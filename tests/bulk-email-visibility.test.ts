@@ -251,7 +251,22 @@ assert.ok(
 assert.match(pipeline, /<BulkEmailDialog/, "composer mounted");
 assert.match(pipeline, /<BulkSendHistory/, "history mounted");
 assert.match(pipeline, /onOpenEmail=\{\(\) => setEmailDialogOpen\(true\)\}/);
-assert.match(pipeline, /onOpenHistory=\{\(\) => setSendHistoryOpen\(true\)\}/);
+
+// 🚨 The receipt must be reachable WITHOUT a selection. BulkActionBar renders
+// only in select mode with >=1 record checked, and the send dialog clears the
+// selection on close, so a history button living there is unreachable at
+// exactly the moment an operator asks "did that batch go out?"
+// (Codex review P2, 2026-08-20 round 3.)
+const bulkBarStart = pipeline.indexOf("function BulkActionBar(");
+assert.ok(bulkBarStart > 0, "BulkActionBar found");
+assert.ok(
+  !pipeline.slice(bulkBarStart).includes("setSendHistoryOpen"),
+  "the Recent sends control must NOT live inside the selection-only toolbar",
+);
+assert.ok(
+  pipeline.slice(0, bulkBarStart).includes("onClick={() => setSendHistoryOpen(true)}"),
+  "it lives in the always-rendered page header instead",
+);
 // The old fire-from-a-dropdown path is gone; it queued correctly but told the
 // operator nothing, which is the behaviour being fixed.
 assert.ok(!/setPendingEmail/.test(pipeline), "the old bare-dropdown send is removed");

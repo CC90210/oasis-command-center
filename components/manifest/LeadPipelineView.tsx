@@ -471,6 +471,19 @@ export function LeadPipelineView({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Recent sends lives HERE, not in the selection toolbar: the whole
+              point is answering "did that batch go out?" after the fact, and
+              by then the selection is cleared. Gating the receipt behind
+              having something selected would defeat it. */}
+          <button
+            type="button"
+            onClick={() => setSendHistoryOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-fg-muted transition-colors hover:text-fg"
+            title="See every bulk email you've sent, and whether each one landed."
+          >
+            <History className="h-3.5 w-3.5" />
+            Recent sends
+          </button>
           {/* Multi-select is available to every employee. The bulk API
               (/api/leads/bulk) skips any lead a non-admin doesn't own, so a
               member can only bulk-act on their own book — safe to always show. */}
@@ -737,7 +750,6 @@ export function LeadPipelineView({
               : undefined
           }
           onOpenEmail={() => setEmailDialogOpen(true)}
-          onOpenHistory={() => setSendHistoryOpen(true)}
           onCcBlast={(templateId) => runBulk({ op: "cc_blast", template_id: templateId }, "sent")}
           onClear={() => setSelected(new Set())}
         />
@@ -765,7 +777,6 @@ function BulkActionBar({
   onStage,
   onDecline,
   onOpenEmail,
-  onOpenHistory,
   onCcBlast,
   onClear,
 }: {
@@ -782,7 +793,6 @@ function BulkActionBar({
   onStage: (stageKey: string) => void;
   onDecline?: () => void;
   onOpenEmail: () => void;
-  onOpenHistory: () => void;
   onCcBlast: (templateId: string) => void;
   onClear: () => void;
 }) {
@@ -869,18 +879,6 @@ function BulkActionBar({
       >
         <Mail className="h-3.5 w-3.5 text-fg-dim" />
         Email…
-      </button>
-
-      {/* The durable receipt. Without somewhere to confirm a past send, an
-          operator has no way to answer "did that go out?" */}
-      <button
-        type="button"
-        onClick={onOpenHistory}
-        className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1 text-[12px] text-fg-muted hover:border-accent/50 hover:text-fg"
-        title="See every bulk email you've sent, and whether each one landed."
-      >
-        <History className="h-3.5 w-3.5 text-fg-dim" />
-        Recent sends
       </button>
 
       {/* Constant Contact bulk blast — leads only, admin-only (enforced server-side). */}
