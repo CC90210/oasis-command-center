@@ -59,6 +59,20 @@ const sheets: Sheet[] = [
   assert.equal(trades?.count, 130, "industry counts DO reflect the city selection");
 }
 
+// Mirror of the above for the province half: selecting Ontario must NOT hide
+// Quebec from the rail, or a rep could never widen a province selection back
+// out. This is the bug the geography loop had: it exempted city from its own
+// filter but not province, so `provinces: ["ON"]` silently dropped QC.
+{
+  const f = buildFacets(sheets, { ...EMPTY_FILTERS, provinces: ["ON"] });
+  const qc = f.provinces.find((p) => p.code === "QC");
+  assert.ok(qc, "other provinces stay visible so the selection can be widened");
+  assert.equal(qc?.count, 200, "QC keeps its full callable count, unaffected by the ON selection");
+  assert.ok(qc?.cities.some((c) => c.name === "Montreal"), "QC's own cities stay listed too");
+  const trades = f.industries.find((i) => i.name === "Trades & Contractors");
+  assert.equal(trades?.count, 130, "industry counts DO reflect the province selection (s2 only, ON+Trades)");
+}
+
 // noSiteOnly: true uses the intersection counter, not the min of two independent counts.
 // With the fixture values, callable_no_site = 300 + 90 + 70 + 140 = 600, while
 // min(callable, no_site) would give 400 + 120 + 90 + 180 = 790. The test proves we use

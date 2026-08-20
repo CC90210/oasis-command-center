@@ -40,12 +40,25 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
     let alive = true;
     setLead(null);
     setError(null);
+    // `alive` is re-checked AFTER the body is parsed, right before every
+    // setState -- not once at the top of the callback. A check before
+    // `await r.json()` only covers the header round-trip: click lead A, then
+    // lead B while A's body is still streaming, and A's late body would land
+    // after B's (smaller/faster) body and overwrite it, showing B's URL next
+    // to A's name and A's `tel:` number. Same invariant WebLeadsBrowser.tsx
+    // uses for its fetches.
     fetch(`/api/web-leads/${encodeURIComponent(leadId)}`)
       .then(async (r) => {
-        if (!alive) return;
-        if (r.status === 404) { setError("This lead no longer exists."); return; }
-        if (!r.ok) { setError("Could not load this lead."); return; }
-        setLead(await r.json());
+        if (r.status === 404) {
+          if (alive) setError("This lead no longer exists.");
+          return;
+        }
+        if (!r.ok) {
+          if (alive) setError("Could not load this lead.");
+          return;
+        }
+        const body = await r.json();
+        if (alive) setLead(body);
       })
       .catch(() => { if (alive) setError("Could not load this lead."); });
     return () => { alive = false; };

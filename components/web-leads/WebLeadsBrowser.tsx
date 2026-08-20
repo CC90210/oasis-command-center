@@ -50,8 +50,11 @@ export function WebLeadsBrowser() {
   // `alive` guards against an out-of-order response: if filters change again
   // before this fetch resolves, the effect's cleanup flips alive to false and
   // the late .then()/.catch() becomes a no-op instead of overwriting fresher
-  // state with stale data. Same pattern WebLeadDetail.tsx already uses for
-  // its per-lead fetch.
+  // state with stale data. The check runs in the SECOND .then(), after the
+  // body has already been parsed -- not right after the fetch resolves --
+  // so a slow body arriving after a newer request can't win. WebLeadDetail.tsx
+  // enforces the same alive-after-body-parse invariant for its per-lead
+  // fetch, via a differently-shaped promise chain.
   useEffect(() => {
     let alive = true;
     const qs = filtersToParams({ ...filters, page: 1, leadId: null }).toString();

@@ -21,9 +21,22 @@ export type WebLeadFilters = {
   leadId: string | null;
 };
 
-export const EMPTY_FILTERS: WebLeadFilters = {
-  provinces: [], cities: [], industries: [], noSiteOnly: false, query: "", page: 1, leadId: null,
-};
+// Frozen (object AND its arrays): this is a module-level singleton shared by
+// every server route in a warm lambda. Without freezing, one accidental
+// in-place mutation (e.g. `EMPTY_FILTERS.provinces.push(...)` instead of
+// spreading into a new array) would silently contaminate every later request
+// that reuses this instance, instead of throwing.
+const EMPTY_LIST = Object.freeze([]) as unknown as string[];
+
+export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
+  provinces: EMPTY_LIST,
+  cities: EMPTY_LIST,
+  industries: EMPTY_LIST,
+  noSiteOnly: false,
+  query: "",
+  page: 1,
+  leadId: null,
+});
 
 /** Split a repeated param into decoded, non-empty values. */
 function list(sp: URLSearchParams, key: string): string[] {

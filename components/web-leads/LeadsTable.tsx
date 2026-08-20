@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import { AlertCircle, Phone } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 
@@ -16,6 +17,26 @@ export function LeadsTable({
   emptyHint: string;
   pageSize: number;
 }) {
+  // pageSize is passed in rather than hardcoded: a literal 50 here would silently
+  // disagree with PAGE_SIZE in data.ts the moment either changed, and the pager
+  // would offer pages the API never returns.
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+
+  // A bookmarked `?page=8` can outlive the result set it pointed to (filters
+  // changed, data shrank since). Left alone, the header still reports the
+  // real total ("1,247 leads") while `leads` for that stale page comes back
+  // empty and the body claims "No leads ... Try removing a filter" -- two
+  // contradictory statements, and the hint blames the wrong thing. Clamp
+  // back to the last real page instead of showing that. Gated on !loading
+  // (and !error, so a failed fetch never gets read as "page too far") so
+  // this only fires once we know `pages` reflects a real response, and it
+  // naturally stops re-firing once `page` settles at `pages`. Hook itself
+  // must run unconditionally (before the early `return` below) per the
+  // rules of hooks -- the gating lives inside the effect body instead.
+  useEffect(() => {
+    if (!loading && !error && page > pages) onPage(pages);
+  }, [loading, error, page, pages, onPage]);
+
   if (error) {
     return (
       <div className="flex-1 rounded-lg border border-red-200 bg-red-50 p-6 text-sm text-red-800">
@@ -26,11 +47,6 @@ export function LeadsTable({
       </div>
     );
   }
-
-  // pageSize is passed in rather than hardcoded: a literal 50 here would silently
-  // disagree with PAGE_SIZE in data.ts the moment either changed, and the pager
-  // would offer pages the API never returns.
-  const pages = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <div className="flex-1">

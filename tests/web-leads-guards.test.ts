@@ -30,6 +30,25 @@ for (const route of [
     /if\s*\(\s*!\s*session\.ok\s*\)/,
     `${route} must branch on session.ok, not on session's truthiness`,
   );
+  // Branching on session.ok is not enough on its own: these three routes
+  // ACTUALLY LEAKED every one of ~31,000 Web Studio leads to any
+  // authenticated user of ANY tenant, because they resolved session.tenantId
+  // and never read it -- reads were pinned to a hardcoded WEBDEV_TENANT_ID
+  // regardless of who was asking. A guard that only checks "is there a
+  // session.ok branch" passed the whole time this was broken. This asserts
+  // the caller is actually CONSTRAINED to the tenant, not merely resolved:
+  // the route must compare session.tenantId against the pinned tenant and
+  // fail closed with a 403 when it doesn't match.
+  assert.match(
+    src,
+    /session\.tenantId/,
+    `${route} must reference session.tenantId -- resolving it and never checking it is how this leaked`,
+  );
+  assert.match(
+    src,
+    /status:\s*403/,
+    `${route} must refuse a caller from another tenant with a 403`,
+  );
 }
 
 const data = read("lib/web-leads/data.ts");
