@@ -145,6 +145,9 @@ const TESTS = [
   "tests/offboard-stages.test.ts",
   "tests/audience-narrowing.test.ts",
   "tests/client-automation-profiles.test.ts",
+  // Beside it deliberately: the profile module decides WHO a client's replies
+  // come from, and this covers the rules that decision must satisfy.
+  "tests/reply-identity.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

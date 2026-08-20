@@ -242,6 +242,7 @@ const GOOD_INTAKE: Record<string, unknown> = {
 const draft = buildClientProfileDraft(GOOD_INTAKE, {
   tenantId: "22222222-2222-2222-2222-222222222222",
   replyFromIdentity: "support@oasisai.work",
+  replyIdentityMode: "shared_oasis",
   consentAt: "2026-08-19T15:04:05.000Z",
 });
 assert.equal(draft.website_domain, "acmeheating.com", "domain normalized to the webhook's key");
@@ -278,15 +279,82 @@ assert.throws(
   () => buildClientProfileDraft({ ...GOOD_INTAKE, reply_tone: "sassy" }, {
     tenantId: "t",
     replyFromIdentity: "support@oasisai.work",
+    replyIdentityMode: "shared_oasis",
   }),
   /reply_tone "sassy"/,
 );
 
 // No guessed default for who speaks as the client's business.
 assert.throws(
-  () => buildClientProfileDraft(GOOD_INTAKE, { tenantId: "t", replyFromIdentity: "" }),
+  () =>
+    buildClientProfileDraft(GOOD_INTAKE, {
+      tenantId: "t",
+      replyFromIdentity: "",
+      replyIdentityMode: "shared_oasis",
+    }),
   /replyFromIdentity is required/,
 );
+
+// Nor for WHICH KIND of identity it is. The address alone cannot say whether
+// this client shares OASIS's sender reputation with every other client, and a
+// guess would surface months later as unrelated clients' mail going to spam.
+for (const mode of ["", "   "]) {
+  assert.throws(
+    () =>
+      buildClientProfileDraft(GOOD_INTAKE, {
+        tenantId: "t",
+        replyFromIdentity: "support@oasisai.work",
+        replyIdentityMode: mode,
+      }),
+    /replyIdentityMode is required/,
+    `replyIdentityMode "${mode}" is refused rather than defaulted`,
+  );
+}
+assert.throws(
+  () =>
+    buildClientProfileDraft(GOOD_INTAKE, {
+      tenantId: "t",
+      replyFromIdentity: "support@oasisai.work",
+      replyIdentityMode: "per_client_ip",
+    }),
+  /replyIdentityMode "per_client_ip" is not one of/,
+);
+
+// The address is checked AGAINST the mode. A client-domain address filed as
+// shared_oasis would have OASIS sending as a domain it does not control.
+assert.throws(
+  () =>
+    buildClientProfileDraft(GOOD_INTAKE, {
+      tenantId: "t",
+      replyFromIdentity: "hello@acmeheating.com",
+      replyIdentityMode: "shared_oasis",
+    }),
+  /reply identity rejected:.*oasisai\.work/s,
+);
+
+// And per_client_domain is checked against THIS client's registered domain, not
+// merely against "not oasisai.work".
+assert.throws(
+  () =>
+    buildClientProfileDraft(GOOD_INTAKE, {
+      tenantId: "t",
+      replyFromIdentity: "hello@some-other-shop.com",
+      replyIdentityMode: "per_client_domain",
+    }),
+  /reply identity rejected:.*acmeheating\.com/s,
+);
+
+// The happy path for a client on its own domain, and the proof that the stored
+// address is the normalized one rather than whatever was typed.
+const ownDomain = buildClientProfileDraft(GOOD_INTAKE, {
+  tenantId: "t",
+  replyFromIdentity: "  Hello@AcmeHeating.com  ",
+  replyIdentityMode: "per_client_domain",
+});
+assert.equal(ownDomain.reply_identity_mode, "per_client_domain");
+assert.equal(ownDomain.reply_from_identity, "hello@acmeheating.com", "stored lowercased + trimmed");
+assert.equal(ownDomain.status, "pending", "still never activates — and DNS is not verified yet");
+assert.equal(draft.reply_identity_mode, "shared_oasis", "the shared draft records its mode too");
 
 // EVERY problem at once, not the first one. An operator fixing an intake should
 // see all four bad answers in one pass.
@@ -300,7 +368,7 @@ try {
       business_name: "  ",
       approver_email: "dana@",
     },
-    { tenantId: "t", replyFromIdentity: "support@oasisai.work" },
+    { tenantId: "t", replyFromIdentity: "support@oasisai.work", replyIdentityMode: "shared_oasis" },
   );
   assert.fail("expected ProfileDraftError");
 } catch (err) {
@@ -321,6 +389,7 @@ assert.throws(
   () => buildClientProfileDraft({ ...GOOD_INTAKE, send_consent: "no" }, {
     tenantId: "t",
     replyFromIdentity: "support@oasisai.work",
+    replyIdentityMode: "shared_oasis",
   }),
   /no authority to send/,
 );
@@ -329,7 +398,7 @@ assert.throws(
 // row carries no consent, and the table's CHECK blocks activation.
 const noConsent = buildClientProfileDraft(
   { ...GOOD_INTAKE, send_consent: "", consent_signed_name: "" },
-  { tenantId: "t", replyFromIdentity: "support@oasisai.work" },
+  { tenantId: "t", replyFromIdentity: "support@oasisai.work", replyIdentityMode: "shared_oasis" },
 );
 assert.equal(noConsent.send_consent_at, null);
 assert.deepEqual(noConsent.send_consent_evidence, {});

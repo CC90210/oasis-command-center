@@ -27,11 +27,26 @@
  * it finds and throws them together in one ProfileDraftError. An operator
  * fixing a client's intake should see all four bad addresses in one pass, not
  * discover them one re-run at a time.
+ *
+ * WHO THE REPLY IS FROM IS A DECISION, NOT A STRING (149). The address alone
+ * never said whether this client shares OASIS's sender reputation with everyone
+ * else or stands on its own domain, so reply_identity_mode now records which,
+ * the address is validated against it, and per_client_domain cannot be activated
+ * before its DNS is verified. The rules and the tradeoffs live in
+ * lib/reply-identity.ts; this module supplies the operator's answer to them.
  */
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { getServiceSupabase } from "./supabase-server";
 import { dbError } from "./db-error";
+import {
+  canActivateProfile,
+  isReplyIdentityMode,
+  resolveReplyIdentity,
+  REPLY_IDENTITY_MODE_IDS,
+  REPLY_IDENTITY_MODES_REQUIRING_DNS,
+  type ReplyIdentityMode,
+} from "./reply-identity";
 import {
   CLIENT_ONBOARDING_CONSENT_TEXT,
   CLIENT_ONBOARDING_SLUG,
@@ -59,6 +74,12 @@ export type ClientAutomationProfile = {
   services: string[];
   prohibited_claims: string[];
   reply_from_identity: string;
+  /** Which sending-identity strategy this address is — see lib/reply-identity.ts.
+   *  Never defaulted; an absent one is a rejected provision, not a guess. */
+  reply_identity_mode: ReplyIdentityMode;
+  /** When SPF/DKIM/DMARC were confirmed on the CLIENT's own domain. Only
+   *  meaningful for per_client_domain, where NULL blocks activation. */
+  dns_verified_at: string | null;
   cc_emails: string[];
   notification_emails: string[];
   primary_phone: string | null;
@@ -84,10 +105,20 @@ export type ClientAutomationProfile = {
   updated_at: string;
 };
 
-/** Everything buildClientProfileDraft() can derive from the client's answers. */
+/**
+ * Everything buildClientProfileDraft() can derive from the client's answers.
+ *
+ * THIS Omit IS LOAD-BEARING: every column NOT listed here becomes a required
+ * field on the draft, and therefore part of the INSERT. reply_identity_mode is
+ * deliberately absent from the list — it must travel with the row. Whereas
+ * dns_verified_at is listed: it records something an operator confirms about the
+ * client's DNS days later, and nothing in an intake could ever imply it. A draft
+ * that had to produce one would only ever produce a lie.
+ */
 export type ClientProfileDraft = Omit<
   ClientAutomationProfile,
   | "id"
+  | "dns_verified_at"
   | "ingest_key_hash"
   | "ingest_key_issued_at"
   | "ingest_key_rotated_at"
@@ -328,6 +359,19 @@ export type BuildProfileDraftOptions = {
    * wrong default would be discovered by the client's customers.
    */
   replyFromIdentity: string;
+  /**
+   * WHICH KIND of sending identity that address is: shared_oasis,
+   * per_client_subaddress, or per_client_domain. REQUIRED, with no default and
+   * no inference from the address — the mode decides whose sender reputation
+   * absorbs this client's spam complaints, and a guess would surface months
+   * later as "our email stopped arriving", across unrelated clients.
+   *
+   * Typed as a plain string rather than the union because operators supply it
+   * from a CLI or a provisioning form, where TypeScript is not a gate; the
+   * check that matters is the runtime one below. lib/reply-identity.ts holds
+   * what each id actually commits to.
+   */
+  replyIdentityMode: string;
   onboardingId?: string | null;
   leadId?: string | null;
   icpTrack?: string | null;
@@ -365,6 +409,22 @@ export function buildClientProfileDraft(
     );
   }
 
+  // The mode is reported on its own, before the address is paired against it, so
+  // an operator who omitted both is told about both rather than about whichever
+  // check happened to run first.
+  const modeRaw = typeof opts.replyIdentityMode === "string" ? opts.replyIdentityMode.trim() : "";
+  if (!modeRaw) {
+    problems.push(
+      `replyIdentityMode is required — pass one of ${REPLY_IDENTITY_MODE_IDS.join(", ")} ` +
+        "explicitly (the mode decides whether this client shares OASIS's sender reputation " +
+        "with every other client or stands on its own domain; there is no safe default)",
+    );
+  } else if (!isReplyIdentityMode(modeRaw)) {
+    problems.push(
+      `replyIdentityMode "${modeRaw}" is not one of ${REPLY_IDENTITY_MODE_IDS.join(", ")}`,
+    );
+  }
+
   const clientName = str(intake, "business_name");
   if (!clientName) problems.push("business_name is empty — the agent has no name to sign replies with");
 
@@ -376,6 +436,22 @@ export function buildClientProfileDraft(
         ? `website_domain "${shown}" is not a usable domain — the inbound webhook matches on this exact value`
         : "website_domain is empty — the inbound webhook has nothing to match this client on",
     );
+  }
+
+  // ---- Does the address match the mode it was filed under? ----------------
+  // Only askable once both halves are present and the client's own domain is
+  // known, because per_client_domain is checked AGAINST that domain. Asking it
+  // early would emit a second problem line about an address that was already
+  // reported as missing.
+  let replyIdentity: { mode: ReplyIdentityMode; address: string } | null = null;
+  if (replyFrom && isReplyIdentityMode(modeRaw)) {
+    const resolved = resolveReplyIdentity({
+      mode: modeRaw,
+      address: replyFrom,
+      websiteDomain: domain,
+    });
+    if (resolved.ok) replyIdentity = { mode: resolved.mode, address: resolved.address };
+    else problems.push(`reply identity rejected: ${resolved.error}`);
   }
 
   // ---- CC addresses: the transparency contract ----------------------------
@@ -462,7 +538,12 @@ export function buildClientProfileDraft(
     reply_tone: replyTone,
     services: parseTextList(intake.top_services, { maxItems: 12 }),
     prohibited_claims: parseTextList(intake.never_say, { maxItems: 25, allowExplicitNone: true }),
-    reply_from_identity: replyFrom,
+    // Both come from the resolution rather than from the raw options: the
+    // address is stored lowercased and mode-checked, so what the webhook later
+    // sends as is exactly what was validated here. Non-null by this point —
+    // any failure above threw, same as `domain` two fields up.
+    reply_from_identity: (replyIdentity as { address: string }).address,
+    reply_identity_mode: (replyIdentity as { mode: ReplyIdentityMode }).mode,
     cc_emails: ccEmails,
     notification_emails: notificationEmails,
     primary_phone: str(intake, "phone") || null,
@@ -610,6 +691,8 @@ export async function provisionProfileFromOnboardingSubmission(args: {
   formId: string;
   leadId: string;
   replyFromIdentity: string;
+  /** Required, never defaulted — see BuildProfileDraftOptions.replyIdentityMode. */
+  replyIdentityMode: string;
   onboardingId?: string | null;
   icpTrack?: string | null;
   createdBy?: string | null;
@@ -631,6 +714,7 @@ export async function provisionProfileFromOnboardingSubmission(args: {
   return provisionClientAutomationProfile(intake, {
     tenantId: args.tenantId,
     replyFromIdentity: args.replyFromIdentity,
+    replyIdentityMode: args.replyIdentityMode,
     onboardingId: args.onboardingId ?? null,
     leadId: args.leadId,
     icpTrack: args.icpTrack ?? null,
@@ -692,6 +776,15 @@ export async function activateClientAutomationProfile(args: {
       "no recorded consent — OASIS has no written authority to send email as this business",
     );
   }
+  // THE DNS GATE (149). per_client_domain sends as a domain OASIS does not own,
+  // so flipping this on before SPF/DKIM/DMARC exist puts unauthenticated mail
+  // claiming to be the client into inboxes — and it is the client's domain, not
+  // OASIS's, that gets scored down for it afterwards.
+  const identity = canActivateProfile({
+    mode: current.reply_identity_mode,
+    dnsVerifiedAt: current.dns_verified_at,
+  });
+  if (!identity.ok) blockers.push(identity.error);
   if (blockers.length > 0) throw new ProfileDraftError(blockers);
 
   const db = getServiceSupabase();
@@ -739,6 +832,60 @@ export async function pauseClientAutomationProfile(args: {
     .maybeSingle();
   if (error) throw dbError("client_automation_profile.pause", error);
   if (!data) throw dbError("client_automation_profile.pause", null);
+  return data as ClientAutomationProfile;
+}
+
+/**
+ * Record that SPF, DKIM and DMARC were confirmed on the CLIENT's own domain —
+ * the one thing that unblocks activating a per_client_domain profile.
+ *
+ * THIS RECORDS AN ATTESTATION. IT DOES NOT PERFORM A LOOKUP. Nothing here
+ * queries DNS; a human checked the records and is signing that they did. The
+ * distinction matters more than it looks: a function named for verification that
+ * silently rubber-stamps would make the activation gate feel enforced while
+ * being satisfied by anyone who called it, which is worse than no gate at all
+ * because it reads as one. If a real resolver check is ever added, it belongs in
+ * front of this call, not inside it.
+ *
+ * WITHOUT THIS THE GATE HAS NO KEY. canActivateProfile() refuses a
+ * per_client_domain profile while dns_verified_at is null, and nothing else in
+ * this codebase can set that column — so every client on their own domain would
+ * be permanently un-activatable except by hand-written SQL against production.
+ * A guard whose only remedy is a manual database edit is a trapdoor, not a
+ * guard.
+ *
+ * `verifiedAt` is accepted so a check done yesterday is recorded as yesterday.
+ * The inverse is deliberately not a function: migration 149 refuses to clear
+ * dns_verified_at while the profile is active, so un-verifying means pausing
+ * first — which is the correct order of operations anyway, since the reason to
+ * un-verify is that the records stopped resolving and sending must stop.
+ */
+export async function recordDnsVerification(args: {
+  id: string;
+  tenantId: string;
+  verifiedAt?: string | null;
+}): Promise<ClientAutomationProfile> {
+  const current = await loadProfile(args.id, args.tenantId);
+  // Recording DNS verification against an OASIS-owned mode is a category error,
+  // and refusing it names the misunderstanding: an operator doing this believes
+  // the client's DNS gates a send that actually leaves from oasisai.work.
+  if (!REPLY_IDENTITY_MODES_REQUIRING_DNS.has(current.reply_identity_mode)) {
+    throw new ProfileDraftError([
+      `this profile is on ${current.reply_identity_mode}, which sends from an OASIS-owned ` +
+        "domain — there is no client DNS to verify, and nothing is blocking activation on it",
+    ]);
+  }
+  const db = getServiceSupabase();
+  const now = new Date().toISOString();
+  const { data, error } = await db
+    .from("client_automation_profiles")
+    .update({ dns_verified_at: args.verifiedAt?.trim() || now, updated_at: now })
+    .eq("id", args.id)
+    .eq("tenant_id", args.tenantId)
+    .select("*")
+    .maybeSingle();
+  if (error) throw dbError("client_automation_profile.record_dns", error);
+  if (!data) throw dbError("client_automation_profile.record_dns", null);
   return data as ClientAutomationProfile;
 }
 
