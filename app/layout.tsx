@@ -374,27 +374,24 @@ export default async function RootLayout({
               }
               logo={manifestLogoToSidebarLogo(manifest.brand.logo)}
               subtitle={manifest.brand.subtitle}
-              items={
-                // Persona narrowing is the LAST step, applied to the assembled
-                // list, so it cannot be bypassed by a future nav source that
-                // forgets to filter itself. It REMOVES rows rather than
-                // disabling them: a greyed row still announces the surface
-                // exists, and `enabled: false` items have shipped visible here
-                // before.
-                //
-                // It also closes a real hole above. foundersNavItems is gated on
-                // TENANT identity (FOUNDERS_TENANT_IDS) and reps share OASIS's
-                // own workspace — so without this line a contractor on
-                // oasis-webdev would get a Marketing tab into the founders
-                // portal. The route gate in app/founders/marketing/page.tsx is
-                // the wall; this is the sign on it.
-                navPersona
-                  ? filterNavForPersona(
-                      [...manifestNavToNavItems(manifest.nav), ...foundersNavItems],
-                      navPersona,
-                    )
-                  : [...manifestNavToNavItems(manifest.nav), ...foundersNavItems]
-              }
+              // Persona narrowing is the LAST step, applied to the fully
+              // assembled list, so it cannot be bypassed by a future nav source
+              // that forgets to filter itself. It REMOVES rows rather than
+              // disabling them: a greyed row still announces the surface exists,
+              // and `enabled: false` items have shipped visible here before.
+              //
+              // It also closes a real hole above. foundersNavItems is gated on
+              // TENANT identity (FOUNDERS_TENANT_IDS) and reps share OASIS's own
+              // workspace — so without this a contractor on oasis-webdev would
+              // get a Marketing tab into the founders portal. The gate in
+              // lib/founders/gate.ts is the wall; this is the sign on it.
+              //
+              // A null navPersona (demo shells, pre-auth) means "do not narrow";
+              // filterNavForPersona owns that case.
+              items={filterNavForPersona(
+                [...manifestNavToNavItems(manifest.nav), ...foundersNavItems],
+                navPersona,
+              )}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"

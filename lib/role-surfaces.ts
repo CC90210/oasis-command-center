@@ -291,13 +291,24 @@ export function personaMayVisit(persona: Persona, href: string): boolean {
  * contractor's sidebar should read as a complete, honest tool, not a redacted
  * copy of someone else's.
  *
+ * `persona` is NULLABLE, and null means "do not narrow".
+ *
+ * That decision lives here rather than in the caller's JSX on purpose. The demo
+ * shells and every pre-auth render have no session to resolve, and the layout
+ * used to express "no persona → no filtering" as a ternary that rebuilt the
+ * item list twice. Passing the null through means the one module that owns nav
+ * policy also owns what happens when the persona is unknown, and the call site
+ * is a single expression. It is safe to be permissive here ONLY because the nav
+ * is cosmetic — every page a persona must not reach carries its own
+ * server-side gate.
+ *
  * Generic over the item shape so it works on NavItem without this module
  * importing the nav layer.
  */
 export function filterNavForPersona<T extends { href: string }>(
   items: T[],
-  persona: Persona,
+  persona: Persona | null | undefined,
 ): T[] {
-  if (persona !== "sales") return items;
+  if (!persona || persona !== "sales") return items;
   return items.filter((item) => personaMayVisit(persona, item.href));
 }

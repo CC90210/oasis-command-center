@@ -119,6 +119,7 @@ export default async function TodayPage() {
         tenantId={surface.tenantId}
         viewerName={viewerName}
         readOnly={surface.persona === "readonly"}
+        teamRole={surface.teamRole}
       />
     );
   }

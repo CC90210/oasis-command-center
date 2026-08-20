@@ -20,6 +20,8 @@
 
 import { getActiveProfile } from "@/lib/queries";
 import { isFounderTenant, parseFoundersAllowlist } from "@/lib/founders-marketing-core";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { resolvePersona } from "@/lib/role-surfaces";
 
 export { isFounderTenant, parseFoundersAllowlist };
 
@@ -49,6 +51,33 @@ export async function resolveFounder(): Promise<FounderContext | null> {
   const profile = await getActiveProfile().catch(() => null);
   if (!profile?.tenant_id) return null;
   if (!isFounderTenant(profile.tenant_id, foundersAllowlist())) return null;
+  // THE TENANT CHECK ABOVE IS NECESSARY AND, SINCE 2026-08-19, NOT SUFFICIENT.
+  //
+  // The comment at the top of this file says the gate keys on tenant identity
+  // "never on role, because is_owner/team_role are per-tenant and SunBiz has its
+  // own owners". That reasoning is still right about SunBiz and was wrong about
+  // us: OASIS is now onboarding OUTSIDE commission-only sales contractors
+  // (team_role='agent') INTO OASIS'S OWN WORKSPACE. A tenant-only gate lets
+  // every one of them into the founders portal, because they are, by tenant,
+  // standing exactly where CC and Adon stand.
+  //
+  // So the gate is now tenant AND persona — the same composition the rest of
+  // the dashboard uses (lib/role-surfaces.ts). Persona resolution is an
+  // allowlist that fails closed, so a null / unknown team_role is refused here
+  // rather than admitted.
+  //
+  // Placed in resolveFounder() rather than on the marketing page so it covers
+  // every founders route and API caller at once (library, performance, asset,
+  // train, ingest) — a per-page check would have been one file away from a hole
+  // the next time a founders route is added.
+  const session = await resolveSessionContext();
+  if (!session.ok) return null;
+  const persona = resolvePersona({
+    teamRole: session.teamRole,
+    isTrueAdmin: session.isTrueAdmin,
+    adminAccess: session.adminAccess,
+  });
+  if (persona !== "founder") return null;
   return {
     tenantId: profile.tenant_id,
     profileId: profile.id,

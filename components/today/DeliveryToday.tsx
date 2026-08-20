@@ -85,10 +85,22 @@ export async function DeliveryToday({
   tenantId,
   viewerName,
   readOnly,
+  teamRole,
 }: {
   tenantId: string;
   viewerName: string;
   readOnly: boolean;
+  /**
+   * Shown in the footer line, and it earns its place.
+   *
+   * Persona resolution fails CLOSED: a null, empty or unrecognised team_role
+   * lands here rather than on the founder dashboard. That is the right default
+   * and it has one bad failure mode — a founder whose profile is mis-provisioned
+   * gets this screen with no idea why, and reports it as "my dashboard is gone".
+   * Printing the role that produced the decision turns a mystery into a
+   * one-line fix.
+   */
+  teamRole: string;
 }) {
   const reads = await Promise.all(DELIVERY_STAGE_KEYS.map((s) => loadStage(tenantId, s)));
   const byStage = new Map<DeliveryStageKey, StageRead>(reads.map((r) => [r.stage, r]));
@@ -315,6 +327,12 @@ export async function DeliveryToday({
           </div>
         )}
       </Card>
+
+      <p className="text-xs text-fg-faint">
+        You are seeing the delivery view because your team role is{" "}
+        <span className="font-mono text-fg-dim">{teamRole}</span>. If that is wrong, ask CC to
+        correct it — revenue and pipeline surfaces are scoped to the role on your profile.
+      </p>
     </div>
   );
 }
