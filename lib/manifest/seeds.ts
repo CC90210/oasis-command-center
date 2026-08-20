@@ -12,7 +12,7 @@
  * manifest would use, so the cutover in 1b is a no-op for the renderer.
  */
 
-import { CC_NAV, type NavItem } from "../nav-config";
+import { CC_NAV, WEBDEV_NAV, type NavItem } from "../nav-config";
 import { HELIOS_TOOL_PALETTE } from "../chat-tool-palettes";
 import { OASIS_LEAD_STAGE_KEYS } from "../oasis-stage-meta";
 import {
@@ -226,6 +226,23 @@ export const OASIS_SEED: TenantManifest = {
     updated_at: FROZEN_AT,
     schema_version: MANIFEST_SCHEMA_VERSION,
   },
+};
+
+// OASIS AI, `oasis-ai-cc` slug — the ACTUAL live agency-CRM tenant (the
+// `oasis` slug above is historical; see lib/role-surfaces.ts). This is
+// getManifest()'s real fallback target for Adon's session, so it — not
+// lib/client-profiles.ts's WEBDEV_PROFILE.nav — is what the sidebar
+// actually renders (app/layout.tsx resolves `manifest = getManifest(slug)`,
+// which checks the Supabase tenant_manifests table for this slug and
+// otherwise falls back here via getSeedManifest; it never reads
+// lib/client-profiles.ts). Everything else is identical to OASIS_SEED —
+// only `nav` changes, adding the Web Leads browser tab (2026-08-20 fix:
+// the tab previously only existed in the unused WEBDEV_PROFILE, bound to a
+// zero-user tenant slug, so no real operator ever saw it).
+export const OASIS_AI_CC_SEED: TenantManifest = {
+  ...OASIS_SEED,
+  tenant_slug: "oasis-ai-cc",
+  nav: navToManifest(WEBDEV_NAV),
 };
 
 // SunBiz Funding — fully populated tenant. Used at /t/sun/* as the
@@ -857,6 +874,7 @@ export const SUGA_SEED: TenantManifest = {
 export const SEED_MANIFESTS: Record<string, TenantManifest> = {
   default: OASIS_SEED,
   oasis: OASIS_SEED,
+  "oasis-ai-cc": OASIS_AI_CC_SEED,
   sun: SUN_SEED,
   suga: SUGA_SEED,
 };

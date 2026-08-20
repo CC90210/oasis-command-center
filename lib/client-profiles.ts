@@ -111,21 +111,29 @@ const SUGA_PROFILE: ClientCommandCenterProfile = {
 };
 
 const WEBDEV_PROFILE: ClientCommandCenterProfile = {
-  // Must equal the CLIENT_PROFILES key below ("oasis-webdev") — the
+  // Must equal the CLIENT_PROFILES key below ("oasis-ai-cc") — the
   // "ById" lookup (getClientCommandCenterProfileById) is really a by-KEY
   // lookup into CLIENT_PROFILES, and an id/key mismatch degrades silently
-  // to DEFAULT_PROFILE instead of erroring. Canonical slug for this tenant
-  // per lib/website-sales-workflow.ts OASIS_WEBSITE_TENANT_SLUG.
-  id: "oasis-webdev",
-  brand: "Oasis Web Studio",
+  // to DEFAULT_PROFILE instead of erroring.
+  //
+  // Repointed 2026-08-20 from "oasis-webdev" ("Oasis Web Studio"): that
+  // tenant had ZERO users, so nobody could ever log in and see the Leads
+  // tab this profile exists to add. `oasis-ai-cc` is the OASIS AI
+  // command-center tenant (id ef8d389e-3f15-43f2-ae00-3660f69a1452) where
+  // the web leads AND the operators who work them both live — see
+  // lib/web-leads/data.ts WEBDEV_TENANT_ID. Every field below except `id`
+  // and `nav` is copied verbatim from DEFAULT_PROFILE: the only thing that
+  // should change for this tenant's operators is gaining a Leads tab, not
+  // their brand, data backend, or anything else.
+  id: "oasis-ai-cc",
+  brand: "OASIS AI",
   logo: "oasis",
   subtitle: "Agent Command Center",
-  footerLabel: "Oasis Web Studio · Agent Command Center · v1.0",
-  footerTagline: "Sites that earn their keep.",
+  footerLabel: "OASIS AI · Agent Command Center · v1.0",
+  footerTagline: '"Only good things from now on."',
   agentLabel: "Bravo",
   primaryAgent: "bravo",
-  // Turso, like every client workspace. Never Supabase (retired 2026-08-09).
-  dataBackend: "turso",
+  dataBackend: "supabase",
   deploymentMode: "shared",
   nav: WEBDEV_NAV,
   // No `sms` key. Nothing here is consented under CASL and the phone numbers
@@ -136,7 +144,7 @@ const CLIENT_PROFILES: Record<string, ClientCommandCenterProfile> = {
   default: DEFAULT_PROFILE,
   sun: SUN_PROFILE,
   suga: SUGA_PROFILE,
-  "oasis-webdev": WEBDEV_PROFILE,
+  "oasis-ai-cc": WEBDEV_PROFILE,
 };
 
 function _readTenantProfileSlug(
