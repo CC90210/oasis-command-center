@@ -21,6 +21,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { runHealthChecks, checkFleetHeartbeat } from "@/lib/health/runner";
+import { runGuardAudit, announceGuardAudit } from "@/lib/health/guard-audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,6 +42,24 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // failure in one cannot hide the other.
     const heartbeat = await checkFleetHeartbeat(getServiceSupabase());
 
+    // DID EACH GUARD ACTUALLY DO ANYTHING?
+    //
+    // The checks above measure OUTCOMES (did texts go out, did email volume
+    // hold). This measures the MECHANISMS, and it exists because all three bugs
+    // found on 2026-08-20 were guards that ran, raised nothing, and affected
+    // nothing. A filter that excludes 100% of its input is indistinguishable
+    // from a quiet upstream unless something asks.
+    //
+    // Runs every tick but only PAGES once a day: the reading is a weekly
+    // window, so re-alerting every 15 minutes would say the same thing 96 times
+    // and get the channel muted. Failures here are swallowed for the same
+    // reason the alerting is — a broken self-check must not take down the
+    // health check it rides on.
+    const guards = await runGuardAudit(SUNBIZ_TENANT_ID).catch(() => null);
+    if (notify && guards) {
+      await announceGuardAudit(SUNBIZ_TENANT_ID, guards).catch(() => undefined);
+    }
+
     return NextResponse.json({
       ok: true,
       worst: summary.worst,
@@ -48,6 +67,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       alerted: summary.alerted,
       recovered: summary.recovered,
       fleet_heartbeat: { verdict: heartbeat.verdict, reason: heartbeat.reason },
+      guard_audit: guards
+        ? { summary: guards.summary, findings: guards.findings.filter((f) => f.severity !== "info") }
+        : { summary: "guard audit could not run", findings: [] },
       results: summary.results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
       })),

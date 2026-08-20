@@ -16,6 +16,7 @@ import { sendTelegram } from "@/lib/notify/telegram";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
+import { refreshDestinationHealth } from "@/lib/sms/destination-health";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -88,6 +89,28 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // means a recovered route resumes on the next dispatch rather than up to a
     // minute later, and a newly dead one halts just as fast.
     for (const t of tenants) resetBreakerCache(t);
+
+    // DESTINATION HEALTH IS MATERIALISED HERE, and this is the only place it
+    // happens (Codex P1, 2026-08-20: refreshDestinationHealth had no production
+    // caller at all, so the landline gate would have stayed a permanent no-op —
+    // a missing row reads as textable by design).
+    //
+    // This is the right seam: the verdicts it derives from have just landed, so
+    // recomputing anywhere else would read a staler picture than the one that
+    // exists at this instant.
+    //
+    // Failures are recorded, never thrown. Reconciliation is the load-bearing
+    // job on this route and must not be taken down by a downstream refresh; a
+    // stale destination table degrades to "text them and find out", which is
+    // where we were before, not somewhere worse.
+    const destinationHealth: Record<string, { examined: number; untextable: number; error: string | null }> = {};
+    for (const t of tenants) {
+      const res = await refreshDestinationHealth(t).catch((err) => ({
+        examined: 0, untextable: 0, written: 0,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      destinationHealth[t] = { examined: res.examined, untextable: res.untextable, error: res.error };
+    }
     const breakers: Record<string, Awaited<ReturnType<typeof smsSendAllowed>>> = {};
     for (const t of tenants) breakers[t] = await smsSendAllowed(t, { force: true });
     const breaker = breakers[SUNBIZ_TENANT_ID];
@@ -120,7 +143,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       ).catch(() => undefined);
     }
 
-    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breaker, halted });
+    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breaker, halted, destination_health: destinationHealth });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[reconcile-sms] failed", message);

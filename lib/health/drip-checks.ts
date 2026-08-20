@@ -177,6 +177,96 @@ export const DRIP_CHECKS: DripCheck[] = [
       `Those sends are unverifiable: we cannot tell whether they arrived.`,
   },
   {
+    /**
+     * THE CHECK THAT WOULD HAVE CAUGHT 2026-08-16 ON DAY ONE.
+     *
+     * sms.receipt_coverage above verifies receipts are CREATED. Nothing
+     * verified they are RESOLVED, and that is precisely what broke: from
+     * 2026-08-16 the reconciler could no longer match our message inside the
+     * provider's thread (TextTorrent stopped returning the `platform` field we
+     * were gating on), so every receipt was opened, never answered, and quietly
+     * retired as 'unknown' three days later.
+     *
+     * 47 receipts reached a real carrier verdict between 08-07 and 08-16. From
+     * 08-16 to 08-20: zero. Coverage stayed green the whole time, because the
+     * receipts existed. They were just empty.
+     *
+     * This matters far beyond reporting. smsSendAllowed() reads these same
+     * receipts, so with nothing ever resolving the circuit breaker could not
+     * open no matter how many sends died — the guard was inert while looking
+     * healthy. Three carrier failures on a live wire went unnoticed for two
+     * days underneath it.
+     *
+     * Six hours of grace: the reconciler runs every 15 minutes and ignores
+     * anything younger than 90 seconds, so a healthy pipeline resolves well
+     * inside an hour. Six is generous enough that a transient provider outage
+     * does not page, and tight enough that a broken matcher is caught the same
+     * working day.
+     */
+    id: "sms.receipts_unresolved",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .is("resolved_at", null)
+          // Older than the grace window...
+          .lt("sent_at", iso(endMs - 6 * 3_600_000))
+          // ...but inside the retirement cutoff. Past three days the reconciler
+          // force-resolves as 'unknown', so anything older cannot be counted
+          // here and this check would silently read zero during a total outage.
+          .gte("sent_at", iso(endMs - 3 * DAY)),
+      ),
+    describe: (r) =>
+      `${r.observed} delivery receipt(s) have gone more than 6h without a carrier verdict. ` +
+      `The receipts exist but are empty, so every SMS check above is reading an instrument ` +
+      `that is not measuring anything — and the send breaker cannot open, because it reads these.`,
+  },
+  {
+    /**
+     * Verify CONTRIBUTION, not presence: is the reconciler actually producing
+     * verdicts, or merely running?
+     *
+     * The count above catches a full stop. This catches the partial case — a
+     * matcher that resolves some threads and silently drops the rest — which
+     * would otherwise sit under the grace window forever, always a few rows
+     * short of alarming.
+     *
+     * Measured over receipts old enough to have been answered. Returns null
+     * when there is nothing in the window, and evaluate() reports that as
+     * check_broken rather than a pass: no sample is not the same as a clean
+     * one, and "no texts went out" is a finding in its own right that
+     * drips.enrolments_24h and sms.delivered_24h already speak to.
+     */
+    id: "sms.carrier_verdict_rate",
+    severity: "high",
+    rule: { kind: "must_reach", target: 95, failingBelow: 80 },
+    observe: async (db, tenantId, endMs) => {
+      const startMs = Math.max(endMs - 3 * DAY, RECEIPTS_LIVE_FROM_MS);
+      const cutoff = iso(endMs - 6 * 3_600_000);
+      if (startMs >= endMs - 6 * 3_600_000) return null;
+      const total = await countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).gte("sent_at", iso(startMs)).lt("sent_at", cutoff),
+      );
+      const answered = await countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).gte("sent_at", iso(startMs)).lt("sent_at", cutoff)
+          // A REAL verdict. 'unknown' is what a retired receipt carries, so
+          // counting it would let the three-day give-up path masquerade as
+          // successful reconciliation — the exact outage, reported as health.
+          .in("carrier_status", ["delivered", "failed", "undelivered"]),
+      );
+      if (total === null || answered === null) return null;
+      if (total === 0) return null;
+      return Math.round((answered / total) * 100);
+    },
+    describe: (r) =>
+      `${r.observed}% of delivery receipts older than 6h carry a real carrier verdict. ` +
+      `Below this, sends are going out unverified and the breaker is running on partial evidence.`,
+  },
+  {
     // A backlog that stops draining is the shape of a stalled dispatcher, and
     // it is visible before output drops to zero.
     id: "drips.overdue_backlog",

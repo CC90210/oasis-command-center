@@ -34,6 +34,8 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+import { isTextable } from "@/lib/sms/destination-health";
+import { sendablePool, announceBenchedLines } from "@/lib/sms/line-health";
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { maybeMintApplicationUrl, updateRecord } from "@/lib/manifest/data";
@@ -923,6 +925,30 @@ async function processSmsStep(
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
 
+  // CAN THIS PHONE RECEIVE A TEXT AT ALL?
+  //
+  // Measured 2026-08-20, carrier verdicts split by where the number came from:
+  // looked-up numbers delivered 8 and failed 3; numbers merchants typed on
+  // their application delivered 0 and failed 53. A number written on a business
+  // application is usually the office line, and a landline physically cannot
+  // receive SMS.
+  //
+  // That is the whole of the "outage" that started 2026-08-19: nothing broke,
+  // the cohort changed. The exact refused message was later replayed from the
+  // same line to a mobile and delivered.
+  //
+  // Deliberately placed AFTER the opt-out check and BEFORE the lawful-basis
+  // one: an opt-out is a legal instruction and outranks everything, while this
+  // is a technical fact that should not consume a consent decision.
+  //
+  // A skip, not a failure. Nothing about this lead will change on its own, and
+  // the sequence's EMAIL steps should still run — that is how a merchant on a
+  // desk phone still hears from us.
+  {
+    const reach = await isTextable(row.tenant_id, phone);
+    if (!reach.textable) return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+  }
+
   // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
   // needs no prior permission, a marketing text does. $500 a message, $1,500 if
   // wilful, no cap, private right of action, and Florida has its own statute —
@@ -1138,6 +1164,40 @@ async function processSmsStep(
     // filter runs in the query, and an exclusion cannot be expressed there
     // without an operator the Turso adapter does not implement.
     const wireLines = await linesForWire(row.tenant_id, wire, run);
+
+    // PER-LINE HEALTH, before the per-wire breaker.
+    //
+    // Adon, 2026-08-20: "3 failures in a row on a phone number stops that
+    // number. 5 across the whole account stops all texting."
+    //
+    // The wire breaker cannot do this job. A canary from all twelve of our
+    // numbers to ONE handset came back six delivered, six failed — half the
+    // pool was dead and the wire-level consecutive count never got near its
+    // limit, because the healthy half kept resetting it.
+    //
+    // NOTE the deliberate asymmetry below: the BREAKER still reads every line's
+    // receipts (`wireLines`), not just the healthy ones. Scoping it to the
+    // survivors would hide the route dying — the breaker would only ever see
+    // the numbers that are still working and could never halt.
+    const pool = await sendablePool(row.tenant_id, wireLines, { wire });
+    // Alerting must never be able to stop a send, so failures here are
+    // swallowed. The bench decision itself is already made above.
+    await announceBenchedLines(row.tenant_id, pool, { wire }).catch(() => undefined);
+    if (identity.senderId && pool.blocked.some((b) => b.number === identity.senderId)) {
+      // This lead was assigned a number that is now benched. Hold and retry:
+      // the row is not damaged and another line may pick it up next tick.
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_line_benched: ${pool.blocked.find((b) => b.number === identity.senderId)?.reason ?? "line benched"}`,
+      );
+    }
+    if (pool.lines.length === 0) {
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_no_healthy_line: ${pool.reason}`,
+      );
+    }
+
     const breaker = await smsSendAllowed(row.tenant_id, { wire, onlyLines: wireLines });
     // Halted but due for a probe: try to CLAIM it. The claim is a conditional
     // update in Postgres, so exactly one caller wins across every concurrent
