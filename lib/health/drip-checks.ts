@@ -24,6 +24,16 @@ export type DripCheck = {
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
+  /**
+   * Rebuild the rule at EVALUATION time.
+   *
+   * DRIP_CHECKS is a module-level const, so a threshold computed inside `rule`
+   * is frozen at import. For a target an operator is expected to move, that
+   * means the check keeps grading against a stale number while reporting green
+   * — the same shape as every other bug found on 2026-08-20. Supplying this
+   * makes the threshold live.
+   */
+  resolveRule?: () => CheckRule;
   describe: (r: CheckResult) => string;
 };
 
@@ -42,6 +52,18 @@ const iso = (ms: number) => new Date(ms).toISOString();
  * Self-expiring: once the deploy is more than 24h old the clamp stops binding.
  */
 const RECEIPTS_LIVE_FROM_MS = Date.parse("2026-08-08T00:00:00Z");
+
+/**
+ * The daily drip-text target. Adon set this to 40 on 2026-08-20.
+ *
+ * Read from env at CALL time, not at module load, so the number can move
+ * without a deploy — and so a list of checks captured at process start cannot
+ * keep grading against a stale target while reporting green.
+ */
+export function smsTargetPerDay(): number {
+  const n = parseInt((process.env.DRIPS_SMS_DAILY_TARGET || "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 40;
+}
 
 async function countOrNull(q: PromiseLike<{ error: unknown; count: number | null }>): Promise<number | null> {
   try {
@@ -267,6 +289,55 @@ export const DRIP_CHECKS: DripCheck[] = [
       `Below this, sends are going out unverified and the breaker is running on partial evidence.`,
   },
   {
+    /**
+     * IS THE TEXT PROGRAMME ACTUALLY HITTING ITS NUMBER?
+     *
+     * Adon, 2026-08-20: "it should be at 40 a day - how can we ensure this
+     * happens."
+     *
+     * You cannot ensure it by setting the cap to 40. The cap is a CEILING and
+     * has never been the binding constraint: measured that day, sends ran at
+     * 2 to 17 a day against a cap already set to 40, while 1,269 leads had a
+     * phone number, 4 were landlines and none had opted out. Raising a ceiling
+     * nobody was touching changes nothing.
+     *
+     * What ensures it is measuring the gap and saying so. Every reason volume
+     * falls short is diagnosable and none of them announce themselves:
+     *   - too few working lines (six of twelve were dead and nobody knew)
+     *   - enrolment starved, so the queue has nothing due
+     *   - the deal gate closing more leads than expected
+     *   - sequence step delays spacing sends further apart than the target
+     *
+     * DEGRADED below target, FAILING below a third of it. A programme merely
+     * behind should not page like a dead pipe, but it must still be visible —
+     * that is the whole ask.
+     */
+    id: "sms.sent_vs_target",
+    severity: "high",
+    // Placeholder; the live threshold comes from resolveRule below.
+    rule: { kind: "must_reach", target: 40, failingBelow: 13 },
+    resolveRule: () => ({
+      kind: "must_reach",
+      target: smsTargetPerDay(),
+      failingBelow: Math.max(1, Math.floor(smsTargetPerDay() / 3)),
+    }),
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("lead_interactions").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .eq("type", "sms_sent")
+          .eq("direction", "outbound")
+          // Sequence sends only. Reps send far more by hand than the engine
+          // does, and counting those would show a healthy number while the
+          // drip programme sat at zero.
+          .like("agent_source", "sequence:%")
+          .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
+      ),
+    describe: (r) =>
+      `${r.observed} drip texts in 24h against a target of ${smsTargetPerDay()}. ` +
+      `The cap is a ceiling, not a source: check working lines, enrolment, and the deal gate before raising it.`,
+  },
+  {
     // A backlog that stops draining is the shape of a stalled dispatcher, and
     // it is visible before output drops to zero.
     id: "drips.overdue_backlog",
@@ -425,8 +496,10 @@ export async function runCheck(
   historyDays = 14,
 ): Promise<CheckResult> {
   const observed = await check.observe(db, tenantId, nowMs);
+  // A live threshold beats the one captured at import. See DripCheck.resolveRule.
+  const rule = check.resolveRule ? check.resolveRule() : check.rule;
   const history: number[] = [];
-  if (check.rule.kind === "baseline_drop") {
+  if (rule.kind === "baseline_drop") {
     // Skip the most recent window: including the outage in its own baseline is
     // how a slow decline normalises itself into invisibility.
     for (let d = 1; d <= historyDays; d++) {
@@ -434,5 +507,5 @@ export async function runCheck(
       if (v !== null) history.push(v);
     }
   }
-  return evaluate(check.id, check.rule, observed, history);
+  return evaluate(check.id, rule, observed, history);
 }

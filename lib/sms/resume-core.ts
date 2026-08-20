@@ -11,18 +11,43 @@
  * evidence separated in time (canary-core.ts), and this file will not resume
  * without it.
  *
- * IT ALSO RESUMES SMALL. The caps before the halt were 40/day and 7/hour. Going
- * straight back to those would put a day's volume through lines that have two
- * data points each. Ten a day is enough to accumulate real receipts and cheap
- * enough that being wrong again costs ten messages, not four hundred.
+ * IT RESUMES AT FULL VOLUME, and that is a deliberate reversal. An earlier cut
+ * restarted at 10/day; Adon set it back to 40. The protection against a bad
+ * line is no longer the ceiling — it is the canary allow-list, the per-line
+ * bench, the wire halt and the landline gate, all of which act in single digits
+ * of wasted messages whatever the cap says. See RESTART_DAILY.
  */
 
 import type { LineResult } from "./canary-core";
 import { clearedLines, resumeAllowed } from "./canary-core";
 
-/** Where volume restarts, regardless of where it was before the halt. */
-export const RESTART_DAILY = 10;
-export const RESTART_HOURLY = 2;
+/**
+ * Where volume restarts.
+ *
+ * Adon, 2026-08-20: "it should be at 40 a day."
+ *
+ * I had this at 10 and he overrode it. Worth recording WHY that is defensible
+ * now and was not this morning: on 2026-08-18 a low cap was the only thing
+ * standing between a bad line and a burned cohort. It no longer is. Since then
+ *
+ *   - a line that refuses a canary is excluded from the pool entirely,
+ *   - 3 consecutive carrier failures bench a line automatically,
+ *   - 5 across a wire halt it,
+ *   - known landlines are skipped before a message is spent,
+ *   - and receipts are verified again, so all of the above actually fire.
+ *
+ * Those catch a fault in single digits of wasted messages regardless of the
+ * ceiling. A volume cap was a blunt substitute for exactly this machinery, and
+ * keeping it low now would cost real merchant contact to buy protection we
+ * already have.
+ *
+ * Note this is a CEILING, not a target. Measured 2026-08-20, actual sends were
+ * 2-17 a day against a cap of 40 — the cap has never been the binding
+ * constraint. sms.sent_vs_target is the check that tells us when the gap is
+ * real, because a number in this file cannot make texts happen.
+ */
+export const RESTART_DAILY = 40;
+export const RESTART_HOURLY = 7;
 
 export type ResumePlan = {
   allowed: boolean;
@@ -72,17 +97,3 @@ export function resumePlan(
   };
 }
 
-/**
- * The next step up, once a restart has held.
- *
- * Deliberately NOT automatic. Every ramp in this system that moved on a timer
- * eventually moved on a day when the thing it was measuring was broken. A step
- * requires a clean week of real carrier receipts, which is a judgement about
- * evidence rather than about elapsed time, and it stays a human decision.
- */
-export function nextRamp(currentDaily: number): number {
-  if (currentDaily < RESTART_DAILY) return RESTART_DAILY;
-  if (currentDaily < 25) return 25;
-  if (currentDaily < 40) return 40;
-  return currentDaily;
-}
