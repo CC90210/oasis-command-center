@@ -10,6 +10,7 @@ import {
 import {
   classifyBulkRecipients,
   summarizeClassification,
+  redactForResponse,
   type BulkRecord,
 } from "../lib/bulk-email/recipients";
 
@@ -130,12 +131,48 @@ assert.deepEqual(scoped.skipped, [{ id: "e", reason: "no_access" }]);
 // Empty selection must not throw.
 assert.equal(classifyBulkRecipients([], all, yes).counts.selected, 0);
 
+// --- redactForResponse: no UUID oracle -------------------------------------
+// "exists but not yours" must be indistinguishable from "does not exist", or a
+// non-admin can submit arbitrary UUIDs and read off which are real.
+const oracle = classifyBulkRecipients(["e", "zz"], all, (d) => d.assigned_to !== "someone-else");
+assert.equal(oracle.counts.no_access, 1, "internally the distinction is real");
+assert.equal(oracle.counts.not_found, 1);
+const safe = redactForResponse(oracle);
+assert.equal(safe.counts.no_access, 0, "and is erased on the way out");
+assert.equal(safe.counts.not_found, 2, "both fold into one bucket");
+assert.deepEqual(
+  safe.skipped.map((s) => s.reason),
+  ["not_found", "not_found"],
+  "per-id reasons are folded too, not just the counts",
+);
+assert.equal(
+  new Set(safe.skipped.map((s) => s.reason)).size,
+  1,
+  "a real record and a fake one are reported identically",
+);
+// The eligible set is untouched: this hides a reason, never a recipient.
+assert.deepEqual(redactForResponse(c).eligible, c.eligible);
+// No-op when there is nothing to hide (admins never produce no_access).
+assert.equal(redactForResponse(c), c, "returns the same object when no_access is 0");
+// The shared label must be true of BOTH cases it now covers, and must not
+// leak which one applies. Uses a selection with a sendable record so the
+// summary reaches the per-reason labels rather than the all-blocked sentence.
+const mixed = redactForResponse(
+  classifyBulkRecipients(["a", "e", "zz"], all, (d) => d.assigned_to !== "someone-else"),
+);
+const mixedLine = summarizeClassification(mixed);
+assert.equal(mixedLine, "3 leads selected · 1 can be emailed · 2 not available to you");
+assert.ok(
+  !/assigned|someone else|access|permission/i.test(mixedLine),
+  "wording must not hint that the record exists but belongs to someone else",
+);
+
 // ---------------------------------------------------------------------------
 // summarizeClassification — the sentence the operator reads before confirming
 // ---------------------------------------------------------------------------
 assert.equal(
   summarizeClassification(classifyBulkRecipients(["a", "b", "c", "d", "zz"], all, yes)),
-  "5 leads selected · 2 can be emailed · 2 no email address on file · 1 no longer in this list",
+  "5 leads selected · 2 can be emailed · 2 no email address on file · 1 not available to you",
 );
 assert.equal(
   summarizeClassification(classifyBulkRecipients(["a"], all, yes)),

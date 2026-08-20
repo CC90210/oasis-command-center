@@ -33,7 +33,7 @@ import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templ
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
 import { BULK_EMAIL_SOURCE, runDispatchBulkEmail } from "@/lib/bulk-email/dispatch";
-import { classifyBulkRecipients, summarizeClassification } from "@/lib/bulk-email/recipients";
+import { classifyBulkRecipients, summarizeClassification, redactForResponse } from "@/lib/bulk-email/recipients";
 import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { stripDashes, matchPositioningPhrases } from "@/lib/integrations/blast-safety-core";
@@ -264,6 +264,10 @@ export async function POST(req: NextRequest) {
 
     const readableIds = ids.filter((id) => !unreadable.has(id));
     const cls = classifyBulkRecipients(readableIds, byId, canAct);
+    // Everything the CLIENT sees goes through the fold: "not yours" and
+    // "does not exist" must stay indistinguishable or this endpoint becomes a
+    // UUID oracle. `cls` keeps the true reasons for the queue write below.
+    const shown = redactForResponse(cls);
 
     // Preflight answers "what would happen", writes nothing, sends nothing.
     // It runs the SAME classifier as the send below, so the count an operator
@@ -272,10 +276,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         ok: true,
         op,
-        counts: { ...cls.counts, unreadable: unreadable.size },
-        summary: summarizeClassification(cls, emailEntity),
-        skipped: cls.skipped,
-        sample: cls.eligible.slice(0, 3).map((r) => ({
+        counts: { ...shown.counts, unreadable: unreadable.size },
+        summary: summarizeClassification(shown, emailEntity),
+        skipped: shown.skipped,
+        sample: shown.eligible.slice(0, 3).map((r) => ({
           id: r.id,
           to_email: r.toEmail,
           first_name: r.firstName,
@@ -431,13 +435,13 @@ export async function POST(req: NextRequest) {
       batch_id: batchId,
       ...out,
       counts: {
-        ...cls.counts,
+        ...shown.counts,
         queued,
         blocked_copy: blockedAfterMerge,
         unreadable: unreadable.size,
         insert_failed: insertFailed,
       },
-      summary: summarizeClassification(cls, emailEntity),
+      summary: summarizeClassification(shown, emailEntity),
     });
   }
 

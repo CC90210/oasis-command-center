@@ -58,10 +58,44 @@ const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 /** Operator-facing wording for each skip reason. Lives here, next to the
  *  reasons themselves, so a new reason can't ship without copy. */
 export const SKIP_REASON_LABEL: Record<BulkSkipReason, string> = {
-  not_found: "no longer in this list",
-  no_access: "assigned to someone else",
+  // Deliberately covers BOTH "does not exist" and "exists but not yours" —
+  // see redactForResponse below. The wording has to be true of either.
+  not_found: "not available to you",
+  no_access: "not available to you",
   no_email: "no email address on file",
 };
+
+/**
+ * Collapse `no_access` into `not_found` before anything leaves the server.
+ *
+ * The bulk route deliberately makes "you may not touch this record"
+ * INDISTINGUISHABLE from "this record does not exist", so the endpoint cannot
+ * be used to probe which UUIDs are real (it mirrors the single-record routes,
+ * which 404 for both). Reporting the two as separate counts, or as separate
+ * per-id reasons, hands back exactly that oracle: a non-admin could submit
+ * arbitrary UUIDs and read off which ones exist on the tenant.
+ *
+ * Callers classify with the true reasons (the distinction is real, and worth
+ * having internally) and pass the result through here on the way out.
+ * (Codex review P1, 2026-08-20 round 4.)
+ *
+ * Note this costs an admin nothing: canViewLead always passes for an admin, so
+ * `no_access` is only ever non-zero for the very caller it must not inform.
+ */
+export function redactForResponse(c: BulkClassification): BulkClassification {
+  if (c.counts.no_access === 0) return c;
+  return {
+    eligible: c.eligible,
+    skipped: c.skipped.map((s) =>
+      s.reason === "no_access" ? { id: s.id, reason: "not_found" as const } : s,
+    ),
+    counts: {
+      ...c.counts,
+      not_found: c.counts.not_found + c.counts.no_access,
+      no_access: 0,
+    },
+  };
+}
 
 /**
  * Partition a selection into sendable recipients and explained skips.

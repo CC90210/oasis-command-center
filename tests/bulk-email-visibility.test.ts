@@ -29,7 +29,7 @@ const pipeline = read("components/manifest/LeadPipelineView.tsx");
 // ---------------------------------------------------------------------------
 assert.match(
   bulkRoute,
-  /import \{ classifyBulkRecipients, summarizeClassification \} from "@\/lib\/bulk-email\/recipients"/,
+  /import \{ classifyBulkRecipients, summarizeClassification, redactForResponse \} from "@\/lib\/bulk-email\/recipients"/,
   "route imports the shared classifier",
 );
 assert.equal(
@@ -85,6 +85,26 @@ assert.match(
   bulkRoute,
   /if \(!canWriteCrm\(sess\.teamRole\)\) \{/,
   "free-form send carries a role gate",
+);
+
+// 🚨 No UUID enumeration oracle. The route deliberately makes "not yours"
+// indistinguishable from "does not exist"; the preflight must not undo that by
+// reporting them as separate counts or reasons.
+// (Codex review P1, 2026-08-20 round 4.)
+assert.match(bulkRoute, /const shown = redactForResponse\(cls\);/, "responses go through the fold");
+assert.ok(
+  !/counts: \{ \.\.\.cls\.counts/.test(bulkRoute),
+  "the RAW classification never reaches the client",
+);
+assert.ok(
+  !/skipped: cls\.skipped/.test(bulkRoute),
+  "nor do the raw per-id skip reasons",
+);
+assert.match(bulkRoute, /summary: summarizeClassification\(shown, emailEntity\)/, "the summary is built from the folded view");
+assert.equal(
+  (bulkRoute.match(/summarizeClassification\(cls,/g) || []).length,
+  0,
+  "no response path summarizes the unfolded classification",
 );
 
 // ---------------------------------------------------------------------------
