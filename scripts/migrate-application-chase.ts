@@ -234,6 +234,14 @@ async function main() {
     log("   statements nag: SMS removed");
   }
 
+  // Containment must SUCCEED before anyone is enrolled. A rejected cancel leaves
+  // a scheduled text alive, or leaves the legacy VPS runner able to claim the
+  // sequence, and enrolling on top of either is exactly the harm this migration
+  // exists to prevent. A CAS miss (no error, row already claimed by the
+  // dispatcher) is fine and is NOT an error; a real database error is fatal.
+  // (Codex review P1, round 2.)
+  const containmentErrors: string[] = [];
+
   let cancelledRuns = 0;
   for (const r of smsRows) {
     const c = await db
@@ -241,7 +249,8 @@ async function main() {
       .update({ status: "cancelled", last_error: "sms removed from application chase (2026-08-20)" })
       .eq("id", r.id)
       .eq("status", r.status); // CAS: leave anything the dispatcher just claimed
-    if (!c.error) cancelledRuns += 1;
+    if (c.error) containmentErrors.push(`drip_runs ${r.id}: ${c.error.message}`);
+    else cancelledRuns += 1;
   }
   log(`   cancelled ${cancelledRuns}/${smsRows.length} in-flight SMS run(s)`);
 
@@ -252,9 +261,17 @@ async function main() {
       .update({ status: "cancelled", last_error: "superseded by drip_runs; VPS runner contained (2026-08-20)" })
       .eq("id", r.id)
       .eq("status", r.status);
-    if (!c.error) cancelledState += 1;
+    if (c.error) containmentErrors.push(`sequence_state ${r.id}: ${c.error.message}`);
+    else cancelledState += 1;
   }
   log(`   cancelled ${cancelledState}/${stateRows.length} VPS sequence_state row(s)`);
+
+  if (containmentErrors.length) {
+    throw new Error(
+      `containment incomplete (${containmentErrors.length} cancel(s) failed) — NOT enrolling anyone. ` +
+      `The sequence rewrite is live and safe; re-run to finish containment. First error: ${containmentErrors[0]}`,
+    );
+  }
 
   if (BACKFILL > 0) {
     const tranche = dormant.slice(0, BACKFILL);
@@ -294,7 +311,13 @@ async function findDormant(tenantId: string, sequenceId: string) {
     .eq("tenant_id", tenantId)
     .eq("entity_type", "lead")
     .eq("data->>stage", "viewed_application");
-  const leads = ((recs.data ?? []) as Array<{ id: string; data: Record<string, unknown> }>).filter(
+  // Fail closed like every other decision read: an error swallowed as zero rows
+  // would rewrite and cancel the old sequences, re-engage nobody, and report
+  // success. (Codex review P2, round 2.)
+  const leadRows = must(recs, "read viewed_application leads") as Array<{
+    id: string; data: Record<string, unknown>;
+  }>;
+  const leads = leadRows.filter(
     (r) => typeof r.data?.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.data.email as string),
   );
 
