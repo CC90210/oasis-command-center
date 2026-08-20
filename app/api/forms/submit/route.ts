@@ -1545,7 +1545,7 @@ async function initAnonymousLead(input: {
         "viewed_application"
       : form.on_complete_stage ||
         (form.step_outcomes as Record<string, string> | null | undefined)?.["0"] ||
-        "new_contact";
+        "researched";
     const leadData: Record<string, unknown> = {
       stage: defaultStage,
       // OASIS lead source enum has no "public_form" — map to "inbound" (a

@@ -345,17 +345,19 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
     description:
       "Move a lead through its lifecycle by firing a stage-engine event. " +
       "Use this (NOT update_record with a stage patch) when the operator " +
-      "says things like 'mark Bennett as lost', 'Acme just churned', 'I " +
-      "got off the phone with Windsor — they signed the contract', or 'move " +
-      "this lead to archived'. The engine validates the transition, emits " +
-      "the proper timeline event, and invalidates the dashboard cache so " +
-      "the kanban + active-clients tab refresh immediately. " +
-      "Event types (OASIS): manual_outreach_started (-> outreach), " +
-      "discovery_call_scheduled (-> discovery), lead_qualified (-> " +
-      "qualified), proposal_sent (-> proposal), proposal_viewed (-> " +
-      "negotiation), contract_signed (-> onboarding), onboarding_complete " +
-      "(-> active_client), lead_replied_negative (-> lost), contract_ended " +
-      "(-> churned, only from active_client), manual_archive (-> archived). " +
+      "says things like 'mark Bennett as lost', 'I got off the phone with " +
+      "Windsor — they signed the contract', or 'kickoff is done, start the " +
+      "build'. The engine validates the transition, emits the proper " +
+      "timeline event, and invalidates the dashboard cache so the kanban " +
+      "refreshes immediately. " +
+      "Event types (OASIS, 14-stage lifecycle): manual_outreach_started " +
+      "(-> attempting_contact), discovery_call_scheduled (-> " +
+      "founder_meeting_booked), lead_qualified (-> qualified), " +
+      "proposal_sent (-> proposal_sent), proposal_viewed (-> proposal_sent, " +
+      "lag-repair), contract_signed (-> won), onboarding_complete (-> " +
+      "in_build), lead_replied_negative (-> lost), contract_ended (-> lost, " +
+      "only from launched; reason code marks it as churn), manual_archive " +
+      "(-> lost, operator cleanup from any non-lost stage). " +
       "Find the lead's UUID first via search_records or list_records.",
     input_schema: {
       type: "object",
@@ -948,10 +950,10 @@ async function dispatch(
 }
 
 /**
- * NL-CRM bridge: operator says "Bennett just churned" -> Bravo calls
- * this with {lead_id, event_type: "contract_ended"} -> engine moves
- * the lead's stage, emits BRAVO_LEAD_AUTO_BUMPED, revalidates the
- * dashboard cache.
+ * NL-CRM bridge: operator says "Bennett's contract ended" -> Bravo
+ * calls this with {lead_id, event_type: "contract_ended"} -> engine
+ * moves the lead's stage, emits BRAVO_LEAD_AUTO_BUMPED, revalidates
+ * the dashboard cache.
  *
  * This is preferred over update_record({stage: "..."}) because it
  * runs through the engine: archived-lead bypass kicks in, from-set

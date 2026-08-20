@@ -2,10 +2,10 @@
  * lib/oasis-lead-stage-engine.ts — automatic lead.stage transitions for
  * the OASIS tenant.
  *
- * Mirrors lib/lead-stage-engine.ts in shape but encodes the 11-stage
- * AI-agency lifecycle from lib/oasis-stage-meta.ts instead of SunBiz's
- * funding funnel. Same Event union, same Result type, same idempotency
- * + manual-override-wins semantics:
+ * Mirrors lib/lead-stage-engine.ts in shape but encodes the 14-stage
+ * Website Sales Engine lifecycle from lib/oasis-stage-meta.ts instead
+ * of SunBiz's funding funnel. Same Event union, same Result type, same
+ * idempotency + manual-override-wins semantics:
  *
  *   - Each rule has a narrow `from` set. Once an operator manually moves
  *     a lead past that point, automatic events can't yank it backwards.
@@ -16,28 +16,39 @@
  *     carrying the `reason` + `via` so the timeline can render WHY a
  *     stage moved (not just THAT it did).
  *
- * Rule coverage (per the V6.9 ribbon-pass brief's table):
+ * Rule coverage (Website Sales Engine v2, 14-stage vocabulary):
  *
- *   Event                       From               → To             Reason
- *   outbound_email_queued       new_contact        → outreach        first_outreach_sent
- *   outbound_email_sent         new_contact        → outreach        first_outreach_sent
- *   discovery_call_scheduled    outreach           → discovery       discovery_call_scheduled
- *   lead_qualified              discovery          → qualified       qualified_explicit
- *   proposal_sent               qualified          → proposal        proposal_sent
- *   proposal_viewed             proposal           → negotiation     proposal_viewed
- *   contract_signed             negotiation        → onboarding      contract_signed
- *   onboarding_complete         onboarding         → active_client   onboarding_complete
- *   lead_replied_negative       any active stage   → lost            lead_replied_negative
- *   contract_ended              active_client      → churned         contract_ended
+ *   Event                       From                            → To                     Reason
+ *   outbound_email_queued       researched/assigned             → attempting_contact     first_outreach_sent
+ *   outbound_email_sent         researched/assigned             → attempting_contact     first_outreach_sent
+ *   discovery_call_scheduled    attempting_contact/connected/
+ *                               qualified                       → founder_meeting_booked discovery_call_scheduled
+ *   lead_qualified              attempting_contact/connected    → qualified              qualified_explicit
+ *   proposal_sent               founder_meeting_booked/
+ *                               demo_completed                  → proposal_sent          proposal_sent
+ *   proposal_viewed             founder_meeting_booked/
+ *                               demo_completed                  → proposal_sent          proposal_viewed
+ *   contract_signed             demo_completed/proposal_sent    → won                    contract_signed
+ *   onboarding_complete         onboarding                      → in_build               onboarding_complete
+ *   lead_replied_negative       any pre-won sales stage         → lost                   lead_replied_negative
+ *   contract_ended              launched                        → lost                   contract_ended
+ *   manual_outreach_started     researched/assigned             → attempting_contact     operator_marked_outreach_started
+ *   manual_archive              any non-lost stage              → lost                   operator_archived_lead
  *
- * Wiring status (2026-05-21): rule definitions land here so future
- * surfaces have something to dispatch against. ONE rule is wired
- * upstream today — outbound_email_queued / outbound_email_sent via
- * app/api/leads/[id]/email/route.ts and the tenant-aware dispatcher
- * in lib/lead-stage-dispatcher.ts. The remaining events need their
- * own trigger sites (calendar webhook for discovery_call_scheduled,
- * proposal tracking pixel for proposal_viewed, e-signature webhook
- * for contract_signed, etc.) which are deferred.
+ * The 14-stage vocabulary has no `negotiation`, `churned`, or `archived`
+ * stage — `lost` is the only dead-branch bucket, so contract_ended and
+ * manual_archive both land there (distinguished by their reason codes
+ * on the timeline).
+ *
+ * Wiring status (unchanged since 2026-05-21): rule definitions land
+ * here so future surfaces have something to dispatch against. ONE rule
+ * is wired upstream today — outbound_email_queued / outbound_email_sent
+ * via app/api/leads/[id]/email/route.ts and the tenant-aware dispatcher
+ * in lib/lead-stage-dispatcher.ts (plus the operator/chat-triggered
+ * events via cloud-tool-runner's advance_lead_stage). The remaining
+ * events need their own trigger sites (calendar webhook for
+ * discovery_call_scheduled, proposal tracking pixel for proposal_viewed,
+ * e-signature webhook for contract_signed, etc.) which are deferred.
  */
 
 import { getRecord, updateRecord } from "./manifest/data";
@@ -55,12 +66,11 @@ export type OasisLeadStageEvent =
   | { type: "lead_replied_negative"; tenantId: string; leadId: string }
   | { type: "contract_ended"; tenantId: string; leadId: string }
   // 2026-05-22: operator-driven transitions that the automated webhooks
-  // don't cover. Without these, operators couldn't move a lead from
-  // new_contact -> outreach without sending email through the dashboard
-  // (manual outreach via phone / Telegram / LinkedIn left the lead
-  // stuck at new_contact). And they couldn't archive a churned/lost
-  // lead from the UI — which is exactly why Bennett Agency stayed
-  // labelled active_client for weeks despite being lost.
+  // don't cover. Without these, operators couldn't mark a manual first
+  // touch (phone / Telegram / LinkedIn) without sending email through
+  // the dashboard, and couldn't retire a dead lead from the UI — which
+  // is exactly why Bennett Agency stayed labelled as an active client
+  // for weeks despite being lost.
   | { type: "manual_outreach_started"; tenantId: string; leadId: string }
   | { type: "manual_archive"; tenantId: string; leadId: string };
 
@@ -74,134 +84,158 @@ type Rule = {
   reasonCode: string;
 };
 
-// "Active stages" — every stage an operator might still be pursuing.
-// Used by negative-reply + contract-end rules to short-circuit
-// from anywhere in the funnel without listing the same 8 stages twice.
+// "Active sales stages" — every pre-won stage a rep or founder might
+// still be pursuing. Used by the negative-reply rule to short-circuit
+// from anywhere in the sales funnel without listing the same 8 stages
+// twice. Deliberately excludes won + the delivery stages (onboarding,
+// in_build, client_review, launched): a paying client who sends a
+// grumpy email is a delivery/refund conversation, not a lost lead.
 const ACTIVE_STAGES = new Set<string>([
-  "new_contact",
-  "outreach",
-  "discovery",
+  "researched",
+  "assigned",
+  "attempting_contact",
+  "connected",
   "qualified",
-  "proposal",
-  "negotiation",
-  "onboarding",
-  "active_client",
+  "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
 ]);
 
 const RULES: Record<OasisLeadStageEvent["type"], Rule> = {
-  // First outreach goes out — bump fresh leads into the outreach stage.
-  // Both the "queued" and "sent" events map here so the lead progresses
-  // whether the dashboard or the daemon path triggers it.
+  // First outreach goes out — bump fresh/assigned leads into
+  // attempting_contact. Both the "queued" and "sent" events map here so
+  // the lead progresses whether the dashboard or the daemon path
+  // triggers it.
   outbound_email_queued: {
-    from: new Set<string>(["", "new_contact"]),
-    to: "outreach",
+    from: new Set<string>(["", "researched", "assigned"]),
+    to: "attempting_contact",
     reasonCode: "first_outreach_sent",
   },
   outbound_email_sent: {
-    from: new Set<string>(["", "new_contact"]),
-    to: "outreach",
+    from: new Set<string>(["", "researched", "assigned"]),
+    to: "attempting_contact",
     reasonCode: "first_outreach_sent",
   },
 
-  // Calendar webhook (Google / Cal.com) fires this when a discovery
-  // call is on the books. Only valid from `outreach` — already-qualified
-  // leads with a follow-up call don't regress.
+  // Calendar webhook (Google / Cal.com) fires this when the founder
+  // meeting is on the books. Valid from the working stages up through
+  // qualified — leads already past founder_meeting_booked (demo done,
+  // proposal out) don't regress when a follow-up call is booked.
   discovery_call_scheduled: {
-    from: new Set<string>(["outreach"]),
-    to: "discovery",
+    from: new Set<string>(["attempting_contact", "connected", "qualified"]),
+    to: "founder_meeting_booked",
     reasonCode: "discovery_call_scheduled",
   },
 
   // Manual qualification or AI-scoring threshold crossed. The drawer's
   // "Mark qualified" action and ai-lead-scoring.ts both fire this.
   lead_qualified: {
-    from: new Set<string>(["discovery", "outreach"]),
+    from: new Set<string>(["attempting_contact", "connected"]),
     to: "qualified",
     reasonCode: "qualified_explicit",
   },
 
   // Proposal document sent through the dashboard or a tracked
-  // attachment in the chat. Lead moves into the proposal stage so the
+  // attachment in the chat. Lead moves into proposal_sent so the
   // operator's funnel reflects "waiting on signature."
   proposal_sent: {
-    from: new Set<string>(["qualified", "discovery"]),
-    to: "proposal",
+    from: new Set<string>(["founder_meeting_booked", "demo_completed"]),
+    to: "proposal_sent",
     reasonCode: "proposal_sent",
   },
 
   // Tracking pixel hit on the proposal preview, OR the proposal link
-  // was clicked. Bumps to negotiation since the prospect is actively
-  // reading + about to push back on terms.
+  // was clicked. The 14-stage vocabulary has no negotiation stage, so
+  // this is now lag-repair only: a view proves the proposal went out,
+  // so a record still sitting pre-proposal gets bumped to
+  // proposal_sent. Already at proposal_sent → no-op.
   proposal_viewed: {
-    from: new Set<string>(["proposal"]),
-    to: "negotiation",
+    from: new Set<string>(["founder_meeting_booked", "demo_completed"]),
+    to: "proposal_sent",
     reasonCode: "proposal_viewed",
   },
 
   // E-signature webhook (DocuSign / HelloSign / Stripe agreement)
-  // confirms the contract is signed. Lead moves into onboarding —
-  // the deliverable side of the funnel.
+  // confirms the contract is signed. Deal is won; delivery stages
+  // (onboarding onward) take over from here.
   contract_signed: {
-    from: new Set<string>(["negotiation", "proposal"]),
-    to: "onboarding",
+    from: new Set<string>(["demo_completed", "proposal_sent"]),
+    to: "won",
     reasonCode: "contract_signed",
   },
 
-  // Operator marks onboarding complete (first deliverable shipped,
-  // kickoff call done). Lead becomes an active_client; MRR meter ticks.
+  // Operator marks onboarding complete (assets + access collected,
+  // kickoff call done). The build starts.
   onboarding_complete: {
     from: new Set<string>(["onboarding"]),
-    to: "active_client",
+    to: "in_build",
     reasonCode: "onboarding_complete",
   },
 
   // Inbound classifier or operator flags an explicit "not interested /
-  // remove me / wrong fit." Overrides every active stage; once a lead
-  // says no, the funnel respects it.
+  // remove me / wrong fit." Overrides every pre-won sales stage; once a
+  // lead says no, the funnel respects it. Post-won stages are excluded —
+  // see the ACTIVE_STAGES comment above.
   lead_replied_negative: {
     from: ACTIVE_STAGES,
     to: "lost",
     reasonCode: "lead_replied_negative",
   },
 
-  // Contract expiry or cancellation. Only valid from active_client so
-  // a deal that never closed but lapsed doesn't get mislabelled as
-  // "churned" (it's "lost" via the prior rule instead).
+  // Contract expiry or cancellation after launch. The 14-stage
+  // vocabulary has no "churned" stage — lost is the only dead branch,
+  // and the contract_ended reason code keeps the timeline honest about
+  // WHY (was a client, then departed — vs never closed). Narrow from
+  // set: a deal that never launched but lapsed is lost via the
+  // negative-reply rule or a manual move, not mislabelled here.
   contract_ended: {
-    from: new Set<string>(["active_client"]),
-    to: "churned",
+    from: new Set<string>(["launched"]),
+    to: "lost",
     reasonCode: "contract_ended",
   },
 
   // Operator pressed "Outreach started" — they called / DM'd / met the
   // lead in person and want the funnel to reflect it. Only valid from
-  // new_contact so already-progressed leads don't regress to outreach.
+  // the pre-contact stages so already-progressed leads don't regress.
   manual_outreach_started: {
-    from: new Set<string>(["new_contact"]),
-    to: "outreach",
+    from: new Set<string>(["researched", "assigned"]),
+    to: "attempting_contact",
     reasonCode: "operator_marked_outreach_started",
   },
 
-  // Operator pressed "Move to archived" — final cleanup for stale rows
-  // that should disappear from active views. Allowed from any terminal
-  // OR active stage so things like Bennett (active_client, but lost
-  // months ago) can finally be cleaned up from the UI without a DB
-  // edit. Engine-side guard: target stage is "archived"; from filters
-  // out only "archived" itself (no-op when already there).
+  // Operator retires a stale row so it disappears from active views.
+  // The 14-stage vocabulary has no "archived" stage, so this lands on
+  // lost with its own reason code (operator_archived_lead) to keep the
+  // timeline distinguishable from a genuine lost-in-funnel. Allowed
+  // from any stage except lost itself (no-op when already there);
+  // legacy rows still carrying retired 11-stage keys (active_client,
+  // churned, archived) are included so they can finally be cleaned up
+  // from the UI without a DB edit.
   manual_archive: {
     from: new Set<string>([
+      "researched",
+      "assigned",
+      "attempting_contact",
+      "connected",
+      "qualified",
+      "founder_meeting_booked",
+      "demo_completed",
+      "proposal_sent",
+      "won",
+      "onboarding",
+      "in_build",
+      "client_review",
+      "launched",
+      // Legacy 11-stage keys — rows the data migration hasn't touched yet.
       "new_contact",
       "outreach",
       "discovery",
-      "qualified",
       "proposal",
       "negotiation",
-      "onboarding",
       "active_client",
       "churned",
-      "lost",
     ]),
-    to: "archived",
+    to: "lost",
     reasonCode: "operator_archived_lead",
   },
 };

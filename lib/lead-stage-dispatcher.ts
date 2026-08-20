@@ -9,7 +9,8 @@
  *     migration 064 retired imported / not_interested / approved)
  *
  *   - OASIS (slug starts with "oasis") → lib/oasis-lead-stage-engine.ts
- *     (AI-agency lifecycle: new_contact → outreach → ... → active_client)
+ *     (14-stage Website Sales Engine lifecycle: researched → assigned →
+ *     attempting_contact → ... → launched)
  *
  *   - Anything else → no-op (returns { fired: false, reason: "no_rule" }).
  *

@@ -4,19 +4,18 @@
  * StageMeta type) but covers the AI-agency client lifecycle rather than
  * the funding/lender funnel.
  *
- * Eleven stages, in canonical order:
- *   new_contact   → outreach   → discovery   → qualified  → proposal →
- *   negotiation   → onboarding → active_client → churned  → lost     →
- *   archived
+ * Fourteen stages (Website Sales Engine v2), in canonical order:
+ *   researched → assigned → attempting_contact → connected → qualified →
+ *   founder_meeting_booked → demo_completed → proposal_sent → won | lost →
+ *   onboarding → in_build → client_review → launched
  *
  * Palette principles (consistent with lib/sunbiz-stage-meta.ts):
  *   - Lower saturation than Salesforce Lightning; readable on bg-bg-deep.
  *   - Cool blues for upper-funnel (no commitment yet).
  *   - Warmer / purple-leaning hues for active deal motion.
- *   - Amber for onboarding (the "in transition" period).
- *   - Green only for active_client (the goal state).
- *   - Wine / rose for the dead branches (churned / lost).
- *   - Slate for archived (permanently inactive).
+ *   - Amber for the delivery build-out (onboarding / in_build).
+ *   - Green for the goal states (won / launched).
+ *   - Wine / rose for the dead branch (lost).
  *
  * Imported by lib/manifest/seeds.ts → OASIS_SEED.data_model.lead.stages
  * (which lists the keys only) and by components/manifest/StageRail.tsx

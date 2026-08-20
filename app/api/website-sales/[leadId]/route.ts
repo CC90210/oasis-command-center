@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { AUTOMATION_ADD_ONS, WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
+import { WEBSITE_PACKAGES, WEBSITE_SALES_STAGES, isSellableAutomation, validateQuote, type WebsitePackageId } from "@/lib/website-sales";
 import { dispositionPatch, mayAgentBookFounder, mayAgentQualify, type RepDisposition } from "@/lib/website-sales-workflow";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -15,11 +15,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const db = getServiceSupabase();
   const lead = await db.from("tenant_records").select("id,data").eq("tenant_id", session.tenantId).eq("id",leadId).eq("entity_type","lead").maybeSingle();
   if (!lead.data) return NextResponse.json({ok:false,error:"lead_not_found"},{status:404});
-  const current = lead.data as Record<string,unknown>;
+  // The lead's fields live in the row's `data` JSON column — the row object
+  // itself only has {id, data}. Reading sales_program/assigned_to off the row
+  // (the pre-v2 shape of this line) made every request 404 as
+  // not_website_sales_lead before any action could run.
+  const row = lead.data as { id: string; data?: unknown };
+  const current = (row.data && typeof row.data === "object" && !Array.isArray(row.data) ? row.data : {}) as Record<string,unknown>;
   if (current.sales_program !== "website_sales_v1") return NextResponse.json({ok:false,error:"not_website_sales_lead"},{status:404});
-  if (!session.isAdmin && String(current.assigned_to || "").toLowerCase() !== session.userId.toLowerCase()) {
+  const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
+  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
+  if (!session.isAdmin && !assignedToUser && !attributedToUser) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
+  // Comp v2: reps (team_role='agent') may run proposal + close THEMSELVES on
+  // their own leads (assigned or frozen-attributed). Founder approval still
+  // gates the commission PAYOUT — closing only accrues.
+  const repMayRunDeal = session.teamRole === "agent" && (assignedToUser || attributedToUser);
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
   const repAction = ["disposition","qualify","book_founder"].includes(body.action);
@@ -62,19 +73,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     if (!session.isAdmin) return NextResponse.json({ok:false,error:"rep_stage_forbidden"},{status:403});
     patch = { stage:body.stage };
   } else if (body.action === "proposal") {
-    if (!session.isTrueAdmin) return NextResponse.json({ok:false,error:"founder_only"},{status:403});
+    if (!session.isTrueAdmin && !repMayRunDeal) return NextResponse.json({ok:false,error:"founder_only"},{status:403});
     const packageId = body.packageId as WebsitePackageId;
     const automationIds = Array.isArray(body.automationIds) ? body.automationIds : [];
-    if (!WEBSITE_PACKAGES[packageId] || automationIds.some(id => !AUTOMATION_ADD_ONS.some(a => a.id === id))) return NextResponse.json({ok:false,error:"invalid_offer"},{status:400});
+    // Retired add-ons stay resolvable for historical deals but can never be
+    // attached to a NEW quote — isSellableAutomation is the only gate.
+    if (!WEBSITE_PACKAGES[packageId] || !automationIds.every(isSellableAutomation)) return NextResponse.json({ok:false,error:"invalid_offer"},{status:400});
     const check = validateQuote(packageId,Number(body.setupAmount),Number(body.monthlyAmount),session.isTrueAdmin);
     if (!check.ok) return NextResponse.json({ok:false,error:check.error},{status:400});
     patch = { stage:"proposal_sent", recommended_tier:packageId, automation_interests:automationIds, proposal_status:"sent", quoted_setup_amount:Number(body.setupAmount), quoted_monthly_amount:Number(body.monthlyAmount), currency:body.currency === "USD" ? "USD" : "CAD" };
   } else if (body.action === "close") {
-    if (!session.isTrueAdmin) return NextResponse.json({ok:false,error:"founder_only"},{status:403});
-    const data = lead.data as Record<string,unknown>;
-    const rep = String(data.attributed_rep_user_id || data.assigned_to || "");
+    if (!session.isTrueAdmin && !repMayRunDeal) return NextResponse.json({ok:false,error:"founder_only"},{status:403});
+    const rep = String(current.attributed_rep_user_id || current.assigned_to || "");
     if (!UUID.test(rep) || typeof body.paymentReference !== "string" || !body.paymentReference.trim()) return NextResponse.json({ok:false,error:"missing_attribution_or_payment"},{status:400});
-    const result = await db.rpc("close_website_deal", { p_tenant_id:session.tenantId,p_lead_id:leadId,p_rep_user_id:rep,p_founder_user_id:session.userId,p_package_id:body.packageId,p_automation_ids:body.automationIds||[],p_currency:body.currency,p_setup_amount:body.setupAmount,p_monthly_amount:body.monthlyAmount,p_payment_reference:body.paymentReference });
+    // Comp v2: the CLOSER decides the rate. A rep closing their own attributed
+    // lead is the opener-closer path (30%); a founder close pays the attributed
+    // rep the opener rate (20%). The RPC re-verifies both sides (agent role +
+    // frozen attribution; owner/admin for founder closes) — this flag alone
+    // never grants anything.
+    const closedByRep = !session.isTrueAdmin && rep.toLowerCase() === session.userId.toLowerCase();
+    // website_deals.founder_user_id: the founder who closed; on a rep-close,
+    // the founder from the booked meeting when one exists, else the rep
+    // themselves (self-run deal with no founder in the loop).
+    const bookedFounder = typeof current.booked_founder === "string" && UUID.test(current.booked_founder) ? current.booked_founder : null;
+    const founderUserId = closedByRep ? (bookedFounder ?? session.userId) : session.userId;
+    const result = await db.rpc("close_website_deal", { p_tenant_id:session.tenantId,p_lead_id:leadId,p_rep_user_id:rep,p_founder_user_id:founderUserId,p_package_id:body.packageId,p_automation_ids:body.automationIds||[],p_currency:body.currency,p_setup_amount:body.setupAmount,p_monthly_amount:body.monthlyAmount,p_payment_reference:body.paymentReference,p_closed_by_rep:closedByRep });
     if (result.error) return NextResponse.json({ok:false,error:result.error.message},{status:500});
     return NextResponse.json({ok:true,result:result.data});
   } else return NextResponse.json({ok:false,error:"unknown_action"},{status:400});

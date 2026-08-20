@@ -248,8 +248,9 @@ export async function POST(
   });
 
   // Engine moves the lead forward through the sales motion. For SunBiz
-  // that's imported → sent_application; for OASIS that's new_contact →
-  // outreach. The dispatcher picks the right rules based on tenant.
+  // that's imported → sent_application; for OASIS that's researched/
+  // assigned → attempting_contact. The dispatcher picks the right rules
+  // based on tenant.
   // Engine guards manual overrides so an operator-set stage isn't yanked.
   const stageEvent = await dispatchLeadStageEvent({
     type: "outbound_email_queued",

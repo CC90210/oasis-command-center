@@ -10,7 +10,7 @@
  *   https://oasisai.work/f/oasis-ai-cc/start
  *
  * Submissions ingest into the OASIS pipeline as `inbound` leads at
- * `new_contact` (see app/api/forms/submit/route.ts → initAnonymousLead), then
+ * `researched` (see app/api/forms/submit/route.ts → initAnonymousLead), then
  * fire a Telegram ping + a Claude-personalized welcome email (the OASIS
  * notification path keyed off OASIS_FUNNEL_SLUG).
  *
@@ -34,8 +34,9 @@ export const OASIS_FUNNEL_NAME = "Work with CC";
 export const OASIS_FUNNEL_DESCRIPTION =
   "CC's personal-brand lead funnel — AI automation, DJ bookings, brand coaching.";
 
-/** Leads land here on completion + at create time (single-stage funnel). */
-export const OASIS_FUNNEL_ON_COMPLETE_STAGE = "new_contact";
+/** Leads land here on completion + at create time (single-stage funnel).
+ *  First stage of the 14-stage OASIS lifecycle (lib/oasis-stage-meta.ts). */
+export const OASIS_FUNNEL_ON_COMPLETE_STAGE = "researched";
 
 export const OASIS_FUNNEL_BRANDING: FormBranding = {
   // CC-funnel brand: gold on near-black. primary drives the CTA + accents.
