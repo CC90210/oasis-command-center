@@ -180,6 +180,11 @@ const TESTS = [
   // lib/web-leads/outcome.ts's header for the full reasoning.
   "tests/web-leads-outcome.test.ts",
   "tests/web-leads-outcome-guards.test.ts",
+  // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
+  // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
+  // the pipeline route's read-only auth spine, agent-role scoping wiring,
+  // and that an unrecognised stage value is bucketed and shown, not dropped.
+  "tests/web-leads-pipeline.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

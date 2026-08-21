@@ -310,3 +310,72 @@ export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]
     };
   });
 }
+
+/**
+ * A lead as the pipeline view needs it: everything WebLead already carries,
+ * plus the two fields that view is built on top of and that toWebLead()
+ * deliberately does NOT surface (see its neighbouring functions' comments) --
+ * `stage`, which is CC's website-sales lifecycle field on the SAME row
+ * (lib/website-sales.ts's WEBSITE_SALES_STAGES), and `assignedTo`, needed
+ * here only so an admin viewer can filter the board to one rep. Both are read
+ * directly off the raw row inside fetchPipelineLeads, not added to WebLead
+ * itself -- WebLead is the shape every other web-leads surface renders, and
+ * widening it would leak assignedTo into components that were never audited
+ * against exposing it.
+ */
+export type PipelineLead = WebLead & { stage: string | null; assignedTo: string | null };
+
+/**
+ * All leads THIS ENGINE produced (see WEBDEV_TENANT_ID's doc comment: as of
+ * 2026-08-20 the web-design prospecting book and OASIS's own agency-CRM
+ * leads live in the SAME tenant, both as tenant_records(entity_type='lead')
+ * -- tenant pinning alone does not separate them). A lead this engine
+ * promoted always carries `data.webdev_territory_id` (stamped by the
+ * promoter, see toWebLead's territoryId mapping); an OASIS agency-CRM lead
+ * never does. So the same field that already lets fetchLeads() intersect
+ * against a caller-supplied sheet list doubles here as the leadgen SOURCE
+ * MARKER: requiring it non-null is what keeps the pipeline view from ever
+ * rendering the agency's own book next to this feature's leads.
+ *
+ * Scoping mirrors fetchSheetsScopedToViewer exactly: one full tenant-pinned
+ * read (capped and throwing on a possibly-truncated result, same
+ * LEAD_READ_CAP contract as every other full scan in this file), then
+ * visibleToViewer applied per row BEFORE mapping -- a scoped contractor must
+ * never receive a row outside their own book, not just have it hidden by the
+ * caller.
+ */
+export async function fetchPipelineLeads(viewer: Viewer): Promise<PipelineLead[]> {
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("tenant_records")
+    .select("id,data")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`leads_read_failed: ${error.message}`);
+  if ((data || []).length >= LEAD_READ_CAP) {
+    throw new Error(
+      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
+    );
+  }
+
+  return (data || [])
+    .map((r: { id: string; data: Record<string, unknown> }) => r)
+    .filter((r) =>
+      visibleToViewer(
+        typeof r.data.assigned_to === "string" ? r.data.assigned_to : null,
+        viewer,
+      ),
+    )
+    .map((r): PipelineLead => {
+      const lead = toWebLead(r);
+      const stage = typeof r.data.stage === "string" && r.data.stage.trim() ? r.data.stage.trim() : null;
+      const assignedTo =
+        typeof r.data.assigned_to === "string" && r.data.assigned_to.trim()
+          ? r.data.assigned_to.trim()
+          : null;
+      return { ...lead, stage, assignedTo };
+    })
+    // The leadgen source marker: see this function's doc comment above.
+    .filter((lead) => lead.territoryId !== null);
+}
