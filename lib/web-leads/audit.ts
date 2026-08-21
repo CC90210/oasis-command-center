@@ -166,7 +166,7 @@ function compareToOurBenchmark(dimensions: DimensionProfile[]): BenchmarkCompari
  * tenant-pinned read of one more column on the SAME row, not a second
  * authorization check.
  */
-async function businessIdForLead(id: string): Promise<string | null> {
+export async function businessIdForLead(id: string): Promise<string | null> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("tenant_records")
@@ -183,7 +183,7 @@ async function businessIdForLead(id: string): Promise<string | null> {
 }
 
 /** Charset-allowlist before a value reaches a PostgREST filter string. */
-function safeFilterValue(v: string): string | null {
+export function safeFilterValue(v: string): string | null {
   return /^[A-Za-z0-9._:@-]{1,128}$/.test(v) ? v : null;
 }
 

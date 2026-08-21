@@ -20,6 +20,7 @@ import { X, Phone, MapPin, Globe, Tag, ExternalLink } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 import { WebsiteComparison } from "./WebsiteComparison";
+import { CallOutcomeLog } from "./CallOutcomeLog";
 
 function Row({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
   return (
@@ -137,6 +138,7 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                 <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
               </div>
               <WebsiteComparison leadId={leadId} />
+              <CallOutcomeLog leadId={leadId} />
             </>
           )}
         </div>
