@@ -10,7 +10,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
-  destinationVerdict, normalizeLast10, lineTypeFor,
+  destinationVerdict, normalizeLast10, lineTypeFor, isVerifiedMobile,
   type DestinationOutcome, type DestinationVerdict, type LineType,
 } from "./destination-health-core";
 
@@ -28,7 +28,7 @@ const MAX_ROWS = 20_000;
 export async function refreshDestinationHealth(
   tenantId: string,
   opts: { sinceMs?: number } = {},
-): Promise<{ examined: number; untextable: number; written: number; error: string | null }> {
+): Promise<{ examined: number; untextable: number; verified: number; written: number; error: string | null }> {
   const db: Db = getServiceSupabase();
   const since = new Date(opts.sinceMs ?? Date.now() - 90 * 24 * 3_600_000).toISOString();
 
@@ -47,7 +47,7 @@ export async function refreshDestinationHealth(
       .gte("sent_at", since)
       .order("sent_at", { ascending: false })
       .range(from, from + PAGE - 1);
-    if (res.error) return { examined: 0, untextable: 0, written: 0, error: res.error.message };
+    if (res.error) return { examined: 0, untextable: 0, verified: 0, written: 0, error: res.error.message };
     const page = (res.data || []) as typeof receipts;
     receipts.push(...page);
     if (page.length < PAGE) break;
@@ -58,7 +58,7 @@ export async function refreshDestinationHealth(
   const runToLead = new Map<string, string>();
   for (let i = 0; i < runIds.length; i += PAGE) {
     const res = await db.from("drip_runs").select("id, lead_id").eq("tenant_id", tenantId).in("id", runIds.slice(i, i + PAGE));
-    if (res.error) return { examined: 0, untextable: 0, written: 0, error: res.error.message };
+    if (res.error) return { examined: 0, untextable: 0, verified: 0, written: 0, error: res.error.message };
     for (const r of (res.data || []) as Array<{ id: string; lead_id: string | null }>) {
       if (r.lead_id) runToLead.set(String(r.id), String(r.lead_id));
     }
@@ -79,7 +79,7 @@ export async function refreshDestinationHealth(
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lead")
       .range(from, from + PAGE - 1);
-    if (res.error) return { examined: 0, untextable: 0, written: 0, error: res.error.message };
+    if (res.error) return { examined: 0, untextable: 0, verified: 0, written: 0, error: res.error.message };
     const page = (res.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>;
     for (const r of page) {
       const d = r.data || {};
@@ -116,10 +116,18 @@ export async function refreshDestinationHealth(
   }
 
   let untextable = 0;
+  let verifiedCount = 0;
   let written = 0;
   for (const [last10, outcomes] of byNumber) {
-    const v = destinationVerdict(outcomes, { lineType: lineTypes.get(last10), last10 });
+    const lineType = lineTypes.get(last10);
+    const v = destinationVerdict(outcomes, { lineType, last10 });
+    // The stricter flag the sender uses while the lookup backlog drains. See
+    // isVerifiedMobile: `textable` fails open on an unknown number by design,
+    // which is right in general and wrong for a cohort that is 100%
+    // application-provided and has delivered 0 of 53.
+    const ver = isVerifiedMobile(outcomes, lineType);
     if (!v.textable) untextable++;
+    if (ver.verified) verifiedCount++;
     const up = await db.from("sms_destination_health").upsert(
       {
         tenant_id: tenantId,
@@ -129,6 +137,7 @@ export async function refreshDestinationHealth(
         // libSQL stores booleans as 0/1; write the integer explicitly rather
         // than relying on a driver coercion that differs between planes.
         textable: v.textable ? 1 : 0,
+        verified: ver.verified ? 1 : 0,
         reason: v.reason.slice(0, 200),
         last_seen_at: outcomes[0]?.at ?? null,
         updated_at: new Date().toISOString(),
@@ -137,11 +146,11 @@ export async function refreshDestinationHealth(
     );
     // The adapter RETURNS errors rather than throwing. Ignoring the result here
     // would report a clean refresh over a table that never changed.
-    if (up.error) return { examined: byNumber.size, untextable, written, error: up.error.message };
+    if (up.error) return { examined: byNumber.size, untextable, verified: verifiedCount, written, error: up.error.message };
     written++;
   }
 
-  return { examined: byNumber.size, untextable, written, error: null };
+  return { examined: byNumber.size, untextable, verified: verifiedCount, written, error: null };
 }
 
 /**
@@ -170,24 +179,92 @@ export async function untextableNumbers(tenantId: string): Promise<Set<string> |
 }
 
 /** One number's verdict, for a per-lead check at dispatch. */
-export async function isTextable(tenantId: string, phone: unknown): Promise<{ textable: boolean; reason: string }> {
+export type Reachability = {
+  textable: boolean;
+  reason: string;
+  /**
+   * WHY it is held, when it is.
+   *
+   *   "unreachable"           a landline, or a number that keeps failing.
+   *                           Permanent until something about the number changes.
+   *   "awaiting_verification" verified-only mode and no lookup on file yet.
+   *                           TEMPORARY: it clears when the queue drains.
+   *
+   * Kept apart because they need different reactions, and because the guard
+   * audit counts these by reason: a temporary wait reported as a permanent
+   * bench would show the landline gate firing hundreds of times and hide the
+   * occasions it really fires.
+   */
+  hold: "unreachable" | "awaiting_verification" | null;
+};
+
+export async function isTextable(tenantId: string, phone: unknown): Promise<Reachability> {
   const last10 = normalizeLast10(phone);
-  if (!last10) return { textable: false, reason: "no usable phone number" };
+  if (!last10) return { textable: false, reason: "no usable phone number", hold: "unreachable" };
   const db: Db = getServiceSupabase();
   const res = await db
     .from("sms_destination_health")
-    .select("textable, reason")
+    .select("textable, verified, reason")
     .eq("tenant_id", tenantId)
     .eq("phone_last10", last10)
     .maybeSingle();
   // FAIL CLOSED on a read error. Every other outcome here is a fact; this one
   // is an absence of facts, and sending into it is what a landline blast looks
   // like from the inside.
-  if (res.error) return { textable: false, reason: `destination health unreadable: ${res.error.message}` };
-  const row = res.data as { textable: unknown; reason: string | null } | null;
-  if (!row) return { textable: true, reason: "no history" };
+  if (res.error) {
+    return { textable: false, reason: `destination health unreadable: ${res.error.message}`, hold: "unreachable" };
+  }
+  const row = res.data as { textable: unknown; verified: unknown; reason: string | null } | null;
+
+  // VERIFIED-FIRST MODE. While the lookup backlog drains, send only where there
+  // is positive evidence the number reaches a handset.
+  //
+  // Env-gated so it can be turned off without a deploy, and deliberately NOT a
+  // change to the underlying rule: destinationVerdict still fails open on an
+  // unknown number, because that is how a new number gets learned about. This
+  // is a stricter question asked on top, not a reversal.
+  //
+  // Without it, the 347-lead follow-up cohort — 100% application-provided
+  // numbers, 0 delivered of 53 — all read as textable, and 40/day into that
+  // benches our lines within the hour.
+  if (verifiedOnly()) {
+    // An unknown number has no row at all. Under this mode that is a HOLD, not
+    // a send: it is exactly the state the whole cohort is in.
+    if (!row) {
+      return { textable: false, reason: "awaiting phone verification (no lookup on file)", hold: "awaiting_verification" };
+    }
+    const verified = row.verified === true || row.verified === 1;
+    if (!verified) {
+      // A KNOWN landline stays permanent even in this mode. Only a genuinely
+      // not-yet-looked-up number is a temporary wait.
+      const knownBad = row.textable === false || row.textable === 0;
+      return {
+        textable: false,
+        reason: row.reason || "awaiting phone verification",
+        hold: knownBad ? "unreachable" : "awaiting_verification",
+      };
+    }
+    return { textable: true, reason: row.reason || "verified mobile", hold: null };
+  }
+
+  if (!row) return { textable: true, reason: "no history", hold: null };
   const textable = row.textable === true || row.textable === 1;
-  return { textable, reason: row.reason || (textable ? "known good" : "benched") };
+  return {
+    textable,
+    reason: row.reason || (textable ? "known good" : "benched"),
+    hold: textable ? null : "unreachable",
+  };
+}
+
+/**
+ * Send only to numbers proven to receive texts.
+ *
+ * Read at CALL time so it can be switched without a deploy — a value captured
+ * at module load would keep the old behaviour on a warm serverless instance
+ * long after the operator changed it.
+ */
+export function verifiedOnly(env: NodeJS.ProcessEnv = process.env): boolean {
+  return String(env.DRIPS_SMS_VERIFIED_ONLY || "").trim() === "1";
 }
 
 export type { DestinationVerdict };

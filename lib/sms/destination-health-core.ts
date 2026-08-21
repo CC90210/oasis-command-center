@@ -109,6 +109,48 @@ export function wirelessCandidates(candidates: unknown): string[] {
  * stop the channel entirely. The cost of being wrong is one message; the cost
  * of failing closed here is the whole programme.
  */
+/**
+ * Is this number PROVEN to receive texts?
+ *
+ * Stricter than `textable`, and the two answer different questions:
+ *
+ *   textable  — "no reason to think this will fail" (fails OPEN on unknown, so
+ *               a new number can be tried once and learned from)
+ *   verified  — "we have positive evidence this reaches a handset"
+ *
+ * WHY THE STRICTER ONE IS NEEDED (measured 2026-08-20). The follow-up cohort we
+ * most want to text is 347 leads, 100% of them application-provided numbers,
+ * and that provenance has delivered 0 of 53. Under `textable` every one of them
+ * is a candidate, because none has failed twice yet and none carries a line
+ * type. Sending 40/day into that would fail almost every message, and since 3
+ * consecutive carrier failures bench a line and 5 halt a wire, the programme
+ * would stop itself inside an hour and deliver LESS than a careful one.
+ *
+ * Two ways to qualify, and the order matters:
+ *   1. a real delivery — observation, and it outranks any classification
+ *   2. a phone lookup tagged the number Wireless
+ *
+ * A landline label or a bench always disqualifies, whatever else is true.
+ */
+export function isVerifiedMobile(
+  outcomes: DestinationOutcome[],
+  lineType: LineType | undefined,
+): { verified: boolean; reason: string } {
+  const delivered = outcomes.filter((o) => o.status === "delivered").length;
+  // Observation first. A number that has actually reached a handset is a mobile
+  // regardless of what any lookup called it.
+  if (delivered > 0) {
+    return { verified: true, reason: `delivered ${delivered} time(s)` };
+  }
+  if (lineType === "landline") {
+    return { verified: false, reason: "phone lookup says landline" };
+  }
+  if (lineType === "wireless") {
+    return { verified: true, reason: "phone lookup says wireless" };
+  }
+  return { verified: false, reason: "never verified — no delivery and no line type on file" };
+}
+
 export function destinationVerdict(
   outcomes: DestinationOutcome[],
   opts: { failuresBeforeUntextable?: number; lineType?: LineType; last10?: string } = {},

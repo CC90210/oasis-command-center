@@ -946,7 +946,21 @@ async function processSmsStep(
   // desk phone still hears from us.
   {
     const reach = await isTextable(row.tenant_id, phone);
-    if (!reach.textable) return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+    if (!reach.textable) {
+      // TWO DIFFERENT HOLDS, RECORDED UNDER TWO DIFFERENT REASONS.
+      //
+      // `sms_unreachable` is permanent — a landline, or a number that keeps
+      // failing. `sms_awaiting_verification` is temporary and clears on its own
+      // once the phone-lookup queue drains.
+      //
+      // Kept apart because the guard audit counts by reason: a backlog of
+      // temporary waits filed as "unreachable" would show the landline gate
+      // firing hundreds of times and hide the occasions it genuinely does.
+      const reason = reach.hold === "awaiting_verification"
+        ? `sms_awaiting_verification: ${reach.reason}`
+        : `sms_unreachable: ${reach.reason}`;
+      return skipStep(db, row, steps, reason);
+    }
   }
 
   // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
