@@ -592,6 +592,40 @@ export function FormPublicClient({
     branding.thanks_message ||
     "Thanks, your details are in. A specialist will reach out within one business day.";
 
+  /**
+   * WHICH step is outstanding, not merely THAT one is.
+   *
+   * Two different things put a form in `nextForms`, and they need opposite
+   * copy (Codex review P1, 2026-08-21):
+   *
+   *   full-application      the interest form is done and the APPLICATION IS
+   *                         NOT SUBMITTED. This is the handoff that merchants
+   *                         were abandoning.
+   *   bank-statement-upload the full application IS submitted; only documents
+   *                         remain (a legacy application form that did not
+   *                         collect them in-flow). Telling this merchant their
+   *                         application "has not been submitted yet" is simply
+   *                         untrue, and would push a finished applicant to
+   *                         re-apply.
+   */
+  const applicationOutstanding = nextForms.some((f) => f.slug === "full-application");
+  const handoff = applicationOutstanding
+    ? {
+        doneLabel: "Details received",
+        nextLabel: "Your application",
+        heading: "Part 1 complete. One step left.",
+        body: "Your application has not been submitted yet. Complete the second part so we can review your file.",
+        footer:
+          "Takes about 5 minutes. We\u2019ve emailed you this link as well, so you can come back to it.",
+      }
+    : {
+        doneLabel: "Application received",
+        nextLabel: "Bank statements",
+        heading: "Application received. One thing left.",
+        body: "We have your application. Add 3 months of business bank statements so we can review your file and come back to you with numbers.",
+        footer: "We\u2019ve emailed you this link as well, so you can come back to it.",
+      };
+
   return (
     <main
       className={`min-h-screen ${isLight ? "form-light" : "bg-bg-deep"} text-fg flex items-start sm:items-center justify-center px-4 py-10`}
@@ -678,7 +712,7 @@ export function FormPublicClient({
                 <div className="mx-auto flex max-w-[15rem] flex-col gap-2 text-left">
                   <div className="flex items-center gap-2 text-sm text-fg-muted">
                     <CheckCircle2 className="h-4 w-4 shrink-0" style={{ color: primary }} />
-                    <span>Details received</span>
+                    <span>{handoff.doneLabel}</span>
                   </div>
                   <div className="flex items-center gap-2 text-sm font-semibold text-fg">
                     <span
@@ -687,16 +721,13 @@ export function FormPublicClient({
                     >
                       <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: primary }} />
                     </span>
-                    <span>Your application</span>
+                    <span>{handoff.nextLabel}</span>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <h2 className="text-xl font-bold text-fg">Part 1 complete. One step left.</h2>
-                  <p className="text-sm text-fg-muted max-w-md mx-auto">
-                    Your application has not been submitted yet. Complete the second part
-                    so we can review your file.
-                  </p>
+                  <h2 className="text-xl font-bold text-fg">{handoff.heading}</h2>
+                  <p className="text-sm text-fg-muted max-w-md mx-auto">{handoff.body}</p>
                 </div>
 
                 {/* The largest element on the screen, deliberately. */}
@@ -716,10 +747,7 @@ export function FormPublicClient({
                 {/* Says the link is saved WITHOUT inviting them to leave. The
                     previous "No rush ... finish anytime" did the opposite of
                     what this screen is for. */}
-                <p className="text-[11px] text-fg-dim">
-                  Takes about 5 minutes. We&apos;ve emailed you this link as well, so you can
-                  come back to it.
-                </p>
+                <p className="text-[11px] text-fg-dim">{handoff.footer}</p>
               </div>
             ) : (
               <div className="text-center space-y-4 py-8">

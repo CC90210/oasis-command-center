@@ -2,105 +2,123 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 /**
- * The Form 1 -> Form 2 handoff screen.
+ * The public form completion screen has THREE endings, and showing the wrong
+ * one has cost real applications.
  *
- * Adon, 2026-08-21: merchants who finished the interest form were shown a large
- * success tick, the words "All set." and the tenant's "a specialist will reach
- * out" message, with the actual next step offered underneath as an optional
- * "have a few minutes?" extra. They read the top, believed they were finished,
- * and left. Their application was never submitted.
+ *   1. nothing outstanding          -> "All set." (correct, keep it)
+ *   2. full-application outstanding -> the application is NOT submitted
+ *   3. bank-statement-upload only   -> the application IS submitted
  *
- * Every assertion below is that failure mode, pinned.
+ * Adon, 2026-08-21: merchants who finished the interest form were shown a
+ * large success tick, "All set.", and the tenant's "a specialist will reach
+ * out" message, with the real next step below them as an optional "have a few
+ * minutes?" extra. They read the top, believed they were finished, and left.
+ *
+ * Codex review P1, same day: the first fix treated ANY outstanding form as
+ * ending 2, which told merchants who had just SUBMITTED a full application
+ * that it "has not been submitted yet" and labelled it "Part 1".
  */
 
 const src = readFileSync(new URL("../components/forms/FormPublicClient.tsx", import.meta.url), "utf8");
+const stripComments = (t: string) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-// The completion block splits on whether another form is still owed.
-const doneIdx = src.indexOf("{done ? (");
-assert.ok(doneIdx > 0, "completion block not found");
-const forkIdx = src.indexOf("nextForms.length > 0 ? (", doneIdx);
-assert.ok(forkIdx > doneIdx, "the completion screen must branch on whether a form is still outstanding");
+// ---------------------------------------------------------------------------
+// 1. The ending is chosen by WHICH form is outstanding, not merely that one is.
+// ---------------------------------------------------------------------------
+assert.match(
+  src,
+  /const applicationOutstanding = nextForms\.some\(\(f\) => f\.slug === "full-application"\)/,
+  "the copy must key on the outstanding form's slug; any-pending-form is what produced the false " +
+    "'not submitted yet' on a completed application",
+);
 
-// Everything from the fork to the START of the else branch is what a merchant
-// with an outstanding form sees. The boundary is the else marker, not the
-// "All set." heading: the terminal branch opens with its large success tick
-// ABOVE that heading, so slicing to the heading would pull that tick into the
-// pending block and test the wrong text.
+const handoffIdx = src.indexOf("const handoff = applicationOutstanding");
+assert.ok(handoffIdx > 0, "handoff copy block not found");
+const handoffBlock = stripComments(src.slice(handoffIdx, src.indexOf("return (", handoffIdx)));
+const [appBranch, docsBranch] = handoffBlock.split(": {");
+assert.ok(appBranch && docsBranch, "handoff must define both an application branch and a documents branch");
+
+// --- ending 2: the application is genuinely not submitted ------------------
+assert.match(appBranch, /Part 1 complete\. One step left\./, "handoff heading states progress AND that work remains");
+assert.match(appBranch, /has not been submitted yet/, "handoff says plainly the application is not in");
+assert.match(appBranch, /Details received/, "progress row shows what is done");
+assert.match(appBranch, /Your application/, "progress row shows what is next");
+
+// --- ending 3: the application IS submitted, documents remain --------------
+assert.ok(
+  !/has not been submitted/.test(docsBranch),
+  "the documents ending must NOT claim the application is unsubmitted; it is, and saying otherwise " +
+    "pushes a finished applicant to re-apply",
+);
+assert.ok(!/Part 1/.test(docsBranch), 'the documents ending must not label a completed application "Part 1"');
+assert.match(docsBranch, /Application received/, "the documents ending confirms the application landed");
+assert.match(docsBranch, /bank statements/i, "the documents ending names what is actually needed");
+
+// ---------------------------------------------------------------------------
+// 2. The pending screen renders from that classification, and never claims
+//    completion.
+// ---------------------------------------------------------------------------
+const forkIdx = src.indexOf("nextForms.length > 0 ? (");
+assert.ok(forkIdx > 0, "the completion screen must branch on whether a form is outstanding");
+// Boundary is the else marker, not the "All set." heading: the terminal branch
+// opens with its large tick ABOVE that heading.
 const elseIdx = src.indexOf("          ) : (", forkIdx);
 assert.ok(elseIdx > forkIdx, "the fork must have an else branch for the terminal ending");
 const pendingRaw = src.slice(forkIdx, elseIdx);
+const pending = stripComments(pendingRaw);
 
-const terminalIdx = src.indexOf('<h2 className="text-xl font-bold text-fg">All set.</h2>', elseIdx);
-assert.ok(terminalIdx > elseIdx, '"All set." must live in the terminal branch, after the else');
-/** Comments in this block QUOTE the old copy in order to explain why it was
- *  removed, so the copy assertions below must read the rendered text only. */
-const pending = pendingRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-
-// ---------------------------------------------------------------------------
-// 1. The pending screen must never claim completion.
-// ---------------------------------------------------------------------------
 assert.ok(!pending.includes("All set."), 'the outstanding-form screen must not say "All set."');
 assert.ok(
   !pending.includes("{thanksMessage}"),
-  "the outstanding-form screen must not render the tenant's thanks message — on this tenant it reads " +
-    "'a specialist will reach out within one business day', which tells a merchant to sit back and wait " +
-    "while their application is still unsubmitted",
+  "the outstanding-form screen must not render the tenant's thanks message; on this tenant it reads " +
+    "'a specialist will reach out within one business day', which tells a merchant to wait while " +
+    "something is still required of them",
 );
-assert.ok(
-  !/have a few minutes/i.test(pending),
-  "the next step is required, not an optional extra offered to people with spare time",
-);
-assert.ok(
-  !/no rush|anytime/i.test(pending),
-  "copy inviting the merchant to leave and come back later is the behaviour being fixed",
-);
+assert.ok(!/have a few minutes/i.test(pending), "the next step is required, not an optional extra");
+assert.ok(!/no rush|anytime/i.test(pending), "copy inviting the merchant to leave is the behaviour being fixed");
 
-// ---------------------------------------------------------------------------
-// 2. It must state progress and the outstanding requirement.
-// ---------------------------------------------------------------------------
-assert.ok(
-  pending.includes("Part 1 complete. One step left."),
-  "the heading must state both what is done and that something remains",
-);
-assert.ok(
-  /has not been submitted yet/.test(pending),
-  "the screen must say plainly that the application is not submitted",
-);
-assert.ok(
-  pending.includes("Details received") && pending.includes("Your application"),
-  "a two-line progress indicator must replace the single success tick",
-);
+for (const token of [
+  "{handoff.heading}",
+  "{handoff.body}",
+  "{handoff.doneLabel}",
+  "{handoff.nextLabel}",
+  "{handoff.footer}",
+]) {
+  assert.ok(pending.includes(token), `pending screen must render ${token} rather than hard-coded copy`);
+}
 
-// A lone large tick is the visual that reads as 'finished'. The pending branch
-// may only use a small one, inside the progress row.
+// A lone large tick reads as completion however the text is worded.
 assert.ok(
   !/<CheckCircle2\s*\n?\s*className="w-12 h-12/.test(pendingRaw),
-  "the large success tick must not appear while a form is still outstanding",
+  "the large success tick must not appear while a form is outstanding",
 );
 
 // ---------------------------------------------------------------------------
-// 3. The next step must be the most prominent thing on the screen.
+// 3. The next step is the most prominent thing on the screen.
 // ---------------------------------------------------------------------------
 const cta = pendingRaw.match(/min-h-\[(\d+)px\]/);
 assert.ok(cta, "the continue button must set an explicit minimum height");
 assert.ok(
   Number(cta[1]) >= 56,
-  `continue button is ${cta[1]}px tall; it was 44px when merchants were missing it, so it must be visibly larger`,
+  `continue button is ${cta[1]}px; it was 44px when merchants were missing it, so it must be visibly larger`,
 );
 
 // ---------------------------------------------------------------------------
-// 4. The terminal ending still exists, for forms with nothing following.
-//    This screen is shared: "All set." is CORRECT when nothing is outstanding,
-//    so the fix must be conditional rather than a blanket rewording.
+// 4. Ending 1 survives. This screen is shared by every public form, and
+//    "All set." is CORRECT when nothing is outstanding, so the fix must be a
+//    fork rather than a blanket rewording.
 // ---------------------------------------------------------------------------
-const terminal = src.slice(terminalIdx, terminalIdx + 600);
-assert.ok(terminal.includes("{thanksMessage}"), "the terminal ending keeps the tenant's thanks message");
+const terminalIdx = src.indexOf('<h2 className="text-xl font-bold text-fg">All set.</h2>', elseIdx);
+assert.ok(terminalIdx > elseIdx, '"All set." must live in the terminal branch');
+assert.ok(
+  src.slice(terminalIdx, terminalIdx + 600).includes("{thanksMessage}"),
+  "the terminal ending keeps the tenant's thanks message",
+);
 
 // ---------------------------------------------------------------------------
 // 5. No em dashes in merchant-facing copy.
 // ---------------------------------------------------------------------------
-const strippedComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-const dashes = strippedComments.match(/.{0,50}[—–].{0,50}/g) || [];
+const dashes = stripComments(src).match(/.{0,50}[—–].{0,50}/g) || [];
 assert.deepEqual(dashes, [], `em/en dash in merchant-facing copy: ${dashes.join(" | ")}`);
 
-console.log("ok form-handoff-copy");
+console.log("ok form-handoff-copy (3 endings)");
