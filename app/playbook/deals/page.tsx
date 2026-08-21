@@ -1,12 +1,25 @@
 import Link from "next/link";
 import { ArrowLeft, Check } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { AUTOMATION_ADD_ONS, COMMISSION_MODEL, WEBSITE_PACKAGES } from "@/lib/website-sales";
+import { AUTOMATION_ADD_ONS, WEBSITE_PACKAGES } from "@/lib/website-sales";
+// Rates come from the payout engine and are never retyped here. This page
+// is the comp plan as a rep understands it, so a number on it that the
+// engine does not pay is a promise the company breaks to someone it
+// recruited on that promise.
+import {
+  COMPANY_TRACK_BPS,
+  SELF_TRACK_BPS,
+  PRICE_BOOK,
+  UPSELL_SHARE_BPS,
+  MAX_HUMAN_PAYOUT_BPS,
+  SPECIALIST_SPLIT_FLOOR_CENTS,
+} from "@/lib/website-sales-comp";
+import { CLAWBACK_WINDOW_DAYS } from "@/lib/turso-rpc-shim";
 
 export const dynamic = "force-dynamic";
 
 // Every rate + dollar figure on this page is computed from
-// lib/website-sales.ts (COMMISSION_MODEL + package setup floors) —
+// lib/website-sales-comp.ts (rates + price book) and lib/website-sales.ts (packages) —
 // change the model there and this page follows. No hardcoded comp math.
 const pct = (rate: number) => `${Math.round(rate * 1000) / 10}%`;
 const usd = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
@@ -34,7 +47,7 @@ export default function DealArchitecturePage() {
       <ul className="list-disc pl-5 space-y-2 text-sm text-fg-muted"><li>Agents see only Assigned, Attempting Contact, Connected, Qualified, and Founder Meeting.</li><li>Agents see only records assigned to their own account.</li><li>Voicemail is a disposition inside Attempting Contact, not a stage.</li><li>Agents cannot discount, promise delivery dates, confirm custom automation feasibility, or move delivery stages. Closer-track Agents may send a proposal and close at listed floors on their own leads; below-floor pricing and scope changes stay with CC or Adon.</li><li>Every commission accrues only — a founder approves each payout. No rep can approve their own.</li><li>Admins and members operating internally retain the complete tenant pipeline; only admins assign leads and control sensitive fulfilment actions.</li></ul>
     </Card>
     <Card title="Role growth path" subtitle="Launch V1 stays simple without boxing the company in.">
-      <p className="text-sm leading-relaxed text-fg-muted">Every new sales hire starts as an <b className="text-fg">Agent appointment setter</b> earning {pct(COMMISSION_MODEL.opener)}. Their scorecard is conversations, qualified meetings booked, show rate, and handoff quality. A proven Agent is then granted the <b className="text-fg">closer track</b>: they run the demo, proposal, and close on their own leads and earn {pct(COMMISSION_MODEL.openerCloser)} instead. The track is granted per rep by CC or Adon and is never implied by tenure — but it is open to anyone who books consistently, and it is the single biggest raise available here.</p>
+      <p className="text-sm leading-relaxed text-fg-muted">Every new sales hire starts as an <b className="text-fg">opener</b>, earning {pct(COMPANY_TRACK_BPS.opener / 10000)} on company-sourced leads. Their scorecard is conversations, qualified meetings booked, show rate, and handoff quality. A proven Agent is then granted the <b className="text-fg">closer track</b>: they run the demo, proposal, and close on their own leads and earn {pct(COMPANY_TRACK_BPS.closer / 10000)} — or {pct(SELF_TRACK_BPS.open_close / 10000)} on a client they sourced themselves. The track is granted per rep by CC or Adon and is never implied by tenure — but it is open to anyone who books consistently, and it is the single biggest raise available here.</p>
     </Card>
     <div className="grid lg:grid-cols-3 gap-4">
       {packages.map((offer) => <Card key={offer.id}>
@@ -50,31 +63,37 @@ export default function DealArchitecturePage() {
         <div className="text-xs text-fg-muted mt-2 leading-relaxed">{item.delivers}</div>
       </div>)}</div>
     </Card>
-    <Card title="Rep compensation" subtitle={`Percent of collected setup revenue · ${usd(COMMISSION_MODEL.floorSetup)} minimum deal · no recurring share in V1.`}>
+    <Card title="Rep compensation" subtitle="Percent of collected setup revenue · paid on cash collected · no recurring share in V1.">
+      <p className="text-sm leading-relaxed text-fg-muted mb-4">Your rate depends on <b className="text-fg">who sourced the lead</b> and <b className="text-fg">how much of the deal you owned</b>. Self-sourced work pays more, because you supplied what the company otherwise pays to generate. These are the same numbers as in your agreement and the same numbers the payout runs on — all three read from one place.</p>
       <div className="grid sm:grid-cols-2 gap-3">
-        <RateCard role="You book it" rate={pct(COMMISSION_MODEL.opener)} detail="Open it: source and work the lead, qualify it, and put the founder meeting on the calendar. CC or Adon runs the close."/>
-        <RateCard role="You close it" rate={pct(COMMISSION_MODEL.openerCloser)} detail="Open and close it: run the demo, the proposal, and the close yourself. Founder approval on the payout."/>
+        <RateCard role="You book it" rate={pct(COMPANY_TRACK_BPS.opener / 10000)} detail="Open a company-sourced lead: work it, qualify it, put the founder meeting on the calendar. Someone else closes."/>
+        <RateCard role="You close it" rate={pct(COMPANY_TRACK_BPS.closer / 10000)} detail="Close a company-sourced lead that someone else opened. Founder approval on the payout."/>
+        <RateCard role="You found it AND closed it" rate={pct(SELF_TRACK_BPS.open_close / 10000)} detail="You sourced the client yourself and ran the close. The single biggest raise available here."/>
+        <RateCard role="You did all of it" rate={pct(SELF_TRACK_BPS.full_stack / 10000)} detail="Sourced it, closed it, and built it. OASIS keeps the remainder for the tooling."/>
       </div>
       <div className="mt-4 rounded-lg border border-bg-border bg-bg-elev/40 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-[11px] uppercase tracking-wider text-fg-muted border-b border-bg-border">
-              <th className="text-left font-semibold px-4 py-2.5">Collected setup</th>
-              <th className="text-right font-semibold px-4 py-2.5">You book it ({pct(COMMISSION_MODEL.opener)})</th>
-              <th className="text-right font-semibold px-4 py-2.5">You close it ({pct(COMMISSION_MODEL.openerCloser)})</th>
+              <th className="text-left font-semibold px-4 py-2.5">Package (at book price)</th>
+              <th className="text-right font-semibold px-4 py-2.5">You book it ({pct(COMPANY_TRACK_BPS.opener / 10000)})</th>
+              <th className="text-right font-semibold px-4 py-2.5">You close it ({pct(COMPANY_TRACK_BPS.closer / 10000)})</th>
+              <th className="text-right font-semibold px-4 py-2.5">Found + closed ({pct(SELF_TRACK_BPS.open_close / 10000)})</th>
             </tr>
           </thead>
           <tbody>
-            {packages.map((offer) => <tr key={offer.id} className="border-b border-bg-border last:border-0">
-              <td className="px-4 py-2.5 text-fg-muted">{usd(offer.setupFloor)} <span className="text-fg-dim">({offer.name})</span></td>
-              <td className="px-4 py-2.5 text-right font-semibold text-fg">{usd(offer.setupFloor * COMMISSION_MODEL.opener)}</td>
-              <td className="px-4 py-2.5 text-right font-bold text-status-engaged">{usd(offer.setupFloor * COMMISSION_MODEL.openerCloser)}</td>
+            {Object.entries(PRICE_BOOK).map(([id, tier]) => <tr key={id} className="border-b border-bg-border last:border-0">
+              <td className="px-4 py-2.5 text-fg-muted">{usd(tier.bookCents / 100)} <span className="text-fg-dim">({id})</span></td>
+              <td className="px-4 py-2.5 text-right font-semibold text-fg">{usd((tier.bookCents / 100) * COMPANY_TRACK_BPS.opener / 10000)}</td>
+              <td className="px-4 py-2.5 text-right font-semibold text-fg">{usd((tier.bookCents / 100) * COMPANY_TRACK_BPS.closer / 10000)}</td>
+              <td className="px-4 py-2.5 text-right font-bold text-status-engaged">{usd((tier.bookCents / 100) * SELF_TRACK_BPS.open_close / 10000)}</td>
             </tr>)}
           </tbody>
         </table>
       </div>
-      <p className="text-sm leading-relaxed text-fg mt-4">The math rewards the rep who doesn&apos;t quit: twenty real conversations a week turns into booked meetings, and one closed {WEBSITE_PACKAGES.growth.name} build pays {usd(WEBSITE_PACKAGES.growth.setupFloor * COMMISSION_MODEL.openerCloser)} when you run the close yourself. Most reps give up two conversations before the yes — these leads arrive researched and pre-qualified, so the only variable left is your volume. The rate is fixed; how often you collect it is up to you.</p>
-      <p className="text-xs text-fg-muted mt-3">Attribution freezes to the assigned rep when the founder meeting is booked. Cleared payment creates one accrual; refunds create an offset instead of erasing history.</p>
+      <p className="text-sm leading-relaxed text-fg mt-4">Sell <b className="text-fg">above book price</b> and you keep {pct(UPSELL_SHARE_BPS / 10000)} of the difference on top of your rate. Sell below book and the rate steps down — discounting is allowed, it is simply not free.</p>
+      <p className="text-sm leading-relaxed text-fg-muted mt-3">Deals under {usd(SPECIALIST_SPLIT_FLOOR_CENTS / 100)} are worked by one person end to end rather than split between an opener and a closer — a split that size pays neither party properly. They still pay in full; they are not excluded.</p>
+      <p className="text-xs text-fg-muted mt-3">Attribution freezes to the assigned rep when the founder meeting is booked. Cleared payment creates one accrual per person on the deal. A refund within {CLAWBACK_WINDOW_DAYS} days creates an offset instead of erasing history; after {CLAWBACK_WINDOW_DAYS} days your commission is final. Across everyone on a deal, payouts never exceed {pct(MAX_HUMAN_PAYOUT_BPS / 10000)} of what was collected.</p>
     </Card>
   </div>;
 }

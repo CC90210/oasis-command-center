@@ -11,6 +11,9 @@
  * engine's own constant. If someone edits a rate in one place, this fails.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   COMPANY_TRACK_BPS,
   MANAGER_OVERRIDE_BPS,
@@ -21,6 +24,8 @@ import {
 } from "../lib/website-sales-comp";
 import { CLAWBACK_WINDOW_DAYS } from "../lib/turso-rpc-shim";
 import { renderContract, type ContractRole } from "../lib/contracts/templates";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 const VARS = {
   contractorName: "Jordan Example",
@@ -156,7 +161,44 @@ for (const role of ROLES) {
   }
 }
 
+/* ── 7. THE REP-FACING COPY MUST COME FROM THE ENGINE TOO. ─────────────────
+ *
+ * A contract is only one of the three places a rate is stated. The other two
+ * are the Playbook (the comp plan a rep is recruited on) and their own Today
+ * dashboard. For a while this repo had the engine and the contracts agreeing
+ * with each other while the Playbook still showed the OLD 20/30 model and a
+ * "$2,000 minimum deal" that no longer existed — so a rep could read one number
+ * on screen, sign a second in their agreement, and be paid a third.
+ *
+ * Source-level, because rendering a server component with live database reads
+ * is not what this test is for. What matters is that the numbers ORIGINATE in
+ * the engine, and a hardcoded percentage is visible in the source. */
+const src = (p: string) => readFileSync(join(ROOT, p), "utf8");
+const REP_FACING = ["app/playbook/deals/page.tsx", "components/today/RepToday.tsx"];
+
+for (const file of REP_FACING) {
+  const code = src(file);
+  assert.ok(
+    code.includes("@/lib/website-sales-comp"),
+    `${file} must import its rates from the payout engine, not restate them`,
+  );
+  assert.equal(
+    /COMMISSION_MODEL\./.test(code),
+    false,
+    `${file} still reads COMMISSION_MODEL — that is the superseded single-payee model ` +
+      `(20/30, $2,000 hard floor). A rep reading it would be told a rate the engine no longer pays.`,
+  );
+  // The retired floor copy, verbatim: it told reps a sub-$2,000 deal earned
+  // nothing, which stopped being true when the split threshold replaced it.
+  assert.equal(
+    /no deal and no commission/.test(code),
+    false,
+    `${file} still claims small deals earn nothing — they book and pay in full now`,
+  );
+}
+
 console.log(
-  `contracts-match-engine: OK — ${ROLES.length} agreements, every quoted rate traced to the engine, ` +
-    `clawback ${CLAWBACK_WINDOW_DAYS}d consistent, ${Object.keys(PRICE_BOOK).length} tiers disclosed`,
+  `contracts-match-engine: OK — ${ROLES.length} agreements + ${REP_FACING.length} rep-facing surfaces, ` +
+    `every quoted rate traced to the engine, clawback ${CLAWBACK_WINDOW_DAYS}d consistent, ` +
+    `${Object.keys(PRICE_BOOK).length} tiers disclosed`,
 );

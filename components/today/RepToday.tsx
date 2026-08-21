@@ -36,7 +36,14 @@ import {
   filterWebsiteSalesRows,
   stagesForOasisRole,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { COMMISSION_MODEL } from "@/lib/website-sales";
+// Rates read from the payout engine — the same module close_website_deal
+// pays from and the contractor agreements quote.
+import {
+  COMPANY_TRACK_BPS,
+  SELF_TRACK_BPS,
+  PRICE_BOOK,
+  SPECIALIST_SPLIT_FLOOR_CENTS,
+} from "@/lib/website-sales-comp";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
 
@@ -200,8 +207,11 @@ export async function RepToday({
   // this person's pay, and we do not make claims we could not verify.
   const commissionValue = (n: number) => (commissionRead.ok ? money(n) : "—");
 
-  const openerPct = Math.round(COMMISSION_MODEL.opener * 100);
-  const closerPct = Math.round(COMMISSION_MODEL.openerCloser * 100);
+  // From the payout engine, not retyped. This card is what a rep believes
+  // they earn; a number here the engine does not pay is a promise broken to
+  // the person least able to audit it.
+  const openerPct = Math.round(COMPANY_TRACK_BPS.opener / 100);
+  const closerPct = Math.round(COMPANY_TRACK_BPS.closer / 100);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -419,7 +429,7 @@ export async function RepToday({
 
       {/*
         The comp plan, stated rather than implied. Rates and floor are read from
-        COMMISSION_MODEL — the same constant the payout calculation uses — so
+        lib/website-sales-comp.ts — the same module close_website_deal pays from — so
         this card cannot drift away from what actually gets paid. The example is
         arithmetic on the published floor, clearly labelled as such; it is a
         worked formula, not a claim about any deal.
@@ -457,29 +467,35 @@ export async function RepToday({
           </div>
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
             <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              Floor
+              Solo threshold
             </div>
             <div className="mt-1.5 text-2xl font-bold tabular-nums text-fg">
-              {money(COMMISSION_MODEL.floorSetup)}
+              {money(SPECIALIST_SPLIT_FLOOR_CENTS / 100)}
             </div>
             <p className="mt-1 text-xs text-fg-dim">
-              Below this collected setup there is no deal and no commission.
+              Under this, one person works the deal end to end instead of splitting it. It still
+              pays in full.
             </p>
           </div>
         </div>
         <p className="mt-4 flex items-start gap-2 text-xs text-fg-muted">
           <LayoutList className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-dim" aria-hidden />
           <span>
-            A {money(COMMISSION_MODEL.floorSetup)} deal pays{" "}
+            A {money(PRICE_BOOK.growth.bookCents / 100)} Growth build pays{" "}
             <strong className="text-fg">
-              {money(COMMISSION_MODEL.floorSetup * COMMISSION_MODEL.opener)}
+              {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.opener / 10000)}
             </strong>{" "}
             if you opened it,{" "}
             <strong className="text-fg">
-              {money(COMMISSION_MODEL.floorSetup * COMMISSION_MODEL.openerCloser)}
+              {money((PRICE_BOOK.growth.bookCents / 100) * COMPANY_TRACK_BPS.closer / 10000)}
             </strong>{" "}
-            if you also closed it. Commission is on setup only, never on the monthly. Every deal
-            accrues first and a founder approves the payout — nothing pays itself.
+            if you closed it, and{" "}
+            <strong className="text-status-engaged">
+              {money((PRICE_BOOK.growth.bookCents / 100) * SELF_TRACK_BPS.open_close / 10000)}
+            </strong>{" "}
+            if you found the client yourself and closed it. Commission is on setup only, never on
+            the monthly. Every deal accrues first and a founder approves the payout — nothing pays
+            itself.
           </span>
         </p>
       </Card>

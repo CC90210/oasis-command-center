@@ -43,23 +43,21 @@
  * and the 30-day clawback window live in the ledger, not in arithmetic.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * ⚠ NOT YET WIRED. NOTHING CALLS computePayout().
- * ─────────────────────────────────────────────────────────────────────────────
- * The live close path still runs calculateCommission() in lib/website-sales.ts
- * — single payee, 20/30, hard $2,000 floor. So this engine can price a $500
- * deal correctly and that deal still cannot be closed in production. Read any
- * claim that "$500 deals book now" against this paragraph.
+ * WIRED. close_website_deal() in lib/turso-rpc-shim.ts pays from this module,
+ * and lib/contracts/templates.ts states these rates in the agreements people
+ * sign. calculateCommission() in lib/website-sales.ts is no longer on the close
+ * path — it survives only as the v2 reference and for rows stamped
+ * comp_version=2.
  *
- * Porting it is not a one-line swap, because the numbers are PUBLISHED:
- *   - app/playbook/deals/page.tsx renders rate cards and a full payout table
- *     from COMMISSION_MODEL — that page is the comp plan as a rep understands
- *     it, and it is what they were recruited on.
- *   - components/today/RepToday.tsx shows the floor and both rates on the
- *     rep's own dashboard.
- *   - the contractor agreements quote the same figures.
+ * THE NUMBERS ARE PUBLISHED, so changing one here changes what a person is
+ * told as well as what they are paid:
+ *   - app/playbook/deals/page.tsx — the rep-facing comp plan, what they were
+ *     recruited on
+ *   - components/today/RepToday.tsx — the rates on a rep's own dashboard
+ *   - the four contractor agreements
  *
- * Engine, close path, Playbook copy and contracts have to move together, or a
- * rep is told one number and paid another.
+ * tests/contracts-match-engine.test.ts enforces the contract half: a rate
+ * typed into contract prose that this module does not pay fails the build.
  */
 
 export type PartyRole = "opener" | "closer" | "builder" | "manager" | "full_stack";
