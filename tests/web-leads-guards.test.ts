@@ -167,4 +167,48 @@ assert.match(
   "fetchLeads must apply visibleToViewer scoping to each row -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
 );
 
+// ---------------------------------------------------------------------------
+// Task 3 (2026-08-21 build-a-lead-detail plan): the audit endpoint is a NEW
+// door onto the same tenant_records table, so it must pass the identical
+// auth gate the loop above already proves for the sibling routes -- resolve
+// the caller, branch on session.ok (not session's truthiness, the same bug
+// class documented above), fail closed on an unresolved caller, and refuse a
+// caller from another tenant before any read.
+// ---------------------------------------------------------------------------
+{
+  const route = "app/api/web-leads/[id]/audit/route.ts";
+  const src = read(route);
+  assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
+  assert.match(
+    src,
+    /if\s*\(\s*!\s*session\.ok\s*\)/,
+    `${route} must branch on session.ok, not on session's truthiness`,
+  );
+  assert.match(src, /status:\s*401/, `${route} must fail closed on an unresolved caller`);
+  assert.match(
+    src,
+    /session\.tenantId/,
+    `${route} must reference session.tenantId -- resolving it and never checking it is how the sibling routes leaked`,
+  );
+  assert.match(src, /status:\s*403/, `${route} must refuse a caller from another tenant with a 403`);
+}
+
+// ---------------------------------------------------------------------------
+// THE RULE THAT OUTRANKS THE FEATURE: a site we could not reach is NEVER
+// given a score, and the head-to-head "ours vs theirs" benchmark ships
+// default OFF because our own sites do not yet win it -- shipping it live
+// would put a rep in front of a prospect whose site beats ours. This asserts
+// both that the flag gate exists in the data layer (not just described in a
+// doc) and that a comment explains WHY it defaults off, so a future editor
+// cannot flip it to always-on without also deleting the reasoning that
+// argues against that.
+// ---------------------------------------------------------------------------
+const auditLib = read("lib/web-leads/audit.ts");
+assert.match(auditLib, /WEBDEV_SHOW_BENCHMARK/, "lib/web-leads/audit.ts must reference WEBDEV_SHOW_BENCHMARK");
+assert.match(
+  auditLib,
+  /own sites do not yet win|do not yet win this comparison|our own sites/i,
+  "lib/web-leads/audit.ts must comment that the benchmark comparison is default-off because our own sites do not yet win it",
+);
+
 console.log("web-leads-guards ok");
