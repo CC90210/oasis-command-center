@@ -13,6 +13,11 @@
  *   TikTok and YouTube genuinely cannot take an image deck and X truncates past four.
  *   So the rule is per-channel, and it lives here — outside the client component — so
  *   it can be tested without a DOM.
+ *
+ * NOT THE SAME "CHANNELS" AS lib/founders-marketing-core.ts. That one is the content
+ * taxonomy an asset is CLASSIFIED by ("organic-instagram", "paid-meta", "seo-article");
+ * this one is the set of connected accounts an asset can be PUBLISHED TO. They overlap
+ * in vocabulary and in nothing else — do not try to merge them.
  */
 
 /**
