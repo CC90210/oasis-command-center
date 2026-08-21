@@ -1,4 +1,17 @@
--- 151 — OASIS sales org: who a rep reports to.
+-- 153 — OASIS sales org: who a rep reports to.
+--
+-- ALREADY APPLIED TO PRODUCTION, UNDER A DIFFERENT NUMBER. This shipped as
+-- 151_oasis_sales_roles on 2026-08-21 and ran against Turso before the author
+-- noticed main had independently taken 151 (sms_destination_health) and 152
+-- (sms_destination_verified) on the same day. Renumbered to 153 so the repo has
+-- one migration per number; the DDL is byte-identical.
+--
+-- CONSEQUENCE FOR PRODUCTION: user_profiles.manager_user_id and its index
+-- ALREADY EXIST there, recorded in the schema_migrations ledger under the old
+-- filename. Do NOT re-run this against that database — SQLite has no
+-- ADD COLUMN IF NOT EXISTS, so the ALTER would raise "duplicate column name".
+-- A fresh database applies this file once and is correct. Verified live after
+-- the original apply: 50 profiles, 50 NULL, index present.
 --
 -- THIS IS THE FILE THAT ACTUALLY RUNS. Production is
 -- EMPIRE_DATA_BACKEND=turso_cloud; the Postgres companion (database/151) is the
