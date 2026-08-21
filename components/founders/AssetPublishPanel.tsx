@@ -24,33 +24,47 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 /**
- * The channels reachable from here.
+ * The channels reachable from here, and which of them can take a given asset,
+ * live in lib/founders/publish-targets — pure so they can be tested without a DOM.
  *
- * Mirrors CMO-Agent/scripts/schedule_posts.py ACCOUNTS, which is the only place
- * that knows what is actually connected — the drainer re-checks against it and
- * refuses rather than silently posting to fewer surfaces than asked.
+ * PUBLISH_CHANNELS mirrors CMO-Agent/scripts/schedule_posts.py ACCOUNTS, which is
+ * the only place that knows what is actually connected — the drainer re-checks
+ * against it and refuses rather than silently posting to fewer surfaces than asked.
  *
  * `googlebusiness` is connected and deliberately absent: CC's own call,
  * 2026-07-27 — local/offer posts are a different content shape, added on purpose
  * rather than by default.
  */
-const CHANNELS = [
-  { id: "instagram", label: "Instagram", handle: "@oasisaisolutions" },
-  { id: "tiktok", label: "TikTok", handle: "@ccmckennaa" },
-  { id: "youtube", label: "YouTube", handle: "@ccmusicc03" },
-  { id: "twitter", label: "X", handle: "@Conaugh90210" },
-  { id: "threads", label: "Threads", handle: "@ccmckennaa" },
-  { id: "linkedin", label: "LinkedIn", handle: "Conaugh McKenna" },
-] as const;
+import {
+  PUBLISH_CHANNELS,
+  formatList,
+  refusalFor,
+  unavailableChannels,
+  type PublishMediaKind,
+} from "@/lib/founders/publish-targets";
 
 export function AssetPublishPanel({
   assetId,
-  hasVideo,
+  mediaKind,
+  slideCount = 0,
   lastIntent,
   staleWarning = null,
 }: {
   assetId: string;
-  hasVideo: boolean;
+  /**
+   * What is actually attached — NOT "is there a video".
+   *
+   * 2026-08-21: this was `hasVideo: boolean`, computed from the video url alone.
+   * A carousel has no video and never will, so it always arrived false and the
+   * panel told CC "every channel below will refuse this asset" about the exact
+   * format the Library was rebuilt to hold. The backend was never the problem:
+   * marketing_publish_drain.fetch_media returns the cover plus the ordered
+   * slides for asset_type "carousel" and publishes them correctly. The gate was
+   * written when every asset was a reel, and it outlived that assumption.
+   */
+  mediaKind: PublishMediaKind;
+  /** Slides in the deck — decides which channels can take it (see PUBLISH_CHANNELS). */
+  slideCount?: number;
   lastIntent?: { state: string; platforms: string[]; created_at: string } | null;
   /**
    * Computed by the SERVER via stalePublishWarning, not here.
@@ -78,13 +92,21 @@ export function AssetPublishPanel({
     // click would fire a second request. The route 409s on a duplicate, but the
     // button should not have let it happen — and on a slow upload the window is
     // seconds wide.
-    if (!picked.length || busy) return;
+    // Belt and braces: refused channels are already disabled, but never POST a
+    // platform this asset cannot satisfy. The route would record the intent and
+    // the drain would fail it later, which reads as a publishing bug rather than
+    // a bad pick.
+    const platforms = picked.filter((id) => {
+      const c = PUBLISH_CHANNELS.find((x) => x.id === id);
+      return c ? !refusalFor(c, mediaKind, slideCount) : false;
+    });
+    if (!platforms.length || busy) return;
     setBusy(true);
     setMsg(null);
     const res = await fetch(`/api/founders/marketing/assets/${assetId}/publish`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ platforms: picked }),
+      body: JSON.stringify({ platforms }),
     }).catch(() => null);
     const body = await res?.json().catch(() => null);
     setBusy(false);
@@ -105,32 +127,46 @@ export function AssetPublishPanel({
     // collected.
     setMsg({
       ok: true,
-      text: `Recorded for ${(body.platforms || picked).join(", ")}. It goes out on the next publisher run.`,
+      text: `Recorded for ${(body.platforms || platforms).join(", ")}. It goes out on the next publisher run.`,
     });
     start(() => router.refresh());
   }
 
   const working = busy || pending;
 
+  // Computed once for the hint line and reused as the per-button gate, so the
+  // sentence and the disabled state can never disagree.
+  const unavailable = unavailableChannels(mediaKind, slideCount);
+
   return (
     <div className="space-y-4">
-      {!hasVideo && (
+      {mediaKind === "none" && (
         <p className="text-xs text-fg-dim">
-          No playable video is attached, so every channel below will refuse this asset.
+          No media is attached, so every channel below will refuse this asset.
+        </p>
+      )}
+
+      {mediaKind === "images" && unavailable.length > 0 && (
+        <p className="text-xs text-fg-dim">
+          {formatList(unavailable.map((c) => c.label))} cannot take a {slideCount}-slide
+          deck — hover for why. The rest accept it.
         </p>
       )}
 
       <div className="flex flex-wrap gap-2">
-        {CHANNELS.map((c) => {
+        {PUBLISH_CHANNELS.map((c) => {
           const on = picked.includes(c.id);
+          const refusal = refusalFor(c, mediaKind, slideCount);
           return (
             <button
               key={c.id}
               type="button"
               onClick={() => toggle(c.id)}
-              disabled={working}
+              disabled={working || Boolean(refusal)}
               aria-pressed={on}
-              title={c.handle}
+              // The handle is what CC needs on a channel he CAN use; the reason
+              // is what he needs on one he cannot.
+              title={refusal ?? c.handle}
               className={
                 "rounded-md px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-40 " +
                 (on
