@@ -41,6 +41,25 @@
  * Whether a commission is PAYABLE. Everything here is an accrual computed at
  * the moment cash is collected. Founder approval (accrued -> approved -> paid)
  * and the 30-day clawback window live in the ledger, not in arithmetic.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ⚠ NOT YET WIRED. NOTHING CALLS computePayout().
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The live close path still runs calculateCommission() in lib/website-sales.ts
+ * — single payee, 20/30, hard $2,000 floor. So this engine can price a $500
+ * deal correctly and that deal still cannot be closed in production. Read any
+ * claim that "$500 deals book now" against this paragraph.
+ *
+ * Porting it is not a one-line swap, because the numbers are PUBLISHED:
+ *   - app/playbook/deals/page.tsx renders rate cards and a full payout table
+ *     from COMMISSION_MODEL — that page is the comp plan as a rep understands
+ *     it, and it is what they were recruited on.
+ *   - components/today/RepToday.tsx shows the floor and both rates on the
+ *     rep's own dashboard.
+ *   - the contractor agreements quote the same figures.
+ *
+ * Engine, close path, Playbook copy and contracts have to move together, or a
+ * rep is told one number and paid another.
  */
 
 export type PartyRole = "opener" | "closer" | "builder" | "manager" | "full_stack";
