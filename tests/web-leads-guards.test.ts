@@ -167,4 +167,138 @@ assert.match(
   "fetchLeads must apply visibleToViewer scoping to each row -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
 );
 
+// ---------------------------------------------------------------------------
+// Task 3 (2026-08-21 build-a-lead-detail plan): the audit endpoint is a NEW
+// door onto the same tenant_records table, so it must pass the identical
+// auth gate the loop above already proves for the sibling routes -- resolve
+// the caller, branch on session.ok (not session's truthiness, the same bug
+// class documented above), fail closed on an unresolved caller, and refuse a
+// caller from another tenant before any read.
+// ---------------------------------------------------------------------------
+{
+  const route = "app/api/web-leads/[id]/audit/route.ts";
+  const src = read(route);
+  assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
+  assert.match(
+    src,
+    /if\s*\(\s*!\s*session\.ok\s*\)/,
+    `${route} must branch on session.ok, not on session's truthiness`,
+  );
+  assert.match(src, /status:\s*401/, `${route} must fail closed on an unresolved caller`);
+  assert.match(
+    src,
+    /session\.tenantId/,
+    `${route} must reference session.tenantId -- resolving it and never checking it is how the sibling routes leaked`,
+  );
+  assert.match(src, /status:\s*403/, `${route} must refuse a caller from another tenant with a 403`);
+}
+
+// ---------------------------------------------------------------------------
+// THE RULE THAT OUTRANKS THE FEATURE: a site we could not reach is NEVER
+// given a score, and the head-to-head "ours vs theirs" benchmark ships
+// default OFF because our own sites do not yet win it -- shipping it live
+// would put a rep in front of a prospect whose site beats ours. This asserts
+// both that the flag gate exists in the data layer (not just described in a
+// doc) and that a comment explains WHY it defaults off, so a future editor
+// cannot flip it to always-on without also deleting the reasoning that
+// argues against that.
+// ---------------------------------------------------------------------------
+const auditLib = read("lib/web-leads/audit.ts");
+assert.match(auditLib, /WEBDEV_SHOW_BENCHMARK/, "lib/web-leads/audit.ts must reference WEBDEV_SHOW_BENCHMARK");
+assert.match(
+  auditLib,
+  /own sites do not yet win|do not yet win this comparison|our own sites/i,
+  "lib/web-leads/audit.ts must comment that the benchmark comparison is default-off because our own sites do not yet win it",
+);
+// A comment explaining WHY the flag defaults off is not itself a guard: the
+// actual condition could still be written `!== "false"` (which also
+// "references WEBDEV_SHOW_BENCHMARK" and would pass a presence-only check)
+// and default the benchmark ON. This pins the fail-closed direction of the
+// check itself, not just its presence.
+assert.match(
+  auditLib,
+  /WEBDEV_SHOW_BENCHMARK\s*===\s*"true"/,
+  'lib/web-leads/audit.ts must gate the benchmark on WEBDEV_SHOW_BENCHMARK === "true" (fail closed) -- any other comparison could default it on',
+);
+
+// ---------------------------------------------------------------------------
+// Task 5 (2026-08-21 build-a-lead-detail plan): pin the honesty rules Task 4
+// shipped as tests, so a future edit can't quietly reintroduce a fabricated
+// finding. Nothing has verified these prospects' websites except our own
+// crawler -- a site we could not reach may be perfectly good -- and if a rep
+// reads a fabricated finding aloud to a stranger on a live call, that is the
+// worst outcome this whole system can produce. A polished UI is exactly
+// where that nuance gets flattened: a badge, a colour, or a shortened
+// verdict string all read as more confident than the underlying data is.
+// ---------------------------------------------------------------------------
+for (const view of [
+  "components/web-leads/WebsiteComparison.tsx",
+  "components/web-leads/WebLeadDetail.tsx",
+]) {
+  const src = read(view);
+
+  // No standalone "No website" verdict. The quote-scoped regex matches only
+  // the bare four-word JS string literal (e.g. a future `websiteCondition ||
+  // "No website"` fallback) -- it will NOT false-positive on the hedged
+  // sentence below, which is plain JSX text that never closes its quotes
+  // right after the word "website".
+  assert.doesNotMatch(src, /"No website"/, `${view} must not render a bare "No website" verdict`);
+
+  // No colour class keyed to a score. Red says "bad", green says "good" --
+  // neither is something the number backs up when nothing but our own
+  // crawler has ever looked at the site. One exception: the generic "could
+  // not load" network-error banner, which is a pre-existing, repo-wide
+  // convention (28+ other components render a fetch failure with the exact
+  // same `border-amber-200 bg-amber-50 ... text-amber-900` triple) and fires
+  // before any audit data even exists -- it is not a judgement about a
+  // score. That one paragraph is identified by rendering the literal
+  // `{error}` fetch-failure state, not any audit/score field, so stripping
+  // it before checking targets colour attached to actual audit content
+  // without flagging an unrelated, already-shipped app convention.
+  const withoutLoadErrorBanner = src.replace(/<p className="[^"]*amber[^"]*">\{error\}<\/p>;?/g, "");
+  for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-", "bg-amber-"]) {
+    assert.doesNotMatch(
+      withoutLoadErrorBanner,
+      new RegExp(cls.replace(/-/g, "\\-")),
+      `${view} must not attach ${cls} to audit/score content -- a colour keyed to a score renders a judgement the number does not support`,
+    );
+  }
+}
+
+// The hedged phrasing is what must actually appear where a bare "No website"
+// verdict was tempting to write -- absence of the bad string is not proof the
+// honest one replaced it.
+assert.match(
+  read("components/web-leads/WebsiteComparison.tsx"),
+  /No website found yet, needs checking/,
+  "WebsiteComparison must render the hedged no-website message, not merely avoid the bare verdict",
+);
+
+// WebsiteComparison must actually HANDLE the unreachable state, not just
+// avoid contradicting it: reference `unreachable` and render sentence text
+// for it. A site we could not reach may be perfectly fine -- silently
+// falling through to "no website" (which reads as neutral/available) or to
+// a score of zero (which reads as a verdict) would both be dishonest in a
+// different way than naming the failure plainly.
+{
+  const src = read("components/web-leads/WebsiteComparison.tsx");
+  assert.match(src, /unreachable/, "WebsiteComparison must reference the unreachable audit state");
+  assert.match(
+    src,
+    /audit\.state === "unreachable"[\s\S]{0,400}?<p[^>]*>[^<]*could not check[^<]*<\/p>/i,
+    "WebsiteComparison must render sentence text for the unreachable state, not merely mention the word",
+  );
+}
+
+// The external "View website" link opens one of 27,000 sites we do not
+// control and have not vetted. Without rel="noopener noreferrer", the
+// opened tab can reach back through window.opener (e.g. redirect the
+// original tab to a fake "session expired" page) -- a real security
+// requirement, not a style nit, and easy to lose in a refactor of this link.
+assert.match(
+  read("components/web-leads/WebLeadDetail.tsx"),
+  /target="_blank"[\s\S]{0,120}?rel="noopener noreferrer"/,
+  'WebLeadDetail\'s external website link must carry rel="noopener noreferrer" alongside target="_blank"',
+);
+
 console.log("web-leads-guards ok");

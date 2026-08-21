@@ -16,8 +16,10 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { X, Phone, MapPin, Globe, Tag } from "lucide-react";
+import { X, Phone, MapPin, Globe, Tag, ExternalLink } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
+import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { WebsiteComparison } from "./WebsiteComparison";
 
 function Row({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
   return (
@@ -102,6 +104,29 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                   <Phone className="h-4 w-4" />Call {lead.phone}
                 </a>
               )}
+              {/* safeExternalUrl adds a scheme to bare domains (217 of our
+                  stored websites have none -- a bare string in an href is
+                  app-relative and would navigate inside our own dashboard)
+                  and allowlists http/https (these values come from OSM,
+                  which anyone can edit, and a javascript: href would run in
+                  our origin). Render nothing rather than a dead or
+                  dangerous link when it returns null. */}
+              {(() => {
+                const websiteHref = safeExternalUrl(lead.websiteUrl);
+                return websiteHref && (
+                  // rel="noopener noreferrer" is required: without it the
+                  // opened page can reach back through window.opener, and
+                  // these are 27,000 sites we do not control.
+                  <a
+                    href={websiteHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mb-4 flex w-full items-center justify-center gap-2 rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                  >
+                    <ExternalLink className="h-4 w-4" />View website
+                  </a>
+                );
+              })()}
               <div className="divide-y divide-slate-100">
                 <Row icon={<MapPin className="h-4 w-4" />} label="Address" value={[lead.address, lead.city, lead.province, lead.postal].filter(Boolean).join(", ") || null} />
                 <Row icon={<Tag className="h-4 w-4" />} label="Industry" value={lead.industry} />
@@ -111,6 +136,7 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                 <Row icon={<Tag className="h-4 w-4" />} label="Research notes" value={lead.auditFindings} />
                 <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
               </div>
+              <WebsiteComparison leadId={leadId} />
             </>
           )}
         </div>
