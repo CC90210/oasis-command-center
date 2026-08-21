@@ -33,7 +33,7 @@ import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
 import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { filterWebsiteSalesRows } from "@/lib/oasis-sales-pipeline-policy";
+import { canOpenOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -63,9 +63,22 @@ export default async function PipelineLeadDetailPage({
   }).catch(() => null);
 
   const session = await resolveSessionContext();
-  const visibleRecord = record && session.ok
-    ? filterWebsiteSalesRows([record], { role: session.teamRole, userId: session.userId, isOwner: session.isTrueAdmin, adminAccess: session.adminAccess })[0]
-    : null;
+  // Opening ONE record is an access question: is it mine, or am I an admin?
+  // It is NOT the board's list-shaping question. Running a single record through
+  // filterWebsiteSalesRows made every lead on oasis-ai-cc unopenable (31,031
+  // rows, none stamped website_sales_v1) and stopped a rep opening the very
+  // deal they closed once its stage moved past the five rep stages.
+  const visibleRecord =
+    record &&
+    session.ok &&
+    canOpenOasisSalesRecord(record, {
+      role: session.teamRole,
+      userId: session.userId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    })
+      ? record
+      : null;
 
   if (!visibleRecord) {
     return (
