@@ -104,6 +104,24 @@ export const OASIS_SEED: TenantManifest = {
         { name: "company", type: "string" },
         { name: "email", type: "string" },
         { name: "phone", type: "string" },
+        // LEADGEN FIELDS. The OSM importer already WRITES these on every lead
+        // it creates (source=oasis_webdev_leadgen:osm) — website, the site's
+        // condition, industry and location. They were absent from this entity,
+        // and ManifestRecordForm renders the ENTITY, not the row, so the data
+        // was in the database and invisible on the lead profile. A rep opening
+        // "Mango Rain" could not see https://www.mangorain.ca/ even though it
+        // was stored on the record.
+        //
+        // Website condition is the single most useful field on a cold call for
+        // this offer — "no site" and "has a site, not reviewed" are completely
+        // different openers — so it goes on the profile, not just in the
+        // /web-leads browser.
+        { name: "website", type: "string" },
+        { name: "website_condition", type: "string" },
+        { name: "audit_findings", type: "string" },
+        { name: "industry", type: "string" },
+        { name: "business_city", type: "string" },
+        { name: "state", type: "string" },
         { name: "source", type: "enum", enum_values: ["referral", "inbound", "outbound", "event", "cold_outreach", "other"] },
         // OASIS lead lifecycle (Website Sales Engine v2). 14 stages cover
         // every state a prospect or client can be in — from researched lead

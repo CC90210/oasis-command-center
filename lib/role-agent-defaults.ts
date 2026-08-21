@@ -37,6 +37,7 @@ const SUNBIZ_BY_ROLE: Record<TeamRole, string[]> = {
   closer: ["solara"],
   opener: ["solara"],
   builder: ["solara"],
+  marketing: ["solara"],
 };
 
 const OASIS_BY_ROLE: Record<TeamRole, string[]> = {
@@ -54,6 +55,9 @@ const OASIS_BY_ROLE: Record<TeamRole, string[]> = {
   closer: ["bravo"],
   opener: ["bravo"],
   builder: ["bravo"],
+  // Maven owns CMO — content and brand voice. A marketing hire gets the
+  // agent whose job matches theirs.
+  marketing: ["maven"],
 };
 
 const POLICY_BY_TENANT_SLUG: Record<string, Record<TeamRole, string[]>> = {

@@ -31,7 +31,7 @@ import { foundersAllowlist } from "@/lib/founders/gate";
 import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import type { NavItem } from "@/lib/nav-config";
-import { filterNavForPersona, type Persona } from "@/lib/role-surfaces";
+import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 
 // Default metadata — tenant-neutral. Individual pages override via
@@ -304,7 +304,19 @@ export default async function RootLayout({
   // pure predicate — this is exactly why the check was split out of the
   // session-touching wrapper.
   const foundersNavItems: NavItem[] = shouldShowFoundersNav({
-    isFounder: isFounderTenant(profile?.tenant_id, foundersAllowlist()),
+    // TENANT **AND** CAPABILITY, matching lib/founders/gate.ts. The tenant
+    // check alone showed the Marketing tab to everyone standing in the OASIS
+    // workspace — including the 43 `member` profiles — while the page itself
+    // 404s them. A visible tab over a dead page is the inverse of the leak this
+    // codebase guards against, and it is how CC first noticed the marketing
+    // hire could not get in: the tab was there, the page was not.
+    //
+    // navPersona is null before a persona resolves (demo shells, pre-auth), and
+    // that falls back to the tenant answer alone — the nav is cosmetic and the
+    // page gate is the real wall.
+    isFounder:
+      isFounderTenant(profile?.tenant_id, foundersAllowlist()) &&
+      (navPersona === null || SURFACE_CAPABILITIES[navPersona].canSeeMarketing),
     isFullBleed,
     demoMode,
     pathOverrideSlug,

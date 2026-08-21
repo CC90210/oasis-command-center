@@ -27,6 +27,7 @@
  */
 
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { getActiveProfile } from "@/lib/queries";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
@@ -35,7 +36,7 @@ import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
-import { attachAssignedNames } from "@/lib/assigned-names";
+import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
@@ -57,7 +58,7 @@ const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENA
 export default async function PipelinePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ stage?: string; q?: string }>;
+  searchParams?: Promise<{ stage?: string; q?: string; rep?: string }>;
 }) {
   // Tenant-aware redirect. Non-OASIS operators land in their own
   // tenant's leads view rather than seeing CC's OASIS personal stages.
@@ -95,6 +96,9 @@ export default async function PipelinePage({
   const sp = (await searchParams) || {};
   const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
   const query = typeof sp.q === "string" && sp.q.trim() ? sp.q.trim() : null;
+  // ?rep=<auth_user_id> narrows the board to one person; ?rep=unassigned shows
+  // the pool nobody owns yet.
+  const repFilter = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : null;
 
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
@@ -152,8 +156,34 @@ export default async function PipelinePage({
         { programScoped: false },
       )
     : [];
+  // WHO IS ON THE BOARD. Built from the tenant's own members, and applied
+  // AFTER filterWebsiteSalesRows — never instead of it. That ordering is the
+  // security property: a rep who hand-types ?rep=<someone-else> has already
+  // been narrowed to their own rows, so the filter can only ever subtract from
+  // what they were allowed to see. It cannot be used to look sideways.
+  const repRoster = session.ok && session.isAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  // RESEARCHED IS THE PROSPECT POOL, NOT PIPELINE WORK.
+  //
+  // CC, 2026-08-21: the board showed 30,847 untouched directory rows as a
+  // pipeline stage, capped at 500, which is why it read as clogged and why
+  // every profile opened thin — those are un-worked prospects, not deals.
+  //
+  // HIDDEN, NOT DELETED, and the distinction is load-bearing: /web-leads reads
+  // the SAME rows from the SAME table and tenant (WEBDEV_TENANT_ID is
+  // oasis-ai-cc). Deleting the researched leads would empty the Leads browser
+  // too — there is no second copy. So the board starts at `assigned`, and
+  // assigning a lead is what puts it on the pipeline.
+  const workingRows = scopedRows.filter((r) => String(r.data.stage || '') !== 'researched');
+
+  const repScopedRows = repFilter
+    ? workingRows.filter((r) => {
+        const owner = typeof r.data.assigned_to === "string" ? r.data.assigned_to.toLowerCase() : "";
+        return repFilter === "unassigned" ? !owner : owner === repFilter;
+      })
+    : workingRows;
+
   const rows = query
-    ? scopedRows.filter((r) => {
+    ? repScopedRows.filter((r) => {
         const d = r.data;
         const hay = [
           d.name,
@@ -161,6 +191,14 @@ export default async function PipelinePage({
           d.email,
           d.phone,
           d.notes,
+          // Added with the leadgen fields: a rep hunting "dentists in Montreal"
+          // should not have to leave the board to do it. Searching only
+          // name/company/email/phone made every geographic or vertical query
+          // silently return nothing, which reads as an empty pipeline rather
+          // than an unsupported search.
+          d.industry,
+          d.business_city,
+          d.website,
         ]
           .filter((v): v is string => typeof v === "string")
           .join(" ")
@@ -168,12 +206,62 @@ export default async function PipelinePage({
         return hay.includes(query.toLowerCase());
       })
     : scopedRows;
-  const stages = session.ok
+  // The STAGE LIST has to drop researched too, not just the rows. Filtering one
+  // without the other leaves a permanently-empty "Researched" column on the
+  // board — which reads as "we have no prospects" when the truth is the
+  // opposite: 30,847 of them, deliberately parked in /web-leads until a rep
+  // picks one up. An empty column is a worse lie than no column.
+  const stages = (session.ok
     ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
-    : [];
+    : []
+  ).filter((stage) => stage.key !== "researched");
+
+  const repChip = (label: string, value: string | null, count: number) => {
+    const active = (value ?? null) === repFilter;
+    const params = new URLSearchParams();
+    if (stageFilter) params.set("stage", stageFilter);
+    if (query) params.set("q", query);
+    if (value) params.set("rep", value);
+    const href = `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
+    return (
+      <Link
+        key={value ?? "all"}
+        href={href}
+        className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+          active
+            ? "border-accent bg-accent/15 text-accent font-semibold"
+            : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg hover:border-fg-dim"
+        }`}
+      >
+        {label} <span className="tabular-nums opacity-70">{count}</span>
+      </Link>
+    );
+  };
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in space-y-4">
+      {/* WHOSE BOARD. Admins and managers get one chip per rep plus the
+          unassigned pool, so assigning work is a click rather than a search.
+          Reps never see this row: their board is already only theirs, so a
+          filter would be a list of colleagues they cannot open — an org chart
+          disguised as a control. */}
+      {repRoster.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
+          {repChip("Everyone", null, workingRows.length)}
+          {[...repRoster.entries()].map(([id, name]) =>
+            repChip(
+              name,
+              id,
+              workingRows.filter(
+                (r) => typeof r.data.assigned_to === "string" && r.data.assigned_to.toLowerCase() === id.toLowerCase(),
+              ).length,
+            ),
+          )}
+          {repChip("Unassigned", "unassigned", workingRows.filter((r) => !r.data.assigned_to).length)}
+        </div>
+      )}
+
       <LeadPipelineView
         slug="oasis"
         entityName="lead"
