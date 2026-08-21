@@ -178,6 +178,14 @@ export default async function PipelinePage({
           d.email,
           d.phone,
           d.notes,
+          // Added with the leadgen fields: a rep hunting "dentists in Montreal"
+          // should not have to leave the board to do it. Searching only
+          // name/company/email/phone made every geographic or vertical query
+          // silently return nothing, which reads as an empty pipeline rather
+          // than an unsupported search.
+          d.industry,
+          d.business_city,
+          d.website,
         ]
           .filter((v): v is string => typeof v === "string")
           .join(" ")
