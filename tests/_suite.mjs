@@ -163,6 +163,9 @@ const TESTS = [
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
   "tests/web-leads-scope.test.ts",
+  // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
+  // from JARVIS's services/leadgen/lib/remedies.js.
+  "tests/web-leads-remedies.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
