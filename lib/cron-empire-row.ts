@@ -76,12 +76,42 @@ function asCount(v: unknown): number {
  * Infer the owning agent from the job name for UI grouping. Tenant scoping is
  * done by the query's tenant_id filter, never by this function.
  */
+/**
+ * Content and brand work belongs to Maven (CMO), whatever the job is called.
+ *
+ * The prefix rules below only catch a job NAMED after its agent, and the
+ * empire's content jobs are not: "Marketing Publish Drain", "Post Analytics
+ * Sync", "Library Post Linker" and "Training Corpus Ingest" are all Maven's by
+ * their own descriptions — they drive CMO-Agent's send_gateway, pull per-post
+ * platform metrics, link founders Library assets to what actually published,
+ * and write style exemplars into CMO-Agent/brain/exemplars/. All four were
+ * filing under Bravo, so the board credited the CEO lane with the CMO's work
+ * and CC could not see his marketing automation as a group.
+ *
+ * Matched on distinctive domain words rather than a name list, so a new content
+ * job does not silently land in the wrong lane the day someone adds it.
+ */
+const MAVEN_MARKERS = [
+  "marketing",
+  "post analytics",
+  "library post",
+  "training corpus",
+  "publish drain",
+  "content",
+  "caption",
+  "exemplar",
+];
+
 export function inferEmpireAgentKey(name: unknown, actionType: unknown): string {
   const n = asText(name).toLowerCase();
   const t = asText(actionType).toLowerCase();
   if (n.startsWith("atlas") || t.startsWith("atlas_")) return "atlas";
   if (n.startsWith("maven") || t.startsWith("maven_")) return "maven";
   if (n.startsWith("aura") || n.includes("pow wow") || t.startsWith("morning_powwow")) return "aura";
+  // Domain match runs AFTER the explicit agent prefixes, so an
+  // "Atlas — marketing spend" job stays with Atlas rather than being
+  // reassigned by a keyword in its description.
+  if (MAVEN_MARKERS.some((m) => n.includes(m))) return "maven";
   return "bravo";
 }
 
