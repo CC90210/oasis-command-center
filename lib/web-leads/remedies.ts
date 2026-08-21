@@ -240,4 +240,5 @@ export function remedyFor(code: string): Remedy | null {
   return REMEDIES[code] || null;
 }
 
-export default { REMEDIES, remedyFor };
+const remediesModule = { REMEDIES, remedyFor };
+export default remediesModule;
