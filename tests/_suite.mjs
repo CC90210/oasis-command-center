@@ -174,6 +174,10 @@ const TESTS = [
   // http/https against OSM-sourced data anyone can edit -- see
   // lib/web-leads/url-safety.ts.
   "tests/web-leads-url-safety.test.ts",
+  // Build B (2026-08-21): territory -> rep assignment. Admin-only enforcement,
+  // tenant mismatch, propagation to the right leads, and the rule that an
+  // unassign must never strip a lead's own data.assigned_to.
+  "tests/web-leads-territory-assign.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
