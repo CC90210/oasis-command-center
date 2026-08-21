@@ -1488,11 +1488,28 @@ async function initAnonymousLead(input: {
 
   // Merchant-entered contact fields — seed a new lead OR merge into an existing
   // one (smart matching below). Email lowercased so dedup matches reliably.
+  // FIELD NAMES ARE TENANT-SPECIFIC, AND THIS USED TO IGNORE THAT.
+  //
+  // The reads below are deliberately generous — a form can call the field
+  // anything. The WRITES were not: every tenant got SunBiz's vocabulary
+  // (contact_name / business_name), including OASIS, whose lead entity declares
+  // `name` REQUIRED and `company` (lib/manifest/seeds.ts OASIS_SEED).
+  //
+  // So an inbound funnel lead landed in a shape the OASIS lead profile has no
+  // field to render, and /pipeline's ?q= search — which matches on d.name and
+  // d.company — could never find one. Measured on oasis-ai-cc: 31,028 leads
+  // carry `name`, and exactly 3 carry `contact_name`. Those 3 are the funnel
+  // leads. It reads as "only the newest leads are broken", which is the most
+  // confusing possible version of this bug.
+  //
+  // This function is ALREADY tenant-aware for stage and source a few lines
+  // down (isFundingTenant). The contact fields simply never were.
+  const funding = isFundingTenant(tenantSlug);
   const contactFields: Record<string, unknown> = {};
   const name = pick("contact_name") || pick("name") || pick("full_name");
-  if (name) contactFields.contact_name = name;
+  if (name) contactFields[funding ? "contact_name" : "name"] = name;
   const business = pick("business_name") || pick("company");
-  if (business) contactFields.business_name = business;
+  if (business) contactFields[funding ? "business_name" : "company"] = business;
   const emailRaw = pick("email");
   const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
   if (email) contactFields.email = email;
@@ -1537,7 +1554,6 @@ async function initAnonymousLead(input: {
     // the form's own on_complete_stage — its lifecycle's first stage — because
     // "intent_inquiry_submitted" isn't a valid OASIS stage and would render as
     // a phantom kanban column.
-    const funding = isFundingTenant(tenantSlug);
     const defaultStage = funding
       ? // 2026-07-15 (Adon): opening/engaging the application = viewed_application
         // (intent_inquiry removed). The form's step_outcomes/on_complete_stage

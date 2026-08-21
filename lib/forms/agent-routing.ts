@@ -101,18 +101,26 @@ export async function findExistingLead(
   const business = (match.business || "").trim();
   if (business) {
     const safe = business.replace(/[%_\\]/g, "\\$&");
-    const q = await db
-      .from("tenant_records")
-      .select("id, data, created_at")
-      .eq("tenant_id", tenantId)
-      .eq("entity_type", "lead")
-      .ilike("data->>business_name", safe)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (!q.error && q.data) {
-      const row = q.data as { id: string; data: Record<string, unknown> | null };
-      return { id: row.id, data: row.data || {} };
+    // BOTH SPELLINGS, because the estate genuinely contains both. SunBiz leads
+    // store the company under `business_name`; OASIS leads store it under
+    // `company` (its lead entity declares that field, not the other one).
+    // Matching only business_name meant a returning OASIS merchant with a new
+    // email always looked brand new — a duplicate lead, and the original
+    // agent's attribution quietly lost with it.
+    for (const field of ["business_name", "company"] as const) {
+      const q = await db
+        .from("tenant_records")
+        .select("id, data, created_at")
+        .eq("tenant_id", tenantId)
+        .eq("entity_type", "lead")
+        .ilike(`data->>${field}`, safe)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!q.error && q.data) {
+        const row = q.data as { id: string; data: Record<string, unknown> | null };
+        return { id: row.id, data: row.data || {} };
+      }
     }
   }
 

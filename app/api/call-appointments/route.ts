@@ -186,9 +186,18 @@ export async function GET(req: NextRequest) {
       for (const rec of (recs.data || []) as Array<{ id: string; entity_type: string; data: Record<string, unknown> }>) {
         const d = rec.data || {};
         const stageField = rec.entity_type === "application" ? "status" : "stage";
+        // BOTH SPELLINGS. SunBiz leads store these as business_name /
+        // contact_name; OASIS leads store them as company / name, because that
+        // is what its lead entity declares. Reading only the SunBiz pair left
+        // the call sheet blank for every OASIS lead — a rep about to dial with
+        // no name on screen. Same fallback the drip tracker already uses.
+        const str = (...keys: string[]) => {
+          for (const k of keys) if (typeof d[k] === "string" && d[k]) return d[k] as string;
+          return null;
+        };
         leadMap.set(rec.id, {
-          business_name: typeof d.business_name === "string" ? d.business_name : null,
-          contact_name: typeof d.contact_name === "string" ? d.contact_name : null,
+          business_name: str("business_name", "company"),
+          contact_name: str("contact_name", "name", "full_name"),
           phone: typeof d.phone === "string" ? d.phone : null,
           stage: typeof d[stageField] === "string" ? (d[stageField] as string) : null,
         });
