@@ -250,7 +250,17 @@ export default async function AssetDetailPage({
             <Card title="Post to channels" subtitle="Goes out through the send gateway">
               <AssetPublishPanel
                 assetId={asset.id}
-                hasVideo={Boolean(videoUrl)}
+                // Was `hasVideo={Boolean(videoUrl)}`. A carousel has no video and
+                // never will, so that arrived false and the panel announced that
+                // every channel would refuse the asset — about the format CC
+                // pivoted the whole feed to on 2026-08-21. The drain publishes
+                // image decks correctly (fetch_media returns cover + ordered
+                // slides for asset_type "carousel"), so the gate, not the
+                // backend, was what stood in the way.
+                mediaKind={
+                  videoUrl ? "video" : slideUrls.length > 0 || imageUrl ? "images" : "none"
+                }
+                slideCount={slideUrls.length}
                 lastIntent={lastIntent}
                 // Server-computed: the panel is a client component and anything
                 // derived from `new Date()` inside it would mismatch on hydration.
