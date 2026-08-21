@@ -347,12 +347,22 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // DISTINCT on payment_reference because a multi-party deal writes several
   // rows against ONE payment. Summing the basis per row would count the same
   // collected dollars once per role the rep happened to play on that deal.
+  //
+  // SALES ROLES ONLY, and that restriction is load-bearing rather than tidy.
+  // basis_amount_cents does not mean the same thing on every row: on a sales
+  // line it is the collected amount, on a MANAGER line it is what OASIS
+  // retained. A manager who also closed the deal therefore has two rows with
+  // two different bases against one payment, and DISTINCT would keep both —
+  // inflating their trailing volume by the retainer and buying them an
+  // accelerator band they did not sell. Builder lines carry basis 0 and are
+  // excluded for the same reason: a flat build fee is not revenue that rep sold.
   const trailingRs = await client.execute({
     sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
             SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
             FROM website_sales_commissions
             WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
               AND status IN ('accrued','approved','paid')
+              AND "party_role" IN ('opener','closer','full_stack')
               AND created_at >= ?
           )`,
     args: [p_tenant_id, p_rep_user_id, new Date(Date.now() - 30 * 864e5).toISOString()],

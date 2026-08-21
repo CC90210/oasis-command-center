@@ -165,6 +165,36 @@ async function main() {
       "not the sum of commission amounts, and not multiplied by the roles a rep played",
   );
 
+  /* basis_amount_cents does NOT mean the same thing on every row: a manager
+   * line's basis is what OASIS retained, not what was collected. Without the
+   * sales-role filter, a manager who also closed the deal has two rows with two
+   * different bases against one payment, DISTINCT keeps both, and their volume
+   * is inflated by the retainer — buying an accelerator band they did not sell. */
+  const mgrRow = await client.execute({
+    sql: `SELECT basis_amount_cents FROM website_sales_commissions
+          WHERE payment_reference = 'pay-8k' AND party_role = 'manager'`,
+    args: [],
+  });
+  assert.ok(
+    Number(mgrRow.rows[0].basis_amount_cents) !== 800_000,
+    "a manager line's basis is the RETAINER, not the collected amount — which is exactly " +
+      "why trailing volume must exclude it",
+  );
+  const salesOnly = await client.execute({
+    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+              AND "party_role" IN ('opener','closer','full_stack')
+          )`,
+    args: [TENANT, MANAGER],
+  });
+  assert.equal(
+    Number(salesOnly.rows[0].c), 0,
+    "a pure manager sold nothing, so their trailing SALES volume is 0 — their override " +
+      "must never earn them a volume accelerator",
+  );
+
   /* ── 4. A rep hired as `closer` can close. ───────────────────────────────
    * 147 gated on team_role='agent'; migration 153 introduced the job titles,
    * which would have made every new hire unable to close anything. */

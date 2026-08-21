@@ -44,7 +44,7 @@ import { MANAGER_OVERRIDE_BPS } from "@/lib/website-sales-comp";
 type Read<T> = { ok: true; value: T } | { ok: false };
 
 type RepRow = { auth_user_id: string; display_name: string | null; full_name: string | null; team_role: string | null };
-type LineRow = { rep_user_id: string | null; amount_cents: number | null; party_role: string | null; status: string | null };
+type LineRow = { rep_user_id: string | null; amount_cents: number | null };
 
 // Two decimals, always. maximumFractionDigits: 0 rounded 150 cents to "$2" —
 // on a page whose entire job is telling someone what they earned.
@@ -81,9 +81,15 @@ async function loadTeamLines(tenantId: string, repIds: string[]): Promise<Read<L
     const db = getServiceSupabase();
     const r = await db
       .from("website_sales_commissions")
-      .select("rep_user_id, amount_cents, party_role, status")
+      .select("rep_user_id, amount_cents")
       .eq("tenant_id", tenantId)
       .eq("entry_type", "accrual")
+      // LIVE ROWS ONLY. Without this the total counts commissions that were
+      // clawed back: a refund moves the accrual to status='offset' and writes a
+      // negative refund_offset row, and entry_type='accrual' alone keeps the
+      // original. A manager would see money on the board that the company
+      // reclaimed weeks ago, and coach against a number that is not real.
+      .in("status", ["accrued", "approved", "paid"])
       .in("rep_user_id", repIds)
       .order("id", { ascending: true })
       .limit(LINE_PAGE + 1);
@@ -110,6 +116,7 @@ async function loadMyOverride(tenantId: string, managerUserId: string): Promise<
       .eq("tenant_id", tenantId)
       .eq("rep_user_id", managerUserId)
       .eq("party_role", "manager")
+      .in("status", ["accrued", "approved", "paid"])
       .order("id", { ascending: true })
       .limit(LINE_PAGE + 1);
     if (r.error) return { ok: false };
