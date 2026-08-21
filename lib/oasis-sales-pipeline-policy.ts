@@ -12,6 +12,30 @@ export const AGENT_PIPELINE_STAGE_KEYS = [
 
 const AGENT_STAGE_SET = new Set<string>(AGENT_PIPELINE_STAGE_KEYS);
 
+/**
+ * ALLOWLIST. The OASIS sales titles added 2026-08-21 — manager, closer, opener,
+ * builder — are deliberately ABSENT, and each absence is a decision:
+ *
+ *   closer / opener  correct and final. A rep sees their own book at the rep
+ *                    stages. That is the whole design.
+ *
+ *   manager          deliberately UNDER-permissive for now. A manager should see
+ *                    their TEAM's book, which is a third scope this function
+ *                    cannot express — `true` here would hand them the entire
+ *                    tenant including CC's own leads, which is worse than
+ *                    showing them too little. They see their own until the
+ *                    team-scope read lands with the manager pages.
+ *
+ *   builder          not a sales role at all. They are scoped to their own rows
+ *                    here, and because AGENT_STAGE_SET holds only the five REP
+ *                    stages, a builder's board is EMPTY today — their work sits
+ *                    at onboarding / in_build / client_review / launched. Empty
+ *                    is not a leak, but it is not their tool either; the
+ *                    delivery board is what fixes it.
+ *
+ * Do not "fix" a role into this list to make a screen populate. Widening here
+ * widens `filterWebsiteSalesRows` to every program row in the tenant.
+ */
 export function isOasisPipelineAdmin(role: string, isOwner = false, adminAccess = false): boolean {
   return isOwner || role === "owner" || role === "admin" || role === "member" || adminAccess;
 }

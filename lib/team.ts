@@ -19,6 +19,37 @@ export { INVITABLE_ROLES, isInvitableRole };
 export type { InvitableRole, TeamRole };
 
 /**
+ * The workspace slug for a tenant id, lowercased. Null when the row is missing
+ * or the read fails.
+ *
+ * Null is FAIL-CLOSED by construction at every current call site: both feed
+ * `invitableRoleOptionsFor` / `roleAllowedForTenant`, which treat an unknown
+ * workspace as "not OASIS" and therefore withhold the sales roles. A caller that
+ * needs to tell "not ours" apart from "could not tell" must not use this — see
+ * resolveViewerSurface's `degraded` flag, which exists for exactly that reason.
+ *
+ * NOTE: this lookup is inlined in roughly ten other modules. This helper is used
+ * by the two surfaces added for the sales roles; consolidating the rest is a
+ * separate change and not one to make while shipping a feature.
+ */
+export async function tenantSlugFor(tenantId: string): Promise<string | null> {
+  try {
+    const supa = getServiceSupabase();
+    const { data, error } = await supa
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const slug = (data as { slug?: string | null }).slug;
+    return slug ? slug.trim().toLowerCase() : null;
+  } catch (err) {
+    console.error("[team.tenantSlugFor]", err);
+    return null;
+  }
+}
+
+/**
  * How long a fresh invite stays redeemable.
  *
  * THIS LIVED IN THE DATABASE AND THE DATABASE LOST IT. In Postgres the column

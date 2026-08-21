@@ -29,6 +29,14 @@ const SUNBIZ_BY_ROLE: Record<TeamRole, string[]> = {
   processor: ["solara"],
   read_only: ["solara"],
   member: ["solara"],
+  // The OASIS sales titles cannot be granted on a SunBiz tenant —
+  // roleAllowedForTenant rejects them at the invite API. These rows exist so the
+  // map stays TOTAL rather than having a hole, and they take the most
+  // conservative palette in case one ever arrives by another path.
+  manager: ["solara"],
+  closer: ["solara"],
+  opener: ["solara"],
+  builder: ["solara"],
 };
 
 const OASIS_BY_ROLE: Record<TeamRole, string[]> = {
@@ -39,6 +47,13 @@ const OASIS_BY_ROLE: Record<TeamRole, string[]> = {
   processor: ["bravo"],
   read_only: ["bravo"],
   member: ["bravo"],
+  // Sales org: Bravo only. Atlas is CFO (company money), Maven is CMO (brand
+  // voice) and Aura is not theirs to drive — handing a commission contractor the
+  // founders' agent fleet would leak through the agent rather than the UI.
+  manager: ["bravo"],
+  closer: ["bravo"],
+  opener: ["bravo"],
+  builder: ["bravo"],
 };
 
 const POLICY_BY_TENANT_SLUG: Record<string, Record<TeamRole, string[]>> = {

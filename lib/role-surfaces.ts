@@ -45,6 +45,11 @@
  */
 
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
+import {
+  OASIS_SALES_ROLE_OPTIONS,
+  PLATFORM_ROLE_OPTIONS,
+  type RoleOption,
+} from "@/lib/team-roles";
 
 /**
  * The five kinds of person who open this dashboard.
@@ -62,7 +67,7 @@ import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
  *   readonly — the worker surface with the actions taken away.
  *   legacy   — SunBiz's own roles (loan_officer / processor). See below.
  */
-export type Persona = "founder" | "sales" | "worker" | "readonly" | "legacy";
+export type Persona = "founder" | "manager" | "sales" | "worker" | "readonly" | "legacy";
 
 /**
  * What a persona is allowed to SEE. Each flag names a class of data, not a
@@ -78,10 +83,22 @@ export type SurfaceCapabilities = {
   canSeeCompanyFinancials: boolean;
   /** Every lead in the tenant, at every stage. */
   canSeeAllPipeline: boolean;
+  /**
+   * Leads belonging to the reps who roll up to this viewer
+   * (user_profiles.manager_user_id = me), plus their own. A THIRD scope, between
+   * "all" and "own" — a sales manager coaches a book they do not personally own,
+   * but the rest of the tenant is still none of their business.
+   */
+  canSeeTeamPipeline: boolean;
   /** Only leads assigned to this viewer, only at the rep-workable stages. */
   canSeeOwnPipelineOnly: boolean;
   /** This viewer's own commission rows (website_sales_commissions.rep_user_id = me). */
   canSeeOwnCommissionOnly: boolean;
+  /**
+   * Commission rows for this viewer's direct reports — what a manager needs to
+   * verify the override they are paid on. NOT the tenant-wide ledger.
+   */
+  canSeeTeamCommission: boolean;
   /** Every rep's commission — the payout ledger a founder approves from. */
   canSeeCommissionLedger: boolean;
   /** Post-sale delivery: onboarding / in_build / client_review / launched. */
@@ -119,6 +136,43 @@ export function isOasisSurfaceTenant(slug: string | null | undefined): boolean {
   return OASIS_SURFACE_TENANT_SLUGS.has((slug || "").trim().toLowerCase());
 }
 
+/**
+ * Which roles may be handed out in this workspace.
+ *
+ * The OASIS sales job titles are a PRODUCT concern. CONTEXT.md's rule is that
+ * product features do not extrapolate across tenants — so a SunBiz admin's
+ * invite menu offers Member and Admin, and an OASIS admin's also offers the four
+ * sales titles. Without this, every tenant on the platform would be offered
+ * "Closer", and anyone invited as one onto a foreign tenant would resolve to a
+ * persona built for a workspace they are not standing in.
+ *
+ * This lives here rather than in lib/team-roles.ts because it is a policy that
+ * depends on the workspace, and this module already owns "which OASIS slugs are
+ * ours". team-roles.ts stays dependency-free and answers only "what roles exist".
+ *
+ * Unknown / null slug → platform roles only. Fail closed: an unresolvable
+ * workspace does not get the product's roles.
+ */
+export function invitableRoleOptionsFor(
+  tenantSlug: string | null | undefined,
+): ReadonlyArray<RoleOption> {
+  return isOasisSurfaceTenant(tenantSlug)
+    ? [...PLATFORM_ROLE_OPTIONS, ...OASIS_SALES_ROLE_OPTIONS]
+    : PLATFORM_ROLE_OPTIONS;
+}
+
+/**
+ * Server-side counterpart to the menu above — the API's gate, not the UI's.
+ * The dropdown not offering a role is cosmetic; this is what makes a hand-rolled
+ * POST of `{"role":"closer"}` against a SunBiz tenant fail.
+ */
+export function roleAllowedForTenant(
+  role: string,
+  tenantSlug: string | null | undefined,
+): boolean {
+  return invitableRoleOptionsFor(tenantSlug).some((o) => o.value === role);
+}
+
 /** Everything persona resolution needs. Mirrors the fields resolveSessionContext returns. */
 export type PersonaInput = {
   /** user_profiles.team_role, as resolved by the session layer. */
@@ -142,25 +196,69 @@ export function resolvePersona(input: PersonaInput): Persona {
   const role = (input.teamRole || "").trim().toLowerCase();
   if (input.isTrueAdmin === true || input.adminAccess === true) return "founder";
   if (role === "owner" || role === "admin") return "founder";
-  if (role === "agent") return "sales";
-  if (role === "member") return "worker";
+  if (role === "manager") return "manager";
+  // opener and closer share ONE persona on purpose. Their SURFACES are identical
+  // — own book, own commission, no company money. What differs is which pipeline
+  // STAGES they may act on, which is a pipeline-policy question and lives in
+  // lib/oasis-sales-pipeline-policy.ts. Splitting the persona here would put the
+  // same screen behind two rows that must then be kept identical by hand, which
+  // is the drift this module exists to remove.
+  if (role === "closer" || role === "opener" || role === "agent") return "sales";
+  if (role === "builder" || role === "member") return "worker";
   if (role === "loan_officer" || role === "processor") return "legacy";
   if (role === "read_only") return "readonly";
-  // Fail closed. Not "member", not "agent" — the persona that can see the least.
+  // Fail closed. Not "worker", not "sales" — the persona that can see the least.
   return "readonly";
 }
 
 const FOUNDER: SurfaceCapabilities = {
   canSeeCompanyFinancials: true,
   canSeeAllPipeline: true,
+  canSeeTeamPipeline: true,
   canSeeOwnPipelineOnly: false,
   canSeeOwnCommissionOnly: false,
+  canSeeTeamCommission: true,
   canSeeCommissionLedger: true,
   canSeeDeliveryQueues: true,
   canSeeClientIdentities: true,
   canSeeInboundTape: true,
   canSeeMarketing: true,
   canSeeSystemSurfaces: true,
+  canAct: true,
+};
+
+/**
+ * The sales manager. Coaches a team, is paid an override on what OASIS retains
+ * from that team's deals, and sells personally alongside them.
+ *
+ * The line this persona draws: they see THEIR TEAM's book and THEIR TEAM's
+ * commission, because they cannot manage what they cannot see and cannot verify
+ * their own override without it. They do NOT see company financials — Net MRR,
+ * gap to goal, client concentration — because a manager is still a commission
+ * contractor, not a partner in the business. That distinction is the entire
+ * reason `canSeeTeamPipeline` exists rather than reusing `canSeeAllPipeline`:
+ * "all" would have handed them the whole tenant, including CC's own leads.
+ *
+ * canSeeSystemSurfaces stays FALSE. /operations, /health and /automations are
+ * OASIS's internal machinery, not a sales management tool. The manager's
+ * equivalents — team performance, team payouts — are their own surfaces built
+ * on the two flags above, per CC's "same tab names, their own data".
+ */
+const MANAGER: SurfaceCapabilities = {
+  canSeeCompanyFinancials: false,
+  canSeeAllPipeline: false,
+  canSeeTeamPipeline: true,
+  canSeeOwnPipelineOnly: true,
+  canSeeOwnCommissionOnly: true,
+  canSeeTeamCommission: true,
+  canSeeCommissionLedger: false,
+  canSeeDeliveryQueues: false,
+  // Their team's deals are their team's clients. Scoped by canSeeTeamPipeline,
+  // not a licence to browse the tenant's client list.
+  canSeeClientIdentities: true,
+  canSeeInboundTape: false,
+  canSeeMarketing: false,
+  canSeeSystemSurfaces: false,
   canAct: true,
 };
 
@@ -172,8 +270,10 @@ const FOUNDER: SurfaceCapabilities = {
 const SALES: SurfaceCapabilities = {
   canSeeCompanyFinancials: false,
   canSeeAllPipeline: false,
+  canSeeTeamPipeline: false,
   canSeeOwnPipelineOnly: true,
   canSeeOwnCommissionOnly: true,
+  canSeeTeamCommission: false,
   canSeeCommissionLedger: false,
   canSeeDeliveryQueues: false,
   canSeeClientIdentities: false,
@@ -183,12 +283,15 @@ const SALES: SurfaceCapabilities = {
   canAct: true,
 };
 
-/** Internal fulfilment. Sees the work, not the money. */
+/** Internal fulfilment — the `builder` role, and the legacy `member`. Sees the
+ *  work, not the money. */
 const WORKER: SurfaceCapabilities = {
   canSeeCompanyFinancials: false,
   canSeeAllPipeline: true,
+  canSeeTeamPipeline: true,
   canSeeOwnPipelineOnly: false,
   canSeeOwnCommissionOnly: false,
+  canSeeTeamCommission: false,
   canSeeCommissionLedger: false,
   canSeeDeliveryQueues: true,
   canSeeClientIdentities: true,
@@ -218,6 +321,7 @@ const LEGACY: SurfaceCapabilities = { ...FOUNDER, canSeeMarketing: false };
 
 export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   founder: FOUNDER,
+  manager: MANAGER,
   sales: SALES,
   worker: WORKER,
   readonly: READONLY,
@@ -269,6 +373,40 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   "/playbook",
 ];
 
+/**
+ * The sales manager's nav: the rep's rows plus the leads board they coach from.
+ *
+ * DELIBERATELY NOT YET the full set in the plan (Analytics, Commissions, a
+ * team-scoped Settings). Those pages do not exist in a manager-scoped form yet,
+ * and `requireSystemSurface()` 404s /analytics and /settings for any persona
+ * whose canSeeSystemSurfaces is false — which a manager's is. Listing them now
+ * would put a visible row over a page that 404s.
+ *
+ * A hidden tab over a live page is a rehearsal for a leak; a visible tab over a
+ * dead page is just a broken product. Neither is shipped. The rows arrive in the
+ * same change that builds the manager-scoped pages behind them.
+ */
+export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
+  "/",
+  "/schedule",
+  "/pipeline",
+  "/playbook",
+  "/leads",
+];
+
+/**
+ * Which allowlist narrows which persona. A persona ABSENT from this map is not
+ * narrowed at all — that is how founder / worker / legacy keep the full nav.
+ *
+ * A map rather than an if-chain so adding a narrowed persona is a data change,
+ * and so `personaMayVisit` cannot accidentally fall through to "allow" for one
+ * of them the way an unmatched `if (persona !== "sales")` did.
+ */
+const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {
+  sales: SALES_NAV_ALLOWLIST,
+  manager: MANAGER_NAV_ALLOWLIST,
+};
+
 /** Path-prefix match on a URL boundary: `/playbook` matches `/playbook/script`, not `/playbooks`. */
 function matchesAllowedPrefix(href: string, prefix: string): boolean {
   const h = (href || "").trim().toLowerCase();
@@ -276,10 +414,11 @@ function matchesAllowedPrefix(href: string, prefix: string): boolean {
   return h === prefix || h.startsWith(`${prefix}/`);
 }
 
-/** May this persona reach `href` at all? Only `sales` is narrowed today. */
+/** May this persona reach `href` at all? Narrowed personas only; others pass. */
 export function personaMayVisit(persona: Persona, href: string): boolean {
-  if (persona !== "sales") return true;
-  return SALES_NAV_ALLOWLIST.some((p) => matchesAllowedPrefix(href, p));
+  const allowlist = PERSONA_NAV_ALLOWLIST[persona];
+  if (!allowlist) return true;
+  return allowlist.some((p) => matchesAllowedPrefix(href, p));
 }
 
 /**
@@ -309,6 +448,6 @@ export function filterNavForPersona<T extends { href: string }>(
   items: T[],
   persona: Persona | null | undefined,
 ): T[] {
-  if (!persona || persona !== "sales") return items;
+  if (!persona) return items;
   return items.filter((item) => personaMayVisit(persona, item.href));
 }

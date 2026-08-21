@@ -19,31 +19,75 @@
  */
 
 export type TeamRole =
+  // Platform roles. Meaningful in every workspace.
   | "owner"
   | "admin"
-  | "agent"
-  | "loan_officer"
-  | "processor"
   | "read_only"
-  | "member";
+  // OASIS sales org (2026-08-21). Job titles, not permission tiers: the role IS
+  // the job, so the nav a person gets and the rate they are paid both derive
+  // from this one field rather than a second lookup that can disagree with it.
+  | "manager"
+  | "closer"
+  | "opener"
+  | "builder"
+  // Legacy. Still resolvable because live rows carry them (43 `member`, and
+  // `member` is the column DEFAULT), but no longer offered on the invite menu —
+  // "member" and "agent" are the ambiguous pair the job titles above replace.
+  | "agent"
+  | "member"
+  // SunBiz's own roles. A different portal; not ours to change.
+  | "loan_officer"
+  | "processor";
 
 /** A role an admin may hand out through the invite UI. `owner` is never invitable. */
 export type InvitableRole = Exclude<TeamRole, "owner">;
 
+export type RoleOption = { value: InvitableRole; label: string };
+
 /**
- * The invite menu, in display order. Value AND label together — a label kept
- * apart from its value is a label that drifts away from it.
+ * Roles offered in EVERY workspace. Infrastructure, not product.
  */
-export const INVITABLE_ROLE_OPTIONS: ReadonlyArray<{
-  value: InvitableRole;
-  label: string;
-}> = [
+export const PLATFORM_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
   { value: "member", label: "Member" },
   { value: "admin", label: "Admin" },
-  { value: "agent", label: "Agent (sales rep)" },
 ];
 
-/** Just the values — what the API validates an inbound role against. */
+/**
+ * Roles offered ONLY in an OASIS-owned workspace.
+ *
+ * These are a PRODUCT concern, not infrastructure, and CONTEXT.md's rule is that
+ * product features do not extrapolate across tenants. A SunBiz admin has no use
+ * for "Closer", and someone invited as a closer onto a SunBiz tenant would get a
+ * persona built for a workspace they are not standing in.
+ */
+export const OASIS_SALES_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
+  { value: "manager", label: "Sales manager" },
+  { value: "closer", label: "Closer" },
+  { value: "opener", label: "Opener" },
+  { value: "builder", label: "Builder" },
+];
+
+/** The OASIS sales job titles, as a set — used to decide tenant eligibility. */
+export const OASIS_SALES_ROLES: ReadonlySet<string> = new Set(
+  OASIS_SALES_ROLE_OPTIONS.map((o) => o.value),
+);
+
+/** True when `role` is one of the OASIS sales job titles. */
+export function isOasisSalesRole(role: unknown): boolean {
+  return typeof role === "string" && OASIS_SALES_ROLES.has(role);
+}
+
+/**
+ * Every role the invite UI can offer ANYWHERE. This is the "is it a role at
+ * all" set — it deliberately does NOT answer "may it be used here", which is
+ * tenant-dependent and lives in lib/role-surfaces.ts.
+ */
+export const INVITABLE_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
+  ...PLATFORM_ROLE_OPTIONS,
+  ...OASIS_SALES_ROLE_OPTIONS,
+];
+
+/** Just the values — the first gate an inbound role passes. */
 export const INVITABLE_ROLES: InvitableRole[] = INVITABLE_ROLE_OPTIONS.map((o) => o.value);
 
 /**
