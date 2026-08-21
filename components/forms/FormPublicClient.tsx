@@ -347,7 +347,7 @@ export function FormPublicClient({
       if (field.type === "file_upload" && v instanceof File) {
         if (v.size > INLINE_FILE_MAX_BYTES) {
           return {
-            error: `File "${v.name}" is ${(v.size / (1024 * 1024)).toFixed(1)} MB — files larger than ${INLINE_FILE_MAX_BYTES / (1024 * 1024)} MB aren't supported on this form yet. Email it to your contact instead.`,
+            error: `File "${v.name}" is ${(v.size / (1024 * 1024)).toFixed(1)} MB. Files larger than ${INLINE_FILE_MAX_BYTES / (1024 * 1024)} MB aren't supported on this form yet. Email it to your contact instead.`,
           };
         }
         const base64 = await fileToBase64(v);
@@ -590,7 +590,7 @@ export function FormPublicClient({
   const headline = branding.headline || formName;
   const thanksMessage =
     branding.thanks_message ||
-    "Thanks — your details are in. A specialist will reach out within one business day.";
+    "Thanks, your details are in. A specialist will reach out within one business day.";
 
   return (
     <main
@@ -653,38 +653,83 @@ export function FormPublicClient({
         {/* Body */}
         <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-6 shadow-lg">
           {done ? (
-            <div className="text-center space-y-4 py-8">
-              <CheckCircle2
-                className="w-12 h-12 mx-auto"
-                style={{ color: primary }}
-              />
-              <h2 className="text-xl font-bold text-fg">All set.</h2>
-              <p className="text-sm text-fg-muted max-w-md mx-auto">
-                {thanksMessage}
-              </p>
-              {nextForms.length > 0 && (
-                <div className="pt-3 space-y-3">
-                  <div className="text-[11px] font-bold uppercase tracking-wider text-fg-dim">
-                    Have a few minutes? Keep going
+            /*
+             * TWO ENDINGS, and which one shows is load-bearing (Adon,
+             * 2026-08-21).
+             *
+             * When another form is still owed, this screen used to open with a
+             * large success tick, the word "All set." and the tenant's
+             * "a specialist will reach out" message — three separate signals
+             * that the job was finished — and offered the real next step below
+             * them as an optional "have a few minutes?" extra. Merchants read
+             * the top of the screen, believed they were done, and left. Their
+             * application was never submitted.
+             *
+             * So the completion ending is reserved for the case where nothing
+             * further is actually required. While a form is outstanding the
+             * screen states progress, says plainly that the application is not
+             * submitted, and makes the next step the largest thing on it.
+             */
+            nextForms.length > 0 ? (
+              <div className="text-center space-y-5 py-6">
+                {/* Progress, not completion. A ticked line above an ACTIVE line
+                    reads as "part way" at a glance, which a single tick never
+                    can however it is worded. */}
+                <div className="mx-auto flex max-w-[15rem] flex-col gap-2 text-left">
+                  <div className="flex items-center gap-2 text-sm text-fg-muted">
+                    <CheckCircle2 className="h-4 w-4 shrink-0" style={{ color: primary }} />
+                    <span>Details received</span>
                   </div>
-                  <div className="mx-auto flex max-w-sm flex-col gap-2">
-                    {nextForms.map((f) => (
-                      <a
-                        key={f.slug}
-                        href={f.url}
-                        className="flex min-h-[44px] w-full items-center justify-center rounded-lg px-4 py-3 text-sm font-bold shadow-sm transition-opacity hover:opacity-90"
-                        style={{ backgroundColor: primary, color: getContrastingTextColor(primary) }}
-                      >
-                        {f.label} →
-                      </a>
-                    ))}
+                  <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+                    <span
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2"
+                      style={{ borderColor: primary }}
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: primary }} />
+                    </span>
+                    <span>Your application</span>
                   </div>
-                  <p className="text-[11px] text-fg-dim">
-                    No rush — we&apos;ve emailed these links too, so you can finish anytime.
+                </div>
+
+                <div className="space-y-2">
+                  <h2 className="text-xl font-bold text-fg">Part 1 complete. One step left.</h2>
+                  <p className="text-sm text-fg-muted max-w-md mx-auto">
+                    Your application has not been submitted yet. Complete the second part
+                    so we can review your file.
                   </p>
                 </div>
-              )}
-            </div>
+
+                {/* The largest element on the screen, deliberately. */}
+                <div className="mx-auto flex max-w-sm flex-col gap-2">
+                  {nextForms.map((f) => (
+                    <a
+                      key={f.slug}
+                      href={f.url}
+                      className="flex min-h-[56px] w-full items-center justify-center rounded-xl px-5 py-4 text-base font-bold shadow-md transition-opacity hover:opacity-90"
+                      style={{ backgroundColor: primary, color: getContrastingTextColor(primary) }}
+                    >
+                      {f.label} →
+                    </a>
+                  ))}
+                </div>
+
+                {/* Says the link is saved WITHOUT inviting them to leave. The
+                    previous "No rush ... finish anytime" did the opposite of
+                    what this screen is for. */}
+                <p className="text-[11px] text-fg-dim">
+                  Takes about 5 minutes. We&apos;ve emailed you this link as well, so you can
+                  come back to it.
+                </p>
+              </div>
+            ) : (
+              <div className="text-center space-y-4 py-8">
+                <CheckCircle2 className="w-12 h-12 mx-auto" style={{ color: primary }} />
+                <h2 className="text-xl font-bold text-fg">All set.</h2>
+                <p className="text-sm text-fg-muted max-w-md mx-auto">
+                  {thanksMessage}
+                </p>
+              </div>
+            )
           ) : (
             <>
               {serverError && (
@@ -732,7 +777,7 @@ export function FormPublicClient({
             this renders on every tenant's public form (SunBiz funding + CC's
             personal-brand funnel), so it must not be funding-specific. */}
         <p className="text-center text-[11px] text-fg-dim">
-          Your information is kept private — used to follow up on your request and process your submission.
+          Your information is kept private, and is used to follow up on your request and process your submission.
         </p>
 
         {/* FTC AI disclosure. Deliberately BRAND-NEUTRAL and unlinked: this
