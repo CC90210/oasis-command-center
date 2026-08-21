@@ -376,6 +376,51 @@ const deliveryCode = stripComments(deliveryToday);
 const dispatcherCode = stripComments(dispatcher);
 const founderCode = stripComments(founderToday);
 
+/* ───── the MANAGER surface ──────────────────────────────────────────────────
+ * A persona without its own branch in app/page.tsx falls through to
+ * FounderToday. `manager` shipped without one, and although the money was safe
+ * (showFinancials is false for that persona), FounderToday consults no other
+ * capability — so it would have rendered the whole tenant's pipeline and the
+ * company inbound tape to someone whose record denies both.
+ *
+ * These assertions exist so that cannot recur silently for the NEXT persona. */
+const managerToday = read("components/today/ManagerToday.tsx");
+const managerCode = stripComments(managerToday);
+
+assert.ok(
+  /surface\.persona === "manager"/.test(dispatcherCode),
+  "app/page.tsx MUST branch on the manager persona — without it a manager falls through to FounderToday",
+);
+assert.ok(
+  dispatcherCode.indexOf('surface.persona === "manager"') < dispatcherCode.indexOf("<FounderToday"),
+  "the manager branch must come BEFORE the FounderToday fallthrough, or it never runs",
+);
+for (const reader of FINANCIAL_READERS) {
+  assert.equal(
+    managerCode.includes(reader),
+    false,
+    `ManagerToday must not reach ${reader} — a manager is a commission contractor, not a partner in the business`,
+  );
+}
+assert.ok(
+  managerCode.includes('.eq("manager_user_id"'),
+  "the manager's roster must be scoped in the QUERY by manager_user_id — a filter applied after fetching " +
+    "still ships every profile in the RSC payload",
+);
+assert.ok(
+  managerCode.includes('.in("rep_user_id"'),
+  "team commission must be scoped to the roster, not fetched tenant-wide and filtered in memory",
+);
+assert.ok(
+  /repIds\.length === 0/.test(managerCode),
+  "an empty roster must short-circuit the query: an empty `in` list is how 'no reps' becomes 'every row'",
+);
+assert.ok(
+  /ok:\s*false/.test(managerCode) && /not \$0|couldn't load/i.test(managerToday),
+  "a failed read must render as 'couldn't load', never as $0 — a manager acting on a fake zero " +
+    "will confront a rep about money that was never missing",
+);
+
 for (const reader of FINANCIAL_READERS) {
   assert.equal(
     repCode.includes(reader),

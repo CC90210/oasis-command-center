@@ -24,7 +24,7 @@
     "test:watermark": "node --conditions=react-server --import tsx scripts/test-watermark.ts",
     "test:media": "node --conditions=react-server --import tsx tests/media-frame.test.ts",
     "test:paged-reads": "node --conditions=react-server --import tsx tests/paged-reads-ordered.test.ts",
-    "test:website-sales": "node --conditions=react-server --import tsx tests/website-sales-workflow.test.ts && node --conditions=react-server --import tsx tests/website-sales-surface.test.ts && node --conditions=react-server --import tsx tests/oasis-sales-pipeline-policy.test.ts && node --conditions=react-server --import tsx tests/role-surfaces.test.ts && node --conditions=react-server --import tsx tests/website-sales-security.test.ts && node --conditions=react-server --import tsx scripts/smoke-website-sales.ts"
+    "test:website-sales": "node --conditions=react-server --import tsx tests/website-sales-comp.test.ts && node --conditions=react-server --import tsx tests/contracts-match-engine.test.ts && node --conditions=react-server --import tsx tests/website-sales-close-ledger.test.ts && node --conditions=react-server --import tsx tests/website-sales-workflow.test.ts && node --conditions=react-server --import tsx tests/website-sales-surface.test.ts && node --conditions=react-server --import tsx tests/oasis-sales-pipeline-policy.test.ts && node --conditions=react-server --import tsx tests/role-surfaces.test.ts && node --conditions=react-server --import tsx tests/website-sales-security.test.ts && node --conditions=react-server --import tsx scripts/smoke-website-sales.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.3",

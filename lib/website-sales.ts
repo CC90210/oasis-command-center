@@ -184,6 +184,32 @@ export const WEBSITE_SALES_STAGES = [
  * decides the rate, not the deal size. Rep-closed deals still accrue only —
  * founder approval gates payout (accrued → approved → paid), never auto-approve.
  */
+/**
+ * ⚠ SINGLE-PAYEE MODEL — SUPERSEDED BY lib/website-sales-comp.ts, STILL LIVE.
+ *
+ * This is comp v2: one rep per deal, 20% opened / 30% opened-and-closed, and a
+ * hard $2,000 floor below which `calculateCommission` returns zero. It is still
+ * the path the close actually runs, so DO NOT delete it — but do not extend it
+ * either. New comp rules belong in lib/website-sales-comp.ts (comp v3), which
+ * pays opener, closer, builder and manager from one collected payment.
+ *
+ * TWO REASONS THIS COMMENT EXISTS RATHER THAN A DELETION:
+ *
+ * 1. Until the close path is ported, two commission implementations coexist.
+ *    Two sources of truth for "what is a commission" is exactly how they drift,
+ *    and the drift is invisible until someone is paid the wrong amount.
+ *
+ * 2. THESE CONSTANTS ARE RENDERED TO REPS. app/playbook/deals/page.tsx builds
+ *    its rate cards and its whole payout table from them, and
+ *    components/today/RepToday.tsx shows the floor and both rates on the rep's
+ *    own dashboard. That copy is the comp plan as a rep understands it — the
+ *    thing they were recruited on. Changing the engine without changing that
+ *    page tells a rep one number and pays them another, which is a trust
+ *    problem before it is a code problem.
+ *
+ * So the port must land in one piece: engine, close path, Playbook copy, and
+ * the contracts that quote the same figures.
+ */
 export const COMMISSION_MODEL = {
   opener: 0.2,        // rep opened (booked the founder meeting); founder closed
   openerCloser: 0.3,  // rep opened AND closed the deal themselves

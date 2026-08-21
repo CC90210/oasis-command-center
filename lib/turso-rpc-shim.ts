@@ -13,6 +13,23 @@
  */
 
 import type { Client } from "@libsql/client";
+import {
+  COMP_VERSION,
+  PRICE_BOOK,
+  computePayout,
+  type LeadSourceTrack,
+  type PartyInput,
+} from "@/lib/website-sales-comp";
+
+/**
+ * How long a refund can still reverse a commission.
+ *
+ * Lives here rather than in website-sales-comp.ts because it is a LEDGER term,
+ * not arithmetic: the engine computes what is owed, this decides how long that
+ * remains reversible. CC chose 30 days (2026-08-20) — long enough to catch a
+ * chargeback, short enough that a rep's pay stops being provisional.
+ */
+export const CLAWBACK_WINDOW_DAYS = 30;
 
 export async function approve_sunbiz_draft(client: Client, args: Record<string, unknown>): Promise<unknown> {
   const p_draft_id = typeof args.p_draft_id === "string" ? args.p_draft_id : null;
@@ -266,8 +283,23 @@ export async function close_website_deal(client: Client, args: Record<string, un
     if (founderRs.rows.length === 0) throw new Error("founder_not_authorized_for_tenant");
   }
 
+  // WHICH ROLES MAY BE PAID ON A DEAL.
+  //
+  // 147 hard-coded team_role='agent'. That was correct when 'agent' was the
+  // only sales role — and it silently became a bug the moment migration 153
+  // introduced the job titles, because a rep hired as a `closer` would fail
+  // this guard and be unable to close anything. The failure would have looked
+  // like a permissions mystery, not a stale allowlist.
+  //
+  // Allowlist, not denylist: a role added to the enum next month cannot be paid
+  // on a deal until someone puts it here deliberately. `member` is absent on
+  // purpose — internal staff are not commissioned. `builder` IS present: they
+  // are paid a flat fee from the same ledger.
   const repRs = await client.execute({
-    sql: `SELECT 1 FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? AND team_role = 'agent' LIMIT 1`,
+    sql: `SELECT 1 FROM user_profiles
+          WHERE tenant_id = ? AND auth_user_id = ?
+            AND team_role IN ('agent','closer','opener','builder','manager')
+          LIMIT 1`,
     args: [p_tenant_id, p_rep_user_id],
   });
   if (repRs.rows.length === 0) throw new Error("rep_not_agent_for_tenant");
@@ -279,12 +311,101 @@ export async function close_website_deal(client: Client, args: Record<string, un
     throw new Error("rep_does_not_match_frozen_attribution");
   }
 
-  if (p_setup_amount < 2000) throw new Error("collected setup below commission floor");
-
+  // COMP v3. 147 threw here below $2,000:
+  //
+  //     if (p_setup_amount < 2000) throw new Error("collected setup below
+  //     commission floor");
+  //
+  // which meant a $500 website could not be CLOSED at all — not merely that it
+  // paid nothing. CC sells those. The floor survives as a SPLIT threshold
+  // instead (lib/website-sales-comp.ts): under it, the deal pays one full-stack
+  // operator rather than a chain of specialists, because $100 and $150 is not
+  // worth two people's time. The deal always books.
   const v_closed_by = p_closed_by_rep ? p_rep_user_id : p_founder_user_id;
-  const v_rate = v_closed_by === p_rep_user_id ? 0.3 : 0.2;
-  // round(numeric, 2) — half-up on positive amounts, same as Math.round here.
-  const v_amount = Math.round(p_setup_amount * v_rate * 100) / 100;
+  const collectedCents = Math.round(p_setup_amount * 100);
+
+  // Optional v3 arguments. Absent = the v2 shape: one rep, company-sourced,
+  // which is exactly what every caller sends today. Adding parties is opt-in,
+  // so this port cannot change the payout of a deal closed the old way.
+  const p_opener_user_id = typeof args.p_opener_user_id === "string" ? args.p_opener_user_id : null;
+  const p_builder_user_id = typeof args.p_builder_user_id === "string" ? args.p_builder_user_id : null;
+  const p_manager_user_id = typeof args.p_manager_user_id === "string" ? args.p_manager_user_id : null;
+  const p_lead_source_track: LeadSourceTrack = args.p_lead_source_track === "self" ? "self" : "company";
+
+  // The rep's own trailing-30-day collected total drives their accelerator.
+  // Read from the ledger rather than passed in: a caller that could set its own
+  // volume could set its own rate.
+  // COLLECTED REVENUE, not commission earned.
+  //
+  // Summing amount_cents was wrong and it underpaid reps against their own
+  // signed agreement: VOLUME_ACCELERATOR bands are collected-revenue figures,
+  // and lib/contracts/templates.ts states the accelerator is "measured on the
+  // Contractor's own collected revenue over the trailing 30 days". At a 30%
+  // rate a rep who collected $25,000 sums roughly $7,500 of commission, never
+  // reaches the $10,000 band, and is paid below the rate they signed.
+  //
+  // DISTINCT on payment_reference because a multi-party deal writes several
+  // rows against ONE payment. Summing the basis per row would count the same
+  // collected dollars once per role the rep happened to play on that deal.
+  //
+  // SALES ROLES ONLY, and that restriction is load-bearing rather than tidy.
+  // basis_amount_cents does not mean the same thing on every row: on a sales
+  // line it is the collected amount, on a MANAGER line it is what OASIS
+  // retained. A manager who also closed the deal therefore has two rows with
+  // two different bases against one payment, and DISTINCT would keep both —
+  // inflating their trailing volume by the retainer and buying them an
+  // accelerator band they did not sell. Builder lines carry basis 0 and are
+  // excluded for the same reason: a flat build fee is not revenue that rep sold.
+  const trailingRs = await client.execute({
+    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+              AND status IN ('accrued','approved','paid')
+              AND "party_role" IN ('opener','closer','full_stack')
+              AND created_at >= ?
+          )`,
+    args: [p_tenant_id, p_rep_user_id, new Date(Date.now() - 30 * 864e5).toISOString()],
+  });
+  const trailing30dCollectedCents = Number(trailingRs.rows[0]?.["c"] ?? 0);
+
+  const parties: PartyInput[] = [];
+  if (p_opener_user_id && p_opener_user_id !== p_rep_user_id) {
+    // A separate opener handed off, so the attributed rep is the closer.
+    parties.push({ userId: p_opener_user_id, role: "opener" });
+    parties.push({ userId: p_rep_user_id, role: "closer", trailing30dCollectedCents });
+  } else {
+    // One person owns the sale. Whether they also BUILT it decides 40% vs 70%
+    // on the self-sourced ladder.
+    parties.push({
+      userId: p_rep_user_id,
+      role: "full_stack",
+      trailing30dCollectedCents,
+      builtItToo: p_builder_user_id === p_rep_user_id,
+    });
+  }
+  if (p_builder_user_id && p_builder_user_id !== p_rep_user_id) {
+    parties.push({ userId: p_builder_user_id, role: "builder" });
+  }
+
+  const plan = computePayout({
+    collectedCents,
+    packageId: p_package_id,
+    track: p_lead_source_track,
+    parties,
+    managerUserId: p_manager_user_id,
+  });
+
+  const tier = PRICE_BOOK[p_package_id];
+  // Clawback window opens at accrual. Stored per row so changing the term later
+  // never silently re-opens rows that already closed.
+  const clawbackDeadlineIso = new Date(Date.now() + CLAWBACK_WINDOW_DAYS * 864e5).toISOString();
+
+  // The v2 legacy mirrors, kept so existing readers of `rate`/`amount` keep
+  // working. Derived from the plan, never computed a second time — two
+  // independent calculations of the same money is how they disagree.
+  const primaryLine =
+    plan.lines.find((l) => l.role === "full_stack" || l.role === "closer") ?? plan.lines[0] ?? null;
   const automationText = JSON.stringify(automationIds);
 
   // select * into v_deal ... for update — SQLite's single-writer model plus the
@@ -292,7 +413,8 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // caught by UNIQUE(tenant_id, lead_id) failing the batch, never by silence.
   const dealRs = await client.execute({
     sql: `SELECT id, status, rep_user_id, founder_user_id, package_id, automation_ids,
-                 currency, setup_amount, monthly_amount, payment_reference, closed_by
+                 currency, setup_amount, monthly_amount, payment_reference, closed_by,
+                 opener_user_id, builder_user_id, manager_user_id, lead_source_track
           FROM website_deals WHERE tenant_id = ? AND lead_id = ?`,
     args: [p_tenant_id, p_lead_id],
   });
@@ -314,7 +436,23 @@ export async function close_website_deal(client: Client, args: Record<string, un
       Number(d.setup_amount) !== p_setup_amount ||
       Number(d.monthly_amount) !== p_monthly_amount ||
       d.payment_reference !== p_payment_reference ||
-      ((d.closed_by ?? null) as string | null) !== v_closed_by;
+      ((d.closed_by ?? null) as string | null) !== v_closed_by ||
+      // THE v3 PARTY FIELDS MUST BE COMPARED TOO, and leaving them out was a
+      // double-pay.
+      //
+      // The commission rows are keyed (payment_reference, entry_type,
+      // party_role). A replay carrying a DIFFERENT p_opener_user_id passes a
+      // v2-only mismatch gate, and computePayout then emits `opener` + `closer`
+      // lines where the first close emitted `full_stack`. Different roles, no
+      // conflict, four fresh rows — one collected payment paying twice.
+      //
+      // The uniqueness rule cannot catch this on its own: it guarantees one row
+      // per role, not one SET of roles per payment. Only the mismatch gate can,
+      // which is why every input that changes the payout shape belongs here.
+      ((d.opener_user_id ?? null) as string | null) !== p_opener_user_id ||
+      ((d.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
+      ((d.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
+      String(d.lead_source_track ?? "company") !== p_lead_source_track;
     if (mismatch) throw new Error("deal_already_closed_mismatch");
     dealId = String(d.id);
   } else {
@@ -328,12 +466,21 @@ export async function close_website_deal(client: Client, args: Record<string, un
       sql: `INSERT INTO website_deals
               (id, tenant_id, lead_id, rep_user_id, founder_user_id, closed_by, package_id,
                automation_ids, currency, setup_amount, monthly_amount, proposal_status,
-               status, payment_reference, closed_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 'won', ?, ?, ?, ?)`,
+               status, payment_reference, closed_at, created_at, updated_at,
+               opener_user_id, closer_user_id, builder_user_id, manager_user_id,
+               lead_source_track, book_price_cents, sold_price_cents)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 'won', ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         dealId, p_tenant_id, p_lead_id, p_rep_user_id, p_founder_user_id, v_closed_by,
         p_package_id, automationText, p_currency, p_setup_amount, p_monthly_amount,
         p_payment_reference, nowIso, nowIso, nowIso,
+        p_opener_user_id, p_rep_user_id, p_builder_user_id, p_manager_user_id,
+        p_lead_source_track,
+        // Book price is stamped AT SALE so "sold above book" stays
+        // reconstructible after PRICE_BOOK moves.
+        tier ? tier.bookCents : null,
+        collectedCents,
       ],
     });
   }
@@ -341,19 +488,34 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // no-op gated on deal_id = excluded.deal_id. Fresh insert and same-deal
   // replay both RETURN the row; a payment_reference already owned by ANOTHER
   // deal fails the WHERE, returns nothing, and we raise after the batch.
-  writes.push({
-    sql: `INSERT INTO website_sales_commissions
-            (id, tenant_id, deal_id, rep_user_id, payment_reference, entry_type,
-             collected_setup_amount, rate, amount, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, 'accrual', ?, ?, ?, 'accrued', ?, ?)
-          ON CONFLICT ("tenant_id", "payment_reference", "entry_type")
-          DO UPDATE SET "updated_at" = "updated_at" WHERE "deal_id" = excluded."deal_id"
-          RETURNING id, amount`,
-    args: [
-      crypto.randomUUID(), p_tenant_id, dealId, p_rep_user_id, p_payment_reference,
-      p_setup_amount, v_rate, v_amount, nowIso, nowIso,
-    ],
-  });
+  // ONE ROW PER PARTY. The 146/147 upsert trick survives verbatim — DO UPDATE
+  // is a self-assign no-op gated on deal_id = excluded.deal_id — but the
+  // conflict target now carries party_role, so four payees coexist on one
+  // payment and a replay still updates those four rather than duplicating them.
+  // A payment_reference already owned by ANOTHER deal fails the WHERE, returns
+  // nothing, and is raised after the batch exactly as before.
+  const commissionWriteCount = plan.lines.length;
+  for (const payLine of plan.lines) {
+    writes.push({
+      sql: `INSERT INTO website_sales_commissions
+              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, entry_type,
+               comp_version, basis_amount_cents, rate_bps, amount_cents, notes,
+               collected_setup_amount, rate, amount, status,
+               clawback_deadline_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'accrual', ?, ?, ?, ?, ?, ?, ?, ?, 'accrued', ?, ?, ?)
+            ON CONFLICT ("tenant_id", "payment_reference", "entry_type", "party_role")
+            DO UPDATE SET "updated_at" = "updated_at" WHERE "deal_id" = excluded."deal_id"
+            RETURNING id, amount_cents`,
+      args: [
+        crypto.randomUUID(), p_tenant_id, dealId, payLine.userId, payLine.role, p_payment_reference,
+        COMP_VERSION, payLine.basisCents, payLine.rateBps, payLine.amountCents,
+        JSON.stringify(payLine.notes),
+        // Legacy mirrors, derived from the authoritative integers above.
+        p_setup_amount, payLine.rateBps / 10_000, payLine.amountCents / 100,
+        clawbackDeadlineIso, nowIso, nowIso,
+      ],
+    });
+  }
   writes.push({
     sql: `INSERT INTO website_onboarding (id, tenant_id, deal_id, lead_id, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?)
@@ -362,9 +524,18 @@ export async function close_website_deal(client: Client, args: Record<string, un
   });
 
   const batchRs = await client.batch(writes, "write");
-  const commissionRs = batchRs[dealIsNew ? 1 : 0];
-  const cRow = commissionRs.rows[0] as Record<string, unknown> | undefined;
-  if (!cRow) throw new Error("payment_reference_already_used_by_another_deal");
+  // The commission writes sit between the optional deal insert and the
+  // onboarding insert. Every one of them must have returned a row: a single
+  // silent no-op means that payment_reference already belongs to a different
+  // deal, and paying only three of four parties is worse than failing.
+  const firstCommissionIdx = dealIsNew ? 1 : 0;
+  const commissionRows = batchRs
+    .slice(firstCommissionIdx, firstCommissionIdx + commissionWriteCount)
+    .map((rs) => rs.rows[0] as Record<string, unknown> | undefined);
+  if (commissionRows.length === 0 || commissionRows.some((r) => !r)) {
+    throw new Error("payment_reference_already_used_by_another_deal");
+  }
+  const cRow = commissionRows[0]!;
 
   // perform patch_tenant_record_data(... 'stage','onboarding' ...) — through
   // the ported CAS implementation later in this file (hoisted declaration).
@@ -381,12 +552,149 @@ export async function close_website_deal(client: Client, args: Record<string, un
   });
 
   // RETURNS jsonb — supabase-js callers receive this object as { data }.
+  // The first three keys are the v2 contract and are unchanged, so existing
+  // callers keep working; `commission_amount` reports the PRIMARY line (the
+  // closer or full-stack operator), which is what it always meant.
   return {
     deal_id: dealId,
     commission_id: String(cRow.id),
-    commission_amount: Number(cRow.amount),
+    commission_amount: primaryLine ? primaryLine.amountCents / 100 : 0,
+    // v3 additions: the whole split, so a caller can show every party what
+    // they earned and why without recomputing it.
+    comp_version: COMP_VERSION,
+    payout_lines: plan.lines.map((l) => ({
+      user_id: l.userId,
+      role: l.role,
+      amount_cents: l.amountCents,
+      rate_bps: l.rateBps,
+      notes: l.notes,
+    })),
+    total_human_cents: plan.totalHumanCents,
+    oasis_retained_cents: plan.oasisRetainedCents,
+    guardrail_applied: plan.guardrailApplied,
   };
 }
+/**
+ * refund_website_deal — reverse a deal's commissions after a refund.
+ *
+ * Comp v3, Phase 3D. There was no reversal path at all before this: a refunded
+ * deal left its accruals sitting in the ledger as though the money had been
+ * kept, and the only correction was somebody remembering to edit rows by hand.
+ *
+ * OFFSET ROWS, NEVER DELETION. Each reversal is a NEW row with
+ * entry_type='refund_offset' and a NEGATIVE amount, and the original accrual is
+ * moved to status='offset'. The ledger stays append-only, so "what were we paid
+ * and why" is answerable a year later. Deleting the accrual would make a
+ * refunded deal indistinguishable from one that never closed.
+ *
+ * THE WINDOW IS PER-ROW, AND IT IS CHECKED. clawback_deadline_at is stamped at
+ * accrual (CLAWBACK_WINDOW_DAYS). A refund arriving after it does NOT reverse
+ * the commission — the rep keeps it. That is the term CC agreed: 30 days, so a
+ * chargeback is recoverable but a rep's pay stops being provisional forever.
+ * Rows past their deadline are reported back as `skipped`, never silently left
+ * out, because "nothing was reversed" and "some things were reversed" must not
+ * look the same to the operator running this.
+ *
+ * ALREADY-PAID ROWS ARE ALSO SKIPPED. Money that has left the building cannot
+ * be un-sent by a ledger write; recovering it is a conversation, not a query.
+ * They are reported so that conversation can actually happen.
+ */
+export async function refund_website_deal(client: Client, args: Record<string, unknown>): Promise<unknown> {
+  const p_tenant_id = typeof args.p_tenant_id === "string" ? args.p_tenant_id : null;
+  const p_deal_id = typeof args.p_deal_id === "string" ? args.p_deal_id : null;
+  const p_reason = typeof args.p_reason === "string" ? args.p_reason : null;
+  if (!p_tenant_id || !p_deal_id) throw new Error("refund_website_deal: missing required argument");
+
+  const nowIso = new Date().toISOString();
+
+  const rs = await client.execute({
+    sql: `SELECT id, rep_user_id, party_role, payment_reference, amount_cents, rate_bps,
+                 basis_amount_cents, collected_setup_amount, amount, status, clawback_deadline_at
+          FROM website_sales_commissions
+          WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual'
+            AND status IN ('accrued','approved')
+          ORDER BY id`,
+    args: [p_tenant_id, p_deal_id],
+  });
+
+  const reversed: Array<Record<string, unknown>> = [];
+  const skipped: Array<Record<string, unknown>> = [];
+  const writes: Array<{ sql: string; args: Array<string | number | null> }> = [];
+
+  for (const row of rs.rows as unknown as Array<Record<string, unknown>>) {
+    const deadline = (row.clawback_deadline_at ?? null) as string | null;
+    if (!deadline) {
+      // FAIL CLOSED TOWARD THE REP. A NULL deadline means the row predates the
+      // clawback column — migration 154 backfills v2 rows without one — and
+      // treating absent as "never expired" would make every historical
+      // commission reversible forever, which is the opposite of the bounded
+      // window the agreement promises. No stored deadline, no reversal; it is
+      // reported so an operator can handle it deliberately.
+      skipped.push({
+        id: String(row.id),
+        rep_user_id: String(row.rep_user_id),
+        reason: "no_clawback_deadline_recorded",
+      });
+      continue;
+    }
+    if (nowIso > deadline) {
+      skipped.push({ id: String(row.id), rep_user_id: String(row.rep_user_id), reason: "clawback_window_expired", deadline });
+      continue;
+    }
+    const cents = Number(row.amount_cents ?? 0);
+    writes.push({
+      sql: `INSERT INTO website_sales_commissions
+              (id, tenant_id, deal_id, rep_user_id, party_role, payment_reference, entry_type,
+               comp_version, basis_amount_cents, rate_bps, amount_cents, notes,
+               collected_setup_amount, rate, amount, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'refund_offset', ?, ?, ?, ?, ?, ?, ?, ?, 'offset', ?, ?)
+            ON CONFLICT ("tenant_id", "payment_reference", "entry_type", "party_role")
+            DO UPDATE SET "updated_at" = excluded."updated_at" WHERE "deal_id" = excluded."deal_id"`,
+      args: [
+        crypto.randomUUID(), p_tenant_id, p_deal_id, String(row.rep_user_id), String(row.party_role),
+        String(row.payment_reference), COMP_VERSION,
+        Number(row.basis_amount_cents ?? 0), Number(row.rate_bps ?? 0), -cents,
+        JSON.stringify([`refund_offset of ${cents}c`, p_reason ? `reason: ${p_reason}` : "reason: not given"]),
+        Number(row.collected_setup_amount ?? 0), 0, -Number(row.amount ?? 0),
+        nowIso, nowIso,
+      ],
+    });
+    writes.push({
+      sql: `UPDATE website_sales_commissions SET status = 'offset', updated_at = ? WHERE id = ? AND tenant_id = ?`,
+      args: [nowIso, String(row.id), p_tenant_id],
+    });
+    reversed.push({ id: String(row.id), rep_user_id: String(row.rep_user_id), role: String(row.party_role), amount_cents: -cents });
+  }
+
+  // Paid rows are reported separately: a ledger write cannot recall a transfer.
+  const paidRs = await client.execute({
+    sql: `SELECT id, rep_user_id, party_role, amount_cents FROM website_sales_commissions
+          WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual' AND status = 'paid'`,
+    args: [p_tenant_id, p_deal_id],
+  });
+  for (const row of paidRs.rows as unknown as Array<Record<string, unknown>>) {
+    skipped.push({ id: String(row.id), rep_user_id: String(row.rep_user_id), reason: "already_paid_out", amount_cents: Number(row.amount_cents ?? 0) });
+  }
+
+  writes.push({
+    sql: `UPDATE website_deals SET status = 'refunded', loss_reason = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+    args: [p_reason, nowIso, p_deal_id, p_tenant_id],
+  });
+
+  if (writes.length > 0) await client.batch(writes, "write");
+
+  return {
+    deal_id: p_deal_id,
+    reversed_count: reversed.length,
+    reversed,
+    // NEVER an empty silence: an operator must be able to see what this did NOT
+    // undo, because those are the rows that need a human.
+    skipped_count: skipped.length,
+    skipped,
+    comp_version: COMP_VERSION,
+  };
+}
+
 export async function consume_texttorrent_rate_token(client: Client, args: Record<string, unknown>): Promise<unknown> {
   // Signature parity: p_bucket text, p_worker_id text (unused in SQL body), p_priority int,
   // p_limit int DEFAULT 60, p_window_seconds int DEFAULT 60. Returns boolean.
@@ -1821,6 +2129,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
 export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string, unknown>) => Promise<unknown>> = {
   approve_sunbiz_draft,
   close_website_deal,
+  refund_website_deal,
   consume_texttorrent_rate_token,
   find_similar_merchants,
   force_materialize_today_plan,
