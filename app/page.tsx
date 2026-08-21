@@ -167,7 +167,14 @@ export default async function TodayPage() {
     return <MarketingToday viewerName={viewerName} />;
   }
 
-  if (surface.persona === "worker" || surface.persona === "readonly") {
+  // builder has its own persona now but the DELIVERY surface is still the
+  // right screen for them — it is the work queue. What changed is the nav
+  // and the capability record around it, not the dashboard.
+  if (
+    surface.persona === "worker" ||
+    surface.persona === "builder" ||
+    surface.persona === "readonly"
+  ) {
     return (
       <DeliveryToday
         tenantId={surface.tenantId}

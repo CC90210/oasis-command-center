@@ -88,7 +88,7 @@ assert.equal(resolvePersona({ teamRole: "marketing" }), "marketing");
 assert.equal(resolvePersona({ teamRole: " MARKETING " }), "marketing", "trim + case-fold applies here too");
 assert.equal(resolvePersona({ teamRole: "closer" }), "sales");
 assert.equal(resolvePersona({ teamRole: "opener" }), "sales");
-assert.equal(resolvePersona({ teamRole: "builder" }), "worker");
+assert.equal(resolvePersona({ teamRole: "builder" }), "builder", "split out of worker 2026-08-21 — see the BUILDER block below");
 assert.equal(resolvePersona({ teamRole: " CLOSER " }), "sales", "trim + case-fold applies to new roles too");
 assert.equal(resolvePersona({ teamRole: "Manager" }), "manager");
 // The escalation toggle outranks a sales title, same as it does every other role.
@@ -100,7 +100,7 @@ assert.equal(resolvePersona({ teamRole: "manager", isTrueAdmin: true }), "founde
  * `undefined` at every call site — which reads as falsy, i.e. accidentally
  * locked down, until someone "fixes" it by guessing. Assert the matrix is
  * total instead of trusting Record<> to have been filled in thoughtfully. */
-for (const persona of ["founder", "manager", "sales", "marketing", "worker", "readonly", "legacy"] as Persona[]) {
+for (const persona of ["founder", "manager", "sales", "marketing", "builder", "worker", "readonly", "legacy"] as Persona[]) {
   assert.ok(SURFACE_CAPABILITIES[persona], `${persona} must have a capability row`);
   assert.equal(
     Object.keys(SURFACE_CAPABILITIES[persona]).length,
@@ -108,7 +108,7 @@ for (const persona of ["founder", "manager", "sales", "marketing", "worker", "re
     `${persona} must declare EVERY capability — a missing key is silently false`,
   );
 }
-for (const persona of ["manager", "sales", "marketing", "worker", "readonly"] as Persona[]) {
+for (const persona of ["manager", "sales", "marketing", "builder", "worker", "readonly"] as Persona[]) {
   assert.equal(
     SURFACE_CAPABILITIES[persona].canSeeCompanyFinancials,
     false,
@@ -475,10 +475,13 @@ const pipelineCode = stripComments(pipelinePage);
  * were ever applied to the raw rows instead, it would become a way to look
  * sideways at a colleague's book. */
 assert.ok(
-  /repScopedRows = repFilter\s*\?\s*scopedRows\.filter/.test(pipelineCode),
-  "the rep filter must narrow scopedRows — the set filterWebsiteSalesRows ALREADY reduced to " +
-    "what this viewer may see. Filtering namedRows or allRows instead would turn ?rep=<other> " +
-    "into a way to read a colleague's pipeline, and the page would look identical.",
+  /workingRows = scopedRows\.filter/.test(pipelineCode) &&
+    /repScopedRows = repFilter\s*\?\s*workingRows\.filter/.test(pipelineCode),
+  "THE SCOPING CHAIN. scopedRows is what filterWebsiteSalesRows already reduced to this " +
+    "viewer; workingRows drops the researched pool from THAT; the rep chips filter THAT. " +
+    "Every link must narrow the previous one — if any step reached back to namedRows or " +
+    "allRows, ?rep=<other> would quietly become a way to read a colleague pipeline and the " +
+    "page would look identical.",
 );
 assert.ok(
   /repRoster\.size > 0 &&/.test(pipelineCode),
@@ -510,6 +513,48 @@ for (const field of ["website", "website_condition", "industry"]) {
       `cannot render what the entity does not declare`,
   );
 }
+
+/* ───── the BUILDER, split out of worker after a REAL exposure ──────────────
+ * 2026-08-21: a builder was invited, logged in, and could see the whole tenant
+ * pipeline and every system surface — because `builder` resolved to the legacy
+ * `worker` persona, which carries canSeeSystemSurfaces: true. `worker` was
+ * written for INTERNAL staff on `member` (43 live profiles, mostly SunBiz), so
+ * it was split rather than narrowed in place. */
+assert.equal(resolvePersona({ teamRole: "builder" }), "builder", "builder has its OWN persona now");
+assert.equal(
+  resolvePersona({ teamRole: "member" }),
+  "worker",
+  "and member is untouched — 43 live profiles depend on that row",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeSystemSurfaces,
+  false,
+  "/automations runs background workers and drip sends on CC's own machine. A delivery " +
+    "contractor toggling those is an outage, not a permissions nicety.",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeAllPipeline,
+  false,
+  "a builder builds what was sold — they do not need the whole prospect book",
+);
+assert.equal(capabilitiesFor("builder", OASIS).canSeeCompanyFinancials, false);
+assert.equal(capabilitiesFor("builder", OASIS).canSeeDeliveryQueues, true, "their actual work");
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeMarketing,
+  true,
+  "CC 2026-08-21: this hire is a builder AND a marketing specialist",
+);
+assert.equal(personaMayVisit("builder", "/automations"), false, "never the automation controls");
+assert.equal(personaMayVisit("builder", "/operations"), false, "never the internal ops surface");
+assert.equal(personaMayVisit("builder", "/settings"), false);
+assert.equal(personaMayVisit("builder", "/founders/marketing"), true);
+
+/* The board must not render the raw prospect pool as pipeline work. */
+assert.ok(
+  /workingRows/.test(pipelineCode) && /researched/.test(pipelineCode),
+  "the pipeline must exclude the researched stage — those are un-worked directory rows, " +
+    "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",
+);
 
 const managerToday = read("components/today/ManagerToday.tsx");
 const managerCode = stripComments(managerToday);

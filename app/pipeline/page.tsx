@@ -162,12 +162,25 @@ export default async function PipelinePage({
   // been narrowed to their own rows, so the filter can only ever subtract from
   // what they were allowed to see. It cannot be used to look sideways.
   const repRoster = session.ok && session.isAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  // RESEARCHED IS THE PROSPECT POOL, NOT PIPELINE WORK.
+  //
+  // CC, 2026-08-21: the board showed 30,847 untouched directory rows as a
+  // pipeline stage, capped at 500, which is why it read as clogged and why
+  // every profile opened thin — those are un-worked prospects, not deals.
+  //
+  // HIDDEN, NOT DELETED, and the distinction is load-bearing: /web-leads reads
+  // the SAME rows from the SAME table and tenant (WEBDEV_TENANT_ID is
+  // oasis-ai-cc). Deleting the researched leads would empty the Leads browser
+  // too — there is no second copy. So the board starts at `assigned`, and
+  // assigning a lead is what puts it on the pipeline.
+  const workingRows = scopedRows.filter((r) => String(r.data.stage || '') !== 'researched');
+
   const repScopedRows = repFilter
-    ? scopedRows.filter((r) => {
+    ? workingRows.filter((r) => {
         const owner = typeof r.data.assigned_to === "string" ? r.data.assigned_to.toLowerCase() : "";
         return repFilter === "unassigned" ? !owner : owner === repFilter;
       })
-    : scopedRows;
+    : workingRows;
 
   const rows = query
     ? repScopedRows.filter((r) => {
@@ -229,17 +242,17 @@ export default async function PipelinePage({
       {repRoster.size > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
-          {repChip("Everyone", null, scopedRows.length)}
+          {repChip("Everyone", null, workingRows.length)}
           {[...repRoster.entries()].map(([id, name]) =>
             repChip(
               name,
               id,
-              scopedRows.filter(
+              workingRows.filter(
                 (r) => typeof r.data.assigned_to === "string" && r.data.assigned_to.toLowerCase() === id.toLowerCase(),
               ).length,
             ),
           )}
-          {repChip("Unassigned", "unassigned", scopedRows.filter((r) => !r.data.assigned_to).length)}
+          {repChip("Unassigned", "unassigned", workingRows.filter((r) => !r.data.assigned_to).length)}
         </div>
       )}
 

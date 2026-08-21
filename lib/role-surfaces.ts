@@ -72,6 +72,7 @@ export type Persona =
   | "manager"
   | "sales"
   | "marketing"
+  | "builder"
   | "worker"
   | "readonly"
   | "legacy";
@@ -230,7 +231,11 @@ export function resolvePersona(input: PersonaInput): Persona {
   // same screen behind two rows that must then be kept identical by hand, which
   // is the drift this module exists to remove.
   if (role === "closer" || role === "opener" || role === "agent") return "sales";
-  if (role === "builder" || role === "member") return "worker";
+  // builder NO LONGER shares the legacy `worker` persona. It did, and that
+  // handed a delivery contractor every system surface and the whole tenant
+  // pipeline — see the BUILDER row below.
+  if (role === "builder") return "builder";
+  if (role === "member") return "worker";
   if (role === "loan_officer" || role === "processor") return "legacy";
   if (role === "read_only") return "readonly";
   // Fail closed. Not "worker", not "sales" — the persona that can see the least.
@@ -360,6 +365,50 @@ const MARKETING: SurfaceCapabilities = {
   canAct: true,
 };
 
+/**
+ * The delivery builder — an OUTSIDE contractor who builds the sites sold.
+ *
+ * SPLIT OUT OF `worker` ON 2026-08-21, AFTER A REAL EXPOSURE. A builder
+ * resolved to the legacy `worker` persona, which carries
+ * canSeeSystemSurfaces: true and canSeeAllPipeline: true. The first builder
+ * invited to the platform could therefore open /operations, /automations,
+ * /health, /analytics and /settings, and read every lead in the tenant.
+ *
+ * `worker` was written for INTERNAL staff on the `member` role — 43 of whom
+ * exist, most on SunBiz — so widening or narrowing it in place would have
+ * changed those people's access to fix a different problem. Hence a separate
+ * row rather than an edit.
+ *
+ * canSeeSystemSurfaces is FALSE and that one matters most: /automations
+ * controls background workers and drip sends that run on CC's own machine, and
+ * /operations is the empire's internal health. A contractor toggling either is
+ * not a permissions nicety, it is an outage. They are not read-only pages with
+ * a friendly audience — they are controls.
+ *
+ * What a builder DOES get: the delivery queues they work from, and client
+ * identities, because you cannot build a client's website without knowing who
+ * the client is.
+ */
+const BUILDER: SurfaceCapabilities = {
+  canSeeCompanyFinancials: false,
+  canSeeAllPipeline: false,
+  canSeeTeamPipeline: false,
+  canSeeOwnPipelineOnly: false,
+  canSeeOwnCommissionOnly: true,
+  canSeeTeamCommission: false,
+  canSeeCommissionLedger: false,
+  canSeeDeliveryQueues: true,
+  canSeeClientIdentities: true,
+  canSeeInboundTape: false,
+  // CC, 2026-08-21: this hire is "a builder and a marketing specialist". One
+  // profile carries one role, so the builder row grants the marketing studio
+  // rather than forcing a choice between the two halves of the job. Still
+  // gated by tenant in capabilitiesFor.
+  canSeeMarketing: true,
+  canSeeSystemSurfaces: false,
+  canAct: true,
+};
+
 const READONLY: SurfaceCapabilities = { ...WORKER, canAct: false };
 
 /**
@@ -383,6 +432,7 @@ export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   manager: MANAGER,
   sales: SALES,
   marketing: MARKETING,
+  builder: BUILDER,
   worker: WORKER,
   readonly: READONLY,
   legacy: LEGACY,
@@ -489,7 +539,21 @@ export const MARKETING_NAV_ALLOWLIST: readonly string[] = [
   "/founders/marketing",
 ];
 
+/**
+ * The builder's nav: their delivery work, the studio, and nothing that controls
+ * the machine. /automations and /operations are deliberately absent — those run
+ * background workers and sends on CC's own hardware.
+ */
+export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
+  "/",
+  "/schedule",
+  "/pipeline",
+  "/playbook",
+  "/founders/marketing",
+];
+
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {
+  builder: BUILDER_NAV_ALLOWLIST,
   sales: SALES_NAV_ALLOWLIST,
   manager: MANAGER_NAV_ALLOWLIST,
   marketing: MARKETING_NAV_ALLOWLIST,
