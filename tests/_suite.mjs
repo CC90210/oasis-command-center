@@ -169,6 +169,11 @@ const TESTS = [
   // Task 3 hotfix (2026-08-21): proves the Turso adapter's object-vs-string
   // profile decoding is handled -- see coerceProfile() in lib/web-leads/audit.ts.
   "tests/web-leads-audit.test.ts",
+  // Task 4 P2 fix (2026-08-21, independent review): the "View website" link
+  // must not treat a bare domain as app-relative, and must allowlist
+  // http/https against OSM-sourced data anyone can edit -- see
+  // lib/web-leads/url-safety.ts.
+  "tests/web-leads-url-safety.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
