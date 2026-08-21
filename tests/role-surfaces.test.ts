@@ -556,6 +556,43 @@ assert.ok(
     "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",
 );
 
+/* ───── the FOUNDERS GATE must follow the capability, not a persona name ─────
+ * 2026-08-21: schneur@oasisai.work was given the marketing studio via
+ * canSeeMarketing and STILL got "page not found", because
+ * lib/founders/gate.ts additionally required `persona === "founder"`. Two
+ * gates, and widening only one of them changes nothing.
+ *
+ * The gate now reads SURFACE_CAPABILITIES[persona].canSeeMarketing, so this
+ * table IS the founders-portal access list. That makes the next assertion the
+ * important one: the gate exists to keep outside commission-only contractors
+ * out, and it still does. */
+const gateSource = read("lib/founders/gate.ts");
+assert.equal(
+  /persona !== "founder"/.test(stripComments(gateSource)),
+  false,
+  "the founders gate must not hardcode a persona name — a marketing hire whose entire job " +
+    "is that portal was 404'd by exactly that line",
+);
+assert.ok(
+  /SURFACE_CAPABILITIES\[persona\]\.canSeeMarketing/.test(gateSource),
+  "the gate must key on the capability, so one table decides portal access",
+);
+for (const allowed of ["founder", "marketing", "builder"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[allowed].canSeeMarketing,
+    true,
+    `${allowed} must reach the founders marketing portal`,
+  );
+}
+for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[refused].canSeeMarketing,
+    false,
+    `${refused} must NOT reach the founders portal — this gate was written to keep outside ` +
+      `commission-only contractors out of it, and that has to survive the widening`,
+  );
+}
+
 const managerToday = read("components/today/ManagerToday.tsx");
 const managerCode = stripComments(managerToday);
 
