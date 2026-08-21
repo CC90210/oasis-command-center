@@ -46,8 +46,10 @@ type Read<T> = { ok: true; value: T } | { ok: false };
 type RepRow = { auth_user_id: string; display_name: string | null; full_name: string | null; team_role: string | null };
 type LineRow = { rep_user_id: string | null; amount_cents: number | null; party_role: string | null; status: string | null };
 
+// Two decimals, always. maximumFractionDigits: 0 rounded 150 cents to "$2" —
+// on a page whose entire job is telling someone what they earned.
 const money = (cents: number) =>
-  `$${(cents / 100).toLocaleString("en-CA", { maximumFractionDigits: 0 })}`;
+  `$${(cents / 100).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 async function loadTeam(tenantId: string, managerUserId: string): Promise<Read<RepRow[]>> {
   try {
@@ -67,6 +69,10 @@ async function loadTeam(tenantId: string, managerUserId: string): Promise<Read<R
   }
 }
 
+/** Enough headroom for a real team, plus one row so truncation is DETECTABLE
+ *  rather than silent. See the guard below. */
+const LINE_PAGE = 2_000;
+
 async function loadTeamLines(tenantId: string, repIds: string[]): Promise<Read<LineRow[]>> {
   // No roster, no query. Sending an empty `in` list is how "this manager has no
   // reps" quietly becomes "every row in the tenant" on some clients.
@@ -80,9 +86,16 @@ async function loadTeamLines(tenantId: string, repIds: string[]): Promise<Read<L
       .eq("entry_type", "accrual")
       .in("rep_user_id", repIds)
       .order("id", { ascending: true })
-      .limit(500);
+      .limit(LINE_PAGE + 1);
     if (r.error) return { ok: false };
-    return { ok: true, value: (r.data || []) as LineRow[] };
+    const rows = (r.data || []) as LineRow[];
+    // A CAP THAT BINDS IS A WRONG TOTAL, NOT A SMALL ONE. Reading a fixed page
+    // and summing it renders a partial figure as a complete one — the manager
+    // sees "team commission: $18,400" with no hint that rows were dropped. If
+    // the cap is reached we report a FAILED read instead, because "couldn't
+    // load" is honest and a truncated total is not.
+    if (rows.length > LINE_PAGE) return { ok: false };
+    return { ok: true, value: rows };
   } catch {
     return { ok: false };
   }
@@ -98,8 +111,9 @@ async function loadMyOverride(tenantId: string, managerUserId: string): Promise<
       .eq("rep_user_id", managerUserId)
       .eq("party_role", "manager")
       .order("id", { ascending: true })
-      .limit(500);
+      .limit(LINE_PAGE + 1);
     if (r.error) return { ok: false };
+    if ((r.data || []).length > LINE_PAGE) return { ok: false };
     const total = (r.data || []).reduce(
       (s: number, row: { amount_cents: number | null }) => s + Number(row.amount_cents ?? 0),
       0,
@@ -122,10 +136,20 @@ export async function ManagerToday({
   const dateKey = operatorDateKey();
   const teamRead = await loadTeam(tenantId, userId);
   const repIds = teamRead.ok ? teamRead.value.map((r) => r.auth_user_id).filter(Boolean) : [];
-  const [linesRead, overrideRead] = await Promise.all([
+  const [rawLinesRead, overrideRead] = await Promise.all([
     loadTeamLines(tenantId, repIds),
     loadMyOverride(tenantId, userId),
   ]);
+
+  // THIS FILE'S OWN HEADER SAYS AN ABSENT ANSWER IS NOT A ZERO, and the first
+  // version broke that rule three lines after stating it. When loadTeam fails,
+  // repIds is [] — and loadTeamLines answers an empty roster with a SUCCESSFUL
+  // empty result, so the card rendered a confident "$0.00" for a team whose
+  // roster we could not even read. A manager would go and ask a rep why they
+  // earned nothing this month.
+  //
+  // An unknown roster makes the team total unknowable. Say so.
+  const linesRead: Read<LineRow[]> = teamRead.ok ? rawLinesRead : { ok: false };
 
   const byRep = new Map<string, number>();
   if (linesRead.ok) {

@@ -120,6 +120,51 @@ async function main() {
     "STILL four rows after a replay — a double-pay is the worst failure this ledger can have",
   );
 
+  /* ── 3b. A replay with DIFFERENT parties must be REJECTED, not paid. ─────
+   * The double-pay the identical-replay test above cannot see. A second call
+   * on the same payment_reference carrying a new opener passes any v2-only
+   * mismatch gate, and computePayout then emits opener+closer lines where the
+   * first close emitted a different shape. Different roles do not collide on
+   * the uniqueness key, so fresh rows land and ONE collected payment pays
+   * twice. Only the mismatch gate can catch this. */
+  let rejected = false;
+  try {
+    await close_website_deal(client, {
+      p_tenant_id: TENANT, p_lead_id: "lead-8k", p_rep_user_id: CLOSER,
+      p_founder_user_id: FOUNDER, p_package_id: "authority", p_currency: "CAD",
+      p_setup_amount: 8000, p_monthly_amount: 500, p_payment_reference: "pay-8k",
+      p_closed_by_rep: true,
+      p_opener_user_id: "someone-else",   // <- the only change
+      p_builder_user_id: BUILDER, p_manager_user_id: MANAGER, p_lead_source_track: "company",
+    });
+  } catch (err) {
+    rejected = /deal_already_closed_mismatch/.test(String(err));
+  }
+  assert.equal(rejected, true, "a replay that CHANGES the parties must be rejected as a mismatch");
+  const afterDrift = await client.execute(`SELECT COUNT(*) c FROM website_sales_commissions WHERE payment_reference = 'pay-8k'`);
+  assert.equal(
+    Number(afterDrift.rows[0].c), 4,
+    "still four rows — a changed-party replay must not add payees to a paid deal",
+  );
+
+  /* ── 3c. The accelerator measures COLLECTED REVENUE, not commission. ─────
+   * Summing amount_cents under-counts by the commission rate, so a rep who
+   * collected $25k sums ~$7.5k, never reaches the $10k band, and is paid below
+   * the rate their signed agreement states. */
+  const trailing = await client.execute({
+    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+          )`,
+    args: [TENANT, CLOSER],
+  });
+  assert.equal(
+    Number(trailing.rows[0].c), 850_000,
+    "trailing volume is the COLLECTED basis ($500 + $8,000), counted once per payment — " +
+      "not the sum of commission amounts, and not multiplied by the roles a rep played",
+  );
+
   /* ── 4. A rep hired as `closer` can close. ───────────────────────────────
    * 147 gated on team_role='agent'; migration 153 introduced the job titles,
    * which would have made every new hire unable to close anything. */

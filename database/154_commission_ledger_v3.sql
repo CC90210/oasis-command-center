@@ -86,7 +86,7 @@ alter table public.website_sales_commissions
 -- so an opener, a closer, a builder and a manager coexist on one payment and a
 -- replay still updates those four rather than inserting duplicates.
 alter table public.website_sales_commissions
-  drop constraint if exists website_sales_commissions_tenant_id_payment_reference_entry_key;
+  drop constraint if exists website_sales_commissions_tenant_id_payment_reference_entry_typ;
 create unique index if not exists website_sales_commissions_party_key
   on public.website_sales_commissions (tenant_id, payment_reference, entry_type, party_role);
 

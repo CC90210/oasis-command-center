@@ -335,12 +335,26 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // The rep's own trailing-30-day collected total drives their accelerator.
   // Read from the ledger rather than passed in: a caller that could set its own
   // volume could set its own rate.
+  // COLLECTED REVENUE, not commission earned.
+  //
+  // Summing amount_cents was wrong and it underpaid reps against their own
+  // signed agreement: VOLUME_ACCELERATOR bands are collected-revenue figures,
+  // and lib/contracts/templates.ts states the accelerator is "measured on the
+  // Contractor's own collected revenue over the trailing 30 days". At a 30%
+  // rate a rep who collected $25,000 sums roughly $7,500 of commission, never
+  // reaches the $10,000 band, and is paid below the rate they signed.
+  //
+  // DISTINCT on payment_reference because a multi-party deal writes several
+  // rows against ONE payment. Summing the basis per row would count the same
+  // collected dollars once per role the rep happened to play on that deal.
   const trailingRs = await client.execute({
-    sql: `SELECT COALESCE(SUM("amount_cents"), 0) AS c
-          FROM website_sales_commissions
-          WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
-            AND status IN ('accrued','approved','paid')
-            AND created_at >= ?`,
+    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+              AND status IN ('accrued','approved','paid')
+              AND created_at >= ?
+          )`,
     args: [p_tenant_id, p_rep_user_id, new Date(Date.now() - 30 * 864e5).toISOString()],
   });
   const trailing30dCollectedCents = Number(trailingRs.rows[0]?.["c"] ?? 0);
@@ -389,7 +403,8 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // caught by UNIQUE(tenant_id, lead_id) failing the batch, never by silence.
   const dealRs = await client.execute({
     sql: `SELECT id, status, rep_user_id, founder_user_id, package_id, automation_ids,
-                 currency, setup_amount, monthly_amount, payment_reference, closed_by
+                 currency, setup_amount, monthly_amount, payment_reference, closed_by,
+                 opener_user_id, builder_user_id, manager_user_id, lead_source_track
           FROM website_deals WHERE tenant_id = ? AND lead_id = ?`,
     args: [p_tenant_id, p_lead_id],
   });
@@ -411,7 +426,23 @@ export async function close_website_deal(client: Client, args: Record<string, un
       Number(d.setup_amount) !== p_setup_amount ||
       Number(d.monthly_amount) !== p_monthly_amount ||
       d.payment_reference !== p_payment_reference ||
-      ((d.closed_by ?? null) as string | null) !== v_closed_by;
+      ((d.closed_by ?? null) as string | null) !== v_closed_by ||
+      // THE v3 PARTY FIELDS MUST BE COMPARED TOO, and leaving them out was a
+      // double-pay.
+      //
+      // The commission rows are keyed (payment_reference, entry_type,
+      // party_role). A replay carrying a DIFFERENT p_opener_user_id passes a
+      // v2-only mismatch gate, and computePayout then emits `opener` + `closer`
+      // lines where the first close emitted `full_stack`. Different roles, no
+      // conflict, four fresh rows — one collected payment paying twice.
+      //
+      // The uniqueness rule cannot catch this on its own: it guarantees one row
+      // per role, not one SET of roles per payment. Only the mismatch gate can,
+      // which is why every input that changes the payout shape belongs here.
+      ((d.opener_user_id ?? null) as string | null) !== p_opener_user_id ||
+      ((d.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
+      ((d.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
+      String(d.lead_source_track ?? "company") !== p_lead_source_track;
     if (mismatch) throw new Error("deal_already_closed_mismatch");
     dealId = String(d.id);
   } else {
@@ -582,7 +613,21 @@ export async function refund_website_deal(client: Client, args: Record<string, u
 
   for (const row of rs.rows as unknown as Array<Record<string, unknown>>) {
     const deadline = (row.clawback_deadline_at ?? null) as string | null;
-    if (deadline && nowIso > deadline) {
+    if (!deadline) {
+      // FAIL CLOSED TOWARD THE REP. A NULL deadline means the row predates the
+      // clawback column — migration 154 backfills v2 rows without one — and
+      // treating absent as "never expired" would make every historical
+      // commission reversible forever, which is the opposite of the bounded
+      // window the agreement promises. No stored deadline, no reversal; it is
+      // reported so an operator can handle it deliberately.
+      skipped.push({
+        id: String(row.id),
+        rep_user_id: String(row.rep_user_id),
+        reason: "no_clawback_deadline_recorded",
+      });
+      continue;
+    }
+    if (nowIso > deadline) {
       skipped.push({ id: String(row.id), rep_user_id: String(row.rep_user_id), reason: "clawback_window_expired", deadline });
       continue;
     }

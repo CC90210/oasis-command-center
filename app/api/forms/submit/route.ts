@@ -1506,9 +1506,21 @@ async function initAnonymousLead(input: {
   // down (isFundingTenant). The contact fields simply never were.
   const funding = isFundingTenant(tenantSlug);
   const contactFields: Record<string, unknown> = {};
-  const name = pick("contact_name") || pick("name") || pick("full_name");
+  // TRIMMED, and blanks discarded. pick() returns the raw value, so a field
+  // holding "   " is truthy and would be written as a name. This block runs
+  // BEFORE required-field validation, and on a returning merchant the merge
+  // below writes into an EXISTING lead — so an invalid submission could
+  // overwrite a real name with whitespace and still be rejected afterwards.
+  const trimmed = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = pick(k);
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+  };
+  const name = trimmed("contact_name", "name", "full_name");
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
-  const business = pick("business_name") || pick("company");
+  const business = trimmed("business_name", "company");
   if (business) contactFields[funding ? "business_name" : "company"] = business;
   const emailRaw = pick("email");
   const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
