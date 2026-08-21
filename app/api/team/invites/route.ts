@@ -2,13 +2,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
 import {
-  INVITABLE_ROLES,
   canManageTeam,
   createInvite,
   getSessionContext,
+  isInvitableRole,
   isTrueAdminRole,
   listActiveInvites,
-  type TeamRole,
 } from "@/lib/team";
 
 export const runtime = "nodejs";
@@ -43,8 +42,11 @@ export async function POST(req: NextRequest) {
     return bad(400, "invalid JSON");
   }
 
-  const role = (body.role ?? "member") as TeamRole;
-  if (!INVITABLE_ROLES.includes(role as Exclude<TeamRole, "owner">)) {
+  // `body.role` is untrusted request input. isInvitableRole narrows it from
+  // unknown to InvitableRole, so nothing below needs a cast — and "owner",
+  // which is never invitable, cannot survive this line.
+  const role = body.role ?? "member";
+  if (!isInvitableRole(role)) {
     return bad(400, "invalid role");
   }
   // ESCALATION GUARD: minting a permanent ADMIN via invite is a TRUE-admin
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
   try {
     const invite = await createInvite({
       tenantId: ctx.tenantId,
-      role: role as Exclude<TeamRole, "owner">,
+      role,
       createdBy: ctx.authUserId,
       email,
     });

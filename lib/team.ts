@@ -3,14 +3,19 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
 
-import { INVITABLE_ROLES, type InvitableRole, type TeamRole } from "@/lib/team-roles";
+import {
+  INVITABLE_ROLES,
+  isInvitableRole,
+  type InvitableRole,
+  type TeamRole,
+} from "@/lib/team-roles";
 
 /**
  * Re-exported so every existing `from "@/lib/team"` import keeps working. The
  * declarations themselves live in lib/team-roles.ts, which has no dependencies
  * and is therefore safe for a client component to import — this module is not.
  */
-export { INVITABLE_ROLES };
+export { INVITABLE_ROLES, isInvitableRole };
 export type { InvitableRole, TeamRole };
 
 /**
