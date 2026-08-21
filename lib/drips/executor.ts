@@ -946,7 +946,33 @@ async function processSmsStep(
   // desk phone still hears from us.
   {
     const reach = await isTextable(row.tenant_id, phone);
-    if (!reach.textable) return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+    if (!reach.textable) {
+      // TWO DIFFERENT HOLDS, AND THEY MUST BE HANDLED DIFFERENTLY (Codex P1,
+      // 2026-08-20).
+      //
+      // `sms_unreachable` is PERMANENT — a landline, or a number that keeps
+      // failing. Nothing about it will change, so the step is skipped and the
+      // sequence advances to whatever email steps follow.
+      //
+      // `sms_awaiting_verification` is TEMPORARY: the number simply has no
+      // phone lookup yet. The first cut skipped that too, and skipStep calls
+      // advanceRow — so the message was permanently stepped past and the
+      // lookup completing later could never deliver it. The comment claimed it
+      // "clears when the queue drains"; it did not. Held and retried instead.
+      //
+      // 24h because the lookup queue drains at a daily cap; anything shorter
+      // just re-checks a row whose answer cannot have arrived yet.
+      if (reach.hold === "awaiting_verification") {
+        return holdOrEmailInstead(
+          db, row, data, step, steps, run, emailClass,
+          24, `sms_awaiting_verification: ${reach.reason}`,
+        );
+      }
+      // Kept under distinct reasons because the guard audit counts by reason: a
+      // backlog of temporary waits filed as "unreachable" would show the
+      // landline gate firing hundreds of times and hide when it genuinely does.
+      return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+    }
   }
 
   // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
