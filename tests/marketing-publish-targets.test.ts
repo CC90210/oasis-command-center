@@ -14,6 +14,8 @@
  *   from the UI to the drain, where it costs a queued intent instead of a click.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   PUBLISH_CHANNELS,
   formatList,
@@ -83,3 +85,35 @@ assert.equal(byId("tiktok").imageCap, 0);
 assert.equal(byId("youtube").imageCap, 0);
 
 console.log("marketing-publish-targets: all assertions passed");
+
+// ── the server must apply the same rule the picker does ─────────────────────
+//
+// A static call-site audit, in the style of marketing-core's "the page actually
+// reads the summary — otherwise this suite is vacuous". The picker disables a
+// channel this asset cannot satisfy, but a stale tab, a replayed request or a
+// direct POST all bypass the client entirely. If this import is ever dropped the
+// route goes back to accepting a 5-slide deck for X, and the failure surfaces
+// minutes later in the drain as a broken publisher rather than at the door.
+const publishRoute = readFileSync(
+  join(import.meta.dirname, "..", "app", "api", "founders", "marketing",
+       "assets", "[id]", "publish", "route.ts"),
+  "utf8",
+);
+
+assert.match(
+  publishRoute,
+  /from "@\/lib\/founders\/publish-targets"/,
+  "the publish route must share the picker's rule, not restate it",
+);
+assert.match(
+  publishRoute,
+  /refusalFor\(/,
+  "the publish route must actually CALL refusalFor — importing it is not enforcing it",
+);
+assert.match(
+  publishRoute,
+  /asset_type, slide_count, media_urls/,
+  "the route cannot judge an image cap without selecting the columns that carry the slide count",
+);
+
+console.log("marketing-publish-targets: server-side call-site audit passed");
