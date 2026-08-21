@@ -206,9 +206,15 @@ export default async function PipelinePage({
         return hay.includes(query.toLowerCase());
       })
     : scopedRows;
-  const stages = session.ok
+  // The STAGE LIST has to drop researched too, not just the rows. Filtering one
+  // without the other leaves a permanently-empty "Researched" column on the
+  // board — which reads as "we have no prospects" when the truth is the
+  // opposite: 30,847 of them, deliberately parked in /web-leads until a rep
+  // picks one up. An empty column is a worse lie than no column.
+  const stages = (session.ok
     ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
-    : [];
+    : []
+  ).filter((stage) => stage.key !== "researched");
 
   const repChip = (label: string, value: string | null, count: number) => {
     const active = (value ?? null) === repFilter;
