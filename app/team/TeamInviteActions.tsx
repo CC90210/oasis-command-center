@@ -23,7 +23,7 @@ export function TeamInviteActions({
    * client never has to know the tenant rules — and so the menu can never offer
    * a role the API would reject.
    */
-  roleOptions: RoleOption[];
+  roleOptions: readonly RoleOption[];
 }) {
   const router = useRouter();
   const [role, setRole] = useState(roleOptions[0]?.value ?? "member");

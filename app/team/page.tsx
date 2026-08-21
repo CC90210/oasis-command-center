@@ -49,7 +49,7 @@ export default async function TeamPage() {
   // The OASIS sales titles appear only in an OASIS workspace. Resolved here, on
   // the server, so the client component never carries the tenant rules — and so
   // the menu cannot offer a role the invite API would reject.
-  const roleOptions = [...invitableRoleOptionsFor(tenantSlug)];
+  const roleOptions = invitableRoleOptionsFor(tenantSlug);
 
   return (
     <div className="space-y-6">

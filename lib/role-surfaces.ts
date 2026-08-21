@@ -88,6 +88,18 @@ export type SurfaceCapabilities = {
    * (user_profiles.manager_user_id = me), plus their own. A THIRD scope, between
    * "all" and "own" — a sales manager coaches a book they do not personally own,
    * but the rest of the tenant is still none of their business.
+   *
+   * ⚠ DECLARED, NOT YET ENFORCED (2026-08-21). No read path consults this flag.
+   * A manager therefore sees only their OWN leads today, because
+   * isOasisPipelineAdmin excludes them and filterWebsiteSalesRows falls to the
+   * own-rows branch. That is the fail-closed direction — too little, not too
+   * much — and it is why the flag ships ahead of its consumer: the alternative
+   * was `canSeeAllPipeline: true`, which is the failure this whole flag exists
+   * to prevent.
+   *
+   * Wiring it means a team-scoped read (profiles WHERE tenant_id = ? AND
+   * manager_user_id = me, then leads assigned to those ids). Until that exists,
+   * do NOT describe a manager as seeing their team — the screen does not.
    */
   canSeeTeamPipeline: boolean;
   /** Only leads assigned to this viewer, only at the rep-workable stages. */
@@ -97,6 +109,12 @@ export type SurfaceCapabilities = {
   /**
    * Commission rows for this viewer's direct reports — what a manager needs to
    * verify the override they are paid on. NOT the tenant-wide ledger.
+   *
+   * ⚠ DECLARED, NOT YET ENFORCED (2026-08-21). Same status as
+   * canSeeTeamPipeline above, and additionally blocked on the multi-party
+   * commission ledger: website_sales_commissions is still one row per deal
+   * keyed on a single rep_user_id, so there is no manager-override row for this
+   * flag to reveal even once a reader exists.
    */
   canSeeTeamCommission: boolean;
   /** Every rep's commission — the payout ledger a founder approves from. */
