@@ -227,7 +227,7 @@ export async function ManagerToday({
         subtitle="Your team's pipeline, scoped to the reps above."
       >
         <EmptyState
-          message="Your board shows the leads assigned to you and your reps — not the whole tenant."
+          message="Your pipeline currently shows the leads assigned to you. Team-scoped coaching views are not wired yet — the roster and payouts above are live, the board is not team-filtered."
           cta={
             <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
               Go to pipeline

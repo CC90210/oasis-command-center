@@ -11,7 +11,30 @@
 import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { readFileSync } from "node:fs";
-import { close_website_deal, refund_website_deal, CLAWBACK_WINDOW_DAYS } from "../lib/turso-rpc-shim";
+import {
+  close_website_deal,
+  refund_website_deal,
+  CLAWBACK_WINDOW_DAYS,
+  TURSO_RPC_SHIM,
+} from "../lib/turso-rpc-shim";
+
+/* ── 0. REACHABILITY, before any behaviour. ────────────────────────────────
+ * getServiceSupabase's rpc handler resolves by name against TURSO_RPC_SHIM.
+ * A function that is exported but absent from that registry is unreachable in
+ * production no matter how well it works.
+ *
+ * refund_website_deal shipped exactly that way: fully implemented, fully
+ * tested, and impossible to call. The tests could not see it because they
+ * import the function DIRECTLY — proving the logic while the feature did not
+ * exist. Assert registration first, so behaviour tests can never again pass
+ * for something nobody can invoke. */
+for (const name of ["close_website_deal", "refund_website_deal"]) {
+  assert.equal(
+    typeof TURSO_RPC_SHIM[name],
+    "function",
+    `${name} must be registered in TURSO_RPC_SHIM — an unregistered RPC is dead code with a green test`,
+  );
+}
 
 const TENANT = "t-oasis";
 const FOUNDER = "u-cc";

@@ -2129,6 +2129,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
 export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string, unknown>) => Promise<unknown>> = {
   approve_sunbiz_draft,
   close_website_deal,
+  refund_website_deal,
   consume_texttorrent_rate_token,
   find_similar_merchants,
   force_materialize_today_plan,
