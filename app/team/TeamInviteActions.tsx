@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { isInvitableRole, type RoleOption } from "@/lib/team-roles";
 
 type ActiveInvite = {
   id: string;
@@ -10,19 +11,22 @@ type ActiveInvite = {
   expires_at: string;
 };
 
-const INVITABLE_ROLES = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
-  { value: "agent", label: "Agent (sales rep)" },
-];
 
 export function TeamInviteActions({
   activeInvites,
+  roleOptions,
 }: {
   activeInvites: ActiveInvite[];
+  /**
+   * Which roles this WORKSPACE may hand out, resolved on the server by
+   * invitableRoleOptionsFor(tenantSlug). Passed in rather than imported so the
+   * client never has to know the tenant rules — and so the menu can never offer
+   * a role the API would reject.
+   */
+  roleOptions: readonly RoleOption[];
 }) {
   const router = useRouter();
-  const [role, setRole] = useState("member");
+  const [role, setRole] = useState(roleOptions[0]?.value ?? "member");
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
   const [issuedToken, setIssuedToken] = useState<string | null>(null);
@@ -88,10 +92,15 @@ export function TeamInviteActions({
           <span className="text-xs uppercase tracking-wider text-fg-dim">Role</span>
           <select
             value={role}
-            onChange={(e) => setRole(e.target.value)}
+            // Narrowed, not cast. A <select> hands back a plain string, and a
+            // tampered option value would otherwise land straight in state. The
+            // server re-validates regardless — this keeps the client honest too.
+            onChange={(e) => {
+              if (isInvitableRole(e.target.value)) setRole(e.target.value);
+            }}
             className="mt-1 w-full bg-bg-elevated text-fg border border-bg-border rounded px-3 py-2 text-sm"
           >
-            {INVITABLE_ROLES.map((r) => (
+            {roleOptions.map((r) => (
               <option key={r.value} value={r.value}>
                 {r.label}
               </option>

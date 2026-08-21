@@ -78,6 +78,11 @@ export async function refreshDestinationHealth(
       .select("id, data")
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lead")
+      // Unordered .range() has no defined row order, so page 2 may repeat or
+      // skip rows. Skipping is the dangerous direction here: a missed lead is a
+      // number this walk never classifies, which is exactly the landline this
+      // file exists to avoid texting. id is tenant_records' primary key.
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (res.error) return { examined: 0, untextable: 0, verified: 0, written: 0, error: res.error.message };
     const page = (res.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>;
@@ -169,6 +174,12 @@ export async function untextableNumbers(tenantId: string): Promise<Set<string> |
       .select("phone_last10")
       .eq("tenant_id", tenantId)
       .eq("textable", 0)
+      // Same invariant. sms_destination_health's PK is
+      // (tenant_id, phone_last10) and tenant_id is already pinned above, so
+      // phone_last10 is unique across this result set — a valid order key.
+      // A skipped page here drops a number from the untextable set, which
+      // silently re-enables sending to it.
+      .order("phone_last10", { ascending: true })
       .range(from, from + PAGE - 1);
     if (res.error) return null;
     const page = (res.data || []) as Array<{ phone_last10: string }>;

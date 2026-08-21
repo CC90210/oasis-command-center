@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { INVITE_TTL_DAYS, createInvite, inviteEmailMatchesUser } from "@/lib/team";
+import {
+  INVITABLE_ROLES,
+  INVITABLE_ROLE_OPTIONS,
+  isInvitableRole,
+} from "@/lib/team-roles";
 
 assert.equal(
   inviteEmailMatchesUser("emliy@sunbizfunding.com", "emliy@sunbizfunding.com"),
@@ -24,6 +29,60 @@ assert.equal(
   false,
   "pinned invite must not be redeemable by a different signed-in email",
 );
+
+// ── the role allowlist is the ONLY thing enforcing the enum ─────────────────
+// 2026-08-21: the live Turso user_profiles DDL is `"team_role" TEXT NOT NULL
+// DEFAULT 'member'` — no CHECK constraint, and a sqlite_master search finds no
+// table constraining team_role anywhere. The user_profiles_team_role_check in
+// the legacy Postgres files was never applied to Turso.
+//
+// So there is no database backstop. If isInvitableRole lets a bad value pass,
+// it is written, and nothing downstream objects. These assertions are the
+// backstop, which is why they test the REJECT cases as hard as the accepts.
+for (const role of INVITABLE_ROLES) {
+  assert.equal(isInvitableRole(role), true, `${role} is on the allowlist and must be invitable`);
+}
+
+assert.equal(
+  isInvitableRole("owner"),
+  false,
+  "owner must NEVER be invitable — an invite that mints an owner is a privilege-escalation path, " +
+    "and with no DB constraint this guard is the only thing standing in the way",
+);
+
+for (const notARole of ["", "Admin", "ADMIN", "superuser", "agent ", "read_only "]) {
+  assert.equal(
+    isInvitableRole(notARole),
+    false,
+    `"${notARole}" is not an exact allowlist entry and must be rejected — ` +
+      "role comparison is exact, never case-folded or trimmed",
+  );
+}
+
+for (const notAString of [null, undefined, 42, {}, [], true, { value: "admin" }]) {
+  assert.equal(
+    isInvitableRole(notAString),
+    false,
+    `${JSON.stringify(notAString) ?? "undefined"} came from untrusted JSON and must be rejected`,
+  );
+}
+
+// The drift this module exists to prevent: the values the API validates against
+// and the options the dropdown renders must be the same set, in the same order.
+assert.deepEqual(
+  INVITABLE_ROLE_OPTIONS.map((o) => o.value),
+  INVITABLE_ROLES,
+  "INVITABLE_ROLE_OPTIONS and INVITABLE_ROLES must not drift — they were two " +
+    "hand-typed lists before, which is how a role could be offered but not accepted",
+);
+
+for (const option of INVITABLE_ROLE_OPTIONS) {
+  assert.ok(
+    option.label.trim().length > 0,
+    `${option.value} needs a human label — the dropdown renders this, and an empty ` +
+      "string is an invisible menu row",
+  );
+}
 
 // ── the invite INSERT must satisfy the table's real column contract ──────────
 // 2026-08-14, CC: the Team page returned "invite_create_failed" for every invite.

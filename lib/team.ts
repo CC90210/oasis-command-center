@@ -3,14 +3,51 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
 
-export type TeamRole =
-  | "owner"
-  | "admin"
-  | "agent"
-  | "loan_officer"
-  | "processor"
-  | "read_only"
-  | "member";
+import {
+  INVITABLE_ROLES,
+  isInvitableRole,
+  type InvitableRole,
+  type TeamRole,
+} from "@/lib/team-roles";
+
+/**
+ * Re-exported so every existing `from "@/lib/team"` import keeps working. The
+ * declarations themselves live in lib/team-roles.ts, which has no dependencies
+ * and is therefore safe for a client component to import — this module is not.
+ */
+export { INVITABLE_ROLES, isInvitableRole };
+export type { InvitableRole, TeamRole };
+
+/**
+ * The workspace slug for a tenant id, lowercased. Null when the row is missing
+ * or the read fails.
+ *
+ * Null is FAIL-CLOSED by construction at every current call site: both feed
+ * `invitableRoleOptionsFor` / `roleAllowedForTenant`, which treat an unknown
+ * workspace as "not OASIS" and therefore withhold the sales roles. A caller that
+ * needs to tell "not ours" apart from "could not tell" must not use this — see
+ * resolveViewerSurface's `degraded` flag, which exists for exactly that reason.
+ *
+ * NOTE: this lookup is inlined in roughly ten other modules. This helper is used
+ * by the two surfaces added for the sales roles; consolidating the rest is a
+ * separate change and not one to make while shipping a feature.
+ */
+export async function tenantSlugFor(tenantId: string): Promise<string | null> {
+  try {
+    const supa = getServiceSupabase();
+    const { data, error } = await supa
+      .from("tenants")
+      .select("slug")
+      .eq("id", tenantId)
+      .maybeSingle();
+    if (error || !data) return null;
+    const slug = (data as { slug?: string | null }).slug;
+    return slug ? slug.trim().toLowerCase() : null;
+  } catch (err) {
+    console.error("[team.tenantSlugFor]", err);
+    return null;
+  }
+}
 
 /**
  * How long a fresh invite stays redeemable.
@@ -39,12 +76,6 @@ export const INVITE_TTL_DAYS = 7;
 export function inviteExpiryFrom(from: Date = new Date()): string {
   return new Date(from.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
-
-export const INVITABLE_ROLES: Exclude<TeamRole, "owner">[] = [
-  "member",
-  "admin",
-  "agent",
-];
 
 export type MemberRow = {
   id: string;

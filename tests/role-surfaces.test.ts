@@ -29,6 +29,8 @@ import { join } from "node:path";
 
 import {
   SALES_NAV_ALLOWLIST,
+  invitableRoleOptionsFor,
+  roleAllowedForTenant,
   SURFACE_CAPABILITIES,
   capabilitiesFor,
   filterNavForPersona,
@@ -77,6 +79,47 @@ assert.equal(SURFACE_CAPABILITIES.readonly.canSeeCompanyFinancials, false);
 assert.equal(SURFACE_CAPABILITIES.readonly.canSeeCommissionLedger, false);
 assert.equal(SURFACE_CAPABILITIES.readonly.canAct, false);
 
+/* ───── the OASIS sales job titles (2026-08-21) ──────────────────────────────
+ * manager / closer / opener / builder replace the ambiguous member-vs-agent
+ * pair. opener and closer share ONE persona deliberately: identical surfaces,
+ * different pipeline STAGES, and stages are not this module's business. */
+assert.equal(resolvePersona({ teamRole: "manager" }), "manager");
+assert.equal(resolvePersona({ teamRole: "closer" }), "sales");
+assert.equal(resolvePersona({ teamRole: "opener" }), "sales");
+assert.equal(resolvePersona({ teamRole: "builder" }), "worker");
+assert.equal(resolvePersona({ teamRole: " CLOSER " }), "sales", "trim + case-fold applies to new roles too");
+assert.equal(resolvePersona({ teamRole: "Manager" }), "manager");
+// The escalation toggle outranks a sales title, same as it does every other role.
+assert.equal(resolvePersona({ teamRole: "closer", adminAccess: true }), "founder");
+assert.equal(resolvePersona({ teamRole: "manager", isTrueAdmin: true }), "founder");
+
+/* ───── TOTALITY. Every persona has a row, and only two may see money. ────────
+ * A persona added to the union without a SURFACE_CAPABILITIES entry would be
+ * `undefined` at every call site — which reads as falsy, i.e. accidentally
+ * locked down, until someone "fixes" it by guessing. Assert the matrix is
+ * total instead of trusting Record<> to have been filled in thoughtfully. */
+for (const persona of ["founder", "manager", "sales", "worker", "readonly", "legacy"] as Persona[]) {
+  assert.ok(SURFACE_CAPABILITIES[persona], `${persona} must have a capability row`);
+  assert.equal(
+    Object.keys(SURFACE_CAPABILITIES[persona]).length,
+    Object.keys(SURFACE_CAPABILITIES.founder).length,
+    `${persona} must declare EVERY capability — a missing key is silently false`,
+  );
+}
+for (const persona of ["manager", "sales", "worker", "readonly"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[persona].canSeeCompanyFinancials,
+    false,
+    `${persona} must never see company financials — only founder and the grandfathered legacy row may`,
+  );
+  assert.equal(
+    SURFACE_CAPABILITIES[persona].canSeeCommissionLedger,
+    false,
+    `${persona} must never see the tenant-wide payout ledger`,
+  );
+}
+
+
 /* ───────────────────── 2. the capability matrix, per persona ─────────────── */
 
 const OASIS = "oasis-webdev"; // where the reps live
@@ -110,6 +153,26 @@ assert.equal(capabilitiesFor("founder", null).canSeeCompanyFinancials, false, "u
 assert.equal(capabilitiesFor("founder", "").canSeeCompanyFinancials, false);
 assert.equal(capabilitiesFor("founder", SUNBIZ).canSeeMarketing, false);
 // Grandfathered SunBiz roles keep their surface but not OASIS's revenue.
+/* ───── the sales MANAGER. Team scope is a third thing, not "all". ───────────
+ * The trap this guards: `canSeeAllPipeline: true` would have been the easy way
+ * to let a manager coach a team, and it would have handed them every lead in
+ * the tenant — CC's own book included. Team is its own flag for that reason. */
+const mgr = capabilitiesFor("manager", OASIS);
+assert.equal(mgr.canSeeAllPipeline, false, "a manager must NOT get the whole tenant's pipeline");
+assert.equal(mgr.canSeeTeamPipeline, true, "a manager sees the book of the reps who roll up to them");
+assert.equal(mgr.canSeeTeamCommission, true, "a manager can verify the override they are paid");
+assert.equal(mgr.canSeeCommissionLedger, false, "team commission is not the company ledger");
+assert.equal(mgr.canSeeCompanyFinancials, false, "a manager is a contractor, not a partner — no Net MRR");
+assert.equal(mgr.canSeeInboundTape, false, "the company mailbox is not a management tool");
+assert.equal(mgr.canSeeMarketing, false, "the founders portal stays founders-only");
+assert.equal(mgr.canSeeSystemSurfaces, false, "/operations and /health are machinery, not management");
+assert.equal(mgr.canAct, true);
+// A rep must not gain team scope by accident — this is the flag that separates them.
+assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamPipeline, false);
+assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamCommission, false);
+// Standing in someone else's workspace does not make a manager's money appear.
+assert.equal(capabilitiesFor("manager", SUNBIZ).canSeeCompanyFinancials, false);
+
 assert.equal(capabilitiesFor("legacy", SUNBIZ).canSeeCompanyFinancials, false);
 assert.equal(capabilitiesFor("legacy", SUNBIZ).canSeeSystemSurfaces, true, "loan_officer / processor keep the pages they have today");
 
@@ -147,6 +210,10 @@ const FULL_NAV = [
   { href: "/pipeline", label: "Pipeline" },
   { href: "/forms", label: "Forms" },
   { href: "/agent", label: "Agents" },
+  // Real nav row (lib/nav-config.ts). Present in the fixture so the rep
+  // assertion below proves a rep does NOT get it, rather than passing because
+  // the fixture happened to omit it.
+  { href: "/leads", label: "Leads" },
   { href: "/playbook", label: "Playbook" },
   { href: "/operations", label: "Operations" },
   { href: "/automations", label: "Automations" },
@@ -179,6 +246,63 @@ for (const persona of ["founder", "worker", "readonly", "legacy"] as Persona[]) 
     FULL_NAV.map((n) => n.href),
     `${persona} nav must be unchanged`,
   );
+}
+
+/* ───── the manager's sidebar ────────────────────────────────────────────────
+ * The rep's rows plus the leads board they coach from. Deliberately NOT
+ * Analytics / Settings yet: requireSystemSurface 404s those for any persona
+ * whose canSeeSystemSurfaces is false, and a visible row over a 404 is a broken
+ * product. The rows land with the manager-scoped pages behind them. */
+const mgrNav = filterNavForPersona(FULL_NAV, "manager");
+assert.deepEqual(
+  mgrNav.map((n) => n.href),
+  ["/", "/schedule", "/pipeline", "/leads", "/playbook"],
+  "a manager's sidebar is Today, Schedule, Pipeline, Leads, Playbook",
+);
+assert.equal(
+  personaMayVisit("manager", "/analytics"),
+  false,
+  "a manager must not be offered a page that would 404 on them",
+);
+assert.equal(personaMayVisit("manager", "/settings"), false);
+assert.equal(personaMayVisit("manager", "/operations"), false);
+assert.equal(personaMayVisit("manager", "/founders/marketing"), false);
+assert.equal(personaMayVisit("manager", "/leads"), true, "the leads board is the manager's coaching surface");
+assert.equal(personaMayVisit("manager", "/leads/abc-123"), true, "and they can open one");
+assert.equal(
+  personaMayVisit("sales", "/leads"),
+  false,
+  "a rep does NOT get the leads board — that is the manager's row, not theirs",
+);
+
+/* ───── which roles a WORKSPACE may hand out ─────────────────────────────────
+ * The sales titles are a product concern; product features do not extrapolate
+ * across tenants. Cosmetically the dropdown omits them elsewhere — these
+ * assertions cover the server gate, which is what stops a hand-rolled POST. */
+for (const oasisSlug of [OASIS, "oasis-ai-cc", "oasis"]) {
+  const values = invitableRoleOptionsFor(oasisSlug).map((o) => o.value);
+  assert.ok(values.includes("closer"), `${oasisSlug} may hand out sales roles`);
+  assert.ok(values.includes("manager"));
+  assert.equal(roleAllowedForTenant("builder", oasisSlug), true);
+}
+for (const foreign of [SUNBIZ, "submissions", "someone-elses-tenant"]) {
+  const values = invitableRoleOptionsFor(foreign).map((o) => o.value);
+  assert.equal(values.includes("closer"), false, `${foreign} must not be offered OASIS sales roles`);
+  assert.equal(roleAllowedForTenant("closer", foreign), false);
+  assert.equal(roleAllowedForTenant("manager", foreign), false);
+  assert.ok(values.includes("admin"), `${foreign} keeps the platform roles`);
+}
+// Fail closed: an unresolved workspace does not get the product's roles.
+for (const unknown of [null, undefined, ""]) {
+  assert.equal(
+    roleAllowedForTenant("closer", unknown),
+    false,
+    "an unknown workspace must not be able to mint a sales role",
+  );
+}
+// owner is never invitable anywhere, by any path.
+for (const slug of [OASIS, SUNBIZ, null]) {
+  assert.equal(roleAllowedForTenant("owner", slug), false, "owner is never invitable");
 }
 
 // No persona identified (demo shells, pre-auth renders) → do not narrow. This
@@ -396,7 +520,11 @@ assert.equal(
 );
 
 console.log(
-  `role-surfaces: OK — 5 personas, ${Object.keys(SURFACE_CAPABILITIES.sales).length} capabilities, ` +
+  // Computed, not hand-counted: this line read "5 personas" for a while after
+  // the sixth was added, which is the smallest possible version of a summary
+  // that lies about what it checked.
+  `role-surfaces: OK — ${Object.keys(SURFACE_CAPABILITIES).length} personas, ` +
+    `${Object.keys(SURFACE_CAPABILITIES.sales).length} capabilities, ` +
     `${FINANCIAL_READERS.length} financial readers proven absent from the rep path, ` +
     `${GATED_PAGES.length} pages gated + the founders portal`,
 );
