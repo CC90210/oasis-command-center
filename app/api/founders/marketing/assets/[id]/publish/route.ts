@@ -29,6 +29,8 @@ import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveFounder } from "@/lib/founders/gate";
 import { methodNotHere } from "@/lib/founders/method-guard";
+import { parseSlideUrls } from "@/lib/founders-marketing-core";
+import { PUBLISH_CHANNELS, refusalFor } from "@/lib/founders/publish-targets";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -96,7 +98,7 @@ export async function POST(req: Request, ctx: Ctx) {
   // deliverable is a 404 here rather than something you can broadcast.
   const asset = await db
     .from("marketing_asset")
-    .select("id, title, status, brand_slug, format")
+    .select("id, title, status, brand_slug, format, asset_type, slide_count, media_urls")
     .eq("tenant_id", founder.tenantId)
     .eq("id", id)
     .maybeSingle();
@@ -105,6 +107,43 @@ export async function POST(req: Request, ctx: Ctx) {
   }
   if (!asset.data) return notFound();
   if (asset.data.brand_slug !== "oasis-ai") return notFound();
+
+  // Per-channel media limits, enforced HERE and not only in the picker.
+  //
+  // The panel disables a channel this asset cannot satisfy, but the panel's own
+  // contract says the server re-validates and nothing chosen there is trusted —
+  // and a stale tab, a replayed request or a direct POST all bypass the client.
+  // Without this, a 5-slide deck could be queued for X (cap 4); the route would
+  // accept it, and marketing_publish_drain would fail it minutes later, which
+  // reads as a broken publisher rather than a channel that never could.
+  //
+  // One rule, one definition: `refusalFor` is the same function the picker uses,
+  // and its caps mirror PLATFORM_IMAGE_CAP in CMO-Agent/scripts/schedule_posts.py,
+  // which enforces the identical limits on Maven's scheduled path. All three
+  // surfaces now agree about what a channel can take.
+  if (asset.data.asset_type === "carousel") {
+    const slideCount =
+      parseSlideUrls(asset.data.media_urls).length || Number(asset.data.slide_count || 0);
+    const refused = platforms
+      .map((p) => {
+        const channel = PUBLISH_CHANNELS.find((c) => c.id === p);
+        return channel ? { p, why: refusalFor(channel, "images", slideCount) } : null;
+      })
+      .filter((r): r is { p: string; why: string } => Boolean(r && r.why));
+    if (refused.length) {
+      // Refuse the whole request, matching the unsupported_platform rule above:
+      // publishing to fewer surfaces than asked is how you think you published.
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "platform_media_limit",
+          detail: refused.map((r) => r.why).join("; "),
+          refused: refused.map((r) => r.p),
+        },
+        { status: 400 },
+      );
+    }
+  }
 
   // Something has to be attached or every channel rejects it downstream. Better
   // to say so now than to queue work that cannot succeed.
