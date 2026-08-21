@@ -39,6 +39,26 @@ import {
 } from "@/lib/website-sales-comp";
 import { CLAWBACK_WINDOW_DAYS } from "@/lib/turso-rpc-shim";
 
+/**
+ * ⚠ `marketing` IS DELIBERATELY ABSENT, AND THAT IS A GAP, NOT A DESIGN.
+ *
+ * The marketing role exists in team_role and has a working portal, but it has
+ * no agreement here because nobody has said how a marketing hire is PAID. The
+ * four roles below are commission or per-build: every number in their contracts
+ * is derived from lib/website-sales-comp.ts, which is what makes those
+ * documents safe to generate unattended.
+ *
+ * Marketing is neither. A retainer, a salary, a per-campaign fee and a
+ * day rate are all plausible and they are not interchangeable, and the tax and
+ * classification consequences differ between them. Inventing one would put a
+ * number nobody approved into a document someone signs — the exact failure
+ * tests/contracts-match-engine.test.ts exists to prevent, committed by hand
+ * instead of by drift.
+ *
+ * So the generator REFUSES `--role marketing` (argparse rejects it) rather than
+ * emitting a template with a blank where the money goes. Give the structure and
+ * this becomes a short addition.
+ */
 export type ContractRole = "opener" | "closer" | "manager" | "builder";
 
 export type ContractVars = {
