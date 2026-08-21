@@ -174,6 +174,12 @@ const TESTS = [
   // http/https against OSM-sourced data anyone can edit -- see
   // lib/web-leads/url-safety.ts.
   "tests/web-leads-url-safety.test.ts",
+  // Build C (2026-08-21 leads-to-pipeline-design.md, section 5): logging a
+  // call outcome is the byproduct that advances the lead's stage. nextStage()
+  // is the constrained, pure stage-advance function -- see
+  // lib/web-leads/outcome.ts's header for the full reasoning.
+  "tests/web-leads-outcome.test.ts",
+  "tests/web-leads-outcome-guards.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
