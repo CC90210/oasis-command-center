@@ -3,14 +3,15 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
 
-export type TeamRole =
-  | "owner"
-  | "admin"
-  | "agent"
-  | "loan_officer"
-  | "processor"
-  | "read_only"
-  | "member";
+import { INVITABLE_ROLES, type InvitableRole, type TeamRole } from "@/lib/team-roles";
+
+/**
+ * Re-exported so every existing `from "@/lib/team"` import keeps working. The
+ * declarations themselves live in lib/team-roles.ts, which has no dependencies
+ * and is therefore safe for a client component to import — this module is not.
+ */
+export { INVITABLE_ROLES };
+export type { InvitableRole, TeamRole };
 
 /**
  * How long a fresh invite stays redeemable.
@@ -39,12 +40,6 @@ export const INVITE_TTL_DAYS = 7;
 export function inviteExpiryFrom(from: Date = new Date()): string {
   return new Date(from.getTime() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
-
-export const INVITABLE_ROLES: Exclude<TeamRole, "owner">[] = [
-  "member",
-  "admin",
-  "agent",
-];
 
 export type MemberRow = {
   id: string;

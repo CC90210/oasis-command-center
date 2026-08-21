@@ -2,6 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { INVITABLE_ROLE_OPTIONS } from "@/lib/team-roles";
 
 type ActiveInvite = {
   id: string;
@@ -10,11 +11,6 @@ type ActiveInvite = {
   expires_at: string;
 };
 
-const INVITABLE_ROLES = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
-  { value: "agent", label: "Agent (sales rep)" },
-];
 
 export function TeamInviteActions({
   activeInvites,
@@ -91,7 +87,7 @@ export function TeamInviteActions({
             onChange={(e) => setRole(e.target.value)}
             className="mt-1 w-full bg-bg-elevated text-fg border border-bg-border rounded px-3 py-2 text-sm"
           >
-            {INVITABLE_ROLES.map((r) => (
+            {INVITABLE_ROLE_OPTIONS.map((r) => (
               <option key={r.value} value={r.value}>
                 {r.label}
               </option>
