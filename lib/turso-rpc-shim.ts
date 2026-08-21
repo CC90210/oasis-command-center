@@ -1005,6 +1005,48 @@ export async function patch_tenant_record_data(
     `patch_tenant_record_data: concurrent modification, gave up after ${MAX_ATTEMPTS} attempts (id=${p_id}, tenant=${p_tenant_id})`
   );
 }
+
+/** Atomically assign one Web Leads territory and every promoted CRM lead in it. */
+export async function assign_web_lead_territory(
+  client: Client,
+  args: Record<string, unknown>
+): Promise<unknown> {
+  const tenantId = typeof args.p_tenant_id === "string" ? args.p_tenant_id : "";
+  const territoryId = typeof args.p_territory_id === "string" ? args.p_territory_id : "";
+  const assignedTo = args.p_assigned_to == null ? null : String(args.p_assigned_to).trim().toLowerCase();
+  if (!tenantId || !territoryId) throw new Error("missing territory assignment scope");
+
+  const territory = await client.execute({
+    sql: "SELECT id FROM leadgen_territories WHERE id = ? AND tenant_id = ? LIMIT 1",
+    args: [territoryId, tenantId],
+  });
+  if (territory.rows.length !== 1) throw new Error("territory_not_found");
+
+  if (assignedTo) {
+    const member = await client.execute({
+      sql: "SELECT 1 FROM user_profiles WHERE tenant_id = ? AND auth_user_id = ? AND team_role = 'agent' LIMIT 1",
+      args: [tenantId, assignedTo],
+    });
+    if (member.rows.length !== 1) throw new Error("assignee_not_an_agent_in_tenant");
+  }
+
+  const now = new Date().toISOString();
+  const results = await client.batch([
+    {
+      sql: "UPDATE leadgen_territories SET assigned_to = ?, assigned_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?",
+      args: [assignedTo, assignedTo ? now : null, now, territoryId, tenantId],
+    },
+    {
+      sql: "UPDATE tenant_records SET data = json_set(COALESCE(data, '{}'), '$.assigned_to', ?), updated_at = ? " +
+        "WHERE tenant_id = ? AND entity_type = 'lead' AND json_valid(COALESCE(data, '{}')) " +
+        "AND json_extract(data, '$.webdev_territory_id') = ?",
+      args: [assignedTo, now, tenantId, territoryId],
+    },
+  ], "write");
+
+  if (results[0].rowsAffected !== 1) throw new Error("territory_assignment_not_applied");
+  return { territory_id: territoryId, assigned_to: assignedTo, leads_updated: results[1].rowsAffected };
+}
 export async function preview_tenant_invite(
   client: Client,
   args: Record<string, unknown>
@@ -1802,6 +1844,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
 
 /**
  * MANIFEST
+ *   assign_web_lead_territory          app-native       writes=True  confidence=high
  *   approve_sunbiz_draft               ported-unverified  writes=True  confidence=high
  *   close_website_deal                 hand-ported (147 comp v2)  writes=True  confidence=high
  *   consume_texttorrent_rate_token     ported-unverified  writes=True  confidence=high
@@ -1819,6 +1862,7 @@ export async function signup_tenant(client: Client, args: Record<string, unknown
  *   signup_tenant                      ported-unverified  writes=True  confidence=high
  */
 export const TURSO_RPC_SHIM: Record<string, (client: Client, args: Record<string, unknown>) => Promise<unknown>> = {
+  assign_web_lead_territory,
   approve_sunbiz_draft,
   close_website_deal,
   consume_texttorrent_rate_token,

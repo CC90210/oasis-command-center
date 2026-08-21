@@ -16,6 +16,7 @@ import type { WebLead } from "@/lib/web-leads/data";
 import { FilterRail } from "./FilterRail";
 import { LeadsTable } from "./LeadsTable";
 import { WebLeadDetail } from "./WebLeadDetail";
+import { TerritoryAssignments } from "./TerritoryAssignments";
 
 export function WebLeadsBrowser() {
   const router = useRouter();
@@ -127,6 +128,7 @@ export function WebLeadsBrowser() {
       <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
 
       <div className="min-w-0 flex-1">
+        <TerritoryAssignments />
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <input
             type="search"
