@@ -185,6 +185,10 @@ const TESTS = [
   // the pipeline route's read-only auth spine, agent-role scoping wiring,
   // and that an unrecognised stage value is bucketed and shown, not dropped.
   "tests/web-leads-pipeline.test.ts",
+  // Build B (2026-08-21): territory -> rep assignment. Admin-only enforcement,
+  // tenant mismatch, propagation to the right leads, and the rule that an
+  // unassign must never strip a lead's own data.assigned_to.
+  "tests/web-leads-territory-assign.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
