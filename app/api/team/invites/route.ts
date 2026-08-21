@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
+import { roleAllowedForTenant } from "@/lib/role-surfaces";
 import {
   canManageTeam,
   createInvite,
@@ -8,7 +9,9 @@ import {
   isInvitableRole,
   isTrueAdminRole,
   listActiveInvites,
+  tenantSlugFor,
 } from "@/lib/team";
+import { isOasisSalesRole } from "@/lib/team-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,6 +50,17 @@ export async function POST(req: NextRequest) {
   // which is never invitable, cannot survive this line.
   const role = body.role ?? "member";
   if (!isInvitableRole(role)) {
+    return bad(400, "invalid role");
+  }
+  // TENANT GATE. The OASIS sales titles are a product concern, not platform
+  // infrastructure, so they may only be granted inside an OASIS workspace. The
+  // dropdown already omits them elsewhere, but that is cosmetic — this is what
+  // makes a hand-rolled POST of {"role":"closer"} against a SunBiz tenant fail.
+  //
+  // The slug read happens ONLY on the sales-role path, so the ordinary
+  // member/admin invite pays no extra query. An unresolvable slug is treated as
+  // "not OASIS" and rejects, which is the fail-closed direction.
+  if (isOasisSalesRole(role) && !roleAllowedForTenant(role, await tenantSlugFor(ctx.tenantId))) {
     return bad(400, "invalid role");
   }
   // ESCALATION GUARD: minting a permanent ADMIN via invite is a TRUE-admin

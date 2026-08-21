@@ -7,7 +7,9 @@ import {
   INVITE_TTL_DAYS,
   isTrueAdminRole,
   listActiveInvites,
+  tenantSlugFor,
 } from "@/lib/team";
+import { invitableRoleOptionsFor } from "@/lib/role-surfaces";
 import { computeSeatWarning } from "@/lib/seat-warning";
 import {
   TeamInviteActions,
@@ -38,11 +40,16 @@ export default async function TeamPage() {
   // may grant/revoke the admin-access switch. Mirrors the endpoint's escalation
   // guard so the control never renders for someone the API would 403.
   const canGrantAdmin = isTrueAdminRole(ctx.teamRole, ctx.isOwner);
-  const [members, invites, seatWarning] = await Promise.all([
+  const [members, invites, seatWarning, tenantSlug] = await Promise.all([
     getTenantMembers(ctx.tenantId),
     canManage ? listActiveInvites(ctx.tenantId) : Promise.resolve([]),
     canManage ? computeSeatWarning(ctx.tenantId) : Promise.resolve(null),
+    canManage ? tenantSlugFor(ctx.tenantId) : Promise.resolve(null),
   ]);
+  // The OASIS sales titles appear only in an OASIS workspace. Resolved here, on
+  // the server, so the client component never carries the tenant rules — and so
+  // the menu cannot offer a role the invite API would reject.
+  const roleOptions = [...invitableRoleOptionsFor(tenantSlug)];
 
   return (
     <div className="space-y-6">
@@ -72,7 +79,7 @@ export default async function TeamPage() {
               : "Generate a one-time invite link."
           }
         >
-          <TeamInviteActions activeInvites={invites.map((i) => ({
+          <TeamInviteActions roleOptions={roleOptions} activeInvites={invites.map((i) => ({
             id: i.id,
             email: i.email,
             team_role: i.team_role,
