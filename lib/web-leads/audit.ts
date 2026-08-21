@@ -77,7 +77,7 @@ export type DimensionProfile = {
  * reads only `composite`, the name `profileSite` itself uses, so there is one
  * name for this number on the oasis side.)
  */
-type StoredProfile = {
+export type StoredProfile = {
   composite: number;
   dimensions: DimensionProfile[];
   // results/overall may also be present on the stored JSON; not consumed here.
@@ -188,6 +188,43 @@ function safeFilterValue(v: string): string | null {
 }
 
 /**
+ * `leadgen_site_audits.profile` is stored as JSON TEXT (see repository.js's
+ * saveAudit -- libSQL has no json type), but this repo's Turso adapter
+ * (lib/turso-postgrest.ts's fromSql/rowOut) auto-decodes any string column
+ * that LOOKS like JSON before the row ever reaches calling code. That means
+ * the SAME column arrives as an already-parsed OBJECT when read through the
+ * Turso backend (EMPIRE_DATA_BACKEND=turso_cloud, the live path -- see
+ * data.ts's header comment) and as a raw STRING when read through a real
+ * supabase-js client (the non-Turso fallback path), because supabase-js does
+ * no such decoding. Code that assumes only one of those shapes is silently
+ * wrong on the other backend: assuming a string here previously ran
+ * JSON.parse() on an already-decoded object, which stringifies it to the
+ * literal text "[object Object]", throws, and was swallowed by the
+ * not-scored fallback -- so every real, correctly-scored lead rendered "Not
+ * scored yet" on the live Turso path. Caught by an independent review
+ * (2026-08-21), not by this module's own tests, because the test's fixture
+ * fabricated the row directly and never went through the adapter.
+ */
+function safeParse(text: string): StoredProfile | null {
+  try {
+    return JSON.parse(text) as StoredProfile;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Accepts a profile column value in either shape the adapter can hand back.
+ * Exported so tests can prove both shapes are handled without standing up a
+ * live DB client for fetchAudit() -- see tests/web-leads-audit.test.ts.
+ */
+export function coerceProfile(raw: unknown): StoredProfile | null {
+  if (raw && typeof raw === "object") return raw as StoredProfile;
+  if (typeof raw === "string") return safeParse(raw);
+  return null;
+}
+
+/**
  * `lead` must already be the result of a tenant-pinned, viewer-scoped
  * fetchLead(id, viewer) call for this SAME id -- the route resolves it once
  * for its own 404 check and passes it through here so authorization happens
@@ -231,20 +268,16 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
   if (audit.error) throw new Error(`audit_read_failed: ${audit.error.message}`);
   if (!audit.data) return { state: "not_scored" }; // Rule 3: no audit row.
 
-  const row = audit.data as { url: string; fetched_at: string; profile: string | null };
+  const row = audit.data as { url: string; fetched_at: string; profile: unknown };
   if (!row.profile) return { state: "not_scored" }; // Rule 4: scored before profiles existed.
 
-  let profile: StoredProfile;
-  try {
-    profile = JSON.parse(row.profile) as StoredProfile;
-  } catch {
-    // A corrupt profile string is functionally the same as no profile: never
-    // surface a broken panel, and never guess at a score from unparseable
-    // data. See repository.js's own reasoning for why this column is JSON
-    // text with an honest null rather than ever a literal "undefined".
-    return { state: "not_scored" };
-  }
-  if (typeof profile.composite !== "number" || !Array.isArray(profile.dimensions)) {
+  const profile = coerceProfile(row.profile);
+  if (!profile || typeof profile.composite !== "number" || !Array.isArray(profile.dimensions)) {
+    // A missing, corrupt, or malformed profile is functionally the same as no
+    // profile: never surface a broken panel, and never guess at a score from
+    // data that doesn't match the shape profileSite() actually produces. See
+    // repository.js's own reasoning for why this column is JSON text with an
+    // honest null rather than ever a literal "undefined".
     return { state: "not_scored" };
   }
 

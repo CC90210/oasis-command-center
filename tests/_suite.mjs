@@ -166,6 +166,9 @@ const TESTS = [
   // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
   // from JARVIS's services/leadgen/lib/remedies.js.
   "tests/web-leads-remedies.test.ts",
+  // Task 3 hotfix (2026-08-21): proves the Turso adapter's object-vs-string
+  // profile decoding is handled -- see coerceProfile() in lib/web-leads/audit.ts.
+  "tests/web-leads-audit.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
