@@ -1,4 +1,5 @@
 import { OASIS_LEAD_STAGES, type StageMeta } from "@/lib/oasis-stage-meta";
+import { normalizeCollaborators } from "@/lib/lead-scope";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 
@@ -82,18 +83,30 @@ type OasisViewer = { role: string; userId: string | null; isOwner?: boolean; adm
  * record never arrives in the first place. Re-checking it here would imply this
  * function is the tenant guard, and it is not.
  *
+ * COLLABORATORS COUNT. `data.collaborators` is first-class here, not a
+ * curiosity: lib/manifest/data.ts runs indexed "owns OR collaborates" reads,
+ * lib/lead-scope.ts honours it in recordMatchesViewer, and the applications
+ * editor treats it as a writable field. Omitting it would make this predicate
+ * stricter than every other access path in the codebase — and would break the
+ * two-party sale outright, where an opener hands a lead to a closer, stops
+ * being `assigned_to`, and is still owed 20% on it. They must be able to open
+ * the deal they are being paid for.
+ *
  * Fail-closed: an unresolved identity, or a record nobody owns, opens nothing.
  */
 export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return true;
   if (!viewer.userId) return false;
+  const me = viewer.userId.trim().toLowerCase();
   const assignedTo =
     typeof row.data.assigned_to === "string" ? row.data.assigned_to.trim().toLowerCase() : "";
   // An unassigned lead belongs to nobody, so it is not "yours" by default —
   // without this, an empty assigned_to would match an empty userId and hand
   // every unowned record to any signed-in rep.
-  if (!assignedTo) return false;
-  return assignedTo === viewer.userId.trim().toLowerCase();
+  if (assignedTo && assignedTo === me) return true;
+  // Reused, not reimplemented: normalizeCollaborators already tolerates the
+  // field being absent / not-an-array / full of junk, and fails closed to [].
+  return normalizeCollaborators(row.data).includes(me);
 }
 
 /**

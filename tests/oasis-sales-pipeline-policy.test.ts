@@ -95,6 +95,47 @@ assert.equal(
   false,
   "same for an opener",
 );
+/* ─── the two-party sale. An opener who handed off is still owed 20%. ────────
+ * Once a closer takes the deal, `assigned_to` is the closer — the opener is
+ * only in `collaborators`. An ownership check that ignored that field would
+ * lock the opener out of the one deal they are being paid on. */
+const handedOff = {
+  id: "handed-off",
+  data: {
+    sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+    assigned_to: "closer-1",
+    collaborators: ["OPENER-1"],
+    stage: "qualified",
+  },
+};
+assert.equal(
+  canOpenOasisSalesRecord(handedOff, { role: "closer", userId: "closer-1" }),
+  true,
+  "the closer owns it",
+);
+assert.equal(
+  canOpenOasisSalesRecord(handedOff, { role: "opener", userId: "opener-1" }),
+  true,
+  "the opener who sourced it keeps access after handoff — they are paid on this deal",
+);
+assert.equal(
+  canOpenOasisSalesRecord(handedOff, { role: "closer", userId: "rep-9" }),
+  false,
+  "a rep on neither side of the deal still gets nothing",
+);
+// Malformed collaborators must fail closed, never throw — normalizeCollaborators
+// is what guarantees that, and this asserts we actually delegate to it.
+for (const junk of [null, "opener-1", 42, [42, null], {}]) {
+  assert.equal(
+    canOpenOasisSalesRecord(
+      { id: "j", data: { assigned_to: "someone", collaborators: junk } },
+      { role: "opener", userId: "opener-1" },
+    ),
+    false,
+    `malformed collaborators (${JSON.stringify(junk)}) must fail closed, not throw`,
+  );
+}
+
 // The admin-toggle grant is honoured here exactly as it is on the board.
 assert.equal(
   canOpenOasisSalesRecord({ id: "theirs", data: { assigned_to: "rep-2" } }, { role: "closer", userId: "rep-1", adminAccess: true }),
