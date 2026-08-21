@@ -84,6 +84,8 @@ assert.equal(SURFACE_CAPABILITIES.readonly.canAct, false);
  * pair. opener and closer share ONE persona deliberately: identical surfaces,
  * different pipeline STAGES, and stages are not this module's business. */
 assert.equal(resolvePersona({ teamRole: "manager" }), "manager");
+assert.equal(resolvePersona({ teamRole: "marketing" }), "marketing");
+assert.equal(resolvePersona({ teamRole: " MARKETING " }), "marketing", "trim + case-fold applies here too");
 assert.equal(resolvePersona({ teamRole: "closer" }), "sales");
 assert.equal(resolvePersona({ teamRole: "opener" }), "sales");
 assert.equal(resolvePersona({ teamRole: "builder" }), "worker");
@@ -98,7 +100,7 @@ assert.equal(resolvePersona({ teamRole: "manager", isTrueAdmin: true }), "founde
  * `undefined` at every call site — which reads as falsy, i.e. accidentally
  * locked down, until someone "fixes" it by guessing. Assert the matrix is
  * total instead of trusting Record<> to have been filled in thoughtfully. */
-for (const persona of ["founder", "manager", "sales", "worker", "readonly", "legacy"] as Persona[]) {
+for (const persona of ["founder", "manager", "sales", "marketing", "worker", "readonly", "legacy"] as Persona[]) {
   assert.ok(SURFACE_CAPABILITIES[persona], `${persona} must have a capability row`);
   assert.equal(
     Object.keys(SURFACE_CAPABILITIES[persona]).length,
@@ -106,7 +108,7 @@ for (const persona of ["founder", "manager", "sales", "worker", "readonly", "leg
     `${persona} must declare EVERY capability — a missing key is silently false`,
   );
 }
-for (const persona of ["manager", "sales", "worker", "readonly"] as Persona[]) {
+for (const persona of ["manager", "sales", "marketing", "worker", "readonly"] as Persona[]) {
   assert.equal(
     SURFACE_CAPABILITIES[persona].canSeeCompanyFinancials,
     false,
@@ -384,6 +386,68 @@ const founderCode = stripComments(founderToday);
  * company inbound tape to someone whose record denies both.
  *
  * These assertions exist so that cannot recur silently for the NEXT persona. */
+/* ───── the MARKETING surface ───────────────────────────────────────────────
+ * Marketing exists to make ONE thing possible: reaching /founders/marketing
+ * WITHOUT being an admin. Before it, canSeeMarketing was true for `founder`
+ * alone, so hiring a marketing person meant handing over Net MRR, the
+ * commission ledger and every client name — or hiring them and locking them out
+ * of the job. These assertions keep both halves true. */
+const marketingToday = read("components/today/MarketingToday.tsx");
+const marketingCode = stripComments(marketingToday);
+
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeMarketing,
+  true,
+  "the entire point of the role: marketing reaches the marketing studio",
+);
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeCompanyFinancials,
+  false,
+  "and does so WITHOUT company revenue — that pairing is the whole reason the role exists",
+);
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeAllPipeline, false, "marketing does not work leads");
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeCommissionLedger, false);
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeInboundTape, false);
+assert.equal(
+  capabilitiesFor("marketing", SUNBIZ).canSeeMarketing,
+  false,
+  "OASIS content is OASIS's — the tenant gate applies to marketing like everything else",
+);
+assert.ok(
+  /surface\.persona === "marketing"/.test(dispatcherCode),
+  "app/page.tsx MUST branch on marketing — without it they fall through to FounderToday",
+);
+assert.ok(
+  dispatcherCode.indexOf('surface.persona === "marketing"') < dispatcherCode.indexOf("<FounderToday"),
+  "the marketing branch must precede the FounderToday fallthrough or it never runs",
+);
+for (const reader of FINANCIAL_READERS) {
+  assert.equal(
+    marketingCode.includes(reader),
+    false,
+    `MarketingToday must not reach ${reader}`,
+  );
+}
+assert.equal(
+  /getServiceSupabase|listRecords/.test(marketingCode),
+  false,
+  "MarketingToday reads NOTHING from the database — it routes to tools that already exist, " +
+    "so there is no second copy of the marketing surface to keep true",
+);
+assert.deepEqual(
+  filterNavForPersona(FULL_NAV, "marketing").map((n) => n.href),
+  ["/", "/schedule", "/playbook", "/founders/marketing"],
+  "marketing nav: Today, their week, the playbook, the studio — no pipeline, no leads",
+);
+assert.equal(
+  personaMayVisit("marketing", "/pipeline"),
+  false,
+  "marketing must not be offered the pipeline — putting the book in front of them is the " +
+    "client-data exposure this role exists to avoid",
+);
+assert.equal(personaMayVisit("marketing", "/leads"), false);
+assert.equal(personaMayVisit("marketing", "/analytics"), false, "system surfaces stay closed");
+
 const managerToday = read("components/today/ManagerToday.tsx");
 const managerCode = stripComments(managerToday);
 

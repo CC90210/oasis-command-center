@@ -67,7 +67,14 @@ import {
  *   readonly — the worker surface with the actions taken away.
  *   legacy   — SunBiz's own roles (loan_officer / processor). See below.
  */
-export type Persona = "founder" | "manager" | "sales" | "worker" | "readonly" | "legacy";
+export type Persona =
+  | "founder"
+  | "manager"
+  | "sales"
+  | "marketing"
+  | "worker"
+  | "readonly"
+  | "legacy";
 
 /**
  * What a persona is allowed to SEE. Each flag names a class of data, not a
@@ -215,6 +222,7 @@ export function resolvePersona(input: PersonaInput): Persona {
   if (input.isTrueAdmin === true || input.adminAccess === true) return "founder";
   if (role === "owner" || role === "admin") return "founder";
   if (role === "manager") return "manager";
+  if (role === "marketing") return "marketing";
   // opener and closer share ONE persona on purpose. Their SURFACES are identical
   // — own book, own commission, no company money. What differs is which pipeline
   // STAGES they may act on, which is a pipeline-policy question and lives in
@@ -319,6 +327,39 @@ const WORKER: SurfaceCapabilities = {
   canAct: true,
 };
 
+/**
+ * Marketing staff — content, campaigns, the founders marketing studio.
+ *
+ * THE ONE THING THIS ROLE EXISTS TO MAKE POSSIBLE: reaching Marketing WITHOUT
+ * being an admin. Before it, the only persona with canSeeMarketing was
+ * `founder`, so hiring a marketing person meant handing them Net MRR, the
+ * commission ledger, every client name and the whole pipeline — or hiring them
+ * and giving them no access to the thing they were hired to do.
+ *
+ * canSeeMarketing is TRUE and every money flag is FALSE. They are also not a
+ * sales persona: no pipeline of their own, no commission, no delivery board.
+ * Marketing produces demand; it does not work leads.
+ *
+ * canSeeClientIdentities is TRUE because a case study, a testimonial or a logo
+ * wall is client work by name — that is the job. It is scoped by the same
+ * tenant gate as everything else in capabilitiesFor.
+ */
+const MARKETING: SurfaceCapabilities = {
+  canSeeCompanyFinancials: false,
+  canSeeAllPipeline: false,
+  canSeeTeamPipeline: false,
+  canSeeOwnPipelineOnly: false,
+  canSeeOwnCommissionOnly: false,
+  canSeeTeamCommission: false,
+  canSeeCommissionLedger: false,
+  canSeeDeliveryQueues: false,
+  canSeeClientIdentities: true,
+  canSeeInboundTape: false,
+  canSeeMarketing: true,
+  canSeeSystemSurfaces: false,
+  canAct: true,
+};
+
 const READONLY: SurfaceCapabilities = { ...WORKER, canAct: false };
 
 /**
@@ -341,6 +382,7 @@ export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   founder: FOUNDER,
   manager: MANAGER,
   sales: SALES,
+  marketing: MARKETING,
   worker: WORKER,
   readonly: READONLY,
   legacy: LEGACY,
@@ -420,9 +462,26 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
  * and so `personaMayVisit` cannot accidentally fall through to "allow" for one
  * of them the way an unmatched `if (persona !== "sales")` did.
  */
+/**
+ * Marketing's nav. Today, their own week, the playbook (brand voice and offer
+ * language live there), and the marketing studio itself.
+ *
+ * NOT /pipeline and NOT /leads: marketing does not work leads, and putting the
+ * book in front of them is exactly the client-data exposure the role exists to
+ * avoid. NOT the system surfaces either — /operations and /health are
+ * machinery, not a content tool.
+ */
+export const MARKETING_NAV_ALLOWLIST: readonly string[] = [
+  "/",
+  "/schedule",
+  "/playbook",
+  "/founders/marketing",
+];
+
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {
   sales: SALES_NAV_ALLOWLIST,
   manager: MANAGER_NAV_ALLOWLIST,
+  marketing: MARKETING_NAV_ALLOWLIST,
 };
 
 /** Path-prefix match on a URL boundary: `/playbook` matches `/playbook/script`, not `/playbooks`. */

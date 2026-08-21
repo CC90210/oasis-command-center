@@ -30,6 +30,9 @@ export type TeamRole =
   | "closer"
   | "opener"
   | "builder"
+  // Marketing staff (2026-08-21). Content, campaigns and the founders
+  // marketing studio — never revenue, never the sales pipeline.
+  | "marketing"
   // Legacy. Still resolvable because live rows carry them (43 `member`, and
   // `member` is the column DEFAULT), but no longer offered on the invite menu —
   // "member" and "agent" are the ambiguous pair the job titles above replace.
@@ -65,6 +68,7 @@ export const OASIS_SALES_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
   { value: "closer", label: "Closer" },
   { value: "opener", label: "Opener" },
   { value: "builder", label: "Builder" },
+  { value: "marketing", label: "Marketing" },
 ];
 
 /** The OASIS sales job titles, as a set — used to decide tenant eligibility. */

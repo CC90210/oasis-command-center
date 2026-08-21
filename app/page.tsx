@@ -40,6 +40,7 @@ import { FounderToday } from "@/components/today/FounderToday";
 import { RepToday } from "@/components/today/RepToday";
 import { DeliveryToday } from "@/components/today/DeliveryToday";
 import { ManagerToday } from "@/components/today/ManagerToday";
+import { MarketingToday } from "@/components/today/MarketingToday";
 
 export const dynamic = "force-dynamic";
 
@@ -157,6 +158,13 @@ export default async function TodayPage() {
         managerName={viewerName}
       />
     );
+  }
+
+  // Same reasoning as the manager branch above: without one, marketing falls
+  // through to FounderToday, which reads no capability but showFinancials and
+  // would render the whole pipeline and the company inbound tape.
+  if (surface.persona === "marketing") {
+    return <MarketingToday viewerName={viewerName} />;
   }
 
   if (surface.persona === "worker" || surface.persona === "readonly") {
