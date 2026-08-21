@@ -39,6 +39,7 @@ import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { FounderToday } from "@/components/today/FounderToday";
 import { RepToday } from "@/components/today/RepToday";
 import { DeliveryToday } from "@/components/today/DeliveryToday";
+import { ManagerToday } from "@/components/today/ManagerToday";
 
 export const dynamic = "force-dynamic";
 
@@ -138,6 +139,22 @@ export default async function TodayPage() {
         userId={surface.userId}
         teamRole={surface.teamRole}
         repName={viewerName}
+      />
+    );
+  }
+
+  // The manager MUST have its own branch. Without one it falls through to
+  // FounderToday below, which takes `showFinancials` (correctly false here) but
+  // consults no other capability — so it would render the whole tenant's
+  // pipeline and the company inbound tape to someone whose capability record
+  // denies both. A persona without a surface is a leak waiting for its first
+  // login.
+  if (surface.persona === "manager") {
+    return (
+      <ManagerToday
+        tenantId={surface.tenantId}
+        userId={surface.userId}
+        managerName={viewerName}
       />
     );
   }
