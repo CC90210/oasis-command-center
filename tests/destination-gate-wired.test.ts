@@ -39,7 +39,7 @@ assert.ok(
   "the split must come from the discriminator, not from parsing the reason text",
 );
 assert.ok(
-  /import \{ isTextable \} from "@\/lib\/sms\/destination-health";/.test(exec),
+  /import \{[^}]*\bisTextable\b[^}]*\} from "@\/lib\/sms\/destination-health";/.test(exec),
   "and the import must exist, or the call site is a reference error waiting to ship",
 );
 

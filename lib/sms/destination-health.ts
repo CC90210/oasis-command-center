@@ -11,6 +11,7 @@ import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   destinationVerdict, normalizeLast10, lineTypeFor, isVerifiedMobile,
+  wirelessCandidates, chooseTextableNumber,
   type DestinationOutcome, type DestinationVerdict, type LineType,
 } from "./destination-health-core";
 
@@ -72,6 +73,10 @@ export async function refreshDestinationHealth(
   // them, which is the cost this whole change exists to avoid.
   const leadToPhone = new Map<string, string>();
   const lineTypes = new Map<string, LineType>();
+  // Numbers that belong to no lead's `phone` field but are still send targets:
+  // the mobiles the lookup found. They need a health row or they can never be
+  // chosen.
+  const extraNumbers = new Set<string>();
   for (let from = 0; from < MAX_ROWS; from += PAGE) {
     const res = await db
       .from("tenant_records")
@@ -97,6 +102,24 @@ export async function refreshDestinationHealth(
       // delivery later, never by another lead's missing label.
       const prev = lineTypes.get(last10);
       if (!prev || prev === "unknown") lineTypes.set(last10, t);
+
+      // CLASSIFY THE LOOKED-UP NUMBERS TOO, not just the one on the lead.
+      //
+      // The lookup finds a mobile and writes it to `phone_lookup_candidates`
+      // without touching `data.phone` (which stays the merchant's own record).
+      // Walking only `data.phone` meant those mobiles never got a health row —
+      // and with no row there is no verdict, so under verified-only the sender
+      // had nothing to send to and the lead stayed held. Measured 2026-08-21:
+      // lookups succeeded, found Wireless numbers, and changed nothing.
+      //
+      // A candidate is tagged wireless by the lookup itself, so it seeds as
+      // wireless — but never over an explicit landline for the same number, and
+      // never over evidence, which destinationVerdict still resolves below.
+      for (const w of wirelessCandidates(d.phone_lookup_candidates)) {
+        const known = lineTypes.get(w);
+        if (!known || known === "unknown") lineTypes.set(w, "wireless");
+        if (!extraNumbers.has(w)) extraNumbers.add(w);
+      }
     }
     if (page.length < PAGE) break;
   }
@@ -106,6 +129,8 @@ export async function refreshDestinationHealth(
   // row. Without this, the benching only ever applies to numbers we already
   // burned a message on.
   for (const last10 of leadToPhone.values()) if (!byNumber.has(last10)) byNumber.set(last10, []);
+  // ...and the looked-up mobiles, which no lead carries in `phone`.
+  for (const w of extraNumbers) if (!byNumber.has(w)) byNumber.set(w, []);
   for (const rec of receipts) {
     const leadId = rec.drip_run_id ? runToLead.get(String(rec.drip_run_id)) : undefined;
     const last10 = leadId ? leadToPhone.get(leadId) : undefined;
@@ -289,6 +314,99 @@ export async function isTextable(tenantId: string, phone: unknown): Promise<Reac
  */
 export function verifiedOnly(env: NodeJS.ProcessEnv = process.env): boolean {
   return String(env.DRIPS_SMS_VERIFIED_ONLY || "").trim() === "1";
+}
+
+/**
+ * WHICH of a lead's numbers should we actually text?
+ *
+ * THE GAP THIS CLOSES (measured 2026-08-21). The phone lookup writes what it
+ * finds into `phone_lookup_candidates` and deliberately does NOT overwrite the
+ * lead's `phone` — that field is what the merchant gave us and clobbering it
+ * would destroy their own record of themselves.
+ *
+ * Correct, and it left the chain one link short. A lead now looks like this:
+ *
+ *   phone:      6619789433                    <- the office landline
+ *   candidates: +12094831972 (Wireless), ...  <- the mobile we just found
+ *
+ * Everything downstream keys on `phone`, so the lookup succeeded, found a
+ * reachable mobile, and the lead stayed held anyway. The night's lookups would
+ * have produced nothing usable.
+ *
+ * So the send path asks for the best number rather than assuming the stored
+ * one. Preference order lives in chooseTextableNumber: a number we have
+ * actually delivered to beats a looked-up mobile beats anything else, and
+ * anything benched is excluded outright.
+ *
+ * Returns the number in the form it is stored in, ready to send, plus where it
+ * came from so the caller can record which one it used.
+ */
+export async function resolveSendNumber(
+  tenantId: string,
+  data: Record<string, unknown>,
+): Promise<{ phone: string; source: "provided" | "looked_up" } | null> {
+  const stored = typeof data.phone === "string" ? data.phone.trim() : "";
+  const wireless = wirelessCandidates(data.phone_lookup_candidates);
+
+  // Keep the sendable form for each candidate: chooseTextableNumber reasons in
+  // last-10 (the only form that compares reliably), but the provider needs the
+  // real number back.
+  const forms = new Map<string, string>();
+  const candidates: Array<{ phone: unknown; source: "provided" | "looked_up" }> = [];
+  if (stored) {
+    const k = normalizeLast10(stored);
+    if (k) { forms.set(k, stored); candidates.push({ phone: stored, source: "provided" }); }
+  }
+  for (const w of wireless) {
+    if (forms.has(w)) continue;   // the stored number IS the wireless one
+    forms.set(w, w);
+    candidates.push({ phone: w, source: "looked_up" });
+  }
+  if (candidates.length === 0) return null;
+
+  // Verdicts for just these numbers.
+  const db: Db = getServiceSupabase();
+  const keys = [...forms.keys()];
+  const res = await db
+    .from("sms_destination_health")
+    .select("phone_last10, delivered, failed, textable, verified, reason")
+    .eq("tenant_id", tenantId)
+    .in("phone_last10", keys);
+  // FAIL CLOSED. An unreadable table must not silently promote an unvetted
+  // number into the send path.
+  if (res.error) return null;
+
+  const verdicts = new Map<string, DestinationVerdict>();
+  for (const r of (res.data || []) as Array<{
+    phone_last10: string; delivered: number; failed: number; textable: unknown; verified: unknown; reason: string | null;
+  }>) {
+    verdicts.set(String(r.phone_last10), {
+      last10: String(r.phone_last10),
+      textable: r.textable === true || r.textable === 1,
+      reason: r.reason || "",
+      delivered: Number(r.delivered) || 0,
+      failed: Number(r.failed) || 0,
+    });
+  }
+
+  // Under verified-only, a candidate with no verdict row at all is not a
+  // send-worthy option — the whole point of the mode. chooseTextableNumber only
+  // excludes explicitly-untextable numbers, so the stricter filter is applied
+  // here rather than by loosening that shared helper.
+  const pool = verifiedOnly()
+    ? candidates.filter((c) => {
+        const k = normalizeLast10(c.phone);
+        const row = (res.data || []).find((x) => String((x as { phone_last10: string }).phone_last10) === k) as
+          | { verified: unknown } | undefined;
+        return !!row && (row.verified === true || row.verified === 1);
+      })
+    : candidates;
+  if (pool.length === 0) return null;
+
+  const pick = chooseTextableNumber(pool, verdicts);
+  if (!pick) return null;
+  const phone = forms.get(pick.last10);
+  return phone ? { phone, source: pick.source } : null;
 }
 
 export type { DestinationVerdict };

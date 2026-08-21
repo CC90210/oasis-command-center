@@ -34,7 +34,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
-import { isTextable } from "@/lib/sms/destination-health";
+import { isTextable, resolveSendNumber } from "@/lib/sms/destination-health";
 import { sendablePool, announceBenchedLines } from "@/lib/sms/line-health";
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
@@ -916,9 +916,29 @@ async function processSmsStep(
    *  and are exempt from the marketing consent bar — see mayTextFor. */
   emailClass: string,
 ): Promise<StepOutcome> {
-  const phone = typeof data.phone === "string" ? data.phone.trim() : "";
-  // No phone for an SMS step: SKIP + advance (the sequence may have email steps
-  // this lead CAN receive) rather than fail the whole chain (audit H5).
+  // WHICH NUMBER, not just whether there is one.
+  //
+  // The phone lookup writes what it finds into `phone_lookup_candidates` and
+  // deliberately does not overwrite `data.phone` — that field is the merchant's
+  // own record of themselves. Correct, and it leaves a lead looking like this:
+  //
+  //   phone:      6619789433                    <- the office landline
+  //   candidates: +12094831972 (Wireless), ...  <- the mobile we just found
+  //
+  // Reading `data.phone` here meant the lookup could succeed, find a reachable
+  // mobile, and the lead stayed held anyway (measured 2026-08-21). resolveSendNumber
+  // applies the preference order: a number we have actually delivered to beats
+  // a looked-up mobile beats anything else, and benched numbers are excluded.
+  //
+  // EVERY GATE BELOW USES THIS NUMBER — opt-out, reachability, TCPA window and
+  // the send itself. Resolving here rather than at the send is the whole point:
+  // checking consent against one number and texting another is how a merchant
+  // who opted out gets texted anyway.
+  const resolved = await resolveSendNumber(row.tenant_id, data);
+  const phone = resolved?.phone ?? "";
+  // No usable number for an SMS step: SKIP + advance (the sequence may have
+  // email steps this lead CAN receive) rather than fail the whole chain
+  // (audit H5).
   if (!phone) return skipStep(db, row, steps, "no_phone_for_sms_step");
 
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
