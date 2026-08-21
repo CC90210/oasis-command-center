@@ -234,14 +234,27 @@ export async function isTextable(tenantId: string, phone: unknown): Promise<Reac
       return { textable: false, reason: "awaiting phone verification (no lookup on file)", hold: "awaiting_verification" };
     }
     const verified = row.verified === true || row.verified === 1;
+    const benched = row.textable === false || row.textable === 0;
+
+    // A BENCH ALWAYS WINS, EVEN OVER VERIFICATION (Codex P1, 2026-08-20).
+    //
+    // The two flags answer different questions and can genuinely disagree: a
+    // number the lookup tagged Wireless is verified=1, and if it then racks up
+    // carrier failures it becomes textable=0. The first cut returned early on
+    // `verified` and never looked at `textable`, so this stricter mode was a
+    // way AROUND the existing failure bench — it would have kept sending to a
+    // number we had already proven does not work.
+    //
+    // Checked before the verified branch so the ordering cannot be reversed by
+    // a later edit without deleting this.
+    if (benched) {
+      return { textable: false, reason: row.reason || "benched", hold: "unreachable" };
+    }
     if (!verified) {
-      // A KNOWN landline stays permanent even in this mode. Only a genuinely
-      // not-yet-looked-up number is a temporary wait.
-      const knownBad = row.textable === false || row.textable === 0;
       return {
         textable: false,
         reason: row.reason || "awaiting phone verification",
-        hold: knownBad ? "unreachable" : "awaiting_verification",
+        hold: "awaiting_verification",
       };
     }
     return { textable: true, reason: row.reason || "verified mobile", hold: null };
