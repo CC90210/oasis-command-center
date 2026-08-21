@@ -27,6 +27,7 @@
  */
 
 import { redirect } from "next/navigation";
+import Link from "next/link";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { getActiveProfile } from "@/lib/queries";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
@@ -35,7 +36,7 @@ import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
-import { attachAssignedNames } from "@/lib/assigned-names";
+import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
@@ -57,7 +58,7 @@ const OASIS_PIPELINE_SLUGS = new Set(["oasis", "oasis-ai-cc", OASIS_WEBSITE_TENA
 export default async function PipelinePage({
   searchParams,
 }: {
-  searchParams?: Promise<{ stage?: string; q?: string }>;
+  searchParams?: Promise<{ stage?: string; q?: string; rep?: string }>;
 }) {
   // Tenant-aware redirect. Non-OASIS operators land in their own
   // tenant's leads view rather than seeing CC's OASIS personal stages.
@@ -95,6 +96,9 @@ export default async function PipelinePage({
   const sp = (await searchParams) || {};
   const stageFilter = typeof sp.stage === "string" && sp.stage.trim() ? sp.stage.trim() : null;
   const query = typeof sp.q === "string" && sp.q.trim() ? sp.q.trim() : null;
+  // ?rep=<auth_user_id> narrows the board to one person; ?rep=unassigned shows
+  // the pool nobody owns yet.
+  const repFilter = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : null;
 
   const profile = await safe("pipeline.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
@@ -152,8 +156,21 @@ export default async function PipelinePage({
         { programScoped: false },
       )
     : [];
-  const rows = query
+  // WHO IS ON THE BOARD. Built from the tenant's own members, and applied
+  // AFTER filterWebsiteSalesRows — never instead of it. That ordering is the
+  // security property: a rep who hand-types ?rep=<someone-else> has already
+  // been narrowed to their own rows, so the filter can only ever subtract from
+  // what they were allowed to see. It cannot be used to look sideways.
+  const repRoster = session.ok && session.isAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  const repScopedRows = repFilter
     ? scopedRows.filter((r) => {
+        const owner = typeof r.data.assigned_to === "string" ? r.data.assigned_to.toLowerCase() : "";
+        return repFilter === "unassigned" ? !owner : owner === repFilter;
+      })
+    : scopedRows;
+
+  const rows = query
+    ? repScopedRows.filter((r) => {
         const d = r.data;
         const hay = [
           d.name,
@@ -172,8 +189,52 @@ export default async function PipelinePage({
     ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
     : [];
 
+  const repChip = (label: string, value: string | null, count: number) => {
+    const active = (value ?? null) === repFilter;
+    const params = new URLSearchParams();
+    if (stageFilter) params.set("stage", stageFilter);
+    if (query) params.set("q", query);
+    if (value) params.set("rep", value);
+    const href = `/pipeline${params.toString() ? `?${params.toString()}` : ""}`;
+    return (
+      <Link
+        key={value ?? "all"}
+        href={href}
+        className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+          active
+            ? "border-accent bg-accent/15 text-accent font-semibold"
+            : "border-bg-border bg-bg-elev/40 text-fg-muted hover:text-fg hover:border-fg-dim"
+        }`}
+      >
+        {label} <span className="tabular-nums opacity-70">{count}</span>
+      </Link>
+    );
+  };
+
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in space-y-4">
+      {/* WHOSE BOARD. Admins and managers get one chip per rep plus the
+          unassigned pool, so assigning work is a click rather than a search.
+          Reps never see this row: their board is already only theirs, so a
+          filter would be a list of colleagues they cannot open — an org chart
+          disguised as a control. */}
+      {repRoster.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
+          {repChip("Everyone", null, scopedRows.length)}
+          {[...repRoster.entries()].map(([id, name]) =>
+            repChip(
+              name,
+              id,
+              scopedRows.filter(
+                (r) => typeof r.data.assigned_to === "string" && r.data.assigned_to.toLowerCase() === id.toLowerCase(),
+              ).length,
+            ),
+          )}
+          {repChip("Unassigned", "unassigned", scopedRows.filter((r) => !r.data.assigned_to).length)}
+        </div>
+      )}
+
       <LeadPipelineView
         slug="oasis"
         entityName="lead"

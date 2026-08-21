@@ -448,6 +448,69 @@ assert.equal(
 assert.equal(personaMayVisit("marketing", "/leads"), false);
 assert.equal(personaMayVisit("marketing", "/analytics"), false, "system surfaces stay closed");
 
+/* ───── the Leads browser is open to reps, and the rep filter is admin-only ──
+ * CC, 2026-08-21: "those sales reps should be able to access the leads page so
+ * they can import leads themselves."
+ *
+ * /web-leads is the prospecting POOL — a public directory of Canadian
+ * businesses with website status — not another rep's book. Nothing in it is
+ * assigned to anyone, so opening it exposes no colleague's pipeline. It is what
+ * makes SELF-SOURCING possible, which is the track that pays 25/40/70 instead
+ * of 20/30. */
+assert.equal(personaMayVisit("sales", "/web-leads"), true, "a rep can source their own leads");
+assert.equal(personaMayVisit("manager", "/web-leads"), true, "so can a manager, to assign from");
+assert.equal(
+  personaMayVisit("marketing", "/web-leads"),
+  false,
+  "marketing does not prospect — the pool stays out of their nav",
+);
+
+const pipelinePage = read("app/pipeline/page.tsx");
+const pipelineCode = stripComments(pipelinePage);
+
+/* THE ORDERING IS THE SECURITY PROPERTY. The rep chips filter `scopedRows`,
+ * which filterWebsiteSalesRows has ALREADY narrowed to what this viewer may
+ * see. So a rep who hand-types ?rep=<someone-else> filters a set that never
+ * contained that person's leads — the control can only subtract. If the filter
+ * were ever applied to the raw rows instead, it would become a way to look
+ * sideways at a colleague's book. */
+assert.ok(
+  /repScopedRows = repFilter\s*\?\s*scopedRows\.filter/.test(pipelineCode),
+  "the rep filter must narrow scopedRows — the set filterWebsiteSalesRows ALREADY reduced to " +
+    "what this viewer may see. Filtering namedRows or allRows instead would turn ?rep=<other> " +
+    "into a way to read a colleague's pipeline, and the page would look identical.",
+);
+assert.ok(
+  /repRoster\.size > 0 &&/.test(pipelineCode),
+  'the rep chips must actually RENDER. A first pass wired the filter logic and the chip ' +
+    'builder but never placed the row, so the control existed only as unused code — eslint ' +
+    'caught it, not the tests.',
+);
+assert.ok(
+  /session\.ok && session\.isAdmin \? await buildMemberNameMap/.test(pipelineCode),
+  "the roster behind the chips is built for admins only: a rep does not need a list of " +
+    "colleagues whose boards they cannot open",
+);
+
+/* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
+ * The OSM importer writes website / website_condition / industry on every lead
+ * it creates. ManifestRecordForm renders the ENTITY, not the row, so a field
+ * missing here is invisible on the profile no matter what the database holds —
+ * which is why a rep could not see https://www.mangorain.ca/ on a lead that
+ * stored exactly that. */
+const seeds = read("lib/manifest/seeds.ts");
+const oasisLeadEntity = seeds.slice(
+  seeds.indexOf('name: "lead"'),
+  seeds.indexOf('name: "lead"') + 2400,
+);
+for (const field of ["website", "website_condition", "industry"]) {
+  assert.ok(
+    new RegExp(`name: "${field}"`).test(oasisLeadEntity),
+    `the OASIS lead entity must expose ${field} — the importer writes it and the profile ` +
+      `cannot render what the entity does not declare`,
+  );
+}
+
 const managerToday = read("components/today/ManagerToday.tsx");
 const managerCode = stripComments(managerToday);
 

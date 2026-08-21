@@ -431,6 +431,15 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  // The Leads browser (CC, 2026-08-21): "those sales reps should be able to
+  // access the leads page so they can import leads themselves."
+  //
+  // This is the prospecting POOL, not another rep's book — a public directory
+  // of Canadian businesses with website status, filtered by province, city and
+  // industry. Nothing in it is assigned to anyone, so opening it to reps
+  // exposes no colleague's pipeline. It is what makes self-sourcing possible,
+  // which is the track that pays them 25/40/70 rather than 20/30.
+  "/web-leads",
 ];
 
 /**
@@ -452,6 +461,8 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   "/pipeline",
   "/playbook",
   "/leads",
+  // Managers assign from the same pool their reps source from.
+  "/web-leads",
 ];
 
 /**
