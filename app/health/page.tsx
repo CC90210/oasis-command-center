@@ -80,7 +80,14 @@ type StuckLead = {
   updated_at: string;
 };
 
-async function loadHealth(tenantId: string, enabledAgents: string[]) {
+async function loadHealth(
+  tenantId: string,
+  enabledAgents: string[],
+  // Lender shop-outs are SunBiz funding workflow. Other tenants have no
+  // application_lender_threads rows by definition — skip the read instead of
+  // rendering a SunBiz-vocabulary section around an inevitable zero.
+  includeLenderThreads: boolean,
+) {
   const db = getServiceSupabase();
   const now = Date.now();
   const dayAgoIso = new Date(now - 24 * 60 * 60 * 1000).toISOString();
@@ -133,16 +140,18 @@ async function loadHealth(tenantId: string, enabledAgents: string[]) {
     .order("last_run_at", { ascending: false })
     .limit(20);
 
-  // 3. Lender threads stuck at sent>7d.
-  const stuckThreadsPromise = db
-    .from("application_lender_threads")
-    .select("id, application_id, lender_id, recipient_email, status, sent_at")
-    .eq("tenant_id", tenantId)
-    .eq("status", "sent")
-    .lt("sent_at", weekAgoIso)
-    .order("sent_at", { ascending: true })
-    .limit(50)
-    .then((res) => (res.data as StuckThread[]) || []);
+  // 3. Lender threads stuck at sent>7d (SunBiz only — see includeLenderThreads).
+  const stuckThreadsPromise = includeLenderThreads
+    ? db
+        .from("application_lender_threads")
+        .select("id, application_id, lender_id, recipient_email, status, sent_at")
+        .eq("tenant_id", tenantId)
+        .eq("status", "sent")
+        .lt("sent_at", weekAgoIso)
+        .order("sent_at", { ascending: true })
+        .limit(50)
+        .then((res) => (res.data as StuckThread[]) || [])
+    : Promise.resolve<StuckThread[]>([]);
 
   // 4. Lead rows with updated_at >14d. Cap at 50 — the operator only
   //    needs the worst offenders; if there are more, the count tile
@@ -207,31 +216,42 @@ export default async function HealthPage() {
   // for their tenant, which is exactly why CC could see Bennett was
   // stale but couldn't fix the stage from this page.
   const tenant = await getTenant(tenantId).catch(() => null);
-  const tenantSlug = (tenant && resolveClientProfileSlug(tenant)) || "sun";
+  const profileSlug = tenant ? resolveClientProfileSlug(tenant) : null;
+  // SunBiz-specific sections (outcome checks, lender shop-outs) render ONLY
+  // on the SunBiz tenant. A failed tenant lookup resolves to null → the
+  // SunBiz sections stay hidden (fail closed, never another tenant's copy).
+  const isSunbizTenant = profileSlug === "sun";
+  // Link base for the shop-outs card (sun-only, so the fallback matters only
+  // while standing in the SunBiz workspace).
+  const tenantSlug = profileSlug || "sun";
   const { recentErrors, failedCrons, stuckThreads, stuckLeads } = await loadHealth(
     tenantId,
     enabledAgents,
+    isSunbizTenant,
   );
 
   // The outcome checks count toward the HEADER, not just their own card.
   // Otherwise the page renders "All clear" directly above a failing check, a
   // stale one, an open alert, or a blind read — and the header is the part
-  // people actually read.
-  const outcome = await loadOutcomeChecks(tenantId, Date.now());
+  // people actually read. SunBiz only: the checks are the SunBiz outcome
+  // system (app/api/cron/health-check runs them for SUNBIZ_TENANT_ID alone),
+  // so on any other tenant the panel could only ever render an alarming
+  // empty state about a checker that was never meant to run there.
+  const outcome = isSunbizTenant ? await loadOutcomeChecks(tenantId, Date.now()) : null;
 
   const totalSignals =
     recentErrors.length +
     failedCrons.length +
     stuckThreads.length +
     stuckLeads.length +
-    outcome.signalCount;
+    (outcome?.signalCount ?? 0);
   const overallHealthy = totalSignals === 0;
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="System health"
-        subtitle="Four things that might need you. Green tiles mean everything in that bucket is fine. Hover each one for plain-English context."
+        subtitle="Each tile is a bucket that might need you. Green means everything in that bucket is fine. Hover each one for plain-English context."
         action={
           overallHealthy ? (
             <Tag tone="engaged">
@@ -262,13 +282,15 @@ export default async function HealthPage() {
           tone={failedCrons.length === 0 ? "engaged" : "warm"}
           hint="Scheduled jobs (Daily Brief, lead scoring, etc.) whose last run errored. Fix the underlying script or pause the job."
         />
-        <HealthTile
-          label="Quiet shop-outs"
-          count={stuckThreads.length}
-          icon={<Clock className="w-4 h-4" />}
-          tone={stuckThreads.length === 0 ? "engaged" : "accent"}
-          hint="Emails sent to lenders more than 7 days ago with no reply yet. Worth a chase call or a polite close-loop note."
-        />
+        {isSunbizTenant && (
+          <HealthTile
+            label="Quiet shop-outs"
+            count={stuckThreads.length}
+            icon={<Clock className="w-4 h-4" />}
+            tone={stuckThreads.length === 0 ? "engaged" : "accent"}
+            hint="Emails sent to lenders more than 7 days ago with no reply yet. Worth a chase call or a polite close-loop note."
+          />
+        )}
         <HealthTile
           label="Cold leads"
           count={stuckLeads.length}
@@ -282,16 +304,20 @@ export default async function HealthPage() {
 
       {/* Outcome checks first. They answer "did a merchant actually receive
           anything", which outranks "were there errors": during the ten-day SMS
-          outage there were no errors to show, and every tile below was green. */}
-      <Card title="Are merchants actually being reached?">
-        <OutcomeChecksPanel
-          rows={outcome.rows}
-          openAlerts={outcome.openAlerts}
-          readFailed={outcome.readFailed}
-          readError={outcome.readError}
-          now={Date.now()}
-        />
-      </Card>
+          outage there were no errors to show, and every tile below was green.
+          SunBiz only — the checks run for SUNBIZ_TENANT_ID alone, and the
+          merchant/lender vocabulary belongs to that tenant. */}
+      {outcome && (
+        <Card title="Are merchants actually being reached?">
+          <OutcomeChecksPanel
+            rows={outcome.rows}
+            openAlerts={outcome.openAlerts}
+            readFailed={outcome.readFailed}
+            readError={outcome.readError}
+            now={Date.now()}
+          />
+        </Card>
+      )}
 
       <Card
         title="Recent errors / warnings"
@@ -374,7 +400,8 @@ export default async function HealthPage() {
         )}
       </Card>
 
-      {/* ── Stuck lender threads ────────────────────────────────── */}
+      {/* ── Stuck lender threads (SunBiz funding workflow only) ──── */}
+      {isSunbizTenant && (
       <Card
         title="Quiet shop-outs"
         subtitle="Emails you sent to lenders more than a week ago that haven't gotten a reply. Worth a chase call or a polite 'still alive?' nudge — leaving them hanging burns the relationship."
@@ -410,6 +437,7 @@ export default async function HealthPage() {
           </ul>
         )}
       </Card>
+      )}
 
       {/* ── Stale leads ─────────────────────────────────────────── */}
       <Card

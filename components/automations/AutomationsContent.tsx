@@ -25,6 +25,7 @@ import { AgentsModulesStatusBoard } from "@/components/automations/AgentsModules
 import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
@@ -183,6 +184,22 @@ export async function AutomationsContent({
           <DescribeAutomationFlow />
           <AgentsModulesStatusBoard tenantSlug={tenantSlug} />
           <CronJobsManager agentKeys={automationAgentKeys} />
+          {isOasisSurfaceTenant(tenantSlug) && (
+            // The panel existed and rendered for exactly one tenant: "sun".
+            // OASIS's own workspace — where the empire daemons actually run —
+            // never saw it, so the page that lists scheduled jobs had no way to
+            // show the always-on processes doing the work beside them. The
+            // Instagram setter was the cost: a live daemon answering real
+            // prospects, invisible on the operations page, with only its parked
+            // cron twin visible and reading OFF.
+            //
+            // Gated on the SURFACE, not the role — same rule as the Breeze
+            // section below. isOasisSurfaceTenant covers OASIS's own workspaces
+            // only, and /automations is already 404 for the personas whose
+            // canSeeSystemSurfaces is false (reps, managers), so no client
+            // tenant and no rep gets CC's machine's daemon list.
+            <BackgroundWorkersPanel />
+          )}
           {tenantSlug === "sun" && (
             // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
             // until 2026-08-17, and the first half of that leaked a client's book

@@ -285,8 +285,23 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     if (opts?.ignoreDuplicates) this.onConflictCols = `IGNORE:${this.onConflictCols ?? ""}`;
     return this;
   }
-  update(values: Row) { this.mode = "update"; this.payload = [values]; return this; }
-  delete() { this.mode = "delete"; return this; }
+  // update/delete accept the supabase-js `{ count }` option. Before 2026-08-22
+  // the option was silently swallowed and runDelete/runUpdate always returned
+  // count:null — so every route using `.delete({ count: "exact" })` as an
+  // existence check (forms/[id], sequences/[id], cron-jobs/[id],
+  // lib/manifest/data.ts) deleted the row AND THEN reported
+  // 404 not_found_or_forbidden. Count comes from the driver's rowsAffected.
+  update(values: Row, opts?: { count?: "exact" | "estimated" | "planned" }) {
+    this.mode = "update";
+    this.payload = [values];
+    if (opts?.count) this.countMode = opts.count;
+    return this;
+  }
+  delete(opts?: { count?: "exact" | "estimated" | "planned" }) {
+    this.mode = "delete";
+    if (opts?.count) this.countMode = opts.count;
+    return this;
+  }
 
   // ---- filters
   eq(c: string, v: unknown) { this.conds.push(compileOp(c, "eq", v)); return this; }
@@ -615,7 +630,8 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
       (this.returning ? " RETURNING *" : "");
     const res = await this.client.execute({
       sql, args: [...cols.map((c) => toSql(values[c])), ...where.args] });
-    return this.finalizeRows(this.returning ? (res.rows as any[]).map(rowOut) : [], null);
+    const rows = this.returning ? (res.rows as any[]).map(rowOut) : [];
+    return this.finalizeRows(rows, this.affectedCount(res, rows));
   }
 
   private async runDelete(): Promise<PgResponse<any>> {
@@ -623,7 +639,17 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     if (!where.sql) throw new Error("delete without filters refused — it would empty the table");
     const sql = `DELETE FROM "${this.table}"${where.sql}` + (this.returning ? " RETURNING *" : "");
     const res = await this.client.execute({ sql, args: where.args });
-    return this.finalizeRows(this.returning ? (res.rows as any[]).map(rowOut) : [], null);
+    const rows = this.returning ? (res.rows as any[]).map(rowOut) : [];
+    return this.finalizeRows(rows, this.affectedCount(res, rows));
+  }
+
+  /** PostgREST count for a mutation: rows affected, only when the caller asked
+   *  for a count. With RETURNING the returned rows are the affected set (and
+   *  some drivers under-report rowsAffected on RETURNING statements), so the
+   *  larger of the two is the honest number. */
+  private affectedCount(res: { rowsAffected: number }, returnedRows: Row[]): number | null {
+    if (!this.countMode) return null;
+    return Math.max(Number(res.rowsAffected ?? 0), returnedRows.length);
   }
 }
 

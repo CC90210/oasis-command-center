@@ -18,6 +18,7 @@
  *       service: string,             // "pm2.sequence-runner", "skool_engine"
  *       label: string,               // operator-friendly name
  *       status: "healthy" | "degraded" | "down" | "unconfigured" | "archived",
+ *       stale: boolean,               // status row exists but is >5 min old — degraded to "down"
  *       metadata: Record<string, unknown>,
  *       last_ping_at: string | null,
  *       purpose: string,             // 1-line "what this daemon does"
@@ -37,6 +38,7 @@ import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { bridgeControlEligibility } from "@/lib/bridge-proxy";
 import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
+import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
 import { jsonRoute } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
@@ -69,9 +71,25 @@ const EXPECTED_WORKERS: Array<{
     purpose: "Polls cron_jobs every 60s on the operator's machine and executes due jobs.",
   },
   {
+    // The setter. Absent from this list until 2026-08-21, which meant its
+    // health row was filtered out of the response even while the bridge was
+    // reporting it healthy every 60s — the operator's most important
+    // background process was invisible on the page that exists to show
+    // background processes. Its parked cron twin is wired up in
+    // lib/automations/daemon-backed-crons.ts.
+    service: "pm2.bravo-ig-dm",
+    label: "Instagram DM setter",
+    purpose: "Answers Instagram DMs on its own tick so a reply never queues behind the scheduler's batch jobs.",
+  },
+  {
     service: "pm2.bravo-telegram",
     label: "Telegram bridge",
     purpose: "Bridges Telegram messages to the chat backbone. Windows-default, Mac cold-standby.",
+  },
+  {
+    service: "pm2.bravo-coord",
+    label: "OASIS coordination bridge",
+    purpose: "Group-scoped Telegram bridge for the shared OASIS boardroom (CC + Adon + Bravo + APEX). Separate bot token from the DM bridge.",
   },
   {
     service: "pm2.claude-bridge",
@@ -234,6 +252,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     }
   }
 
+  const now = Date.now();
   const workers = workerSet.map((w) => {
     const archived = Boolean(w.archived_on);
     const h = archived ? undefined : healthMap.get(w.service);
@@ -244,9 +263,17 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     // "down" so the tile honestly says Stopped. CC 2026-06-06:
     // "the Skool daemon is showing a checkmark, but it hasn't stopped."
     const reportedStatus = (h?.status as "healthy" | "degraded" | "down" | "unconfigured") || "unconfigured";
+    // A row the bridge has stopped refreshing is not a reading, it's a relic.
+    // Same freshness rule as the daemon-backed cron rows (5 min vs the 60s
+    // heartbeat): an unparseable or old last_ping_at degrades the worker to
+    // "down" — a twenty-minute-old "healthy" must never render as a green
+    // tile. The timestamp is kept so the UI can say when it was last seen.
+    const pingedAt = h?.last_ping_at ? Date.parse(h.last_ping_at) : NaN;
+    const unreporting =
+      Boolean(h) && (!Number.isFinite(pingedAt) || now - pingedAt > DAEMON_HEALTH_STALE_MS);
     const status = archived
       ? ("archived" as const)
-      : w.manageable_via_pm2 === false
+      : w.manageable_via_pm2 === false || unreporting
         ? ("down" as const)
         : reportedStatus;
     return {
@@ -254,10 +281,13 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       label: w.label,
       purpose: w.purpose,
       status,
-      // Strip stale metadata for forced-down standalones so the
-      // tooltip doesn't show a phantom 5-restart count from when it
-      // last ran.
-      metadata: w.manageable_via_pm2 === false ? {} : h?.metadata || {},
+      // True when a status row exists but is too old to trust — the tile
+      // renders "stopped reporting · last seen …" instead of plain Stopped.
+      stale: unreporting,
+      // Strip stale metadata for forced-down standalones AND unreporting
+      // workers so the tooltip doesn't show a phantom PID/uptime from the
+      // last time the bridge actually saw the process.
+      metadata: w.manageable_via_pm2 === false || unreporting ? {} : h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
       // Default to true so existing pm2-managed workers keep their action
       // buttons. Skool (the one non-pm2 standalone) flips this false. SunBiz

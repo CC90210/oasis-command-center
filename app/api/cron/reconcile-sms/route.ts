@@ -19,7 +19,13 @@ import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// 300, not 60: cron-driver runs on 2026-08-22 caught this route 504ing at the
+// 60s ceiling (runs 32550806413 / 32548947352) once per-tenant destination
+// health refresh landed on top of the deadline-bounded receipt sweep. The
+// receipts phase still self-limits (deadlineMs below); this is headroom for
+// the phases after it, within the Pro-plan function limit. The cron-driver
+// workflow's curl budget was raised in step (-m 330 > 300).
+export const maxDuration = 300;
 
 const SUNBIZ_TENANT_ID = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 

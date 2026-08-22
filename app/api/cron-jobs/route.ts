@@ -18,6 +18,12 @@ import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-h
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
+import {
+  daemonBackedCronForName,
+  deriveDaemonState,
+  type DaemonHealthRow,
+  type DaemonState,
+} from "@/lib/automations/daemon-backed-crons";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -78,10 +84,15 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("tenant_id")
+    .select("id, tenant_id")
     .eq("auth_user_id", user.id)
     .maybeSingle();
-  const tenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  const profileRow = profile.data as { id: string | null; tenant_id: string | null } | null;
+  const tenantId = profileRow?.tenant_id ?? null;
+  // The bridge writes its pm2 snapshot to integrations_health keyed by
+  // profile_id (same scope the background-workers route reads). Needed below
+  // to tell a parked cron twin whether its daemon is actually up.
+  const profileId = profileRow?.id ?? null;
   if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
   // Tenant lane — every authed user sees their tenant's jobs.
@@ -122,6 +133,44 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       .order("created_at", { ascending: false });
     if (!empireQuery.error && empireQuery.data) {
       empireJobs = (empireQuery.data as EmpireCronRow[]).map(normalizeEmpireRow);
+    }
+  }
+
+  // Daemon-backed rows: attach what the process is ACTUALLY doing.
+  //
+  // These rows sit at is_active=0 on purpose — a dedicated PM2 daemon took the
+  // work over and the parked flag is what stops a second runner from
+  // double-messaging real prospects. Reporting `enabled: false` and stopping
+  // there is how the tab came to show the setter as OFF while it was answering
+  // people, so the row now carries the daemon's live status alongside the DB
+  // flag and the UI renders from that. `enabled` stays the honest DB value —
+  // nothing here rewrites it.
+  //
+  // A failed or empty read yields `unknown`, never a green. See
+  // lib/automations/daemon-backed-crons.ts for the freshness rule.
+  const daemonRows = empireJobs.filter((j) => daemonBackedCronForName(j.name));
+  if (daemonRows.length > 0) {
+    const healthByService = new Map<string, DaemonHealthRow>();
+    if (profileId) {
+      const services = daemonRows.map((j) => daemonBackedCronForName(j.name)!.service);
+      const healthQuery = await db
+        .from("integrations_health")
+        .select("service, status, last_ping_at")
+        .eq("profile_id", profileId)
+        .in("service", services);
+      if (!healthQuery.error && Array.isArray(healthQuery.data)) {
+        for (const r of healthQuery.data as Array<{
+          service: string;
+          status: string | null;
+          last_ping_at: string | null;
+        }>) {
+          healthByService.set(r.service, { status: r.status, last_ping_at: r.last_ping_at });
+        }
+      }
+    }
+    for (const job of daemonRows) {
+      const def = daemonBackedCronForName(job.name)!;
+      job.daemon = deriveDaemonState(def, healthByService.get(def.service) ?? null);
     }
   }
 
@@ -197,6 +246,9 @@ function normalizeEmpireRow(row: EmpireCronRow) {
     created_at: row.created_at,
     updated_at: row.created_at,
     source: "empire" as const,
+    // Filled in by the GET for rows a PM2 daemon has taken over; null for the
+    // ordinary rows the shared scheduler still runs.
+    daemon: null as DaemonState | null,
   };
 }
 

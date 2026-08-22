@@ -130,6 +130,8 @@ export default async function FormsPage() {
           initialRows={result.rows}
           tenantLogoUrl={tenantLogoUrl}
           tenantSlug={tenantSlug}
+          tenantName={tenant?.name ?? null}
+          profileSlug={profileSlug}
         />
       ) : null}
     </div>
