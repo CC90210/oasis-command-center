@@ -1,4 +1,5 @@
 import "server-only";
+import { dbError } from "@/lib/db-error";
 import { buildDripHtml } from "@/lib/email/tracked-html";
 
 type Db = ReturnType<typeof import("@/lib/supabase-server").getServiceSupabase>;
@@ -40,7 +41,7 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
       Boolean(row.to_email && row.subject && row.content)
     );
   });
-  if (!candidates.length) return { scanned: 0, inserted: 0, already_recorded: 0 };
+  if (!candidates.length) return { scanned: 0, inserted: 0, already_recorded: 0, orphaned: 0 };
 
   const runIds = candidates.map((row) => String(row.metadata!.drip_run_id));
   const existing = new Set<string>();
@@ -66,9 +67,35 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
     }
   }
 
+  // PARENT EXISTENCE, checked before writing. Both sequence_id (NOT NULL FK ->
+  // drip_sequences) and drip_run_id (FK -> drip_runs) come from HISTORICAL
+  // interaction metadata; when the parent has since been deleted the upsert
+  // dies with SQLITE_CONSTRAINT: FOREIGN KEY — which took this route down
+  // hourly (4 of the last 12 failed cron-driver runs) while the catch reported
+  // "unknown_error". A telemetry row for a deleted sequence or run is
+  // meaningless; it is SKIPPED and COUNTED, never nulled into plausibility and
+  // never allowed to kill the batch that carries the valid rows.
+  const liveRuns = new Set<string>();
+  {
+    const missingRunIds = [...new Set(missing.map((row) => String(row.metadata!.drip_run_id)))];
+    for (let offset = 0; offset < missingRunIds.length; offset += 200) {
+      const result = await db
+        .from("drip_runs")
+        .select("id")
+        .in("id", missingRunIds.slice(offset, offset + 200));
+      if (result.error) throw dbError("drip_runs_existence_check_failed", result.error);
+      for (const row of result.data || []) liveRuns.add(String(row.id));
+    }
+  }
+  const writable = missing.filter((row) =>
+    sequenceClasses.has(String(row.metadata!.sequence_id)) &&
+    liveRuns.has(String(row.metadata!.drip_run_id)),
+  );
+  const orphaned = missing.length - writable.length;
+
   let inserted = 0;
-  for (let offset = 0; offset < missing.length; offset += 100) {
-    const rows = missing.slice(offset, offset + 100).map((row) => {
+  for (let offset = 0; offset < writable.length; offset += 100) {
+    const rows = writable.slice(offset, offset + 100).map((row) => {
       const meta = row.metadata!;
       const sequenceId = String(meta.sequence_id);
       const recipient = row.to_email!;
@@ -113,5 +140,5 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
     inserted += rows.length;
   }
 
-  return { scanned: candidates.length, inserted, already_recorded: existing.size };
+  return { scanned: candidates.length, inserted, already_recorded: existing.size, orphaned };
 }

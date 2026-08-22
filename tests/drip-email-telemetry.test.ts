@@ -101,3 +101,20 @@ assert.doesNotMatch(manifestData, /const chosen = intakeMatch/);
 assert.match(manifestData, /fail closed: never substitute the lead-capture form/);
 
 console.log("drip-email-telemetry: all assertions passed");
+
+// ---------------------------------------------------------------------------
+// FK-orphan gate (2026-08-22). Both sequence_id (NOT NULL FK) and drip_run_id
+// (FK) come from HISTORICAL interaction metadata; a deleted parent made the
+// upsert die with SQLITE_CONSTRAINT: FOREIGN KEY hourly, and until #270 the
+// route reported the cause as "unknown_error". The lib must check parent
+// existence BEFORE writing, skip-and-count orphans (never null them into
+// plausibility), and report the count so a growing orphan set is visible.
+// ---------------------------------------------------------------------------
+{
+  const src = readFileSync("lib/drips/reconcile-email-telemetry.ts", "utf8");
+  assert.match(src, /from\("drip_runs"\)/, "must check drip_runs for parent existence before upserting");
+  assert.match(src, /sequenceClasses\.has\(/, "a sequence missing from the fetch is a DELETED parent, not 'commercial by default'");
+  assert.match(src, /const orphaned = missing\.length - writable\.length/, "orphans must be counted, not silently dropped");
+  assert.match(src, /already_recorded: existing\.size, orphaned/, "the orphan count must be returned so the route surfaces it");
+  assert.doesNotMatch(src, /drip_run_id:\s*null/, "never null an orphan's run id to force the insert through");
+}
