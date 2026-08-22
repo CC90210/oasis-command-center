@@ -43,7 +43,32 @@ function checkPollRateLimit(req: NextRequest): NextResponse | null {
   return null;
 }
 
-async function resolveBridge(req: NextRequest): Promise<{ tenantId: string } | null> {
+// One EXPECTED EXECUTOR per tenant. Cron jobs are machine-affine — the scripts
+// live in repos that exist on exactly one machine — but ANY paired machine
+// could pull the list and, worse, REPORT results. Three incidents in one week
+// came through that gap: a stale-code Mac stamped "unresolvable root" over
+// healthy Atlas rows, and the VPS spent 11 days paired to the wrong tenant.
+// Revocation cannot close it: the Mac holds an operator session and re-pairs
+// itself within the hour (three times on 2026-08-22, same machine
+// fingerprint). So the gate lives here, on the job pipe itself: an unexpected
+// executor receives an EMPTY job list and its result reports are refused.
+// Pairing stays open for ping/health; the cron pipe is exclusive.
+// Mirrors cron_health_check.EXPECTED_PAIRINGS in the harness — change both.
+const EXPECTED_EXECUTOR_BY_TENANT_PREFIX: Record<string, string> = {
+  ef8d389e: "CCPC (Windows)", // OASIS — CC's PC
+  aa04fa1f: "srv1723601 (Linux)", // SunBiz — the VPS
+};
+
+function isExpectedExecutor(tenantId: string, label: string): boolean {
+  const expected = EXPECTED_EXECUTOR_BY_TENANT_PREFIX[tenantId.slice(0, 8)];
+  // Tenants without a declared executor keep the old open behavior — this
+  // gate hardens the governed tenants without bricking future ones.
+  return expected === undefined || expected === label;
+}
+
+async function resolveBridge(
+  req: NextRequest,
+): Promise<{ tenantId: string; label: string } | null> {
   const auth = req.headers.get("authorization") || "";
   if (!auth.toLowerCase().startsWith("bearer ")) return null;
   const tokenPlain = auth.slice(7).trim();
@@ -52,12 +77,12 @@ async function resolveBridge(req: NextRequest): Promise<{ tenantId: string } | n
   const db = getServiceSupabase();
   const pairing = await db
     .from("bridge_pairings")
-    .select("tenant_id, revoked_at")
+    .select("tenant_id, label, revoked_at")
     .eq("bridge_token_hash", tokenHash)
     .maybeSingle();
   if (pairing.error || !pairing.data) return null;
   if (pairing.data.revoked_at) return null;
-  return { tenantId: pairing.data.tenant_id };
+  return { tenantId: pairing.data.tenant_id, label: String(pairing.data.label || "") };
 }
 
 export async function GET(req: NextRequest) {
@@ -65,6 +90,12 @@ export async function GET(req: NextRequest) {
   if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
+  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
+    // 200 with an empty list, not an error: the machine is paired and healthy,
+    // it is simply not this tenant's executor. An error would make its daemon
+    // retry-spin; an empty list makes it idle politely.
+    return NextResponse.json({ ok: true, jobs: [], polled_at: new Date().toISOString() });
+  }
 
   const db = getServiceSupabase();
   // Only enabled jobs go to the bridge — disabled rows still live in the
@@ -86,6 +117,11 @@ export async function POST(req: NextRequest) {
   if (limited) return limited;
   const bridge = await resolveBridge(req);
   if (!bridge) return bad(401, "invalid_or_revoked_bridge_token");
+  if (!isExpectedExecutor(bridge.tenantId, bridge.label)) {
+    // The WRITE side is the one that poisons rows — refuse it loudly so the
+    // machine's own log says exactly why its report was not accepted.
+    return bad(403, "executor_not_authorized_for_tenant");
+  }
 
   let body: Record<string, unknown>;
   try {
