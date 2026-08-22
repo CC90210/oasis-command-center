@@ -35,11 +35,11 @@ import {
   type FormBranding,
   type FormStep,
 } from "@/lib/forms/types";
-import { FORM_THEMES, inferActiveThemeId } from "@/lib/forms/themes";
+import { formThemesForTenant, inferActiveThemeId } from "@/lib/forms/themes";
 import {
-  LEAD_PIPELINE_STAGES,
-  OPPORTUNITY_PIPELINE_STAGES,
-} from "@/lib/sunbiz-stage-meta";
+  formStageGroupsForTenant,
+  isSunbizFormsTenant,
+} from "@/lib/forms/tenant-form-config";
 
 type FormRecord = {
   id: string;
@@ -56,28 +56,19 @@ type FormRecord = {
 
 type Props = {
   initialForm: FormRecord;
+  /** Resolved PROFILE slug ("sun" for SunBiz) — scopes themes, stage
+   *  vocabulary, and the SunBiz doc-step affordances to the right tenant. */
+  profileSlug: string | null;
 };
 
-// Operator-friendly stage options for the per-step "what happens next?"
-// dropdown. The Lead and Opportunity pipelines are the two stage families
-// a SunBiz form can transition into; rendered as optgroups so a flat list
-// of 20+ stages doesn't overwhelm.
-const STAGE_GROUPS: Array<{ label: string; options: { value: string; label: string }[] }> = [
-  {
-    label: "Lead Pipeline",
-    options: LEAD_PIPELINE_STAGES.map((s) => ({ value: s.key, label: s.label })),
-  },
-  {
-    label: "Opportunity Pipeline",
-    options: OPPORTUNITY_PIPELINE_STAGES.map((s) => ({
-      value: s.key,
-      label: s.label,
-    })),
-  },
-];
-
-export function FormBuilderClient({ initialForm }: Props) {
+export function FormBuilderClient({ initialForm, profileSlug }: Props) {
   const router = useRouter();
+  const isSunbiz = isSunbizFormsTenant(profileSlug);
+  // Tenant-scoped presets: SunBiz keeps its branded themes and its
+  // Lead/Opportunity stage vocabulary; other tenants get neutral themes and
+  // THEIR OWN stage list (empty = dropdown offers only "don't change").
+  const formThemes = useMemo(() => formThemesForTenant(profileSlug), [profileSlug]);
+  const stageGroups = useMemo(() => formStageGroupsForTenant(profileSlug), [profileSlug]);
 
   const [name, setName] = useState(initialForm.name);
   const [description, setDescription] = useState(initialForm.description || "");
@@ -92,7 +83,10 @@ export function FormBuilderClient({ initialForm }: Props) {
     initialForm.on_complete_stage || "",
   );
 
-  const activeThemeId = useMemo(() => inferActiveThemeId(branding), [branding]);
+  const activeThemeId = useMemo(
+    () => inferActiveThemeId(branding, formThemes),
+    [branding, formThemes],
+  );
 
   // Live-validate via the same parsers the server runs so we surface
   // FormDefinitionError messages before the save round-trip.
@@ -128,7 +122,7 @@ export function FormBuilderClient({ initialForm }: Props) {
   >(null);
 
   function applyTheme(themeId: string) {
-    const theme = FORM_THEMES.find((t) => t.id === themeId);
+    const theme = formThemes.find((t) => t.id === themeId);
     if (!theme) return;
     // Merge so operator-customized logo_url survives.
     setBranding({ ...branding, ...theme.branding });
@@ -248,7 +242,9 @@ export function FormBuilderClient({ initialForm }: Props) {
           </span>
         </div>
 
-        {!hasFileUploadField && (
+        {/* SunBiz-only affordance: the doc-collection reminder + one-click
+            docs step are SunBiz underwriting workflow, not platform UI. */}
+        {isSunbiz && !hasFileUploadField && (
           <div className="rounded-xl border border-status-warn/40 bg-status-warn/10 p-3 text-xs text-fg flex items-start gap-2">
             <AlertCircle className="h-3.5 w-3.5 text-status-warn shrink-0 mt-0.5" />
             <span>
@@ -315,7 +311,7 @@ export function FormBuilderClient({ initialForm }: Props) {
             those live under Settings → Templates.
           </p>
           <div className="grid sm:grid-cols-2 gap-2">
-            {FORM_THEMES.map((theme) => {
+            {formThemes.map((theme) => {
               const active = activeThemeId === theme.id;
               return (
                 <button
@@ -383,7 +379,11 @@ export function FormBuilderClient({ initialForm }: Props) {
           <h3 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
             Steps & fields
           </h3>
-          <VisualFieldsEditor steps={steps} onChange={setSteps} />
+          <VisualFieldsEditor
+            steps={steps}
+            onChange={setSteps}
+            sunbizPresets={isSunbiz}
+          />
         </section>
 
         <section className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/40 p-4">
@@ -392,40 +392,64 @@ export function FormBuilderClient({ initialForm }: Props) {
           </h3>
           <p className="text-[11px] text-fg-dim leading-relaxed">
             When the prospect finishes a step, optionally move their lead to
-            a new pipeline stage. The standard SunBiz flow is to advance to
-            <strong> Sent Application</strong> after the first step, then{" "}
-            <strong>Submitted</strong> after the docs are uploaded.
+            a new pipeline stage.
+            {isSunbiz && (
+              <>
+                {" "}The standard SunBiz flow is to advance to
+                <strong> Sent Application</strong> after the first step, then{" "}
+                <strong>Submitted</strong> after the docs are uploaded.
+              </>
+            )}
+            {stageGroups.length === 0 && (
+              <>
+                {" "}No pipeline vocabulary is registered for this workspace
+                yet, so submissions won&apos;t move the lead&apos;s stage.
+              </>
+            )}
           </p>
           <div className="space-y-2">
-            {steps.map((step, idx) => (
-              <div
-                key={step.key || idx}
-                className="flex items-center gap-3 rounded-md border border-bg-border bg-bg-deep/60 px-3 py-2"
-              >
-                <span className="text-[11px] font-bold uppercase tracking-wider text-fg-dim shrink-0">
-                  Step {idx + 1}
-                </span>
-                <span className="text-sm text-fg truncate flex-1">
-                  {step.title || `(untitled)`}
-                </span>
-                <select
-                  value={outcomeForStep(idx)}
-                  onChange={(e) => updateStepOutcome(idx, e.target.value)}
-                  className="rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-xs text-fg"
+            {steps.map((step, idx) => {
+              const current = outcomeForStep(idx);
+              // A stage saved before the vocabulary was tenant-scoped (or by
+              // another tenant's operator) may not be in this tenant's list.
+              // Keep it VISIBLE as a legacy option rather than silently
+              // rendering the select as "don't change" over a live value.
+              const currentIsKnown =
+                !current ||
+                stageGroups.some((g) => g.options.some((o) => o.value === current));
+              return (
+                <div
+                  key={step.key || idx}
+                  className="flex items-center gap-3 rounded-md border border-bg-border bg-bg-deep/60 px-3 py-2"
                 >
-                  <option value="">Don&apos;t change the stage</option>
-                  {STAGE_GROUPS.map((group) => (
-                    <optgroup key={group.label} label={group.label}>
-                      {group.options.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </div>
-            ))}
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-fg-dim shrink-0">
+                    Step {idx + 1}
+                  </span>
+                  <span className="text-sm text-fg truncate flex-1">
+                    {step.title || `(untitled)`}
+                  </span>
+                  <select
+                    value={current}
+                    onChange={(e) => updateStepOutcome(idx, e.target.value)}
+                    className="rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-xs text-fg"
+                  >
+                    <option value="">Don&apos;t change the stage</option>
+                    {!currentIsKnown && (
+                      <option value={current}>{current} (legacy)</option>
+                    )}
+                    {stageGroups.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
           </div>
           <div>
             <label className="block text-[11px] uppercase tracking-wider font-bold text-fg-dim mb-1">

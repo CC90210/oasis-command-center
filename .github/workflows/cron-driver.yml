@@ -76,7 +76,11 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 25, not 10: curl below waits up to 330s per route (matching the slowest
+    # route's maxDuration=300 + margin), and the busiest tick drives 4 routes
+    # sequentially — 4 x 330s = 22 min worst case. A job timeout below that
+    # would kill a still-succeeding tick and report it as a driver failure.
+    timeout-minutes: 25
     steps:
       - name: Drive the due cron routes
         env:
@@ -174,7 +178,10 @@ jobs:
           # exports GET. (Codex review, 2026-08-11.)
           FAILED=0
           for path in ${ROUTES}; do
-            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 120 \
+            # -m 330 covers the slowest route's maxDuration (reconcile-sms,
+            # 300s) plus network margin. At the old -m 120 a route Vercel was
+            # still legally running would be reported dead by the driver.
+            code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 330 \
                      "${BASE}${path}" \
                      -H "Authorization: Bearer ${SECRET}") || code="000"
             body=$(head -c 400 /tmp/out.json 2>/dev/null | tr -d '\n')

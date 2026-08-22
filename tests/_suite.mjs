@@ -44,6 +44,14 @@ const TESTS = [
   "tests/application-pdf-rendered.test.ts",
   "tests/application-pdf.test.ts",
   "tests/forms-visibility.test.ts",
+  // Delete reported 404 AFTER deleting the row: the Turso adapter swallowed
+  // `{ count: "exact" }` on delete/update. Runs the real adapter against a
+  // real in-memory libSQL db and pins create+delete to one resolveTenantId.
+  "tests/forms-delete-tenant-scope.test.ts",
+  // The form builder was SunBiz-hardcoded for every tenant. Pins the tenant
+  // boundary: sun keeps its presets, nobody else ever sees them, unknown
+  // tenants get NO stage vocabulary (fail closed).
+  "tests/forms-tenant-scoping.test.ts",
   "tests/oasis-funnel.test.ts",
   "tests/lead-scope.test.ts",
   // Sits beside lead-scope deliberately: both defend "who may see which rows".
@@ -121,6 +129,10 @@ const TESTS = [
   "tests/sms-lawful-basis.test.ts",
   "tests/shopout-dispatch-honesty.test.ts",
   "tests/cron-driver-coverage.test.ts",
+  // Sits beside cron-driver-coverage deliberately: that one proves every
+  // registered cron has something driving it, this one proves the one cron
+  // that must NOT be driven can't be armed from the dashboard.
+  "tests/daemon-backed-crons.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",
@@ -156,6 +168,11 @@ const TESTS = [
   // Beside it deliberately: the profile module decides WHO a client's replies
   // come from, and this covers the rules that decision must satisfy.
   "tests/reply-identity.test.ts",
+  // tests/client-automation-lifecycle.test.ts was registered here (1b58d49c)
+  // but its file and the 150_reply_identity_pairing migration it builds from
+  // were never committed — and main has since shipped a different migration
+  // 150. Re-register it when the reply-identity work lands with a renumbered
+  // migration; until then the registration pointed at nothing.
   // APEX's Web Leads browser (PR #242).
   "tests/web-leads-filters.test.ts",
   "tests/web-leads-queries.test.ts",

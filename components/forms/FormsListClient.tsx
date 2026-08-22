@@ -12,7 +12,7 @@ import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Plus, Edit3, ToggleLeft, ToggleRight, Trash2, ExternalLink, Loader2, Copy, Check } from "lucide-react";
-import { getFormTheme } from "@/lib/forms/themes";
+import { starterFormForTenant } from "@/lib/forms/tenant-form-config";
 
 type FormRow = {
   id: string;
@@ -29,71 +29,20 @@ function todayStamp(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Starter template — every new form ships with a file-upload step out of
-// the box so SunBiz operators don't have to remember to add one. The
-// document field names (bank_statements_3mo / drivers_license /
-// void_cheque / proof_of_ownership) match the doc_type classifier in
-// migration 049 so submit-side storage keys land in the right bucket
-// without a second pass. proof_of_ownership is required:false — it
-// speeds up underwriting when present but funding can proceed without
-// it. Branding is sourced from the sunbiz_standard theme so the picker
-// highlights it as active immediately and the two sources can't drift.
-function starterBranding(tenantLogoUrl: string | null) {
-  const base = getFormTheme("sunbiz_standard")!.branding;
-  return tenantLogoUrl ? { ...base, logo_url: tenantLogoUrl } : base;
-}
-
-const STARTER_FORM_TEMPLATE = {
-  steps: [
-    {
-      key: "basic",
-      title: "Tell us about your business",
-      description: "A few quick questions to get started.",
-      fields: [
-        { name: "business_name", label: "Business name", type: "text", required: true },
-        { name: "contact_name", label: "Your name", type: "text", required: true },
-        { name: "email", label: "Email", type: "email", required: true },
-        { name: "phone", label: "Phone", type: "phone", required: true },
-        { name: "monthly_revenue", label: "Monthly revenue", type: "currency" },
-      ],
-    },
-    {
-      key: "documents",
-      title: "Upload your documents",
-      description:
-        "Drag and drop everything here — bank statements, driver's license, voided check. As many files as you need.",
-      fields: [
-        {
-          // 2026-06-20 (Ethan/Alex): ONE drag-and-drop bucket for ALL document
-          // types — no fixed sub-slots. Matches the canonical SunBiz templates
-          // (lib/forms/sunbiz-templates.ts); the submit route classifies each
-          // file by filename. Field name `bank_statements` for submit-route
-          // detection + the Telegram bank hook.
-          name: "bank_statements",
-          label: "Your documents",
-          help: "Last 3+ months of business bank statements (all accounts), plus your driver's license and a voided check if you have them. PDF or clear photos. Add as many as you need.",
-          type: "file_upload_multi",
-          required: true,
-          accept: ["application/pdf", "image/*"],
-          max_files: 50,
-          max_file_mb: 25,
-        },
-      ],
-    },
-  ],
-  step_outcomes: { "0": "sent_application" },
-  on_complete_stage: "submitted",
-  enabled: true,
-};
-
 export function FormsListClient({
   initialRows,
   tenantLogoUrl,
   tenantSlug,
+  tenantName,
+  profileSlug,
 }: {
   initialRows: FormRow[];
   tenantLogoUrl: string | null;
   tenantSlug: string | null;
+  /** tenants.name — the neutral starter's headline is the tenant's own name. */
+  tenantName: string | null;
+  /** Resolved PROFILE slug ("sun" for SunBiz) — picks the starter template. */
+  profileSlug: string | null;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -122,12 +71,14 @@ export function FormsListClient({
       // Mint a unique slug — operator can change it before save (well,
       // can't, since slug is immutable, but the starter slug is OK).
       const slug = `form-${Date.now().toString(36)}`;
+      // Tenant-scoped starter — SunBiz gets its doc-collection template,
+      // everyone else a neutral contact form in THEIR branding (see
+      // lib/forms/tenant-form-config.ts).
       const res = await fetch("/api/forms", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          ...STARTER_FORM_TEMPLATE,
-          branding: starterBranding(tenantLogoUrl),
+          ...starterFormForTenant(profileSlug, tenantName, tenantLogoUrl),
           name: `New form — ${todayStamp()}`,
           slug,
         }),

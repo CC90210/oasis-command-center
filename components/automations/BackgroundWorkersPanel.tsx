@@ -17,10 +17,8 @@
 
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/fetch-json";
+import { runWorkerAction, type WorkerAction } from "@/lib/automations/worker-control";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
-
-const BRIDGE_BASE =
-  process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
 
 /**
  * Workers whose Stop or Restart action could break the dashboard's
@@ -44,6 +42,10 @@ type Worker = {
   label: string;
   purpose: string;
   status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
+  /** True when a status row exists but stopped refreshing (>5 min old) — the
+   * server already degraded `status` to "down"; this flag only changes the
+   * copy from "Stopped" to "stopped reporting". */
+  stale?: boolean;
   metadata: Record<string, unknown>;
   last_ping_at: string | null;
   /** True when the worker is registered with pm2 and the dashboard's
@@ -227,57 +229,6 @@ export function BackgroundWorkersPanel() {
   );
 }
 
-/** PM2 control actions exposed in the UI. */
-type WorkerAction = "start" | "stop" | "restart";
-
-/**
- * Drive pm2 from the dashboard. Two routes:
- *   - LOCAL (operator's machine): the browser POSTs the bridge's localhost
- *     exec-tool directly (Vercel can't reach localhost).
- *   - REMOTE (SunBiz VPS daemons): route through the server-side proxy
- *     /api/automations/background-workers/control, which holds the bridge
- *     bearer + allowlists the command. The browser never sees the bearer and
- *     can only ask for `pm2 <action> <allowlisted-name>`.
- *
- * service is the full Worker.service string ("pm2.claude-bridge"). The
- * pm2 CLI wants the name without the prefix.
- */
-async function runWorkerAction(
-  service: string,
-  action: WorkerAction,
-  remoteControl: boolean,
-): Promise<{ ok: boolean; output: string }> {
-  // Strip "pm2." prefix if present; defense-in-depth allowlist of allowed
-  // characters keeps the bash injection surface to literal pm2 names.
-  const name = service.replace(/^pm2\./, "");
-  if (!/^[a-z0-9._-]+$/i.test(name)) {
-    return { ok: false, output: "invalid_service_name" };
-  }
-  try {
-    const res = remoteControl
-      ? await fetch(`/api/automations/background-workers/control`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ service, action }),
-        })
-      : await fetch(`${BRIDGE_BASE}/exec-tool`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            tool_name: "bash",
-            input: { command: `pm2 ${action} ${name}` },
-          }),
-        });
-    const data = (await res.json()) as { ok?: boolean; output?: string; is_error?: boolean; error?: string };
-    if (!res.ok || data.ok === false || data.is_error === true) {
-      return { ok: false, output: data.error || data.output || `http_${res.status}` };
-    }
-    return { ok: true, output: data.output || "ok" };
-  } catch (e) {
-    return { ok: false, output: e instanceof Error ? e.message : "network_failure" };
-  }
-}
-
 function WorkerRow({
   worker,
   bridgeOnline,
@@ -328,15 +279,25 @@ function WorkerRow({
   const memMb = memBytes ? Math.round(memBytes / 1024 / 1024) : 0;
   const uptimeStr = uptimeMs ? formatUptime(Date.now() - uptimeMs) : null;
 
+  // A down tile always says WHEN the worker was last heard from — "Stopped"
+  // with no timestamp and a 20-minute-old silence look identical otherwise.
+  // The optimistic flip has no fresh ping to quote, so it shows plain
+  // "Stopped"/"Running" until the next heartbeat lands.
+  const lastSeen =
+    optimisticStatus === null && worker.last_ping_at
+      ? ` · last seen ${new Date(worker.last_ping_at).toLocaleTimeString()}`
+      : "";
   const statusLabel =
     effectiveStatus === "healthy"
       ? uptimeStr
         ? `Running · up ${uptimeStr}`
         : "Running"
       : effectiveStatus === "down"
-        ? "Stopped"
+        ? optimisticStatus === null && worker.stale
+          ? `Down — stopped reporting${lastSeen}`
+          : `Stopped${lastSeen}`
         : effectiveStatus === "degraded"
-          ? "Degraded — check logs"
+          ? `Degraded — check logs${lastSeen}`
           : "Not running on your machine";
 
   // Detailed pm2 fields land in the tooltip. Operators who care about

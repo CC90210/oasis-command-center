@@ -22,6 +22,8 @@ import {
   Clock,
   Check,
   AlertCircle,
+  HelpCircle,
+  Cpu,
   Sparkles,
   Edit3,
   Save,
@@ -32,6 +34,8 @@ import {
 } from "lucide-react";
 import { friendlyDescription } from "@/lib/cron-descriptions";
 import { fetchJson } from "@/lib/fetch-json";
+import { runWorkerAction } from "@/lib/automations/worker-control";
+import type { DaemonState } from "@/lib/automations/daemon-backed-crons";
 
 type ActionType = "script_run" | "snapshot_run" | "agent_prompt" | "webhook_post";
 
@@ -57,7 +61,24 @@ type CronJob = {
   created_at: string;
   updated_at: string;
   source: "tenant" | "empire";
+  /**
+   * Present when a dedicated PM2 process does this row's work and the cron
+   * twin is parked at is_active=0 on purpose. When it's here, `enabled` is
+   * the parked DB flag and says nothing about whether the automation is
+   * running — `daemon.state` is the answer, and the toggle drives the
+   * process rather than the row. See lib/automations/daemon-backed-crons.ts.
+   */
+  daemon?: DaemonState | null;
 };
+
+/**
+ * Is this automation on? For a daemon-backed row that is a question about the
+ * process, not about `is_active` — reading the DB flag is what put "OFF" under
+ * the Instagram setter while it was answering people.
+ */
+function isRunning(job: CronJob): boolean {
+  return job.daemon ? job.daemon.state === "running" : job.enabled;
+}
 
 type Props = { agentKeys: string[] };
 
@@ -263,7 +284,62 @@ export function CronJobsManager({ agentKeys }: Props) {
     refresh();
   }, []);
 
+  /**
+   * Start or stop the PM2 process behind a daemon-backed row.
+   *
+   * Deliberately NOT a PATCH. Writing `enabled` on one of these rows re-arms
+   * the shared scheduler's copy of the same script AND stops the daemon from
+   * booting next time (it reads that flag and refuses when armed), so the
+   * toggle that looks like "turn my setter back on" was the toggle that took
+   * it offline. The API refuses that write now; this is the path that
+   * replaces it — the same localhost exec-tool the Background workers panel
+   * has always used for Start/Stop/Restart.
+   *
+   * Local, not remote: empire rows are CC's own machine's daemons by
+   * definition, so the browser talks to the local bridge directly.
+   */
+  async function toggleDaemonBacked(job: CronJob) {
+    const daemon = job.daemon;
+    if (!daemon) return;
+    const running = daemon.state === "running";
+    const action = running ? "stop" : "start";
+    // Stopping is the destructive direction and there is no undo fast enough
+    // for someone mid-conversation, so it asks. Starting doesn't.
+    if (running && !confirm(`${daemon.stop_warning}\n\nStop ${daemon.process_name}?`)) return;
+
+    setPendingId(job.id);
+    setToggleError(null);
+    const result = await runWorkerAction(daemon.service, action, false);
+    setPendingId((cur) => (cur === job.id ? null : cur));
+    if (!result.ok) {
+      setToggleError(
+        `Couldn't ${action} ${daemon.process_name}: ${result.output.slice(0, 120)}`,
+      );
+      return;
+    }
+    // Optimistic flip so the click reads as cause-and-effect. The bridge's
+    // next 60s heartbeat replaces this with a measured value; the refresh
+    // below pulls it as soon as one lands.
+    setJobs((prev) =>
+      prev?.map((j) =>
+        j.id === job.id
+          ? { ...j, daemon: { ...daemon, state: running ? "stopped" : "running", stale: false } }
+          : j,
+      ) ?? null,
+    );
+    setRecentlyToggled({ id: job.id, ts: Date.now() });
+    setTimeout(() => {
+      setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
+    }, 6_000);
+    setTimeout(() => { void refresh(); }, 5_000);
+  }
+
   async function toggleEnabled(job: CronJob) {
+    // A row a background process owns never reaches the PATCH below.
+    if (job.daemon) {
+      await toggleDaemonBacked(job);
+      return;
+    }
     const next = !job.enabled;
     // Optimistic update — paint the new state instantly so the operator
     // sees a click → state-change cause-and-effect even when the network
@@ -358,7 +434,9 @@ export function CronJobsManager({ agentKeys }: Props) {
             if (jobs.length === 0) return "No automations yet.";
             const tenantCount = jobs.filter((j) => j.source === "tenant").length;
             const empireCount = jobs.filter((j) => j.source === "empire").length;
-            const activeCount = jobs.filter((j) => j.enabled).length;
+            // Counts the daemon-backed rows by what their process is doing,
+            // so "N active" matches the toggles the operator can see.
+            const activeCount = jobs.filter(isRunning).length;
             // Honest, unambiguous labels (CC asked 2026-05-25 "what
             // even are those metrics"). The "empire" split only shows
             // when the signed-in user is the empire operator AND
@@ -517,17 +595,31 @@ function JobRow({
   // SEED_JOBS re-asserts them on every bridge tick; only the on/off is
   // operator-controlled.
   const isEmpire = job.source === "empire";
+  // A dedicated PM2 process owns this row's work. `job.enabled` is then the
+  // parked interlock flag that keeps a second runner off the same script — it
+  // is not this automation's state, and nothing below may read it as one.
+  const daemon = job.daemon ?? null;
+  const running = isRunning(job);
+  const daemonUnknown = daemon !== null && daemon.state === "unknown";
   const ranOk = job.last_run_status === "success";
   const ranBad = job.last_run_status === "error";
   // Card border telegraphs status at a glance: green if last run succeeded,
-  // warm if it errored, muted if disabled, neutral otherwise.
-  const borderClass = !job.enabled
-    ? "border-bg-border bg-bg-deep/40 opacity-60"
-    : ranBad
-      ? "border-status-warm/30 bg-status-warm/5"
-      : ranOk
-        ? "border-bg-border bg-bg-elev/30"
-        : "border-bg-border bg-bg-elev/30";
+  // warm if it errored, muted if disabled, neutral otherwise. Daemon-backed
+  // rows answer from the process instead — a stale scheduler-era error must
+  // not paint a running setter red, and a parked flag must not grey it out.
+  const borderClass = daemon
+    ? daemon.state === "running"
+      ? "border-bg-border bg-bg-elev/30"
+      : daemon.state === "stopped"
+        ? "border-status-warm/30 bg-status-warm/5"
+        : "border-bg-border bg-bg-deep/40"
+    : !job.enabled
+      ? "border-bg-border bg-bg-deep/40 opacity-60"
+      : ranBad
+        ? "border-status-warm/30 bg-status-warm/5"
+        : ranOk
+          ? "border-bg-border bg-bg-elev/30"
+          : "border-bg-border bg-bg-elev/30";
   return (
     <div className={`rounded-lg border p-4 ${borderClass}`}>
       <div className="flex items-start gap-4">
@@ -540,24 +632,32 @@ function JobRow({
             disabled={isPending}
             className="flex flex-col items-center gap-0.5 group disabled:opacity-70"
             title={
-              isEmpire
-                ? job.enabled
-                  ? "Empire automation — click to pause. Schedule + action stay locked to SEED_JOBS; only the on/off flips."
-                  : "Empire automation — click to resume."
-                : job.enabled
-                  ? "Click to disable — keeps the spec, stops firing"
-                  : "Click to enable"
+              daemon
+                ? daemon.state === "running"
+                  ? `Running as the ${daemon.process_name} process — click to stop it.`
+                  : daemon.state === "stopped"
+                    ? `The ${daemon.process_name} process is stopped — click to start it.`
+                    : `Can't read ${daemon.process_name}'s status right now. Clicking will try to start it.`
+                : isEmpire
+                  ? job.enabled
+                    ? "Empire automation — click to pause. Schedule + action stay locked to SEED_JOBS; only the on/off flips."
+                    : "Empire automation — click to resume."
+                  : job.enabled
+                    ? "Click to disable — keeps the spec, stops firing"
+                    : "Click to enable"
             }
           >
             {isPending ? (
               <Loader2 className="w-7 h-7 text-accent animate-spin" />
-            ) : job.enabled ? (
+            ) : daemonUnknown ? (
+              <HelpCircle className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
+            ) : running ? (
               <ToggleRight className="w-7 h-7 text-status-engaged group-hover:scale-110 transition-transform" />
             ) : (
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
-            <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : job.enabled ? "text-status-engaged" : "text-fg-faint"}`}>
-              {isPending ? "Saving" : job.enabled ? "On" : "Off"}
+            <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : daemonUnknown ? "text-fg-dim" : running ? "text-status-engaged" : "text-fg-faint"}`}>
+              {isPending ? (daemon ? "Working" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
             </span>
           </button>
         </div>
@@ -571,6 +671,15 @@ function JobRow({
                 Empire
               </span>
             )}
+            {daemon && (
+              <span
+                className="text-[10px] uppercase tracking-wider text-fg-muted border border-bg-border rounded-full px-1.5 py-0.5 font-bold inline-flex items-center gap-1 font-mono"
+                title="Runs as a dedicated background process, not on the shared scheduler."
+              >
+                <Cpu className="w-3 h-3" />
+                {daemon.process_name}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-wrap mt-1">
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
@@ -581,6 +690,7 @@ function JobRow({
               {job.action_type.replace(/_/g, " ")}
             </span>
           </div>
+          {daemon && <DaemonBanner daemon={daemon} />}
           {/* Prefer operator-friendly copy from lib/cron-descriptions
               over the raw DB row (which is written for engineers and
               references internal paths). Falls back to the DB string
@@ -595,19 +705,32 @@ function JobRow({
           {justToggled && (
             <div className="mt-2 text-[11px] text-accent inline-flex items-center gap-1">
               <Clock className="w-3 h-3" />
-              {job.enabled
-                ? "Enabled — first fire within ~60 seconds (next bridge poll)."
-                : "Disabled — stops firing within ~60 seconds (next bridge poll)."}
+              {daemon
+                ? running
+                  ? `${daemon.process_name} started — it picks up its queue on the next tick.`
+                  : `${daemon.process_name} stopped. Nothing else was changed.`
+                : job.enabled
+                  ? "Enabled — first fire within ~60 seconds (next bridge poll)."
+                  : "Disabled — stops firing within ~60 seconds (next bridge poll)."}
             </div>
           )}
 
           {/* Schedule + last run live on one row so the eye reads
               "Daily at 06:00 · Ran successfully 2h ago · 142 total" */}
           <div className="flex items-center gap-x-3 gap-y-1 flex-wrap mt-2.5 text-xs">
-            <span className="inline-flex items-center gap-1.5 text-fg-muted">
+            {/* Daemon-backed rows do not run on this schedule — the process
+                ticks on its own. Showing "Every minute" here would be the
+                same class of lie as the OFF toggle was. The parked cron
+                expression stays available in the tooltip. */}
+            <span
+              className="inline-flex items-center gap-1.5 text-fg-muted"
+              title={daemon ? `Parked scheduler entry: ${job.schedule}` : undefined}
+            >
               <Clock className="w-3.5 h-3.5" />
-              <span className="font-medium text-fg">{friendlySchedule}</span>
-              {showRawSchedule && (
+              <span className="font-medium text-fg">
+                {daemon ? "Continuously — its own process" : friendlySchedule}
+              </span>
+              {!daemon && showRawSchedule && (
                 <span className="text-fg-faint font-mono text-[10px]">({job.schedule})</span>
               )}
             </span>
@@ -620,8 +743,18 @@ function JobRow({
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
-                <span className={ranBad ? "text-status-warm font-medium" : "text-fg-muted"}>
-                  {ranOk ? "Ran" : ranBad ? "Failed" : "Ran"} {relativeTimeShort(job.last_run_at)}
+                <span className={ranBad && !daemon ? "text-status-warm font-medium" : "text-fg-muted"}>
+                  {/* For a daemon-backed row this is history from when the
+                      shared scheduler still ran it — say so, rather than
+                      letting it read as the process's last tick. */}
+                  {daemon
+                    ? "Last scheduler run"
+                    : ranOk
+                      ? "Ran"
+                      : ranBad
+                        ? "Failed"
+                        : "Ran"}{" "}
+                  {relativeTimeShort(job.last_run_at)}
                 </span>
                 <span className="text-fg-faint">·</span>
                 <span className="text-fg-faint">{job.run_count} total</span>
@@ -656,11 +789,83 @@ function JobRow({
       </div>
 
       {job.last_run_error && (
-        <div className="mt-3 text-[11px] text-status-warm bg-status-warm/5 border border-status-warm/30 rounded px-2.5 py-1.5 font-mono break-words">
-          <span className="font-bold not-italic">Error: </span>
+        <div
+          className={`mt-3 text-[11px] rounded px-2.5 py-1.5 font-mono break-words ${
+            daemon
+              ? "text-fg-muted bg-bg-deep/50 border border-bg-border"
+              : "text-status-warm bg-status-warm/5 border border-status-warm/30"
+          }`}
+        >
+          {/* Not this process's error — it belongs to the parked scheduler
+              entry. Labelled and de-emphasised so a running daemon doesn't
+              wear an old red box. */}
+          <span className="font-bold not-italic">
+            {daemon ? "Last scheduler run error: " : "Error: "}
+          </span>
           {job.last_run_error.slice(0, 240)}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The honest line for a row a background process runs.
+ *
+ * Two jobs: explain why the row's cron twin is parked (so nobody "fixes" it),
+ * and report what the process is doing RIGHT NOW with the time of the reading.
+ * `unknown` is a first-class outcome here — a status we can't currently read
+ * says so and shows how old the last one was, because the alternative is a
+ * green light that means nothing.
+ */
+function DaemonBanner({ daemon }: { daemon: DaemonState }) {
+  const dotClass =
+    daemon.state === "running"
+      ? "bg-status-engaged"
+      : daemon.state === "stopped"
+        ? "bg-status-warm"
+        : daemon.state === "degraded"
+          ? "bg-accent"
+          : "bg-fg-dim";
+  const seen = relativeTimeShort(daemon.last_ping_at);
+  const line =
+    daemon.state === "running" ? (
+      <>
+        <span className="text-status-engaged font-bold">Running.</span> Checked {seen}.
+      </>
+    ) : daemon.state === "stopped" ? (
+      <>
+        <span className="text-status-warm font-bold">Stopped.</span>{" "}
+        <span className="font-mono">{daemon.process_name}</span> was not running as of {seen}.
+        Nothing is doing this work right now.
+      </>
+    ) : daemon.state === "degraded" ? (
+      <>
+        <span className="text-accent font-bold">Starting or stopping.</span> Your machine reported{" "}
+        <span className="font-mono">{daemon.reported_status}</span> {seen}.
+      </>
+    ) : daemon.stale ? (
+      <>
+        <span className="text-fg-muted font-bold">Unknown.</span> Last reading was{" "}
+        <span className="font-mono">{daemon.reported_status}</span> {seen} — too old to trust, so
+        this isn&apos;t reporting it as running. Check the bridge on your machine.
+      </>
+    ) : (
+      <>
+        <span className="text-fg-muted font-bold">Unknown.</span> Your machine hasn&apos;t reported{" "}
+        <span className="font-mono">{daemon.process_name}</span> at all. Nothing here can say
+        whether it&apos;s up.
+      </>
+    );
+  return (
+    <div className="mt-2 rounded-md border border-bg-border bg-bg-deep/50 px-2.5 py-2 space-y-1">
+      <div className="text-[11px] text-fg-muted leading-relaxed">
+        <span className="text-fg font-bold">Runs as its own process.</span> {daemon.why}
+      </div>
+      <div className="text-[11px] text-fg-muted leading-relaxed inline-flex items-start gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 mt-1.5 ${dotClass}`} />
+        <span>{line}</span>
+      </div>
     </div>
   );
 }

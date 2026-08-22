@@ -9,6 +9,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { daemonToggleRefusal, type CronNameLookup } from "@/lib/automations/daemon-cron-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +21,42 @@ function isValidCron(expr: string): boolean {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
   return parts.every((p) => CRON_FIELD.test(p));
+}
+
+/**
+ * Look the row's name up, then let daemonToggleRefusal() decide.
+ *
+ * Both lanes are read with the SAME filter their UPDATE below uses, so the
+ * guard can never check one row while the write lands on another. A failed
+ * read is reported as a failed read — NOT as "no such row" — because the two
+ * lead to opposite decisions (see lib/automations/daemon-cron-guard.ts).
+ *
+ * Returns a response to send, or null when the write may proceed.
+ */
+async function refuseDaemonBackedToggle(
+  db: ReturnType<typeof getServiceSupabase>,
+  id: string,
+  tenantId: string,
+): Promise<NextResponse | null> {
+  const tenantRow = await db
+    .from("tenant_cron_jobs")
+    .select("name")
+    .eq("id", id)
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  const empireRow = await db.from("cron_jobs").select("name").eq("id", id).maybeSingle();
+  const lookup: CronNameLookup =
+    tenantRow.error || empireRow.error
+      ? { ok: false }
+      : {
+          ok: true,
+          name:
+            (tenantRow.data as { name: string | null } | null)?.name ??
+            (empireRow.data as { name: string | null } | null)?.name ??
+            null,
+        };
+  const refusal = daemonToggleRefusal(lookup);
+  return refusal ? NextResponse.json(refusal.body, { status: refusal.status }) : null;
 }
 
 export async function PATCH(
@@ -88,6 +125,11 @@ export async function PATCH(
   }
 
   const db = getServiceSupabase();
+  // Before ANY write: a row a background process owns is not toggled from here.
+  if (typeof body.enabled === "boolean") {
+    const refusal = await refuseDaemonBackedToggle(db, id, tenantId);
+    if (refusal) return refusal;
+  }
   const { data, error } = await db
     .from("tenant_cron_jobs")
     .update(update)

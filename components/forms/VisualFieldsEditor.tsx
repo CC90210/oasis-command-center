@@ -142,9 +142,16 @@ function blankField(type: FormFieldType): FormField {
 type Props = {
   steps: FormStep[];
   onChange: (next: FormStep[]) => void;
+  /**
+   * Show the SunBiz-specific one-click presets ("Add SunBiz docs step").
+   * Off by default: the underwriting doc-collection step is SunBiz workflow,
+   * and rendering it on another tenant's builder was a tenant bleed
+   * (2026-08-22). FormBuilderClient passes true only for the "sun" profile.
+   */
+  sunbizPresets?: boolean;
 };
 
-export function VisualFieldsEditor({ steps, onChange }: Props) {
+export function VisualFieldsEditor({ steps, onChange, sunbizPresets = false }: Props) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(steps.map((s, i) => [s.key || String(i), i === 0])),
   );
@@ -374,15 +381,17 @@ export function VisualFieldsEditor({ steps, onChange }: Props) {
           <Plus className="w-3.5 h-3.5" />
           Add step
         </button>
-        <button
-          type="button"
-          onClick={addSunBizDocsStep}
-          className="inline-flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-bold text-accent hover:bg-accent/20"
-          title="Adds the SunBiz underwriting docs step: bank statements + driver's license + void cheque (required) and proof of ownership (optional)"
-        >
-          <Wand2 className="w-3.5 h-3.5" />
-          Add SunBiz docs step
-        </button>
+        {sunbizPresets && (
+          <button
+            type="button"
+            onClick={addSunBizDocsStep}
+            className="inline-flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-bold text-accent hover:bg-accent/20"
+            title="Adds the SunBiz underwriting docs step: bank statements + driver's license + void cheque (required) and proof of ownership (optional)"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            Add SunBiz docs step
+          </button>
+        )}
       </div>
     </div>
   );

@@ -91,8 +91,9 @@ export function OutcomeChecksPanel({
 
       {!readFailed && rows.length === 0 ? (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 text-xs text-amber-400">
-          No check has ever recorded a result. The checks run on the every-15-minute cron; if this stays empty the
-          scheduler is not firing, which is a finding rather than a clean bill of health.
+          The checker has not run yet, so there are no results to show — not a problem with your data, just no
+          measurements taken so far. It runs every 15 minutes; if this message is still here in an hour, the
+          scheduler that drives it isn&apos;t firing and is worth a look.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-bg-border">

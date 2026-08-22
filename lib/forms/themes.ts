@@ -109,6 +109,67 @@ export const FORM_THEMES: FormTheme[] = [
   },
 ];
 
+/**
+ * Tenant-neutral theme presets — same three visual palettes as the generic
+ * SunBiz-list entries, but with copy that assumes NOTHING about the tenant's
+ * product. The SunBiz list's copy ("Apply for funding", "Executive Funding
+ * Application") is funding vocabulary; applying it wholesale to a web-dev
+ * agency's form was the tenant bleed reported 2026-08-22. Same ids as the
+ * generic SunBiz entries on purpose: `inferActiveThemeId` matches on
+ * primary_color + headline against the TENANT'S list, so there is no
+ * cross-list ambiguity.
+ */
+export const GENERIC_FORM_THEMES: FormTheme[] = [
+  {
+    id: "minimal_clean",
+    label: "Minimal Clean",
+    description: "Neutral palette, big type. Good when the brand is already known.",
+    branding: {
+      primary_color: "#111827",
+      accent_color: "#0ea5e9",
+      headline: "Tell us about your project",
+      subheadline: "Three minutes. No obligation.",
+      thanks_message: "We've got it. Watch your inbox.",
+    },
+  },
+  {
+    id: "premium_executive",
+    label: "Premium Executive",
+    description: "Deep navy + brass — for high-touch, high-value intake.",
+    branding: {
+      primary_color: "#1e293b",
+      accent_color: "#b45309",
+      headline: "Priority intake",
+      subheadline: "Confidential — a senior team member reviews every submission.",
+      thanks_message: "Your submission is in. Someone senior will reach out personally.",
+    },
+  },
+  {
+    id: "problem_solution",
+    label: "Problem · Solution",
+    description: "Direct, copy-led layout for cold inbound traffic.",
+    branding: {
+      primary_color: "#dc2626",
+      accent_color: "#0ea5e9",
+      headline: "Tell us where you're stuck",
+      subheadline: "Describe the problem. We'll come back with a path forward.",
+      thanks_message: "Got it. We'll come back with a path forward within one business day.",
+    },
+  },
+];
+
+/**
+ * The theme list for a given tenant, keyed on the resolved PROFILE slug
+ * (resolveClientProfileSlug — "sun" for SunBiz, tenant.slug otherwise).
+ * SunBiz keeps its full branded list; every other tenant gets the neutral
+ * presets and can never see — or accidentally apply — SunBiz branding.
+ */
+export function formThemesForTenant(profileSlug: string | null | undefined): FormTheme[] {
+  return (profileSlug || "").trim().toLowerCase() === "sun"
+    ? FORM_THEMES
+    : GENERIC_FORM_THEMES;
+}
+
 export function getFormTheme(id: string | null | undefined): FormTheme | null {
   if (!id) return null;
   return FORM_THEMES.find((t) => t.id === id) || null;
@@ -147,9 +208,10 @@ export function getContrastingTextColor(hex: string | null | undefined): string 
  */
 export function inferActiveThemeId(
   branding: FormBranding | null | undefined,
+  themes: FormTheme[] = FORM_THEMES,
 ): string | null {
   if (!branding) return null;
-  for (const t of FORM_THEMES) {
+  for (const t of themes) {
     if (
       t.branding.primary_color === branding.primary_color &&
       t.branding.headline === branding.headline

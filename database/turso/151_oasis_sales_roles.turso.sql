@@ -1,0 +1,53 @@
+-- 151 — OASIS sales org: who a rep reports to.
+--
+-- THIS IS THE FILE THAT ACTUALLY RUNS. Production is
+-- EMPIRE_DATA_BACKEND=turso_cloud; the Postgres companion (database/151) is the
+-- reference dialect. Same warning 147, 148, 149 and 150 carry.
+--
+-- WHY THIS COLUMN EXISTS
+-- The sales org pays a manager 20% of what OASIS RETAINS from their team's
+-- deals. "Their team" has to be a fact the database knows, not a spreadsheet
+-- someone maintains, or the override cannot be computed and cannot be audited.
+-- It is also a VISIBILITY input: the manager persona (lib/role-surfaces.ts) is
+-- the only one with canSeeTeamPipeline, and this column is what "team" means.
+--
+-- ONE HOME, NOT TWO. The obvious alternative was to put this on the sales
+-- roster table arriving with the commission engine. It lives here instead
+-- because the reporting line answers a PERMISSION question (whose pipeline may
+-- I see) as well as a PAY question, and a value duplicated across two tables is
+-- a value that will eventually disagree with itself. Effective-dated comp
+-- TERMS still belong on the roster; the reporting line does not.
+--
+-- ---------------------------------------------------------------------------
+-- WHY A PLAIN NULLABLE ALTER IS SAFE HERE
+-- ---------------------------------------------------------------------------
+-- user_profiles is NOT empty (50 rows: 43 member, 4 owner, 3 admin). SQLite
+-- permits ADD COLUMN on a populated table only when the new column is either
+-- nullable or carries a constant default — a NOT NULL column with no DEFAULT is
+-- rejected outright, and that window closes for good once a table has rows.
+-- Nullable is also the honest shape: most people have no manager, and NULL says
+-- exactly that without inventing a sentinel.
+--
+-- NO FOREIGN KEY, deliberately. The value is an auth_user_id, which is not
+-- user_profiles' primary key (that is `id`), so there is nothing well-formed to
+-- point a REFERENCES clause at. It matches user_profiles.auth_user_id, the same
+-- value leads carry in data.assigned_to and commissions carry in rep_user_id —
+-- one identity across the whole sales path. Integrity is enforced in the
+-- application, where the tenant check lives too: a manager must be in the SAME
+-- tenant, which a foreign key could not have expressed either.
+--
+-- SELF-REFERENCE IS NOT VALIDATED HERE. Nothing in SQLite stops a row naming
+-- itself, or two rows naming each other. The team roll-up query must therefore
+-- be written to terminate — one level, not a recursive CTE — which is what the
+-- manager surface does. Said out loud because "it is only one column" is how
+-- that gets forgotten.
+-- ---------------------------------------------------------------------------
+
+alter table user_profiles add column manager_user_id TEXT;
+
+-- The manager roll-up reads "every profile in MY tenant whose manager is ME".
+-- Tenant first: it is the higher-selectivity column and the leading edge of
+-- every other scoped read, so this index also serves a plain tenant scan.
+-- Without it the roll-up is a full table scan on every manager page load.
+create index if not exists idx_user_profiles_tenant_manager
+  on user_profiles (tenant_id, manager_user_id);

@@ -1,37 +1,38 @@
 /**
- * Browser-side auth that works on EITHER backend.
+ * Browser-side auth with an explicit legacy rollback.
  *
- * The dashboard is mid-migration: Supabase Auth is still live and is the
- * rollback path, so every one of these tries the Turso route first and falls
- * back to Supabase when Turso mode is off. The Turso routes 404 when
- * EMPIRE_AUTH_BACKEND is unset, which is the signal to fall back — that is why
- * the checks below are on the STATUS, not on a client-side env var (browsers
- * cannot see server-only env).
- *
- * Delete the Supabase halves once the subscription is actually cancelled, not
- * before.
+ * Turso is the default. The server reports `supabase_legacy` only when an
+ * operator selected that rollback mode deliberately. Network failures,
+ * invalid responses, and missing Turso configuration throw; none of them may
+ * silently switch the browser to the retired auth provider.
  */
 import { getBrowserSupabase } from "./supabase-browser";
 
 export type AuthUser = { id: string; email: string | null };
 
 /** True when the server is running Turso auth. Cached per page load. */
-let modeCache: "turso" | "supabase" | null = null;
+let modeCache: "turso" | "supabase_legacy" | null = null;
 
-export async function authMode(): Promise<"turso" | "supabase"> {
+export async function authMode(): Promise<"turso" | "supabase_legacy"> {
     if (modeCache) return modeCache;
     try {
         const r = await fetch("/api/auth/turso-me", { cache: "no-store" });
-        if (r.ok) {
-            const j = await r.json();
-            modeCache = j?.mode === "turso" ? "turso" : "supabase";
-            return modeCache;
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            throw new Error(j?.error || `auth backend check failed (${r.status})`);
         }
-    } catch {
-        /* fall through */
+        if (j?.mode !== "turso" && j?.mode !== "supabase_legacy") {
+            throw new Error("auth backend returned an unsupported mode");
+        }
+        // Narrow into a local first: TS won't narrow a module-level `let`
+        // across the assignment, so `return modeCache` would still see `null`.
+        const mode: "turso" | "supabase_legacy" = j.mode;
+        modeCache = mode;
+        return mode;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Unable to resolve the authentication backend: ${message}`);
     }
-    modeCache = "supabase";
-    return modeCache;
 }
 
 export async function getCurrentUser(): Promise<AuthUser | null> {

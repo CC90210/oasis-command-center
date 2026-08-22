@@ -14,6 +14,9 @@
 
 import { PageHeader } from "@/components/Card";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getTenant } from "@/lib/queries";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { safe } from "@/lib/api-helpers";
 import { FormBuilderClient } from "@/components/forms/FormBuilderClient";
 import Link from "next/link";
 import { redirect, notFound } from "next/navigation";
@@ -75,6 +78,12 @@ export default async function EditFormPage({
   const row = await loadForm(id, user.id);
   if (!row) notFound();
 
+  // Resolve the tenant's PROFILE slug ("sun" for SunBiz) so the builder
+  // renders THIS tenant's themes, stage vocabulary, and step presets —
+  // same gate /forms uses to pick SunBizFormsClient vs the generic list.
+  const tenant = await safe("forms.edit.tenant", getTenant(row.tenant_id), null);
+  const profileSlug = resolveClientProfileSlug(tenant);
+
   // Parse the jsonb columns once on the server — if they're somehow
   // malformed (manual DB edit, schema migration drift), the parsers
   // throw which Next.js renders as a 500 page. Builder UI handles
@@ -133,6 +142,7 @@ export default async function EditFormPage({
           enabled: row.enabled,
           redirect_url: row.redirect_url,
         }}
+        profileSlug={profileSlug}
       />
     </div>
   );
