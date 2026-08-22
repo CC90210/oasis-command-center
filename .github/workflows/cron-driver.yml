@@ -181,6 +181,14 @@ jobs:
             # -m 330 covers the slowest route's maxDuration (reconcile-sms,
             # 300s) plus network margin. At the old -m 120 a route Vercel was
             # still legally running would be reported dead by the driver.
+            #
+            # Truncate FIRST: on a curl failure (code 000) out.json still holds
+            # the PREVIOUS route's response, and the log line then attributes
+            # that stale body to the failed route — during the 2026-08-22
+            # triage a reconcile-sms 000 printed enroll-accelerated's body and
+            # sent diagnosis the wrong way. A failed call must show an EMPTY
+            # body, because that is the truth.
+            : > /tmp/out.json
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 330 \
                      "${BASE}${path}" \
                      -H "Authorization: Bearer ${SECRET}") || code="000"
