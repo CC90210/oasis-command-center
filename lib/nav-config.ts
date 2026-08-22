@@ -210,7 +210,11 @@ export const WEBDEV_NAV: NavItem[] = [
   // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
   // filtered to this engine's leads -- a VIEW over the fourteen-stage
   // lifecycle CC already runs, never a second one (2026-08-21, Build D).
-  { group: "Leads", href: "/web-leads/pipeline", label: "Pipeline", icon: "GitBranch" },
+  // "Web Pipeline", not "Pipeline": CC_NAV (spread above) already carries an
+  // Operations → Pipeline entry for /pipeline, so this label collided and the
+  // operator saw "Pipeline" twice in one sidebar pointing at two different
+  // boards (2026-08-22). Distinct label, same route — bookmarks unaffected.
+  { group: "Leads", href: "/web-leads/pipeline", label: "Web Pipeline", icon: "GitBranch" },
 ];
 
 /**
