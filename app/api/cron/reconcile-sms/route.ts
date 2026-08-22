@@ -16,15 +16,16 @@ import { sendTelegram } from "@/lib/notify/telegram";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
+import { refreshDestinationHealth } from "@/lib/sms/destination-health";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// 300, not 60: cron-driver runs on 2026-08-22 caught this route 504ing at the
-// 60s ceiling (runs 32550806413 / 32548947352) once per-tenant destination
-// health refresh landed on top of the deadline-bounded receipt sweep. The
-// receipts phase still self-limits (deadlineMs below); this is headroom for
-// the phases after it, within the Pro-plan function limit. The cron-driver
-// workflow's curl budget was raised in step (-m 330 > 300).
+// 300, not 60 (Pro plan ceiling headroom). This route 504'd on 7 of the last 12
+// failed cron-driver runs — every 15 minutes, an email to CC each time. The
+// receipts phase budgets itself (deadlineMs = start + 45s), but the
+// destination-health loop after it re-scans 90 DAYS of receipts per tenant with
+// NO deadline, inside whatever was left of 60s. Headroom here plus the loop
+// deadline below ends the flood without touching the shared health lib.
 export const maxDuration = 300;
 
 const SUNBIZ_TENANT_ID = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
@@ -94,6 +95,43 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // means a recovered route resumes on the next dispatch rather than up to a
     // minute later, and a newly dead one halts just as fast.
     for (const t of tenants) resetBreakerCache(t);
+
+    // DESTINATION HEALTH IS MATERIALISED HERE, and this is the only place it
+    // happens (Codex P1, 2026-08-20: refreshDestinationHealth had no production
+    // caller at all, so the landline gate would have stayed a permanent no-op —
+    // a missing row reads as textable by design).
+    //
+    // This is the right seam: the verdicts it derives from have just landed, so
+    // recomputing anywhere else would read a staler picture than the one that
+    // exists at this instant.
+    //
+    // Failures are recorded, never thrown. Reconciliation is the load-bearing
+    // job on this route and must not be taken down by a downstream refresh; a
+    // stale destination table degrades to "text them and find out", which is
+    // where we were before, not somewhere worse.
+    // Deadlined like the receipts phase above, and for the same reason: this
+    // loop re-scans a 90-day receipt window per tenant, and unbounded it is the
+    // route's 504 (7 of the last 12 cron-driver failures). A tenant skipped for
+    // deadline is RECORDED as skipped — visible in the response, never silent —
+    // and health is a rolling refresh, so the next quarter-hour tick catches it
+    // up. Narrowing the lib's 90-day window instead would change benching
+    // semantics for every caller (shared substrate), so the bound lives here.
+    const healthDeadlineMs = startedAt + (maxDuration - 60) * 1000;
+    const destinationHealth: Record<string, { examined: number; untextable: number; error: string | null }> = {};
+    for (const t of tenants) {
+      if (Date.now() > healthDeadlineMs) {
+        destinationHealth[t] = {
+          examined: 0, untextable: 0,
+          error: "skipped: health-refresh deadline reached; next tick catches up",
+        };
+        continue;
+      }
+      const res = await refreshDestinationHealth(t).catch((err) => ({
+        examined: 0, untextable: 0, written: 0,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      destinationHealth[t] = { examined: res.examined, untextable: res.untextable, error: res.error };
+    }
     const breakers: Record<string, Awaited<ReturnType<typeof smsSendAllowed>>> = {};
     for (const t of tenants) breakers[t] = await smsSendAllowed(t, { force: true });
     const breaker = breakers[SUNBIZ_TENANT_ID];
@@ -126,7 +164,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       ).catch(() => undefined);
     }
 
-    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breaker, halted });
+    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breaker, halted, destination_health: destinationHealth });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[reconcile-sms] failed", message);

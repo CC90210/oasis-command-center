@@ -101,17 +101,39 @@ export async function findExistingLead(
   const business = (match.business || "").trim();
   if (business) {
     const safe = business.replace(/[%_\\]/g, "\\$&");
-    const q = await db
-      .from("tenant_records")
-      .select("id, data, created_at")
-      .eq("tenant_id", tenantId)
-      .eq("entity_type", "lead")
-      .ilike("data->>business_name", safe)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (!q.error && q.data) {
-      const row = q.data as { id: string; data: Record<string, unknown> | null };
+    // BOTH SPELLINGS, because the estate genuinely contains both. SunBiz leads
+    // store the company under `business_name`; OASIS leads store it under
+    // `company` (its lead entity declares that field, not the other one).
+    // Matching only business_name meant a returning OASIS merchant with a new
+    // email always looked brand new — a duplicate lead, and the original
+    // agent's attribution quietly lost with it.
+    // BOTH LOOKUPS RUN, THEN THE GLOBALLY NEWEST WINS.
+    //
+    // Returning from inside the loop looked equivalent and was not: each query
+    // orders only its OWN results. With an older `business_name` lead and a
+    // newer `company` lead for the same business, the loop returned the older
+    // one purely because business_name is checked first — and forms/submit then
+    // merges the submission into the wrong lead, taking the newer lead's
+    // attribution with it. "Most recent match" has to mean most recent across
+    // both spellings, not most recent within whichever ran first.
+    const candidates: Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }> = [];
+    for (const field of ["business_name", "company"] as const) {
+      const q = await db
+        .from("tenant_records")
+        .select("id, data, created_at")
+        .eq("tenant_id", tenantId)
+        .eq("entity_type", "lead")
+        .ilike(`data->>${field}`, safe)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!q.error && q.data) {
+        candidates.push(q.data as { id: string; data: Record<string, unknown> | null; created_at: string | null });
+      }
+    }
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+      const row = candidates[0];
       return { id: row.id, data: row.data || {} };
     }
   }

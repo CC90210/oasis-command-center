@@ -30,6 +30,9 @@ export type TeamRole =
   | "closer"
   | "opener"
   | "builder"
+  // Marketing staff (2026-08-21). Content, campaigns and the founders
+  // marketing studio — never revenue, never the sales pipeline.
+  | "marketing"
   // Legacy. Still resolvable because live rows carry them (43 `member`, and
   // `member` is the column DEFAULT), but no longer offered on the invite menu —
   // "member" and "agent" are the ambiguous pair the job titles above replace.
@@ -59,12 +62,21 @@ export const PLATFORM_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
  * product features do not extrapolate across tenants. A SunBiz admin has no use
  * for "Closer", and someone invited as a closer onto a SunBiz tenant would get a
  * persona built for a workspace they are not standing in.
+ *
+ * NAME NOTE: this now carries `marketing` as well, which is not a sales role.
+ * The list is "roles that exist only inside OASIS", and the SALES_ in the name
+ * is a leftover from when that was the same thing. Left as-is on purpose — the
+ * identifier is load-bearing across team-roles, role-surfaces and the invite
+ * API, and renaming it to correct a comment is a wide change for zero
+ * behavioural gain. `isOasisSalesRole` gates tenant eligibility, and marketing
+ * belongs in that gate for exactly the same reason a closer does.
  */
 export const OASIS_SALES_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
   { value: "manager", label: "Sales manager" },
   { value: "closer", label: "Closer" },
   { value: "opener", label: "Opener" },
   { value: "builder", label: "Builder" },
+  { value: "marketing", label: "Marketing" },
 ];
 
 /** The OASIS sales job titles, as a set — used to decide tenant eligibility. */

@@ -63,6 +63,9 @@ const TESTS = [
   "tests/role-surfaces.test.ts",
   "tests/agent-api-scope.test.ts",
   "tests/fetch-json.test.ts",
+  // The Automations board crashed for weeks here: normalizeEmpireRow had no
+  // test and met a data layer that hands back objects where text was declared.
+  "tests/cron-empire-row.test.ts",
   "tests/fuzzy-match.test.ts",
   "tests/infer-result-text.test.ts",
   "tests/csv-combine.test.ts",
@@ -132,6 +135,10 @@ const TESTS = [
   "tests/daemon-backed-crons.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
+  "tests/bulk-email-compose.test.ts",
+  "tests/bulk-email-visibility.test.ts",
+  "tests/sunbiz-application-chase.test.ts",
+  "tests/form-handoff-copy.test.ts",
   "tests/email-idempotency-marker.test.ts",
   "tests/watermark-large-pdf.test.ts",
   "tests/drip-activity.test.ts",
@@ -161,11 +168,44 @@ const TESTS = [
   // Beside it deliberately: the profile module decides WHO a client's replies
   // come from, and this covers the rules that decision must satisfy.
   "tests/reply-identity.test.ts",
-  // And this covers whether those rules are actually WIRED IN. It builds a real
-  // libSQL database from migrations 148-150 in a temp dir and runs the real
-  // provision/activate/verify path through the real Turso adapter — no
-  // credentials, no network, nothing shared with another test.
-  "tests/client-automation-lifecycle.test.ts",
+  // tests/client-automation-lifecycle.test.ts was registered here (1b58d49c)
+  // but its file and the 150_reply_identity_pairing migration it builds from
+  // were never committed — and main has since shipped a different migration
+  // 150. Re-register it when the reply-identity work lands with a renumbered
+  // migration; until then the registration pointed at nothing.
+  // APEX's Web Leads browser (PR #242).
+  "tests/web-leads-filters.test.ts",
+  "tests/web-leads-queries.test.ts",
+  "tests/web-leads-data.test.ts",
+  "tests/web-leads-counters.test.ts",
+  "tests/web-leads-guards.test.ts",
+  "tests/web-leads-scope.test.ts",
+  // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
+  // from JARVIS's services/leadgen/lib/remedies.js.
+  "tests/web-leads-remedies.test.ts",
+  // Task 3 hotfix (2026-08-21): proves the Turso adapter's object-vs-string
+  // profile decoding is handled -- see coerceProfile() in lib/web-leads/audit.ts.
+  "tests/web-leads-audit.test.ts",
+  // Task 4 P2 fix (2026-08-21, independent review): the "View website" link
+  // must not treat a bare domain as app-relative, and must allowlist
+  // http/https against OSM-sourced data anyone can edit -- see
+  // lib/web-leads/url-safety.ts.
+  "tests/web-leads-url-safety.test.ts",
+  // Build C (2026-08-21 leads-to-pipeline-design.md, section 5): logging a
+  // call outcome is the byproduct that advances the lead's stage. nextStage()
+  // is the constrained, pure stage-advance function -- see
+  // lib/web-leads/outcome.ts's header for the full reasoning.
+  "tests/web-leads-outcome.test.ts",
+  "tests/web-leads-outcome-guards.test.ts",
+  // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
+  // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
+  // the pipeline route's read-only auth spine, agent-role scoping wiring,
+  // and that an unrecognised stage value is bucketed and shown, not dropped.
+  "tests/web-leads-pipeline.test.ts",
+  // Build B (2026-08-21): territory -> rep assignment. Admin-only enforcement,
+  // tenant mismatch, propagation to the right leads, and the rule that an
+  // unassign must never strip a lead's own data.assigned_to.
+  "tests/web-leads-territory-assign.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

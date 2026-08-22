@@ -84,9 +84,11 @@ assert.equal(SURFACE_CAPABILITIES.readonly.canAct, false);
  * pair. opener and closer share ONE persona deliberately: identical surfaces,
  * different pipeline STAGES, and stages are not this module's business. */
 assert.equal(resolvePersona({ teamRole: "manager" }), "manager");
+assert.equal(resolvePersona({ teamRole: "marketing" }), "marketing");
+assert.equal(resolvePersona({ teamRole: " MARKETING " }), "marketing", "trim + case-fold applies here too");
 assert.equal(resolvePersona({ teamRole: "closer" }), "sales");
 assert.equal(resolvePersona({ teamRole: "opener" }), "sales");
-assert.equal(resolvePersona({ teamRole: "builder" }), "worker");
+assert.equal(resolvePersona({ teamRole: "builder" }), "builder", "split out of worker 2026-08-21 — see the BUILDER block below");
 assert.equal(resolvePersona({ teamRole: " CLOSER " }), "sales", "trim + case-fold applies to new roles too");
 assert.equal(resolvePersona({ teamRole: "Manager" }), "manager");
 // The escalation toggle outranks a sales title, same as it does every other role.
@@ -98,7 +100,7 @@ assert.equal(resolvePersona({ teamRole: "manager", isTrueAdmin: true }), "founde
  * `undefined` at every call site — which reads as falsy, i.e. accidentally
  * locked down, until someone "fixes" it by guessing. Assert the matrix is
  * total instead of trusting Record<> to have been filled in thoughtfully. */
-for (const persona of ["founder", "manager", "sales", "worker", "readonly", "legacy"] as Persona[]) {
+for (const persona of ["founder", "manager", "sales", "marketing", "builder", "worker", "readonly", "legacy"] as Persona[]) {
   assert.ok(SURFACE_CAPABILITIES[persona], `${persona} must have a capability row`);
   assert.equal(
     Object.keys(SURFACE_CAPABILITIES[persona]).length,
@@ -106,7 +108,7 @@ for (const persona of ["founder", "manager", "sales", "worker", "readonly", "leg
     `${persona} must declare EVERY capability — a missing key is silently false`,
   );
 }
-for (const persona of ["manager", "sales", "worker", "readonly"] as Persona[]) {
+for (const persona of ["manager", "sales", "marketing", "builder", "worker", "readonly"] as Persona[]) {
   assert.equal(
     SURFACE_CAPABILITIES[persona].canSeeCompanyFinancials,
     false,
@@ -375,6 +377,258 @@ const repCode = stripComments(repToday);
 const deliveryCode = stripComments(deliveryToday);
 const dispatcherCode = stripComments(dispatcher);
 const founderCode = stripComments(founderToday);
+
+/* ───── the MANAGER surface ──────────────────────────────────────────────────
+ * A persona without its own branch in app/page.tsx falls through to
+ * FounderToday. `manager` shipped without one, and although the money was safe
+ * (showFinancials is false for that persona), FounderToday consults no other
+ * capability — so it would have rendered the whole tenant's pipeline and the
+ * company inbound tape to someone whose record denies both.
+ *
+ * These assertions exist so that cannot recur silently for the NEXT persona. */
+/* ───── the MARKETING surface ───────────────────────────────────────────────
+ * Marketing exists to make ONE thing possible: reaching /founders/marketing
+ * WITHOUT being an admin. Before it, canSeeMarketing was true for `founder`
+ * alone, so hiring a marketing person meant handing over Net MRR, the
+ * commission ledger and every client name — or hiring them and locking them out
+ * of the job. These assertions keep both halves true. */
+const marketingToday = read("components/today/MarketingToday.tsx");
+const marketingCode = stripComments(marketingToday);
+
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeMarketing,
+  true,
+  "the entire point of the role: marketing reaches the marketing studio",
+);
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeCompanyFinancials,
+  false,
+  "and does so WITHOUT company revenue — that pairing is the whole reason the role exists",
+);
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeAllPipeline, false, "marketing does not work leads");
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeCommissionLedger, false);
+assert.equal(capabilitiesFor("marketing", OASIS).canSeeInboundTape, false);
+assert.equal(
+  capabilitiesFor("marketing", SUNBIZ).canSeeMarketing,
+  false,
+  "OASIS content is OASIS's — the tenant gate applies to marketing like everything else",
+);
+assert.ok(
+  /surface\.persona === "marketing"/.test(dispatcherCode),
+  "app/page.tsx MUST branch on marketing — without it they fall through to FounderToday",
+);
+assert.ok(
+  dispatcherCode.indexOf('surface.persona === "marketing"') < dispatcherCode.indexOf("<FounderToday"),
+  "the marketing branch must precede the FounderToday fallthrough or it never runs",
+);
+for (const reader of FINANCIAL_READERS) {
+  assert.equal(
+    marketingCode.includes(reader),
+    false,
+    `MarketingToday must not reach ${reader}`,
+  );
+}
+assert.equal(
+  /getServiceSupabase|listRecords/.test(marketingCode),
+  false,
+  "MarketingToday reads NOTHING from the database — it routes to tools that already exist, " +
+    "so there is no second copy of the marketing surface to keep true",
+);
+assert.deepEqual(
+  filterNavForPersona(FULL_NAV, "marketing").map((n) => n.href),
+  ["/", "/schedule", "/playbook", "/founders/marketing"],
+  "marketing nav: Today, their week, the playbook, the studio — no pipeline, no leads",
+);
+assert.equal(
+  personaMayVisit("marketing", "/pipeline"),
+  false,
+  "marketing must not be offered the pipeline — putting the book in front of them is the " +
+    "client-data exposure this role exists to avoid",
+);
+assert.equal(personaMayVisit("marketing", "/leads"), false);
+assert.equal(personaMayVisit("marketing", "/analytics"), false, "system surfaces stay closed");
+
+/* ───── the Leads browser is open to reps, and the rep filter is admin-only ──
+ * CC, 2026-08-21: "those sales reps should be able to access the leads page so
+ * they can import leads themselves."
+ *
+ * /web-leads is the prospecting POOL — a public directory of Canadian
+ * businesses with website status — not another rep's book. Nothing in it is
+ * assigned to anyone, so opening it exposes no colleague's pipeline. It is what
+ * makes SELF-SOURCING possible, which is the track that pays 25/40/70 instead
+ * of 20/30. */
+assert.equal(personaMayVisit("sales", "/web-leads"), true, "a rep can source their own leads");
+assert.equal(personaMayVisit("manager", "/web-leads"), true, "so can a manager, to assign from");
+assert.equal(
+  personaMayVisit("marketing", "/web-leads"),
+  false,
+  "marketing does not prospect — the pool stays out of their nav",
+);
+
+const pipelinePage = read("app/pipeline/page.tsx");
+const pipelineCode = stripComments(pipelinePage);
+
+/* THE ORDERING IS THE SECURITY PROPERTY. The rep chips filter `scopedRows`,
+ * which filterWebsiteSalesRows has ALREADY narrowed to what this viewer may
+ * see. So a rep who hand-types ?rep=<someone-else> filters a set that never
+ * contained that person's leads — the control can only subtract. If the filter
+ * were ever applied to the raw rows instead, it would become a way to look
+ * sideways at a colleague's book. */
+assert.ok(
+  /workingRows = scopedRows\.filter/.test(pipelineCode) &&
+    /repScopedRows = repFilter\s*\?\s*workingRows\.filter/.test(pipelineCode),
+  "THE SCOPING CHAIN. scopedRows is what filterWebsiteSalesRows already reduced to this " +
+    "viewer; workingRows drops the researched pool from THAT; the rep chips filter THAT. " +
+    "Every link must narrow the previous one — if any step reached back to namedRows or " +
+    "allRows, ?rep=<other> would quietly become a way to read a colleague pipeline and the " +
+    "page would look identical.",
+);
+assert.ok(
+  /repRoster\.size > 0 &&/.test(pipelineCode),
+  'the rep chips must actually RENDER. A first pass wired the filter logic and the chip ' +
+    'builder but never placed the row, so the control existed only as unused code — eslint ' +
+    'caught it, not the tests.',
+);
+assert.ok(
+  /session\.ok && session\.isAdmin \? await buildMemberNameMap/.test(pipelineCode),
+  "the roster behind the chips is built for admins only: a rep does not need a list of " +
+    "colleagues whose boards they cannot open",
+);
+
+/* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
+ * The OSM importer writes website / website_condition / industry on every lead
+ * it creates. ManifestRecordForm renders the ENTITY, not the row, so a field
+ * missing here is invisible on the profile no matter what the database holds —
+ * which is why a rep could not see https://www.mangorain.ca/ on a lead that
+ * stored exactly that. */
+const seeds = read("lib/manifest/seeds.ts");
+const oasisLeadEntity = seeds.slice(
+  seeds.indexOf('name: "lead"'),
+  seeds.indexOf('name: "lead"') + 2400,
+);
+for (const field of ["website", "website_condition", "industry"]) {
+  assert.ok(
+    new RegExp(`name: "${field}"`).test(oasisLeadEntity),
+    `the OASIS lead entity must expose ${field} — the importer writes it and the profile ` +
+      `cannot render what the entity does not declare`,
+  );
+}
+
+/* ───── the BUILDER, split out of worker after a REAL exposure ──────────────
+ * 2026-08-21: a builder was invited, logged in, and could see the whole tenant
+ * pipeline and every system surface — because `builder` resolved to the legacy
+ * `worker` persona, which carries canSeeSystemSurfaces: true. `worker` was
+ * written for INTERNAL staff on `member` (43 live profiles, mostly SunBiz), so
+ * it was split rather than narrowed in place. */
+assert.equal(resolvePersona({ teamRole: "builder" }), "builder", "builder has its OWN persona now");
+assert.equal(
+  resolvePersona({ teamRole: "member" }),
+  "worker",
+  "and member is untouched — 43 live profiles depend on that row",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeSystemSurfaces,
+  false,
+  "/automations runs background workers and drip sends on CC's own machine. A delivery " +
+    "contractor toggling those is an outage, not a permissions nicety.",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeAllPipeline,
+  false,
+  "a builder builds what was sold — they do not need the whole prospect book",
+);
+assert.equal(capabilitiesFor("builder", OASIS).canSeeCompanyFinancials, false);
+assert.equal(capabilitiesFor("builder", OASIS).canSeeDeliveryQueues, true, "their actual work");
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeMarketing,
+  true,
+  "CC 2026-08-21: this hire is a builder AND a marketing specialist",
+);
+assert.equal(personaMayVisit("builder", "/automations"), false, "never the automation controls");
+assert.equal(personaMayVisit("builder", "/operations"), false, "never the internal ops surface");
+assert.equal(personaMayVisit("builder", "/settings"), false);
+assert.equal(personaMayVisit("builder", "/founders/marketing"), true);
+
+/* The board must not render the raw prospect pool as pipeline work. */
+assert.ok(
+  /workingRows/.test(pipelineCode) && /researched/.test(pipelineCode),
+  "the pipeline must exclude the researched stage — those are un-worked directory rows, " +
+    "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",
+);
+
+/* ───── the FOUNDERS GATE must follow the capability, not a persona name ─────
+ * 2026-08-21: schneur@oasisai.work was given the marketing studio via
+ * canSeeMarketing and STILL got "page not found", because
+ * lib/founders/gate.ts additionally required `persona === "founder"`. Two
+ * gates, and widening only one of them changes nothing.
+ *
+ * The gate now reads SURFACE_CAPABILITIES[persona].canSeeMarketing, so this
+ * table IS the founders-portal access list. That makes the next assertion the
+ * important one: the gate exists to keep outside commission-only contractors
+ * out, and it still does. */
+const gateSource = read("lib/founders/gate.ts");
+assert.equal(
+  /persona !== "founder"/.test(stripComments(gateSource)),
+  false,
+  "the founders gate must not hardcode a persona name — a marketing hire whose entire job " +
+    "is that portal was 404'd by exactly that line",
+);
+assert.ok(
+  /SURFACE_CAPABILITIES\[persona\]\.canSeeMarketing/.test(gateSource),
+  "the gate must key on the capability, so one table decides portal access",
+);
+for (const allowed of ["founder", "marketing", "builder"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[allowed].canSeeMarketing,
+    true,
+    `${allowed} must reach the founders marketing portal`,
+  );
+}
+for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[refused].canSeeMarketing,
+    false,
+    `${refused} must NOT reach the founders portal — this gate was written to keep outside ` +
+      `commission-only contractors out of it, and that has to survive the widening`,
+  );
+}
+
+const managerToday = read("components/today/ManagerToday.tsx");
+const managerCode = stripComments(managerToday);
+
+assert.ok(
+  /surface\.persona === "manager"/.test(dispatcherCode),
+  "app/page.tsx MUST branch on the manager persona — without it a manager falls through to FounderToday",
+);
+assert.ok(
+  dispatcherCode.indexOf('surface.persona === "manager"') < dispatcherCode.indexOf("<FounderToday"),
+  "the manager branch must come BEFORE the FounderToday fallthrough, or it never runs",
+);
+for (const reader of FINANCIAL_READERS) {
+  assert.equal(
+    managerCode.includes(reader),
+    false,
+    `ManagerToday must not reach ${reader} — a manager is a commission contractor, not a partner in the business`,
+  );
+}
+assert.ok(
+  managerCode.includes('.eq("manager_user_id"'),
+  "the manager's roster must be scoped in the QUERY by manager_user_id — a filter applied after fetching " +
+    "still ships every profile in the RSC payload",
+);
+assert.ok(
+  managerCode.includes('.in("rep_user_id"'),
+  "team commission must be scoped to the roster, not fetched tenant-wide and filtered in memory",
+);
+assert.ok(
+  /repIds\.length === 0/.test(managerCode),
+  "an empty roster must short-circuit the query: an empty `in` list is how 'no reps' becomes 'every row'",
+);
+assert.ok(
+  /ok:\s*false/.test(managerCode) && /not \$0|couldn't load/i.test(managerToday),
+  "a failed read must render as 'couldn't load', never as $0 — a manager acting on a fake zero " +
+    "will confront a rep about money that was never missing",
+);
 
 for (const reader of FINANCIAL_READERS) {
   assert.equal(

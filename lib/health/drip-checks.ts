@@ -24,6 +24,16 @@ export type DripCheck = {
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
+  /**
+   * Rebuild the rule at EVALUATION time.
+   *
+   * DRIP_CHECKS is a module-level const, so a threshold computed inside `rule`
+   * is frozen at import. For a target an operator is expected to move, that
+   * means the check keeps grading against a stale number while reporting green
+   * — the same shape as every other bug found on 2026-08-20. Supplying this
+   * makes the threshold live.
+   */
+  resolveRule?: () => CheckRule;
   describe: (r: CheckResult) => string;
 };
 
@@ -42,6 +52,18 @@ const iso = (ms: number) => new Date(ms).toISOString();
  * Self-expiring: once the deploy is more than 24h old the clamp stops binding.
  */
 const RECEIPTS_LIVE_FROM_MS = Date.parse("2026-08-08T00:00:00Z");
+
+/**
+ * The daily drip-text target. Adon set this to 40 on 2026-08-20.
+ *
+ * Read from env at CALL time, not at module load, so the number can move
+ * without a deploy — and so a list of checks captured at process start cannot
+ * keep grading against a stale target while reporting green.
+ */
+export function smsTargetPerDay(): number {
+  const n = parseInt((process.env.DRIPS_SMS_DAILY_TARGET || "").trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : 40;
+}
 
 async function countOrNull(q: PromiseLike<{ error: unknown; count: number | null }>): Promise<number | null> {
   try {
@@ -175,6 +197,189 @@ export const DRIP_CHECKS: DripCheck[] = [
     describe: (r) =>
       `${r.observed} drip SMS send(s) in the last 24h have no delivery receipt. ` +
       `Those sends are unverifiable: we cannot tell whether they arrived.`,
+  },
+  {
+    /**
+     * THE CHECK THAT WOULD HAVE CAUGHT 2026-08-16 ON DAY ONE.
+     *
+     * sms.receipt_coverage above verifies receipts are CREATED. Nothing
+     * verified they are RESOLVED, and that is precisely what broke: from
+     * 2026-08-16 the reconciler could no longer match our message inside the
+     * provider's thread (TextTorrent stopped returning the `platform` field we
+     * were gating on), so every receipt was opened, never answered, and quietly
+     * retired as 'unknown' three days later.
+     *
+     * 47 receipts reached a real carrier verdict between 08-07 and 08-16. From
+     * 08-16 to 08-20: zero. Coverage stayed green the whole time, because the
+     * receipts existed. They were just empty.
+     *
+     * This matters far beyond reporting. smsSendAllowed() reads these same
+     * receipts, so with nothing ever resolving the circuit breaker could not
+     * open no matter how many sends died — the guard was inert while looking
+     * healthy. Three carrier failures on a live wire went unnoticed for two
+     * days underneath it.
+     *
+     * Six hours of grace: the reconciler runs every 15 minutes and ignores
+     * anything younger than 90 seconds, so a healthy pipeline resolves well
+     * inside an hour. Six is generous enough that a transient provider outage
+     * does not page, and tight enough that a broken matcher is caught the same
+     * working day.
+     */
+    id: "sms.receipts_unresolved",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .is("resolved_at", null)
+          // Older than the grace window...
+          .lt("sent_at", iso(endMs - 6 * 3_600_000))
+          // ...but inside the retirement cutoff. Past three days the reconciler
+          // force-resolves as 'unknown', so anything older cannot be counted
+          // here and this check would silently read zero during a total outage.
+          .gte("sent_at", iso(endMs - 3 * DAY)),
+      ),
+    describe: (r) =>
+      `${r.observed} delivery receipt(s) have gone more than 6h without a carrier verdict. ` +
+      `The receipts exist but are empty, so every SMS check above is reading an instrument ` +
+      `that is not measuring anything — and the send breaker cannot open, because it reads these.`,
+  },
+  {
+    /**
+     * Verify CONTRIBUTION, not presence: is the reconciler actually producing
+     * verdicts, or merely running?
+     *
+     * The count above catches a full stop. This catches the partial case — a
+     * matcher that resolves some threads and silently drops the rest — which
+     * would otherwise sit under the grace window forever, always a few rows
+     * short of alarming.
+     *
+     * Measured over receipts old enough to have been answered. Returns null
+     * when there is nothing in the window, and evaluate() reports that as
+     * check_broken rather than a pass: no sample is not the same as a clean
+     * one, and "no texts went out" is a finding in its own right that
+     * drips.enrolments_24h and sms.delivered_24h already speak to.
+     */
+    id: "sms.carrier_verdict_rate",
+    severity: "high",
+    rule: { kind: "must_reach", target: 95, failingBelow: 80 },
+    observe: async (db, tenantId, endMs) => {
+      const startMs = Math.max(endMs - 3 * DAY, RECEIPTS_LIVE_FROM_MS);
+      const cutoff = iso(endMs - 6 * 3_600_000);
+      if (startMs >= endMs - 6 * 3_600_000) return null;
+      const total = await countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).gte("sent_at", iso(startMs)).lt("sent_at", cutoff),
+      );
+      const answered = await countOrNull(
+        db.from("sms_delivery_receipts").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId).gte("sent_at", iso(startMs)).lt("sent_at", cutoff)
+          // A REAL verdict. 'unknown' is what a retired receipt carries, so
+          // counting it would let the three-day give-up path masquerade as
+          // successful reconciliation — the exact outage, reported as health.
+          .in("carrier_status", ["delivered", "failed", "undelivered"]),
+      );
+      if (total === null || answered === null) return null;
+      if (total === 0) return null;
+      return Math.round((answered / total) * 100);
+    },
+    describe: (r) =>
+      `${r.observed}% of delivery receipts older than 6h carry a real carrier verdict. ` +
+      `Below this, sends are going out unverified and the breaker is running on partial evidence.`,
+  },
+  {
+    /**
+     * IS THE TEXT PROGRAMME ACTUALLY HITTING ITS NUMBER?
+     *
+     * Adon, 2026-08-20: "it should be at 40 a day - how can we ensure this
+     * happens."
+     *
+     * You cannot ensure it by setting the cap to 40. The cap is a CEILING and
+     * has never been the binding constraint: measured that day, sends ran at
+     * 2 to 17 a day against a cap already set to 40, while 1,269 leads had a
+     * phone number, 4 were landlines and none had opted out. Raising a ceiling
+     * nobody was touching changes nothing.
+     *
+     * What ensures it is measuring the gap and saying so. Every reason volume
+     * falls short is diagnosable and none of them announce themselves:
+     *   - too few working lines (six of twelve were dead and nobody knew)
+     *   - enrolment starved, so the queue has nothing due
+     *   - the deal gate closing more leads than expected
+     *   - sequence step delays spacing sends further apart than the target
+     *
+     * DEGRADED below target, FAILING below a third of it. A programme merely
+     * behind should not page like a dead pipe, but it must still be visible —
+     * that is the whole ask.
+     */
+    id: "sms.sent_vs_target",
+    severity: "high",
+    // Placeholder; the live threshold comes from resolveRule below.
+    rule: { kind: "must_reach", target: 40, failingBelow: 13 },
+    resolveRule: () => ({
+      kind: "must_reach",
+      target: smsTargetPerDay(),
+      failingBelow: Math.max(1, Math.floor(smsTargetPerDay() / 3)),
+    }),
+    observe: (db, tenantId, endMs) =>
+      countOrNull(
+        db.from("lead_interactions").select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .eq("type", "sms_sent")
+          .eq("direction", "outbound")
+          // Sequence sends only. Reps send far more by hand than the engine
+          // does, and counting those would show a healthy number while the
+          // drip programme sat at zero.
+          .like("agent_source", "sequence:%")
+          .gte("created_at", iso(endMs - DAY)).lt("created_at", iso(endMs)),
+      ),
+    describe: (r) =>
+      `${r.observed} drip texts in 24h against a target of ${smsTargetPerDay()}. ` +
+      `The cap is a ceiling, not a source: check working lines, enrolment, and the deal gate before raising it.`,
+  },
+  {
+    /**
+     * THE PHONE-LOOKUP QUEUE HAS A DRAINER, AND IT STOPS.
+     *
+     * Found 2026-08-20 while working out why texting cannot reach 40/day: the
+     * last completed lookup was 2026-08-05 and one job had been pending since
+     * 08-12, 197 hours. Nobody knew. The queue is FILLED in the cloud on a
+     * 10-minute cron but DRAINED by a worker on a single desktop, so the two
+     * halves fail independently and only the filling half is visible anywhere.
+     *
+     * This matters far beyond tidiness. 1,099 leads at SMS-relevant stages have
+     * never had a lookup, and the numbers those leads gave us are mostly office
+     * landlines (0 delivered / 53 failed). A working lookup queue is the only
+     * route from those leads to a textable mobile, so a dead drainer is a hard
+     * ceiling on drip volume that looks exactly like "not many leads today".
+     *
+     * Measured in HOURS since the oldest pending job was created, so a queue
+     * that is filling but not draining fails even while enrolment reports
+     * healthy. 24h is generous for a worker that normally turns a job around in
+     * minutes.
+     */
+    id: "leads.phone_lookup_stalled",
+    severity: "high",
+    rule: { kind: "must_be_below", ceiling: 24 },
+    observe: async (db, tenantId, endMs) => {
+      const r = await db
+        .from("phone_lookup_jobs")
+        .select("created_at")
+        .eq("tenant_id", tenantId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true })
+        .limit(1);
+      if (r.error) return null;
+      const oldest = r.data?.[0]?.created_at;
+      // An EMPTY queue is healthy, not unmeasurable: nothing is waiting.
+      if (!oldest) return 0;
+      const ms = endMs - Date.parse(oldest);
+      return Number.isFinite(ms) ? Math.round(ms / 3_600_000) : null;
+    },
+    describe: (r) =>
+      `the oldest un-drained phone lookup has been waiting ${r.observed}h. ` +
+      `The queue fills in the cloud but drains on one desktop worker, so this fails ` +
+      `silently and caps how many leads can ever become textable.`,
   },
   {
     // A backlog that stops draining is the shape of a stalled dispatcher, and
@@ -335,8 +540,10 @@ export async function runCheck(
   historyDays = 14,
 ): Promise<CheckResult> {
   const observed = await check.observe(db, tenantId, nowMs);
+  // A live threshold beats the one captured at import. See DripCheck.resolveRule.
+  const rule = check.resolveRule ? check.resolveRule() : check.rule;
   const history: number[] = [];
-  if (check.rule.kind === "baseline_drop") {
+  if (rule.kind === "baseline_drop") {
     // Skip the most recent window: including the outage in its own baseline is
     // how a slow decline normalises itself into invisibility.
     for (let d = 1; d <= historyDays; d++) {
@@ -344,5 +551,5 @@ export async function runCheck(
       if (v !== null) history.push(v);
     }
   }
-  return evaluate(check.id, check.rule, observed, history);
+  return evaluate(check.id, rule, observed, history);
 }

@@ -195,6 +195,29 @@ export const SUN_NAV: NavItem[] = [
 ];
 
 /**
+ * The web-design leads browser (Adon 2026-08-20). This is NOT a separate
+ * client portal — the leads and the operators who work them both live in
+ * the OASIS AI command-center tenant (slug `oasis-ai-cc`), the same tenant
+ * CC_NAV serves. So this is CC_NAV plus one Leads entry, not a standalone
+ * nav: binding that tenant to a WEBDEV_NAV-only profile would strip the 11
+ * tabs its operators already use every day. (An earlier version of this
+ * feature shipped as a 4-entry standalone nav bound to a zero-user tenant
+ * slug `oasis-webdev` — invisible to everyone, see lib/web-leads/data.ts.)
+ */
+export const WEBDEV_NAV: NavItem[] = [
+  ...CC_NAV,
+  { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
+  // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
+  // filtered to this engine's leads -- a VIEW over the fourteen-stage
+  // lifecycle CC already runs, never a second one (2026-08-21, Build D).
+  // "Web Pipeline", not "Pipeline": CC_NAV (spread above) already carries an
+  // Operations → Pipeline entry for /pipeline, so this label collided and the
+  // operator saw "Pipeline" twice in one sidebar pointing at two different
+  // boards (2026-08-22). Distinct label, same route — bookmarks unaffected.
+  { group: "Leads", href: "/web-leads/pipeline", label: "Web Pipeline", icon: "GitBranch" },
+];
+
+/**
  * Suga Sean O'Malley nav — fan-ops + brand sidebar (Phase 1 scaffold).
  *
  * Placeholder routes that mostly point to /agent or generic stubs until the

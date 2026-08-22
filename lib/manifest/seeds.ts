@@ -12,7 +12,7 @@
  * manifest would use, so the cutover in 1b is a no-op for the renderer.
  */
 
-import { CC_NAV, type NavItem } from "../nav-config";
+import { CC_NAV, WEBDEV_NAV, type NavItem } from "../nav-config";
 import { HELIOS_TOOL_PALETTE } from "../chat-tool-palettes";
 import { OASIS_LEAD_STAGE_KEYS } from "../oasis-stage-meta";
 import {
@@ -104,6 +104,24 @@ export const OASIS_SEED: TenantManifest = {
         { name: "company", type: "string" },
         { name: "email", type: "string" },
         { name: "phone", type: "string" },
+        // LEADGEN FIELDS. The OSM importer already WRITES these on every lead
+        // it creates (source=oasis_webdev_leadgen:osm) — website, the site's
+        // condition, industry and location. They were absent from this entity,
+        // and ManifestRecordForm renders the ENTITY, not the row, so the data
+        // was in the database and invisible on the lead profile. A rep opening
+        // "Mango Rain" could not see https://www.mangorain.ca/ even though it
+        // was stored on the record.
+        //
+        // Website condition is the single most useful field on a cold call for
+        // this offer — "no site" and "has a site, not reviewed" are completely
+        // different openers — so it goes on the profile, not just in the
+        // /web-leads browser.
+        { name: "website", type: "string" },
+        { name: "website_condition", type: "string" },
+        { name: "audit_findings", type: "string" },
+        { name: "industry", type: "string" },
+        { name: "business_city", type: "string" },
+        { name: "state", type: "string" },
         { name: "source", type: "enum", enum_values: ["referral", "inbound", "outbound", "event", "cold_outreach", "other"] },
         // OASIS lead lifecycle (Website Sales Engine v2). 14 stages cover
         // every state a prospect or client can be in — from researched lead
@@ -226,6 +244,23 @@ export const OASIS_SEED: TenantManifest = {
     updated_at: FROZEN_AT,
     schema_version: MANIFEST_SCHEMA_VERSION,
   },
+};
+
+// OASIS AI, `oasis-ai-cc` slug — the ACTUAL live agency-CRM tenant (the
+// `oasis` slug above is historical; see lib/role-surfaces.ts). This is
+// getManifest()'s real fallback target for Adon's session, so it — not
+// lib/client-profiles.ts's WEBDEV_PROFILE.nav — is what the sidebar
+// actually renders (app/layout.tsx resolves `manifest = getManifest(slug)`,
+// which checks the Supabase tenant_manifests table for this slug and
+// otherwise falls back here via getSeedManifest; it never reads
+// lib/client-profiles.ts). Everything else is identical to OASIS_SEED —
+// only `nav` changes, adding the Web Leads browser tab (2026-08-20 fix:
+// the tab previously only existed in the unused WEBDEV_PROFILE, bound to a
+// zero-user tenant slug, so no real operator ever saw it).
+export const OASIS_AI_CC_SEED: TenantManifest = {
+  ...OASIS_SEED,
+  tenant_slug: "oasis-ai-cc",
+  nav: navToManifest(WEBDEV_NAV),
 };
 
 // SunBiz Funding — fully populated tenant. Used at /t/sun/* as the
@@ -857,6 +892,7 @@ export const SUGA_SEED: TenantManifest = {
 export const SEED_MANIFESTS: Record<string, TenantManifest> = {
   default: OASIS_SEED,
   oasis: OASIS_SEED,
+  "oasis-ai-cc": OASIS_AI_CC_SEED,
   sun: SUN_SEED,
   suga: SUGA_SEED,
 };

@@ -24,6 +24,7 @@ import {
   type DaemonHealthRow,
   type DaemonState,
 } from "@/lib/automations/daemon-backed-crons";
+import { normalizeEmpireRow, type EmpireCronRow } from "@/lib/cron-empire-row";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -47,20 +48,6 @@ type ActionType = (typeof VALID_ACTION_TYPES)[number];
  * normalizes both to a single shape with a `source` discriminator and the
  * UI surfaces an "Empire" tag on cron_jobs rows.
  */
-type EmpireCronRow = {
-  id: string;
-  name: string;
-  description: string | null;
-  schedule: string;
-  action_type: string;
-  action_config: Record<string, unknown> | null;
-  is_active: boolean;
-  last_run_at: string | null;
-  last_result: string | null;
-  next_run_at: string | null;
-  run_count: number | null;
-  created_at: string;
-};
 
 // Minimal cron-expression validator. Five fields, each one of:
 //   *, N, N-M, */N, N,M,K
@@ -122,7 +109,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
   // to suppress tenant-scoped rows that leaked in; the column makes both
   // unnecessary.
-  let empireJobs: ReturnType<typeof normalizeEmpireRow>[] = [];
+  let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
   if (isOperatorEmail(user.email)) {
     const empireQuery = await db
       .from("cron_jobs")
@@ -132,7 +119,14 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });
     if (!empireQuery.error && empireQuery.data) {
-      empireJobs = (empireQuery.data as EmpireCronRow[]).map(normalizeEmpireRow);
+      // The daemon field is decorated HERE, not in lib/cron-empire-row.ts —
+      // the shared normalizer stays daemon-agnostic; only this route knows
+      // which parked rows a PM2 daemon has taken over. Null for the ordinary
+      // rows the shared scheduler still runs; filled in below.
+      empireJobs = (empireQuery.data as EmpireCronRow[]).map((row) => ({
+        ...normalizeEmpireRow(row),
+        daemon: null as DaemonState | null,
+      }));
     }
   }
 
@@ -202,56 +196,6 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
  *   - "Aura *" / "Morning Pow Wow" → aura (life-coach)
  *   - everything else → bravo (CEO — business ops)
  */
-function inferEmpireAgentKey(name: string, actionType: string | null): string {
-  const n = (name || "").toLowerCase();
-  const t = (actionType || "").toLowerCase();
-  if (n.startsWith("atlas") || t.startsWith("atlas_")) return "atlas";
-  if (n.startsWith("maven") || t.startsWith("maven_")) return "maven";
-  if (n.startsWith("aura") || n.includes("pow wow") || t.startsWith("morning_powwow")) return "aura";
-  return "bravo";
-}
-
-function normalizeEmpireRow(row: EmpireCronRow) {
-  // last_result is a free-form text column written by scripts/scheduler.py.
-  // Observed patterns in scheduler.py:
-  //   "ok"                            → success (lowercase, no prefix)
-  //   "<stdout snippet>"              → success (raw script output)
-  //   "stripe sync ok: ..."           → success
-  //   "ERROR: <reason>"               → error
-  //   "FAILED (exit N): <stderr>"     → error
-  //
-  // Match case-insensitively, prefix-only, so the success/error tag in the
-  // UI matches what the scheduler actually wrote.
-  const lastResult = row.last_result || "";
-  const upper = lastResult.toUpperCase();
-  const status: "success" | "error" | null = !lastResult
-    ? null
-    : upper.startsWith("ERROR") || upper.startsWith("FAILED")
-      ? "error"
-      : "success";
-  return {
-    id: row.id,
-    agent_key: inferEmpireAgentKey(row.name, row.action_type),
-    name: row.name,
-    description: row.description,
-    schedule: row.schedule,
-    action_type: row.action_type,
-    action_payload: row.action_config || {},
-    enabled: row.is_active,
-    last_run_at: row.last_run_at,
-    last_run_status: status,
-    last_run_output: status === "success" ? lastResult : null,
-    last_run_error: status === "error" ? lastResult : null,
-    run_count: row.run_count || 0,
-    created_at: row.created_at,
-    updated_at: row.created_at,
-    source: "empire" as const,
-    // Filled in by the GET for rows a PM2 daemon has taken over; null for the
-    // ordinary rows the shared scheduler still runs.
-    daemon: null as DaemonState | null,
-  };
-}
-
 export async function POST(req: NextRequest) {
   // Admin-only: creating a scheduled job (script_run / agent_prompt /
   // webhook_post / snapshot_run). Non-admin members can view (GET) only.

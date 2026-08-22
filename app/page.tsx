@@ -39,6 +39,8 @@ import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { FounderToday } from "@/components/today/FounderToday";
 import { RepToday } from "@/components/today/RepToday";
 import { DeliveryToday } from "@/components/today/DeliveryToday";
+import { ManagerToday } from "@/components/today/ManagerToday";
+import { MarketingToday } from "@/components/today/MarketingToday";
 
 export const dynamic = "force-dynamic";
 
@@ -142,7 +144,37 @@ export default async function TodayPage() {
     );
   }
 
-  if (surface.persona === "worker" || surface.persona === "readonly") {
+  // The manager MUST have its own branch. Without one it falls through to
+  // FounderToday below, which takes `showFinancials` (correctly false here) but
+  // consults no other capability — so it would render the whole tenant's
+  // pipeline and the company inbound tape to someone whose capability record
+  // denies both. A persona without a surface is a leak waiting for its first
+  // login.
+  if (surface.persona === "manager") {
+    return (
+      <ManagerToday
+        tenantId={surface.tenantId}
+        userId={surface.userId}
+        managerName={viewerName}
+      />
+    );
+  }
+
+  // Same reasoning as the manager branch above: without one, marketing falls
+  // through to FounderToday, which reads no capability but showFinancials and
+  // would render the whole pipeline and the company inbound tape.
+  if (surface.persona === "marketing") {
+    return <MarketingToday viewerName={viewerName} />;
+  }
+
+  // builder has its own persona now but the DELIVERY surface is still the
+  // right screen for them — it is the work queue. What changed is the nav
+  // and the capability record around it, not the dashboard.
+  if (
+    surface.persona === "worker" ||
+    surface.persona === "builder" ||
+    surface.persona === "readonly"
+  ) {
     return (
       <DeliveryToday
         tenantId={surface.tenantId}

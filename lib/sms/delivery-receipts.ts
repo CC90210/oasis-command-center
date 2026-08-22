@@ -37,6 +37,13 @@ export type OpenReceiptArgs = {
   toPhone: string;
   body: string;
   sentAt?: Date;
+  /**
+   * 'drip' (default) or 'canary'. A canary is a line-commissioning test send;
+   * it deliberately shares this table so that clearing a line PROVES the
+   * receipt pipeline works, rather than proving it works in a private copy of
+   * the pipeline that the drips do not use.
+   */
+  purpose?: "drip" | "canary";
 };
 
 /**
@@ -66,6 +73,7 @@ export async function openReceipt(db: Db, args: OpenReceiptArgs): Promise<string
           body_hash: hashBody(args.body),
           sent_at: sentAt.toISOString(),
           carrier_status: "unknown",
+          purpose: args.purpose ?? "drip",
         },
         { onConflict: "tenant_id,chat_id,body_hash,sent_at" },
       )
@@ -394,6 +402,48 @@ export type RecentReceipt = { status: CarrierStatus; at: number };
  * load-bearing: the breaker halts on null (it cannot see) and permits on empty
  * (there is genuinely nothing yet).
  */
+/**
+ * Recent verdicts WITH the sending line attached, for the per-line breaker.
+ *
+ * readRecentReceipts deliberately drops `from_number` because the wire-level
+ * breaker does not need it. The per-line rule does: on 2026-08-20 a canary from
+ * all twelve of our numbers to one handset came back six delivered and six
+ * failed, and a wire-level view cannot see that at all — the healthy half keeps
+ * resetting the consecutive count while half the pool is dead.
+ *
+ * Returns null on a read failure, never []. The caller treats null as "refuse
+ * to send"; an empty array means "no evidence yet", which is a different and
+ * much safer state.
+ */
+export async function readRecentReceiptsByLine(
+  tenantId: string,
+  opts: { sinceMs?: number; limit?: number; onlyLines?: string[] } = {},
+): Promise<Array<{ number: string; status: CarrierStatus; at: number }> | null> {
+  const db = getServiceSupabase();
+  const since = new Date(opts.sinceMs ?? Date.now() - 24 * 3_600_000).toISOString();
+  if (opts.onlyLines && opts.onlyLines.length === 0) return [];
+  try {
+    let q = db
+      .from("sms_delivery_receipts")
+      .select("from_number, carrier_status, sent_at")
+      .eq("tenant_id", tenantId)
+      .in("carrier_status", ["delivered", "failed"])
+      .gte("sent_at", since);
+    if (opts.onlyLines?.length) q = q.in("from_number", opts.onlyLines);
+    const r = await q.order("sent_at", { ascending: false }).limit(opts.limit ?? 300);
+    if (r.error) return null;
+    return (r.data || [])
+      .filter((x: { from_number: string | null }) => !!x.from_number)
+      .map((x: { from_number: string; carrier_status: string; sent_at: string }) => ({
+        number: String(x.from_number),
+        status: x.carrier_status as CarrierStatus,
+        at: Date.parse(x.sent_at),
+      }));
+  } catch {
+    return null;
+  }
+}
+
 export async function readRecentReceipts(
   tenantId: string,
   opts: {

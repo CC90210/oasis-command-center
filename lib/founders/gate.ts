@@ -21,7 +21,7 @@
 import { getActiveProfile } from "@/lib/queries";
 import { isFounderTenant, parseFoundersAllowlist } from "@/lib/founders-marketing-core";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { resolvePersona } from "@/lib/role-surfaces";
+import { SURFACE_CAPABILITIES, resolvePersona } from "@/lib/role-surfaces";
 
 export { isFounderTenant, parseFoundersAllowlist };
 
@@ -70,6 +70,25 @@ export async function resolveFounder(): Promise<FounderContext | null> {
   // every founders route and API caller at once (library, performance, asset,
   // train, ingest) — a per-page check would have been one file away from a hole
   // the next time a founders route is added.
+  //
+  // 2026-08-21: the persona check was `persona !== "founder"`, which was right
+  // when the only people who did marketing WERE the founders. It stopped being
+  // right the moment OASIS hired a marketing specialist: their whole job is
+  // this portal, and the gate 404'd them out of it. CC reported exactly that
+  // for schneur@oasisai.work.
+  //
+  // The gate now asks the CAPABILITY rather than naming a persona, which is the
+  // composition the rest of the dashboard already uses. `canSeeMarketing` is
+  // true for founder, marketing and builder, and FALSE for sales and manager —
+  // so the protection this gate was written for is untouched: an outside
+  // commission-only contractor still cannot reach the founders portal, and now
+  // that fact lives in one capability row instead of a hardcoded string here.
+  //
+  // The BASE capability row is the right thing to read here, not
+  // capabilitiesFor(): that function re-applies the OASIS tenant narrowing, and
+  // isFounderTenant() three lines above has already established this tenant is
+  // on the founders allowlist. Asking again would mean a second slug lookup on
+  // every founders route to re-answer a question already answered.
   const session = await resolveSessionContext();
   if (!session.ok) return null;
   const persona = resolvePersona({
@@ -77,7 +96,7 @@ export async function resolveFounder(): Promise<FounderContext | null> {
     isTrueAdmin: session.isTrueAdmin,
     adminAccess: session.adminAccess,
   });
-  if (persona !== "founder") return null;
+  if (!SURFACE_CAPABILITIES[persona].canSeeMarketing) return null;
   return {
     tenantId: profile.tenant_id,
     profileId: profile.id,

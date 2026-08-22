@@ -34,6 +34,8 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, checkEmailSuppressed } from "@/lib/lead-interactions-queries";
+import { isTextable, resolveSendNumber } from "@/lib/sms/destination-health";
+import { sendablePool, announceBenchedLines } from "@/lib/sms/line-health";
 import { sanitizeBlastMessage, stripDashes } from "@/lib/integrations/blast-safety";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { maybeMintApplicationUrl, updateRecord } from "@/lib/manifest/data";
@@ -914,14 +916,84 @@ async function processSmsStep(
    *  and are exempt from the marketing consent bar — see mayTextFor. */
   emailClass: string,
 ): Promise<StepOutcome> {
-  const phone = typeof data.phone === "string" ? data.phone.trim() : "";
-  // No phone for an SMS step: SKIP + advance (the sequence may have email steps
-  // this lead CAN receive) rather than fail the whole chain (audit H5).
+  // WHICH NUMBER, not just whether there is one.
+  //
+  // The phone lookup writes what it finds into `phone_lookup_candidates` and
+  // deliberately does not overwrite `data.phone` — that field is the merchant's
+  // own record of themselves. Correct, and it leaves a lead looking like this:
+  //
+  //   phone:      6619789433                    <- the office landline
+  //   candidates: +12094831972 (Wireless), ...  <- the mobile we just found
+  //
+  // Reading `data.phone` here meant the lookup could succeed, find a reachable
+  // mobile, and the lead stayed held anyway (measured 2026-08-21). resolveSendNumber
+  // applies the preference order: a number we have actually delivered to beats
+  // a looked-up mobile beats anything else, and benched numbers are excluded.
+  //
+  // EVERY GATE BELOW USES THIS NUMBER — opt-out, reachability, TCPA window and
+  // the send itself. Resolving here rather than at the send is the whole point:
+  // checking consent against one number and texting another is how a merchant
+  // who opted out gets texted anyway.
+  const resolved = await resolveSendNumber(row.tenant_id, data);
+  const phone = resolved?.phone ?? "";
+  // No usable number for an SMS step: SKIP + advance (the sequence may have
+  // email steps this lead CAN receive) rather than fail the whole chain
+  // (audit H5).
   if (!phone) return skipStep(db, row, steps, "no_phone_for_sms_step");
 
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
   if (supp.checkFailed) return markRetryOrFail(db, row, "suppression_check_failed");
+
+  // CAN THIS PHONE RECEIVE A TEXT AT ALL?
+  //
+  // Measured 2026-08-20, carrier verdicts split by where the number came from:
+  // looked-up numbers delivered 8 and failed 3; numbers merchants typed on
+  // their application delivered 0 and failed 53. A number written on a business
+  // application is usually the office line, and a landline physically cannot
+  // receive SMS.
+  //
+  // That is the whole of the "outage" that started 2026-08-19: nothing broke,
+  // the cohort changed. The exact refused message was later replayed from the
+  // same line to a mobile and delivered.
+  //
+  // Deliberately placed AFTER the opt-out check and BEFORE the lawful-basis
+  // one: an opt-out is a legal instruction and outranks everything, while this
+  // is a technical fact that should not consume a consent decision.
+  //
+  // A skip, not a failure. Nothing about this lead will change on its own, and
+  // the sequence's EMAIL steps should still run — that is how a merchant on a
+  // desk phone still hears from us.
+  {
+    const reach = await isTextable(row.tenant_id, phone);
+    if (!reach.textable) {
+      // TWO DIFFERENT HOLDS, AND THEY MUST BE HANDLED DIFFERENTLY (Codex P1,
+      // 2026-08-20).
+      //
+      // `sms_unreachable` is PERMANENT — a landline, or a number that keeps
+      // failing. Nothing about it will change, so the step is skipped and the
+      // sequence advances to whatever email steps follow.
+      //
+      // `sms_awaiting_verification` is TEMPORARY: the number simply has no
+      // phone lookup yet. The first cut skipped that too, and skipStep calls
+      // advanceRow — so the message was permanently stepped past and the
+      // lookup completing later could never deliver it. The comment claimed it
+      // "clears when the queue drains"; it did not. Held and retried instead.
+      //
+      // 24h because the lookup queue drains at a daily cap; anything shorter
+      // just re-checks a row whose answer cannot have arrived yet.
+      if (reach.hold === "awaiting_verification") {
+        return holdOrEmailInstead(
+          db, row, data, step, steps, run, emailClass,
+          24, `sms_awaiting_verification: ${reach.reason}`,
+        );
+      }
+      // Kept under distinct reasons because the guard audit counts by reason: a
+      // backlog of temporary waits filed as "unreachable" would show the
+      // landline gate firing hundreds of times and hide when it genuinely does.
+      return skipStep(db, row, steps, `sms_unreachable: ${reach.reason}`);
+    }
+  }
 
   // LAWFUL BASIS TO TEXT. Email and SMS are not interchangeable in law: email
   // needs no prior permission, a marketing text does. $500 a message, $1,500 if
@@ -1138,6 +1210,40 @@ async function processSmsStep(
     // filter runs in the query, and an exclusion cannot be expressed there
     // without an operator the Turso adapter does not implement.
     const wireLines = await linesForWire(row.tenant_id, wire, run);
+
+    // PER-LINE HEALTH, before the per-wire breaker.
+    //
+    // Adon, 2026-08-20: "3 failures in a row on a phone number stops that
+    // number. 5 across the whole account stops all texting."
+    //
+    // The wire breaker cannot do this job. A canary from all twelve of our
+    // numbers to ONE handset came back six delivered, six failed — half the
+    // pool was dead and the wire-level consecutive count never got near its
+    // limit, because the healthy half kept resetting it.
+    //
+    // NOTE the deliberate asymmetry below: the BREAKER still reads every line's
+    // receipts (`wireLines`), not just the healthy ones. Scoping it to the
+    // survivors would hide the route dying — the breaker would only ever see
+    // the numbers that are still working and could never halt.
+    const pool = await sendablePool(row.tenant_id, wireLines, { wire });
+    // Alerting must never be able to stop a send, so failures here are
+    // swallowed. The bench decision itself is already made above.
+    await announceBenchedLines(row.tenant_id, pool, { wire }).catch(() => undefined);
+    if (identity.senderId && pool.blocked.some((b) => b.number === identity.senderId)) {
+      // This lead was assigned a number that is now benched. Hold and retry:
+      // the row is not damaged and another line may pick it up next tick.
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_line_benched: ${pool.blocked.find((b) => b.number === identity.senderId)?.reason ?? "line benched"}`,
+      );
+    }
+    if (pool.lines.length === 0) {
+      return holdOrEmailInstead(
+        db, row, data, step, steps, run, emailClass,
+        2, `sms_no_healthy_line: ${pool.reason}`,
+      );
+    }
+
     const breaker = await smsSendAllowed(row.tenant_id, { wire, onlyLines: wireLines });
     // Halted but due for a probe: try to CLAIM it. The claim is a conditional
     // update in Postgres, so exactly one caller wins across every concurrent
