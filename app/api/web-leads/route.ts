@@ -62,7 +62,12 @@ export async function GET(req: NextRequest) {
     // say so. An error the operator can see is the honest failure here.
     const [sheets, scoreIndex] = await Promise.all([fetchSheets(), fetchScoreIndex()]);
     const ids = selectSheetIds(sheets, filters);
-    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex);
+    // scope=mine returns the caller's OWN book (including lapsed claims);
+    // the default pool excludes every lead somebody currently holds, which is
+    // what stops two reps dialling the same business. One clock for the whole
+    // request so the expiry rules cannot see time move mid-read.
+    const scope = req.nextUrl.searchParams.get("scope") === "mine" ? "mine" : "pool";
+    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, { scope, now: Date.now() });
     return NextResponse.json({ leads, total, page: filters.page, pageSize: PAGE_SIZE });
   } catch (err) {
     return NextResponse.json(

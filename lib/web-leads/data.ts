@@ -30,6 +30,8 @@ import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
+import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
+import { isClaimable } from "./claim-ops";
 
 // Re-exported so every existing import site keeps working. They live in a leaf
 // module now so scores.ts can pin the same tenant and cap without creating an
@@ -111,7 +113,26 @@ export type WebLead = {
 export type WebLeadRow = WebLead & {
   score: number | null;
   scoreState: ScoreState;
+  /** Auth user id of the rep who holds it, or null when it is in the pool. */
+  assignedTo: string | null;
+  /** Current lifecycle stage, for My Leads. */
+  stage: string | null;
+  /** True when a rep nominally holds this lead but the claim has lapsed -- see
+   *  lib/web-leads/claim.ts. Rendered as a marker in the rep's own book rather
+   *  than by silently removing the row. */
+  released: boolean;
+  /** When the last call was logged, so a rep can see what they have not touched. */
+  lastCallAt: string | null;
 };
+
+/**
+ * Which slice of the world a list read is asking for.
+ *
+ *   "pool" — the shared Leads tab: only leads nobody currently holds. This is
+ *            what stops two reps dialling the same business.
+ *   "mine" — the caller's own book, including leads whose claim has lapsed.
+ */
+export type LeadScope = "pool" | "mine";
 
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
@@ -181,8 +202,14 @@ export async function fetchLeads(
   sheetIds: string[],
   viewer: Viewer,
   scoreIndex: ScoreIndex,
+  // `now` is injected, never read here, for the same reason claim.ts takes it
+  // as a parameter: ownership expiry is a pure derivation over timestamps, and
+  // one request must not see the clock move between filtering and paging.
+  { scope, now }: { scope: LeadScope; now: number },
 ): Promise<{ leads: WebLeadRow[]; total: number }> {
-  if (sheetIds.length === 0) return { leads: [], total: 0 };
+  // A rep's own book is not confined to the sheets the filters selected, so an
+  // empty sheet selection means "no leads" only for the shared pool.
+  if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0 };
   const db = getServiceSupabase();
   const { data, error, count } = await db
     .from("tenant_records")
@@ -218,6 +245,16 @@ export async function fetchLeads(
         viewer,
       ),
     )
+    // OWNERSHIP FILTER, before anything else touches the row. The shared Leads
+    // tab must never show a lead somebody already holds -- that is the entire
+    // point of claiming. `mine` is the complement: the caller's own book,
+    // including lapsed claims, which stay visible and flagged rather than
+    // vanishing overnight (see claim.ts on why silent disappearance is worse).
+    .filter((r: { id: string; data: Record<string, unknown> }) =>
+      scope === "mine"
+        ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+        : isClaimable(r.data || {}, now),
+    )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
       const lead = toWebLead(r);
       // webdev_source_business_id is the one-way pointer JARVIS's crm-sink.js
@@ -227,9 +264,21 @@ export async function fetchLeads(
       const bid = typeof r.data.webdev_source_business_id === "string"
         ? r.data.webdev_source_business_id
         : null;
-      return { ...lead, ...resolveScore(lead.websiteUrl, bid, scoreIndex) };
+      const facts = factsFrom(r.data || {});
+      return {
+        ...lead,
+        ...resolveScore(lead.websiteUrl, bid, scoreIndex),
+        assignedTo: facts.assignedTo,
+        stage: facts.stage,
+        released: isReleasedFromBook(facts, now),
+        lastCallAt: facts.lastCallAt,
+      };
     })
-    .filter((l) => l.territoryId && wanted.has(l.territoryId))
+    // Sheet narrowing applies to the shared pool only. A rep's own book must
+    // show every lead they hold, including any whose territory sits outside
+    // the filters currently set on the Leads tab -- otherwise a rep changes a
+    // filter and leads they own disappear from their own page.
+    .filter((l) => (scope === "mine" ? true : l.territoryId && wanted.has(l.territoryId)))
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => matchesBand(l, f.band))
