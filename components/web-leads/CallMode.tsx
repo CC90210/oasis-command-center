@@ -280,16 +280,28 @@ export function CallMode({
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
+      // Escape stays live even mid-write: leaving is always allowed, and the
+      // POST either lands or does not regardless of what is on screen.
       if (e.key === "Escape") { e.preventDefault(); onExit(); return; }
+      if (e.key.toLowerCase() === "n") { e.preventDefault(); noteRef.current?.focus(); return; }
+
+      // NOTHING MOVES THE QUEUE WHILE A WRITE IS IN FLIGHT. A successful log()
+      // advances by itself; a rep pressing Skip in the moment between the POST
+      // starting and returning would advance a second time and silently skip
+      // the lead in between -- never called, never logged, and nothing on
+      // screen to suggest it was missed. (Codex review, 2026-08-23.) log() has
+      // its own `pending` guard against double-dispositioning; this is the
+      // navigation half of the same rule.
+      if (pending) return;
+
       if (e.key === "ArrowRight" || e.key.toLowerCase() === "s") { e.preventDefault(); next(); return; }
       if (e.key === "ArrowLeft" || e.key.toLowerCase() === "b") { e.preventDefault(); prev(); return; }
-      if (e.key.toLowerCase() === "n") { e.preventDefault(); noteRef.current?.focus(); return; }
       const hit = OUTCOMES.find((o) => o.digit === e.key);
       if (hit) { e.preventDefault(); void log(hit.key); }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [log, next, prev, onExit]);
+  }, [log, next, prev, onExit, pending]);
 
   const websiteHref = useMemo(() => safeExternalUrl(lead?.websiteUrl ?? null), [lead?.websiteUrl]);
   const progress = leads.length ? Math.min(100, ((i + (atEnd ? 0 : 1)) / leads.length) * 100) : 0;
@@ -459,7 +471,9 @@ export function CallMode({
               <button
                 type="button"
                 onClick={prev}
-                disabled={i === 0}
+                // Same rule as the keyboard handler: a successful log()
+                // advances on its own, so a second move mid-write skips a lead.
+                disabled={i === 0 || pending !== null}
                 className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />Back
@@ -467,7 +481,8 @@ export function CallMode({
               <button
                 type="button"
                 onClick={next}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+                disabled={pending !== null}
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
               >
                 Skip <Key>S</Key><ArrowRight className="h-3.5 w-3.5" />
               </button>
