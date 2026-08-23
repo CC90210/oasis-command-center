@@ -158,7 +158,7 @@ function TalkingPoints({ leadId }: { leadId: string }) {
 }
 
 export function CallMode({
-  leads, queueKey, queueLabel, loading, onExit, onOpenDetail, onLoadMore, hasMore,
+  leads, queueKey, queueLabel, ready, onExit, onOpenDetail, onLoadMore, hasMore,
 }: {
   leads: WebLeadRow[];
   /** Changes whenever `leads` becomes a DIFFERENT queue (a new page, or new
@@ -166,7 +166,19 @@ export function CallMode({
    *  the effect below. */
   queueKey: string;
   queueLabel: string;
-  loading: boolean;
+  /**
+   * True only when `leads` is the data for THIS `queueKey`.
+   *
+   * Not merely "not loading". When a rep hits "load the next page", queueKey
+   * changes instantly while the parent still holds the PREVIOUS page's leads
+   * until the fetch lands. Without this flag the cursor resets to 0 and Call
+   * Mode renders lead #1 of the page just finished, with live disposition
+   * buttons -- so the rep calls and logs a business they already called
+   * moments ago, and the duplicate looks exactly like a real second attempt.
+   * (Codex caught this in review, 2026-08-23.) Nothing renders a lead until
+   * the leads on screen belong to the queue named in the header.
+   */
+  ready: boolean;
   onExit: () => void;
   onOpenDetail: (id: string) => void;
   onLoadMore: (() => void) | null;
@@ -192,10 +204,14 @@ export function CallMode({
     setError(null);
   }, [queueKey]);
 
-  // A shorter queue (the rep changed a filter behind the overlay, or the page
-  // reloaded with fewer results) must not strand the cursor past the end.
-  const lead: WebLeadRow | undefined = leads[i];
-  const atEnd = !loading && i >= leads.length;
+  // Nothing resolves to a lead until the leads on screen belong to this queue
+  // -- see the `ready` prop's doc comment. Everything downstream (the rendered
+  // lead, the disposition buttons, the end-of-queue screen, the keyboard
+  // shortcuts via `lead`) is gated through these two, so there is no second
+  // place to remember. A shorter queue (a filter changed behind the overlay)
+  // also cannot strand the cursor past the end.
+  const lead: WebLeadRow | undefined = ready ? leads[i] : undefined;
+  const atEnd = ready && i >= leads.length;
 
   const next = useCallback(() => {
     setNote("");

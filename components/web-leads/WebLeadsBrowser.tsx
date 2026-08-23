@@ -97,6 +97,16 @@ export function WebLeadsBrowser() {
   const [facets, setFacets] = useState<Facets | null>(null);
   const [facetError, setFacetError] = useState<string | null>(null);
   const [leads, setLeads] = useState<WebLeadRow[]>([]);
+  /**
+   * The queue identity the currently-held `leads` actually belong to.
+   *
+   * `loading` alone is not enough to answer "is what I am showing the thing I
+   * say I am showing". Between a rep hitting "load the next page" and that
+   * response landing, the URL (and so queueKey) already names page 2 while
+   * `leads` still holds page 1. Call Mode uses the comparison, not the flag --
+   * see its `ready` prop.
+   */
+  const [leadsKey, setLeadsKey] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   // Infinity, not 50: an inert placeholder for "the server hasn't answered
   // yet". total is also 0 until the same response lands, so Math.ceil(0 /
@@ -173,6 +183,10 @@ export function WebLeadsBrowser() {
       .then((body) => {
         if (!alive) return;
         setLeads(body.leads);
+        // Stamped from `qs`, the query these leads were fetched with -- not
+        // from `filters`, which may already have moved on. That is the whole
+        // point of the stamp.
+        setLeadsKey(qs);
         setTotal(body.total);
         setPageSize(body.pageSize);
         setListError(null);
@@ -215,6 +229,15 @@ export function WebLeadsBrowser() {
   }, [filters]);
 
   const pages = Math.max(1, Math.ceil(total / pageSize));
+
+  /** The identity of the queue the URL currently describes. Compared against
+   *  `leadsKey` to tell "these are the leads I asked for" apart from "these are
+   *  whatever arrived last". Built the same way the fetch builds its query, so
+   *  the two strings are comparable by construction. */
+  const queueKey = useMemo(
+    () => filtersToParams({ ...filters, leadId: null }).toString(),
+    [filters],
+  );
 
   return (
     <div className="space-y-6">
@@ -264,9 +287,12 @@ export function WebLeadsBrowser() {
           // Page AND filter identity: a rep who changes a filter in another tab
           // and comes back is working a different queue even at the same page
           // number, and the cursor should start over rather than land mid-list.
-          queueKey={filtersToParams({ ...filters, leadId: null }).toString()}
+          queueKey={queueKey}
           queueLabel={queueLabel}
-          loading={loading}
+          // NOT `!loading`. The leads on screen must belong to THIS queue key,
+          // or a rep can be handed the previous page's first lead with live
+          // disposition buttons while the next page is still in flight.
+          ready={!loading && leadsKey === queueKey}
           onExit={() => setCalling(false)}
           // Leaving Call Mode to open the drawer, rather than stacking two
           // full-screen overlays on top of each other.

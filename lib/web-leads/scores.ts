@@ -68,14 +68,27 @@ export const EMPTY_SCORE_INDEX: ScoreIndex = { scored: new Map(), unreachable: n
 export async function fetchScoreIndex(): Promise<ScoreIndex> {
   const db = getServiceSupabase();
 
-  const [audits, unreachable] = await Promise.all([
+  const [allAudits, scoredAudits, unreachable] = await Promise.all([
+    // EVERY audit row, so the newest one per business can be identified before
+    // anything is filtered out -- see the newest-row comment below for why that
+    // order matters. `profile` is never selected: it is the full 49-check
+    // evaluation, kilobytes per row across ~23,000 rows, and all this needs is
+    // one bit about it, which the second read supplies.
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,fetched_at")
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .limit(LEAD_READ_CAP),
+    // The subset the panel would call `scored`: a profile actually landed
+    // (audit.ts rule 3 treats a null profile as not_scored, so a row written
+    // before migrations/005_audit_profile.sql and never backfilled is not a
+    // score no matter what its quality_score column says).
     db
       .from("leadgen_site_audits")
       .select("business_id,quality_score,fetched_at")
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
-      // Rows whose profile never landed are `not_scored` to the panel (audit.ts
-      // rule 3). Excluding them here is what keeps the two views agreeing.
       .is("profile", "not.null")
       .limit(LEAD_READ_CAP),
     db
@@ -86,31 +99,55 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
       .limit(LEAD_READ_CAP),
   ]);
 
-  if (audits.error) throw new Error(`audit_index_read_failed: ${audits.error.message}`);
+  if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
+  if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
   if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
 
-  const auditRows = (audits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
+  const allRows = (allAudits.data || []) as { business_id: string; fetched_at: string }[];
+  const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
   const unreachableRows = (unreachable.data || []) as { business_id: string }[];
 
-  if (auditRows.length >= LEAD_READ_CAP || unreachableRows.length >= LEAD_READ_CAP) {
+  if (
+    allRows.length >= LEAD_READ_CAP ||
+    scoredRows.length >= LEAD_READ_CAP ||
+    unreachableRows.length >= LEAD_READ_CAP
+  ) {
     throw new Error(
       `score_index_truncated: hit the ${LEAD_READ_CAP}-row cap, scores would be silently incomplete`,
     );
   }
 
-  // One business can hold several audit rows (the table's natural key is
-  // business_id + audit_version + url, so a business with two URLs has two).
-  // audit.ts resolves that by taking the newest fetched_at; do the same, or a
-  // lead's table score could come from a different crawl than its panel score.
-  const newest = new Map<string, { score: number; at: string }>();
-  for (const r of auditRows) {
-    if (typeof r.quality_score !== "number") continue; // never invent a 0
-    const prev = newest.get(r.business_id);
-    if (!prev || r.fetched_at > prev.at) newest.set(r.business_id, { score: r.quality_score, at: r.fetched_at });
+  /**
+   * NEWEST ROW FIRST, THEN ASK WHETHER IT IS SCORED -- NOT THE OTHER WAY ROUND.
+   *
+   * One business can hold several audit rows (the natural key is business_id +
+   * audit_version + url, so a business with two URLs has two). audit.ts orders
+   * ALL of them by fetched_at, takes the newest, and only then reports "not
+   * scored" if that row's profile is null.
+   *
+   * An earlier draft of this function filtered `profile is not null` in SQL and
+   * picked the newest of whatever survived. That looks equivalent and is not:
+   * for a business whose newest crawl has no profile but an older one does, it
+   * silently resurrects the OLD score, so the table shows 61 while the panel
+   * says "Not scored yet" about the same business. Codex caught it in review
+   * (2026-08-23). It matches zero rows in production today -- verified by
+   * query, which is precisely why it would have sat here unnoticed until the
+   * next re-crawl wrote a profile-less row and quietly re-dated an old score.
+   */
+  const newestAt = new Map<string, string>();
+  for (const r of allRows) {
+    const prev = newestAt.get(r.business_id);
+    if (!prev || r.fetched_at > prev) newestAt.set(r.business_id, r.fetched_at);
   }
 
   const scored = new Map<string, number>();
-  for (const [bid, v] of newest) scored.set(bid, v.score);
+  for (const r of scoredRows) {
+    // Only if THIS row is the business's newest audit. Anything older is a
+    // superseded crawl and the panel would not show it either.
+    if (newestAt.get(r.business_id) !== r.fetched_at) continue;
+    if (typeof r.quality_score !== "number") continue; // never invent a 0
+    scored.set(r.business_id, r.quality_score);
+  }
 
   return { scored, unreachable: new Set(unreachableRows.map((r) => r.business_id)) };
 }
