@@ -11,7 +11,19 @@
  * nothing.
  */
 
+/**
+ * The three in-page views the browser can show (2026-08-23 revamp). Pipeline
+ * and Territories used to be separate destinations (`/web-leads/pipeline`,
+ * an inline-only TerritoryAssignment card) -- the operator never asked for a
+ * standalone pipeline page, so both moved in-page behind a segmented control,
+ * switched the same way every other filter here is: through the URL, so a
+ * view survives a refresh, back/forward, and a shared link.
+ */
+export type WebLeadView = "leads" | "pipeline" | "territories";
+const VALID_VIEWS: readonly WebLeadView[] = ["leads", "pipeline", "territories"];
+
 export type WebLeadFilters = {
+  view: WebLeadView;
   provinces: string[];
   cities: string[];
   industries: string[];
@@ -29,6 +41,7 @@ export type WebLeadFilters = {
 const EMPTY_LIST = Object.freeze([]) as unknown as string[];
 
 export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
+  view: "leads",
   provinces: EMPTY_LIST,
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
@@ -52,7 +65,12 @@ function list(sp: URLSearchParams, key: string): string[] {
 
 export function parseFilters(sp: URLSearchParams): WebLeadFilters {
   const pageRaw = Number.parseInt(sp.get("page") || "", 10);
+  const viewRaw = sp.get("view");
+  const view: WebLeadView = (VALID_VIEWS as string[]).includes(viewRaw || "")
+    ? (viewRaw as WebLeadView)
+    : "leads";
   return {
+    view,
     provinces: list(sp, "prov"),
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
@@ -65,6 +83,10 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
 
 export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   const sp = new URLSearchParams();
+  // "leads" is the default view and stays out of the URL, same convention
+  // as page=1 and every other default below -- only a non-default view
+  // earns a query param.
+  if (f.view !== "leads") sp.set("view", f.view);
   const put = (key: string, values: string[]) => {
     if (values.length) sp.set(key, values.map((v) => encodeURIComponent(v)).join(","));
   };

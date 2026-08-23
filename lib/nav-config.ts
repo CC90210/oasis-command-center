@@ -214,7 +214,6 @@ export const WEBDEV_NAV: NavItem[] = [
   // Operations → Pipeline entry for /pipeline, so this label collided and the
   // operator saw "Pipeline" twice in one sidebar pointing at two different
   // boards (2026-08-22). Distinct label, same route — bookmarks unaffected.
-  { group: "Leads", href: "/web-leads/pipeline", label: "Web Pipeline", icon: "GitBranch" },
 ];
 
 /**

@@ -1,9 +1,13 @@
 "use client";
 
 /**
- * WebsiteComparison — the website-score half of the lead detail panel.
- * Fetches GET /api/web-leads/[id]/audit (lib/web-leads/audit.ts) and renders
- * one of its four honest states.
+ * WebsiteComparison — the website-score half of the lead detail panel, and
+ * (2026-08-23 revamp) its HERO: mounted directly under the call/website
+ * actions in WebLeadDetail.tsx, ahead of the address/industry metadata, with
+ * its own larger type scale, so a rep's eye lands on the score and the gap
+ * list first -- exactly what they read mid-call. Fetches
+ * GET /api/web-leads/[id]/audit (lib/web-leads/audit.ts) and renders one of
+ * its four honest states.
  *
  * THE RULE THAT OUTRANKS THE UI (see audit.ts's header comment): a site we
  * could not reach is NEVER given a score, and the three non-scored states
@@ -14,7 +18,11 @@
  * So, deliberately, nowhere in this file: a badge that shortens a phrase
  * into a verdict, a red/green colour keyed to a score, an icon that reads as
  * a judgement, or a tooltip more confident than the text. The dimension bars
- * below fill with ONE neutral colour regardless of score, on purpose.
+ * below fill with ONE neutral colour regardless of score, on purpose, and
+ * the composite number itself is rendered in the page's plain foreground
+ * colour (with an ambient glow for hero weight) rather than any hue that
+ * could be misread as "this one's good" -- the same glow renders identically
+ * whether the score is 4 or 94.
  *
  * Uses the same `alive`-after-body-parse fetch pattern as WebLeadDetail.tsx
  * (and WebLeadsBrowser.tsx before it) so a slow response for lead A can
@@ -39,9 +47,9 @@ function RemedyLines({ code }: { code: string }) {
   const remedy = remedyFor(code);
   if (!remedy) return null;
   return (
-    <div className="mt-1.5 space-y-1 text-xs text-slate-600">
-      <p><span className="font-medium text-slate-700">Costs them:</span> {remedy.costs}</p>
-      <p><span className="font-medium text-slate-700">We&apos;d fix it:</span> {remedy.fix}</p>
+    <div className="mt-1.5 space-y-1 text-xs text-fg-dim">
+      <p><span className="font-medium text-fg-muted">Costs them:</span> {remedy.costs}</p>
+      <p><span className="font-medium text-fg-muted">We&apos;d fix it:</span> {remedy.fix}</p>
     </div>
   );
 }
@@ -60,8 +68,18 @@ function biggestGaps(dimensions: DimensionProfile[]): CheckResult[] {
 function ScoreBar({ score }: { score: number }) {
   const pct = Math.min(100, Math.max(0, score));
   return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
-      <div className="h-full rounded-full bg-slate-500" style={{ width: `${pct}%` }} />
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-border">
+      <div className="h-full rounded-full bg-fg-dim" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function HeroSkeleton() {
+  return (
+    <div className="mt-6 space-y-3 border-t border-bg-border pt-5" aria-busy="true" aria-live="polite">
+      <div className="h-3 w-28 rounded bg-bg-deep animate-pulse-slow" />
+      <div className="h-12 w-28 rounded bg-bg-deep animate-pulse-slow" />
+      <div className="h-3 w-40 rounded bg-bg-deep/70 animate-pulse-slow" />
     </div>
   );
 }
@@ -91,27 +109,35 @@ export function WebsiteComparison({ leadId }: { leadId: string }) {
   }, [leadId]);
 
   if (error) {
-    return <p className="mt-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{error}</p>;
+    return <p className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">{error}</p>;
   }
 
   if (!audit) {
-    return <p className="mt-4 text-sm text-slate-500">Loading website score…</p>;
+    return <HeroSkeleton />;
   }
 
   if (audit.state === "no_website") {
-    return <p className="mt-4 text-sm text-slate-500">No website found yet, needs checking</p>;
+    return (
+      <div className="mt-6 border-t border-bg-border pt-5">
+        <p className="text-sm text-fg-muted">No website found yet, needs checking</p>
+      </div>
+    );
   }
 
   if (audit.state === "not_scored") {
-    return <p className="mt-4 text-sm text-slate-500">Not scored yet.</p>;
+    return (
+      <div className="mt-6 border-t border-bg-border pt-5">
+        <p className="text-sm text-fg-muted">Not scored yet.</p>
+      </div>
+    );
   }
 
   if (audit.state === "unreachable") {
     return (
-      <div className="mt-4">
-        <p className="text-sm text-slate-500">We could not check this site.</p>
+      <div className="mt-6 border-t border-bg-border pt-5">
+        <p className="text-sm text-fg-muted">We could not check this site.</p>
         {/* The reason is for us -- not a claim about them -- so it stays small and muted. */}
-        <p className="mt-1 text-xs text-slate-400">{audit.reason}</p>
+        <p className="mt-1 text-xs text-fg-faint">{audit.reason}</p>
       </div>
     );
   }
@@ -120,34 +146,36 @@ export function WebsiteComparison({ leadId }: { leadId: string }) {
   const gaps = biggestGaps(audit.dimensions);
 
   return (
-    <div className="mt-4 space-y-5 border-t border-slate-100 pt-4">
-      {/* Headline */}
+    <div className="mt-6 space-y-6 border-t border-bg-border pt-5">
+      {/* Headline -- the hero. */}
       <div>
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="flex items-end justify-between gap-3">
           <div>
-            <p className="text-xs uppercase tracking-wide text-slate-500">Website score</p>
-            <p className="text-3xl font-semibold text-slate-900">{audit.composite}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Website score</p>
+            <p className="mt-1 text-6xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_18px_rgba(59,130,246,0.28)]">
+              {audit.composite}
+            </p>
           </div>
           {/* Benchmark column only when the payload actually carries one --
               default off (WEBDEV_SHOW_BENCHMARK), usually absent. */}
           {audit.benchmark && (
-            <div className="text-right">
-              <p className="text-xs uppercase tracking-wide text-slate-500">Our sites</p>
-              <p className="text-3xl font-semibold text-slate-400">{audit.benchmark.ourComposite}</p>
+            <div className="pb-1 text-right">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Our sites</p>
+              <p className="mt-1 text-2xl font-bold tabular-nums text-fg-dim">{audit.benchmark.ourComposite}</p>
             </div>
           )}
         </div>
-        <p className="mt-1 text-xs text-slate-500">Measured {formatDate(audit.measuredAt)}</p>
+        <p className="mt-2 text-xs text-fg-dim">Measured {formatDate(audit.measuredAt)}</p>
       </div>
 
       {/* Biggest gaps -- the script a rep reads aloud, most prominent after the score. */}
       {gaps.length > 0 && (
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Biggest gaps</p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Biggest gaps</p>
           <ul className="mt-2 space-y-2">
             {gaps.map((check) => (
-              <li key={check.code} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                <p className="text-sm font-medium text-slate-900">{check.label}</p>
+              <li key={check.code} className="rounded-md border border-bg-border bg-bg-deep/50 p-3">
+                <p className="text-sm font-semibold text-fg">{check.label}</p>
                 <RemedyLines code={check.code} />
               </li>
             ))}
@@ -157,13 +185,13 @@ export function WebsiteComparison({ leadId }: { leadId: string }) {
 
       {/* Seven dimensions */}
       <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dimensions</p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Dimensions</p>
         <div className="mt-2 space-y-2.5">
           {audit.dimensions.map((d) => (
             <div key={d.key}>
-              <div className="flex items-center justify-between text-xs text-slate-600">
+              <div className="flex items-center justify-between text-xs text-fg-muted">
                 <span>{d.label}</span>
-                <span className="tabular-nums text-slate-500">{d.score}</span>
+                <span className="tabular-nums text-fg-dim">{d.score}</span>
               </div>
               <div className="mt-1"><ScoreBar score={d.score} /></div>
             </div>
@@ -172,18 +200,18 @@ export function WebsiteComparison({ leadId }: { leadId: string }) {
       </div>
 
       {/* All 49 checks -- collapsed by default. */}
-      <details className="rounded-md border border-slate-200">
-        <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+      <details className="rounded-md border border-bg-border">
+        <summary className="cursor-pointer select-none rounded-md px-3 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted transition-colors hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70">
           All checks
         </summary>
-        <div className="divide-y divide-slate-100 border-t border-slate-200 px-3">
+        <div className="divide-y divide-bg-border border-t border-bg-border px-3">
           {audit.dimensions.map((d) => (
             <div key={d.key} className="py-2.5">
-              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">{d.label}</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">{d.label}</p>
               <ul className="mt-1.5 space-y-2">
                 {d.checks.map((check) => (
-                  <li key={check.code} className="text-sm text-slate-700">
-                    <span className="text-slate-500">{check.has ? "Pass" : "Fail"}</span> — {check.label}
+                  <li key={check.code} className="text-sm text-fg-muted">
+                    <span className="text-fg-dim">{check.has ? "Pass" : "Fail"}</span> - {check.label}
                     {!check.has && <RemedyLines code={check.code} />}
                   </li>
                 ))}
