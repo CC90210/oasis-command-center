@@ -28,7 +28,7 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
-import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP } from "./tenant";
+import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 
 // Re-exported so every existing import site keeps working. They live in a leaf
@@ -184,22 +184,26 @@ export async function fetchLeads(
 ): Promise<{ leads: WebLeadRow[]; total: number }> {
   if (sheetIds.length === 0) return { leads: [], total: 0 };
   const db = getServiceSupabase();
-  const { data, error } = await db
+  const { data, error, count } = await db
     .from("tenant_records")
-    .select("id,data")
+    .select("id,data", { count: "exact" })
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
     .limit(LEAD_READ_CAP);
   if (error) throw new Error(`leads_read_failed: ${error.message}`);
 
-  // Hitting the cap means the read may be truncated (see LEAD_READ_CAP doc
-  // comment) -- a short list that LOOKS complete is worse than a loud
-  // failure, so refuse to serve a possibly-partial dataset.
-  if ((data || []).length >= LEAD_READ_CAP) {
-    throw new Error(
-      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
-    );
-  }
+  // A short list that LOOKS complete is worse than a loud failure, so refuse to
+  // serve a possibly-partial dataset.
+  //
+  // This used to compare the row count against LEAD_READ_CAP, which only
+  // catches truncation by OUR cap. PostgREST enforces its own server-side
+  // max-rows regardless of what `.limit()` asks for, and on that path the check
+  // passed while most of the tenant's leads went missing -- the filter rail
+  // confidently showing 10,872 over a table holding whatever the server felt
+  // like returning. Comparing against the read's own match count proves
+  // completeness instead of guessing at the source of the limit. See
+  // assertCompleteRead() in ./tenant.
+  assertCompleteRead("leads_read", data || [], count);
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
@@ -315,18 +319,16 @@ export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | n
  */
 export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]> {
   const db = getServiceSupabase();
-  const { data, error } = await db
+  const { data, error, count } = await db
     .from("tenant_records")
-    .select("id,data")
+    .select("id,data", { count: "exact" })
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
     .limit(LEAD_READ_CAP);
   if (error) throw new Error(`leads_read_failed: ${error.message}`);
-  if ((data || []).length >= LEAD_READ_CAP) {
-    throw new Error(
-      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
-    );
-  }
+  // Completeness proved against the read's own match count, not inferred from
+  // our cap -- see assertCompleteRead() in ./tenant for what that catches.
+  assertCompleteRead("leads_read", data || [], count);
 
   type Bucket = { total: number; callable: number; noSite: number; callableNoSite: number };
   const counts = new Map<string, Bucket>();
@@ -393,18 +395,16 @@ export type PipelineLead = WebLead & { stage: string | null; assignedTo: string 
  */
 export async function fetchPipelineLeads(viewer: Viewer): Promise<PipelineLead[]> {
   const db = getServiceSupabase();
-  const { data, error } = await db
+  const { data, error, count } = await db
     .from("tenant_records")
-    .select("id,data")
+    .select("id,data", { count: "exact" })
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
     .limit(LEAD_READ_CAP);
   if (error) throw new Error(`leads_read_failed: ${error.message}`);
-  if ((data || []).length >= LEAD_READ_CAP) {
-    throw new Error(
-      `leads_read_truncated: hit the ${LEAD_READ_CAP}-row cap, results would be silently incomplete`,
-    );
-  }
+  // Completeness proved against the read's own match count, not inferred from
+  // our cap -- see assertCompleteRead() in ./tenant for what that catches.
+  assertCompleteRead("leads_read", data || [], count);
 
   return (data || [])
     .map((r: { id: string; data: Record<string, unknown> }) => r)

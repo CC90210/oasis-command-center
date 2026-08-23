@@ -20,6 +20,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveScore, EMPTY_SCORE_INDEX, type ScoreIndex } from "../lib/web-leads/scores";
+import { assertCompleteRead } from "../lib/web-leads/tenant";
 import { parseFilters, filtersToParams, EMPTY_FILTERS } from "../lib/web-leads/filters";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
@@ -126,10 +127,23 @@ assert.deepEqual(
   // Truncation must throw, never degrade. A short read here does not blank the
   // page: it quietly demotes real scored leads to "not scored" and drops them
   // out of every band filter, handing a rep a queue that looks complete.
-  assert.match(
+  //
+  // And it must be proved, not guessed at. A `rows.length >= LEAD_READ_CAP`
+  // check only catches truncation by OUR cap; PostgREST enforces its own
+  // server-side max-rows regardless of what `.limit()` asks for, and on that
+  // path the check passes while most of the ~23K audits go missing. (Codex
+  // review, 2026-08-23.) `count: "exact"` is computed by a separate COUNT(*)
+  // with no limit applied, so comparing rows-returned against rows-matched
+  // detects truncation from any source.
+  const counted = src.match(/\{ count: "exact" \}/g) || [];
+  assert.equal(counted.length, 3, "all three score-index reads must request an exact count");
+  // The open quote distinguishes a real call from a comment naming it.
+  const asserted = src.match(/assertCompleteRead\("/g) || [];
+  assert.equal(asserted.length, 3, "all three score-index reads must prove completeness before being used");
+  assert.doesNotMatch(
     src,
-    /score_index_truncated/,
-    "a truncated score read must throw, not serve a silently incomplete index",
+    /length >= LEAD_READ_CAP/,
+    "a row-count-versus-cap check is not a completeness check -- it passes silently when a server cap truncates below it",
   );
 
   // Never invent a number for a null column.
@@ -150,12 +164,45 @@ assert.deepEqual(
     /newestAt\.get\(r\.business_id\) !== r\.fetched_at/,
     "a score must be ignored unless its row is the business's NEWEST audit -- otherwise a superseded crawl resurfaces as a current score",
   );
+  // An unfiltered read of every audit row, which is what the newest-per-business
+  // pass runs over. The `is("profile", ...)` narrowing happens on a SEPARATE
+  // read; if these two ever merge back into one, this fails.
   assert.match(
     src,
-    /\.select\("business_id,fetched_at"\)/,
+    /\.select\("business_id,fetched_at",\s*\{ count: "exact" \}\)/,
     "the newest audit per business must be derived from ALL rows, before any profile filter narrows them",
   );
 }
+
+// ---------------------------------------------------------------------------
+// 2b. The completeness check itself, exercised rather than asserted about.
+//
+// Every guard above is a source match; this one runs the mechanism, because a
+// completeness check that silently passes is indistinguishable from one that
+// works right up until the day it matters.
+// ---------------------------------------------------------------------------
+
+assert.doesNotThrow(
+  () => assertCompleteRead("t", [1, 2, 3], 3),
+  "a complete read must pass",
+);
+
+assert.throws(
+  () => assertCompleteRead("t", new Array(1000).fill(0), 23170),
+  /t_truncated: got 1000 of 23170 rows/,
+  "a server-side cap that truncates BELOW our own limit must still be caught -- this is the case the old cap comparison missed entirely",
+);
+
+assert.throws(
+  () => assertCompleteRead("t", [1, 2, 3], null),
+  /t_count_unavailable/,
+  "a read that cannot prove it is complete must fail closed, not be assumed complete",
+);
+
+assert.doesNotThrow(
+  () => assertCompleteRead("t", [], 0),
+  "genuinely zero rows is a complete read, not a truncated one",
+);
 
 // ---------------------------------------------------------------------------
 // 3. Ordering: a missing score is not a low score.
