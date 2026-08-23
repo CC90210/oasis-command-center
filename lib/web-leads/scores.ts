@@ -39,8 +39,7 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { WEBDEV_TENANT_ID, LEAD_READ_CAP } from "./data";
-import { MODEL_VERSION } from "./audit";
+import { WEBDEV_TENANT_ID, LEAD_READ_CAP, MODEL_VERSION, assertCompleteRead } from "./tenant";
 
 /** The four honest states, identical to audit.ts's AuditResult discriminant. */
 export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
@@ -76,7 +75,9 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
     // one bit about it, which the second read supplies.
     db
       .from("leadgen_site_audits")
-      .select("business_id,fetched_at")
+      // `count: "exact"` is not decoration: it is how these reads PROVE they
+      // are complete rather than assuming it. See assertCompleteRead().
+      .select("business_id,fetched_at", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .limit(LEAD_READ_CAP),
@@ -86,14 +87,14 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
     // score no matter what its quality_score column says).
     db
       .from("leadgen_site_audits")
-      .select("business_id,quality_score,fetched_at")
+      .select("business_id,quality_score,fetched_at", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .is("profile", "not.null")
       .limit(LEAD_READ_CAP),
     db
       .from("leadgen_site_unreachable")
-      .select("business_id")
+      .select("business_id", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .limit(LEAD_READ_CAP),
@@ -107,15 +108,15 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
   const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
   const unreachableRows = (unreachable.data || []) as { business_id: string }[];
 
-  if (
-    allRows.length >= LEAD_READ_CAP ||
-    scoredRows.length >= LEAD_READ_CAP ||
-    unreachableRows.length >= LEAD_READ_CAP
-  ) {
-    throw new Error(
-      `score_index_truncated: hit the ${LEAD_READ_CAP}-row cap, scores would be silently incomplete`,
-    );
-  }
+  // Completeness is PROVED against each read's own match count, not inferred
+  // from whether our cap was hit -- see assertCompleteRead() in tenant.ts for
+  // the truncation this catches that a cap comparison cannot. A short read here
+  // does not blank the page: it quietly demotes real scored leads to "not
+  // scored" and drops them out of every band filter, handing a rep a queue that
+  // looks complete and is not.
+  assertCompleteRead("audit_index", allRows, allAudits.count);
+  assertCompleteRead("audit_index_scored", scoredRows, scoredAudits.count);
+  assertCompleteRead("unreachable_index", unreachableRows, unreachable.count);
 
   /**
    * NEWEST ROW FIRST, THEN ASK WHETHER IT IS SCORED -- NOT THE OTHER WAY ROUND.

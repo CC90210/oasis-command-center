@@ -51,6 +51,39 @@ export const PAGE_SIZE = 50;
 export const LEAD_READ_CAP = 50000;
 
 /**
+ * Prove a bulk read returned EVERY row it matched, or refuse to serve it.
+ *
+ * WHY THE ROW-COUNT-VERSUS-CAP CHECK IS NOT ENOUGH. The original guard was
+ * `rows.length >= LEAD_READ_CAP -> throw`, which only catches truncation by
+ * OUR cap. PostgREST enforces its own server-side `max-rows` (commonly 1,000)
+ * regardless of what `.limit(50000)` asks for, and on that path the response
+ * comes back at 1,000 rows -- under our cap, no error, nothing to notice. The
+ * check would pass while 22,000 of 23,000 audits went missing: scored leads
+ * would render "Not scored yet", the score bands would return a fraction of
+ * their real contents, and a rep would work a queue that looked complete and
+ * silently excluded most of the prospects they filtered for. Codex caught this
+ * on the 2026-08-23 review.
+ *
+ * `count: "exact"` is computed by a separate COUNT(*) over the same WHERE with
+ * NO limit applied -- on the Turso adapter (lib/turso-postgrest.ts's runSelect)
+ * and by PostgREST's Content-Range header alike. So comparing the rows we got
+ * against the rows that matched detects truncation from ANY source: our cap, a
+ * server cap, a proxy, a future pagination default. It is a completeness proof
+ * rather than a guess about where the limit came from.
+ *
+ * A missing count fails closed for the same reason: a read that cannot prove
+ * it is complete is not evidence that it is.
+ */
+export function assertCompleteRead(label: string, rows: unknown[], count: number | null): void {
+  if (count === null || count === undefined) {
+    throw new Error(`${label}_count_unavailable: cannot prove this read is complete, refusing to serve it`);
+  }
+  if (rows.length !== count) {
+    throw new Error(`${label}_truncated: got ${rows.length} of ${count} rows, results would be silently incomplete`);
+  }
+}
+
+/**
  * Mirrors JARVIS services/leadgen/lib/scoring-run.js's MODEL_VERSION.
  *
  * Both score readers (audit.ts for one lead, scores.ts for the whole list) pin
