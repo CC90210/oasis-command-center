@@ -285,14 +285,28 @@ export function CallMode({
       if (e.key === "Escape") { e.preventDefault(); onExit(); return; }
       if (e.key.toLowerCase() === "n") { e.preventDefault(); noteRef.current?.focus(); return; }
 
-      // NOTHING MOVES THE QUEUE WHILE A WRITE IS IN FLIGHT. A successful log()
-      // advances by itself; a rep pressing Skip in the moment between the POST
-      // starting and returning would advance a second time and silently skip
-      // the lead in between -- never called, never logged, and nothing on
-      // screen to suggest it was missed. (Codex review, 2026-08-23.) log() has
-      // its own `pending` guard against double-dispositioning; this is the
-      // navigation half of the same rule.
-      if (pending) return;
+      /**
+       * NOTHING MOVES THE QUEUE UNLESS A LEAD IS ACTUALLY ON SCREEN.
+       *
+       * Written as one condition rather than a list, because this bug arrived
+       * twice in review as two different-looking instances of the same thing --
+       * a keystroke advancing the cursor at a moment when the number it points
+       * at means nothing:
+       *
+       *   - mid-write: a successful log() advances by itself, so a Skip pressed
+       *     between the POST leaving and returning advances a SECOND time;
+       *   - mid-load: after "load the next page" the cursor has reset and the
+       *     new leads have not arrived, so a Skip lands the rep on lead 2 of
+       *     the incoming page.
+       *
+       * Both silently skip a lead: never called, never logged, and nothing on
+       * screen to suggest it was missed. On a 200-call day that is invisible
+       * attrition out of a queue a rep believes they worked. `lead` is
+       * undefined in exactly the states where the cursor is meaningless (not
+       * ready, past the end), so gating on it closes the class rather than the
+       * two reported instances. (Codex review, 2026-08-23, rounds 4 and 5.)
+       */
+      if (pending || !lead) return;
 
       if (e.key === "ArrowRight" || e.key.toLowerCase() === "s") { e.preventDefault(); next(); return; }
       if (e.key === "ArrowLeft" || e.key.toLowerCase() === "b") { e.preventDefault(); prev(); return; }
@@ -301,7 +315,10 @@ export function CallMode({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [log, next, prev, onExit, pending]);
+    // `lead` is in the deps for a reason: without it the handler closes over a
+    // stale `lead` from the render where it was last re-bound, and the guard
+    // above would test the wrong queue state.
+  }, [log, next, prev, onExit, pending, lead]);
 
   const websiteHref = useMemo(() => safeExternalUrl(lead?.websiteUrl ?? null), [lead?.websiteUrl]);
   const progress = leads.length ? Math.min(100, ((i + (atEnd ? 0 : 1)) / leads.length) * 100) : 0;
