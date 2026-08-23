@@ -29,13 +29,12 @@
  * never land after a faster response for lead B and overwrite it.
  */
 
-import { useEffect, useState } from "react";
-// Type-only: lib/web-leads/audit.ts imports getServiceSupabase() (next/headers,
-// server-only). A value import here would pull that whole module into the
-// client bundle and fail the build -- same reasoning WebLeadsBrowser.tsx
-// documents for lib/web-leads/data.ts's PAGE_SIZE.
-import type { AuditResult, CheckResult, DimensionProfile } from "@/lib/web-leads/audit";
 import { remedyFor } from "@/lib/web-leads/remedies";
+// The fetch, the race guard and the gap ranking live in useAudit.ts so this
+// component and CallMode.tsx cannot drift apart -- two hand-rolled effects
+// against the same endpoint is how one of them ends up with a fix the other
+// never gets. See that file's header for the race it guards.
+import { useAudit, biggestGaps } from "./useAudit";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
@@ -52,16 +51,6 @@ function RemedyLines({ code }: { code: string }) {
       <p><span className="font-medium text-fg-muted">We&apos;d fix it:</span> {remedy.fix}</p>
     </div>
   );
-}
-
-/** Failed checks across every dimension, largest `points` first, top four.
- * Pulled from `checks` (which carries the label needed to render), not from
- * a dimension's `missing` (codes only). */
-function biggestGaps(dimensions: DimensionProfile[]): CheckResult[] {
-  return dimensions
-    .flatMap((d) => d.checks.filter((c) => !c.has))
-    .sort((a, b) => b.points - a.points)
-    .slice(0, 4);
 }
 
 /** Fixed-colour fill -- see the module header for why this never varies by score. */
@@ -85,36 +74,23 @@ function HeroSkeleton() {
 }
 
 export function WebsiteComparison({ leadId }: { leadId: string }) {
-  const [audit, setAudit] = useState<AuditResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const state = useAudit(leadId);
 
-  useEffect(() => {
-    let alive = true;
-    setAudit(null);
-    setError(null);
-    // Same invariant as WebLeadDetail.tsx: `alive` is re-checked AFTER the
-    // body is parsed, not right after the fetch resolves, so a slow body for
-    // an earlier leadId can't win a race against a faster body for a newer one.
-    fetch(`/api/web-leads/${encodeURIComponent(leadId)}/audit`)
-      .then(async (r) => {
-        if (!r.ok) {
-          if (alive) setError("Could not load website score.");
-          return;
-        }
-        const body = await r.json();
-        if (alive) setAudit(body);
-      })
-      .catch(() => { if (alive) setError("Could not load website score."); });
-    return () => { alive = false; };
-  }, [leadId]);
-
-  if (error) {
+  // Held in a local named `error` and rendered as a bare `{error}` on one line
+  // on purpose: tests/web-leads-guards.test.ts bans every red/green/amber class
+  // in this file EXCEPT the repo-wide fetch-failure banner, which it identifies
+  // by exactly that shape. The guard is what stops a colour keyed to a score
+  // from ever appearing here, so this file bends to it rather than the reverse.
+  if (state.status === "error") {
+    const error = state.message;
     return <p className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">{error}</p>;
   }
 
-  if (!audit) {
+  if (state.status === "loading") {
     return <HeroSkeleton />;
   }
+
+  const { audit } = state;
 
   if (audit.state === "no_website") {
     return (

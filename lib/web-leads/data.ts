@@ -26,44 +26,15 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import type { WebLeadFilters } from "./filters";
+import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
+import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP } from "./tenant";
+import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 
-/**
- * OASIS AI command-center tenant (slug `oasis-ai-cc`) — where the web-design
- * leads AND the operators who work them both live. NOT SunBiz (aa04fa1f...),
- * which this feature never reads.
- *
- * Was 42423fde-be8b-454f-932a-750e8c9b743d ("Oasis Web Studio", slug
- * `oasis-webdev`) until 2026-08-20: that tenant had ZERO users, so nobody
- * could ever log in and see this feature. Repointed once the underlying
- * leadgen_territories / leadgen_businesses / tenant_records rows were
- * migrated to carry this tenant_id instead.
- */
-export const WEBDEV_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
-
-export const PAGE_SIZE = 50;
-
-/**
- * Hard cap on rows read per fetchLeads() call. The tenant holds ~31K leads
- * today, so 50,000 is headroom, not a working limit -- this is not meant to
- * ever bind in normal operation.
- *
- * WHY THIS EXISTS: two independent reviewers flagged the missing `.limit()`
- * on this read. The fix is not that the cap is generous -- it's that hitting
- * it can never pass unnoticed. getServiceSupabase() (lib/supabase-server.ts)
- * falls back to a REAL supabase-js client whenever EMPIRE_DATA_BACKEND is not
- * "turso_cloud", and PostgREST enforces its own server-side max-rows cap on
- * every request regardless of what this code asks for. If that fallback path
- * is ever taken, an unbounded select comes back SILENTLY TRUNCATED -- no
- * error, just fewer rows than exist. The filter rail would confidently show
- * 10,872 while the table quietly showed whatever PostgREST's cap allowed,
- * and nothing would say the number was wrong. A plausible-looking wrong
- * number is the exact failure this feature exists to avoid. So fetchLeads
- * treats "returned row count >= LEAD_READ_CAP" as proof the read may be
- * incomplete and throws instead of returning a partial list -- see below.
- */
-export const LEAD_READ_CAP = 50000;
+// Re-exported so every existing import site keeps working. They live in a leaf
+// module now so scores.ts can pin the same tenant and cap without creating an
+// import cycle with this file -- see tenant.ts's header.
+export { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP };
 
 /**
  * Viewer identity for lead-level visibility (PR #237, 26ecc31a). `agent` is
@@ -124,6 +95,24 @@ export type WebLead = {
   firstSeen: string | null;
 };
 
+/**
+ * A lead in the RESULTS LIST, carrying its website score.
+ *
+ * Deliberately a separate type from WebLead rather than two more fields on it.
+ * The single-lead read (fetchLead, used by the detail route) resolves its score
+ * through lib/web-leads/audit.ts, which returns the whole 49-check profile for
+ * that one lead; only the list needs the cheap bulk join in
+ * lib/web-leads/scores.ts. Widening WebLead would have forced every caller of
+ * fetchLead to either run the bulk read for a single row or carry two fields it
+ * cannot honestly populate -- and a `score` field defaulted to null on a lead
+ * that IS scored reads as "not scored", which is the exact false-negative this
+ * feature is built to avoid.
+ */
+export type WebLeadRow = WebLead & {
+  score: number | null;
+  scoreState: ScoreState;
+};
+
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
 
@@ -180,11 +169,19 @@ export async function fetchSheets(): Promise<Sheet[]> {
     }));
 }
 
+/**
+ * `scoreIndex` is INJECTED rather than fetched here so this function stays a
+ * pure read of one table plus in-memory work, and so the route can fetch the
+ * leads and the score index concurrently instead of serially. The route is
+ * also the layer that decides what a failed score read means -- see
+ * app/api/web-leads/route.ts.
+ */
 export async function fetchLeads(
   f: WebLeadFilters,
   sheetIds: string[],
   viewer: Viewer,
-): Promise<{ leads: WebLead[]; total: number }> {
+  scoreIndex: ScoreIndex,
+): Promise<{ leads: WebLeadRow[]; total: number }> {
   if (sheetIds.length === 0) return { leads: [], total: 0 };
   const db = getServiceSupabase();
   const { data, error } = await db
@@ -217,15 +214,65 @@ export async function fetchLeads(
         viewer,
       ),
     )
-    .map((r: { id: string; data: Record<string, unknown> }) => toWebLead(r))
+    .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
+      const lead = toWebLead(r);
+      // webdev_source_business_id is the one-way pointer JARVIS's crm-sink.js
+      // stamps onto the lead at promotion (see audit.ts's header). It is
+      // research plumbing, not a rep-facing fact, so it is read off the raw
+      // row here and never surfaced on WebLead itself.
+      const bid = typeof r.data.webdev_source_business_id === "string"
+        ? r.data.webdev_source_business_id
+        : null;
+      return { ...lead, ...resolveScore(lead.websiteUrl, bid, scoreIndex) };
+    })
     .filter((l) => l.territoryId && wanted.has(l.territoryId))
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
+    .filter((l) => matchesBand(l, f.band))
     .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true))
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort(comparatorFor(f.sort));
 
   const start = (f.page - 1) * PAGE_SIZE;
   return { leads: all.slice(start, start + PAGE_SIZE), total: all.length };
+}
+
+/**
+ * Score-band membership. Only a `scored` lead can be in a numeric band -- an
+ * unreachable or never-scored site has no number, and treating "we don't know"
+ * as "under 40" would hand a rep a queue of businesses whose problems we cannot
+ * actually name. `unscored` collects all three non-scored states so that work
+ * is reachable rather than invisible.
+ */
+function matchesBand(l: WebLeadRow, band: ScoreBand): boolean {
+  if (band === "all") return true;
+  if (band === "unscored") return l.scoreState !== "scored";
+  if (l.scoreState !== "scored" || l.score === null) return false;
+  if (band === "under40") return l.score < 40;
+  if (band === "mid") return l.score >= 40 && l.score < 60;
+  return l.score >= 60; // sixty_plus
+}
+
+/**
+ * Sort comparators. Every one of them breaks ties on name, so paging is stable:
+ * without a total order, two leads with the same score can swap places between
+ * requests and a rep sees the same business twice across two pages while
+ * another never appears at all.
+ *
+ * Unscored leads sort AFTER every scored lead in both score orders (not as a
+ * zero, not as a 100). A missing score is not a low score -- see scores.ts.
+ */
+function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number {
+  const byName = (a: WebLeadRow, b: WebLeadRow) => a.name.localeCompare(b.name);
+  if (sort === "name") return byName;
+  return (a, b) => {
+    const aHas = a.score !== null;
+    const bHas = b.score !== null;
+    if (aHas !== bHas) return aHas ? -1 : 1;
+    if (aHas && bHas && a.score !== b.score) {
+      return sort === "score_desc" ? b.score! - a.score! : a.score! - b.score!;
+    }
+    return byName(a, b);
+  };
 }
 
 export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | null> {

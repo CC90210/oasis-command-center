@@ -234,6 +234,11 @@ assert.match(
 for (const view of [
   "components/web-leads/WebsiteComparison.tsx",
   "components/web-leads/WebLeadDetail.tsx",
+  // Added 2026-08-23 with Call Mode. This is the surface a rep reads WHILE the
+  // prospect is on the line -- the one place where a colour that says "bad
+  // site" turns straight into a spoken claim -- so it earns the same ban as
+  // the panel rather than being trusted to stay clean on its own.
+  "components/web-leads/CallMode.tsx",
 ]) {
   const src = read(view);
 

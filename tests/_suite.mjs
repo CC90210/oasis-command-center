@@ -180,6 +180,11 @@ const TESTS = [
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
   "tests/web-leads-scope.test.ts",
+  // 2026-08-23 sales pass: the score now appears in the LIST as well as the
+  // detail panel, read from a different table by a different query. This proves
+  // the two can never contradict each other about a stranger's website -- and
+  // that Call Mode cannot advance past a call it failed to record.
+  "tests/web-leads-scores.test.ts",
   // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
   // from JARVIS's services/leadgen/lib/remedies.js.
   "tests/web-leads-remedies.test.ts",

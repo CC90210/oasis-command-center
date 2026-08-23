@@ -22,12 +22,44 @@
 export type WebLeadView = "leads" | "pipeline" | "territories";
 const VALID_VIEWS: readonly WebLeadView[] = ["leads", "pipeline", "territories"];
 
+/**
+ * Score bands, as RANGES rather than judgements (2026-08-23).
+ *
+ * The labels are the numbers themselves -- "Under 40", "40 to 59", "60 and up"
+ * -- never "weak"/"strong"/"good". This feature's standing rule is that nothing
+ * renders a verdict the measurement does not support (see WebsiteComparison.tsx
+ * and audit.ts), and a band named "weak sites" would smuggle one in through the
+ * filter control. A rep reading a band name aloud reads a range, not a slur
+ * about a stranger's business.
+ *
+ * WHY BANDS AT ALL: the corpus measurement says the real prospects are the
+ * ~5,258 under 40, and the ~2,471 at 74+ will win a website-quality argument.
+ * Until this existed there was no way for a rep to act on either fact.
+ */
+export type ScoreBand = "all" | "under40" | "mid" | "sixty_plus" | "unscored";
+const VALID_BANDS: readonly ScoreBand[] = ["all", "under40", "mid", "sixty_plus", "unscored"];
+
+/**
+ * Sort order for the results list.
+ *
+ * DEFAULT IS `opportunity`, NOT `name`. An alphabetical list of 31,016
+ * businesses is a directory; a sales list has to answer "who do I call first".
+ * `opportunity` puts the lowest-scoring sites first (the prospects whose
+ * problems we can actually name), with every lead we could not score after
+ * them -- unscored leads are not "bad prospects", they are unknown, so they
+ * sort last rather than being interleaved as if a missing score were a low one.
+ */
+export type LeadSort = "opportunity" | "name" | "score_desc";
+const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc"];
+
 export type WebLeadFilters = {
   view: WebLeadView;
   provinces: string[];
   cities: string[];
   industries: string[];
   noSiteOnly: boolean;
+  band: ScoreBand;
+  sort: LeadSort;
   query: string;
   page: number;
   leadId: string | null;
@@ -46,6 +78,8 @@ export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
   noSiteOnly: false,
+  band: "all",
+  sort: "opportunity",
   query: "",
   page: 1,
   leadId: null,
@@ -69,12 +103,19 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
   const view: WebLeadView = (VALID_VIEWS as string[]).includes(viewRaw || "")
     ? (viewRaw as WebLeadView)
     : "leads";
+  const bandRaw = sp.get("band");
+  const sortRaw = sp.get("sort");
   return {
     view,
     provinces: list(sp, "prov"),
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
+    // Unrecognised values fall back to the default rather than throwing: these
+    // come from a URL a rep can hand-edit or a stale bookmark, and a filter
+    // page that 500s on a typo is worse than one that shows everything.
+    band: (VALID_BANDS as string[]).includes(bandRaw || "") ? (bandRaw as ScoreBand) : "all",
+    sort: (VALID_SORTS as string[]).includes(sortRaw || "") ? (sortRaw as LeadSort) : "opportunity",
     query: (sp.get("q") || "").trim(),
     page: Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1,
     leadId: sp.get("lead") || null,
@@ -90,6 +131,9 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   const put = (key: string, values: string[]) => {
     if (values.length) sp.set(key, values.map((v) => encodeURIComponent(v)).join(","));
   };
+  // Defaults stay out of the URL, same convention as view/page above.
+  if (f.band !== "all") sp.set("band", f.band);
+  if (f.sort !== "opportunity") sp.set("sort", f.sort);
   put("prov", f.provinces);
   put("city", f.cities);
   put("ind", f.industries);

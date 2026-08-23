@@ -72,8 +72,13 @@ export function FilterRail({
   const set = (patch: Partial<WebLeadFilters>) => onChange({ ...filters, ...patch, page: 1 });
 
   return (
-    <aside className="w-64 shrink-0 space-y-6">
-      <label className="flex cursor-pointer items-center gap-2 rounded-md border border-bg-border bg-bg-panel px-3 py-2 text-sm text-fg transition-colors hover:border-accent/40">
+    // Sticky, and scrolls independently of the results. A rep who pages down a
+    // 50-row table should not have to scroll back up to change a city -- the
+    // rail is a control surface, not part of the document flow. `top-6` clears
+    // the app chrome; the inner max-height keeps the whole rail on screen when
+    // a province expands to forty cities.
+    <aside className="sticky top-6 max-h-[calc(100vh-3rem)] w-64 shrink-0 space-y-5 overflow-y-auto overscroll-contain pr-1">
+      <label className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-bg-border bg-bg-panel px-3 py-2.5 text-sm text-fg transition-colors hover:border-accent/40">
         <input
           type="checkbox"
           className="h-3.5 w-3.5 rounded accent-accent"
@@ -83,8 +88,8 @@ export function FilterRail({
         <span>No website found yet</span>
       </label>
 
-      <div>
-        <h3 className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Provinces</h3>
+      <div className="rounded-lg border border-bg-border bg-bg-panel/40 p-3">
+        <h3 className="mb-2 px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Provinces</h3>
         <ul className="space-y-0.5">
           {facets.provinces.map((p) => (
             <li key={p.code}>
@@ -136,8 +141,8 @@ export function FilterRail({
         </ul>
       </div>
 
-      <div>
-        <h3 className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Industries</h3>
+      <div className="rounded-lg border border-bg-border bg-bg-panel/40 p-3">
+        <h3 className="mb-2 px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Industries</h3>
         <ul className="space-y-0.5">
           {facets.industries.map((i) => (
             <li key={i.name}>
