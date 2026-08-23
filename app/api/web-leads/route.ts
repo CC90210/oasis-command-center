@@ -26,6 +26,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { parseFilters } from "@/lib/web-leads/filters";
 import { selectSheetIds } from "@/lib/web-leads/queries";
 import { fetchSheets, fetchLeads, PAGE_SIZE, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
+import { fetchScoreIndex } from "@/lib/web-leads/scores";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -48,9 +49,20 @@ export async function GET(req: NextRequest) {
   try {
     const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
     const filters = parseFilters(req.nextUrl.searchParams);
-    const sheets = await fetchSheets();
+    // Concurrent, not serial: the score index is a tenant-wide read that does
+    // not depend on which sheets the filters select, so it has no reason to
+    // wait on fetchSheets().
+    //
+    // A FAILED SCORE READ FAILS THE WHOLE REQUEST, deliberately. The tempting
+    // alternative -- catch it and serve the list with every lead marked "not
+    // scored" -- produces a page that looks completely normal and is quietly
+    // lying: 23,195 measured sites would read as unmeasured, the score-band
+    // filter would return nothing, and a rep would work a queue that silently
+    // excluded exactly the prospects they asked for. Nothing on screen would
+    // say so. An error the operator can see is the honest failure here.
+    const [sheets, scoreIndex] = await Promise.all([fetchSheets(), fetchScoreIndex()]);
     const ids = selectSheetIds(sheets, filters);
-    const { leads, total } = await fetchLeads(filters, ids, viewer);
+    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex);
     return NextResponse.json({ leads, total, page: filters.page, pageSize: PAGE_SIZE });
   } catch (err) {
     return NextResponse.json(

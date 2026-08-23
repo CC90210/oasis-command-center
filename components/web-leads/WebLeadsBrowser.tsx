@@ -1,59 +1,62 @@
 "use client";
 
 /**
- * WebLeadsBrowser — the whole /web-leads page (2026-08-23 revamp).
+ * WebLeadsBrowser — the whole /web-leads page.
  *
- * WHY THIS EXISTS, AND WHY IT LOOKS DIFFERENT NOW: this feature shipped in a
- * light theme (`bg-white`, `text-slate-*`) inside a dashboard that is dark
- * everywhere else -- 215 other components on the app's dark tokens, these 8
- * on light slate. That mismatch, not any individual polish gap, was why the
- * operator called it "a white island" and asked for a revamp. This file (and
- * every component it mounts) now uses the same tokens as
- * components/leads/LeadDetailDrawer.tsx, components/conversations/
- * ConversationListPane.tsx, components/leads/AssignmentControl.tsx and
- * components/Card.tsx's PageHeader -- studied directly before writing a line
- * here, and reused wherever a pattern already existed rather than invented
- * fresh (checkbox accent color, drawer chrome, panel/raised surfaces, the
- * segmented-tab treatment from components/conversations/ListTabs.tsx).
+ * ONE PAGE, THREE IN-PAGE VIEWS, NOT THREE DESTINATIONS. Pipeline
+ * (PipelineBoard.tsx) and Territories (TerritoryAssignment.tsx) were once a
+ * separate route and an always-on inline card. The operator said, verbatim,
+ * "Not a separate pipeline page" about the former, and the latter cluttered the
+ * default view with an admin-only control most viewers cannot use. Both are now
+ * switched by the segmented control below and carried in the URL as
+ * `?view=pipeline` / `?view=territories` -- an EXTENSION of the same
+ * lib/web-leads/filters.ts mechanism the province/city/industry filters already
+ * use, not a parallel one, so a view survives a refresh, back/forward and a
+ * shared link exactly like every other filter here.
  *
- * ONE PAGE, THREE IN-PAGE VIEWS, NOT THREE DESTINATIONS: Pipeline
- * (PipelineBoard.tsx) and Territories (TerritoryAssignment.tsx) used to be
- * a separate route and an always-on inline card, respectively. The operator
- * said, verbatim, "Not a separate pipeline page" about the former, and the
- * latter cluttered the default Leads view with an admin-only control most
- * viewers can't even use. Both are now views switched by the segmented
- * control below, carried in the URL as `?view=pipeline` / `?view=territories`
- * -- an EXTENSION of the same lib/web-leads/filters.ts mechanism the
- * province/city/industry/search filters already use, not a parallel one, so
- * a view survives a refresh, back/forward, and a shared link exactly like
- * every other filter here.
+ * DARK TOKENS, LIKE THE REST OF THE APP. This feature originally shipped in a
+ * light theme (`bg-white`, `text-slate-*`) inside a dashboard that is dark in
+ * 215 other components -- a white island. Every surface here now uses the same
+ * tokens as components/leads/LeadDetailDrawer.tsx,
+ * components/conversations/ConversationListPane.tsx and components/Card.tsx.
  *
- * ONE SHARED DETAIL PANEL: Leads and Pipeline both open a lead through the
- * same `?lead=<id>` URL convention (established before this revamp). Rather
- * than let each view mount its own <WebLeadDetail>, this component owns the
- * single instance below, keyed off `filters.leadId` -- opening a lead from
- * the stage board and from the results table land on the exact same panel.
+ * THE 2026-08-23 PASS ADDED THE PART THAT MAKES IT A SALES TOOL. Browsing was
+ * already fine; dialling was not a thing you could do. Three additions, in the
+ * order they matter:
+ *
+ *   - CallMode.tsx: the filtered list becomes a queue you work one lead at a
+ *     time, where the disposition is a keystroke and it advances you.
+ *   - LeadsToolbar.tsx: score band + sort, so "Toronto salons scoring under 40,
+ *     worst first" is a queue a rep can compose. The corpus measurement that
+ *     says those are the real prospects was, until now, only in a document.
+ *   - the website score in the list itself (LeadsTable.tsx), so a rep can see
+ *     who is worth calling without opening 31,016 panels.
+ *
+ * ONE SHARED DETAIL PANEL. Leads, Pipeline and Call Mode all open a lead
+ * through the same `?lead=<id>` URL convention. This component owns the single
+ * <WebLeadDetail> instance, keyed off `filters.leadId`, so every route into a
+ * lead lands on the exact same panel.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Search, X } from "lucide-react";
 import { PageHeader } from "@/components/Card";
 import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
 import type { Facets } from "@/lib/web-leads/queries";
 // TYPE-ONLY. `lib/web-leads/data.ts` imports getServiceSupabase() -> next/headers
-// (server-only). A *value* import of PAGE_SIZE from there — as a prior draft of
-// this file had — pulls that whole module into the client bundle and fails the
+// (server-only). A *value* import of PAGE_SIZE from there -- as a prior draft of
+// this file had -- pulls that whole module into the client bundle and fails the
 // build ("You're importing a component that needs next/headers"). pageSize is
-// read from the /api/web-leads response body instead (see the second
-// useEffect below), which is the same source of truth without crossing the
-// server/client line.
-import type { WebLead } from "@/lib/web-leads/data";
+// read from the /api/web-leads response body instead, which is the same source
+// of truth without crossing the server/client line.
+import type { WebLeadRow } from "@/lib/web-leads/data";
 import { FilterRail } from "./FilterRail";
 import { LeadsTable } from "./LeadsTable";
+import { LeadsToolbar } from "./LeadsToolbar";
 import { WebLeadDetail } from "./WebLeadDetail";
 import { TerritoryAssignment } from "./TerritoryAssignment";
 import { PipelineBoard } from "./PipelineBoard";
+import { CallMode } from "./CallMode";
 
 const VIEWS: { key: WebLeadView; label: string }[] = [
   { key: "leads", label: "Leads" },
@@ -62,9 +65,8 @@ const VIEWS: { key: WebLeadView; label: string }[] = [
 ];
 
 /** A segmented control, not browser tabs -- one bordered pill, active state
- * filled with the accent wash, matching ListTabs.tsx's own active treatment
- * (components/conversations/ListTabs.tsx) but sized for a primary nav role
- * rather than a secondary filter. */
+ *  filled with the accent wash, matching ListTabs.tsx's own active treatment
+ *  but sized for a primary nav role rather than a secondary filter. */
 function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v: WebLeadView) => void }) {
   return (
     <div role="tablist" aria-label="View" className="inline-flex items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
@@ -76,9 +78,7 @@ function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v:
           aria-selected={active === v.key}
           onClick={() => onChange(v.key)}
           className={`rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
-            active === v.key
-              ? "bg-accent/15 text-accent"
-              : "text-fg-dim hover:bg-bg-elev hover:text-fg"
+            active === v.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
           }`}
         >
           {v.label}
@@ -96,23 +96,40 @@ export function WebLeadsBrowser() {
 
   const [facets, setFacets] = useState<Facets | null>(null);
   const [facetError, setFacetError] = useState<string | null>(null);
-  const [leads, setLeads] = useState<WebLead[]>([]);
+  const [leads, setLeads] = useState<WebLeadRow[]>([]);
+  /**
+   * The queue identity the currently-held `leads` actually belong to.
+   *
+   * `loading` alone is not enough to answer "is what I am showing the thing I
+   * say I am showing". Between a rep hitting "load the next page" and that
+   * response landing, the URL (and so queueKey) already names page 2 while
+   * `leads` still holds page 1. Call Mode uses the comparison, not the flag --
+   * see its `ready` prop.
+   */
+  const [leadsKey, setLeadsKey] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
-  // Infinity, not 50: an inert placeholder for "server hasn't answered yet".
-  // total is also 0 until the same response lands, so Math.ceil(0 / Infinity)
-  // still resolves to 1 page and no pager renders. Real pageSize always
-  // arrives together with the leads/total it describes, from the same
+  // Infinity, not 50: an inert placeholder for "the server hasn't answered
+  // yet". total is also 0 until the same response lands, so Math.ceil(0 /
+  // Infinity) still resolves to 1 page and no pager renders. The real pageSize
+  // always arrives together with the leads/total it describes, from the same
   // response body, so the two can never disagree.
   const [pageSize, setPageSize] = useState<number>(Number.POSITIVE_INFINITY);
   const [listError, setListError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Local draft for the search box, synced from the URL. See the search
-  // <input> below for why this exists instead of defaultValue.
+  /**
+   * Call Mode is LOCAL state, not a URL param, on purpose. A `?calling=1` link
+   * would drop whoever opened it straight into a full-screen dialling overlay
+   * they did not ask for -- and these links get pasted into chat. The queue it
+   * works is entirely URL-driven, so the shareable part (which leads, in which
+   * order) still travels; only the mode does not.
+   */
+  const [calling, setCalling] = useState(false);
+
+  // Local draft for the search box, synced from the URL. See LeadsToolbar's
+  // input for why this exists instead of defaultValue.
   const [queryDraft, setQueryDraft] = useState(filters.query);
-  useEffect(() => {
-    setQueryDraft(filters.query);
-  }, [filters.query]);
+  useEffect(() => { setQueryDraft(filters.query); }, [filters.query]);
 
   const push = useCallback((f: WebLeadFilters) => {
     const qs = filtersToParams(f).toString();
@@ -120,20 +137,20 @@ export function WebLeadsBrowser() {
   }, [router]);
 
   // Switching views keeps every other field (filters, page, an open lead)
-  // intact -- Leads' own filters simply go unread by Pipeline/Territories,
-  // so a rep who narrows to "Toronto salons", checks Pipeline, then comes
-  // back to Leads finds their filters exactly where they left them.
+  // intact -- Leads' own filters simply go unread by Pipeline/Territories, so a
+  // rep who narrows to "Toronto salons", checks Pipeline, then comes back finds
+  // their filters exactly where they left them.
   const setView = useCallback((v: WebLeadView) => push({ ...filters, view: v }), [push, filters]);
   const closeLead = useCallback(() => push({ ...filters, leadId: null }), [push, filters]);
+  const openLead = useCallback((id: string) => push({ ...filters, leadId: id }), [push, filters]);
 
   // `alive` guards against an out-of-order response: if filters change again
-  // before this fetch resolves, the effect's cleanup flips alive to false and
-  // the late .then()/.catch() becomes a no-op instead of overwriting fresher
-  // state with stale data. The check runs in the SECOND .then(), after the
-  // body has already been parsed -- not right after the fetch resolves --
-  // so a slow body arriving after a newer request can't win. WebLeadDetail.tsx
-  // enforces the same alive-after-body-parse invariant for its per-lead
-  // fetch, via a differently-shaped promise chain.
+  // before this fetch resolves, the cleanup flips alive to false and the late
+  // .then()/.catch() becomes a no-op instead of overwriting fresher state with
+  // stale data. The check runs in the SECOND .then(), AFTER the body has been
+  // parsed -- not right after the fetch resolves -- so a slow body arriving
+  // after a newer request cannot win. WebLeadDetail.tsx and useAudit.ts enforce
+  // the same invariant for their own fetches.
   useEffect(() => {
     let alive = true;
     const qs = filtersToParams({ ...filters, page: 1, leadId: null }).toString();
@@ -151,9 +168,7 @@ export function WebLeadsBrowser() {
         if (!alive) return;
         setFacetError(e instanceof Error ? e.message : "failed");
       });
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [filters]);
 
   useEffect(() => {
@@ -168,6 +183,10 @@ export function WebLeadsBrowser() {
       .then((body) => {
         if (!alive) return;
         setLeads(body.leads);
+        // Stamped from `qs`, the query these leads were fetched with -- not
+        // from `filters`, which may already have moved on. That is the whole
+        // point of the stamp.
+        setLeadsKey(qs);
         setTotal(body.total);
         setPageSize(body.pageSize);
         setListError(null);
@@ -176,12 +195,8 @@ export function WebLeadsBrowser() {
         if (!alive) return;
         setListError(e instanceof Error ? e.message : "failed");
       })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
   }, [filters]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
@@ -191,15 +206,38 @@ export function WebLeadsBrowser() {
     if (filters.cities.length) parts.push(`in ${filters.cities.join(" or ")}`);
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
+    if (filters.band === "under40") parts.push("scoring under 40");
+    if (filters.band === "mid") parts.push("scoring 40 to 59");
+    if (filters.band === "sixty_plus") parts.push("scoring 60 and up");
+    if (filters.band === "unscored") parts.push("without a website score");
     if (filters.query) parts.push(`matching "${filters.query}"`);
     return parts.length ? `No leads ${parts.join(" ")}. Try removing a filter.` : "No leads yet.";
   }, [filters]);
 
-  const chips: { label: string; clear: () => void }[] = [
-    ...filters.provinces.map((p) => ({ label: p, clear: () => push({ ...filters, provinces: filters.provinces.filter((x) => x !== p), page: 1 }) })),
-    ...filters.cities.map((c) => ({ label: c, clear: () => push({ ...filters, cities: filters.cities.filter((x) => x !== c), page: 1 }) })),
-    ...filters.industries.map((i) => ({ label: i, clear: () => push({ ...filters, industries: filters.industries.filter((x) => x !== i), page: 1 }) })),
-  ];
+  /** What the rep chose, in their own words -- shown at the top of Call Mode so
+   *  they can see which queue they are working without leaving it. */
+  const queueLabel = useMemo(() => {
+    const parts = [
+      filters.industries.join(" / "),
+      filters.cities.join(" / ") || filters.provinces.join(" / "),
+      filters.band === "under40" ? "under 40" :
+        filters.band === "mid" ? "40 to 59" :
+          filters.band === "sixty_plus" ? "60 and up" :
+            filters.band === "unscored" ? "not scored" : "",
+    ].filter(Boolean);
+    return parts.length ? parts.join(" · ") : "All leads";
+  }, [filters]);
+
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+
+  /** The identity of the queue the URL currently describes. Compared against
+   *  `leadsKey` to tell "these are the leads I asked for" apart from "these are
+   *  whatever arrived last". Built the same way the fetch builds its query, so
+   *  the two strings are comparable by construction. */
+  const queueKey = useMemo(
+    () => filtersToParams({ ...filters, leadId: null }).toString(),
+    [filters],
+  );
 
   return (
     <div className="space-y-6">
@@ -210,45 +248,25 @@ export function WebLeadsBrowser() {
       />
 
       {view === "leads" && (
-        <div className="flex gap-6">
+        <div className="flex gap-7">
           <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
 
-          <div className="min-w-0 flex-1">
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-dim" />
-                <input
-                  type="search"
-                  // Controlled + synced from filters.query (the effect above),
-                  // rather than defaultValue: defaultValue only applies on mount,
-                  // so browser back/forward -- which correctly changes the results
-                  // via the URL -- left the box showing stale text. A local draft
-                  // state keeps typing snappy (no URL push per keystroke, search
-                  // still commits on Enter) while staying in sync whenever the URL
-                  // itself changes the query from underneath the input.
-                  value={queryDraft}
-                  onChange={(e) => setQueryDraft(e.target.value)}
-                  placeholder="Search name or phone"
-                  onKeyDown={(e) => { if (e.key === "Enter") push({ ...filters, query: queryDraft, page: 1 }); }}
-                  className="w-64 rounded-md border border-bg-border bg-bg-deep py-1.5 pl-8 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
-                />
-              </div>
-              {chips.map((c) => (
-                <button
-                  key={c.label}
-                  type="button"
-                  onClick={c.clear}
-                  className="inline-flex items-center gap-1 rounded-full border border-bg-border bg-bg-panel px-2.5 py-1 text-xs text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-                >
-                  {c.label}<X className="h-3 w-3" />
-                </button>
-              ))}
-            </div>
+          <div className="min-w-0 flex-1 space-y-4">
+            <LeadsToolbar
+              filters={filters}
+              onChange={push}
+              total={total}
+              loading={loading}
+              queryDraft={queryDraft}
+              onQueryDraft={setQueryDraft}
+              onStartCalling={() => setCalling(true)}
+              canStartCalling={!loading && leads.length > 0}
+            />
 
             <LeadsTable
               leads={leads} total={total} page={filters.page} pageSize={pageSize}
               onPage={(n) => push({ ...filters, page: n })}
-              onOpen={(id) => push({ ...filters, leadId: id })}
+              onOpen={openLead}
               loading={loading} error={listError} emptyHint={emptyHint}
             />
           </div>
@@ -261,6 +279,27 @@ export function WebLeadsBrowser() {
         <div className="max-w-3xl">
           <TerritoryAssignment />
         </div>
+      )}
+
+      {calling && (
+        <CallMode
+          leads={leads}
+          // Page AND filter identity: a rep who changes a filter in another tab
+          // and comes back is working a different queue even at the same page
+          // number, and the cursor should start over rather than land mid-list.
+          queueKey={queueKey}
+          queueLabel={queueLabel}
+          // NOT `!loading`. The leads on screen must belong to THIS queue key,
+          // or a rep can be handed the previous page's first lead with live
+          // disposition buttons while the next page is still in flight.
+          ready={!loading && leadsKey === queueKey}
+          onExit={() => setCalling(false)}
+          // Leaving Call Mode to open the drawer, rather than stacking two
+          // full-screen overlays on top of each other.
+          onOpenDetail={(id) => { setCalling(false); openLead(id); }}
+          hasMore={filters.page < pages}
+          onLoadMore={() => push({ ...filters, page: filters.page + 1 })}
+        />
       )}
 
       {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} />}

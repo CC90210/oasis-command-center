@@ -104,11 +104,45 @@ for (const view of [
 // `.limit(` call is present somewhere.
 // ---------------------------------------------------------------------------
 assert.match(data, /LEAD_READ_CAP/, "fetchLeads must reference LEAD_READ_CAP");
-assert.match(
-  code,
-  /if\s*\([\s\S]*?>=\s*LEAD_READ_CAP[\s\S]*?\)\s*{\s*throw/,
-  "fetchLeads must throw when the read hits LEAD_READ_CAP, not return a truncated list",
-);
+
+// STRENGTHENED 2026-08-23 (Codex review). The old assertion here required
+// `if (rows.length >= LEAD_READ_CAP) throw`, which only catches truncation by
+// OUR cap. PostgREST enforces its own server-side max-rows (commonly 1,000)
+// regardless of what `.limit(50000)` asks for; on that path the response comes
+// back under our cap, the check passes, and most of the tenant's leads go
+// missing with nothing on screen to say so. Completeness is now PROVED against
+// each read's own match count instead.
+//
+// Every full scan in this file must do it, not just the one a reviewer happened
+// to read: the weaker check survived in this file precisely because two other
+// scans still carried it and kept the old regex matching.
+{
+  const scans = code.match(/\.from\("tenant_records"\)[\s\S]*?\.limit\(LEAD_READ_CAP\)/g) || [];
+  assert.ok(scans.length >= 3, `expected every tenant_records full scan to be found, saw ${scans.length}`);
+  for (const scan of scans) {
+    assert.match(
+      scan,
+      /\{ count: "exact" \}/,
+      "every full scan must request an exact count -- it is the only way to prove the read was not truncated by a server-side cap",
+    );
+  }
+  // `assertCompleteRead("` — the open quote is what distinguishes a real call
+  // (which passes a string label) from the several line comments that name the
+  // function. Block comments are already stripped from `code`; line comments
+  // are not, and matching them inflated this count to 6.
+  const completeness = code.match(/assertCompleteRead\("/g) || [];
+  assert.equal(
+    completeness.length,
+    scans.length,
+    "every full scan must pass through assertCompleteRead, one call per scan",
+  );
+  // The weaker form must not creep back in beside the stronger one.
+  assert.doesNotMatch(
+    code,
+    /if\s*\([^)]*>=\s*LEAD_READ_CAP[^)]*\)\s*{\s*throw/,
+    "a row-count-versus-cap check is not a completeness check -- it passes silently when a server cap truncates below it",
+  );
+}
 
 // ---------------------------------------------------------------------------
 // A TENANT CHECK ALONE IS NOT SUFFICIENT. #237 (26ecc31a) hardened the
@@ -234,6 +268,11 @@ assert.match(
 for (const view of [
   "components/web-leads/WebsiteComparison.tsx",
   "components/web-leads/WebLeadDetail.tsx",
+  // Added 2026-08-23 with Call Mode. This is the surface a rep reads WHILE the
+  // prospect is on the line -- the one place where a colour that says "bad
+  // site" turns straight into a spoken claim -- so it earns the same ban as
+  // the panel rather than being trusted to stay clean on its own.
+  "components/web-leads/CallMode.tsx",
 ]) {
   const src = read(view);
 
