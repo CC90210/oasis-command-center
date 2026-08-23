@@ -138,6 +138,23 @@ assert.deepEqual(
     /typeof r\.quality_score !== "number"/,
     "a null quality_score must be skipped, not coerced to 0",
   );
+
+  // NEWEST ROW FIRST, THEN ASK IF IT IS SCORED. Filtering profile-not-null in
+  // SQL and taking the newest SURVIVOR is not the same thing: for a business
+  // whose newest crawl has no profile but an older one does, it resurrects the
+  // old score, so the table shows 61 while the panel says "Not scored yet".
+  // (Codex review, 2026-08-23. Zero rows match in production today, which is
+  // exactly why it would have gone unnoticed until the next re-crawl.)
+  assert.match(
+    src,
+    /newestAt\.get\(r\.business_id\) !== r\.fetched_at/,
+    "a score must be ignored unless its row is the business's NEWEST audit -- otherwise a superseded crawl resurfaces as a current score",
+  );
+  assert.match(
+    src,
+    /\.select\("business_id,fetched_at"\)/,
+    "the newest audit per business must be derived from ALL rows, before any profile filter narrows them",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +245,41 @@ assert.deepEqual(
   // next page" leaves the cursor past the end of the fresh array and the button
   // looks broken.
   assert.match(src, /\}, \[queueKey\]\);/, "CallMode must reset its cursor when the queue changes");
+
+  // NO LEAD RESOLVES UNTIL THE LEADS ON SCREEN BELONG TO THIS QUEUE. Between
+  // "load the next page" and that response landing, queueKey already names page
+  // 2 while the parent still holds page 1. Gating on `loading` alone leaves a
+  // window where the cursor has reset to 0 and Call Mode renders lead #1 of the
+  // page just finished, with live disposition buttons -- so the rep calls and
+  // logs a business they finished moments ago, and the duplicate looks exactly
+  // like a real second attempt. (Codex review, 2026-08-23.)
+  assert.match(
+    src,
+    /const lead: WebLeadRow \| undefined = ready \? leads\[i\] : undefined;/,
+    "CallMode must resolve no lead at all until `ready` -- not merely until `loading` is false",
+  );
+  assert.match(
+    src,
+    /const atEnd = ready && i >= leads\.length;/,
+    "the end-of-queue screen must also wait for the current queue, or it fires against the previous page's length",
+  );
+  assert.doesNotMatch(
+    src,
+    /loading: boolean;/,
+    "CallMode must not take a bare `loading` flag -- `ready` is the stronger condition it needs",
+  );
+}
+
+// The parent must stamp the leads with the query they came from, and compare
+// that stamp -- not the loading flag -- when telling Call Mode it is safe.
+{
+  const src = read("components/web-leads/WebLeadsBrowser.tsx");
+  assert.match(src, /setLeadsKey\(qs\)/, "loaded leads must be stamped with the query that fetched them");
+  assert.match(
+    src,
+    /ready=\{!loading && leadsKey === queueKey\}/,
+    "Call Mode's readiness must compare the loaded queue against the requested one",
+  );
 }
 
 console.log("web-leads-scores ok");
