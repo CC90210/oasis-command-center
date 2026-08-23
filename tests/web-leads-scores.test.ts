@@ -326,6 +326,28 @@ assert.doesNotThrow(
     /const atEnd = ready && i >= leads\.length;/,
     "the end-of-queue screen must also wait for the current queue, or it fires against the previous page's length",
   );
+
+  // NOTHING MOVES THE QUEUE WHILE A WRITE IS IN FLIGHT. A successful log()
+  // advances by itself; a Skip pressed between the POST leaving and returning
+  // advances a second time and silently skips the lead in between -- never
+  // called, never logged, nothing on screen to suggest it was missed. (Codex
+  // review, 2026-08-23.) Must hold for the keyboard AND the buttons: reps use
+  // both, and a guard on one of them is not a guard.
+  assert.match(
+    src,
+    /if \(pending\) return;/,
+    "the keyboard handler must refuse to navigate while an outcome write is in flight",
+  );
+  assert.match(
+    src,
+    /disabled=\{i === 0 \|\| pending !== null\}/,
+    "the Back control must be disabled while an outcome write is in flight",
+  );
+  assert.match(
+    src,
+    /onClick=\{next\}\s*\n\s*disabled=\{pending !== null\}/,
+    "the Skip control must be disabled while an outcome write is in flight",
+  );
   assert.doesNotMatch(
     src,
     /loading: boolean;/,
