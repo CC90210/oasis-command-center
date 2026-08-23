@@ -257,4 +257,91 @@ assert.equal(
   );
 }
 
+// ---------------------------------------------------------------------------
+// 9. The rules must be fed. Every field these rules read has to be written by
+//    something, or the rule is decoration.
+//
+//    This is the check that was missing when this file first went green: the
+//    rules above were tested at exact instants against hand-made facts and all
+//    passed, while NOTHING in the codebase wrote last_call_at or lost_at. Both
+//    rules were inverted in production and every test still passed -- claims
+//    expired on day 7 however hard a rep worked them, and lost leads never
+//    recycled at all. Verify the contribution, not the presence.
+// ---------------------------------------------------------------------------
+
+{
+  const outcome = fs.readFileSync(path.join(process.cwd(), "lib/web-leads/outcome.ts"), "utf8");
+
+  assert.match(
+    outcome,
+    /last_call_at:\s*nowIso/,
+    "logging any outcome must stamp last_call_at, or every claim expires on day 7 no matter how hard the rep worked it",
+  );
+  assert.match(
+    outcome,
+    /if \(target === "lost"\) patch\.lost_at = nowIso;/,
+    "the transition into lost must stamp lost_at, or the 90-day recycle can never fire and lost leads are locked forever",
+  );
+
+  // Stamped on the TRANSITION only. A second "not interested" on an
+  // already-lost lead must not keep pushing the recycle date forward and pin
+  // the lead out of the pool indefinitely.
+  const stamp = outcome.match(/if \(target === "lost"\)[^\n]*/);
+  assert.ok(stamp && !/outcome === "not_interested"/.test(stamp[0]),
+    "lost_at must key off the stage transition, not the raw outcome, so re-logging cannot extend the recycle window");
+
+  // "no answer" must stamp too. A rep who dials four times and reaches nobody
+  // is working that lead; taking it off them on day 7 punishes the persistence
+  // this funnel depends on. The patch is built before the `target` check, so it
+  // applies to every outcome including the one that does not move the stage.
+  const patchLine = outcome.indexOf("const patch: Record<string, unknown> = { last_call_at: nowIso };");
+  const targetLine = outcome.indexOf("const target = nextStage(stage, outcome);");
+  assert.ok(
+    patchLine > 0 && targetLine > 0 && patchLine > targetLine,
+    "last_call_at must be stamped unconditionally, not only when the stage advances",
+  );
+  assert.doesNotMatch(
+    outcome,
+    /if \(target\) \{\s*await updateRecord/,
+    "the tenant_records write must no longer be gated on a stage change -- a no-answer call still has to record that the lead was worked",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 10. Claiming is an atomic compare-and-swap, not write-then-hope.
+//
+//     Read-after-write detects most collisions and guarantees none: both
+//     requests can finish verifying before the other's write lands, so both
+//     reps are told they own the lead. Two reps bulk-claiming the same filtered
+//     page at 9am Monday is the normal case, not an edge case.
+// ---------------------------------------------------------------------------
+
+{
+  const ops = fs.readFileSync(path.join(process.cwd(), "lib/web-leads/claim-ops.ts"), "utf8");
+
+  assert.match(
+    ops,
+    /\.is\("data->>assigned_to", null\)/,
+    "an unclaimed lead must be swapped on IS NULL, inside the same UPDATE that writes the claim",
+  );
+  assert.match(
+    ops,
+    /\.eq\("data->>assigned_to", prevOwner\)/,
+    "a recycled lead must be swapped on the owner we OBSERVED -- it still carries its previous owner, so a bare IS NULL would refuse exactly the leads the recycling rules just released",
+  );
+  // The adapter-only spelling that 500s against real supabase-js (see
+  // lib/web-leads/scores.ts) must not appear here either.
+  assert.doesNotMatch(
+    ops.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, ""),
+    /\.is\([^)]*"not\.null"\)/,
+    "adapter-only is.not.null syntax must not be used -- it breaks against real supabase-js",
+  );
+  // An unconfirmed write is never reported as a claim.
+  assert.match(
+    ops,
+    /if \(won\) claimed\.push\(id\);\s*\n\s*else lostRace\.push\(id\);/,
+    "a write that did not return exactly one row must be reported as lost, never as claimed",
+  );
+}
+
 console.log("web-leads-claim ok");

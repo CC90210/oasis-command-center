@@ -5,24 +5,38 @@
  * This module reads the facts those rules need, applies them, writes the
  * result, and PROVES the write landed the way it thinks it did.
  *
- * ═══ TWO REPS, ONE BUSINESS ══════════════════════════════════════════════════
+ * ═══ TWO REPS, ONE BUSINESS: AN ACTUAL COMPARE-AND-SWAP ══════════════════════
  *
- * The race this must handle: two reps press Claim on the same lead within the
- * same second. libSQL through the PostgREST-compatible builder cannot express
- * "update only if data.assigned_to is still null" -- filtering on a JSON path
- * inside a conditional write is not available on this path. So a genuinely
- * atomic compare-and-swap is not on the table.
+ * The race: two reps press Claim on the same lead within the same second. This
+ * is not exotic. Two reps starting Monday on the same filtered view -- "Toronto
+ * salons under 40" -- and bulk-claiming page 1 is the NORMAL case, not an edge
+ * case, and it collides on every lead at once.
  *
- * What IS available, and what this does instead: write, then read back and
- * check who actually owns it. Both reps write, one write lands last and wins,
- * and BOTH reps are then told the truth -- the winner sees the lead in their
- * book, the loser is told someone just took it. Exactly one rep owns the lead
- * and neither is misinformed, which is the outcome that matters. The failure
- * this prevents is not two writes; it is two reps each believing they own it
- * and both dialling.
+ * A first draft of this file wrote unconditionally and then read back to see
+ * who won, and its comment claimed that gave exactly one owner. It did not:
+ * both requests can complete their verification read before the other's write
+ * lands, so both reps are told they own it, and a later write silently changes
+ * the owner while the first rep's screen still says success. Codex caught the
+ * overclaim (2026-08-23). Read-after-write detects most collisions and
+ * guarantees nothing.
  *
- * The alternative -- write and assume -- is the one that produces the duplicate
- * call, silently, with both screens showing success.
+ * What this does instead is a real compare-and-swap, in ONE statement:
+ *
+ *     UPDATE tenant_records SET data = ?
+ *      WHERE id = ? AND tenant_id = ? AND entity_type = 'lead'
+ *        AND json_extract(data,'$.assigned_to') IS <the owner we read>
+ *
+ * lib/turso-postgrest.ts's `q()` compiles `data->>assigned_to` to a
+ * json_extract, and runUpdate() puts every filter into that single UPDATE's
+ * WHERE clause -- so the test and the write are one atomic statement, and
+ * PostgREST compiles the same predicate on the supabase-js path. Zero rows
+ * returned means the owner changed between our read and our write: somebody
+ * else got there first, and the rep is told so.
+ *
+ * The condition is the owner we OBSERVED, not a bare "is null", because a lead
+ * recycled out of an expired claim or a 90-day-old loss still carries its
+ * previous owner. Conditioning on null would refuse exactly the leads the
+ * recycling rules just released.
  *
  * ═══ EVERY READ PINS THE TENANT ══════════════════════════════════════════════
  *
@@ -112,46 +126,48 @@ export async function claimLeads(
   const claimed: string[] = [];
   const lostRace: string[] = [];
 
-  // Sequential, not Promise.all: a rep claiming 250 leads at once would open
-  // 250 concurrent writes against the bridge. Batched in chunks instead --
-  // enough concurrency to be quick, bounded enough not to be a thundering herd.
+  // Chunked, not one Promise.all over 250: a rep claiming their whole cap at
+  // once would otherwise open 250 concurrent writes against the bridge.
   const CHUNK = 12;
   for (let i = 0; i < plan.granted.length; i += CHUNK) {
     const chunk = plan.granted.slice(i, i + CHUNK);
-    await Promise.allSettled(
-      chunk.map((id) =>
-        db
+    const results = await Promise.allSettled(
+      chunk.map((id) => {
+        const raw = byId.get(id) || {};
+        // The owner we OBSERVED, which is what the swap tests against.
+        const prevOwner = factsFrom(raw).assignedTo;
+        let q = db
           .from("tenant_records")
-          .update({ data: { ...(byId.get(id) || {}), ...claimPatch(userId, nowIso) }, updated_at: nowIso })
+          .update({ data: { ...raw, ...claimPatch(userId, nowIso) }, updated_at: nowIso })
           .eq("id", id)
           .eq("tenant_id", WEBDEV_TENANT_ID)
-          .eq("entity_type", "lead")
-          .select("id"),
-      ),
+          .eq("entity_type", "lead");
+        // THE SWAP. One statement, so the test and the write cannot be
+        // separated by another request. `.is(col, null)` compiles to
+        // `IS NULL` on both backends; `.eq` to an equality on the extracted
+        // JSON value. Note this is deliberately NOT `.is(col, "not.null")` --
+        // that spelling works only against our Turso adapter and 500s on
+        // supabase-js (see scores.ts).
+        q = prevOwner === null
+          ? q.is("data->>assigned_to", null)
+          : q.eq("data->>assigned_to", prevOwner);
+        return q.select("id");
+      }),
     );
-  }
-
-  // PROVE IT. Read back every row we tried to claim and check who owns it now.
-  // This is what turns "we wrote something" into "this rep owns these leads",
-  // and it is the only thing standing between a lost race and two reps dialling
-  // the same business.
-  if (plan.granted.length > 0) {
-    const verify = await db
-      .from("tenant_records")
-      .select("id,data")
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("entity_type", "lead")
-      .in("id", plan.granted);
-    if (verify.error) throw new Error(`claim_verify_failed: ${verify.error.message}`);
-    const after = new Map(
-      ((verify.data || []) as { id: string; data: Record<string, unknown> }[])
-        .map((r) => [r.id, factsFrom(r.data || {})]),
-    );
-    for (const id of plan.granted) {
-      const facts = after.get(id);
-      if (facts && isInBookOf(facts, userId)) claimed.push(id);
+    results.forEach((res, idx) => {
+      const id = chunk[idx];
+      const won =
+        res.status === "fulfilled" &&
+        !res.value.error &&
+        ((res.value.data as unknown[] | null)?.length ?? 0) === 1;
+      // Zero rows updated means the owner changed between our read and our
+      // write. That is the whole point of the swap: the rep is told somebody
+      // else got there first, rather than being told they own a lead they do
+      // not. A genuine write error lands here too, which is correct -- an
+      // unconfirmed claim must never be reported as a claim.
+      if (won) claimed.push(id);
       else lostRace.push(id);
-    }
+    });
   }
 
   return {
