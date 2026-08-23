@@ -131,6 +131,19 @@ assert.deepEqual(
     "the bulk audit read must pin MODEL_VERSION, as audit.ts does",
   );
 
+  // ONE definition of it, shared. Two constants that both say 1 today diverge
+  // the moment someone bumps one of them, and the symptom is the list and the
+  // panel silently selecting different audit versions -- the exact disagreement
+  // these modules exist to prevent. (Codex review, 2026-08-23.)
+  const declarations = [read("lib/web-leads/tenant.ts"), read("lib/web-leads/audit.ts"), src]
+    .join("\n")
+    .match(/^\s*(?:export\s+)?const MODEL_VERSION\s*=/gm) || [];
+  assert.equal(
+    declarations.length,
+    1,
+    `MODEL_VERSION must be declared exactly once and imported everywhere else, found ${declarations.length} declarations`,
+  );
+
   // Tenant pin. libSQL has no row-level security; this read is not scoped by a
   // viewer at all (it maps ids to numbers), so the tenant pin is what keeps it
   // from indexing another tenant's audits.
