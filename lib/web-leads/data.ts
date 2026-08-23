@@ -239,17 +239,30 @@ export async function fetchLeads(
     // is deliberately not surfaced on WebLead (see the Viewer doc comment on
     // isScopedContractor -- a scoped viewer must never receive rows outside
     // their own book, not just have them hidden client-side).
-    .filter((r: { id: string; data: Record<string, unknown> }) =>
-      visibleToViewer(
-        typeof r.data.assigned_to === "string" ? r.data.assigned_to : null,
-        viewer,
-      ),
-    )
-    // OWNERSHIP FILTER, before anything else touches the row. The shared Leads
-    // tab must never show a lead somebody already holds -- that is the entire
-    // point of claiming. `mine` is the complement: the caller's own book,
-    // including lapsed claims, which stay visible and flagged rather than
-    // vanishing overnight (see claim.ts on why silent disappearance is worse).
+    /**
+     * OWNERSHIP AND VISIBILITY, resolved together rather than as two stacked
+     * filters -- because stacking them broke the feature.
+     *
+     * `visibleToViewer` hides every UNASSIGNED lead from an `agent`-role
+     * contractor (fail closed: see its doc comment). Run before the pool
+     * filter, that left exactly the people this feature is for -- outside
+     * contractors selling websites -- looking at an empty pool with a Claim
+     * button they could never use, because unassigned leads ARE the claimable
+     * inventory. Codex caught it (2026-08-23).
+     *
+     *   "mine"  — strictly the caller's own book. Self-scoping by
+     *             construction: isInBookOf compares against this viewer's id,
+     *             so a contractor cannot widen it and #237's leak stays shut.
+     *
+     *   "pool"  — every lead nobody currently holds, for everyone in the
+     *             tenant. This is a DELIBERATE widening for `agent`, and it is
+     *             what Adon asked for: "all the accounts can assign themselves
+     *             the lead." A claimable lead is in nobody's book, so there is
+     *             no rep's book to leak; what #237 actually closed was reading
+     *             other people's assigned leads, and that stays closed --
+     *             assigned leads are exactly what the pool excludes. Volume is
+     *             bounded separately by the 250-lead cap in claim.ts.
+     */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
       scope === "mine"
         ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
@@ -265,10 +278,18 @@ export async function fetchLeads(
         ? r.data.webdev_source_business_id
         : null;
       const facts = factsFrom(r.data || {});
+      const ownedByViewer = isInBookOf(facts, viewer.userId);
       return {
         ...lead,
         ...resolveScore(lead.websiteUrl, bid, scoreIndex),
-        assignedTo: facts.assignedTo,
+        // A lead in the POOL can still carry a previous owner -- an expired
+        // claim or a 90-day-old loss is claimable while `assigned_to` still
+        // names whoever had it last. Surfacing that id would tell a contractor
+        // which rep held which business, which is the kind of cross-book
+        // information PR #237 closed. Non-admins see an owner id only for
+        // leads in their own book; everyone else gets null, and the lead is
+        // claimable either way.
+        assignedTo: ownedByViewer || viewer.isAdmin ? facts.assignedTo : null,
         stage: facts.stage,
         released: isReleasedFromBook(facts, now),
         lastCallAt: facts.lastCallAt,
