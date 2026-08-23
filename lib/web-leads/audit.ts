@@ -53,11 +53,15 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 
-/** Mirrors JARVIS services/leadgen/lib/scoring-run.js's MODEL_VERSION.
- *  Exported so lib/web-leads/scores.ts pins the SAME version on its bulk read.
- *  A list scored under one model version sitting beside a panel scored under
- *  another is precisely the disagreement that module exists to prevent. */
-export const MODEL_VERSION = 1;
+// ONE definition, in ./tenant, re-exported here so existing import sites keep
+// working. It was briefly declared in both this file and scores.ts: both said
+// 1, both were correct, and the next bump would have changed one of them --
+// leaving the list selecting one audit version and the panel selecting another,
+// which is precisely the disagreement this pair of modules exists to prevent.
+// A duplicated constant that happens to agree today is not a shared constant.
+// (Codex review, 2026-08-23.)
+export { MODEL_VERSION } from "./tenant";
+import { MODEL_VERSION } from "./tenant";
 
 export type CheckResult = { code: string; label: string; points: number; has: boolean };
 
