@@ -29,6 +29,27 @@
  *   2. SAME PRECEDENCE. resolveScore() below applies audit.ts's four states in
  *      audit.ts's order, for audit.ts's reasons. See its comment.
  *
+ * KNOWN RESIDUAL, NOT CLOSED (measured 2026-08-23). This module treats a
+ * non-null `profile` as proof the panel would call the row scored. The panel
+ * goes one step further: coerceProfile() also has to PARSE it, and returns
+ * not_scored when it cannot. So a row whose profile is non-null but malformed
+ * would show a number here and "Not scored yet" there. Codex raised it; it is
+ * left open deliberately rather than silently.
+ *
+ * Exposure today is zero: of 23,170 non-null profiles in this tenant, 0 fail
+ * json_valid, 0 lack `composite`, and 0 lack a `dimensions` array. Every one
+ * was written by a single code path (JARVIS score-sites.mjs / backfill-
+ * profiles.mjs), which stringifies profileSite() output in the same call that
+ * writes quality_score, so a valid score beside an invalid profile is
+ * essentially only reachable through corruption or a future schema change.
+ *
+ * Both available fixes cost more than that risk right now: validating here
+ * means transferring all ~23,000 full profiles on every list request, which is
+ * the exact cost this module exists to avoid, and a persisted validity flag
+ * means a JARVIS migration plus a backfill. If the model version ever bumps or
+ * the profile shape changes, re-run that query FIRST -- a non-zero answer turns
+ * this from a note into a bug.
+ *
  * WHY NOT JUST SELECT THE PROFILE: `profile` is the full 49-check evaluation
  * with every rep-facing label -- kilobytes per row, ~23,000 rows. This selects
  * three narrow columns and never transfers a profile. `.is("profile",
