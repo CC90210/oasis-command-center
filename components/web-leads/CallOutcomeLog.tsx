@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { PhoneMissed, PhoneCall, ThumbsUp, ThumbsDown } from "lucide-react";
+import { PhoneMissed, PhoneCall, ThumbsUp, ThumbsDown, Loader2 } from "lucide-react";
 // Type-only: lib/web-leads/outcome.ts imports getServiceSupabase() (server-only).
 // A value import here would pull that whole module into the client bundle and
 // fail the build -- same reasoning WebsiteComparison.tsx documents.
@@ -48,6 +48,16 @@ function formatWhen(iso: string): string {
 
 function labelFor(outcome: string): string {
   return OUTCOME_LABEL[outcome as CallOutcome] || outcome;
+}
+
+function HistorySkeleton() {
+  return (
+    <ul className="space-y-2" aria-busy="true" aria-live="polite">
+      {Array.from({ length: 2 }).map((_, i) => (
+        <li key={i} className="h-11 rounded-md border border-bg-border/60 bg-bg-deep/40 animate-pulse-slow" style={{ animationDelay: `${i * 60}ms` }} />
+      ))}
+    </ul>
+  );
 }
 
 export function CallOutcomeLog({ leadId }: { leadId: string }) {
@@ -101,8 +111,8 @@ export function CallOutcomeLog({ leadId }: { leadId: string }) {
   }
 
   return (
-    <div className="mt-4 border-t border-slate-100 pt-4">
-      <p className="mb-2 text-xs uppercase tracking-wide text-slate-500">Log this call</p>
+    <div className="mt-5 border-t border-bg-border pt-4">
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Log this call</p>
 
       <div className="grid grid-cols-2 gap-2">
         {BUTTONS.map(({ outcome, icon }) => (
@@ -111,9 +121,9 @@ export function CallOutcomeLog({ leadId }: { leadId: string }) {
             type="button"
             disabled={pending !== null}
             onClick={() => logOutcome(outcome)}
-            className="flex items-center justify-center gap-2 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex items-center justify-center gap-2 rounded-md border border-bg-border bg-bg-panel px-3 py-2 text-sm font-medium text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {icon}
+            {pending === outcome ? <Loader2 className="h-4 w-4 animate-spin" /> : icon}
             {pending === outcome ? "Logging…" : OUTCOME_LABEL[outcome]}
           </button>
         ))}
@@ -124,23 +134,23 @@ export function CallOutcomeLog({ leadId }: { leadId: string }) {
         onChange={(e) => setNote(e.target.value)}
         placeholder="Optional note for this call"
         rows={2}
-        className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400"
+        className="mt-2 w-full resize-y rounded-md border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
       />
 
-      {error && <p className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">{error}</p>}
+      {error && <p className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">{error}</p>}
 
-      <p className="mb-2 mt-4 text-xs uppercase tracking-wide text-slate-500">Recent calls</p>
-      {history === null && !error && <p className="text-sm text-slate-400">Loading…</p>}
-      {history && history.length === 0 && <p className="text-sm text-slate-400">No calls logged yet.</p>}
+      <p className="mb-2 mt-4 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Recent calls</p>
+      {history === null && !error && <HistorySkeleton />}
+      {history && history.length === 0 && <p className="text-sm text-fg-dim">No calls logged yet.</p>}
       {history && history.length > 0 && (
         <ul className="space-y-2">
           {history.map((h) => (
-            <li key={h.id} className="rounded-md border border-slate-100 bg-slate-50 px-3 py-2">
+            <li key={h.id} className="rounded-md border border-bg-border/60 bg-bg-deep/40 px-3 py-2">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-medium text-slate-800">{labelFor(h.outcome)}</span>
-                <span className="text-xs text-slate-500">{formatWhen(h.calledAt)}</span>
+                <span className="text-sm font-medium text-fg">{labelFor(h.outcome)}</span>
+                <span className="text-xs text-fg-dim">{formatWhen(h.calledAt)}</span>
               </div>
-              {h.note && <p className="mt-1 text-xs text-slate-600">{h.note}</p>}
+              {h.note && <p className="mt-1 text-xs text-fg-muted">{h.note}</p>}
             </li>
           ))}
         </ul>

@@ -4,6 +4,26 @@ import { useEffect } from "react";
 import { AlertCircle, Phone } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 
+/** Matches LeadsTableClientSkeleton's convention (staggered animate-pulse-slow
+ * bars) so a swap from skeleton to real rows is visually quiet, tuned to this
+ * table's five columns rather than the CRM leads table's own shape. */
+function TableSkeleton({ rows = 10 }: { rows?: number }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-bg-border" aria-busy="true" aria-live="polite">
+      <div className="h-9 border-b border-bg-border bg-bg-panel" />
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="flex items-center gap-6 border-b border-bg-border/60 px-3 py-3 last:border-0">
+          <div className="h-3.5 w-36 shrink-0 rounded bg-bg-elev animate-pulse-slow" style={{ animationDelay: `${i * 45}ms` }} />
+          <div className="h-3.5 w-24 shrink-0 rounded bg-bg-elev/70 animate-pulse-slow" style={{ animationDelay: `${i * 45}ms` }} />
+          <div className="h-3.5 w-20 shrink-0 rounded bg-bg-elev/70 animate-pulse-slow" style={{ animationDelay: `${i * 45}ms` }} />
+          <div className="h-3.5 w-28 shrink-0 rounded bg-bg-elev/70 animate-pulse-slow" style={{ animationDelay: `${i * 45}ms` }} />
+          <div className="h-3.5 flex-1 rounded bg-bg-elev/50 animate-pulse-slow" style={{ animationDelay: `${i * 45}ms` }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function LeadsTable({
   leads, total, page, onPage, onOpen, loading, error, emptyHint, pageSize,
 }: {
@@ -39,11 +59,11 @@ export function LeadsTable({
 
   if (error) {
     return (
-      <div className="flex-1 rounded-lg border border-red-200 bg-red-50 p-6 text-sm text-red-800">
+      <div className="flex-1 rounded-lg border border-red-500/40 bg-red-500/10 p-6 text-sm text-red-200">
         <AlertCircle className="mb-2 h-5 w-5" />
         <p className="font-medium">Could not load leads</p>
-        <p className="mt-1 text-xs text-red-700">{error}</p>
-        <p className="mt-2 text-xs text-red-700">Your filters are still applied. Try again.</p>
+        <p className="mt-1 text-xs text-red-300/80">{error}</p>
+        <p className="mt-2 text-xs text-red-300/80">Your filters are still applied. Try again.</p>
       </div>
     );
   }
@@ -51,49 +71,76 @@ export function LeadsTable({
   return (
     <div className="flex-1">
       <div className="mb-3 flex items-baseline justify-between">
-        <p className="text-sm text-slate-600">
-          {loading ? "Loading…" : `${total.toLocaleString()} lead${total === 1 ? "" : "s"}`}
-        </p>
+        {loading ? (
+          <div className="h-4 w-28 rounded bg-bg-elev animate-pulse-slow" />
+        ) : (
+          <p className="text-sm text-fg-muted">
+            <span className="tabular-nums font-semibold text-fg">{total.toLocaleString()}</span> lead{total === 1 ? "" : "s"}
+          </p>
+        )}
         {pages > 1 && (
           <div className="flex items-center gap-2 text-sm">
-            <button type="button" disabled={page <= 1} onClick={() => onPage(page - 1)} className="rounded border border-slate-200 px-2 py-1 disabled:opacity-40">Previous</button>
-            <span className="tabular-nums text-slate-500">Page {page} of {pages}</span>
-            <button type="button" disabled={page >= pages} onClick={() => onPage(page + 1)} className="rounded border border-slate-200 px-2 py-1 disabled:opacity-40">Next</button>
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => onPage(page - 1)}
+              className="rounded-md border border-bg-border px-2 py-1 text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+            >
+              Previous
+            </button>
+            <span className="tabular-nums text-fg-dim">Page {page} of {pages}</span>
+            <button
+              type="button"
+              disabled={page >= pages}
+              onClick={() => onPage(page + 1)}
+              className="rounded-md border border-bg-border px-2 py-1 text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+            >
+              Next
+            </button>
           </div>
         )}
       </div>
 
-      {!loading && leads.length === 0 ? (
+      {loading ? (
+        <TableSkeleton />
+      ) : leads.length === 0 ? (
         // Say WHICH filter emptied it. A bare "0 results" makes a rep re-check
         // every checkbox to find the one that did it.
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-8 text-center text-sm text-slate-600">{emptyHint}</div>
+        <div className="rounded-lg border border-bg-border bg-bg-panel p-8 text-center text-sm text-fg-muted">{emptyHint}</div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-slate-200">
+        <div className="overflow-x-auto rounded-lg border border-bg-border">
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+            <thead className="bg-bg-panel text-left text-[10px] uppercase tracking-[0.12em] text-fg-muted">
               <tr>
-                <th className="px-3 py-2 font-semibold">Business</th>
-                <th className="px-3 py-2 font-semibold">Phone</th>
-                <th className="px-3 py-2 font-semibold">City</th>
-                <th className="px-3 py-2 font-semibold">Industry</th>
-                <th className="px-3 py-2 font-semibold">Website</th>
+                <th className="px-3 py-2.5 font-bold">Business</th>
+                <th className="px-3 py-2.5 font-bold">Phone</th>
+                <th className="px-3 py-2.5 font-bold">City</th>
+                <th className="px-3 py-2.5 font-bold">Industry</th>
+                <th className="px-3 py-2.5 font-bold">Website</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-bg-border/60">
               {leads.map((l) => (
-                <tr key={l.id} onClick={() => onOpen(l.id)} className="cursor-pointer hover:bg-slate-50">
-                  <td className="px-3 py-2 font-medium text-slate-900">{l.name}</td>
-                  <td className="px-3 py-2">
+                <tr
+                  key={l.id}
+                  onClick={() => onOpen(l.id)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onOpen(l.id); }}
+                  tabIndex={0}
+                  className="cursor-pointer transition-colors hover:bg-bg-hover focus-visible:outline-none focus-visible:bg-bg-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/70"
+                >
+                  <td className="px-3 py-2.5 font-medium text-fg">{l.name}</td>
+                  <td className="px-3 py-2.5">
                     {l.phone ? (
-                      <a href={`tel:${l.phone}`} onClick={(e) => e.stopPropagation()} className="inline-flex items-center gap-1 text-blue-700 hover:underline">
+                      <a href={`tel:${l.phone}`} onClick={(e) => e.stopPropagation()} className="inline-flex items-center gap-1 tabular-nums text-accent hover:underline">
                         <Phone className="h-3 w-3" />{l.phone}
                       </a>
-                    ) : <span className="text-slate-400">—</span>}
+                    ) : <span className="text-fg-faint">—</span>}
                   </td>
-                  <td className="px-3 py-2 text-slate-600">{l.city || "—"}</td>
-                  <td className="px-3 py-2 text-slate-600">{l.industry || "—"}</td>
-                  {/* VERBATIM. Never a badge, never shortened. */}
-                  <td className="px-3 py-2 text-slate-600">{l.websiteCondition}</td>
+                  <td className="px-3 py-2.5 text-fg-muted">{l.city || "—"}</td>
+                  <td className="px-3 py-2.5 text-fg-muted">{l.industry || "—"}</td>
+                  {/* VERBATIM. Never a badge, never shortened. Italic reads as a
+                      hedged note rather than a hard data value, on purpose. */}
+                  <td className="px-3 py-2.5 italic text-fg-dim">{l.websiteCondition}</td>
                 </tr>
               ))}
             </tbody>

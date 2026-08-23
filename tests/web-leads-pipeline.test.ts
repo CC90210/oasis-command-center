@@ -234,17 +234,30 @@ function lead(overrides: Partial<PipelineLead> & { id: string }): PipelineLead {
 }
 
 // ---------------------------------------------------------------------------
-// Additive-only nav change: WEBDEV_NAV gains a Pipeline entry; CC_NAV,
-// SUN_NAV and SUGA_NAV -- shared with other live tenants -- must be
-// untouched.
+// Nav consolidation (2026-08-23 revamp): the standalone "Web Pipeline" tab
+// this block used to require is GONE -- the operator said, verbatim, "Not a
+// separate pipeline page." Pipeline and Territories are in-page views inside
+// /web-leads now (?view=pipeline / ?view=territories, lib/web-leads/filters.ts),
+// reached through a segmented control, not a second sidebar entry. WEBDEV_NAV
+// keeps exactly one Leads entry; CC_NAV, SUN_NAV and SUGA_NAV -- shared with
+// other live tenants -- must still be untouched.
 // ---------------------------------------------------------------------------
 {
   const nav = read("lib/nav-config.ts");
-  assert.match(nav, /href:\s*"\/web-leads\/pipeline"/, "WEBDEV_NAV must add a /web-leads/pipeline entry");
   const webdevBlock = nav.match(/export const WEBDEV_NAV[\s\S]*?\];/);
   assert.ok(webdevBlock, "must find WEBDEV_NAV block");
   assert.match(webdevBlock![0], /\.\.\.CC_NAV/, "WEBDEV_NAV must still spread CC_NAV -- additive only");
   assert.match(webdevBlock![0], /href:\s*"\/web-leads"/, "the existing Leads entry must still be present");
+  assert.doesNotMatch(
+    webdevBlock![0],
+    /href:\s*"\/web-leads\/pipeline"/,
+    "the standalone Web Pipeline nav entry must be gone -- Pipeline is now an in-page view, not a second sidebar destination",
+  );
+  // The route itself must still resolve -- old links/bookmarks to
+  // /web-leads/pipeline must redirect into the new view, never 404.
+  const pipelinePage = read("app/web-leads/pipeline/page.tsx");
+  assert.match(pipelinePage, /redirect\(/, "app/web-leads/pipeline/page.tsx must redirect rather than 404 or render its own page");
+  assert.match(pipelinePage, /view=pipeline/, "the redirect must land on the pipeline view");
 }
 
 console.log("web-leads-pipeline ok");

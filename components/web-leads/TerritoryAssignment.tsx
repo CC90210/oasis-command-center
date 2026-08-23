@@ -99,7 +99,15 @@ export function TerritoryAssignment() {
 
   if (!visible) return null;
   if (territories === null) {
-    return loadError ? <p className="mb-4 text-sm text-red-600">{loadError}</p> : null;
+    if (!loadError) {
+      return (
+        <div className="space-y-2" aria-busy="true" aria-live="polite">
+          <div className="h-4 w-32 rounded bg-bg-elev animate-pulse-slow" />
+          <div className="h-20 rounded-lg border border-bg-border bg-bg-panel animate-pulse-slow" />
+        </div>
+      );
+    }
+    return <p className="mb-4 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">{loadError}</p>;
   }
 
   const selected = territories.find((t) => t.id === territoryId) || null;
@@ -133,22 +141,22 @@ export function TerritoryAssignment() {
   }
 
   return (
-    <section className="mb-5 rounded-lg border border-slate-200 bg-white p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <Users className="h-4 w-4" />
-        <h2 className="text-sm font-semibold">Assign a sheet</h2>
+    <section className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card">
+      <div className="mb-4 flex items-center gap-2">
+        <Users className="h-4 w-4 text-fg-dim" />
+        <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-fg">Assign a sheet</h2>
       </div>
       <div className="flex flex-wrap items-end gap-3">
-        <label className="text-xs text-slate-600">
+        <label className="text-[10px] font-bold uppercase tracking-[0.1em] text-fg-muted">
           Find a sheet
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Toronto salons"
-            className="mt-1 block w-56 rounded-md border border-slate-200 px-2 py-1.5 text-sm"
+            className="mt-1.5 block w-56 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-sm normal-case tracking-normal text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
           />
         </label>
-        <label className="text-xs text-slate-600">
+        <label className="text-[10px] font-bold uppercase tracking-[0.1em] text-fg-muted">
           Sheet
           <select
             value={territoryId}
@@ -158,7 +166,7 @@ export function TerritoryAssignment() {
               const t = territories.find((tt) => tt.id === id);
               setAssignedTo(t?.assigned_to || "");
             }}
-            className="mt-1 block w-80 rounded-md border border-slate-200 px-2 py-1.5 text-sm"
+            className="mt-1.5 block w-80 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-sm normal-case tracking-normal text-fg focus:border-accent focus:outline-none"
           >
             <option value="">Select a sheet</option>
             {shown.map((t) => (
@@ -168,13 +176,13 @@ export function TerritoryAssignment() {
             ))}
           </select>
         </label>
-        <label className="text-xs text-slate-600">
+        <label className="text-[10px] font-bold uppercase tracking-[0.1em] text-fg-muted">
           Rep
           <select
             value={assignedTo}
             onChange={(e) => setAssignedTo(e.target.value)}
             disabled={!territoryId}
-            className="mt-1 block w-52 rounded-md border border-slate-200 px-2 py-1.5 text-sm disabled:opacity-50"
+            className="mt-1.5 block w-52 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-sm normal-case tracking-normal text-fg focus:border-accent focus:outline-none disabled:opacity-50"
           >
             <option value="">Unassigned</option>
             {members
@@ -190,15 +198,15 @@ export function TerritoryAssignment() {
           type="button"
           disabled={!territoryId || busy}
           onClick={() => void save()}
-          className="rounded-md bg-slate-900 px-3 py-2 text-sm text-white disabled:opacity-50"
+          className="inline-flex items-center justify-center rounded-md bg-gradient-to-br from-accent to-accent-muted px-4 py-1.5 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.4)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save"}
         </button>
       </div>
       {selected && (
-        <p className="mt-2 text-xs text-slate-500">Current owner: {ownerName(selected.assigned_to)}</p>
+        <p className="mt-3 text-xs text-fg-dim">Current owner: <span className="text-fg-muted">{ownerName(selected.assigned_to)}</span></p>
       )}
-      {message && <p className="mt-2 text-xs text-slate-600">{message}</p>}
+      {message && <p className="mt-2 text-xs text-fg-muted">{message}</p>}
     </section>
   );
 }
