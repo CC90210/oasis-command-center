@@ -104,8 +104,24 @@ assert.deepEqual(
   // statements are individually defensible.
   assert.match(
     src,
-    /\.is\("profile",\s*"not\.null"\)/,
+    /\.not\("profile",\s*"is",\s*null\)/,
     "the bulk audit read must exclude profile-less rows, which the panel treats as not_scored",
+  );
+
+  // PORTABILITY, not style. `.is("profile", "not.null")` works only against our
+  // Turso adapter; real supabase-js serialises it to `profile=is.not.null`,
+  // which PostgREST rejects, so every /api/web-leads request would 500 on that
+  // backend. (Codex review, 2026-08-23.) Both backends are on the supported
+  // production path, so a filter that compiles on only one of them is a bug
+  // that no local test would ever surface.
+  // Checked against CODE with comments stripped: the ban is on the call, and
+  // the comment right above it necessarily quotes the wrong form to explain why
+  // it is wrong.
+  const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(
+    codeOnly,
+    /\.is\([^)]*"not\.null"\)/,
+    "adapter-only `is.not.null` syntax must not be used -- it breaks against real supabase-js",
   );
 
   // Same model version as the panel, or the list is scored by a different model.

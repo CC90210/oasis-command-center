@@ -90,7 +90,13 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
       .select("business_id,quality_score,fetched_at", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
-      .is("profile", "not.null")
+      // `.not("profile", "is", null)`, NOT `.is("profile", "not.null")`. The
+      // second reads better and only works here: our Turso adapter accepts
+      // "not.null" as an `is.` value, real supabase-js serialises it to
+      // `profile=is.not.null`, and PostgREST rejects that outright -- so on the
+      // supabase-js path every /api/web-leads request would 500 while loading
+      // the score index. This form compiles on both. (Codex review 2026-08-23.)
+      .not("profile", "is", null)
       .limit(LEAD_READ_CAP),
     db
       .from("leadgen_site_unreachable")
