@@ -333,10 +333,13 @@ assert.doesNotThrow(
   // called, never logged, nothing on screen to suggest it was missed. (Codex
   // review, 2026-08-23.) Must hold for the keyboard AND the buttons: reps use
   // both, and a guard on one of them is not a guard.
+  // One condition, not a list of known cases. Both reported instances (mid-write
+  // and mid-page-load) are the same bug: a keystroke moving a cursor that points
+  // at nothing. `lead` is undefined in exactly those states.
   assert.match(
     src,
-    /if \(pending\) return;/,
-    "the keyboard handler must refuse to navigate while an outcome write is in flight",
+    /if \(pending \|\| !lead\) return;/,
+    "the keyboard handler must refuse to navigate unless a lead is actually on screen and no write is in flight",
   );
   assert.match(
     src,
