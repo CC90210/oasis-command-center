@@ -53,8 +53,11 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 
-/** Mirrors JARVIS services/leadgen/lib/scoring-run.js's MODEL_VERSION. */
-const MODEL_VERSION = 1;
+/** Mirrors JARVIS services/leadgen/lib/scoring-run.js's MODEL_VERSION.
+ *  Exported so lib/web-leads/scores.ts pins the SAME version on its bulk read.
+ *  A list scored under one model version sitting beside a panel scored under
+ *  another is precisely the disagreement that module exists to prevent. */
+export const MODEL_VERSION = 1;
 
 export type CheckResult = { code: string; label: string; points: number; has: boolean };
 
