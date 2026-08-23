@@ -55,13 +55,12 @@ import { LeadsTable } from "./LeadsTable";
 import { LeadsToolbar } from "./LeadsToolbar";
 import { WebLeadDetail } from "./WebLeadDetail";
 import { TerritoryAssignment } from "./TerritoryAssignment";
-import { PipelineBoard } from "./PipelineBoard";
 import { CallMode } from "./CallMode";
 
 const VIEWS: { key: WebLeadView; label: string }[] = [
   { key: "leads", label: "Leads" },
-  { key: "pipeline", label: "Pipeline" },
-  { key: "territories", label: "Territories" },
+  { key: "mine", label: "My leads" },
+  { key: "territories", label: "Assign" },
 ];
 
 /** A segmented control, not browser tabs -- one bordered pill, active state
@@ -126,6 +125,24 @@ export function WebLeadsBrowser() {
    */
   const [calling, setCalling] = useState(false);
 
+  /**
+   * Ticked lead ids, and the result of the last claim.
+   *
+   * Selection lives HERE rather than inside LeadsTable so the toolbar's
+   * "Claim N" button and the table's checkboxes cannot disagree about what is
+   * selected. A button that claims a different set than the one highlighted is
+   * the kind of bug a rep only discovers after the calls are made.
+   */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [claiming, setClaiming] = useState(false);
+  const [claimNote, setClaimNote] = useState<string | null>(null);
+
+  // A selection is only meaningful against the rows it was made on. When the
+  // filters, page or view change, the ticked ids may no longer be on screen --
+  // and claiming rows a rep cannot see is exactly the surprise this feature
+  // exists to prevent.
+  useEffect(() => { setSelected(new Set()); setClaimNote(null); }, [sp]);
+
   // Local draft for the search box, synced from the URL. See LeadsToolbar's
   // input for why this exists instead of defaultValue.
   const [queryDraft, setQueryDraft] = useState(filters.query);
@@ -175,7 +192,11 @@ export function WebLeadsBrowser() {
     let alive = true;
     setLoading(true);
     const qs = filtersToParams({ ...filters, leadId: null }).toString();
-    fetch(`/api/web-leads?${qs}`)
+    // scope=mine asks for the caller's own book; the default pool excludes
+    // every lead somebody currently holds. `view` is already in `qs` (it is a
+    // filter), but the server reads scope explicitly rather than inferring it
+    // from a presentation concern.
+    fetch(`/api/web-leads?${qs}${filters.view === "mine" ? "&scope=mine" : ""}`)
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
         return r.json();
@@ -239,41 +260,142 @@ export function WebLeadsBrowser() {
     [filters],
   );
 
+  const mine = view === "mine";
+
+  /**
+   * Claim the ticked leads into my book, or (in My Leads) release them back to
+   * the pool.
+   *
+   * REPORTS WHAT ACTUALLY HAPPENED, not what was attempted. A rep ticks 60,
+   * two were taken by someone else in the last minute and one is over their
+   * cap: saying "claimed 60" would be a lie the rep only discovers when three
+   * of their calls turn out to belong to someone else. The server returns the
+   * granted, refused and lost-race sets separately and this renders the
+   * difference. Same discipline assign.ts documents: "a half-assigned territory
+   * that reports success is worse than an error".
+   */
+  const runClaim = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    setClaiming(true);
+    setClaimNote(null);
+    try {
+      const r = await fetch(`/api/web-leads/claim${mine ? "?release=1" : ""}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadIds: ids }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setClaimNote(body?.error ? `Could not do that: ${body.error}` : "Could not do that. Try again.");
+        return;
+      }
+      if (mine) {
+        const n = (body.released || []).length;
+        const failed = (body.refused || []).length;
+        setClaimNote(
+          `Released ${n} back to the pool.` + (failed ? ` ${failed} could not be released.` : ""),
+        );
+      } else {
+        const got = (body.claimed || []).length;
+        const lost = (body.lostRace || []).length;
+        const capped = (body.refused || []).filter((x: { reason: string }) => x.reason === "at_capacity").length;
+        const gone = (body.refused || []).length - capped;
+        setClaimNote(
+          [
+            `Claimed ${got}.`,
+            lost ? `${lost} were taken by someone else just now.` : "",
+            gone ? `${gone} were already held.` : "",
+            capped ? `${capped} would put you over your ${body.cap} lead limit.` : "",
+            `You now hold ${body.held} of ${body.cap}.`,
+          ].filter(Boolean).join(" "),
+        );
+      }
+      setSelected(new Set());
+      // Re-read so the claimed leads leave the pool (or the released ones leave
+      // my book) immediately, rather than lingering until the next navigation.
+      router.refresh();
+      push({ ...filters });
+    } catch {
+      setClaimNote("Could not reach the server. Nothing was changed.");
+    } finally {
+      setClaiming(false);
+    }
+  }, [selected, mine, router, push, filters]);
+
+  const toggle = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleAll = useCallback((ids: string[], select: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) { if (select) next.add(id); else next.delete(id); }
+      return next;
+    });
+  }, []);
+
+  const listBlock = (
+    <div className="flex gap-7">
+      {/* The rail narrows the shared pool. A rep's own book is small enough to
+          scan and is not filtered by geography -- filtering your own 100 leads
+          by province is a question nobody has. */}
+      {!mine && (
+        <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
+      )}
+
+      <div className="min-w-0 flex-1 space-y-4">
+        <LeadsToolbar
+          filters={filters}
+          onChange={push}
+          total={total}
+          loading={loading}
+          queryDraft={queryDraft}
+          onQueryDraft={setQueryDraft}
+          onStartCalling={() => setCalling(true)}
+          canStartCalling={!loading && leads.length > 0}
+          selectedCount={selected.size}
+          onClaim={runClaim}
+          claiming={claiming}
+          claimLabel={mine ? "Release" : "Claim"}
+        />
+
+        {claimNote && (
+          <p className="rounded-lg border border-bg-border bg-bg-panel px-3.5 py-2.5 text-sm text-fg-muted">
+            {claimNote}
+          </p>
+        )}
+
+        <LeadsTable
+          leads={leads} total={total} page={filters.page} pageSize={pageSize}
+          onPage={(n) => push({ ...filters, page: n })}
+          onOpen={openLead}
+          loading={loading} error={listError}
+          emptyHint={mine ? "Nothing in your book yet. Go to Leads, tick the ones you want and claim them." : emptyHint}
+          selected={selected} onToggle={toggle} onToggleAll={toggleAll}
+          showStage={mine}
+        />
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Leads"
-        subtitle="Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
+        title={mine ? "My leads" : "Leads"}
+        subtitle={
+          mine
+            ? "The leads you have claimed. Nobody else can call these while you hold them."
+            : "Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
+        }
         action={<ViewSwitcher active={view} onChange={setView} />}
       />
 
-      {view === "leads" && (
-        <div className="flex gap-7">
-          <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
-
-          <div className="min-w-0 flex-1 space-y-4">
-            <LeadsToolbar
-              filters={filters}
-              onChange={push}
-              total={total}
-              loading={loading}
-              queryDraft={queryDraft}
-              onQueryDraft={setQueryDraft}
-              onStartCalling={() => setCalling(true)}
-              canStartCalling={!loading && leads.length > 0}
-            />
-
-            <LeadsTable
-              leads={leads} total={total} page={filters.page} pageSize={pageSize}
-              onPage={(n) => push({ ...filters, page: n })}
-              onOpen={openLead}
-              loading={loading} error={listError} emptyHint={emptyHint}
-            />
-          </div>
-        </div>
-      )}
-
-      {view === "pipeline" && <PipelineBoard />}
+      {(view === "leads" || mine) && listBlock}
 
       {view === "territories" && (
         <div className="max-w-3xl">
