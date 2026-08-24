@@ -1,6 +1,5 @@
 import { Card, PageHeader, Stat, EmptyState } from "@/components/Card";
 import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
-import { LeadSourceBreakdown } from "@/components/charts/LeadSourceBreakdown";
 import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
 import {
   mrrSnapshot,
@@ -58,17 +57,6 @@ export default async function AnalyticsPage() {
 
       <Card title="Pipeline" subtitle="Funnel by stage">
         <PipelineFunnel stages={pipeline.stages} />
-      </Card>
-
-      {/* Origination attribution (Text vs Dial). Distinct from the "Lead
-          sources" card below, which charts lead.data.source — the
-          channel-of-record enum (public_form / inbound / ...). This one charts
-          lead.data.lead_source, set from the ?source= tag on the shared link. */}
-      <Card
-        title="Lead origination"
-        subtitle="Text vs Dial — where the lead came from, by day"
-      >
-        <LeadSourceBreakdown />
       </Card>
 
       <Card title="Lead sources" subtitle="Where leads come from">
