@@ -19,6 +19,8 @@ import { spawnSync } from "node:child_process";
 
 const TESTS = [
   "tests/alert-decay.test.ts",
+  "tests/lead-source-attribution.test.ts",
+  "tests/lead-source-rollup.test.ts",
   "tests/sunbiz-form-templates.test.ts",
   "tests/public-form-resolver.test.ts",
   "tests/sunbiz-import-routing.test.ts",

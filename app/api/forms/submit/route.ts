@@ -66,6 +66,12 @@ import { sendFormCompletionEmail } from "@/lib/notify/form-completion-email";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { upsertApplicationFromFormStep } from "@/lib/forms/application-upsert";
 import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from "@/lib/forms/agent-routing";
+import {
+  adoptLeadSource,
+  normalizeLeadSource,
+  LEAD_SOURCE_KEY,
+  LEAD_SOURCE_AT_KEY,
+} from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
 import { createHash } from "node:crypto";
@@ -114,6 +120,10 @@ type SubmitBody = {
     // ?rep=<jordan|alex|matt> from the per-agent interest link — resolved to
     // assigned_to so the lead lands under that agent.
     rep?: string;
+    // ?source=<text|dial> from the per-channel link — normalized to
+    // data.lead_source for origination attribution. Untrusted: an unknown or
+    // malformed value resolves to "unknown", it never rejects the submission.
+    source?: string;
   };
   /** Mint the anonymous lead/token without recording a form step. Used only
    * when step 0 itself is a direct-to-storage upload and therefore needs the
@@ -243,6 +253,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       payload: body.payload || {},
       ip,
       rep: body.anonymous_init.rep,
+      source: body.anonymous_init.source,
       origin: req.nextUrl.origin,
       initializeOnly: body.initialize_only === true,
     });
@@ -1450,6 +1461,8 @@ async function initAnonymousLead(input: {
   ip: string | null;
   /** ?rep=<agent> from a per-agent interest link → resolved to assigned_to. */
   rep?: string;
+  /** ?source=<text|dial> from a per-channel link → normalized to lead_source. */
+  source?: string;
   /** Request origin, for minting the absolute full-application link. */
   origin: string;
   /** Restricted bootstrap for forms whose first step cannot upload without a token. */
@@ -1554,6 +1567,13 @@ async function initAnonymousLead(input: {
       merged.assigned_to = repAssign.auth_user_id;
       merged.assigned_agent_name = repAssign.name;
     }
+    // Origination attribution on a RETURNING merchant. adoptLeadSource is the
+    // idempotency boundary: it returns null (no write) when the lead already
+    // carries a real channel, so a retry, a duplicate delivery, or the merchant
+    // opening the other channel's link later can never flip the credit. It only
+    // fills in a lead that has none — an upgrade from "unknown", not a steal.
+    const adopted = adoptLeadSource(existing.data, input.source, new Date().toISOString());
+    if (adopted) Object.assign(merged, adopted);
     await db
       .from("tenant_records")
       .update({ data: merged })
@@ -1579,6 +1599,13 @@ async function initAnonymousLead(input: {
       // OASIS lead source enum has no "public_form" — map to "inbound" (a
       // social/funnel lead came to us). SunBiz keeps "public_form".
       source: funding ? "public_form" : "inbound",
+      // Origination channel (Text vs Dial) — a DIFFERENT axis from `source`
+      // above, which is the channel-of-record enum feeding pipelineBreakdown().
+      // Always stamped, including "unknown", so the metrics denominator counts
+      // every lead and an untagged link shows up as a visible gap instead of
+      // silently vanishing from the chart.
+      [LEAD_SOURCE_KEY]: normalizeLeadSource(input.source),
+      [LEAD_SOURCE_AT_KEY]: new Date().toISOString(),
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
