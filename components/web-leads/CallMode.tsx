@@ -158,7 +158,7 @@ function TalkingPoints({ leadId }: { leadId: string }) {
 }
 
 export function CallMode({
-  leads, queueKey, queueLabel, ready, onExit, onOpenDetail, onLoadMore, hasMore,
+  leads, queueKey, queueLabel, ready, onExit, onLoadMore, hasMore,
 }: {
   leads: WebLeadRow[];
   /** Changes whenever `leads` becomes a DIFFERENT queue (a new page, or new
@@ -180,7 +180,6 @@ export function CallMode({
    */
   ready: boolean;
   onExit: () => void;
-  onOpenDetail: (id: string) => void;
   onLoadMore: (() => void) | null;
   hasMore: boolean;
 }) {
@@ -429,13 +428,23 @@ export function CallMode({
                     <ExternalLink className="h-4 w-4" />Their site
                   </a>
                 )}
-                <button
-                  type="button"
-                  onClick={() => onOpenDetail(lead.id)}
+                {/* FULL DETAIL IS THE BATTLE CARD NOW, IN A NEW TAB.
+                    It used to drop out of Call Mode and open the 28rem drawer
+                    behind it, which cost the rep their place in the queue to
+                    read a narrower version of what they were already looking
+                    at. /web-leads/[id] is the deeper view -- percentile against
+                    real local competitors, the head-to-head, every failed check
+                    with what it costs -- and opening it in its own tab means
+                    the queue, the cursor and the disposition keys survive
+                    intact behind it. */}
+                <a
+                  href={`/web-leads/${encodeURIComponent(lead.id)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 py-3 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                 >
                   Full detail
-                </button>
+                </a>
               </div>
 
               {/* VERBATIM, and it stays next to the call button rather than

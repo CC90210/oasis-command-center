@@ -297,6 +297,15 @@ for (const view of [
   // site" turns straight into a spoken claim -- so it earns the same ban as
   // the panel rather than being trusted to stay clean on its own.
   "components/web-leads/CallMode.tsx",
+  // Added 2026-08-24 with the battle card. It is the densest surface in the
+  // feature -- a radar, a distribution strip, seven recoverable-points bars, a
+  // head-to-head track per dimension, and a percentile marker -- which makes it
+  // the file where a colour keyed to a score is both most tempting and most
+  // damaging. A red arc beside a named local competitor is a rep telling a
+  // stranger their site is bad on the authority of a gradient. Proved to fire
+  // against this file by planting `text-red-400` on the composite score once
+  // (2026-08-24): the assertion failed as intended, and the class was reverted.
+  "components/web-leads/BattleCard.tsx",
 ]) {
   const src = read(view);
 

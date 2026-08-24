@@ -232,6 +232,61 @@ export function coerceProfile(raw: unknown): StoredProfile | null {
 }
 
 /**
+ * The RAW measured signals behind the newest audit for one business, or null.
+ *
+ * WHY A SEPARATE READ RATHER THAN ANOTHER COLUMN ON fetchAudit(): every lead
+ * panel and every Call Mode card calls fetchAudit on open, and none of them
+ * render a single signal. The signals blob is the crawler's whole observation
+ * of a page -- fifty-odd fields -- and widening the hot path to carry it would
+ * make every panel open pay for a section only the battle card shows. The
+ * battle card is a full page a rep opens deliberately; one extra query there is
+ * the right place for the cost.
+ *
+ * SAME ROW AS fetchAudit(), by construction: identical tenant / business /
+ * version pin and identical `fetched_at desc limit 1` ordering. If those ever
+ * diverge, the evidence section would quote a different crawl than the score
+ * above it -- a rep reading "page weight 4.2MB" that belongs to last month's
+ * version of the site.
+ *
+ * `signals` is JSON TEXT (JARVIS migrations/001_leadgen.sql) and therefore
+ * arrives in BOTH shapes depending on the backend, exactly like `profile`: an
+ * already-decoded object through the Turso adapter, a raw string through
+ * supabase-js. See coerceProfile's doc comment for the outage that caused.
+ */
+export function coerceSignals(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function fetchAuditSignals(businessId: string): Promise<Record<string, unknown> | null> {
+  const bid = safeFilterValue(businessId);
+  if (!bid) return null;
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("leadgen_site_audits")
+    .select("signals")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("business_id", bid)
+    .eq("audit_version", MODEL_VERSION)
+    .order("fetched_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`signals_read_failed: ${error.message}`);
+  if (!data) return null;
+  return coerceSignals((data as { signals: unknown }).signals);
+}
+
+/**
  * `lead` must already be the result of a tenant-pinned, viewer-scoped
  * fetchLead(id, viewer) call for this SAME id -- the route resolves it once
  * for its own 404 check and passes it through here so authorization happens

@@ -54,8 +54,17 @@ const store = new Map<string, Entry<unknown>>();
  *
  * SCORES is longer because it changes only when a scoring run writes, which is
  * a batch job measured in hours, not a per-request event.
+ *
+ * CORPUS backs lib/web-leads/competitors.ts and is deliberately NOT folded into
+ * LEADS even though both derive from the same tenant_records scan. They answer
+ * questions with different staleness budgets: the leads table must show a lead
+ * returning to the pool within seconds of a rep releasing it, while a
+ * percentile against 23,195 scored sites changes only when a scoring run
+ * writes. One shared TTL would either re-transfer ~31,000 rows every ten
+ * seconds to answer a question whose answer changes daily, or leave a released
+ * lead on screen for five minutes.
  */
-export const TTL = { LEADS: 10_000, SCORES: 300_000 } as const;
+export const TTL = { LEADS: 10_000, SCORES: 300_000, CORPUS: 300_000 } as const;
 
 /**
  * Run `load` and memoise it for `ttlMs`, keyed by `key`.
