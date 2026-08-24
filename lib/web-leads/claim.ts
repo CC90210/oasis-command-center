@@ -101,13 +101,19 @@ export function availability(f: ClaimFacts, now: number): Availability {
   //    below can hand a do-not-call business to a rep.
   if (f.dnc) return { available: false, reason: "do_not_call" };
 
-  // 2. Nobody holds it.
-  if (!f.assignedTo) return { available: true, reason: "unclaimed" };
-
-  // 3. Marked lost long enough ago that it is worth another conversation.
-  //    Checked before staleness because a lost lead HAS been called -- it would
-  //    never satisfy the never-dialled rule and would otherwise be locked to
-  //    its last owner permanently.
+  // 2. Marked lost. Checked BEFORE ownership, not after.
+  //
+  //    A first draft checked "nobody holds it" first, which quietly made the
+  //    90-day rule unreachable for any lost lead with no owner: it returned
+  //    `unclaimed` at step 2 and never reached this branch, so a business that
+  //    said "not interested" yesterday was immediately callable again by
+  //    anyone, forever. (Codex review, 2026-08-23.) Whether a lead is worth
+  //    calling again is a fact about the CONVERSATION, not about who happens to
+  //    hold the record -- so it is answered before ownership is consulted.
+  //
+  //    It is also checked before staleness because a lost lead HAS been called:
+  //    it would never satisfy the never-dialled rule below and would otherwise
+  //    be locked to its last owner permanently.
   if (f.stage === "lost") {
     const since = ageMs(f.lostAt, now);
     // A lost lead with no lost_at stamp (written before this field existed)
@@ -118,6 +124,9 @@ export function availability(f: ClaimFacts, now: number): Availability {
     }
     return { available: false, reason: "in_progress" };
   }
+
+  // 3. Nobody holds it, and it is not a recent loss.
+  if (!f.assignedTo) return { available: true, reason: "unclaimed" };
 
   // 4. Claimed but never actually dialled. `lastCallAt` set at all means the
   //    rep is working it, whatever the stage says -- one logged call resets
