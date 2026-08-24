@@ -329,15 +329,63 @@ assert.match(
   );
 }
 
-// The external "View website" link opens one of 27,000 sites we do not
-// control and have not vetted. Without rel="noopener noreferrer", the
-// opened tab can reach back through window.opener (e.g. redirect the
-// original tab to a fake "session expired" page) -- a real security
-// requirement, not a style nit, and easy to lose in a refactor of this link.
+// ---------------------------------------------------------------------------
+// EVERY outbound "View website" link, in every surface that renders one.
+//
+// This opens one of ~27,000 sites we do not control, have not vetted, and
+// ingested automatically from OpenStreetMap, which anyone on the internet can
+// edit. Two independent requirements, and BOTH must hold on every link:
+//
+//   safeExternalUrl()          allowlists http/https, so a javascript: value
+//                              in that field cannot execute in our own origin
+//                              the instant a rep clicks it, and adds a scheme
+//                              to the 217 bare domains that would otherwise
+//                              navigate INSIDE our dashboard rather than out
+//                              to the prospect. See lib/web-leads/url-safety.ts.
+//   rel="noopener noreferrer"  without it the opened tab reaches back through
+//                              window.opener and can redirect the rep's
+//                              original tab to a fake "session expired" page.
+//
+// This is deliberately a LOOP over every surface rather than one assertion
+// against the panel. The guard named only WebLeadDetail while CallMode had
+// already shipped a second link, so a third link (the leads table, 2026-08-23)
+// could be added with a raw href and this suite would still have gone green. A
+// per-surface loop fails the moment a new surface renders a link without the
+// seam, which is the only version of this guard that keeps working.
+// ---------------------------------------------------------------------------
+for (const view of [
+  "components/web-leads/WebLeadDetail.tsx",
+  "components/web-leads/CallMode.tsx",
+  "components/web-leads/LeadsTable.tsx",
+]) {
+  const src = read(view);
+  assert.match(
+    src,
+    /safeExternalUrl/,
+    `${view} must route its outbound website link through safeExternalUrl -- these URLs come from a public map anyone can edit`,
+  );
+  // The raw field must never reach an href directly. That is the exact shape
+  // the seam exists to prevent, and it is one careless refactor away always.
+  assert.doesNotMatch(
+    src,
+    /href=\{[^}]*websiteUrl[^}]*\}/,
+    `${view} must not put a raw websiteUrl in an href -- pass it through safeExternalUrl first`,
+  );
+  assert.match(
+    src,
+    /target="_blank"[\s\S]{0,160}?rel="noopener noreferrer"/,
+    `${view}'s external website link must carry rel="noopener noreferrer" alongside target="_blank"`,
+  );
+}
+
+// The leads table's ROW is itself a click target (it opens the detail drawer),
+// so an anchor nested inside it fires both: the site opens in a new tab and the
+// drawer opens behind it, over the list the rep was working. The phone link in
+// that same row already stops propagation; the website link must too.
 assert.match(
-  read("components/web-leads/WebLeadDetail.tsx"),
-  /target="_blank"[\s\S]{0,120}?rel="noopener noreferrer"/,
-  'WebLeadDetail\'s external website link must carry rel="noopener noreferrer" alongside target="_blank"',
+  read("components/web-leads/LeadsTable.tsx"),
+  /stopPropagation/,
+  "LeadsTable's in-row links must stop propagation -- the row itself opens the drawer",
 );
 
 console.log("web-leads-guards ok");

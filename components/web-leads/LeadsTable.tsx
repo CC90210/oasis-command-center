@@ -36,8 +36,9 @@
  */
 
 import { useEffect, useRef } from "react";
-import { AlertCircle, Phone } from "lucide-react";
+import { AlertCircle, ExternalLink, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
+import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 
 /** Matches the app's staggered animate-pulse-slow convention so the swap from
  *  skeleton to real rows is visually quiet. */
@@ -64,6 +65,49 @@ function TableSkeleton({ rows = 12 }: { rows?: number }) {
  * did not. Never a zero, never a dash, never a badge -- see the module header
  * and lib/web-leads/audit.ts.
  */
+/**
+ * The outbound link to the prospect's own site, for the results list.
+ *
+ * WHY IT IS HERE AND NOT IN A FOURTH COLUMN (2026-08-23, operator request): a
+ * rep triaging the list wants to glance at the real site before deciding to
+ * dial, and until now that cost a row click, a drawer, a click and a drawer
+ * close, per lead, down a 50-row page. But this table is three columns ON
+ * PURPOSE -- three is what fits without horizontal scroll, which is what lets
+ * the header stay sticky (see the module header). So the link goes INSIDE the
+ * website cell, under whichever honest statement that cell is already making,
+ * and costs no width.
+ *
+ * IT RENDERS FOR EVERY STATE THAT HAS A URL, INCLUDING `unreachable`. A site
+ * our crawler could not reach is exactly the one a rep most wants to eyeball:
+ * our failure to fetch it is not evidence about the site, and hiding the link
+ * there would quietly turn "we could not check this" into "there is nothing to
+ * see". The cell's wording is unchanged and still names which of the four
+ * states this is -- the link adds a way to LOOK, never a claim about what is
+ * there.
+ *
+ * Renders NOTHING when there is no safe URL -- never a dead or disabled
+ * control. See lib/web-leads/url-safety.ts for why the raw value cannot be
+ * trusted into an href, and tests/web-leads-guards.test.ts for the guard that
+ * holds this seam across all three surfaces that render this link.
+ */
+function WebsiteLink({ lead }: { lead: WebLeadRow }) {
+  const href = safeExternalUrl(lead.websiteUrl);
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      // The row itself opens the drawer. Without this the rep gets the site in
+      // a new tab AND the drawer over the list they were working.
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 rounded text-[11px] font-semibold text-accent transition-colors hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
+      <ExternalLink className="h-3 w-3 shrink-0" />View website
+    </a>
+  );
+}
+
 function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   if (lead.scoreState === "scored" && lead.score !== null) {
     return (
@@ -75,6 +119,7 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
             style={{ width: `${Math.min(100, Math.max(0, lead.score))}%` }}
           />
         </span>
+        <WebsiteLink lead={lead} />
       </div>
     );
   }
@@ -89,7 +134,12 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
         ? "We could not check this site"
         : "Not scored yet";
 
-  return <span className="block text-right text-xs italic leading-snug text-fg-dim">{text}</span>;
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <span className="block text-right text-xs italic leading-snug text-fg-dim">{text}</span>
+      <WebsiteLink lead={lead} />
+    </div>
+  );
 }
 
 export function LeadsTable({
