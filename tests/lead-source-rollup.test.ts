@@ -11,7 +11,7 @@ import {
   MIN_DAYS,
   type LeadRow,
 } from "../lib/metrics/lead-source-rollup";
-import { LEAD_SOURCE_KEY } from "../lib/forms/lead-source";
+import { LEAD_SOURCE_KEY, LEAD_SOURCE_ORDER } from "../lib/forms/lead-source";
 
 // The two quiet-wrong failure modes this pins:
 //   A. Day buckets computed in UTC instead of the operator's timezone, which
@@ -125,8 +125,8 @@ assert.deepEqual(percentages(emptyTotals(), 0), emptyTotals(), "zero denominator
 
 {
   // The classic naive-rounding failure: three equal thirds render 33.3 x 3 = 99.9.
-  const p = percentages({ text: 1, dial: 1, unknown: 1 }, 3);
-  const sum = p.text + p.dial + p.unknown;
+  const p = percentages({ text: 1, dial: 1, email: 0, unknown: 1 }, 3);
+  const sum = LEAD_SOURCE_ORDER.reduce((n, k) => n + p[k], 0);
   assert.equal(
     Math.round(sum * 10) / 10,
     100,
@@ -134,28 +134,49 @@ assert.deepEqual(percentages(emptyTotals(), 0), emptyTotals(), "zero denominator
   );
 }
 
-for (const [t, d, u] of [
-  [1, 1, 1],
-  [1, 2, 0],
-  [7, 3, 0],
-  [1, 0, 0],
-  [0, 0, 5],
-  [333, 333, 334],
-  [1, 999, 0],
-  [17, 41, 3],
-] as Array<[number, number, number]>) {
-  const total = t + d + u;
-  const p = percentages({ text: t, dial: d, unknown: u }, total);
-  const sum = Math.round((p.text + p.dial + p.unknown) * 10) / 10;
-  assert.equal(sum, 100, `percentages for ${t}/${d}/${u} must sum to 100, got ${sum}`);
+{
+  // An INCOMPLETE Totals must not produce a plausible wrong number. Before the
+  // `?? 0` guard this returned 100.2 without throwing: the missing bucket made
+  // the internal deficit NaN, and `NaN <= 0` is false, so every bucket got an
+  // extra tenth. Cast because the whole point is a malformed input.
+  const bad = { text: 1, dial: 1, unknown: 1 } as unknown as Parameters<typeof percentages>[0];
+  const p = percentages(bad, 3);
+  const sum = LEAD_SOURCE_ORDER.reduce((n, k) => n + p[k], 0);
+  assert.equal(
+    Math.round(sum * 10) / 10,
+    100,
+    `a Totals missing a channel must still sum to 100, got ${sum}`,
+  );
+  for (const k of LEAD_SOURCE_ORDER) {
+    assert.equal(Number.isFinite(p[k]), true, `${k} must be a finite number, never NaN`);
+  }
+}
+
+for (const [t, d, e, u] of [
+  [1, 1, 1, 1],
+  [1, 2, 0, 0],
+  [7, 3, 0, 0],
+  [1, 0, 0, 0],
+  [0, 0, 0, 5],
+  [333, 333, 0, 334],
+  [1, 999, 0, 0],
+  [17, 41, 3, 3],
+  [1, 1, 1, 0],
+  [250, 250, 250, 250],
+  [2, 3, 5, 7],
+] as Array<[number, number, number, number]>) {
+  const total = t + d + e + u;
+  const p = percentages({ text: t, dial: d, email: e, unknown: u }, total);
+  const sum = Math.round(LEAD_SOURCE_ORDER.reduce((n, k) => n + p[k], 0) * 10) / 10;
+  assert.equal(sum, 100, `percentages for ${t}/${d}/${e}/${u} must sum to 100, got ${sum}`);
   // Apportionment must never invert the ordering of the underlying counts.
   if (t > d) assert.equal(p.text >= p.dial, true, "a larger count must not get a smaller share");
 }
 
 {
   // A single non-zero bucket takes the whole ring.
-  const p = percentages({ text: 4, dial: 0, unknown: 0 }, 4);
-  assert.deepEqual(p, { text: 100, dial: 0, unknown: 0 });
+  const p = percentages({ text: 4, dial: 0, email: 0, unknown: 0 }, 4);
+  assert.deepEqual(p, { text: 100, dial: 0, email: 0, unknown: 0 });
 }
 
 // ── rollup: the fold ─────────────────────────────────────────────────────────
@@ -177,7 +198,7 @@ const AXIS = ["2026-08-22", "2026-08-23", "2026-08-24"];
 
   const r = rollup(rows, AXIS);
 
-  assert.deepEqual(r.totals, { text: 2, dial: 2, unknown: 2 });
+  assert.deepEqual(r.totals, { text: 2, dial: 2, email: 0, unknown: 2 });
   assert.equal(r.counted, 6, "every dated in-window row is counted");
   assert.equal(r.undated, 0);
   assert.equal(r.outOfWindow, 0);
@@ -223,7 +244,7 @@ const AXIS = ["2026-08-22", "2026-08-23", "2026-08-24"];
   assert.equal(r.counted, 1, "only the in-window dated row counts");
   assert.equal(r.undated, 2, "undated and unparseable are reported, not hidden");
   assert.equal(r.outOfWindow, 1, "out-of-window rows are reported separately");
-  assert.deepEqual(r.totals, { text: 0, dial: 1, unknown: 0 });
+  assert.deepEqual(r.totals, { text: 0, dial: 1, email: 0, unknown: 0 });
   assert.equal(
     r.daily.reduce((s, d) => s + d.total, 0),
     1,
@@ -241,3 +262,57 @@ const AXIS = ["2026-08-22", "2026-08-23", "2026-08-24"];
 }
 
 console.log("lead-source-rollup: all assertions passed");
+
+
+// ============================================================================
+// EMAIL CHANNEL — the regression that hardcoded channel sums would have caused
+// ============================================================================
+// Before LEAD_SOURCE_ORDER drove the sums, `total` was written out by hand as
+// text + dial + unknown. Adding a channel would have silently dropped every
+// emailed lead from the daily bars while the donut still counted it — the bars
+// and the headline would have disagreed and nothing would have errored.
+
+{
+  const rows: LeadRow[] = [
+    { created_at: "2026-08-24T16:00:00.000Z", data: { [LEAD_SOURCE_KEY]: "text" } },
+    { created_at: "2026-08-24T16:05:00.000Z", data: { [LEAD_SOURCE_KEY]: "dial" } },
+    { created_at: "2026-08-24T16:10:00.000Z", data: { [LEAD_SOURCE_KEY]: "email" } },
+    { created_at: "2026-08-24T16:15:00.000Z", data: { [LEAD_SOURCE_KEY]: "email" } },
+    { created_at: "2026-08-24T16:20:00.000Z", data: {} },
+  ];
+  const r = rollup(rows, AXIS);
+
+  assert.equal(r.totals.email, 2, "emailed leads are counted");
+  assert.equal(r.counted, 5);
+
+  const d24 = r.daily.find((d) => d.date === "2026-08-24")!;
+  assert.equal(
+    d24.total,
+    5,
+    "the daily bar total MUST include email - a hardcoded text+dial+unknown sum reports 3 here",
+  );
+  assert.equal(
+    r.daily.reduce((s, d) => s + d.total, 0),
+    r.counted,
+    "bars still reconcile with the headline once a third channel exists",
+  );
+
+  const p = percentages(r.totals, r.counted);
+  const sum = Math.round((p.text + p.dial + p.email + p.unknown) * 10) / 10;
+  assert.equal(sum, 100, `four buckets must still sum to 100, got ${sum}`);
+}
+
+{
+  // emptyTotals must cover every channel, or a zero day drops a key.
+  const t = emptyTotals();
+  for (const k of LEAD_SOURCE_ORDER) {
+    assert.equal(t[k], 0, `emptyTotals must initialise ${k}`);
+  }
+  assert.equal(
+    Object.keys(t).length,
+    LEAD_SOURCE_ORDER.length,
+    "no extra or missing buckets",
+  );
+}
+
+console.log("lead-source-rollup email channel: all assertions passed");

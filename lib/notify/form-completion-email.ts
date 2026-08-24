@@ -8,6 +8,16 @@
  * owner+admins who linked a chat id. This guarantees an EMAIL to the actual
  * assigned agent + the shared submissions@ inbox.
  *
+ * CHANNEL (Adon 2026-08-24): the body now names HOW the application arrived
+ * — Text, Dial, Email or Unknown — plus the link, with the HMAC token segment
+ * REDACTED. The full-application URL is a bearer credential for that lead's
+ * form; the channel is what actually answers "did this come from a text, a
+ * call, or an email link", so the token is not mailed around to get it.
+ *
+ * It reports BOTH axes because they legitimately differ: a merchant found
+ * through a text blast who applies from a drip email is origination=Text,
+ * this-application=Email. Showing only one would misattribute the other.
+ *
  * Internal/operator email (not merchant-facing) → no send-gate / CAN-SPAM
  * footer needed, same exemption as the B2B shop-out emails. Body carries the
  * business name + which form + agent + a lead link ONLY — no SSN/sensitive PII.
@@ -18,6 +28,13 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getTenantMembers } from "@/lib/team";
 import { getSubmissionsCreds, getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
+import {
+  LEAD_SOURCE_LABELS,
+  readLeadSource,
+  normalizeLeadSource,
+  LAST_SUBMITTED_VIA_KEY,
+  LAST_SUBMITTED_LINK_KEY,
+} from "@/lib/forms/lead-source";
 
 const FORM_LABELS: Record<number, string> = {
   1: "the interest form (Form 1)",
@@ -33,6 +50,10 @@ export async function sendFormCompletionEmail(input: {
   leadId: string;
   formNumber: 1 | 2 | 3;
   origin?: string;
+  /** Channel of THIS submission, resolved by the submit route. */
+  submittedVia?: string;
+  /** Link used, token already redacted. */
+  submittedLink?: string;
 }): Promise<void> {
   try {
     const { db, tenantId, leadId, formNumber } = input;
@@ -73,14 +94,42 @@ export async function sendFormCompletionEmail(input: {
     if (to.length === 0) return;
 
     const link = input.origin ? `${input.origin}/t/sun?lead=${leadId}` : "";
-    const subject = `New form completed — ${business} (Form ${formNumber})`;
+
+    // How THIS application arrived. Prefer what the submit route just resolved;
+    // fall back to what the lead carries, so a mid-funnel step with no query
+    // string still reports the channel rather than going blank.
+    const viaRaw =
+      input.submittedVia ??
+      (typeof leadData[LAST_SUBMITTED_VIA_KEY] === "string"
+        ? (leadData[LAST_SUBMITTED_VIA_KEY] as string)
+        : undefined);
+    const via = normalizeLeadSource(viaRaw);
+    const viaLabel = LEAD_SOURCE_LABELS[via];
+    const usedLink =
+      input.submittedLink ??
+      (typeof leadData[LAST_SUBMITTED_LINK_KEY] === "string"
+        ? (leadData[LAST_SUBMITTED_LINK_KEY] as string)
+        : "");
+
+    // Origination (first touch) is a different axis and both are reported.
+    const originated = readLeadSource(leadData);
+    const originatedLabel = LEAD_SOURCE_LABELS[originated];
+
+    const subject = `New form completed — ${business} via ${viaLabel} (Form ${formNumber})`;
     const lines = [
       `${agentName ? `${agentName}'s lead` : "A lead"} just completed ${formLabel}.`,
+      "",
+      `Came in through: ${viaLabel}`,
+      `Originally sourced from: ${originatedLabel}`,
       "",
       `Merchant: ${business}${contact ? ` — ${contact}` : ""}`,
       `Form: ${formLabel}`,
       `Agent: ${agentName || "(unassigned)"}`,
+      ...(usedLink ? [`Link used: ${usedLink}`] : []),
       ...(link ? ["", `Open the lead: ${link}`] : []),
+      "",
+      "The signed part of a form link is redacted above on purpose — it grants",
+      "access to that merchant's form. The channel is the part you need.",
       "",
       "— SunBiz automated notification",
     ];

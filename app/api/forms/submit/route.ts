@@ -69,8 +69,11 @@ import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from 
 import {
   adoptLeadSource,
   normalizeLeadSource,
+  recordSubmissionChannel,
   LEAD_SOURCE_KEY,
   LEAD_SOURCE_AT_KEY,
+  LAST_SUBMITTED_VIA_KEY,
+  LAST_SUBMITTED_LINK_KEY,
 } from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
@@ -125,6 +128,13 @@ type SubmitBody = {
     // malformed value resolves to "unknown", it never rejects the submission.
     source?: string;
   };
+  /** ?source= on a TOKEN link (drip / rep-sent application). The anonymous
+   *  path carries its own copy inside anonymous_init; this one covers the
+   *  EXISTING-lead path, which had no channel at all before 2026-08-24. */
+  submission_source?: string;
+  /** Path the merchant landed on. The token segment is redacted before this
+   *  ever reaches an email — see describeSubmissionLink. */
+  submission_path?: string;
   /** Mint the anonymous lead/token without recording a form step. Used only
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
@@ -772,7 +782,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // full application happens to carry statements — that's Form 2).
       if (form.slug === "bank-statement-upload") {
         after(() =>
-          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin }),
+          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
         );
       }
     }
@@ -815,6 +825,54 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // ---------------------------------------------------------------------
+  // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if
+  // it was an application coming in from a lead through text, through calls,
+  // or an email link").
+  //
+  // Two entry points feed it: anonymous_init.source on the NEW-lead path, and
+  // submission_source on the TOKEN path (the drip / rep-sent application,
+  // which carried no channel at all before this). Whichever is present wins.
+  //
+  // Deliberately SEPARATE from lead_source. lead_source is origination and is
+  // immutable first-touch; this is latest-wins and answers a different
+  // question. A merchant found by text who applies from a drip email is
+  // origination=text, this-application=email, and both facts are true.
+  // ---------------------------------------------------------------------
+  const submissionChannelRaw = body.submission_source || body.anonymous_init?.source;
+  const submissionUrl = body.submission_path
+    ? `${req.nextUrl.origin}${body.submission_path}`
+    : undefined;
+  const channelPatch = recordSubmissionChannel(
+    submissionChannelRaw,
+    submissionUrl,
+    new Date().toISOString(),
+  );
+  if (channelPatch) {
+    // Read-modify-write, guarded. A failed read yields data:null and spreading
+    // {} would wipe every existing field off the lead — the same hazard the
+    // OASIS funnel patch below documents. Only write on a confirmed read.
+    const cur = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("id", link.lead_id)
+      .eq("tenant_id", form.tenant_id)
+      .maybeSingle();
+    const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data;
+    if (!cur.error && curData) {
+      await db
+        .from("tenant_records")
+        .update({ data: { ...curData, ...channelPatch } })
+        .eq("id", link.lead_id)
+        .eq("tenant_id", form.tenant_id);
+    }
+  }
+  // What the operator notification should say about how this arrived. Falls
+  // back to whatever the lead already carried, so a mid-funnel step with no
+  // query string still reports the channel the merchant actually came in on.
+  const notifyVia = channelPatch?.[LAST_SUBMITTED_VIA_KEY];
+  const notifyLink = channelPatch?.[LAST_SUBMITTED_LINK_KEY];
 
   // Stage transition — if step_outcomes has a target for this step,
   // patch the lead via updateRecord. Phase 2's BRAVO_RECORD_STATUS_CHANGED
@@ -1092,7 +1150,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 1 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   } else if (isLastStep && form.slug === "full-application") {
@@ -1171,7 +1229,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 2 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   }

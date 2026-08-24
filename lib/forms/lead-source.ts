@@ -26,8 +26,12 @@
  *   the write rule is adoptLeadSource() below — never a blind overwrite.
  */
 
-/** Real channels. "unknown" is a resolved bucket, not a channel. */
-export const LEAD_SOURCE_CHANNELS = ["text", "dial"] as const;
+/** Real channels. "unknown" is a resolved bucket, not a channel.
+ *  `email` added 2026-08-24 (Adon): applications also arrive through an emailed
+ *  link — a rep sending the application by hand, or the drip engine. Without it
+ *  every emailed application counted as Unknown, which is the same as not
+ *  measuring the channel that sends the most applications. */
+export const LEAD_SOURCE_CHANNELS = ["text", "dial", "email"] as const;
 
 export type LeadSourceChannel = (typeof LEAD_SOURCE_CHANNELS)[number];
 export type LeadSource = LeadSourceChannel | "unknown";
@@ -35,11 +39,12 @@ export type LeadSource = LeadSourceChannel | "unknown";
 export const LEAD_SOURCE_UNKNOWN = "unknown" as const;
 
 /** Stable render/serialize order. Unknown always last. */
-export const LEAD_SOURCE_ORDER: readonly LeadSource[] = ["text", "dial", "unknown"];
+export const LEAD_SOURCE_ORDER: readonly LeadSource[] = ["text", "dial", "email", "unknown"];
 
 export const LEAD_SOURCE_LABELS: Record<LeadSource, string> = {
   text: "Text",
   dial: "Dial",
+  email: "Email",
   unknown: "Unknown",
 };
 
@@ -47,6 +52,25 @@ export const LEAD_SOURCE_LABELS: Record<LeadSource, string> = {
 export const LEAD_SOURCE_KEY = "lead_source";
 /** ISO timestamp of first attribution — set once, alongside LEAD_SOURCE_KEY. */
 export const LEAD_SOURCE_AT_KEY = "lead_source_at";
+
+/**
+ * PER-SUBMISSION channel — a DIFFERENT axis from LEAD_SOURCE_KEY, and the
+ * distinction is load-bearing.
+ *
+ *   lead_source       = ORIGINATION. First touch. Immutable. "How did we meet."
+ *   last_submitted_via = THIS submission. Latest wins. "How did this application
+ *                        actually arrive."
+ *
+ * They legitimately differ: a merchant found through a text blast, got a drip
+ * email a week later, and applied from the emailed link. Origination is Text,
+ * this application arrived by Email. Collapsing the two would either destroy
+ * origination history or misreport how applications come in — both wrong, in
+ * opposite directions.
+ */
+export const LAST_SUBMITTED_VIA_KEY = "last_submitted_via";
+/** Human-readable description of the link used, token redacted. */
+export const LAST_SUBMITTED_LINK_KEY = "last_submitted_link";
+export const LAST_SUBMITTED_AT_KEY = "last_submitted_at";
 /** The query-string parameter operators put on shared links. */
 export const LEAD_SOURCE_PARAM = "source";
 
@@ -66,6 +90,11 @@ const ALIASES = new Map<string, LeadSourceChannel>([
   ["call", "dial"],
   ["calls", "dial"],
   ["phone", "dial"],
+  ["email", "email"],
+  ["emails", "email"],
+  ["mail", "email"],
+  ["drip", "email"],
+  ["drips", "email"],
 ]);
 
 /** Longest alias is 6 chars; anything past this is not a source, it is an
@@ -137,4 +166,62 @@ export function withLeadSourceParam(baseUrl: string, source: LeadSourceChannel):
     const sep = baseUrl.includes("?") ? "&" : "?";
     return `${baseUrl}${sep}${LEAD_SOURCE_PARAM}=${encodeURIComponent(source)}`;
   }
+}
+
+/**
+ * Describe the link a merchant actually submitted through, for the operator
+ * notification email.
+ *
+ * SECURITY: the full-application link carries an HMAC token that is a BEARER
+ * CREDENTIAL for that lead's form. Adon asked for "the link URL that was used"
+ * so the team can tell channels apart, and explicitly offered "or you can even
+ * write it yourself". The channel is what actually answers his question, so the
+ * token is replaced with a marker rather than mailed around. The path still
+ * identifies which form, and the channel still identifies how it arrived.
+ *
+ * Returns a display string, never a usable credential.
+ */
+export function describeSubmissionLink(
+  rawUrl: string | null | undefined,
+  source: LeadSource,
+): string {
+  const channel = LEAD_SOURCE_LABELS[source];
+  if (!rawUrl || typeof rawUrl !== "string" || !rawUrl.trim()) {
+    return `${channel} (no link recorded)`;
+  }
+  let shown = rawUrl.trim().slice(0, 400);
+  try {
+    const u = new URL(shown);
+    // /f/<tenant>/<form>/<token> — the 4th segment is the signed token.
+    const parts = u.pathname.split("/").filter(Boolean);
+    if (parts[0] === "f" && parts.length >= 4) {
+      parts[3] = "[signed-link]";
+      u.pathname = "/" + parts.join("/");
+    }
+    shown = u.toString();
+  } catch {
+    // Not an absolute URL — show what we have, still truncated.
+  }
+  return `${channel} — ${shown}`;
+}
+
+/**
+ * The per-submission write. Unlike adoptLeadSource (first touch wins,
+ * immutable) this one is LATEST WINS on purpose: it answers "how did the
+ * application that just landed arrive", which is a fact about this submission,
+ * not about the relationship. Returns null when there is nothing to record.
+ */
+export function recordSubmissionChannel(
+  rawSource: unknown,
+  rawUrl: string | null | undefined,
+  nowIso: string,
+): Record<string, string> | null {
+  const source = normalizeLeadSource(rawSource);
+  const hasUrl = typeof rawUrl === "string" && rawUrl.trim().length > 0;
+  if (source === LEAD_SOURCE_UNKNOWN && !hasUrl) return null;
+  return {
+    [LAST_SUBMITTED_VIA_KEY]: source,
+    [LAST_SUBMITTED_LINK_KEY]: describeSubmissionLink(rawUrl, source),
+    [LAST_SUBMITTED_AT_KEY]: nowIso,
+  };
 }
