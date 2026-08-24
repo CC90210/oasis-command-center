@@ -160,6 +160,27 @@ export async function pushNextActionToCalendar(input: {
 }
 
 /**
+ * Undo a reminder we created but could not record.
+ *
+ * The caller stores the event id on the lead AFTER Google creates the event.
+ * If that store fails, the event exists and nothing knows its id -- so a later
+ * "clear this reminder" would address a null id, succeed vacuously, and leave a
+ * live alert on the rep's phone forever. For a do-not-call that means ringing a
+ * prospect who asked us never to be called again.
+ *
+ * Rolling the event back returns us to the clean state of "no reminder", which
+ * is recoverable: the rep's queue is still correct and the next disposition
+ * will create a fresh one. Returns false when the rollback itself failed, so
+ * the caller can say plainly that an unaddressable reminder may be live rather
+ * than pretending it is not.
+ */
+export async function rollBackReminder(repUserId: string, eventId: string | null): Promise<boolean> {
+  if (!eventId) return true;
+  const removed = await removeReminderEvent(WEBDEV_TENANT_ID, repUserId, eventId);
+  return removed.ok;
+}
+
+/**
  * Plain-language status for a rep. Returned to the client rather than composed
  * there so the wording stays consistent across the panel and Call Mode, and so
  * a new caller cannot invent a cheerier version of a failure.

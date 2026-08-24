@@ -165,6 +165,42 @@ assert.match(
   /try \{[\s\S]{0,500}?updateRecord\(\{[\s\S]{0,400}?\}\);[\s\S]{0,200}?\} catch/,
   "persisting the event id must be wrapped so a bookkeeping failure cannot fail a logged call",
 );
+
+// ---------------------------------------------------------------------------
+// A FAILED WRITE-BACK MUST ROLL THE EVENT BACK, NOT BE SWALLOWED.
+//
+// REGRESSION (Codex review, sixth pass, 2026-08-24). The earlier version
+// ignored this failure, reasoning that the call was logged, the queue was right
+// and the reminder was on the phone. That reasoning broke in the one case that
+// matters most: an event created but whose id was never recorded is
+// UNADDRESSABLE. A later disposition with no next action passes a null id to
+// the remover, gets `ok` back because there is nothing to remove, reports
+// "cleared" -- and leaves a live reminder ringing forever. For `do_not_call`
+// that is a phone alert to ring a prospect who asked never to be called again.
+// ---------------------------------------------------------------------------
+assert.match(
+  logFn,
+  /rollBackReminder\(/,
+  "a failed event-id write-back must roll the created event back, not leave an unaddressable reminder live",
+);
+assert.match(
+  logFn,
+  /state: "failed"/,
+  "a failed write-back must be REPORTED to the rep, never swallowed as success",
+);
+// And when the rollback itself fails, say so plainly rather than implying the
+// reminder is gone.
+assert.match(
+  logFn,
+  /rollback failed/i,
+  "a failed rollback must state that an unaddressable reminder may still be live",
+);
+const rollback = read("lib/web-leads/calendar-sync.ts");
+assert.match(
+  rollback,
+  /export async function rollBackReminder/,
+  "the rollback must live beside the push so only the calendar client talks to Google",
+);
 assert.match(
   logFn,
   /\[NEXT_ACTION_EVENT_ID_FIELD\]: newEventId/,

@@ -93,6 +93,7 @@ import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
 import {
   pushNextActionToCalendar,
+  rollBackReminder,
   NEXT_ACTION_EVENT_ID_FIELD,
   type CalendarSyncStatus,
 } from "./calendar-sync";
@@ -409,13 +410,26 @@ export async function logCallOutcome(input: {
 
   // Remember what Google called it, so the next push updates that event
   // instead of creating a second one. Written only when it actually changed,
-  // and in its own patch: this is mirror bookkeeping, and it must not be able
-  // to disturb the queue fields the call already committed above.
+  // and in its own patch: this is mirror bookkeeping and it must not disturb
+  // the queue fields the call already committed above.
   //
-  // A failure here is deliberately swallowed rather than surfaced. The call is
-  // logged, the queue is correct, and the reminder is on the phone -- the only
-  // cost is that a later reschedule may create a duplicate event, which is
-  // recoverable and strictly better than reporting a successful call as failed.
+  // THIS FAILURE IS NOT SWALLOWED (Codex review, sixth pass, 2026-08-24). An
+  // earlier version ignored it on the reasoning that the call was logged, the
+  // queue was right and the reminder was on the phone. That reasoning was
+  // wrong in the one case that matters most: if we created an event and then
+  // failed to record its id, the event is UNADDRESSABLE. A later disposition
+  // with no next action would pass a null id to the remover, get `ok` back
+  // (nothing to remove), report "cleared" -- and leave a live reminder ringing
+  // forever. For `do_not_call` that means a phone alert to ring a prospect who
+  // asked us never to be called again, which is the one outcome here with a
+  // legal edge on it.
+  //
+  // So a failed write-back ROLLS THE EVENT BACK using the id still held in
+  // memory, returning to the clean state of "no reminder", and reports the
+  // sync as failed. The rep is told their queue is saved but their phone is
+  // not, which is true. Only if the rollback ALSO fails is there an orphan,
+  // and that is reported rather than hidden.
+  let syncStatus = calendarSync;
   if (newEventId !== existingEventId) {
     try {
       await updateRecord({
@@ -424,8 +438,15 @@ export async function logCallOutcome(input: {
         id: leadId,
         patch: { [NEXT_ACTION_EVENT_ID_FIELD]: newEventId },
       });
-    } catch {
-      // Intentionally ignored. See above.
+    } catch (err) {
+      const rolledBack = await rollBackReminder(repUserId, newEventId);
+      syncStatus = {
+        state: "failed",
+        reason: "api_error",
+        detail: rolledBack
+          ? `event id not persisted, reminder rolled back: ${err instanceof Error ? err.message : String(err)}`
+          : `event id not persisted AND rollback failed -- an unaddressable reminder may be live on this rep's calendar: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 
@@ -433,7 +454,7 @@ export async function logCallOutcome(input: {
     record,
     stageChangedTo: (patch.stage as "connected" | "lost" | undefined) ?? null,
     nextActionAt,
-    calendarSync,
+    calendarSync: syncStatus,
   };
 }
 
