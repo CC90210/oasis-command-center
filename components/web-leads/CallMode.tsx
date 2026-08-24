@@ -43,7 +43,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ExternalLink, Loader2, Phone, X } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import type { CallOutcome } from "@/lib/web-leads/outcome";
-import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { useAudit, biggestGaps, SCORE_STATE_WORDS } from "./useAudit";
 
@@ -320,7 +320,7 @@ export function CallMode({
     // above would test the wrong queue state.
   }, [log, next, prev, onExit, pending, lead]);
 
-  const websiteHref = useMemo(() => safeExternalUrl(lead?.websiteUrl ?? null), [lead?.websiteUrl]);
+  const websiteHref = useMemo(() => preferredSiteUrl(lead?.websiteUrl ?? null), [lead?.websiteUrl]);
   const progress = leads.length ? Math.min(100, ((i + (atEnd ? 0 : 1)) / leads.length) * 100) : 0;
 
   return (

@@ -61,6 +61,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, MODEL_VERSION, assertCompleteRead } from "./tenant";
+import { memo, TTL } from "./cache";
 
 /** The four honest states, identical to audit.ts's AuditResult discriminant. */
 export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
@@ -86,6 +87,13 @@ export const EMPTY_SCORE_INDEX: ScoreIndex = { scored: new Map(), unreachable: n
  * list route surfaces it, rather than serving a plausible wrong queue.
  */
 export async function fetchScoreIndex(): Promise<ScoreIndex> {
+  // Memoised: three whole-table reads (~50,000 rows) that change only when a
+  // scoring RUN writes -- a batch job measured in hours, not a per-request
+  // event. See lib/web-leads/cache.ts for why this is safe here.
+  return memo("web-leads:scores", TTL.SCORES, loadScoreIndex);
+}
+
+async function loadScoreIndex(): Promise<ScoreIndex> {
   const db = getServiceSupabase();
 
   const [allAudits, scoredAudits, unreachable] = await Promise.all([

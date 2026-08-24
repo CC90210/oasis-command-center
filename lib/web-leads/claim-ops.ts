@@ -45,6 +45,7 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { invalidate } from "./cache";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import {
   availability, factsFrom, isInBookOf, planClaim, claimPatch, releasePatch,
@@ -170,6 +171,12 @@ export async function claimLeads(
     });
   }
 
+  // Ownership just changed, so the memoised lead list is stale on this
+  // instance. Dropped BEFORE the cap re-check below, which reads held counts
+  // back -- against a pre-write snapshot it would return the old number and
+  // either miss real overflow or invent some. See lib/web-leads/cache.ts.
+  if (claimed.length > 0 || lostRace.length > 0) invalidate("web-leads:leads");
+
   /**
    * THE CAP, RE-CHECKED AFTER THE FACT.
    *
@@ -293,6 +300,7 @@ export async function releaseLeads(
     });
   }
 
+  if (released.length > 0) invalidate("web-leads:leads");
   return { released, refused };
 }
 
