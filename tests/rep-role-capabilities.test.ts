@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   isSelfScopedRole,
+  mustSeeOwnRecordsOnly,
   mayQuoteAndClose,
   SELF_SCOPED_ROLES,
   DEAL_CLOSING_ROLES,
@@ -66,8 +67,28 @@ for (const role of ["agent", "opener", "closer", "builder", "owner"]) {
 for (const role of ["owner", "admin", "member", "read_only", "loan_officer", "processor", "marketing", ""]) {
   assert.equal(isSelfScopedRole(role), false, `${role || "(empty)"} must not be treated as a self-scoped contractor`);
 }
+// `isSelfScopedRole` answers set membership, so junk is correctly NOT a member.
+// Note what that does and does not mean -- see the block below it.
 for (const junk of [null, undefined, 42, {}, []]) {
-  assert.equal(isSelfScopedRole(junk), false, `${JSON.stringify(junk)} must fail closed, not be treated as a role`);
+  assert.equal(isSelfScopedRole(junk), false, `${JSON.stringify(junk)} is not a member of the self-scoped set`);
+}
+
+// CORRECTED 2026-08-24 after independent review. This block previously asserted
+// the line above with the message "must fail closed". That reading was backwards
+// and it mattered: `false` from a membership test flows into
+// `mustScopeRegardlessOfFlag`, which returns false, which leaves the route's
+// `leadScopingEnabled() || mustScope(...)` false because the flag defaults OFF --
+// so an unrecognised role was served the ENTIRE tenant. `false` was the
+// permissive answer being labelled as the safe one.
+//
+// The fail-closed question has its own predicate now. Deny-by-default has to be
+// an allowlist of who may see everything, never a denylist of who may not.
+for (const junk of [null, undefined, 42, {}, [], "", "  ", "some_future_role"]) {
+  assert.equal(
+    mustSeeOwnRecordsOnly(junk),
+    true,
+    `${JSON.stringify(junk)} must be CONFINED to its own records, not handed the tenant`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +193,17 @@ for (const door of [
   "app/api/manifest/[slug]/records/[entity]/route.ts",
 ]) {
   const src = stripComments(read(door));
-  assert.match(src, /isSelfScopedRole\(/, `${door} must use the shared self-scoped role predicate`);
+  // Updated 2026-08-24: both doors moved from `isSelfScopedRole` (a set
+  // membership test, fail-OPEN on an unrecognised role) to
+  // `mustSeeOwnRecordsOnly` (an allowlist of who may see the tenant, so
+  // anything unknown is confined). Either name satisfies "uses the shared
+  // predicate"; the fail-closed behaviour itself is asserted directly below and
+  // in tests/agent-api-scope.test.ts, not inferred from which name appears.
+  assert.match(
+    src,
+    /(mustSeeOwnRecordsOnly|isSelfScopedRole)\(/,
+    `${door} must use a shared role predicate from lib/team-roles, not a local list`,
+  );
   assert.doesNotMatch(
     src,
     /teamRole === "agent"/,

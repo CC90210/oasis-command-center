@@ -16,7 +16,7 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { isSelfScopedRole } from "@/lib/team-roles";
+import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
@@ -97,7 +97,7 @@ function mustScopeRegardlessOfFlag(teamRole: string, isAdmin: boolean): boolean 
   // `builder` are the roles that REPLACED `agent`, carry the same self-scoped
   // persona, and were reading the whole tenant through this door. The set is
   // shared with lib/web-leads/data.ts so the two cannot drift.
-  return !isAdmin && isSelfScopedRole(teamRole);
+  return !isAdmin && mustSeeOwnRecordsOnly(teamRole);
 }
 
 function handleRecordsError(err: unknown): NextResponse {

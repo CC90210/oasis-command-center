@@ -142,10 +142,56 @@ export const SELF_SCOPED_ROLES: ReadonlySet<string> = new Set([
   "builder",
 ]);
 
-/** True when this role may only ever see its own records. Admins are exempt and
- *  the caller checks that separately, so this stays a pure role question. */
+/** True when this role is a KNOWN self-scoped role. This answers set membership
+ *  and nothing more — for the security question, use `mustSeeOwnRecordsOnly`. */
 export function isSelfScopedRole(role: unknown): boolean {
   return typeof role === "string" && SELF_SCOPED_ROLES.has(role.trim().toLowerCase());
+}
+
+/**
+ * Roles explicitly TRUSTED with the whole tenant's records.
+ *
+ * Added 2026-08-24 after an independent review caught that the scoping gate was
+ * fail-OPEN on an unrecognised role.
+ *
+ * `mustScopeRegardlessOfFlag` returns `!isAdmin && <role predicate>`, and the
+ * route scopes when `leadScopingEnabled() || mustScopeRegardlessOfFlag(...)`.
+ * `LEAD_SCOPING_ENABLED` defaults OFF. So a role the predicate does not
+ * recognise produced `false`, the OR collapsed to false, and the request was
+ * served UNSCOPED — the whole tenant, which is the exact leak this gate exists
+ * to stop. Deny-by-default has to be expressed as an allowlist of who may see
+ * everything, never as a denylist of who may not.
+ *
+ * Verified before changing it: the live `user_profiles` table holds only
+ * member(45), owner(4), admin(3), manager(1) and builder(1) — every one of them
+ * a known value, so this flips the answer for ZERO current users. It is a guard
+ * against the NEXT role someone adds, not a change to anyone's access today.
+ */
+export const TENANT_WIDE_ROLES: ReadonlySet<string> = new Set([
+  "owner",
+  "admin",
+  "manager",
+  "marketing",
+  "read_only",
+  "member",        // legacy, and the column DEFAULT — 45 live rows
+  "loan_officer",  // SunBiz's own portal roles; a different product
+  "processor",
+]);
+
+/**
+ * The security question: must this person be confined to their own records?
+ *
+ * Fail-closed complement of `isSelfScopedRole`. Anything not explicitly on the
+ * tenant-wide allowlist is confined, including an unrecognised or malformed
+ * value. Admins are exempt and every caller checks that separately, so this
+ * stays a pure role question.
+ *
+ * Use THIS at every door onto tenant_records. `isSelfScopedRole` answers a
+ * narrower question and is fail-open by construction.
+ */
+export function mustSeeOwnRecordsOnly(role: unknown): boolean {
+  if (typeof role !== "string") return true;
+  return !TENANT_WIDE_ROLES.has(role.trim().toLowerCase());
 }
 
 /**

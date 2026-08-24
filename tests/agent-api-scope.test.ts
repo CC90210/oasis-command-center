@@ -36,8 +36,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolveAssignedScope } from "../lib/lead-scope";
-import { isSelfScopedRole } from "../lib/team-roles";
-import { OASIS_SALES_ROLE_OPTIONS } from "../lib/team-roles";
+import { isSelfScopedRole, mustSeeOwnRecordsOnly } from "../lib/team-roles";
+import { OASIS_SALES_ROLE_OPTIONS, TENANT_WIDE_ROLES, SELF_SCOPED_ROLES } from "../lib/team-roles";
 
 const ROUTE = "app/api/manifest/[slug]/records/[entity]/route.ts";
 const src = readFileSync(ROUTE, "utf8");
@@ -49,61 +49,100 @@ assert.match(
   /function mustScopeRegardlessOfFlag\(\s*teamRole: string,\s*isAdmin: boolean\s*\)/,
   "mustScopeRegardlessOfFlag must exist with (teamRole, isAdmin)",
 );
-// It must delegate the role question to the SHARED set, not re-decide it here.
-// Two doors onto tenant_records deciding "is this person scoped" independently
-// is how the first leak happened; the shared predicate is what stops them
-// drifting apart again.
+// It must delegate the role question to the SHARED predicate, not re-decide it
+// here. Two doors onto tenant_records answering "is this person scoped"
+// independently is how the first leak happened.
 assert.match(
   src,
-  /return !isAdmin && isSelfScopedRole\(teamRole\);/,
-  "the gate must delegate to the shared isSelfScopedRole predicate",
+  /return !isAdmin && mustSeeOwnRecordsOnly\(teamRole\);/,
+  "the gate must delegate to the shared fail-closed predicate",
 );
 assert.match(
   src,
-  /import \{ isSelfScopedRole \} from "@\/lib\/team-roles";/,
+  /import \{ mustSeeOwnRecordsOnly \} from "@\/lib\/team-roles";/,
   "the route must import the shared predicate rather than copy the list",
 );
 
-// ── The behavioural half: WHO is scoped. ────────────────────────────────────
-// `agent` is legacy but still live on real rows, so dropping it would unscope
-// every rep working today.
+// ── The behavioural half: WHO is confined. ──────────────────────────────────
+// `agent` is legacy but is the role every current rep carries, so dropping it
+// would unscope everyone working today.
 for (const role of ["agent", "opener", "closer", "builder"]) {
   assert.equal(
-    isSelfScopedRole(role),
+    mustSeeOwnRecordsOnly(role),
     true,
-    `${role} must be scoped to its own book — an unscoped one reads all ~31K leads`,
+    `${role} must be confined to its own book — an unconfined one reads all ~31K leads`,
   );
 }
-// Roles that legitimately see the tenant must NOT be swept in. Widening this to
-// every non-admin would empty SunBiz's boards, which is what the staging flag
-// was protecting against in the first place.
-for (const role of ["owner", "admin", "manager", "read_only", "loan_officer", "processor"]) {
+// Roles that legitimately see the tenant must NOT be swept in. Confining every
+// non-admin would empty SunBiz's established boards, which is exactly what the
+// staging flag was protecting against.
+for (const role of ["owner", "admin", "manager", "read_only", "member", "loan_officer", "processor"]) {
   assert.equal(
-    isSelfScopedRole(role),
+    mustSeeOwnRecordsOnly(role),
     false,
-    `${role} must not be force-scoped — that empties established SunBiz boards`,
+    `${role} must not be force-confined — that empties established SunBiz boards`,
   );
 }
-// Fails closed on junk: an unrecognised value is not a free pass.
-assert.equal(isSelfScopedRole(undefined), false, "undefined is not a role");
-assert.equal(isSelfScopedRole(""), false, "empty string is not a role");
-assert.equal(isSelfScopedRole("AGENT"), true, "role matching must be case-insensitive");
+
+// ── Fail-closed on anything unrecognised. ───────────────────────────────────
+// Caught by independent review 2026-08-24: the predicate this replaced was a
+// SET-MEMBERSHIP test, so an unknown role answered "not self-scoped" = false.
+// mustScopeRegardlessOfFlag then returned false, the route's
+// `leadScopingEnabled() || mustScope...` collapsed to false because the flag
+// defaults OFF, and the request was served the ENTIRE tenant. `false` there was
+// the permissive answer, not the safe one. Deny-by-default must be an allowlist
+// of who may see everything.
+assert.equal(mustSeeOwnRecordsOnly("some_new_role"), true, "an unknown role must be confined");
+assert.equal(mustSeeOwnRecordsOnly(undefined), true, "a missing role must be confined");
+assert.equal(mustSeeOwnRecordsOnly(null), true, "a null role must be confined");
+assert.equal(mustSeeOwnRecordsOnly(""), true, "an empty role must be confined");
+assert.equal(mustSeeOwnRecordsOnly(42), true, "a non-string role must be confined");
+assert.equal(mustSeeOwnRecordsOnly("  AGENT  "), true, "matching must trim and lowercase");
+assert.equal(mustSeeOwnRecordsOnly("ADMIN"), false, "matching must trim and lowercase both ways");
+
+// The narrower membership helper is still correct for its own question, and is
+// still used where "is this a known sales seat" is what is being asked.
+assert.equal(isSelfScopedRole("opener"), true);
+assert.equal(isSelfScopedRole("some_new_role"), false);
 
 // ── The drift guard, and the reason this file is worth keeping. ─────────────
 // The 2026-08-21 change added job titles to the invite menu and did not carry
-// them into the scoping gate. Nothing failed; a new title simply meant a rep
-// who could read everything. This asserts the two lists cannot separate again:
-// every OASIS sales title the invite menu OFFERS must be a decided question
-// here, either self-scoped or explicitly trusted with the tenant.
-const TENANT_WIDE_BY_DESIGN = new Set(["manager", "marketing"]);
+// them into the scoping gate. Nothing failed; a new title simply meant a rep who
+// could read everything. That is now impossible in two directions.
+//
+// 1. Every role the invite menu OFFERS must be a deliberate decision. Being
+//    confined is the default, so a forgotten role is merely over-scoped rather
+//    than leaking — but silently over-scoping empties someone's board, so it
+//    still has to be a decision somebody made on purpose.
 for (const { value } of OASIS_SALES_ROLE_OPTIONS) {
-  const decided = isSelfScopedRole(value) || TENANT_WIDE_BY_DESIGN.has(value);
+  const confined = SELF_SCOPED_ROLES.has(value);
+  const tenantWide = TENANT_WIDE_ROLES.has(value);
   assert.equal(
-    decided,
+    confined !== tenantWide,
     true,
-    `invite menu offers "${value}" but no scoping decision exists for it — ` +
-      `add it to SELF_SCOPED_ROLES, or to TENANT_WIDE_BY_DESIGN here if it is ` +
-      `genuinely meant to read the whole tenant`,
+    `invite menu offers "${value}" but it is in ${confined && tenantWide ? "BOTH" : "NEITHER"} ` +
+      `SELF_SCOPED_ROLES nor/and TENANT_WIDE_ROLES — classify it in exactly one`,
+  );
+}
+// 2. The two sets must never overlap. An overlap is not a compile error and
+//    would make the answer depend on which predicate a given door happened to
+//    call, which is the drift this whole module exists to prevent.
+for (const role of SELF_SCOPED_ROLES) {
+  assert.equal(
+    TENANT_WIDE_ROLES.has(role),
+    false,
+    `"${role}" is in BOTH role sets — the two doors would disagree about it`,
+  );
+}
+// 3. Consistency between the two predicates on every KNOWN role: anything on
+//    the self-scoped list must also be confined by the fail-closed predicate.
+//    They answer different questions and may differ on UNKNOWN input by design,
+//    but they must never contradict each other on a role we recognise.
+for (const role of SELF_SCOPED_ROLES) {
+  assert.equal(
+    mustSeeOwnRecordsOnly(role),
+    true,
+    `"${role}" is self-scoped but the fail-closed predicate would let it read the tenant`,
   );
 }
 
