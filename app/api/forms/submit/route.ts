@@ -1567,6 +1567,12 @@ async function initAnonymousLead(input: {
     // original agent or reset pipeline progress. Adopt a rep only if the
     // existing lead was never assigned.
     const merged: Record<string, unknown> = { ...existing.data, ...contactFields };
+    // A returning prospect who supplies their website on this submission earns
+    // the same classification a new one would. Without this the funnel's own
+    // repeat leads stayed off the website-sales board — stampSalesProgram is a
+    // no-op when the lead already carries a program, so an established
+    // classification is never overwritten.
+    if (!funding) Object.assign(merged, stampSalesProgram(merged));
     if (existing.data.stage) merged.stage = existing.data.stage;
     if (existing.data.assigned_to) {
       merged.assigned_to = existing.data.assigned_to;

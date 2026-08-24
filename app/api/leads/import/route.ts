@@ -10,7 +10,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { routeSunBizImportStage } from "@/lib/sunbiz-stage-routing";
-import { stampSalesProgram, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
+import { stampSalesProgramForTenant, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -127,6 +128,10 @@ export async function POST(req: NextRequest) {
     .maybeSingle();
   const tenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
   if (!tenantId) return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 401 });
+  // Which pipeline is this import FOR? A website column is ordinary detail on
+  // a funding application, so the program stamp below is gated on the tenant
+  // running that program — not on the row happening to carry a URL.
+  const importTenantSlug = await resolveOwnedSlug(tenantId);
 
   let body: { rows?: IncomingRow[]; dedup_by?: string[]; default_source?: string };
   try {
@@ -310,7 +315,8 @@ export async function POST(req: NextRequest) {
       ...(auditFindings ? { audit_findings: auditFindings } : {}),
       ...(icpTrack ? { icp_track: icpTrack } : {}),
     };
-    const programStamp = rowEntityType === "lead" ? stampSalesProgram(websiteFields) : {};
+    const programStamp =
+      rowEntityType === "lead" ? stampSalesProgramForTenant(websiteFields, importTenantSlug) : {};
     const isWebsiteSalesRow = Boolean(programStamp.sales_program);
     const rowStage = isWebsiteSalesRow ? stageForWebsiteSalesLead(originalStage) : stage;
 

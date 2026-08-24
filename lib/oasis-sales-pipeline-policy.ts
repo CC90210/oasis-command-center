@@ -96,8 +96,24 @@ type OasisViewer = { role: string; userId: string | null; isOwner?: boolean; adm
  */
 export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return true;
-  if (!viewer.userId) return false;
-  const me = viewer.userId.trim().toLowerCase();
+  return ownsOasisSalesRecord(row, viewer.userId);
+}
+
+/**
+ * Is this record literally THIS person's — assigned to them, or shared with
+ * them as a collaborator? No role shortcut, by design.
+ *
+ * Split out of canOpenOasisSalesRecord because the two questions are not the
+ * same question, and answering a WRITE with the READ predicate quietly grants
+ * more than intended: canOpenOasisSalesRecord treats `member` as an admin (it
+ * is the wide "who may look at the board" role), and `member` is the team_role
+ * COLUMN DEFAULT — so gating an edit on it would have let any default-role
+ * account edit every lead in the tenant, not just their own. Ownership is the
+ * write question; keep them separate.
+ */
+export function ownsOasisSalesRecord(row: PipelineRow, userId: string | null): boolean {
+  if (!userId) return false;
+  const me = userId.trim().toLowerCase();
   const assignedTo =
     typeof row.data.assigned_to === "string" ? row.data.assigned_to.trim().toLowerCase() : "";
   // An unassigned lead belongs to nobody, so it is not "yours" by default —
@@ -156,6 +172,35 @@ export const REP_EDITABLE_LEAD_FIELDS = new Set<string>([
  */
 export function rejectedRepPatchKeys(patch: Record<string, unknown>): string[] {
   return Object.keys(patch).filter((key) => !REP_EDITABLE_LEAD_FIELDS.has(key));
+}
+
+/**
+ * Roles that may edit a lead of their OWN, given ownership is already proven.
+ *
+ * Ownership alone is not authority: a `read_only` account can legitimately be
+ * named in `assigned_to` or `collaborators` (that is how a read-only observer
+ * is attached to a deal), and gating the edit on ownership alone would have
+ * handed them write access they were explicitly denied before — the role name
+ * says exactly what it is. So the check is ownership AND a role floor.
+ *
+ * Allowlist, and `owner`/`admin` are absent because they never reach this
+ * branch — they are already admins upstream. Marketing is absent too: it is
+ * declared "never the sales pipeline" in lib/team-roles.ts.
+ */
+export const SELF_EDIT_LEAD_ROLES = new Set<string>([
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "agent",
+  "member",
+  "loan_officer",
+  "processor",
+]);
+
+/** May this role edit a lead it owns? Fails closed on an unknown role. */
+export function roleMaySelfEditLead(teamRole: string | null | undefined): boolean {
+  return !!teamRole && SELF_EDIT_LEAD_ROLES.has(teamRole);
 }
 
 /**

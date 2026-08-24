@@ -19,14 +19,22 @@ import {
   OASIS_WEBSITE_SALES_PROGRAM,
   SUNBIZ_INTAKE_STAGE,
   isWebsiteSalesLead,
+  isWebsiteSalesTenantSlug,
   normalizeStageForTenant,
   pickWebsiteSalesFields,
   stageForWebsiteSalesLead,
   stampSalesProgram,
+  stampSalesProgramForTenant,
 } from "../lib/leads/canonical-lead-fields";
 import { OASIS_LEAD_STAGE_KEYS } from "../lib/oasis-stage-meta";
 import { LEAD_PIPELINE_STAGES } from "../lib/sunbiz-stage-meta";
-import { REP_EDITABLE_LEAD_FIELDS, rejectedRepPatchKeys } from "../lib/oasis-sales-pipeline-policy";
+import {
+  REP_EDITABLE_LEAD_FIELDS,
+  canOpenOasisSalesRecord,
+  ownsOasisSalesRecord,
+  rejectedRepPatchKeys,
+  roleMaySelfEditLead,
+} from "../lib/oasis-sales-pipeline-policy";
 
 /* ─── the stamp ───────────────────────────────────────────────────────────── */
 
@@ -156,5 +164,92 @@ assert.deepEqual(rejectedRepPatchKeys({ phone: "1", stage: "won", assigned_to: "
 assert.deepEqual(rejectedRepPatchKeys({ some_future_field: 1 }), ["some_future_field"]);
 assert.equal(REP_EDITABLE_LEAD_FIELDS.has("stage"), false);
 assert.equal(REP_EDITABLE_LEAD_FIELDS.has("website"), true);
+
+/* ─── ownership is the WRITE question, visibility is not ──────────────────────
+ *
+ * Caught during self-review, before ship. The rep-edit gate first used
+ * canOpenOasisSalesRecord — the predicate that decides whether a lead may be
+ * OPENED. That one treats `member` as an admin, and `member` is the team_role
+ * COLUMN DEFAULT, so gating an edit on it silently handed every default-role
+ * account write access to every lead in the tenant. A read predicate answering
+ * a write question is the whole bug class; these assertions pin the split.
+ */
+
+const someoneElsesLead = { id: "L1", data: { assigned_to: "REP-1", stage: "assigned" } };
+
+// A `member` may LOOK at any lead on the board...
+assert.equal(
+  canOpenOasisSalesRecord(someoneElsesLead, { role: "member", userId: "rep-2" }),
+  true,
+  "member keeps board-wide visibility — that is deliberate",
+);
+// ...and may NOT write to one that isn't theirs.
+assert.equal(
+  ownsOasisSalesRecord(someoneElsesLead, "rep-2"),
+  false,
+  "REGRESSION: a role shortcut has crept back into the write gate",
+);
+
+// The assigned rep owns it (case-insensitively — assignments are stored lowercased).
+assert.equal(ownsOasisSalesRecord(someoneElsesLead, "rep-1"), true);
+assert.equal(ownsOasisSalesRecord(someoneElsesLead, "REP-1"), true);
+
+// A collaborator owns it too: an opener who handed off is still paid on it.
+assert.equal(
+  ownsOasisSalesRecord({ id: "L2", data: { assigned_to: "rep-1", collaborators: ["rep-9"] } }, "rep-9"),
+  true,
+);
+
+// Fail closed: no identity, and an unassigned lead, belong to nobody.
+assert.equal(ownsOasisSalesRecord(someoneElsesLead, null), false);
+assert.equal(ownsOasisSalesRecord({ id: "L3", data: {} }, "rep-1"), false);
+assert.equal(ownsOasisSalesRecord({ id: "L4", data: { assigned_to: "" } }, ""), false);
+
+/* ─── the tenant guard on classification (Codex audit, finding 3) ────────────
+ *
+ * The shared import routes serve BOTH pipelines. Inferring the program from a
+ * `website` column alone would take a SunBiz MCA lead imported at uw_sheet,
+ * restamp it as website-sales and move it to `researched` — walking it out of
+ * the Live Subs workflow it was filed into. A business website is ordinary
+ * information on a funding application, so the tenant decides, not the column.
+ */
+
+assert.equal(isWebsiteSalesTenantSlug("oasis-webdev"), true);
+assert.equal(isWebsiteSalesTenantSlug("oasis-ai-cc"), true);
+assert.equal(isWebsiteSalesTenantSlug("OASIS"), true, "case-insensitive");
+assert.equal(isWebsiteSalesTenantSlug("sun"), false);
+assert.equal(isWebsiteSalesTenantSlug("suga"), false);
+assert.equal(isWebsiteSalesTenantSlug("submissions"), false);
+assert.equal(isWebsiteSalesTenantSlug(null), false, "fails closed");
+assert.equal(isWebsiteSalesTenantSlug(""), false);
+
+const merchantWithSite = { website: "merchant.com", business_name: "Reyes Motors" };
+assert.deepEqual(
+  stampSalesProgramForTenant(merchantWithSite, "sun"),
+  {},
+  "REGRESSION: a SunBiz merchant's website would drag it onto the OASIS board",
+);
+assert.deepEqual(stampSalesProgramForTenant(merchantWithSite, "oasis-webdev"), {
+  sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+});
+// Unknown / client tenants are not the website-sales program either.
+assert.deepEqual(stampSalesProgramForTenant(merchantWithSite, "some-client"), {});
+
+/* ─── the role floor on self-editing (Codex audit, finding 2) ────────────────
+ *
+ * Ownership is not authority. A read_only account can legitimately be named on
+ * a deal as an observer, and gating the edit on ownership alone handed it the
+ * write access its own role name denies.
+ */
+
+assert.equal(roleMaySelfEditLead("read_only"), false, "REGRESSION: read_only regained write access");
+assert.equal(roleMaySelfEditLead("marketing"), false, "marketing is never the sales pipeline");
+assert.equal(roleMaySelfEditLead(null), false, "fails closed");
+assert.equal(roleMaySelfEditLead(""), false);
+assert.equal(roleMaySelfEditLead("not_a_real_role"), false, "fails closed on an unknown role");
+
+for (const role of ["closer", "opener", "manager", "builder", "agent", "member"]) {
+  assert.equal(roleMaySelfEditLead(role), true, `${role} should be able to edit its own lead`);
+}
 
 console.log("lead-transfer-canonical: OK");

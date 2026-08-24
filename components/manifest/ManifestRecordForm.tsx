@@ -160,6 +160,12 @@ export function ManifestRecordForm({
       const empty = raw === undefined || raw === "" || raw === null;
       if (empty) {
         if (f.required) errs[f.name] = "Required";
+        // Emptying an optional field is an edit, not a non-answer. Skipping it
+        // outright meant a wrong phone number or a stale audit note could be
+        // replaced but never simply deleted — the old value silently survived
+        // the save. Only on edit: on create there is nothing to clear, and
+        // writing empty strings into a new record just adds noise.
+        else if (isEdit && f.name in (initial || {})) out[f.name] = "";
         continue;
       }
       if (f.type === "number") {

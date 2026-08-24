@@ -22,7 +22,7 @@ import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
 import {
   pickWebsiteSalesFields,
-  stampSalesProgram,
+  stampSalesProgramForTenant,
   stageForWebsiteSalesLead,
 } from "@/lib/leads/canonical-lead-fields";
 
@@ -144,8 +144,9 @@ export async function POST(
     cold_list_id: lead.list_id,
     // A promoted lead carrying website research belongs to the website-sales
     // board, which filters on this stamp. Without it the row exists and no
-    // screen shows it.
-    ...stampSalesProgram(carried),
+    // screen shows it. Gated on the tenant: a website in a SunBiz cold list is
+    // ordinary merchant detail, not a program signal.
+    ...stampSalesProgramForTenant(carried, slug),
   };
 
   // Stage vocabularies don't overlap: "imported" is SunBiz intake and has no

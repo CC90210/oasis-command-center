@@ -15,7 +15,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { canWriteCrm } from "@/lib/role-gates";
-import { canOpenOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import { ownsOasisSalesRecord, roleMaySelfEditLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export type PerLeadAccess =
   | { ok: true }
@@ -31,7 +31,18 @@ export async function assertMayWorkLead(args: {
 }): Promise<PerLeadAccess> {
   if (canWriteCrm(args.teamRole)) return { ok: true };
 
-  // Not a blanket CRM writer — but this may still be their own lead.
+  // Not a blanket CRM writer — but this may still be their own lead, provided
+  // the role is one that does sales work at all. Without this floor a
+  // `read_only` account named on a deal could run write-back AI tools, which
+  // is a capability it had before this branch existed.
+  if (!roleMaySelfEditLead(args.teamRole)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "forbidden_role",
+      message: "Your role can't run this.",
+    };
+  }
   const db = getServiceSupabase();
   const res = await db
     .from("tenant_records")
@@ -48,12 +59,11 @@ export async function assertMayWorkLead(args: {
     return { ok: false, status: 404, error: "not_found", message: "Lead not found." };
   }
 
-  const mine = canOpenOasisSalesRecord(row, {
-    role: args.teamRole,
-    userId: args.userId,
-    isOwner: args.isOwner ?? false,
-    adminAccess: args.adminAccess ?? false,
-  });
+  // Ownership, not board visibility. canOpenOasisSalesRecord would also say
+  // yes for the wide `member` role (the team_role column default), which is
+  // the right answer for "may they look at it" and the wrong one for "may
+  // they write to it".
+  const mine = ownsOasisSalesRecord(row, args.userId);
 
   return mine
     ? { ok: true }

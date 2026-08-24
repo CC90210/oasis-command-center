@@ -16,7 +16,7 @@
  */
 
 import { type EntityDefinition } from "./entities";
-import { stampSalesProgram, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
+import { stampSalesProgramForTenant, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const MAX_ROWS = 5_000;
@@ -358,8 +358,15 @@ export async function importRowsForTenant(input: {
   dedupBy?: string[];
   defaultSource?: string;
   dryRun?: boolean;
+  /**
+   * The importing tenant's slug. Decides whether website columns mean
+   * "website-sales lead" or are just ordinary detail on a funding
+   * application. Omitted → never classified, which is the safe default for
+   * every caller that hasn't been taught to pass it.
+   */
+  tenantSlug?: string | null;
 }): Promise<ImportResult | ImportFailure> {
-  const { db, tenantId, entity, rows, dryRun = false } = input;
+  const { db, tenantId, entity, rows, dryRun = false, tenantSlug = null } = input;
   if (!Array.isArray(rows) || rows.length === 0) {
     return { ok: false, error: "no_rows" };
   }
@@ -443,7 +450,7 @@ export async function importRowsForTenant(input: {
     // so a stage lifted verbatim from a spreadsheet ("Hot Lead") would strand
     // the row in a column that doesn't exist.
     if (entity.entity_type === "lead") {
-      Object.assign(data, stampSalesProgram(data));
+      Object.assign(data, stampSalesProgramForTenant(data, tenantSlug));
       if (data.sales_program) {
         data.stage = stageForWebsiteSalesLead(typeof data.stage === "string" ? data.stage : null);
       }

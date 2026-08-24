@@ -29,7 +29,11 @@ import {
   getRecord,
 } from "@/lib/manifest/data";
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
-import { canOpenOasisSalesRecord, rejectedRepPatchKeys } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  ownsOasisSalesRecord,
+  rejectedRepPatchKeys,
+  roleMaySelfEditLead,
+} from "@/lib/oasis-sales-pipeline-policy";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
@@ -241,15 +245,20 @@ export async function PATCH(
         { status: 403 },
       );
     }
+    // Ownership AND a role floor. Ownership alone would let a `read_only`
+    // account write to any deal it is merely attached to, which is the one
+    // thing that role name promises it cannot do.
+    if (!roleMaySelfEditLead(r.team_role)) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden", message: "Your role can't edit lead fields." },
+        { status: 403 },
+      );
+    }
     const existing = await getRecord({ tenant_id: r.tenant_id, entity: "lead", id }).catch(() => null);
-    const mine =
-      existing &&
-      canOpenOasisSalesRecord(existing, {
-        role: r.team_role,
-        userId: user.id,
-        isOwner: false,
-        adminAccess: false,
-      });
+    // Ownership, not board visibility: ownsOasisSalesRecord has no role
+    // shortcut, so the wide `member` default role cannot edit leads that
+    // merely happen to be visible to it.
+    const mine = existing && ownsOasisSalesRecord(existing, user.id);
     if (!mine) {
       return NextResponse.json(
         { ok: false, error: "forbidden", message: "You can only edit leads assigned to you." },

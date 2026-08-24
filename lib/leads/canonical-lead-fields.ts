@@ -64,6 +64,39 @@ export function stampSalesProgram(data: Record<string, unknown>): Record<string,
 }
 
 /**
+ * Tenants whose leads belong to the website-sales program.
+ *
+ * WHY A TENANT CHECK GUARDS THE STAMP. Field presence alone is not enough on
+ * the routes SunBiz and OASIS share. "This merchant has a website" is ordinary,
+ * unremarkable information on a funding application — so inferring the program
+ * from a `website` column would take a SunBiz MCA lead imported at `uw_sheet`,
+ * reclassify it as website-sales, and move it to `researched`, walking it out
+ * of the Live Subs workflow it was filed into. The website columns are only a
+ * program signal on a tenant that RUNS that program.
+ *
+ * Matches the OASIS portal's tenantSlugs (lib/portals/registry.ts) plus
+ * oasis-webdev, the scraped-prospect workspace where the reps work.
+ */
+const WEBSITE_SALES_TENANT_SLUGS = new Set(["oasis", "oasis-ai-cc", "oasis-webdev"]);
+
+/** Does this tenant run the website-sales program? Fails closed on null. */
+export function isWebsiteSalesTenantSlug(slug: string | null | undefined): boolean {
+  return !!slug && WEBSITE_SALES_TENANT_SLUGS.has(slug.trim().toLowerCase());
+}
+
+/**
+ * The program stamp for a lead on a KNOWN tenant — the form every shared
+ * import path should use. Returns {} on any tenant that doesn't run the
+ * program, whatever the row happens to contain.
+ */
+export function stampSalesProgramForTenant(
+  data: Record<string, unknown>,
+  tenantSlug: string | null | undefined,
+): Record<string, string> {
+  return isWebsiteSalesTenantSlug(tenantSlug) ? stampSalesProgram(data) : {};
+}
+
+/**
  * Pull the website/context fields out of an arbitrary source object
  * (a parsed CSV row, an extraction result, a cold_leads.raw blob), keeping
  * only non-empty strings. Returns {} when the source has none.
