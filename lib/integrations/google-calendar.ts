@@ -293,17 +293,45 @@ export async function upsertCalendarEvent(
     if (created.ok && created.body.id) {
       return { ok: true, eventId: created.body.id, htmlLink: created.body.htmlLink || null };
     }
-    // 409 means this lead already has its event: update it in place. Any other
-    // status is a real failure and must not be retried as an update, or a
-    // genuine auth/quota error would be reported as a mysterious 404.
+    // Any status other than 409 is a real failure and must not be retried as an
+    // update, or a genuine auth or quota error would be reported as a
+    // mysterious 404.
     if (created.status !== 409) {
       return { ok: false, reason: "api_error", detail: created.body.error?.message || `HTTP ${created.status}` };
     }
-    const updated = await send(single, "PUT", { ...body, id: eventId });
-    if (!updated.ok || !updated.body.id) {
-      return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
+
+    // 409 means the id is taken -- but by WHAT is the question that matters,
+    // and getting it wrong is how the two fixes above created a third bug
+    // between them (Codex review, second pass, 2026-08-24).
+    //
+    // Clearing a next action DELETES the event, and Google keeps a deleted
+    // event as a CANCELLED TOMBSTONE for a while. So the ordinary lifecycle
+    // "callback -> logged with no follow-up -> callback again" hits: insert
+    // 409s against the tombstone, and a plain update of a cancelled event
+    // answers 410. That lead could then never receive another reminder, and
+    // rescheduling is not an edge case -- it is most of what a rep does.
+    //
+    // `status: "confirmed"` on the update is what RESTORES a tombstone rather
+    // than merely editing a live event, so this one call covers both meanings
+    // of 409.
+    const updated = await send(single, "PUT", { ...body, id: eventId, status: "confirmed" });
+    if (updated.ok && updated.body.id) {
+      return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
     }
-    return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
+
+    // The tombstone was fully purged, so the id is unusable. Fall back to an
+    // insert with NO custom id: the rep gets their reminder, which is the
+    // point, and there is nothing to duplicate because a purged event does not
+    // exist. Per-lead de-duplication is lost for this one event only, and a
+    // missing reminder is a worse failure than a theoretical duplicate.
+    if (updated.status === 404 || updated.status === 410) {
+      const recreated = await send(collection, "POST", body);
+      if (recreated.ok && recreated.body.id) {
+        return { ok: true, eventId: recreated.body.id, htmlLink: recreated.body.htmlLink || null };
+      }
+      return { ok: false, reason: "api_error", detail: recreated.body.error?.message || `HTTP ${recreated.status}` };
+    }
+    return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
   } catch (err) {
     return { ok: false, reason: "network_error", detail: err instanceof Error ? err.message : String(err) };
   }

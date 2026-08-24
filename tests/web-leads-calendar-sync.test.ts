@@ -244,4 +244,44 @@ assert.match(
   "a non-409 insert failure must return immediately rather than retrying as an update",
 );
 
+// ---------------------------------------------------------------------------
+// 8. RESCHEDULING AFTER A CLEARED REMINDER.
+//
+// REGRESSION (Codex review, second pass, 2026-08-24), and it was created BY
+// the two fixes above interacting -- which is the useful part of the lesson.
+//
+// Clearing a next action deletes the event, and Google keeps a deleted event
+// as a CANCELLED TOMBSTONE. So the ordinary lifecycle
+//
+//     callback -> logged with no follow-up -> callback again
+//
+// hit: insert 409s against the tombstone, and a plain update of a cancelled
+// event answers 410. That lead could then NEVER receive another reminder.
+// Rescheduling is not an edge case; it is most of what a rep does.
+//
+// `status: "confirmed"` on the update is what RESTORES a tombstone rather than
+// merely editing a live event. A fully purged id falls back to an insert with
+// no custom id: the rep gets the reminder, nothing can be duplicated because a
+// purged event does not exist, and a missing reminder is a worse failure than
+// a theoretical duplicate.
+// ---------------------------------------------------------------------------
+assert.match(
+  upsertBody,
+  /status:\s*"confirmed"/,
+  'the update must send status:"confirmed" so it RESTORES a deleted tombstone, not only edits a live event',
+);
+assert.match(
+  upsertBody,
+  /updated\.status === 404 \|\| updated\.status === 410/,
+  "a purged tombstone must fall back to a fresh insert rather than stranding that lead without reminders forever",
+);
+// The fallback must be a plain insert with NO custom id -- reusing the purged
+// id would 409 again and loop the same failure.
+const fallback = upsertBody.slice(upsertBody.indexOf("updated.status === 404"));
+assert.match(
+  fallback.slice(0, 400),
+  /send\(collection,\s*"POST",\s*body\)/,
+  "the purged-id fallback must insert without the custom id",
+);
+
 console.log("web-leads-calendar-sync ok");
