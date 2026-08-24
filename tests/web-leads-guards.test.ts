@@ -79,12 +79,47 @@ assert.doesNotMatch(code, /aa04fa1f/, "this feature must never reference the Sun
 // fabricated finding on a live call is the worst outcome this system can
 // produce, and a badge is exactly how that nuance gets flattened.
 // ---------------------------------------------------------------------------
+// The shared block is asserted FIRST and by name, because the two host views
+// below are allowed to satisfy the requirement by importing it. If that
+// indirection were permitted without pinning the component it points at, an
+// empty <BusinessFacts /> would pass every assertion in this section.
+{
+  const facts = "components/web-leads/BusinessFacts.tsx";
+  const src = read(facts);
+  assert.match(src, /lead\.websiteCondition/, `${facts} must render the website status`);
+  assert.match(src, /lead\.auditFindings/, `${facts} must render the research notes`);
+  // Verbatim means the field reaches the screen as-is. A slice, a split, a
+  // replace or a truncate class on the way there is the shortening this rule
+  // exists to forbid.
+  assert.doesNotMatch(
+    src,
+    /(websiteCondition|auditFindings)\s*[.?]?\.?(slice|substring|split|replace|toUpperCase|toLowerCase)/,
+    `${facts} must not transform the verbatim directory strings`,
+  );
+  assert.doesNotMatch(src, /truncate/, `${facts} must not truncate a verbatim directory string`);
+}
+
 for (const view of [
   "components/web-leads/LeadsTable.tsx",
   "components/web-leads/WebLeadDetail.tsx",
+  // Added 2026-08-24. The battle card shipped WITHOUT the identity block --
+  // zero references to address, postal, osmCategory or territoryName -- so a
+  // rep working a lead in their own book could not see where the business was.
+  // It is now held to the same rule as the drawer rather than trusted to keep
+  // carrying the block it was missing on day one.
+  "components/web-leads/BattleCard.tsx",
 ]) {
   const src = read(view);
-  assert.match(src, /websiteCondition/, `${view} should show the website status`);
+  // Either the view renders the field itself (LeadsTable does, for the
+  // no-website cell) or it delegates to the ONE shared block, which is
+  // separately pinned above. Delegation is the outcome this codebase wants:
+  // two hand-maintained copies of a lead's address on two screens are two
+  // things that can disagree about the same business mid-call.
+  assert.match(
+    src,
+    /websiteCondition|<BusinessFacts/,
+    `${view} should show the website status, itself or through the shared BusinessFacts block`,
+  );
   // No view may hardcode a shorter, more confident verdict.
   assert.doesNotMatch(src, /"No website"/, `${view} must not render a bare "No website" verdict`);
   assert.doesNotMatch(src, /No significant issues/, `${view} must not claim a clean audit`);
@@ -312,6 +347,12 @@ for (const view of [
   // brush-off card look like a warning, and a rep reading a red card about
   // "no budget" hears a verdict about the prospect that nothing measured.
   "components/web-leads/ObjectionPanel.tsx",
+  // Added 2026-08-24 with the shared identity block. It is the file that now
+  // renders BOTH verbatim directory sentences on BOTH surfaces, which makes it
+  // the single most tempting place to "helpfully" tint a bad website status
+  // red -- one edit here would colour a judgement onto every screen in the
+  // feature at once.
+  "components/web-leads/BusinessFacts.tsx",
 ]) {
   const src = read(view);
 
@@ -373,10 +414,33 @@ assert.match(
 // opened tab can reach back through window.opener (e.g. redirect the
 // original tab to a fake "session expired" page) -- a real security
 // requirement, not a style nit, and easy to lose in a refactor of this link.
-assert.match(
-  read("components/web-leads/WebLeadDetail.tsx"),
-  /target="_blank"[\s\S]{0,120}?rel="noopener noreferrer"/,
-  'WebLeadDetail\'s external website link must carry rel="noopener noreferrer" alongside target="_blank"',
-);
+for (const view of [
+  "components/web-leads/WebLeadDetail.tsx",
+  // The shared identity block carries its own "View website" link, on both
+  // surfaces at once, so it needs the same requirement rather than inheriting
+  // trust from the button beside it.
+  "components/web-leads/BusinessFacts.tsx",
+]) {
+  const src = read(view);
+  // Counted rather than merely found: a second link added later without the
+  // rel is exactly what a presence check misses.
+  const blanks = (src.match(/target="_blank"/g) || []).length;
+  const safe = (src.match(/target="_blank"[\s\S]{0,160}?rel="noopener noreferrer"/g) || []).length;
+  assert.ok(blanks >= 1, `${view} must open the prospect's site in a new tab`);
+  assert.equal(
+    safe,
+    blanks,
+    `every target="_blank" in ${view} must carry rel="noopener noreferrer" -- without it the opened tab reaches back through window.opener`,
+  );
+  // And the href must come from the allowlisting helper, never the raw stored
+  // value: 217 of these are bare domains (which navigate inside our own
+  // dashboard) and they come from a public map anyone can edit.
+  assert.match(src, /preferredSiteUrl\(/, `${view} must resolve the website URL through preferredSiteUrl`);
+  assert.doesNotMatch(
+    src,
+    /href=\{lead\.websiteUrl\}/,
+    `${view} must never put the raw stored websiteUrl in an href`,
+  );
+}
 
 console.log("web-leads-guards ok");

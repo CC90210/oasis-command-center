@@ -69,6 +69,7 @@ import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
+import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
 
@@ -391,7 +392,7 @@ function DistributionStrip({
 // The non-scored states — sentences, never charts. See rule 2.
 // ───────────────────────────────────────────────────────────────────────────
 
-function NotScored({ audit, lead }: { audit: AuditResult; lead: WebLead }) {
+function NotScored({ audit }: { audit: AuditResult }) {
   const sentence =
     audit.state === "no_website"
       ? "No website found yet, needs checking"
@@ -409,11 +410,14 @@ function NotScored({ audit, lead }: { audit: AuditResult; lead: WebLead }) {
       )}
       <p className="mt-4 max-w-2xl text-sm leading-relaxed text-fg-muted">
         There is nothing measured to compare against competitors yet, so this page shows no score, no ranking and no
-        chart. Everything the directory recorded is below, and it has not been verified by anyone.
+        chart. Everything the directory recorded is in the business details above, and it has not been verified by
+        anyone.
       </p>
-      {/* VERBATIM — the directory's own hedged wording, never shortened. */}
-      <p className="mt-4 text-sm italic text-fg-dim">{lead.websiteCondition}</p>
-      <p className="mt-1 text-sm italic text-fg-dim">{lead.auditFindings}</p>
+      {/* The two verbatim directory strings USED to be repeated here. They now
+          render once, at the top of the page, in BusinessFacts -- which every
+          state of this card shows, scored or not. Printing the same unverified
+          sentence twice on one screen invites a rep to wonder which of the two
+          is the current one. */}
     </Panel>
   );
 }
@@ -470,8 +474,27 @@ export function BattleCard({ leadId }: { leadId: string }) {
     <div className="min-h-screen bg-bg">
       <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} />
       <div className="mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8">
+        {/* FIRST PANEL ON THE PAGE, ABOVE EVERY CHART, and deliberately not
+            behind a disclosure. A rep confirms who they are calling before
+            they pitch, and the card shipped on 2026-08-24 without this block
+            at all -- address, postal code, directory category and territory
+            appeared nowhere on it, so a rep working their own book could not
+            see where the business was. One shared component with the drawer
+            (components/web-leads/BusinessFacts.tsx) rather than a second copy
+            of the same fields, because two renderings of one lead's address
+            are two things that can disagree mid-call. */}
+        <Panel>
+          <SectionTitle>Who you are calling</SectionTitle>
+          <p className="mt-1 text-xs text-fg-dim">
+            Everything the directory recorded about this business. None of it has been verified by anyone here.
+          </p>
+          <div className="mt-4">
+            <BusinessFacts lead={lead} layout="grid" />
+          </div>
+        </Panel>
+
         {audit.state !== "scored" ? (
-          <NotScored audit={audit} lead={lead} />
+          <NotScored audit={audit} />
         ) : (
           <ScoredBody
             lead={lead}
@@ -560,9 +583,14 @@ function Hero({
         <div className="mt-4 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
             <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg lg:text-4xl">{lead.name}</h1>
+            {/* The FULL address, street and postal code included -- not just
+                the city. A rep confirming a business by name needs the street
+                to be sure they have the right branch, and this line is the
+                first thing under the name. The complete block (category,
+                territory, the unverified directory sentences) is the first
+                panel below. */}
             <p className="mt-2 text-sm text-fg-muted">
-              {[lead.industry, [lead.city, lead.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") ||
-                "No location on file"}
+              {[lead.industry, fullAddress(lead)].filter(Boolean).join(" · ") || "No location on file"}
             </p>
             <div className="mt-5 flex flex-wrap gap-2.5">
               {lead.phone ? (
@@ -588,7 +616,10 @@ function Hero({
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 py-3 text-sm font-semibold text-fg transition-[color,border-color,transform] hover:border-accent/40 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none"
                 >
-                  <ExternalLink className="h-4 w-4" />Open their site
+                  {/* Same words as the drawer's button and as the operator's
+                      own request. Two surfaces that send a rep to the same
+                      place should not call it two different things. */}
+                  <ExternalLink className="h-4 w-4" />View website
                 </a>
               )}
             </div>
@@ -942,9 +973,9 @@ function ScoredBody({
             ))}
           </div>
         )}
-        <p className="mt-5 border-t border-bg-border pt-3 text-xs italic text-fg-dim">
-          Directory status, unverified: {lead.websiteCondition}
-        </p>
+        {/* The unverified directory status used to be repeated here too. It
+            renders once now, in the BusinessFacts block at the top of the
+            page, labelled for what it is. */}
       </Panel>
     </>
   );
