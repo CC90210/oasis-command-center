@@ -142,6 +142,18 @@ export function WebLeadsBrowser() {
   // their filters exactly where they left them.
   const setView = useCallback((v: WebLeadView) => push({ ...filters, view: v }), [push, filters]);
   const closeLead = useCallback(() => push({ ...filters, leadId: null }), [push, filters]);
+
+  /**
+   * Bumped when a call outcome is logged from the detail panel, and read by
+   * the list and facet effects below so both re-run.
+   *
+   * A counter, not a boolean: a rep logging two calls in a row must get two
+   * refreshes, and it is deliberately NOT part of `filters` -- putting it in
+   * the URL would push a history entry per logged call and turn the browser
+   * Back button into a walk through the rep's morning.
+   */
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const onLeadLogged = useCallback(() => setRefreshNonce((n) => n + 1), []);
   const openLead = useCallback((id: string) => push({ ...filters, leadId: id }), [push, filters]);
 
   // `alive` guards against an out-of-order response: if filters change again
@@ -169,7 +181,7 @@ export function WebLeadsBrowser() {
         setFacetError(e instanceof Error ? e.message : "failed");
       });
     return () => { alive = false; };
-  }, [filters]);
+  }, [filters, refreshNonce]);
 
   useEffect(() => {
     let alive = true;
@@ -197,7 +209,7 @@ export function WebLeadsBrowser() {
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [filters]);
+  }, [filters, refreshNonce]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
   const emptyHint = useMemo(() => {
@@ -302,7 +314,9 @@ export function WebLeadsBrowser() {
         />
       )}
 
-      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} />}
+      {filters.leadId && (
+        <WebLeadDetail leadId={filters.leadId} onClose={closeLead} onLogged={onLeadLogged} />
+      )}
     </div>
   );
 }

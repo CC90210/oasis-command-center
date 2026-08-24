@@ -111,21 +111,92 @@ for (const forbidden of ["qualified", "founder_meeting_booked", "proposal_sent",
 }
 
 // ---------------------------------------------------------------------------
-// The ONLY tenant_records write in this feature is `data.stage` -- no
-// pricing, commission, or other lifecycle field. Isolates the actual
-// updateRecord() call's patch object rather than merely checking the word
-// "stage" appears somewhere in the file.
+// THE LEAD WRITE IS BUILT BY THE CANONICAL SEAM, NOT ASSEMBLED HERE.
+//
+// This assertion used to require the literal `patch: { stage: target }`, back
+// when advancing the stage was the only thing a logged call did. It now also
+// stamps last_disposition / last_contact_at / next_action_at -- the fields
+// Rep Today ranks and labels on -- so the shape changed, but the property that
+// mattered has not: a rep pressing a button on a call must never be able to
+// move money, price or ownership.
+//
+// So the check is now stronger rather than merely different. The patch object
+// must come from lib/website-sales-workflow.ts (one owner of what a
+// disposition means, which is what stopped the two vocabularies drifting), and
+// the ONLY literal object handed to updateRecord in this file is that variable.
 // ---------------------------------------------------------------------------
-const updateCall = libCode.match(/updateRecord\(\{[\s\S]{0,400}?\}\);/);
-assert.ok(updateCall, `${LIB} must call updateRecord() to advance the stage`);
-assert.match(updateCall![0], /patch:\s*\{\s*stage:\s*target\s*\}/, `${LIB}'s updateRecord() call must patch ONLY { stage: target }`);
-for (const forbiddenField of ["price", "commission", "setupAmount", "monthlyAmount", "collectedSetupAmount", "assigned_to"]) {
+assert.match(
+  libCode,
+  /callDispositionPatch\(/,
+  `${LIB} must build its lead patch with callDispositionPatch, not assemble one locally`,
+);
+assert.match(
+  lib,
+  /@\/lib\/website-sales-workflow/,
+  `${LIB} must import the canonical workflow seam`,
+);
+const updateCalls = libCode.match(/updateRecord\(\{[\s\S]{0,400}?\}\);/g) || [];
+assert.ok(updateCalls.length > 0, `${LIB} must call updateRecord() to apply the disposition`);
+for (const call of updateCalls) {
+  assert.match(call, /patch(:\s*patch)?\s*[,}]/, `${LIB}'s updateRecord() must pass the seam-built patch, not an inline object`);
+  for (const forbiddenField of ["price", "commission", "setupAmount", "monthlyAmount", "collectedSetupAmount", "assigned_to"]) {
+    assert.doesNotMatch(
+      call,
+      new RegExp(forbiddenField, "i"),
+      `${LIB}'s updateRecord() patch must never touch "${forbiddenField}"`,
+    );
+  }
+}
+
+// And the seam itself must not emit a commercial field, which is what makes
+// the check above meaningful rather than merely structural. Asserted against
+// the real function over every disposition in tests/web-leads-next-action.ts;
+// this is the source-level companion so a new key cannot be added quietly.
+const workflow = read("lib/website-sales-workflow.ts");
+for (const forbiddenField of ["price", "commission", "setupAmount", "collectedSetupAmount", "assigned_to"]) {
   assert.doesNotMatch(
-    updateCall![0],
-    new RegExp(forbiddenField, "i"),
-    `${LIB}'s updateRecord() patch must never touch "${forbiddenField}"`,
+    stripComments(workflow),
+    new RegExp(`${forbiddenField}\\s*:`, "i"),
+    `lib/website-sales-workflow.ts must never put "${forbiddenField}" in a disposition patch`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// THE REPAIR ROUTE IS THE SAME BOUNDARY, NOT A LIGHTER ONE.
+//
+// Logging a call is two writes that cannot be made atomic here, so a failed
+// second write answers 409 and POST outcome/reconcile rebuilds the lead's
+// queue fields from the append-only history. That route writes to
+// tenant_records, so a weaker gate on it would simply be the way in -- and a
+// repair endpoint is exactly the kind of thing that gets written as an
+// afterthought with a lighter check.
+// ---------------------------------------------------------------------------
+const RECONCILE = "app/api/web-leads/[id]/outcome/reconcile/route.ts";
+const reconcile = read(RECONCILE);
+assert.match(reconcile, /resolveSessionContext/, `${RECONCILE} must resolve the caller`);
+assert.match(reconcile, /if\s*\(\s*!\s*session\.ok\s*\)/, `${RECONCILE} must branch on session.ok, not truthiness`);
+assert.match(reconcile, /status:\s*401/, `${RECONCILE} must fail closed on an unresolved caller`);
+assert.match(reconcile, /session\.tenantId/, `${RECONCILE} must constrain the caller to the tenant`);
+assert.match(reconcile, /status:\s*403/, `${RECONCILE} must refuse another tenant with a 403`);
+assert.match(reconcile, /fetchLead\(/, `${RECONCILE} must resolve the lead through fetchLead so agent scoping applies`);
+assert.match(reconcile, /status:\s*404/, `${RECONCILE} must 404, not 403, for a lead outside the viewer's scope`);
+assert.match(reconcile, /session\.teamRole/, `${RECONCILE} must reference session.teamRole when building the viewer`);
+assert.match(reconcile, /session\.isAdmin/, `${RECONCILE} must reference session.isAdmin when building the viewer`);
+// It repairs; it must never append. A reconcile that logged a row would turn
+// one conversation into two every time a rep pressed Retry.
+assert.doesNotMatch(
+  stripComments(reconcile),
+  /leadgen_call_outcomes/,
+  `${RECONCILE} must not touch the history table directly -- it reconciles FROM it`,
+);
+assert.doesNotMatch(stripComments(reconcile), /\.insert\(/, `${RECONCILE} must not insert anything`);
+
+// The repair must be reported honestly: "nothing to repair" is not "repaired".
+assert.match(
+  reconcile,
+  /repaired:\s*false/,
+  `${RECONCILE} must distinguish "nothing to repair" from a successful repair`,
+);
 
 // ---------------------------------------------------------------------------
 // Tenant scoping on the write itself -- libSQL has no row-level security, so
@@ -135,14 +206,27 @@ for (const forbiddenField of ["price", "commission", "setupAmount", "monthlyAmou
 assert.match(libCode, /tenant_id:\s*WEBDEV_TENANT_ID/, `${LIB} must pin WEBDEV_TENANT_ID on the leadgen_call_outcomes insert`);
 
 // ---------------------------------------------------------------------------
-// No colour keyed to sentiment on the four buttons. "Not interested" is
+// No colour keyed to sentiment on ANY of the eight buttons. "Not interested" is
 // information a rep needs to log accurately, not a failure -- a red button
 // trains reps to avoid logging it, and log rate matters more than
 // sentiment. Same reasoning tests/web-leads-guards.test.ts already pins for
 // WebsiteComparison's score colours.
 // ---------------------------------------------------------------------------
-for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-"]) {
-  assert.doesNotMatch(ui, new RegExp(cls.replace(/-/g, "\\-")), `${UI} must not attach ${cls} to any outcome button`);
+const CALL_MODE = "components/web-leads/CallMode.tsx";
+const callMode = read(CALL_MODE);
+for (const [label, src] of [[UI, ui], [CALL_MODE, callMode]] as const) {
+  for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-"]) {
+    assert.doesNotMatch(src, new RegExp(cls.replace(/-/g, "\\-")), `${label} must not attach ${cls} to any outcome button`);
+  }
+}
+
+// Every disposition must be reachable from both surfaces. A vocabulary that is
+// wide in the data layer and narrow on one screen is how "no answer" ended up
+// standing in for three different problems for months.
+for (const [label, src] of [[UI, ui], [CALL_MODE, callMode]] as const) {
+  for (const disposition of ["no_answer", "voicemail", "gatekeeper", "connected", "callback", "interested", "not_interested", "do_not_call"]) {
+    assert.match(src, new RegExp(`"${disposition}"`), `${label} must offer the "${disposition}" disposition`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +234,7 @@ for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-"]) {
 // text). Same check tests/form-handoff-copy.test.ts already runs for
 // merchant-facing copy, applied here to the outcome-logging UI.
 // ---------------------------------------------------------------------------
-for (const [label, src] of [[UI, ui], [ROUTE, route], [LIB, lib]] as const) {
+for (const [label, src] of [[UI, ui], [ROUTE, route], [LIB, lib], [CALL_MODE, callMode], [RECONCILE, reconcile]] as const) {
   const dashes = stripComments(src).match(/.{0,50}[—–].{0,50}/g) || [];
   assert.deepEqual(dashes, [], `em/en dash found in ${label}: ${dashes.join(" | ")}`);
 }
