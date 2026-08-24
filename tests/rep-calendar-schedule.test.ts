@@ -8,6 +8,8 @@ import {
   localDayKey,
   localDayStart,
 } from "../lib/web-leads/schedule";
+import { filterNavForPersona } from "../lib/role-surfaces";
+import { WEBDEV_NAV } from "../lib/nav-config";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
@@ -201,3 +203,42 @@ const NOW = Date.parse("2026-08-24T14:00:00.000Z");
 }
 
 console.log("rep-calendar-schedule ok");
+
+// ---------------------------------------------------------------------------
+// 8. THE LINK MUST SURVIVE THE PERSONA FILTER.
+//
+// Caught by an independent review (Codex, 2026-08-24), not by a test, and the
+// failure mode is why it needed one: lib/nav-config.ts's rows are filtered
+// through SALES_NAV_ALLOWLIST per persona. A row added to the nav and not to
+// the allowlist renders for NOBODY in sales. The page works, the link is
+// silently dropped, nothing throws, and the feature is invisible to the only
+// people it was built for.
+//
+// Asserted through the real filter rather than by grepping the array, so a
+// change to how filtering works fails here too.
+// ---------------------------------------------------------------------------
+{
+  const salesNav = filterNavForPersona(WEBDEV_NAV, "sales");
+  assert.ok(
+    salesNav.some((i) => i.href === "/calendar"),
+    "a sales rep must actually see the Calendar link -- an allowlist miss drops it silently",
+  );
+
+  // And it must not leak to a persona with no rep book of their own, where an
+  // empty calendar would read as "you have nothing booked" rather than "this
+  // page is not for you".
+  for (const persona of ["marketing", "builder"] as const) {
+    const nav = filterNavForPersona(WEBDEV_NAV, persona);
+    assert.ok(
+      !nav.some((i) => i.href === "/calendar"),
+      `${persona} must not be offered the rep calendar`,
+    );
+  }
+
+  // `/calendar` and `/schedule` are different features with confusable names:
+  // one is a localStorage week-planner of time blocks, the other is real lead
+  // commitments. Both may exist; neither may replace the other by accident.
+  assert.notEqual("/calendar", "/schedule", "these are two different surfaces");
+}
+
+console.log("rep-calendar-schedule (nav) ok");
