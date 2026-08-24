@@ -110,6 +110,55 @@ export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): 
 }
 
 /**
+ * What a non-admin rep may change on a lead they own (CC directive,
+ * 2026-08-24). The split is between the lead's FACTS and the pipeline's
+ * SHAPE: a rep on a call learns the real phone number, the real contact,
+ * what the website actually looks like — and should record it while it is
+ * in front of them rather than queue an admin request. What they must not
+ * do is move the deal or move themselves: stage, assignment, collaborators
+ * and sales_program decide whose board a lead sits on and who is paid for
+ * it, so they stay admin-only and keep their audited routes
+ * (/api/leads/[id]/set-stage, /api/leads/[id]/assign).
+ *
+ * Allowlist, not denylist: a field added to the seed later is non-editable
+ * by reps until someone decides it should be. The reverse default would
+ * silently hand every new field to every rep.
+ */
+export const REP_EDITABLE_LEAD_FIELDS = new Set<string>([
+  // contact facts a rep corrects mid-call
+  "name",
+  "company",
+  "email",
+  "phone",
+  // the website-sales research a rep gathers or fixes
+  "website",
+  "website_condition",
+  "audit_findings",
+  "industry",
+  "business_city",
+  "state",
+  // call notes + the AI columns the rep's own tools write back
+  "notes",
+  "last_contacted_at",
+  "ai_score",
+  "ai_reasoning",
+  "ai_scored_at",
+  "ai_next_action",
+  "ai_next_action_rationale",
+  "ai_next_action_at",
+]);
+
+/**
+ * The keys in `patch` a rep is not allowed to set. Empty array = the patch
+ * is safe. Callers reject the whole patch when this is non-empty rather
+ * than silently dropping keys — a save that quietly discards half its
+ * fields is worse than one that explains itself.
+ */
+export function rejectedRepPatchKeys(patch: Record<string, unknown>): string[] {
+  return Object.keys(patch).filter((key) => !REP_EDITABLE_LEAD_FIELDS.has(key));
+}
+
+/**
  * Scope pipeline rows to what this viewer may see.
  *
  * `programScoped` (default true) drops anything not stamped

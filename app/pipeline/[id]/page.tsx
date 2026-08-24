@@ -34,6 +34,8 @@ import { MCAProfilePanel } from "@/components/leads/MCAProfilePanel";
 import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canOpenOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { LeadWebsiteAuditBand } from "@/components/leads/LeadWebsiteAuditBand";
 
 export const dynamic = "force-dynamic";
 
@@ -107,6 +109,9 @@ export default async function PipelineLeadDetailPage({
   }
 
   const activeRecord = visibleRecord;
+  // The slug this operator actually owns. Hardcoding "oasis" here 403'd every
+  // save with slug_not_owned — no OASIS workspace is slugged "oasis".
+  const ownedSlug = await resolveOwnedSlug(tenantId);
 
   const title =
     (typeof activeRecord.data.name === "string" && activeRecord.data.name) ||
@@ -163,6 +168,9 @@ export default async function PipelineLeadDetailPage({
           </>
         }
       />
+      {/* Directly above LeadLifecycleActions on purpose: its rep instruction
+          says "Review the website audit, then make the first call". */}
+      <LeadWebsiteAuditBand data={activeRecord.data} />
       <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} canManage={session.ok && session.isAdmin} />
       <MCAProfilePanel data={activeRecord.data} />
       <LeadTimelinePanel leadId={id} />
@@ -172,14 +180,23 @@ export default async function PipelineLeadDetailPage({
         storageKey="oasis.pipeline.editForm.collapsed"
         defaultCollapsed={true}
       >
-        <ManifestRecordForm
-          tenantSlug="oasis"
-          entity={leadEntity}
-          backPath="pipeline"
-          backHref="/pipeline"
-          initial={activeRecord.data}
-          editId={id}
-        />
+        {ownedSlug ? (
+          <ManifestRecordForm
+            tenantSlug={ownedSlug}
+            entity={leadEntity}
+            backPath="pipeline"
+            backHref="/pipeline"
+            initial={activeRecord.data}
+            editId={id}
+          />
+        ) : (
+          <Card>
+            <div className="text-sm text-fg-muted">
+              This account has no workspace namespace, so lead fields can&apos;t be
+              edited here. Ask an admin to finish tenant setup.
+            </div>
+          </Card>
+        )}
       </CollapsibleSection>
       <LeadDocumentsPanel tenantId={tenantId} leadId={id} />
     </div>

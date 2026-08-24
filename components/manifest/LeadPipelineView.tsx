@@ -1434,6 +1434,10 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
+  // Hostname only. On a website-sales board the site IS the qualifier, and a
+  // rep triaging thirty rows shouldn't have to open each one to see whether
+  // there's a site to talk about. Full URL would swamp the cell.
+  const websiteHost = hostOf(str(d.website) || "");
   return {
     name,
     company,
@@ -1444,7 +1448,19 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     cold,
     lastTouchLabel,
     createdLabel,
+    websiteHost,
   };
+}
+
+/** "https://www.expertvelo.com/x" → "expertvelo.com". "" when unparseable. */
+function hostOf(raw: string): string {
+  if (!raw.trim()) return "";
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`;
+    return new URL(withScheme).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 function OasisDesktopRow({
@@ -1477,6 +1493,11 @@ function OasisDesktopRow({
             {m.company && (
               <span className="block truncate text-[10px] text-fg-dim" title={m.company}>
                 {m.company}
+              </span>
+            )}
+            {m.websiteHost && (
+              <span className="block truncate text-[10px] text-fg-dim" title={m.websiteHost}>
+                {m.websiteHost}
               </span>
             )}
             <span className="block truncate text-[10px] text-accent/80" title={m.assignedRep}>Assigned: {m.assignedRep}</span>

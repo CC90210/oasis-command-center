@@ -34,6 +34,7 @@ import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
@@ -162,6 +163,9 @@ export default async function PipelinePage({
   // been narrowed to their own rows, so the filter can only ever subtract from
   // what they were allowed to see. It cannot be used to look sideways.
   const repRoster = session.ok && session.isAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  // The board's write surfaces (inline edits, bulk actions) post to
+  // /api/manifest/<slug>/... — send the slug this tenant owns, not "oasis".
+  const ownedSlug = (await resolveOwnedSlug(tenantId)) || "oasis";
   // RESEARCHED IS THE PROSPECT POOL, NOT PIPELINE WORK.
   //
   // CC, 2026-08-21: the board showed 30,847 untouched directory rows as a
@@ -263,7 +267,7 @@ export default async function PipelinePage({
       )}
 
       <LeadPipelineView
-        slug="oasis"
+        slug={ownedSlug}
         entityName="lead"
         entityLabel="Lead"
         stages={stages}

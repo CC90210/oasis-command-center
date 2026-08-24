@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { routeSunBizImportStage } from "@/lib/sunbiz-stage-routing";
+import { stampSalesProgram, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -98,6 +99,9 @@ type IncomingRow = {
   business_city?: string | null;
   business_zip?: string | null;
   website?: string | null;
+  website_condition?: string | null;
+  audit_findings?: string | null;
+  icp_track?: string | null;
   entity_type?: string | null;
   record_type?: string | null;
   industry?: string | null;
@@ -228,6 +232,14 @@ export async function POST(req: NextRequest) {
     const businessCity = cleanString(raw.business_city, 120);
     const businessZip = cleanString(raw.business_zip, 32);
     const website = cleanString(raw.website, 240);
+    // The parser has recognised these headers since the website-sales engine
+    // shipped, but this route dropped them on the floor — so a CSV of
+    // researched sites imported as bare contacts, un-stamped and therefore
+    // invisible on the OASIS board. lib/leads-import-service.ts (the chat
+    // importer) carried them all along; this is the same mapping.
+    const websiteCondition = cleanString(raw.website_condition, 240);
+    const auditFindings = cleanString(raw.audit_findings, 2_000);
+    const icpTrack = cleanString(raw.icp_track, 120);
     const entityType = cleanString(raw.entity_type, 80);
     const industry = cleanString(raw.industry, 180);
     const title = cleanString(raw.title, 80);
@@ -288,6 +300,20 @@ export async function POST(req: NextRequest) {
     if (phone) seenPhones.add(phone);
     if (businessKey) seenBusinesses.add(businessKey);
 
+    // A row carrying website research belongs to the OASIS website-sales
+    // board, which filters on sales_program and speaks a different stage
+    // vocabulary than SunBiz. Without the stamp the row is invisible there;
+    // with a SunBiz stage it has no column to sit in. Decide both here.
+    const websiteFields = {
+      ...(website ? { website } : {}),
+      ...(websiteCondition ? { website_condition: websiteCondition } : {}),
+      ...(auditFindings ? { audit_findings: auditFindings } : {}),
+      ...(icpTrack ? { icp_track: icpTrack } : {}),
+    };
+    const programStamp = rowEntityType === "lead" ? stampSalesProgram(websiteFields) : {};
+    const isWebsiteSalesRow = Boolean(programStamp.sales_program);
+    const rowStage = isWebsiteSalesRow ? stageForWebsiteSalesLead(originalStage) : stage;
+
     toInsert.push({
       tenant_id: tenantId,
       entity_type: rowEntityType,
@@ -311,7 +337,8 @@ export async function POST(req: NextRequest) {
         ...(businessAddress ? { business_address: businessAddress } : {}),
         ...(businessCity ? { business_city: businessCity } : {}),
         ...(businessZip ? { business_zip: businessZip } : {}),
-        ...(website ? { website } : {}),
+        ...websiteFields,
+        ...programStamp,
         ...(entityType ? { entity_type: entityType } : {}),
         ...(industry ? { industry } : {}),
         ...(title ? { title } : {}),
@@ -324,7 +351,7 @@ export async function POST(req: NextRequest) {
         ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
         ...(originalStage ? { original_stage: originalStage } : {}),
-        stage,
+        stage: rowStage,
         status: rowEntityType === "application" ? stage : "new",
         score: 0,
       },

@@ -16,6 +16,7 @@
  */
 
 import { type EntityDefinition } from "./entities";
+import { stampSalesProgram, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const MAX_ROWS = 5_000;
@@ -436,6 +437,17 @@ export async function importRowsForTenant(input: {
 
     // Source + entity_type metadata
     data.source = data.source || defaultSource;
+
+    // A row carrying website research belongs to the website-sales board,
+    // which filters on this stamp — and its stage vocabulary is not SunBiz's,
+    // so a stage lifted verbatim from a spreadsheet ("Hot Lead") would strand
+    // the row in a column that doesn't exist.
+    if (entity.entity_type === "lead") {
+      Object.assign(data, stampSalesProgram(data));
+      if (data.sales_program) {
+        data.stage = stageForWebsiteSalesLead(typeof data.stage === "string" ? data.stage : null);
+      }
+    }
 
     // Required-field check.
     const requiredFields = entity.canonicalFields.filter((f) => f.requirement === "required");

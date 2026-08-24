@@ -96,6 +96,24 @@ function newPendingDocumentId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Loose equality for "did the operator actually change this field?".
+ * Inputs hand back strings, so a numeric field loaded as 650 and left alone
+ * comes back as "650" — a strict compare would call that an edit and send it.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return a == null && b == null;
+  if (typeof a === "object" || typeof b === "object") {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return String(a) === String(b);
+}
+
 export function ManifestRecordForm({
   tenantSlug,
   entity,
@@ -164,6 +182,29 @@ export function ManifestRecordForm({
       }
     }
     if (Object.keys(errs).length > 0) return { errors: errs };
+
+    if (isEdit) {
+      // A PATCH should carry what changed, not the whole record. Resending
+      // every field made each save clobber concurrent edits, and it put
+      // `stage` in the body of a form that has no business moving a deal —
+      // which the records API now rejects for non-admins, so a rep fixing a
+      // phone number would have been refused over a field they never touched.
+      const changed: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(out)) {
+        if (!sameValue(value, (initial || {})[key])) changed[key] = value;
+      }
+      return { payload: changed };
+    }
+
+    // On create, carry forward anything the caller seeded that the entity
+    // doesn't declare — `sales_program` is passed this way by /pipeline/new
+    // and was being dropped by the loop above, so every hand-created lead was
+    // born without the stamp the board filters on and never appeared on it.
+    for (const [key, value] of Object.entries(initial || {})) {
+      if (!(key in out) && value !== undefined && value !== null && value !== "") {
+        out[key] = value;
+      }
+    }
     return { payload: out };
   }
 

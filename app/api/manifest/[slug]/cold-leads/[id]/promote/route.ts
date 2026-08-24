@@ -20,6 +20,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
+import {
+  pickWebsiteSalesFields,
+  stampSalesProgram,
+  stageForWebsiteSalesLead,
+} from "@/lib/leads/canonical-lead-fields";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +41,7 @@ type ColdLeadDbRow = {
   email: string | null;
   stage: string;
   promoted_lead_id: string | null;
+  raw: Record<string, unknown> | null;
 };
 
 async function resolveContext(
@@ -98,7 +104,7 @@ export async function POST(
   // Load the cold lead — must belong to this tenant.
   const { data: coldLead, error: coldLeadErr } = await db
     .from("cold_leads")
-    .select("id, list_id, business_name, contact_name, phone, email, stage, promoted_lead_id")
+    .select("id, list_id, business_name, contact_name, phone, email, stage, promoted_lead_id, raw")
     .eq("id", id)
     .eq("tenant_id", context.tenantId)
     .maybeSingle();
@@ -121,18 +127,42 @@ export async function POST(
   // Create a tenant_records lead row from the cold lead's data.
   // Stage defaults to 'imported' (the intake stage) so the operator
   // immediately sees the promoted cold lead at the top of the pipeline.
+  // The cold-list importer keeps the whole source row in `raw`, so website
+  // research that was captured on the way in is still here — it just never
+  // made it onto the promoted lead, and the rep opened a deal with no site.
+  const carried = pickWebsiteSalesFields((lead.raw || {}) as Record<string, unknown>);
+
   const leadData: Record<string, unknown> = {
     business_name: lead.business_name ?? "",
     contact_name: lead.contact_name ?? "",
     phone: lead.phone ?? "",
     email: lead.email ?? "",
+    ...carried,
     stage: "imported",
     source: "cold_list_promotion",
     cold_lead_id: lead.id,
     cold_list_id: lead.list_id,
+    // A promoted lead carrying website research belongs to the website-sales
+    // board, which filters on this stamp. Without it the row exists and no
+    // screen shows it.
+    ...stampSalesProgram(carried),
   };
 
+  // Stage vocabularies don't overlap: "imported" is SunBiz intake and has no
+  // column on the OASIS board, so a website-sales lead promoted into it would
+  // be stranded off-board.
+  if (leadData.sales_program) {
+    leadData.stage = stageForWebsiteSalesLead(null);
+  }
+
   if (assigneeUserId) {
+    // `assigned_to` is the field every reader uses — the board's rep filter
+    // (oasis-sales-pipeline-policy), the name resolver (assigned-names), the
+    // per-rep scoping in manifest/data. Writing only `assignee_user_id` meant
+    // a promoted lead was assigned in the database and unassigned on every
+    // screen, including to the rep it was handed to. Both are written: the
+    // legacy key stays for anything still reading it.
+    leadData.assigned_to = assigneeUserId;
     leadData.assignee_user_id = assigneeUserId;
   }
 

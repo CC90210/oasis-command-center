@@ -33,6 +33,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
+import { stampSalesProgram } from "@/lib/leads/canonical-lead-fields";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
@@ -1542,6 +1543,13 @@ async function initAnonymousLead(input: {
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
+  // The AI-audit funnel asks the prospect for their website (see
+  // lib/forms/oasis-ai-audit-seed.ts) and it reached the submission payload and
+  // the notify email — but never the lead. The rep calling an inbound audit
+  // request opened a profile with no site on it, for the one lead type that is
+  // entirely ABOUT the site.
+  const website = trimmed("website", "website_url", "site_url", "url");
+  if (website) contactFields.website = website;
 
   // Per-agent routing: resolve ?rep → the agent's user_profiles.auth_user_id.
   const repAssign = await resolveRepAssignment(form.tenant_id, input.rep);
@@ -1609,6 +1617,11 @@ async function initAnonymousLead(input: {
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
+      // An inbound lead that handed us its website is a website-sales lead;
+      // the board filters on this stamp, so without it the funnel's own leads
+      // never appear on the pipeline they were captured for. SunBiz's funding
+      // funnel is a different program and is left alone.
+      ...(funding ? {} : stampSalesProgram(contactFields)),
     };
     if (repAssign) {
       leadData.assigned_to = repAssign.auth_user_id;

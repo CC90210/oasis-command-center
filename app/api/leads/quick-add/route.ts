@@ -24,6 +24,7 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,8 +67,13 @@ export async function POST(req: NextRequest) {
   }
   const contactName = typeof body.contact_name === "string" ? body.contact_name.trim().slice(0, 200) : "";
   const stage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : DEFAULT_STAGE;
-  if (!LEAD_PIPELINE_STAGES.some((s) => s.key === stage)) {
-    return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
+  // Both vocabularies — an OASIS operator quick-adding a lead at a real OASIS
+  // stage was rejected as invalid_stage because only SunBiz keys were listed.
+  if (![...LEAD_PIPELINE_STAGES, ...OASIS_LEAD_STAGES].some((s) => s.key === stage)) {
+    return NextResponse.json(
+      { ok: false, error: "invalid_stage", message: `"${stage}" isn't a stage on this pipeline.` },
+      { status: 400 },
+    );
   }
 
   const email = normEmail(body.email);

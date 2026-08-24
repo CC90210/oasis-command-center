@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canWriteCrm } from "@/lib/role-gates";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { scoreLead } from "@/lib/ai-lead-scoring";
 
 export const runtime = "nodejs";
@@ -32,19 +32,28 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // Per-lead AI is a MEMBER CRM tool (CC 2026-07-07): any non-read_only member may
-  // score a lead they're working. Admin-only is reserved for automations + sequences
-  // MANAGEMENT — NOT per-lead AI.
-  if (!canWriteCrm(sess.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't run this." },
-      { status: 403 },
-    );
-  }
   const tenantId = sess.tenantId;
   const { id: leadId } = await ctx.params;
   if (!leadId) {
     return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
+  }
+  // Per-lead AI is a MEMBER CRM tool (CC 2026-07-07): any non-read_only member may
+  // score a lead they're working. Admin-only is reserved for automations + sequences
+  // MANAGEMENT — NOT per-lead AI. Extended 2026-08-24 so the OASIS sales roles can
+  // run it on their OWN leads without being added to the tenant-wide allowlist.
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
   }
 
   const db = getServiceSupabase();

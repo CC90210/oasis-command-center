@@ -29,6 +29,7 @@ import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
@@ -529,7 +530,14 @@ export async function POST(req: NextRequest) {
   // op === "stage"
   const entity = body.entity === "application" ? "application" : "lead";
   const stage = typeof body.stage === "string" ? body.stage.trim() : "";
-  const validStages = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
+  // Both vocabularies, matching /api/leads/[id]/set-stage. The OASIS board's
+  // BulkActionBar is populated from OASIS_LEAD_STAGES, so validating against
+  // SunBiz keys alone 400'd every "select rows → move to Assigned" — the one
+  // lever that moves imported leads out of `researched` and onto a rep's board.
+  const validStages =
+    entity === "application"
+      ? OPPORTUNITY_PIPELINE_STAGES
+      : [...LEAD_PIPELINE_STAGES, ...OASIS_LEAD_STAGES];
   if (!stage || !validStages.some((s) => s.key === stage)) {
     return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
   }

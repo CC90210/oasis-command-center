@@ -72,6 +72,26 @@ export async function getManifestRow(slug: string): Promise<ManifestRow | null> 
   return { ...row, manifest: parseManifest(row.manifest) };
 }
 
+/**
+ * Read the slug a tenant has claimed, by tenant_id. Returns null when the
+ * tenant has no manifest row. Selects only the slug — callers want the
+ * namespace, not the manifest body, so this skips the parse.
+ *
+ * tenant_id is unique on this table (070_tenant_manifests_unique_tenant.sql),
+ * so at most one row can come back.
+ */
+export async function getManifestSlugForTenant(tenantId: string): Promise<string | null> {
+  const db = client();
+  const result = await db
+    .from("tenant_manifests")
+    .select("slug")
+    .eq("tenant_id", tenantId)
+    .maybeSingle();
+  if (result.error) throw new ManifestPersistenceError("db", result.error.message);
+  const slug = (result.data as { slug?: unknown } | null)?.slug;
+  return typeof slug === "string" && slug.trim() ? slug.trim() : null;
+}
+
 export type SaveManifestInput = {
   slug: string;
   next: TenantManifest;

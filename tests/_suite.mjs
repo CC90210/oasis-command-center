@@ -24,6 +24,7 @@ const TESTS = [
   "tests/sunbiz-form-templates.test.ts",
   "tests/public-form-resolver.test.ts",
   "tests/sunbiz-import-routing.test.ts",
+  "tests/lead-transfer-canonical.test.ts",
   "tests/auth-routing.test.ts",
   "tests/middleware-prefix.test.ts",
   "tests/pipeline-inline-stage.test.ts",

@@ -30,7 +30,7 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { getManifest } from "./loader";
-import { getManifestRow } from "./persistence";
+import { getManifestRow, getManifestSlugForTenant } from "./persistence";
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -53,6 +53,36 @@ export async function resolveDataTenant(
     }
   }
   return null;
+}
+
+/**
+ * The inverse of resolveDataTenant: "which slug does THIS caller own?"
+ *
+ * Pages that render a write surface (ManifestRecordForm, LeadPipelineView)
+ * must send a slug the records API will accept, or every save 403s with
+ * slug_not_owned. Hardcoding one — /pipeline shipped `tenantSlug="oasis"` —
+ * breaks the moment the real tenant is slugged anything else, which every
+ * OASIS workspace is (oasis-ai-cc, oasis-webdev). The seed manifest keyed
+ * "oasis" let the request past manifestExists() and straight into the
+ * ownership gate, so the failure surfaced as a permission error on a lead
+ * the operator plainly owns.
+ *
+ * Both branches below return a value resolveDataTenant grants on:
+ *   1. the tenant's own manifest row slug → matches on row.tenant_id;
+ *   2. resolveClientProfileSlug(tenant) → matches the no-row fallback.
+ * Client and server therefore cannot disagree about the namespace.
+ *
+ * Returns null when there's no tenant or no resolvable slug — callers
+ * render read-only rather than shipping a slug that is going to 403.
+ */
+export async function resolveOwnedSlug(
+  userTenantId: string | null
+): Promise<string | null> {
+  if (!userTenantId) return null;
+  const claimed = await getManifestSlugForTenant(userTenantId).catch(() => null);
+  if (claimed) return claimed;
+  const tenant = await getTenant(userTenantId).catch(() => null);
+  return resolveClientProfileSlug(tenant || null);
 }
 
 /** True when the caller owns the slug (data access granted). */
