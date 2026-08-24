@@ -65,6 +65,60 @@ assert.equal(bucketDay(""), null);
   assert.equal(denseDayAxis(90, now).length, 90, "the max window produces 90 columns");
 }
 
+// ── denseDayAxis across DST — Codex review 2026-08-24 (P2, confirmed) ────────
+// Stepping backwards in fixed 24h chunks and formatting each instant in ET
+// skips a calendar day across spring-forward: from 00:30 EDT on 2026-03-09,
+// minus 24h is 23:30 EST on 2026-03-07, so 2026-03-08 vanishes from the axis
+// and every lead captured that day is dropped as out-of-window.
+
+{
+  // 2026-03-09T04:30:00Z = 00:30 EDT. Spring forward was 2026-03-08T07:00Z.
+  const springForward = Date.parse("2026-03-09T04:30:00.000Z");
+  const axis = denseDayAxis(5, springForward);
+  assert.deepEqual(
+    axis,
+    ["2026-03-05", "2026-03-06", "2026-03-07", "2026-03-08", "2026-03-09"],
+    "the spring-forward day must NOT be skipped",
+  );
+  assert.equal(axis.includes("2026-03-08"), true, "2026-03-08 is the day that used to vanish");
+  assert.equal(new Set(axis).size, axis.length, "and no day may be duplicated");
+}
+
+{
+  // Fall back (2026-11-01T06:00Z): the 25-hour day is the mirror hazard.
+  // 2026-11-02T04:30Z is 23:30 EST on 11-01 — already back on UTC-5 — so the
+  // axis correctly ENDS on 11-01. That late-evening-belongs-to-today rule is
+  // the same one the bucketing assertions above pin.
+  const fallBack = Date.parse("2026-11-02T04:30:00.000Z");
+  const axis = denseDayAxis(5, fallBack);
+  assert.equal(new Set(axis).size, axis.length, "no duplicate day across fall-back");
+  assert.deepEqual(
+    axis,
+    ["2026-10-28", "2026-10-29", "2026-10-30", "2026-10-31", "2026-11-01"],
+    "fall-back keeps the axis contiguous too",
+  );
+}
+
+{
+  // Property: over a full year of start points, every axis stays contiguous.
+  // A 90-day window crosses both transitions.
+  for (let dayOffset = 0; dayOffset < 365; dayOffset += 7) {
+    const at = Date.parse("2026-01-01T05:30:00.000Z") + dayOffset * 86_400_000;
+    const axis = denseDayAxis(90, at);
+    assert.equal(axis.length, 90, "always 90 columns");
+    assert.equal(new Set(axis).size, 90, `no duplicates in the axis starting ${new Date(at).toISOString()}`);
+    for (let i = 1; i < axis.length; i++) {
+      const prev = Date.parse(`${axis[i - 1]}T00:00:00.000Z`);
+      const cur = Date.parse(`${axis[i]}T00:00:00.000Z`);
+      assert.equal(
+        cur - prev,
+        86_400_000,
+        `axis must advance exactly one calendar day at ${axis[i - 1]} -> ${axis[i]}`,
+      );
+    }
+  }
+}
+
 // ── B. percentages sum to exactly 100 ────────────────────────────────────────
 
 assert.deepEqual(percentages(emptyTotals(), 0), emptyTotals(), "zero denominator is all zeros");

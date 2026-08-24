@@ -365,13 +365,22 @@ function Ready({ data, range }: { data: MetricsResponse; range: Range }) {
             </div>
           ))}
 
+          {/* Codex review 2026-08-24 (P2, confirmed): this used to assert that
+              every Unknown lead arrived through a link missing ?source=. Not
+              true — a lead created by import, by the API, from a dropped
+              document, or by hand never passes the public form at all, so it
+              has no channel to record. Blaming link hygiene for those would
+              send the operator chasing a tagging problem that does not exist. */}
           <div className="border-t border-bg-border pt-2.5 text-[10px] leading-relaxed text-fg-dim">
-            {coverage.toFixed(0)}% of leads carried a channel tag.
+            {coverage.toFixed(0)}% of leads carry a channel.
             {totals.unknown > 0 && (
               <>
                 {" "}
-                The {totals.unknown.toLocaleString()} untagged came in through a link with no{" "}
-                <code className="font-mono text-fg-muted">?source=</code> on it.
+                The other {totals.unknown.toLocaleString()} are unattributed: either they came
+                through a form link with no{" "}
+                <code className="font-mono text-fg-muted">?source=</code> on it, or they never
+                came through a form at all (imported, added by hand, or created from a dropped
+                document).
               </>
             )}
           </div>

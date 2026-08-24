@@ -77,11 +77,29 @@ export function clampDays(raw: string | null | undefined): number {
   return Math.min(MAX_DAYS, Math.max(MIN_DAYS, n));
 }
 
-/** Dense, zero-filled day axis (oldest first) so the bar chart has no gaps. */
+/**
+ * Dense, zero-filled day axis (oldest first) so the bar chart has no gaps.
+ *
+ * DST (Codex review 2026-08-24, P2 — confirmed real): the obvious version of
+ * this walks backwards in fixed 86_400_000ms steps and formats each instant in
+ * BUCKET_TZ. That breaks across a spring-forward boundary. At
+ * now = 2026-03-09T04:30Z (00:30 EDT), one 24h step lands on 2026-03-07T04:30Z,
+ * which was still EST — 23:30 on the 7th. The axis then reads
+ * [... 03-06, 03-07, 03-09] and 2026-03-08 is MISSING, so every lead captured
+ * that day falls outside the window and is silently dropped from the chart.
+ *
+ * So: resolve TODAY as a calendar date in BUCKET_TZ once, then step backwards
+ * in UTC. UTC has no DST, and a bare YYYY-MM-DD carries no offset, so calendar
+ * arithmetic on it is exact. Pinned by the DST cases in
+ * tests/lead-source-rollup.test.ts.
+ */
 export function denseDayAxis(days: number, now: number = Date.now()): string[] {
+  const [y, m, d] = dayFormatter.format(new Date(now)).split("-").map(Number);
+  const todayUtc = Date.UTC(y, m - 1, d);
   const out: string[] = [];
   for (let i = days - 1; i >= 0; i--) {
-    out.push(dayFormatter.format(new Date(now - i * 86_400_000)));
+    // toISOString() on a UTC-midnight instant yields that exact calendar date.
+    out.push(new Date(todayUtc - i * 86_400_000).toISOString().slice(0, 10));
   }
   return out;
 }
