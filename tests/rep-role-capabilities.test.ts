@@ -192,3 +192,47 @@ assert.ok(SELF_SCOPED_ROLES.has("opener") && !DEAL_CLOSING_ROLES.has("opener"), 
 assert.ok(SELF_SCOPED_ROLES.has("closer") && DEAL_CLOSING_ROLES.has("closer"), "closer: scoped, can close");
 
 console.log("rep-role-capabilities ok");
+
+// ---------------------------------------------------------------------------
+// 8. "MAY PERFORM THE CLOSE" IS NOT "MAY BE PAID ON THE DEAL".
+//
+// An independent review (Codex, 2026-08-24) read the close RPC's role list,
+// saw it permits `opener`, and reported the route gate and the RPC as
+// contradicting each other. They do not -- they answer different questions
+// about different people, and conflating them would break the comp plan in one
+// direction or the permission model in the other:
+//
+//   route gate (this file)   session.teamRole -- the person CLICKING close.
+//                            An opener must not, because closing means quoting
+//                            a price.
+//   close RPC allowlist      p_rep_user_id -- the ATTRIBUTED rep, the person
+//                            being PAID. An opener absolutely belongs there:
+//                            they earn the 20% opener rate when a founder
+//                            closes the lead they sourced. Removing them would
+//                            silently stop paying setters for two-party sales.
+//
+// So the two lists MUST differ, and the danger is a future editor "fixing" the
+// disagreement in either direction. This pins the distinction with the reason
+// attached, so the next person to notice it reads why before changing it.
+// ---------------------------------------------------------------------------
+const shim = stripComments(read("lib/turso-rpc-shim.ts"));
+const payeeGate = shim.match(/team_role IN \('agent','closer','opener','builder','manager'\)/);
+assert.ok(
+  payeeGate,
+  "the close RPC must keep its own PAYEE allowlist -- it is a different question from who may click close",
+);
+assert.ok(
+  !mayQuoteAndClose("opener"),
+  "an opener may not PERFORM a close even though they may be PAID on one",
+);
+assert.ok(
+  !mayQuoteAndClose("builder") && !mayQuoteAndClose("manager"),
+  "builder and manager may be paid from the ledger but may not run a deal",
+);
+// The RPC's own guard is defence in depth and must stay: the route gate is not
+// the only caller, and a server-side re-check is what makes a forged request
+// fail. Asserted by presence, so deleting it as "already checked upstream"
+// fails here.
+assert.match(shim, /rep_not_agent_for_tenant/, "the close RPC must re-verify the payee server-side, not trust the route");
+
+console.log("rep-role-capabilities (payee vs actor) ok");
