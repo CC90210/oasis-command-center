@@ -1,6 +1,6 @@
 /**
  * GET /api/metrics/lead-sources — daily lead volume split by origination
- * channel (Text / Dial / Unknown) for the signed-in operator's tenant.
+ * channel (Text / Dial / Email / Unknown) for the signed-in operator's tenant.
  *
  * This file is I/O only: auth, one bounded query, HTTP shape, observability.
  * All arithmetic lives in lib/metrics/lead-source-rollup.ts so it can be tested
@@ -21,6 +21,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { resolveTenantId } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { LEAD_SOURCE_ORDER } from "@/lib/forms/lead-source";
 import {
   clampDays,
   denseDayAxis,
@@ -90,7 +91,7 @@ export async function GET(req: NextRequest) {
   const durationMs = Date.now() - startedAt;
   console.info(
     `${LOG} ok tenant=${tenantId} days=${days} scanned=${rows.length} counted=${folded.counted} ` +
-      `text=${folded.totals.text} dial=${folded.totals.dial} unknown=${folded.totals.unknown} ` +
+      `${LEAD_SOURCE_ORDER.map((k) => `${k}=${folded.totals[k]}`).join(" ")} ` +
       `undated=${folded.undated} truncated=${truncated} ms=${durationMs}`,
   );
 

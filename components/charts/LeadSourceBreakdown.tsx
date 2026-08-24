@@ -28,6 +28,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import {
   LEAD_SOURCE_ORDER,
+  LEAD_SOURCE_CHANNELS,
   LEAD_SOURCE_LABELS,
   type LeadSource,
 } from "@/lib/forms/lead-source";
@@ -41,6 +42,7 @@ import {
 const COLORS: Record<LeadSource, string> = {
   text: "#3b82f6", // accent (OASIS blue)
   dial: "#10b981", // status-engaged
+  email: "#a855f7", // violet - distinct from both at a glance and in the bars
   unknown: "#4b5563", // status-dormant
 };
 
@@ -342,14 +344,17 @@ function Ready({ data, range }: { data: MetricsResponse; range: number }) {
         <div className="text-xs font-bold text-fg-muted">No leads in the last {range} days</div>
         <div className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-fg-dim">
           Once a merchant submits through a tagged link, their channel shows up here. Grab the
-          Text and Dial links from the Forms page.
+          Text, Dial and Email links from the Forms page.
         </div>
       </div>
     );
   }
 
   const segments = LEAD_SOURCE_ORDER.map((k) => ({ key: k, pct: percentages[k] }));
-  const tagged = totals.text + totals.dial;
+  // "Tagged" = every REAL channel, derived from the canonical list. Hardcoding
+  // text+dial here would have quietly reported an emailed application as
+  // untagged the moment the email channel landed.
+  const tagged = LEAD_SOURCE_CHANNELS.reduce((n, k) => n + totals[k], 0);
   const coverage = totals.total > 0 ? (tagged / totals.total) * 100 : 0;
 
   return (

@@ -5,9 +5,15 @@ import {
   readLeadSource,
   adoptLeadSource,
   withLeadSourceParam,
+  describeSubmissionLink,
+  redactSubmissionPath,
+  recordSubmissionChannel,
   LEAD_SOURCE_KEY,
   LEAD_SOURCE_AT_KEY,
   LEAD_SOURCE_ORDER,
+  LEAD_SOURCE_CHANNELS,
+  LAST_SUBMITTED_VIA_KEY,
+  LAST_SUBMITTED_LINK_KEY,
 } from "../lib/forms/lead-source";
 
 // The contract this file pins:
@@ -200,3 +206,172 @@ for (const channel of ["text", "dial"] as const) {
 }
 
 console.log("lead-source-attribution: all assertions passed");
+
+
+// ============================================================================
+// EMAIL CHANNEL (added 2026-08-24) + per-submission channel
+// ============================================================================
+
+assert.equal(normalizeLeadSource("email"), "email");
+assert.equal(normalizeLeadSource("EMAIL"), "email");
+assert.equal(normalizeLeadSource("mail"), "email");
+assert.equal(normalizeLeadSource("drip"), "email", "drip mail is the email channel");
+assert.equal(isLeadSourceChannel("email"), true);
+assert.deepEqual(
+  [...LEAD_SOURCE_CHANNELS],
+  ["text", "dial", "email"],
+  "three real channels; Unknown is not one of them",
+);
+assert.equal(
+  LEAD_SOURCE_ORDER.length,
+  LEAD_SOURCE_CHANNELS.length + 1,
+  "the render order is every channel plus exactly one Unknown bucket",
+);
+assert.equal(
+  LEAD_SOURCE_ORDER[LEAD_SOURCE_ORDER.length - 1],
+  "unknown",
+  "Unknown must stay last so the chart never leads with it",
+);
+
+// First-touch-wins holds across the new channel too.
+assert.equal(
+  adoptLeadSource({ [LEAD_SOURCE_KEY]: "text" }, "email", NOW),
+  null,
+  "an emailed application must not steal origination from the original text",
+);
+assert.deepEqual(
+  adoptLeadSource({}, "email", NOW),
+  { [LEAD_SOURCE_KEY]: "email", [LEAD_SOURCE_AT_KEY]: NOW },
+  "an unattributed lead adopts email like any other channel",
+);
+
+// ---- describeSubmissionLink: the token MUST NOT survive into an email ------
+// The full-application URL is a bearer credential for that lead's form. This is
+// the guard that keeps it out of the operator notification.
+
+{
+  const signed =
+    "https://oasisai.work/f/sun/full-application/eyJhbGciOiJIUzI1NiJ9.SECRETTOKEN.sig";
+  const out = describeSubmissionLink(signed, "email");
+  assert.equal(out.includes("SECRETTOKEN"), false, "the signed token must be redacted");
+  assert.equal(out.includes("[signed-link]"), true, "and replaced with a visible marker");
+  assert.equal(out.startsWith("Email"), true, "the channel leads, because that is the answer");
+  assert.equal(out.includes("/f/sun/full-application/"), true, "the form is still identifiable");
+}
+
+{
+  // An anonymous share link has no token segment and must survive intact.
+  const share = "https://oasisai.work/f/sun/initial-lead-capture?rep=jordan&source=text";
+  const out = describeSubmissionLink(share, "text");
+  assert.equal(out.includes("rep=jordan"), true, "a tokenless link is not mangled");
+  assert.equal(out.includes("[signed-link]"), false, "nothing to redact here");
+}
+
+assert.equal(
+  describeSubmissionLink(null, "unknown"),
+  "Unknown (no link recorded)",
+  "a missing link degrades to honest copy, never a crash",
+);
+assert.equal(describeSubmissionLink("", "dial"), "Dial (no link recorded)");
+assert.equal(
+  describeSubmissionLink("not a url at all", "email").includes("not a url at all"),
+  true,
+  "a malformed URL still reports, it does not throw",
+);
+{
+  // Oversized input is bounded before it reaches an inbox.
+  const huge = "https://x.test/f/sun/x/" + "A".repeat(5000);
+  assert.equal(describeSubmissionLink(huge, "email").length < 600, true, "output is bounded");
+}
+
+// ---- recordSubmissionChannel: LATEST WINS, unlike origination -------------
+
+{
+  const patch = recordSubmissionChannel(
+    "email",
+    "https://oasisai.work/f/sun/full-application/TOKEN123",
+    NOW,
+  );
+  assert.equal(patch?.[LAST_SUBMITTED_VIA_KEY], "email");
+  assert.equal(
+    patch?.[LAST_SUBMITTED_LINK_KEY].includes("TOKEN123"),
+    false,
+    "the stored description is redacted too, not only the emailed one",
+  );
+}
+
+assert.equal(
+  recordSubmissionChannel(undefined, undefined, NOW),
+  null,
+  "nothing to record means no write",
+);
+assert.equal(
+  recordSubmissionChannel("carrier-pigeon", undefined, NOW),
+  null,
+  "an unrecognized channel with no link is not worth a write",
+);
+{
+  // A link with no channel still records: knowing WHICH form beats knowing nothing.
+  const patch = recordSubmissionChannel(undefined, "https://x.test/f/sun/full-application/T", NOW);
+  assert.equal(patch?.[LAST_SUBMITTED_VIA_KEY], "unknown");
+}
+{
+  // Latest wins — the opposite of adoptLeadSource, on purpose.
+  const first = recordSubmissionChannel("text", "https://x.test/f/sun/a", NOW);
+  const second = recordSubmissionChannel("email", "https://x.test/f/sun/b", "2026-09-01T00:00:00.000Z");
+  assert.equal(first?.[LAST_SUBMITTED_VIA_KEY], "text");
+  assert.equal(
+    second?.[LAST_SUBMITTED_VIA_KEY],
+    "email",
+    "a later submission through a different channel MUST overwrite - this axis is not first-touch",
+  );
+}
+
+// The two axes are independent: origination text + this-application email is a
+// real, expected combination and neither value may clobber the other.
+{
+  const lead: Record<string, unknown> = { [LEAD_SOURCE_KEY]: "text" };
+  Object.assign(lead, recordSubmissionChannel("email", "https://x.test/f/sun/x", NOW));
+  assert.equal(readLeadSource(lead), "text", "origination survives a later emailed application");
+  assert.equal(lead[LAST_SUBMITTED_VIA_KEY], "email", "and the submission channel is recorded");
+}
+
+console.log("lead-source email channel + submission channel: all assertions passed");
+
+// ── redactSubmissionPath: the failure-capture leak (CodeRabbit, PR #294) ─────
+// The submit route's crash handler spreads the whole request body into the
+// failure-capture store. submission_path is `/f/<tenant>/<form>/<TOKEN>` on the
+// token route, so without this the store held a live bearer credential for that
+// merchant's form every time the route threw.
+
+assert.equal(
+  redactSubmissionPath("/f/sun/full-application/eyJhbGciOiJIUzI1NiJ9.SECRET.sig"),
+  "/f/sun/full-application/[signed-link]",
+  "the token segment must not reach the failure store",
+);
+assert.equal(
+  redactSubmissionPath("/f/sun/full-application/SECRET?x=1")?.includes("SECRET"),
+  false,
+  "a query string must not smuggle the token through",
+);
+assert.equal(
+  redactSubmissionPath("/f/sun/initial-lead-capture"),
+  "/f/sun/initial-lead-capture",
+  "an anonymous path has no token segment and is left alone",
+);
+assert.equal(redactSubmissionPath(undefined), undefined);
+assert.equal(redactSubmissionPath(null), undefined);
+assert.equal(redactSubmissionPath("   "), undefined, "blank is nothing to record");
+assert.equal(
+  (redactSubmissionPath("/f/sun/x/" + "A".repeat(5000)) || "").length < 500,
+  true,
+  "oversized input is bounded before it is stored",
+);
+{
+  // Deeper paths keep redacting the token segment, never a later one.
+  const out = redactSubmissionPath("/f/sun/full-application/TOKEN/extra") || "";
+  assert.equal(out.includes("TOKEN"), false, "the 4th segment is the token, wherever the path ends");
+  assert.equal(out.includes("extra"), true, "trailing segments are preserved");
+}
+
+console.log("redactSubmissionPath: all assertions passed");
