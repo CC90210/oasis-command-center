@@ -17,25 +17,28 @@
  * bps here, and a $4,000 deal is 400000 cents; both are exact.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * THE TWO TRACKS (CC, 2026-08-20)
- * ─────────────────────────────────────────────────────────────────────────────
- * Who sourced the lead decides which ladder applies. That is the whole reason
- * an opener is 20% on one line of CC's note and 25% on another — the numbers
- * were never inconsistent, they describe different tracks.
+ * ONE LADDER, KEYED ON STAGES OWNED (CC, 2026-08-23)
+ * ---------------------------------------------------------------------------
+ * There WAS a two-track model here — company-sourced vs self-sourced, where
+ * sourcing your own lead paid 25% instead of 20%. It is gone. A stage pays the
+ * same rate regardless of who produced the lead, which removes the frozen
+ * attribution field, the argument about whether a lead was "really"
+ * self-sourced, and a column from every contract. SPLIT_BPS below is the live
+ * table.
  *
- *   COMPANY-SOURCED   the OASIS funnel produced the lead.
- *                     opener 20% · closer 30% · builder flat · manager 20% of
- *                     what OASIS retains.
+ * !! MIGRATION IN PROGRESS — THIS FILE IS NOT YET COHERENT.
+ * SPLIT_BPS carries the new rates, but computePayout still pays a BUILDER a
+ * flat per-tier fee (tier.builderFeeCents) instead of SPLIT_BPS.builder (35%).
+ * Until that is switched, a builder is paid the OLD number. Nothing is merged;
+ * main is untouched.
  *
- *   SELF-SOURCED      the rep brought it. A ladder, by how many stages one
- *                     person owns: 25% hand-off · 40% open+close · 70%
- *                     open+close+build · 85% an outside client run on OASIS
- *                     tooling.
+ * !! AND THE NEW RATES DO NOT FIT THE CEILING.
+ * 20 + 30 + 35 = 8500bps exactly, which IS MAX_HUMAN_PAYOUT_BPS — and the
+ * manager override then takes 20% of the remaining 15%, so humans reach 88%
+ * and OASIS keeps 12%. That ceiling is also quoted in signed agreements.
+ * Resolving it is CC's decision, not a code fix: raise the ceiling, pay the
+ * manager out of the sales portion rather than the retainer, or accept 12%.
  *
- * Both ladders are monotonic — doing more always pays more — and a self-sourced
- * opener (25%) out-earns a company-fed one (20%), which is the point.
- *
- * ─────────────────────────────────────────────────────────────────────────────
  * WHAT THIS FILE DOES NOT DECIDE
  * ─────────────────────────────────────────────────────────────────────────────
  * Whether a commission is PAYABLE. Everything here is an accrual computed at
@@ -92,28 +95,60 @@ export const BPS_SCALE = 10_000 as const;
  */
 export const MAX_HUMAN_PAYOUT_BPS: Bps = 8_500;
 
-/** Company-sourced: the Oasis funnel produced this lead. */
-export const COMPANY_TRACK_BPS = {
+/**
+ * THE SPLITS (CC, 2026-08-23 — supersedes the two-track model).
+ *
+ * The earlier design had a company-sourced track and a self-sourced ladder,
+ * where sourcing your own lead paid 25% instead of 20%. That distinction is
+ * GONE. A stage pays the same rate regardless of who produced the lead, which
+ * removes the field the close path had to freeze, the argument about whether a
+ * lead was "really" self-sourced, and a whole column from the contracts.
+ *
+ * Openers and closers are not separate populations — CC: "most people will be
+ * both" — so the ladder is written from the STAGES a person owns, not from a
+ * job title:
+ *
+ *   open only            20%   OASIS 80%
+ *   close only           30%   OASIS 70%
+ *   open + close         40%   OASIS 60%
+ *   open + close + build 70%   OASIS 30%
+ *   build only           35%
+ *   external harness     85%   OASIS 15%   (their own client, our tooling)
+ */
+export const SPLIT_BPS = {
   opener: 2_000,
   closer: 3_000,
-  /** One person did both on a company lead. Deliberately NOT 2000+3000: the
-   *  specialist rates are the price of specialist labour, and a single operator
-   *  costs OASIS less handoff. Still well above either rate alone. */
-  full_stack: 4_000,
-} as const;
-
-/** Self-sourced: the rep brought the deal. CC's ladder, verbatim. */
-export const SELF_TRACK_BPS = {
-  /** Sourced it, handed it to a closer. A referral with nurture attached. */
-  opener: 2_500,
-  /** Sourced, opened and closed it. */
   open_close: 4_000,
-  /** Sourced, closed, and built it. OASIS keeps 30% for the harness. */
   full_stack: 7_000,
-  /** Their own client, run on OASIS tooling. A licence, not a commission —
-   *  see the note in the plan: this track needs its own agreement. */
+  builder: 3_500,
   external_harness: 8_500,
 } as const;
+
+/** Kept as aliases so the close path, the Playbook and the contracts keep
+ *  reading one name each. Both point at SPLIT_BPS — there is no second table. */
+export const COMPANY_TRACK_BPS = {
+  opener: SPLIT_BPS.opener,
+  closer: SPLIT_BPS.closer,
+  full_stack: SPLIT_BPS.open_close,
+} as const;
+
+export const SELF_TRACK_BPS = {
+  opener: SPLIT_BPS.opener,
+  open_close: SPLIT_BPS.open_close,
+  full_stack: SPLIT_BPS.full_stack,
+  external_harness: SPLIT_BPS.external_harness,
+} as const;
+
+/**
+ * What a builder must invest to get in (CC, 2026-08-23).
+ *
+ * Not a commission term and not deducted from any payout — it is what a builder
+ * pays ONCE, up front, for access to the OASIS frameworks and the AIOS they
+ * build on. It appears in the builder agreement as an entry condition, never in
+ * computePayout: mixing an inbound fee into an outbound split is how a ledger
+ * stops reconciling.
+ */
+export const BUILDER_ENTRY_FEE_CENTS = 1_500_00;
 
 /** A manager earns this share of what OASIS RETAINS from their team's deals —
  *  never of gross. Read literally, 20% of gross would take everything left on
