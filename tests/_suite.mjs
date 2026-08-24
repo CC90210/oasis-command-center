@@ -182,6 +182,10 @@ const TESTS = [
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
   "tests/web-leads-scope.test.ts",
+  // Openers and closers. The 2026-08-21 job titles replaced `agent`, but the
+  // scoping predicate and the deal gate still only knew the legacy name --
+  // so a Closer could not close and an Opener saw the whole tenant.
+  "tests/rep-role-capabilities.test.ts",
   // 2026-08-23 sales pass: the score now appears in the LIST as well as the
   // detail panel, read from a different table by a different query. This proves
   // the two can never contradict each other about a stranger's website -- and

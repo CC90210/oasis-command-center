@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -28,10 +29,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (!session.isAdmin && !assignedToUser && !attributedToUser) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
-  // Comp v2: reps (team_role='agent') may run proposal + close THEMSELVES on
-  // their own leads (assigned or frozen-attributed). Founder approval still
-  // gates the commission PAYOUT — closing only accrues.
-  const repMayRunDeal = session.teamRole === "agent" && (assignedToUser || attributedToUser);
+  // Comp v2: a rep may run proposal + close THEMSELVES on their own leads
+  // (assigned or frozen-attributed). Founder approval still gates the
+  // commission PAYOUT — closing only accrues.
+  //
+  // TWO CONDITIONS, AND BOTH ARE LOAD-BEARING (2026-08-24). This read
+  // `teamRole === "agent"`, which was wrong in both directions: a rep invited
+  // as `closer` — the role literally named for closing — could not close
+  // anything, and there was no way to express a setter-only seat at all.
+  //
+  // `mayQuoteAndClose` now answers the ROLE half (closer yes; agent yes, as the
+  // grandfathered legacy role so nobody working today loses access; opener NO,
+  // which is the whole point of having the title). The ownership half is
+  // unchanged and still required: a closer may no more close someone else's
+  // deal than an opener may close their own.
+  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser);
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
   const repAction = ["disposition","qualify","book_founder"].includes(body.action);
