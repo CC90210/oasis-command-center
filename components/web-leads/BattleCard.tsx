@@ -67,9 +67,10 @@ import type { CompetitorContext } from "@/lib/web-leads/competitors";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
-import { selectAngle, recoverablePoints } from "@/lib/web-leads/angles";
+import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { CallOutcomeLog } from "./CallOutcomeLog";
+import { ObjectionPanel } from "./ObjectionPanel";
 
 type Payload = {
   lead: WebLead;
@@ -737,19 +738,48 @@ function ScoredBody({
         </Panel>
       )}
 
-      {/* ── §5, THE ANGLE ───────────────────────────────────────────────── */}
+      {/* ── §5, THE ANGLE ───────────────────────────────────────────────────
+          Rendered in the order the three beats are actually spoken, because a
+          rep mid-call reads down the page and says what is in front of them.
+          Beat one is stated (Gong's 300M-call data: name the reason outright).
+          Beat two is asked and then followed by silence (Sandler: the prospect
+          cannot argue with a gap he found himself). Beat three is the teach,
+          and it only earns its place AFTER an answer -- delivering it early is
+          precisely what manufactures the objection to it. The rationale and
+          sources are in lib/web-leads/angles.ts. */}
       {angle && (
         <Panel>
           <SectionTitle>How to open</SectionTitle>
           <p className="mt-1 text-xs text-fg-dim">
-            Chosen because {angle.label.toLowerCase()} is losing them more of the score than anything else.
+            Chosen because {angle.label.toLowerCase()} is losing them more of the score than anything else. Say your
+            own name and company first, then these three in order.
           </p>
-          <p className="mt-4 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
+
+          <p className="mt-4 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+            1. Say this
+          </p>
+          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
             &ldquo;{angle.angle.opener}&rdquo;
           </p>
-          <div className="mt-5 grid gap-5 md:grid-cols-3">
+
+          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+            2. Then ask this, and stop talking
+          </p>
+          <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
+            &ldquo;{angle.angle.diagnostic}&rdquo;
+          </p>
+          {/* Rendered with the question, never below the fold of it. A rep who
+              reads straight down this card after a clean answer describes a
+              problem the prospect has just demonstrated they do not have, which
+              is a false claim on a live call. A dimension is several checks and
+              this is one of them. (Codex review, 2026-08-24.) */}
+          <p className="mt-2 max-w-4xl text-xs leading-relaxed text-fg-muted">{IF_THE_ANSWER_IS_CLEAN}</p>
+
+          <div className="mt-6 grid gap-5 border-t border-bg-border pt-5 md:grid-cols-3">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Why it costs them</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+                3. Once they answer, this is why it costs them
+              </p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.cost}</p>
             </div>
             <div>
@@ -763,8 +793,27 @@ function ScoredBody({
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.build}</p>
             </div>
           </div>
+
+          {/* Held in reserve, and labelled as such. This is the ONLY copy on
+              the card carrying a research figure, and it is not part of the
+              pitch: it is what a rep reaches for when the prospect disputes the
+              general claim. The source line is rendered beside it on purpose,
+              so a rep who is challenged twice can name where it came from
+              instead of guessing. */}
+          {angle.angle.proof && (
+            <div className="mt-5 rounded-lg border border-bg-border bg-bg-raised/60 p-4">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+                Only if they push back on that
+              </p>
+              <p className="mt-1.5 max-w-4xl text-sm leading-relaxed text-fg-dim">{angle.angle.proof.stat}</p>
+              <p className="mt-2 text-[11px] leading-relaxed text-fg-muted">Source: {angle.angle.proof.source}</p>
+            </div>
+          )}
         </Panel>
       )}
+
+      {/* ── The objections that arrive whatever the site looks like ──────── */}
+      <ObjectionPanel />
 
       {/* ── §3.2 radar + §3.3 points on the table ───────────────────────── */}
       <div className="grid gap-5 lg:grid-cols-2">

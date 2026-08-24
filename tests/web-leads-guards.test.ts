@@ -306,6 +306,12 @@ for (const view of [
   // against this file by planting `text-red-400` on the composite score once
   // (2026-08-24): the assertion failed as intended, and the class was reverted.
   "components/web-leads/BattleCard.tsx",
+  // Added 2026-08-24 with the objection panel. It renders no audit data at all,
+  // which is exactly why it earns the ban rather than an exemption: a surface
+  // that is "obviously safe" today is the one a future editor tints to make a
+  // brush-off card look like a warning, and a rep reading a red card about
+  // "no budget" hears a verdict about the prospect that nothing measured.
+  "components/web-leads/ObjectionPanel.tsx",
 ]) {
   const src = read(view);
 
