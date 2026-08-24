@@ -266,21 +266,31 @@ export async function upsertCalendarEvent(
   };
 
   try {
-    // INSERT FIRST, THEN UPDATE ON CONFLICT.
+    // TWO STATES, NEVER THREE.
     //
-    // This was a PUT-only path and it was broken for every FIRST push
-    // (Codex review, 2026-08-24). Google's events.update only updates an
-    // EXISTING event: a PUT to a deterministic id that has never been created
-    // returns 404. Since every callback carries an idempotency key, the very
-    // first sync for every lead would have failed, the rep would have been
-    // told their calendar could not be reached, and the feature would never
-    // have worked once -- while every unit test passed, because none of them
-    // exercise the HTTP call.
+    // This path was rebuilt on 2026-08-24 after four consecutive review rounds
+    // each found a defect created by the previous fix. The chain went:
+    // PUT-only (404s on every first push) -> insert-then-update (410s on a
+    // cancelled tombstone) -> fall back to a fresh insert (produced an event
+    // nothing could address) -> reinsert with the same id (409s against a
+    // tombstone that still holds it).
     //
-    // events.insert DOES accept a caller-supplied `id`, and answers 409 when
-    // that id already exists. So: insert, and on 409 fall back to update. That
-    // preserves the property the key exists for -- one event per lead,
-    // rescheduling moves it rather than adding a second reminder.
+    // Every one of those bugs came from the same root: DELETING an event makes
+    // its deterministic id ambiguous. Afterwards the id may be a live event, a
+    // retained tombstone, or free, and Google answers 409/410/404 for those in
+    // combinations this codebase cannot verify without a live account. Each
+    // patch guessed at one arm and broke another.
+    //
+    // So the deletion is gone (see cancelCalendarEvent below). An event is
+    // created ONCE per lead and thereafter only has its status changed. That
+    // leaves exactly two possibilities on write, both unambiguous:
+    //
+    //   the id is free   -> insert succeeds
+    //   the id is taken  -> 409, and update with status "confirmed" both
+    //                       edits a live event and revives a cancelled one
+    //
+    // No third branch exists to get wrong, and the id stays addressable for
+    // every later write, which is what keeps the phone matching the queue.
     if (!eventId || !single) {
       const r = await send(collection, "POST", body);
       if (!r.ok || !r.body.id) {
@@ -293,68 +303,44 @@ export async function upsertCalendarEvent(
     if (created.ok && created.body.id) {
       return { ok: true, eventId: created.body.id, htmlLink: created.body.htmlLink || null };
     }
-    // Any status other than 409 is a real failure and must not be retried as an
-    // update, or a genuine auth or quota error would be reported as a
-    // mysterious 404.
+    // Anything other than "that id is taken" is a real failure. Retrying it as
+    // an update would report a genuine auth or quota error as a confusing 404.
     if (created.status !== 409) {
       return { ok: false, reason: "api_error", detail: created.body.error?.message || `HTTP ${created.status}` };
     }
-
-    // 409 means the id is taken -- but by WHAT is the question that matters,
-    // and getting it wrong is how the two fixes above created a third bug
-    // between them (Codex review, second pass, 2026-08-24).
-    //
-    // Clearing a next action DELETES the event, and Google keeps a deleted
-    // event as a CANCELLED TOMBSTONE for a while. So the ordinary lifecycle
-    // "callback -> logged with no follow-up -> callback again" hits: insert
-    // 409s against the tombstone, and a plain update of a cancelled event
-    // answers 410. That lead could then never receive another reminder, and
-    // rescheduling is not an edge case -- it is most of what a rep does.
-    //
-    // `status: "confirmed"` on the update is what RESTORES a tombstone rather
-    // than merely editing a live event, so this one call covers both meanings
-    // of 409.
+    // `status: "confirmed"` is load-bearing: it is what revives an event that
+    // cancelCalendarEvent previously stood down, as opposed to merely editing
+    // one that is still live. Both are 409s on insert and both land here.
     const updated = await send(single, "PUT", { ...body, id: eventId, status: "confirmed" });
-    if (updated.ok && updated.body.id) {
-      return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
+    if (!updated.ok || !updated.body.id) {
+      return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
     }
-
-    // 404/410 here means the event disappeared BETWEEN our insert and our
-    // update -- the tombstone was purged in that window. The id is therefore
-    // free again, so the correct recovery is to retry the insert WITH THE SAME
-    // DETERMINISTIC ID.
-    //
-    // An earlier version of this fallback inserted without the custom id
-    // (Codex review, third pass, 2026-08-24). That produced an event Google
-    // named at random, which every later update and delete -- all of which
-    // derive the id from the lead key -- could no longer find. Clearing that
-    // lead's next action would then report success while the reminder stayed
-    // live on the rep's phone, and the next reschedule would add another one.
-    // An unaddressable event is exactly the stale reminder this module exists
-    // to prevent, so the recovery must never abandon the mapping.
-    if (updated.status === 404 || updated.status === 410) {
-      const recreated = await send(collection, "POST", { ...body, id: eventId });
-      if (recreated.ok && recreated.body.id) {
-        return { ok: true, eventId: recreated.body.id, htmlLink: recreated.body.htmlLink || null };
-      }
-      return { ok: false, reason: "api_error", detail: recreated.body.error?.message || `HTTP ${recreated.status}` };
-    }
-    return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
+    return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
   } catch (err) {
     return { ok: false, reason: "network_error", detail: err instanceof Error ? err.message : String(err) };
   }
 }
 
 /**
- * Remove an event this system created. Used when a callback is superseded by a
- * terminal disposition -- a prospect who said never call again must not have a
- * reminder waiting on the rep's phone.
+ * Stand an event down so it stops appearing on the rep's phone.
  *
- * A 404/410 counts as SUCCESS: the desired end state is "no event", and an
- * already-absent event satisfies it. Treating that as a failure would make an
- * ordinary retry look broken.
+ * THIS IS AN UPDATE, NOT A DELETE, AND THAT IS THE WHOLE POINT. Deleting makes
+ * the deterministic id ambiguous forever after -- it may then be a tombstone or
+ * free, and Google's answers across 409/410/404 differ in ways this codebase
+ * cannot verify without a live account. Four review rounds produced four
+ * distinct bugs chasing those arms (see upsertCalendarEvent above).
+ *
+ * Setting `status: "cancelled"` removes the event from the calendar exactly as
+ * a delete would, from the rep's point of view, while keeping the id present
+ * and addressable. A later reschedule is then a plain update back to
+ * "confirmed", with no branch that can guess wrong.
+ *
+ * A 404 means we never created one for this lead, which satisfies the intent
+ * ("no reminder") and is reported as success. Treating it as a failure would
+ * make the ordinary case -- a disposition logged on a lead that never had a
+ * callback -- look broken.
  */
-export async function deleteCalendarEvent(
+export async function cancelCalendarEvent(
   tenantId: string,
   userId: string,
   idempotencyKey: string,
@@ -367,11 +353,17 @@ export async function deleteCalendarEvent(
     const r = await fetch(
       `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
       {
-        method: "DELETE",
-        headers: { authorization: `Bearer ${auth.token}` },
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${auth.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ status: "cancelled" }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       },
     );
+    // 404: never created. 410: already gone. Both mean "no reminder", which is
+    // the desired end state, so both are success.
     if (r.ok || r.status === 404 || r.status === 410) return { ok: true };
     return { ok: false, reason: "api_error", detail: `HTTP ${r.status}` };
   } catch (err) {

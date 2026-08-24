@@ -33,7 +33,7 @@
 
 import {
   upsertCalendarEvent,
-  deleteCalendarEvent,
+  cancelCalendarEvent,
   type CalendarFailure,
 } from "@/lib/integrations/google-calendar";
 import { type CallDisposition } from "@/lib/website-sales-workflow";
@@ -121,7 +121,7 @@ export async function pushNextActionToCalendar(input: {
   // prospect who asked us never to call again must not have a reminder waiting
   // on anyone's phone. But the rule is simply that the phone matches the queue.
   if (!input.nextActionAt) {
-    const cleared = await deleteCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, key);
+    const cleared = await cancelCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, key);
     if (cleared.ok) return { state: "cleared" };
     if (cleared.reason === "not_connected") return { state: "not_connected" };
     return { state: "failed", reason: cleared.reason, detail: cleared.detail };
