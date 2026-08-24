@@ -115,7 +115,11 @@ function VisitSite({ url, name }: { url: string | null; name: string }) {
       // the checkbox stop propagation.
       onClick={(e) => e.stopPropagation()}
       title={`Open ${name}'s website in a new tab`}
-      className="inline-flex items-center gap-1 rounded-md border border-bg-border px-2 py-1 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:bg-bg-elev hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      // Always present, never hover-revealed: a control that only exists while
+      // the mouse is over it is invisible to a keyboard and easy to miss. It
+      // sits back at low contrast and comes forward with the row instead, so
+      // the row still feels alive without hiding anything.
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-bg-border/70 px-2.5 py-1.5 text-[11px] font-semibold text-fg-dim opacity-70 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
     >
       <ExternalLink className="h-3 w-3" />View site
     </a>
@@ -125,13 +129,22 @@ function VisitSite({ url, name }: { url: string | null; name: string }) {
 function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   if (lead.scoreState === "scored" && lead.score !== null) {
     return (
-      <div className="flex items-center justify-end gap-3">
+      <div className="flex items-center justify-end gap-4">
         <VisitSite url={lead.websiteUrl} name={lead.name} />
-        <div className="flex flex-col items-end gap-1.5">
-          <span className="text-lg font-bold leading-none tabular-nums text-fg">{lead.score}</span>
-          <span className="block h-1 w-14 overflow-hidden rounded-full bg-bg-border" aria-hidden>
+        {/* Number and track read as one object rather than two stacked things.
+            The track was a 1px hairline that all but vanished at this size --
+            visible enough to add noise, not enough to convey anything. It is
+            now legible AND still colourless: one neutral fill whether the score
+            is 4 or 94, because a red 22 renders a judgement the measurement does
+            not support and a rep who sees red says something they cannot back
+            up. See the module header. */}
+        <div className="flex w-[4.5rem] shrink-0 flex-col items-end gap-1.5">
+          <span className="text-xl font-bold leading-none tracking-tight tabular-nums text-fg">
+            {lead.score}
+          </span>
+          <span className="block h-1.5 w-full overflow-hidden rounded-full bg-bg-border/80" aria-hidden>
             <span
-              className="block h-full rounded-full bg-fg-dim"
+              className="block h-full rounded-full bg-fg-muted transition-[width] duration-300"
               style={{ width: `${Math.min(100, Math.max(0, lead.score))}%` }}
             />
           </span>
@@ -155,9 +168,11 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   // whether the site exists. The button appears whenever there is a safe URL,
   // independent of whether we managed to score it.
   return (
-    <div className="flex items-center justify-end gap-3">
+    <div className="flex items-center justify-end gap-4">
       <VisitSite url={lead.websiteUrl} name={lead.name} />
-      <span className="text-right text-xs italic leading-snug text-fg-dim">{text}</span>
+      {/* Same width as the score block above it, so the column keeps one edge
+          down the page instead of ragging in and out row by row. */}
+      <span className="w-[4.5rem] shrink-0 text-right text-[11px] italic leading-snug text-fg-dim">{text}</span>
     </div>
   );
 }
@@ -270,25 +285,20 @@ export function LeadsTable({
                 }}
                 tabIndex={0}
                 aria-label={`Open ${l.name}`}
-                className="group cursor-pointer border-t border-bg-border/50 transition-colors first:border-t-0 hover:bg-bg-hover focus-visible:bg-bg-hover focus-visible:outline-none"
+                className="group cursor-pointer border-t border-bg-border/50 transition-[background-color,box-shadow] duration-150 first:border-t-0 hover:bg-bg-raised hover:shadow-[inset_0_0_0_1px_rgba(59,130,246,0.16)] focus-visible:bg-bg-raised focus-visible:shadow-[inset_0_0_0_1px_rgba(59,130,246,0.45)] focus-visible:outline-none"
               >
                 {/* stopPropagation: ticking a row must not also open it. */}
-                <td className="relative w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
-                  {/* HOVER RAIL LIVES HERE, at the row's outer edge, not against
-                      the business name.
-                      It used to sit at left-0 of the NAME cell. That was fine
-                      until the checkbox column arrived and took the name cell's
-                      left padding with it -- after which a 2px accent bar
-                      rendered hard against the first letter of every business
-                      on hover, reading as a strike through the name. Adon
-                      flagged it: "it kind of does just like a blue line that
-                      kind of cuts out the name." Anchored to the checkbox cell
-                      it has the full gutter to itself and can never touch text,
-                      whatever happens to the columns after it. */}
-                  <span
-                    aria-hidden
-                    className="absolute inset-y-0 left-0 w-[3px] origin-center scale-y-0 rounded-r bg-accent transition-transform duration-150 group-hover:scale-y-100 group-focus-visible:scale-y-100"
-                  />
+                <td className="w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
+                  {/* NO HOVER BAR. There was a 3px accent rail here; moving it
+                      off the name cell was not enough, because the problem was
+                      never where it sat -- a hard vertical line beside a row of
+                      text reads as a strike through it wherever you put it.
+                      Adon: "I wanted to also have that interactive feel but
+                      without that blue line."
+                      The row now lifts instead: a warmer surface plus a hairline
+                      inset ring, and the row's actions fade in. Nothing draws a
+                      line, nothing shifts position, so the list does not jitter
+                      as the cursor travels down it. */}
                   <input
                     type="checkbox"
                     className="h-3.5 w-3.5 rounded accent-accent align-middle"
@@ -297,9 +307,9 @@ export function LeadsTable({
                     aria-label={`Select ${l.name}`}
                   />
                 </td>
-                <td className="py-3 pl-3 pr-4 align-middle">
-                  <span className="block truncate font-semibold text-fg">{l.name}</span>
-                  <span className="mt-0.5 block truncate text-xs text-fg-dim">
+                <td className="py-3.5 pl-3 pr-4 align-middle">
+                  <span className="block truncate text-[15px] font-semibold leading-tight tracking-[-0.01em] text-fg">{l.name}</span>
+                  <span className="mt-1 block truncate text-xs text-fg-dim">
                     {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
                   </span>
                 </td>
