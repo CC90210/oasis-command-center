@@ -136,6 +136,17 @@ export function WebLeadsBrowser() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [claiming, setClaiming] = useState(false);
   const [claimNote, setClaimNote] = useState<string | null>(null);
+  /**
+   * Bumped after any successful claim or release, to force a refetch.
+   *
+   * The list effect keys off `filters`. After a claim the URL is unchanged, so
+   * pushing the same filters does not change that dependency and the effect
+   * never re-runs; router.refresh() does not help either, since this is a
+   * client component holding its own state. The claimed rows therefore stayed
+   * sitting in the pool until the rep navigated away -- looking exactly as
+   * though the claim had failed. (Codex review, 2026-08-24.)
+   */
+  const [refreshKey, setRefreshKey] = useState(0);
 
   // A selection is only meaningful against the rows it was made on. When the
   // filters, page or view change, the ticked ids may no longer be on screen --
@@ -218,7 +229,7 @@ export function WebLeadsBrowser() {
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [filters]);
+  }, [filters, refreshKey]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
   const emptyHint = useMemo(() => {
@@ -313,15 +324,14 @@ export function WebLeadsBrowser() {
       }
       setSelected(new Set());
       // Re-read so the claimed leads leave the pool (or the released ones leave
-      // my book) immediately, rather than lingering until the next navigation.
-      router.refresh();
-      push({ ...filters });
+      // my book) at once, rather than lingering until the next navigation.
+      setRefreshKey((n) => n + 1);
     } catch {
       setClaimNote("Could not reach the server. Nothing was changed.");
     } finally {
       setClaiming(false);
     }
-  }, [selected, mine, router, push, filters]);
+  }, [selected, mine]);
 
   /**
    * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
