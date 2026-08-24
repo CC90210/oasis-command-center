@@ -331,6 +331,37 @@ export function PersonalIntegrationsPanel({
     }
   }
 
+  /**
+   * Connect this user's Google Calendar.
+   *
+   * SEPARATE FROM GMAIL ON PURPOSE. A rep who wants their callbacks on their
+   * phone should not have to hand over their inbox to get them, and revoking
+   * one must not revoke the other. Different consent screen, different stored
+   * bundle, different service key.
+   */
+  async function connectCalendar() {
+    setBusyService("google_calendar");
+    setError(null);
+    try {
+      const r = await fetch("/api/auth/google-oauth/start?mailbox=calendar");
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        url?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!body.ok || !body.url) {
+        setError(body.message || body.error || `connect_failed:${r.status}`);
+        setBusyService(null);
+        return;
+      }
+      window.location.href = body.url;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "connect_failed");
+      setBusyService(null);
+    }
+  }
+
   async function disconnectGmail() {
     if (!confirm("Disconnect Gmail? Sends from your seat will fall back to the workspace default sender.")) return;
     setBusyService("gmail_oauth");
@@ -353,6 +384,8 @@ export function PersonalIntegrationsPanel({
 
   const gmailStatus = statuses?.find((s) => s.service === "gmail_oauth");
   const gmailConnected = gmailStatus?.connected === true;
+  const calendarStatus = statuses?.find((s) => s.service === "google_calendar");
+  const calendarConnected = calendarStatus?.connected === true;
 
   return (
     <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-5 space-y-4">
@@ -462,6 +495,64 @@ export function PersonalIntegrationsPanel({
             </div>
           </li>
           )}
+
+          {/* Google Calendar. Not a mailbox, but the same per-user OAuth
+              machinery. This is what puts a rep's callbacks on the phone in
+              their pocket: the queue in the dashboard stays the source of
+              truth, and the calendar is a mirror pushed after the queue write
+              succeeds (lib/web-leads/calendar-sync.ts).
+
+              A rep who never connects loses NOTHING -- their queue is complete
+              and Rep Today still ranks their day. They just do not get the
+              lock-screen reminder. That is why this reads as an invitation
+              rather than a warning. */}
+          <li className="rounded-lg border border-bg-border bg-bg-deep/40 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm text-fg">Google Calendar</span>
+                  {calendarConnected ? (
+                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                      <Check className="w-3 h-3" />
+                      Connected
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
+                      Not connected
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
+                  {calendarConnected
+                    ? `Connected as ${calendarStatus?.gmail_address || "(address unknown)"}. Callbacks you schedule appear on your phone, with a reminder 10 minutes before.`
+                    : "Connect your calendar so the callbacks you schedule show up on your phone. We only ever create and update events. We cannot read your mail or your other calendars."}
+                </div>
+              </div>
+              <div className="shrink-0">
+                {calendarConnected ? (
+                  <button
+                    type="button"
+                    onClick={connectCalendar}
+                    disabled={busyService === "google_calendar"}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[12.5px] font-bold text-fg-muted hover:text-fg hover:border-accent/40 disabled:opacity-50 transition-colors"
+                  >
+                    {busyService === "google_calendar" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Reconnect
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={connectCalendar}
+                    disabled={busyService === "google_calendar"}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                  >
+                    {busyService === "google_calendar" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Connect calendar
+                  </button>
+                )}
+              </div>
+            </div>
+          </li>
 
           {/* Per-employee Kixie agent email — Phase 5 of TT + Kixie
               embedding. Drawer click-to-call rings THIS Kixie agent

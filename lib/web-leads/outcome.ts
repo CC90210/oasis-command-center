@@ -91,6 +91,7 @@ import {
 } from "@/lib/website-sales-workflow";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
+import { pushNextActionToCalendar, type CalendarSyncStatus } from "./calendar-sync";
 
 /**
  * The API/UI vocabulary. Identical to the workflow module's CallDisposition --
@@ -321,6 +322,9 @@ export async function logCallOutcome(input: {
   record: CallOutcomeRecord;
   stageChangedTo: "connected" | "lost" | null;
   nextActionAt: string | null;
+  /** How the phone-side mirror went. NEVER affects whether the call was
+   *  logged -- see the ordering rule in lib/web-leads/calendar-sync.ts. */
+  calendarSync: CalendarSyncStatus;
 }> {
   const { leadId, lead, outcome, repUserId } = input;
   const note = boundedNote(input.note);
@@ -378,10 +382,25 @@ export async function logCallOutcome(input: {
     throw new ScheduleNotAppliedError(record.id, err instanceof Error ? err.message : String(err));
   }
 
+  // STEP 3, AND ONLY AFTER STEPS 1 AND 2 SUCCEEDED. The calendar is a mirror
+  // of the queue, not a second source of truth, so it is pushed last and its
+  // failure is reported rather than thrown. A rep whose Google is not connected
+  // still has a complete, working queue; they just do not get the phone alert.
+  const calendarSync = await pushNextActionToCalendar({
+    leadId,
+    repUserId,
+    businessName: lead.name,
+    disposition: outcome,
+    nextActionAt,
+    phone: lead.phone,
+    note,
+  });
+
   return {
     record,
     stageChangedTo: (patch.stage as "connected" | "lost" | undefined) ?? null,
     nextActionAt,
+    calendarSync,
   };
 }
 

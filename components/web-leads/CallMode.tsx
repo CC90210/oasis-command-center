@@ -263,6 +263,8 @@ export function CallMode({
   /** Set only while the rep is entering the time a prospect named. Null the
    *  rest of the time, so every other key stays one-press. */
   const [callbackAt, setCallbackAt] = useState<string | null>(null);
+  /** Degraded-success notice, kept apart from `error` because it is not one. */
+  const [calendarNotice, setCalendarNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastLogged, setLastLogged] = useState<{ label: string; business: string } | null>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -346,6 +348,10 @@ export function CallMode({
           return;
         }
         setCallbackAt(null);
+        // A degraded success. The call and the callback are saved; only the
+        // phone alert is not, so the rep keeps dialling and is told once.
+        const okBody = await r.json().catch(() => ({}));
+        setCalendarNotice(okBody?.calendarNotice || null);
         setLastLogged({ label, business });
         next();
       } catch {
@@ -643,6 +649,9 @@ export function CallMode({
             </p>
 
             {error && <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">{error}</p>}
+            {calendarNotice && !error && (
+              <p className="mt-3 rounded-lg border border-bg-border bg-bg-deep/60 p-2.5 text-xs text-fg-muted">{calendarNotice}</p>
+            )}
 
             <div className="mt-5 flex items-center gap-2 border-t border-bg-border pt-4">
               <button

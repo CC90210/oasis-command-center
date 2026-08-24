@@ -60,6 +60,19 @@ export async function GET() {
           expires_at: bundle.expires_at || null,
         };
       }
+      // Same treatment for the calendar connection: a rep with a personal and
+      // a work Google account signed in needs to see WHICH calendar their
+      // callbacks are landing on, or a missing reminder is unexplainable. Only
+      // the address and expiry cross this boundary, never the tokens.
+      if (service === "google_calendar" && connected) {
+        const bundle = await getUserIntegrationBundle(tenantId, user.id, "google_calendar");
+        return {
+          service,
+          connected: true,
+          gmail_address: bundle.google_address || bundle.gmail_address || null,
+          expires_at: bundle.expires_at || null,
+        };
+      }
       return { service, connected };
     }),
   );
