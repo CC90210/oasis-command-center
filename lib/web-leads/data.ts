@@ -365,10 +365,41 @@ export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | n
   // doesn't exist -- returning null here (not a distinguishable error) is
   // what lets the route answer with a 404 instead of a 403, so a scoped
   // contractor can't use this endpoint to probe which ids exist tenant-wide.
-  if (!visibleToViewer(typeof row.data.assigned_to === "string" ? row.data.assigned_to : null, viewer)) {
-    return null;
-  }
+  //
+  // THIS MUST MATCH WHAT THE LIST SHOWS. fetchLeads' pool scope deliberately
+  // shows an `agent`-role contractor every claimable lead, and every by-id
+  // route -- detail, audit, outcome -- authorizes through here. Left as a bare
+  // visibleToViewer check, a contractor saw the pool, opened a lead, and got a
+  // 404; entered Call Mode and every disposition failed. A list you cannot
+  // click is worse than no list, because the rep only finds out mid-call.
+  // (Codex review, 2026-08-23.)
+  //
+  // So the two rules are the same rule: readable if it is in your book, or if
+  // it is claimable by anyone. Nothing widens beyond that -- a lead somebody
+  // else currently holds is still invisible, which is the property PR #237
+  // closed.
+  if (!canViewerRead(row.data || {}, viewer, Date.now())) return null;
   return toWebLead(row);
+}
+
+/**
+ * Whether `viewer` may read this lead at all, by id.
+ *
+ * The single definition of by-id readability, shared by fetchLead and anything
+ * else that authorizes one lead -- two independent answers to "may they see
+ * it" is how the list and the detail page drift apart, which is exactly the
+ * bug this replaced.
+ */
+export function canViewerRead(
+  data: Record<string, unknown>,
+  viewer: Viewer,
+  now: number,
+): boolean {
+  const facts = factsFrom(data);
+  // Unscoped roles (admins and every established role) are unchanged.
+  if (!isScopedContractor(viewer)) return true;
+  if (isInBookOf(facts, viewer.userId)) return true;
+  return isClaimable(data, now);
 }
 
 /**

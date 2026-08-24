@@ -344,4 +344,80 @@ assert.equal(
   );
 }
 
+// ---------------------------------------------------------------------------
+// 11. What the list shows, the detail page must open.
+//
+//     fetchLeads' pool deliberately shows an agent-role contractor every
+//     claimable lead. Every by-id route authorizes through fetchLead. Left as
+//     two different rules, a contractor saw the pool, clicked a lead and got a
+//     404, entered Call Mode and every disposition failed -- and only found out
+//     mid-call. A list you cannot click is worse than no list.
+// ---------------------------------------------------------------------------
+
+{
+  const data = fs.readFileSync(path.join(process.cwd(), "lib/web-leads/data.ts"), "utf8");
+
+  assert.match(
+    data,
+    /export function canViewerRead\(/,
+    "by-id readability must have ONE definition, shared by fetchLead and anything else that authorizes a single lead",
+  );
+  assert.match(
+    data,
+    /if \(!canViewerRead\(row\.data \|\| \{\}, viewer, Date\.now\(\)\)\) return null;/,
+    "fetchLead must use that shared rule, not a second answer to the same question",
+  );
+  // The rule itself: own book OR claimable, and nothing wider. A lead somebody
+  // else currently holds stays invisible -- the property PR #237 closed.
+  const body = data.match(/export function canViewerRead\([\s\S]*?\n\}/);
+  assert.ok(body, "canViewerRead must be findable");
+  assert.match(body![0], /isInBookOf\(facts, viewer\.userId\)/, "own book is readable");
+  assert.match(body![0], /return isClaimable\(data, now\)/, "a claimable lead is readable");
+  assert.doesNotMatch(
+    body![0],
+    /return true;\s*\n\s*\}\s*$/,
+    "canViewerRead must not fall through to an unconditional true for scoped contractors",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 12. Releasing is a swap too, and the cap converges.
+// ---------------------------------------------------------------------------
+
+{
+  const ops = fs.readFileSync(path.join(process.cwd(), "lib/web-leads/claim-ops.ts"), "utf8");
+
+  // An unconditional release writes back a snapshot read moments earlier. If
+  // another rep claimed a stale lead in between, that write restores the stale
+  // data AND clears the new owner -- silently erasing a claim on a lead they
+  // are about to call.
+  const releaseFn = ops.match(/export async function releaseLeads\([\s\S]*?\n\}/);
+  assert.ok(releaseFn, "releaseLeads must be findable");
+  assert.match(
+    releaseFn![0],
+    /\.eq\("data->>assigned_to", prevOwner as string\)/,
+    "releasing must compare the observed owner, or it can erase another rep's claim",
+  );
+
+  // The per-lead swap says nothing about a rep's own total. Two overlapping
+  // requests from one rep both read the same held count and both grant the
+  // remaining room. The cap is a business limit, not a security boundary, so
+  // it converges after the fact rather than pretending to be atomic.
+  assert.match(
+    ops,
+    /const excess = after - MAX_LEADS_PER_REP;/,
+    "the cap must be re-checked after writing, not only before",
+  );
+  assert.match(
+    ops,
+    /const giveBack = claimed\.slice\(-excess\);/,
+    "overflow must be given back from the leads THIS request just took, newest first, so a concurrent request's leads are never the ones yanked",
+  );
+  assert.match(
+    ops,
+    /reason: "at_capacity" as const/,
+    "leads given back to the cap must be reported as capacity refusals, not silently dropped",
+  );
+}
+
 console.log("web-leads-claim ok");
