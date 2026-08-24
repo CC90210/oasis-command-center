@@ -275,13 +275,38 @@ assert.match(
   /updated\.status === 404 \|\| updated\.status === 410/,
   "a purged tombstone must fall back to a fresh insert rather than stranding that lead without reminders forever",
 );
-// The fallback must be a plain insert with NO custom id -- reusing the purged
-// id would 409 again and loop the same failure.
+// ---------------------------------------------------------------------------
+// 9. EVERY EVENT THIS MODULE CREATES MUST STAY ADDRESSABLE.
+//
+// REGRESSION (Codex review, third pass, 2026-08-24). The recovery insert
+// originally dropped the custom id, so Google named that event at random --
+// and every later update and delete derives the id from the LEAD key. Clearing
+// that lead's next action would then report success while the reminder stayed
+// live on the rep's phone, and the next reschedule would add another one.
+//
+// An unaddressable event is precisely the stale reminder this module exists to
+// prevent. A 404/410 on the update means the tombstone was purged between our
+// two calls, which frees the id, so the correct recovery is to retry the
+// insert WITH THE SAME DETERMINISTIC ID rather than abandon the mapping.
+//
+// Stated as an invariant, not an example: every write in this function carries
+// the deterministic id whenever one exists.
+// ---------------------------------------------------------------------------
 const fallback = upsertBody.slice(upsertBody.indexOf("updated.status === 404"));
 assert.match(
-  fallback.slice(0, 400),
-  /send\(collection,\s*"POST",\s*body\)/,
-  "the purged-id fallback must insert without the custom id",
+  fallback.slice(0, 500),
+  /send\(collection,\s*"POST",\s*\{\s*\.\.\.body,\s*id:\s*eventId\s*\}\)/,
+  "the purged-id recovery must reinsert with the SAME deterministic id -- a random id is unreachable by every later update and delete",
+);
+
+// The invariant, checked over the whole keyed path: once an eventId exists,
+// no write may go out without it. `send(collection, "POST", body)` bare is
+// only legal on the no-key branch, which returns before this point.
+const keyedPath = upsertBody.slice(upsertBody.indexOf("const created = await send("));
+assert.doesNotMatch(
+  keyedPath,
+  /send\(\s*collection,\s*"POST",\s*body\s*\)/,
+  "no write on the keyed path may omit the deterministic id",
 );
 
 console.log("web-leads-calendar-sync ok");

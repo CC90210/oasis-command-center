@@ -319,13 +319,21 @@ export async function upsertCalendarEvent(
       return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
     }
 
-    // The tombstone was fully purged, so the id is unusable. Fall back to an
-    // insert with NO custom id: the rep gets their reminder, which is the
-    // point, and there is nothing to duplicate because a purged event does not
-    // exist. Per-lead de-duplication is lost for this one event only, and a
-    // missing reminder is a worse failure than a theoretical duplicate.
+    // 404/410 here means the event disappeared BETWEEN our insert and our
+    // update -- the tombstone was purged in that window. The id is therefore
+    // free again, so the correct recovery is to retry the insert WITH THE SAME
+    // DETERMINISTIC ID.
+    //
+    // An earlier version of this fallback inserted without the custom id
+    // (Codex review, third pass, 2026-08-24). That produced an event Google
+    // named at random, which every later update and delete -- all of which
+    // derive the id from the lead key -- could no longer find. Clearing that
+    // lead's next action would then report success while the reminder stayed
+    // live on the rep's phone, and the next reschedule would add another one.
+    // An unaddressable event is exactly the stale reminder this module exists
+    // to prevent, so the recovery must never abandon the mapping.
     if (updated.status === 404 || updated.status === 410) {
-      const recreated = await send(collection, "POST", body);
+      const recreated = await send(collection, "POST", { ...body, id: eventId });
       if (recreated.ok && recreated.body.id) {
         return { ok: true, eventId: recreated.body.id, htmlLink: recreated.body.htmlLink || null };
       }
