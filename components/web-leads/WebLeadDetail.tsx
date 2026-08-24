@@ -30,7 +30,7 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Phone, MapPin, Globe, Tag, ExternalLink } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
-import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { WebsiteComparison } from "./WebsiteComparison";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 
@@ -157,7 +157,7 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                     our origin). Render nothing rather than a dead or
                     dangerous link when it returns null. */}
                 {(() => {
-                  const websiteHref = safeExternalUrl(lead.websiteUrl);
+                  const websiteHref = preferredSiteUrl(lead.websiteUrl);
                   return websiteHref && (
                     // rel="noopener noreferrer" is required: without it the
                     // opened page can reach back through window.opener, and
