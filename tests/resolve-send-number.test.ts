@@ -74,9 +74,12 @@ assert.ok(
     /const pool = verifiedOnly\(\)/.test(store),
     "verified-only must filter the candidate pool",
   );
+  // An empty pool yields no number — but as a HOLD, not a bare null. See
+  // hold-not-skip.test.ts: returning null for both "no number at all" and
+  // "nothing verified yet" is what burned 190 rows over two days.
   assert.ok(
-    store.includes("if (pool.length === 0) return null;"),
-    "an empty pool must yield no number rather than falling back to the stored one",
+    store.includes('if (pool.length === 0) return { phone: null, source: null, hold: "awaiting_verification" };'),
+    "an empty pool must hold, never fall back to the stored number",
   );
 }
 

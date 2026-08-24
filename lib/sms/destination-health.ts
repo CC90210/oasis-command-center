@@ -341,10 +341,30 @@ export function verifiedOnly(env: NodeJS.ProcessEnv = process.env): boolean {
  * Returns the number in the form it is stored in, ready to send, plus where it
  * came from so the caller can record which one it used.
  */
+export type SendNumber =
+  | { phone: string; source: "provided" | "looked_up"; hold: null }
+  /**
+   * There is no number at all. PERMANENT — nothing will change on its own, so
+   * the caller should skip the step and let the sequence's email steps run.
+   */
+  | { phone: null; source: null; hold: "no_phone" }
+  /**
+   * There ARE numbers, but none is verified yet. TEMPORARY — a lookup may still
+   * land. The caller must HOLD, never skip.
+   *
+   * This distinction is the whole bug of 2026-08-22/23. Returning a bare null
+   * for both cases meant the caller read "awaiting a lookup" as "no phone" and
+   * called skipStep, which advances the row permanently past its SMS step. 190
+   * leads were burned that way over two days and sends sat at 0 — the exact
+   * defect Codex flagged for the isTextable gate, re-introduced one line
+   * earlier in the code that resolves the number.
+   */
+  | { phone: null; source: null; hold: "awaiting_verification" };
+
 export async function resolveSendNumber(
   tenantId: string,
   data: Record<string, unknown>,
-): Promise<{ phone: string; source: "provided" | "looked_up" } | null> {
+): Promise<SendNumber> {
   const stored = typeof data.phone === "string" ? data.phone.trim() : "";
   const wireless = wirelessCandidates(data.phone_lookup_candidates);
 
@@ -362,7 +382,7 @@ export async function resolveSendNumber(
     forms.set(w, w);
     candidates.push({ phone: w, source: "looked_up" });
   }
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return { phone: null, source: null, hold: "no_phone" };
 
   // Verdicts for just these numbers.
   const db: Db = getServiceSupabase();
@@ -372,9 +392,10 @@ export async function resolveSendNumber(
     .select("phone_last10, delivered, failed, textable, verified, reason")
     .eq("tenant_id", tenantId)
     .in("phone_last10", keys);
-  // FAIL CLOSED. An unreadable table must not silently promote an unvetted
-  // number into the send path.
-  if (res.error) return null;
+  // FAIL CLOSED, but as a HOLD. The lead HAS numbers; we simply cannot vet them
+  // right now. Skipping would burn the row permanently over a transient
+  // database problem, which is the more expensive mistake.
+  if (res.error) return { phone: null, source: null, hold: "awaiting_verification" };
 
   const verdicts = new Map<string, DestinationVerdict>();
   for (const r of (res.data || []) as Array<{
@@ -401,12 +422,14 @@ export async function resolveSendNumber(
         return !!row && (row.verified === true || row.verified === 1);
       })
     : candidates;
-  if (pool.length === 0) return null;
+  if (pool.length === 0) return { phone: null, source: null, hold: "awaiting_verification" };
 
   const pick = chooseTextableNumber(pool, verdicts);
-  if (!pick) return null;
+  // Every candidate was excluded as untextable. That is a property of the
+  // NUMBERS, not a missing lookup, so it is permanent.
+  if (!pick) return { phone: null, source: null, hold: "no_phone" };
   const phone = forms.get(pick.last10);
-  return phone ? { phone, source: pick.source } : null;
+  return phone ? { phone, source: pick.source, hold: null } : { phone: null, source: null, hold: "no_phone" };
 }
 
 export type { DestinationVerdict };
