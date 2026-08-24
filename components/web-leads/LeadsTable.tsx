@@ -36,8 +36,9 @@
  */
 
 import { useEffect, useRef } from "react";
-import { AlertCircle, Phone } from "lucide-react";
+import { AlertCircle, ExternalLink, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 
 /**
  * Rep-facing names for CC's stage values.
@@ -89,17 +90,52 @@ function TableSkeleton({ rows = 12 }: { rows?: number }) {
  * did not. Never a zero, never a dash, never a badge -- see the module header
  * and lib/web-leads/audit.ts.
  */
+/**
+ * "View site" straight from the row, so a rep can look at what they are about
+ * to talk about without opening the lead first. Adon: "you should be able to
+ * view the website directly from that without having to click into the lead."
+ *
+ * Renders NOTHING when safeExternalUrl returns null rather than a dead or
+ * dangerous control: 217 stored websites have no scheme (a bare domain in an
+ * href navigates inside our own dashboard), and these values come from
+ * OpenStreetMap, which anyone can edit, so a `javascript:` href would run in
+ * our origin. rel="noopener noreferrer" for the same reason it is on the panel
+ * button -- these are 27,000 sites we do not control, and without it the opened
+ * page can reach back through window.opener.
+ */
+function VisitSite({ url, name }: { url: string | null; name: string }) {
+  const href = preferredSiteUrl(url);
+  if (!href) return null;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      // The row opens the lead; this must not. Same reason the phone link and
+      // the checkbox stop propagation.
+      onClick={(e) => e.stopPropagation()}
+      title={`Open ${name}'s website in a new tab`}
+      className="inline-flex items-center gap-1 rounded-md border border-bg-border px-2 py-1 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:bg-bg-elev hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
+      <ExternalLink className="h-3 w-3" />View site
+    </a>
+  );
+}
+
 function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   if (lead.scoreState === "scored" && lead.score !== null) {
     return (
-      <div className="flex flex-col items-end gap-1.5">
-        <span className="text-lg font-bold leading-none tabular-nums text-fg">{lead.score}</span>
-        <span className="block h-1 w-14 overflow-hidden rounded-full bg-bg-border" aria-hidden>
-          <span
-            className="block h-full rounded-full bg-fg-dim"
-            style={{ width: `${Math.min(100, Math.max(0, lead.score))}%` }}
-          />
-        </span>
+      <div className="flex items-center justify-end gap-3">
+        <VisitSite url={lead.websiteUrl} name={lead.name} />
+        <div className="flex flex-col items-end gap-1.5">
+          <span className="text-lg font-bold leading-none tabular-nums text-fg">{lead.score}</span>
+          <span className="block h-1 w-14 overflow-hidden rounded-full bg-bg-border" aria-hidden>
+            <span
+              className="block h-full rounded-full bg-fg-dim"
+              style={{ width: `${Math.min(100, Math.max(0, lead.score))}%` }}
+            />
+          </span>
+        </div>
       </div>
     );
   }
@@ -114,7 +150,16 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
         ? "We could not check this site"
         : "Not scored yet";
 
-  return <span className="block text-right text-xs italic leading-snug text-fg-dim">{text}</span>;
+  // An unreachable or unscored site can still HAVE a URL worth glancing at --
+  // "we could not check this" is a statement about our crawler, not about
+  // whether the site exists. The button appears whenever there is a safe URL,
+  // independent of whether we managed to score it.
+  return (
+    <div className="flex items-center justify-end gap-3">
+      <VisitSite url={lead.websiteUrl} name={lead.name} />
+      <span className="text-right text-xs italic leading-snug text-fg-dim">{text}</span>
+    </div>
+  );
 }
 
 export function LeadsTable({
@@ -206,7 +251,7 @@ export function LeadsTable({
                   aria-label={allOnPageSelected ? "Clear selection on this page" : "Select every lead on this page"}
                 />
               </th>
-              <th scope="col" className="px-4 py-3 font-bold">Business</th>
+              <th scope="col" className="pl-3 pr-4 py-3 font-bold">Business</th>
               <th scope="col" className="px-4 py-3 font-bold">Phone</th>
               {showStage && <th scope="col" className="px-4 py-3 font-bold">Stage</th>}
               <th scope="col" className="px-4 py-3 text-right font-bold">Website</th>
@@ -228,7 +273,22 @@ export function LeadsTable({
                 className="group cursor-pointer border-t border-bg-border/50 transition-colors first:border-t-0 hover:bg-bg-hover focus-visible:bg-bg-hover focus-visible:outline-none"
               >
                 {/* stopPropagation: ticking a row must not also open it. */}
-                <td className="w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
+                <td className="relative w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
+                  {/* HOVER RAIL LIVES HERE, at the row's outer edge, not against
+                      the business name.
+                      It used to sit at left-0 of the NAME cell. That was fine
+                      until the checkbox column arrived and took the name cell's
+                      left padding with it -- after which a 2px accent bar
+                      rendered hard against the first letter of every business
+                      on hover, reading as a strike through the name. Adon
+                      flagged it: "it kind of does just like a blue line that
+                      kind of cuts out the name." Anchored to the checkbox cell
+                      it has the full gutter to itself and can never touch text,
+                      whatever happens to the columns after it. */}
+                  <span
+                    aria-hidden
+                    className="absolute inset-y-0 left-0 w-[3px] origin-center scale-y-0 rounded-r bg-accent transition-transform duration-150 group-hover:scale-y-100 group-focus-visible:scale-y-100"
+                  />
                   <input
                     type="checkbox"
                     className="h-3.5 w-3.5 rounded accent-accent align-middle"
@@ -237,14 +297,7 @@ export function LeadsTable({
                     aria-label={`Select ${l.name}`}
                   />
                 </td>
-                <td className="relative py-3 pr-4 align-middle">
-                  {/* Left rail on hover/focus: shows which row is live without
-                      moving anything, so the list does not jitter as the cursor
-                      travels. */}
-                  <span
-                    aria-hidden
-                    className="absolute inset-y-0 left-0 w-0.5 scale-y-0 bg-accent transition-transform group-hover:scale-y-100 group-focus-visible:scale-y-100"
-                  />
+                <td className="py-3 pl-3 pr-4 align-middle">
                   <span className="block truncate font-semibold text-fg">{l.name}</span>
                   <span className="mt-0.5 block truncate text-xs text-fg-dim">
                     {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}

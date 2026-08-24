@@ -29,6 +29,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
+import { memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
 import { isClaimable } from "./claim-ops";
@@ -197,6 +198,44 @@ export async function fetchSheets(): Promise<Sheet[]> {
  * also the layer that decides what a failed score read means -- see
  * app/api/web-leads/route.ts.
  */
+/**
+ * Every lead row for this tenant, memoised for a few seconds.
+ *
+ * THIS READ IS THE 5-7 SECOND PAGE LOAD Adon reported. ~31,000 rows, each
+ * carrying its full `data` JSON blob, pulled across HTTP to render fifty of
+ * them. It cannot move server-side: territory, city and industry live inside
+ * that blob and are free text ("Québec", "Restaurants & Bars"), and those
+ * values must never enter a PostgREST filter string. That rule is a real
+ * injection defence and is not being traded away for latency.
+ *
+ * What CAN change is how OFTEN the read happens. Caching a lead list would
+ * normally be alarming -- a rep could see a lead somebody already claimed --
+ * except that claiming is a compare-and-swap (claim-ops.ts). A stale pool
+ * cannot produce a duplicate call; it can only produce a claim that fails, and
+ * failing tells the rep the truth. Worst case is one wasted click, never a
+ * wasted phone call. Full argument in lib/web-leads/cache.ts; writes invalidate
+ * it immediately.
+ */
+async function allTenantLeads(): Promise<{ id: string; data: Record<string, unknown> }[]> {
+  return memo("web-leads:leads", TTL.LEADS, async () => {
+    const db = getServiceSupabase();
+    const { data, error, count } = await db
+      .from("tenant_records")
+      .select("id,data", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("entity_type", "lead")
+      .limit(LEAD_READ_CAP);
+    if (error) throw new Error(`leads_read_failed: ${error.message}`);
+    // A short list that LOOKS complete is worse than a loud failure. Proved
+    // against the read's own match count, not against our cap -- PostgREST
+    // enforces its own server-side max-rows regardless of what `.limit()` asks
+    // for, and a cap comparison passes silently when that binds first. See
+    // assertCompleteRead() in ./tenant.
+    assertCompleteRead("leads_read", data || [], count);
+    return (data || []) as { id: string; data: Record<string, unknown> }[];
+  });
+}
+
 export async function fetchLeads(
   f: WebLeadFilters,
   sheetIds: string[],
@@ -210,27 +249,7 @@ export async function fetchLeads(
   // A rep's own book is not confined to the sheets the filters selected, so an
   // empty sheet selection means "no leads" only for the shared pool.
   if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0 };
-  const db = getServiceSupabase();
-  const { data, error, count } = await db
-    .from("tenant_records")
-    .select("id,data", { count: "exact" })
-    .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("entity_type", "lead")
-    .limit(LEAD_READ_CAP);
-  if (error) throw new Error(`leads_read_failed: ${error.message}`);
-
-  // A short list that LOOKS complete is worse than a loud failure, so refuse to
-  // serve a possibly-partial dataset.
-  //
-  // This used to compare the row count against LEAD_READ_CAP, which only
-  // catches truncation by OUR cap. PostgREST enforces its own server-side
-  // max-rows regardless of what `.limit()` asks for, and on that path the check
-  // passed while most of the tenant's leads went missing -- the filter rail
-  // confidently showing 10,872 over a table holding whatever the server felt
-  // like returning. Comparing against the read's own match count proves
-  // completeness instead of guessing at the source of the limit. See
-  // assertCompleteRead() in ./tenant.
-  assertCompleteRead("leads_read", data || [], count);
+  const data = await allTenantLeads();
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
