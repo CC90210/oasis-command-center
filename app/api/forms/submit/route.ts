@@ -70,6 +70,7 @@ import {
   adoptLeadSource,
   normalizeLeadSource,
   recordSubmissionChannel,
+  redactSubmissionPath,
   LEAD_SOURCE_KEY,
   LEAD_SOURCE_AT_KEY,
   LAST_SUBMITTED_VIA_KEY,
@@ -196,7 +197,17 @@ export async function POST(req: NextRequest) {
       errorStack: err instanceof Error ? (err.stack ?? null) : null,
       // The signed lead token is a credential; the recovery record needs the
       // merchant's ANSWERS, not the ability to submit as them.
-      payload: { ...(rawBody as Record<string, unknown>), token: body?.token ? "<redacted>" : undefined },
+      payload: {
+        ...(rawBody as Record<string, unknown>),
+        token: body?.token ? "<redacted>" : undefined,
+        // submission_path is `/f/<tenant>/<form>/<TOKEN>` on the token route,
+        // so spreading rawBody persisted a live bearer credential for that
+        // merchant's form into the failure-capture store. The email path was
+        // already careful about this; this path was not. (CodeRabbit, PR #294.)
+        submission_path: body?.submission_path
+          ? redactSubmissionPath(body.submission_path)
+          : undefined,
+      },
       userAgent: req.headers.get("user-agent"),
     });
     return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
@@ -849,10 +860,20 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     submissionUrl,
     new Date().toISOString(),
   );
+  let notifyVia = channelPatch?.[LAST_SUBMITTED_VIA_KEY];
+  let notifyLink = channelPatch?.[LAST_SUBMITTED_LINK_KEY];
+
   if (channelPatch) {
-    // Read-modify-write, guarded. A failed read yields data:null and spreading
-    // {} would wipe every existing field off the lead — the same hazard the
-    // OASIS funnel patch below documents. Only write on a confirmed read.
+    // A hand-rolled read-modify-write here could LOSE an update: two
+    // submissions read the same document, and a delayed earlier request then
+    // writes its older channel over a newer one — or worse, writes back a
+    // stale copy of every OTHER field on the lead. (CodeRabbit, PR #294.)
+    //
+    // updateRecord's ifMatch is real optimistic concurrency: it guards on the
+    // field AND pins updated_at as a row version, both riding on the same
+    // statement as the write. A conflict means somebody else wrote a channel
+    // at least as fresh as ours, so losing our write is the CORRECT outcome
+    // and we swallow it rather than retrying into a fight.
     const cur = await db
       .from("tenant_records")
       .select("data")
@@ -861,18 +882,45 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       .maybeSingle();
     const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data;
     if (!cur.error && curData) {
-      await db
-        .from("tenant_records")
-        .update({ data: { ...curData, ...channelPatch } })
-        .eq("id", link.lead_id)
-        .eq("tenant_id", form.tenant_id);
+      const priorVia =
+        typeof curData[LAST_SUBMITTED_VIA_KEY] === "string"
+          ? (curData[LAST_SUBMITTED_VIA_KEY] as string)
+          : null;
+      const unchanged =
+        priorVia === channelPatch[LAST_SUBMITTED_VIA_KEY] &&
+        curData[LAST_SUBMITTED_LINK_KEY] === channelPatch[LAST_SUBMITTED_LINK_KEY];
+      // Skip the write entirely when nothing changed. A multi-step form
+      // submits the same channel on every step; writing each time multiplies
+      // the collision window for no gain.
+      if (!unchanged) {
+        try {
+          await updateRecord({
+            tenant_id: form.tenant_id,
+            entity: "lead",
+            id: link.lead_id,
+            patch: channelPatch,
+            ifMatch: { field: LAST_SUBMITTED_VIA_KEY, value: priorVia },
+          });
+        } catch (err) {
+          // Conflict is expected under concurrency and is not an error. Report
+          // the value that actually won so the notification never claims a
+          // channel the lead does not carry.
+          if (err instanceof RecordsError && err.code === "conflict") {
+            // Report the channel that actually won, and DROP our link: the
+            // winning writer's link is not ours to quote, and a channel paired
+            // with the wrong link is worse than a channel with none.
+            notifyVia = priorVia ?? notifyVia;
+            notifyLink = undefined;
+          } else {
+            console.error(
+              "[forms.submit] channel stamp failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+      }
     }
   }
-  // What the operator notification should say about how this arrived. Falls
-  // back to whatever the lead already carried, so a mid-funnel step with no
-  // query string still reports the channel the merchant actually came in on.
-  const notifyVia = channelPatch?.[LAST_SUBMITTED_VIA_KEY];
-  const notifyLink = channelPatch?.[LAST_SUBMITTED_LINK_KEY];
 
   // Stage transition — if step_outcomes has a target for this step,
   // patch the lead via updateRecord. Phase 2's BRAVO_RECORD_STATUS_CHANGED

@@ -344,7 +344,7 @@ function Ready({ data, range }: { data: MetricsResponse; range: number }) {
         <div className="text-xs font-bold text-fg-muted">No leads in the last {range} days</div>
         <div className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-fg-dim">
           Once a merchant submits through a tagged link, their channel shows up here. Grab the
-          Text and Dial links from the Forms page.
+          Text, Dial and Email links from the Forms page.
         </div>
       </div>
     );

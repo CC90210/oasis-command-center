@@ -6,6 +6,7 @@ import {
   adoptLeadSource,
   withLeadSourceParam,
   describeSubmissionLink,
+  redactSubmissionPath,
   recordSubmissionChannel,
   LEAD_SOURCE_KEY,
   LEAD_SOURCE_AT_KEY,
@@ -336,3 +337,41 @@ assert.equal(
 }
 
 console.log("lead-source email channel + submission channel: all assertions passed");
+
+// ── redactSubmissionPath: the failure-capture leak (CodeRabbit, PR #294) ─────
+// The submit route's crash handler spreads the whole request body into the
+// failure-capture store. submission_path is `/f/<tenant>/<form>/<TOKEN>` on the
+// token route, so without this the store held a live bearer credential for that
+// merchant's form every time the route threw.
+
+assert.equal(
+  redactSubmissionPath("/f/sun/full-application/eyJhbGciOiJIUzI1NiJ9.SECRET.sig"),
+  "/f/sun/full-application/[signed-link]",
+  "the token segment must not reach the failure store",
+);
+assert.equal(
+  redactSubmissionPath("/f/sun/full-application/SECRET?x=1")?.includes("SECRET"),
+  false,
+  "a query string must not smuggle the token through",
+);
+assert.equal(
+  redactSubmissionPath("/f/sun/initial-lead-capture"),
+  "/f/sun/initial-lead-capture",
+  "an anonymous path has no token segment and is left alone",
+);
+assert.equal(redactSubmissionPath(undefined), undefined);
+assert.equal(redactSubmissionPath(null), undefined);
+assert.equal(redactSubmissionPath("   "), undefined, "blank is nothing to record");
+assert.equal(
+  (redactSubmissionPath("/f/sun/x/" + "A".repeat(5000)) || "").length < 500,
+  true,
+  "oversized input is bounded before it is stored",
+);
+{
+  // Deeper paths keep redacting the token segment, never a later one.
+  const out = redactSubmissionPath("/f/sun/full-application/TOKEN/extra") || "";
+  assert.equal(out.includes("TOKEN"), false, "the 4th segment is the token, wherever the path ends");
+  assert.equal(out.includes("extra"), true, "trailing segments are preserved");
+}
+
+console.log("redactSubmissionPath: all assertions passed");

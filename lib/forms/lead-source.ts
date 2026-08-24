@@ -225,3 +225,26 @@ export function recordSubmissionChannel(
     [LAST_SUBMITTED_AT_KEY]: nowIso,
   };
 }
+
+/**
+ * Strip the signed token out of a `/f/<tenant>/<form>/<token>` path.
+ *
+ * describeSubmissionLink does this for the OPERATOR EMAIL. This is the same
+ * redaction for anywhere else the raw path gets persisted or logged — notably
+ * the submit-failure capture store, which spreads the request body and so was
+ * writing a live bearer credential to disk whenever the route crashed
+ * (CodeRabbit, PR #294).
+ *
+ * Kept as its own export rather than reusing describeSubmissionLink because
+ * that one prefixes a channel label; this returns a bare path.
+ */
+export function redactSubmissionPath(raw: string | null | undefined): string | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  const trimmed = raw.trim().slice(0, 400);
+  const parts = trimmed.split("?")[0].split("/").filter(Boolean);
+  if (parts[0] === "f" && parts.length >= 4) {
+    parts[3] = "[signed-link]";
+    return "/" + parts.join("/");
+  }
+  return trimmed;
+}
