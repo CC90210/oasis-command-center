@@ -935,11 +935,27 @@ async function processSmsStep(
   // checking consent against one number and texting another is how a merchant
   // who opted out gets texted anyway.
   const resolved = await resolveSendNumber(row.tenant_id, data);
-  const phone = resolved?.phone ?? "";
-  // No usable number for an SMS step: SKIP + advance (the sequence may have
-  // email steps this lead CAN receive) rather than fail the whole chain
-  // (audit H5).
-  if (!phone) return skipStep(db, row, steps, "no_phone_for_sms_step");
+
+  // WHY there is no number decides what happens to the row.
+  //
+  // This collapsed both answers into a truthiness check and skipped — and
+  // skipStep calls advanceRow. Measured 2026-08-22/23: 190 rows were burned as
+  // "no_phone_for_sms_step" while every one of those leads HAD a phone. They
+  // were waiting on a lookup. Sends sat at 0 for two days.
+  //
+  // It is the same defect Codex flagged for the isTextable gate, re-introduced
+  // one line earlier by the code that resolves the number. Hence an explicit
+  // discriminator here rather than a falsy test.
+  if (resolved.hold === "awaiting_verification") {
+    return holdOrEmailInstead(
+      db, row, data, step, steps, run, emailClass,
+      24, "sms_awaiting_verification: no verified number for this lead yet",
+    );
+  }
+  // Genuinely nothing to text: SKIP + advance, so the sequence's email steps
+  // still reach the merchant rather than failing the whole chain (audit H5).
+  if (!resolved.phone) return skipStep(db, row, steps, "no_phone_for_sms_step");
+  const phone = resolved.phone;
 
   const supp = await checkPhoneOptOut(row.tenant_id, phone);
   if (supp.optedOut) return markPermanentFail(db, row, "opted_out (replied STOP)");
