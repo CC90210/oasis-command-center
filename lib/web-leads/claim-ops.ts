@@ -170,11 +170,50 @@ export async function claimLeads(
     });
   }
 
+  /**
+   * THE CAP, RE-CHECKED AFTER THE FACT.
+   *
+   * The per-lead swap makes each claim exclusive; it does nothing about the
+   * rep's own total. Two overlapping requests from one rep -- two browser tabs,
+   * a double submit -- both read heldCount = 200, both grant 50, and the rep
+   * ends with 300 against an advertised ceiling of 250. Codex caught it
+   * (2026-08-23).
+   *
+   * A truly atomic reservation needs a counter row or a transaction the bridge
+   * does not expose. What it does NOT need is to be left wrong: the cap is a
+   * business limit, not a security boundary, so the honest fix is to converge
+   * rather than to pretend. Re-count after writing, and if this request pushed
+   * the rep over, immediately release the excess -- the ones this request just
+   * took, newest first, so a concurrent request's leads are never the ones
+   * yanked -- and report them as capacity refusals, which is what they are.
+   *
+   * The rep sees the truth either way: "you now hold 250 of 250", and the
+   * leads they did not get named as over the limit.
+   */
+  let overflowRefused: ClaimPlan["refused"] = [];
+  if (claimed.length > 0) {
+    const after = await heldCount(userId);
+    const excess = after - MAX_LEADS_PER_REP;
+    if (excess > 0) {
+      const giveBack = claimed.slice(-excess);
+      await releaseLeads(userId, false, giveBack);
+      overflowRefused = giveBack.map((id) => ({ id, reason: "at_capacity" as const }));
+      for (const id of giveBack) {
+        const i = claimed.indexOf(id);
+        if (i >= 0) claimed.splice(i, 1);
+      }
+    }
+  }
+
   return {
     claimed,
     refused: [
       ...plan.refused,
-      // Surfaced with a reason the UI can render rather than swallowed.
+      ...overflowRefused,
+      // Surfaced with a reason the UI can render rather than swallowed. An id
+      // that came back with no row does not exist or is outside this tenant --
+      // a rep who selected 60 and is told about 59 has no way to find the
+      // missing one.
       ...missing.map((id) => ({ id, reason: "held" as const })),
     ],
     lostRace,
@@ -224,15 +263,25 @@ export async function releaseLeads(
   for (let i = 0; i < allowed.length; i += CHUNK) {
     const chunk = allowed.slice(i, i + CHUNK);
     const results = await Promise.allSettled(
-      chunk.map((r) =>
-        db
+      chunk.map((r) => {
+        const prevOwner = factsFrom(r.data || {}).assignedTo;
+        return db
           .from("tenant_records")
           .update({ data: { ...(r.data || {}), ...releasePatch() }, updated_at: nowIso })
           .eq("id", r.id)
           .eq("tenant_id", WEBDEV_TENANT_ID)
           .eq("entity_type", "lead")
-          .select("id"),
-      ),
+          // THE SAME SWAP AS CLAIMING, and for a sharper reason. An
+          // unconditional release writes back the snapshot read moments ago.
+          // If another rep claimed a stale lead in between, that write both
+          // restores the stale data AND clears the new owner -- silently
+          // erasing someone else's claim and putting a lead they are about to
+          // call back in the pool for a third rep. Conditioning on the owner we
+          // observed means a release can only ever release what we still hold.
+          // (Codex review, 2026-08-23.)
+          .eq("data->>assigned_to", prevOwner as string)
+          .select("id");
+      }),
     );
     results.forEach((res, idx) => {
       const id = chunk[idx].id;
