@@ -28,23 +28,12 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { X, Phone, MapPin, Globe, Tag, ExternalLink } from "lucide-react";
+import { X, Phone, ExternalLink } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { BusinessFacts } from "./BusinessFacts";
 import { WebsiteComparison } from "./WebsiteComparison";
 import { CallOutcomeLog } from "./CallOutcomeLog";
-
-function Row({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | null }) {
-  return (
-    <div className="flex gap-3 py-2.5">
-      <div className="mt-0.5 text-fg-dim">{icon}</div>
-      <div className="min-w-0 flex-1">
-        <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">{label}</p>
-        <p className="mt-0.5 break-words text-sm text-fg">{value || "—"}</p>
-      </div>
-    </div>
-  );
-}
 
 function HeaderSkeleton() {
   return (
@@ -177,14 +166,16 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
               {/* HERO. See module header. */}
               <WebsiteComparison leadId={leadId} />
 
-              <div className="mt-5 divide-y divide-bg-border/60 border-t border-bg-border">
-                <Row icon={<MapPin className="h-4 w-4" />} label="Address" value={[lead.address, lead.city, lead.province, lead.postal].filter(Boolean).join(", ") || null} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Industry" value={lead.industry} />
-                <Row icon={<Globe className="h-4 w-4" />} label="Website" value={lead.websiteUrl} />
-                {/* VERBATIM — see spec section 2. */}
-                <Row icon={<Globe className="h-4 w-4" />} label="Website status" value={lead.websiteCondition} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Research notes" value={lead.auditFindings} />
-                <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
+              {/* The SAME component the battle card renders, not a second copy
+                  of these rows. The page shipped on 2026-08-24 without any of
+                  them, which is the bug this extraction closes; leaving two
+                  hand-maintained lists would let the two surfaces drift again,
+                  and two screens disagreeing about one business's address
+                  while a rep is on the phone is the failure mode worth paying
+                  a shared component for. It carries the verbatim
+                  websiteCondition/auditFindings rules with it. */}
+              <div className="mt-5">
+                <BusinessFacts lead={lead} layout="stack" />
               </div>
 
               <CallOutcomeLog leadId={leadId} />

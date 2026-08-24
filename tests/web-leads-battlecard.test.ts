@@ -718,4 +718,117 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   );
 }
 
+// ---------------------------------------------------------------------------
+// 10. THE CARD SAYS WHO THE REP IS CALLING.
+//
+// The card shipped on 2026-08-24 with the analysis and without the business.
+// Measured on the file as merged: ZERO occurrences of address, postal,
+// osmCategory or territoryName. The drawer had all of them. A rep opening a
+// lead from their own book got a full screen of percentile charts and no way
+// to see where the business was, which the operator reported in exactly those
+// words: "When the lead is in their pipeline they can't view the address and
+// they can't view a lot of information."
+//
+// This section is the regression guard. It asserts the FIELDS reach a screen,
+// not that a component exists: the previous card imported WebLead, typed it,
+// passed it around, and rendered four of its fourteen fields.
+// ---------------------------------------------------------------------------
+
+{
+  const facts = "components/web-leads/BusinessFacts.tsx";
+  const src = read(facts);
+
+  // The full address, assembled once. Street and postal code included -- city
+  // and province alone cannot tell a rep which branch they have.
+  assert.match(
+    src,
+    /\[lead\.address, lead\.city, lead\.province, lead\.postal\]\s*\.filter\(Boolean\)\s*\.join\(", "\)/,
+    `${facts} must join the full address the way the drawer has always joined it`,
+  );
+  assert.match(src, /export function fullAddress/, `${facts} must own the one address join`);
+
+  // Every field the operator asked for, by name. A block that renders the
+  // address and drops the territory is the same bug one field smaller.
+  for (const field of [
+    "lead.industry",
+    "lead.websiteUrl",
+    "lead.websiteCondition",
+    "lead.auditFindings",
+    "lead.osmCategory",
+    "lead.territoryName",
+    "lead.phone",
+  ]) {
+    assert.ok(src.includes(field), `${facts} must render ${field}`);
+  }
+
+  // VERBATIM, and not merely present. The two hedged directory strings must
+  // reach the screen with no badge, no icon-as-verdict and no shortening --
+  // they are unverified statements about a stranger's business that a rep
+  // reads aloud on a live call.
+  assert.doesNotMatch(
+    src,
+    /(websiteCondition|auditFindings)\s*[.?]?\.?(slice|substring|split|replace|toUpperCase|toLowerCase)/,
+    `${facts} must not transform the verbatim directory strings`,
+  );
+  assert.doesNotMatch(src, /truncate|line-clamp/, `${facts} must not clip a verbatim directory string`);
+
+  // A missing field says so in words. A blank cell mid-call is indistinguishable
+  // from a half-rendered page.
+  assert.match(src, /Not on file/, `${facts} must name a missing field rather than leaving it blank`);
+
+  // Nothing on this surface is generated. Same rule as the rest of the feature.
+  assert.doesNotMatch(src, /claudeMessages|anthropic|openai|generateText/i, `${facts} must never generate copy`);
+}
+
+{
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+
+  // The block is ON the card, and ABOVE the analysis. "Near the top" is the
+  // requirement, not "somewhere on the page": a rep confirms who they are
+  // calling before they pitch, and a block under four charts is a block they
+  // reach after the pitch is already wrong.
+  assert.match(
+    src,
+    /<BusinessFacts lead=\{lead\} layout="grid" \/>[\s\S]*?audit\.state !== "scored"/,
+    `${view} must render the business facts block BEFORE it branches on the audit state`,
+  );
+
+  // Rendered in EVERY state, scored or not. The old card put the two verbatim
+  // directory strings inside the not-scored branch only, so a lead that DID
+  // score showed neither -- the exact case where a rep has a number in front
+  // of them and most needs to know nobody verified the rest.
+  const factsUses = (src.match(/<BusinessFacts/g) || []).length;
+  assert.equal(factsUses, 1, `${view} must render the facts block once, outside the scored/not-scored branch`);
+
+  // The full address is under the business name in the hero too, not just the
+  // city. Asserted on the hero's own subtitle line so a later edit cannot drop
+  // the street back out of it.
+  assert.match(
+    src,
+    /\[lead\.industry, fullAddress\(lead\)\]/,
+    `${view} must put the full address, not just the city, under the business name`,
+  );
+
+  // A prominent way out to the site, near the top, using the allowlisting
+  // helper and rendering NOTHING when it returns null -- a missing control is
+  // honest, a dead one is not. Asserted as three separate facts rather than
+  // one wide regex: the gate, the href it feeds, and the words on it. A single
+  // pattern spanning them would have to allow ~800 characters of class list in
+  // between, which is a window wide enough to match almost anything.
+  assert.match(src, /\{websiteHref && \(/, `${view} must render nothing when preferredSiteUrl returns null`);
+  assert.match(src, /href=\{websiteHref\}/, `${view} must use the resolved URL as the href`);
+  assert.match(src, /\/>View website/, `${view} must label the control "View website"`);
+  assert.match(
+    src,
+    /const websiteHref = preferredSiteUrl\(lead\.websiteUrl\)/,
+    `${view} must resolve the prospect's URL through preferredSiteUrl`,
+  );
+
+  // The duplicates are gone. Two renderings of the same unverified sentence on
+  // one screen invite a rep to wonder which one is current.
+  const conditionUses = (src.match(/lead\.websiteCondition/g) || []).length;
+  assert.equal(conditionUses, 0, `${view} must read the verbatim directory strings through BusinessFacts, once`);
+}
+
 console.log("web-leads-battlecard ok");
