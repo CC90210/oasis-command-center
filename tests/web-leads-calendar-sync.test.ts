@@ -58,7 +58,6 @@ assert.notEqual(nextActionEventKey("abc"), nextActionEventKey("abd"), "different
 const silent: CalendarSyncStatus[] = [
   { state: "synced", eventId: "e1", htmlLink: null },
   { state: "cleared" },
-  { state: "skipped", reason: "no_next_action" },
 ];
 for (const s of silent) {
   assert.equal(describeCalendarSync(s), null, `${s.state} must not interrupt the rep with a notice`);
@@ -160,27 +159,89 @@ assert.match(cb, /calendar:\s*"google_calendar"/, "the callback must map the cal
 assert.match(cb, /calendar_scope_not_granted/, "the callback must refuse a calendar grant that lacks the events scope");
 
 // ---------------------------------------------------------------------------
-// 6. A TERMINAL DISPOSITION REMOVES THE REMINDER.
+// 6. NO NEXT ACTION MEANS NO REMINDER, FOR EVERY DISPOSITION.
 //
-// The sharpest rule here. A prospect who said "never call me again" must not
-// have a reminder waiting on a rep's phone, and clearing the queue field alone
-// would leave the phone alert in place -- the mirror outliving what it mirrors.
+// REGRESSION (Codex review, 2026-08-24). This branch used to delete only for
+// TERMINAL dispositions and merely skip otherwise. But callDispositionPatch
+// clears `next_action_at` for ANY disposition logged without one, so a lead
+// with a callback already on the rep's phone, later logged `connected` or
+// `interested` with no follow-up, kept ringing for a call the queue no longer
+// had. The mirror outlived what it mirrored -- the one thing this module exists
+// to prevent -- and the original test passed the whole time because it only
+// ever examined the terminal branch.
+//
+// The rule is now simply: the phone matches the queue.
 // ---------------------------------------------------------------------------
 const sync = stripComments(read("lib/web-leads/calendar-sync.ts"));
-assert.match(sync, /isTerminalDisposition/, "calendar-sync must branch on terminal dispositions");
-assert.match(sync, /deleteCalendarEvent/, "a terminal disposition must DELETE the reminder, not merely skip the push");
-const terminalBranch = sync.slice(sync.indexOf("isTerminalDisposition(input.disposition)"));
-assert.ok(
-  terminalBranch.indexOf("deleteCalendarEvent") < terminalBranch.indexOf("upsertCalendarEvent"),
-  "the terminal branch must reach the delete before any upsert path",
+assert.match(sync, /deleteCalendarEvent/, "clearing a next action must DELETE the reminder, not merely skip the push");
+
+// The delete must be reached from the plain "no next action" test, NOT from a
+// terminal-only test. Asserted on the guard's shape so a narrowing edit fails.
+const guard = sync.match(/if\s*\(\s*!\s*input\.nextActionAt\s*\)\s*\{[\s\S]{0,400}?\}/);
+assert.ok(guard, "calendar-sync must branch on a bare !input.nextActionAt");
+assert.match(
+  guard![0],
+  /deleteCalendarEvent/,
+  "the no-next-action branch must delete the reminder for EVERY disposition, not only terminal ones",
+);
+// A terminal-only condition must not creep back in as the deletion gate.
+assert.doesNotMatch(
+  sync,
+  /if\s*\(\s*isTerminalDisposition\(input\.disposition\)\s*\)\s*\{[\s\S]{0,200}?deleteCalendarEvent/,
+  "deletion must not be gated on the disposition being terminal -- that is the bug this replaced",
 );
 
+// There is no longer a path that leaves a stale event in place.
+assert.doesNotMatch(sync, /state:\s*"skipped"/, "no push may end without either writing or clearing the reminder");
+
 // An already-absent event is SUCCESS: the desired end state is "no reminder".
-// Treating a 404 as a failure would make an ordinary retry look broken.
+// Treating a 404 as a failure would make an ordinary retry look broken, and
+// deleting is now the common case rather than the rare one.
 assert.match(
   read("lib/integrations/google-calendar.ts"),
   /r\.status === 404 \|\| r\.status === 410/,
   "deleting an already-absent event must count as success",
+);
+
+// ---------------------------------------------------------------------------
+// 7. INSERT BEFORE UPDATE.
+//
+// REGRESSION (Codex review, 2026-08-24). The write path was PUT-only whenever
+// an idempotency key was present -- which is every callback. Google's
+// events.update only updates an EXISTING event and answers 404 for a
+// deterministic id that has never been created, so the FIRST sync for every
+// single lead would have failed, every rep would have been told their calendar
+// could not be reached, and the feature would never have worked once.
+//
+// Every unit test passed throughout, because none of them exercise the HTTP
+// call. That is the lesson worth keeping: this file can prove the SHAPE of the
+// request but not that Google accepts it, and a live connect test is still
+// owed before anyone relies on a phone reminder.
+//
+// events.insert accepts a caller-supplied id and answers 409 when it exists,
+// so insert-then-update-on-conflict preserves one-event-per-lead.
+// ---------------------------------------------------------------------------
+const calendarSrc = read("lib/integrations/google-calendar.ts");
+const upsertBody = calendarSrc.slice(calendarSrc.indexOf("export async function upsertCalendarEvent"));
+const postAt = upsertBody.indexOf('"POST"');
+const putAt = upsertBody.indexOf('"PUT"');
+assert.ok(postAt > -1, "upsertCalendarEvent must be able to INSERT");
+assert.ok(putAt > -1, "upsertCalendarEvent must be able to UPDATE");
+assert.ok(
+  postAt < putAt,
+  "the insert must be attempted before the update -- a PUT to an id that does not exist yet 404s, which broke every first push",
+);
+assert.match(
+  upsertBody,
+  /409/,
+  "the update path must be reached only on a 409 duplicate-id conflict, not on every failure",
+);
+// Any other status must be reported as-is. Falling through to an update after
+// an auth or quota error would report a genuine failure as a mysterious 404.
+assert.match(
+  upsertBody,
+  /created\.status !== 409/,
+  "a non-409 insert failure must return immediately rather than retrying as an update",
 );
 
 console.log("web-leads-calendar-sync ok");

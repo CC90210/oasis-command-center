@@ -36,13 +36,18 @@ import {
   deleteCalendarEvent,
   type CalendarFailure,
 } from "@/lib/integrations/google-calendar";
-import { isTerminalDisposition, type CallDisposition } from "@/lib/website-sales-workflow";
+import { type CallDisposition } from "@/lib/website-sales-workflow";
 import { WEBDEV_TENANT_ID } from "./data";
 
+/**
+ * `skipped` was removed on 2026-08-24 along with the bug it existed for. Once
+ * "no next action" means "delete the reminder" rather than "do nothing", there
+ * is no path that skips, and a state the code can never produce is a lie in the
+ * type that a future reader would write a branch for.
+ */
 export type CalendarSyncStatus =
   | { state: "synced"; eventId: string; htmlLink: string | null }
   | { state: "cleared" }
-  | { state: "skipped"; reason: "no_next_action" }
   | { state: "not_connected" }
   | { state: "failed"; reason: CalendarFailure; detail?: string };
 
@@ -102,17 +107,24 @@ export async function pushNextActionToCalendar(input: {
 }): Promise<CalendarSyncStatus> {
   const key = nextActionEventKey(input.leadId);
 
-  // A terminal disposition must actively REMOVE any reminder still sitting on
-  // the rep's phone. Leaving it would ring a prospect who asked us not to call,
-  // which is the one outcome in this whole feature with a legal edge to it.
-  if (isTerminalDisposition(input.disposition) || !input.nextActionAt) {
-    if (isTerminalDisposition(input.disposition)) {
-      const cleared = await deleteCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, key);
-      if (cleared.ok) return { state: "cleared" };
-      if (cleared.reason === "not_connected") return { state: "not_connected" };
-      return { state: "failed", reason: cleared.reason, detail: cleared.detail };
-    }
-    return { state: "skipped", reason: "no_next_action" };
+  // NO NEXT ACTION MEANS NO REMINDER, WHATEVER THE DISPOSITION.
+  //
+  // This branch used to delete only for TERMINAL dispositions and merely skip
+  // otherwise (Codex review, 2026-08-24). But callDispositionPatch CLEARS
+  // `next_action_at` for any disposition logged without one -- so a lead with
+  // a callback on the rep's phone, later logged `connected` or `interested`
+  // with no follow-up, kept ringing for a call the queue no longer had. The
+  // mirror outlived what it mirrored, which is the one thing this module
+  // exists to prevent.
+  //
+  // Terminal dispositions are the sharpest case rather than the only one: a
+  // prospect who asked us never to call again must not have a reminder waiting
+  // on anyone's phone. But the rule is simply that the phone matches the queue.
+  if (!input.nextActionAt) {
+    const cleared = await deleteCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, key);
+    if (cleared.ok) return { state: "cleared" };
+    if (cleared.reason === "not_connected") return { state: "not_connected" };
+    return { state: "failed", reason: cleared.reason, detail: cleared.detail };
   }
 
   const result = await upsertCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, {
@@ -149,8 +161,6 @@ export function describeCalendarSync(status: CalendarSyncStatus): string | null 
     case "synced":
       return null; // Working as intended needs no announcement.
     case "cleared":
-      return null;
-    case "skipped":
       return null;
     case "not_connected":
       return "Saved to your queue. Connect Google Calendar in Settings to also get it on your phone.";

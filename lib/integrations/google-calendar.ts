@@ -241,18 +241,20 @@ export async function upsertCalendarEvent(
   }
 
   const eventId = input.idempotencyKey ? encodeEventId(input.idempotencyKey) : null;
-  const url = eventId
-    ? `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
-    : `${CALENDAR_API}/calendars/primary/events?sendUpdates=none`;
 
-  try {
+  const collection = `${CALENDAR_API}/calendars/primary/events?sendUpdates=none`;
+  const single = eventId
+    ? `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
+    : null;
+
+  const send = async (url: string, method: "POST" | "PUT", payload: Record<string, unknown>) => {
     const r = await fetch(url, {
-      method: eventId ? "PUT" : "POST",
+      method,
       headers: {
         authorization: `Bearer ${auth.token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify(eventId ? { ...body, id: eventId } : body),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const j = (await r.json().catch(() => ({}))) as {
@@ -260,14 +262,48 @@ export async function upsertCalendarEvent(
       htmlLink?: string;
       error?: { message?: string };
     };
-    if (!r.ok || !j.id) {
-      return {
-        ok: false,
-        reason: "api_error",
-        detail: j.error?.message || `HTTP ${r.status}`,
-      };
+    return { status: r.status, ok: r.ok, body: j };
+  };
+
+  try {
+    // INSERT FIRST, THEN UPDATE ON CONFLICT.
+    //
+    // This was a PUT-only path and it was broken for every FIRST push
+    // (Codex review, 2026-08-24). Google's events.update only updates an
+    // EXISTING event: a PUT to a deterministic id that has never been created
+    // returns 404. Since every callback carries an idempotency key, the very
+    // first sync for every lead would have failed, the rep would have been
+    // told their calendar could not be reached, and the feature would never
+    // have worked once -- while every unit test passed, because none of them
+    // exercise the HTTP call.
+    //
+    // events.insert DOES accept a caller-supplied `id`, and answers 409 when
+    // that id already exists. So: insert, and on 409 fall back to update. That
+    // preserves the property the key exists for -- one event per lead,
+    // rescheduling moves it rather than adding a second reminder.
+    if (!eventId || !single) {
+      const r = await send(collection, "POST", body);
+      if (!r.ok || !r.body.id) {
+        return { ok: false, reason: "api_error", detail: r.body.error?.message || `HTTP ${r.status}` };
+      }
+      return { ok: true, eventId: r.body.id, htmlLink: r.body.htmlLink || null };
     }
-    return { ok: true, eventId: j.id, htmlLink: j.htmlLink || null };
+
+    const created = await send(collection, "POST", { ...body, id: eventId });
+    if (created.ok && created.body.id) {
+      return { ok: true, eventId: created.body.id, htmlLink: created.body.htmlLink || null };
+    }
+    // 409 means this lead already has its event: update it in place. Any other
+    // status is a real failure and must not be retried as an update, or a
+    // genuine auth/quota error would be reported as a mysterious 404.
+    if (created.status !== 409) {
+      return { ok: false, reason: "api_error", detail: created.body.error?.message || `HTTP ${created.status}` };
+    }
+    const updated = await send(single, "PUT", { ...body, id: eventId });
+    if (!updated.ok || !updated.body.id) {
+      return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
+    }
+    return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
   } catch (err) {
     return { ok: false, reason: "network_error", detail: err instanceof Error ? err.message : String(err) };
   }
