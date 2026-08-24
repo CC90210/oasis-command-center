@@ -36,7 +36,8 @@
  */
 
 import { useEffect, useRef } from "react";
-import { AlertCircle, ExternalLink, Phone } from "lucide-react";
+import Link from "next/link";
+import { AlertCircle, ExternalLink, Phone, BarChart3 } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 
@@ -126,10 +127,43 @@ function VisitSite({ url, name }: { url: string | null; name: string }) {
   );
 }
 
+/**
+ * Straight to the battle card, without opening the drawer first.
+ *
+ * The row click still opens the 28rem panel, which is the right shape for
+ * triage -- glance, decide, close. This is the other move: the rep has decided
+ * to call this one and wants the whole case on one screen (percentile against
+ * real local competitors, the head-to-head, every failed check with what it
+ * costs). Making them open a drawer to find a link to the page is a click for
+ * nothing.
+ *
+ * A real `<Link>` rather than a router push, so it middle-clicks and
+ * cmd-clicks into a new tab like any other link -- a rep queueing up three
+ * leads before a call block is the normal case, not an edge one.
+ * stopPropagation for the same reason the phone link and the checkbox have it:
+ * the row must not ALSO open behind it.
+ */
+function BattleCardLink({ id, name }: { id: string; name: string }) {
+  return (
+    <Link
+      href={`/web-leads/${encodeURIComponent(id)}`}
+      onClick={(e) => e.stopPropagation()}
+      title={`Open the full battle card for ${name}`}
+      // Same always-present, low-contrast-until-hover treatment as "View site":
+      // a control that only exists while the mouse is over it is invisible to a
+      // keyboard and easy to miss.
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-bg-border/70 px-2.5 py-1.5 text-[11px] font-semibold text-fg-dim opacity-70 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
+      <BarChart3 className="h-3 w-3" />Battle card
+    </Link>
+  );
+}
+
 function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   if (lead.scoreState === "scored" && lead.score !== null) {
     return (
-      <div className="flex items-center justify-end gap-4">
+      <div className="flex items-center justify-end gap-3">
+        <BattleCardLink id={lead.id} name={lead.name} />
         <VisitSite url={lead.websiteUrl} name={lead.name} />
         {/* Number and track read as one object rather than two stacked things.
             The track was a 1px hairline that all but vanished at this size --
@@ -168,7 +202,12 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   // whether the site exists. The button appears whenever there is a safe URL,
   // independent of whether we managed to score it.
   return (
-    <div className="flex items-center justify-end gap-4">
+    <div className="flex items-center justify-end gap-3">
+      {/* Present for an unscored lead too. The battle card is honest about
+          having no score -- it renders the same sentence as this cell instead
+          of a chart -- and everything else it holds (the number, the site, the
+          directory notes, the call log) is still what a rep wants open. */}
+      <BattleCardLink id={lead.id} name={lead.name} />
       <VisitSite url={lead.websiteUrl} name={lead.name} />
       {/* Same width as the score block above it, so the column keeps one edge
           down the page instead of ragging in and out row by row. */}
@@ -339,7 +378,10 @@ export function LeadsTable({
                     )}
                   </td>
                 )}
-                <td className="w-44 px-4 py-3 align-middle">
+                {/* Widened from w-44 with the battle-card link: three controls
+                    at 11px need the room, and a column that wraps mid-row is
+                    what makes a 50-row page unreadable at the bottom. */}
+                <td className="w-72 px-4 py-3 align-middle">
                   <WebsiteCell lead={l} />
                 </td>
               </tr>

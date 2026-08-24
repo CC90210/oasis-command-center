@@ -216,6 +216,14 @@ const TESTS = [
   // tenant mismatch, propagation to the right leads, and the rule that an
   // unassign must never strip a lead's own data.assigned_to.
   "tests/web-leads-territory-assign.test.ts",
+  // The battle card (2026-08-24). Guards the numbers a rep says out loud: the
+  // percentile understates on a tie, the peer group is never quoted below
+  // MIN_SLICE and never silently widened, the evidence never prints a
+  // measurement the crawler did not take, and a non-scored site gets a sentence
+  // rather than a radar with seven axes at the origin. Plus the auth gate on
+  // the new endpoint, and the rule that a competitor is a measurement of a
+  // public business, never a lead out of another rep's book.
+  "tests/web-leads-battlecard.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

@@ -484,9 +484,10 @@ export function WebLeadsBrowser() {
           // disposition buttons while the next page is still in flight.
           ready={!loading && leadsKey === queueKey}
           onExit={() => setCalling(false)}
-          // Leaving Call Mode to open the drawer, rather than stacking two
-          // full-screen overlays on top of each other.
-          onOpenDetail={(id) => { setCalling(false); openLead(id); }}
+          // No onOpenDetail any more: Call Mode's "Full detail" is now a link
+          // to /web-leads/[id] (the battle card) in a new tab, so a rep reading
+          // the deep view keeps their place in the queue instead of dropping
+          // out of Call Mode to open a narrower drawer behind it.
           hasMore={filters.page < pages}
           onLoadMore={() => push({ ...filters, page: filters.page + 1 })}
         />
