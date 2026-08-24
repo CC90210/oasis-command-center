@@ -25,42 +25,35 @@
  * expected, non-error state, reported once so it can be shown as an invitation
  * to connect rather than retried forever in the background.
  *
- * IDEMPOTENT BY LEAD. The event id is derived from the lead id, so a rep who
- * reschedules the same lead three times ends with ONE event at the latest time
- * instead of three stale reminders. A calendar a rep learns to ignore is worse
- * than no calendar at all.
+ * ONE REMINDER PER LEAD, TRACKED BY A STORED ID.
+ *
+ * `data.next_action_event_id` on the lead holds whatever id Google assigned.
+ * Earlier versions derived a DETERMINISTIC id from the lead so nothing had to
+ * be stored, and five consecutive review rounds each found a defect in that
+ * approach. Every one had the same root: once an event with a caller-supplied
+ * id is deleted or cancelled, that id is ambiguous forever after, and Google's
+ * 409/410/404 behaviour across live events, retained tombstones and freed ids
+ * cannot be verified from here. Remembering the id Google hands back removes
+ * the question entirely, because an id is never reused after its event is
+ * removed. See writeReminderEvent's header for the full chain.
  */
 
 import {
-  upsertCalendarEvent,
-  cancelCalendarEvent,
+  writeReminderEvent,
+  removeReminderEvent,
   type CalendarFailure,
 } from "@/lib/integrations/google-calendar";
 import { type CallDisposition } from "@/lib/website-sales-workflow";
 import { WEBDEV_TENANT_ID } from "./data";
 
-/**
- * `skipped` was removed on 2026-08-24 along with the bug it existed for. Once
- * "no next action" means "delete the reminder" rather than "do nothing", there
- * is no path that skips, and a state the code can never produce is a lie in the
- * type that a future reader would write a branch for.
- */
+/** Where the Google-assigned id lives on the lead. */
+export const NEXT_ACTION_EVENT_ID_FIELD = "next_action_event_id";
+
 export type CalendarSyncStatus =
   | { state: "synced"; eventId: string; htmlLink: string | null }
   | { state: "cleared" }
   | { state: "not_connected" }
   | { state: "failed"; reason: CalendarFailure; detail?: string };
-
-/**
- * The de-duplication key for a lead's single outstanding "call them" reminder.
- *
- * Keyed on the LEAD, deliberately, not on the call. One lead has at most one
- * next action at a time, so one event per lead is the correct model and makes
- * rescheduling an update rather than an addition.
- */
-export function nextActionEventKey(leadId: string): string {
-  return `weblead-next-${leadId}`;
-}
 
 /**
  * What the rep sees on their phone. Business name first: a lock-screen
@@ -73,64 +66,70 @@ function eventSummary(businessName: string): string {
 }
 
 function eventDescription(input: {
-  businessName: string;
   disposition: CallDisposition;
   phone: string | null;
   note: string | null;
   leadUrl: string | null;
 }): string {
-  const lines = [
+  return [
     `Last call: ${input.disposition.replace(/_/g, " ")}`,
     input.phone ? `Phone: ${input.phone}` : null,
     input.note ? `Your note: ${input.note}` : null,
     input.leadUrl ? `Open the lead: ${input.leadUrl}` : null,
-  ].filter(Boolean);
-  return lines.join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
  * Mirror this lead's next action onto the rep's calendar.
  *
  * Call it AFTER the lead write has succeeded, never before and never instead.
- * It returns a status for the caller to show; it does not throw, because a
- * calendar problem is not a reason to fail a call that was genuinely logged.
+ * It returns a status for the caller to show, plus the event id the caller must
+ * PERSIST onto the lead. It does not throw: a calendar problem is not a reason
+ * to fail a call that was genuinely logged.
+ *
+ * `eventId` in the result is the id to store. It is null when the reminder was
+ * removed, which the caller should store too, so the next push knows there is
+ * nothing to update.
  */
 export async function pushNextActionToCalendar(input: {
-  leadId: string;
   repUserId: string;
   businessName: string;
   disposition: CallDisposition;
   nextActionAt: string | null;
+  /** The id we stored last time, or null if this lead has never had one. */
+  existingEventId: string | null;
   phone?: string | null;
   note?: string | null;
   leadUrl?: string | null;
-}): Promise<CalendarSyncStatus> {
-  const key = nextActionEventKey(input.leadId);
-
+}): Promise<{ status: CalendarSyncStatus; eventId: string | null }> {
   // NO NEXT ACTION MEANS NO REMINDER, WHATEVER THE DISPOSITION.
   //
-  // This branch used to delete only for TERMINAL dispositions and merely skip
-  // otherwise (Codex review, 2026-08-24). But callDispositionPatch CLEARS
-  // `next_action_at` for any disposition logged without one -- so a lead with
-  // a callback on the rep's phone, later logged `connected` or `interested`
-  // with no follow-up, kept ringing for a call the queue no longer had. The
-  // mirror outlived what it mirrored, which is the one thing this module
-  // exists to prevent.
-  //
-  // Terminal dispositions are the sharpest case rather than the only one: a
-  // prospect who asked us never to call again must not have a reminder waiting
-  // on anyone's phone. But the rule is simply that the phone matches the queue.
+  // callDispositionPatch clears `next_action_at` for ANY disposition logged
+  // without one, so a lead with a callback already on the rep's phone, later
+  // logged `connected` or `interested` with no follow-up, would otherwise keep
+  // ringing for a call the queue no longer has. The mirror must not outlive
+  // what it mirrors. Terminal dispositions are the sharpest case rather than
+  // the only one: a prospect who asked us never to call again must not have a
+  // reminder waiting on anyone's phone.
   if (!input.nextActionAt) {
-    const cleared = await cancelCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, key);
-    if (cleared.ok) return { state: "cleared" };
-    if (cleared.reason === "not_connected") return { state: "not_connected" };
-    return { state: "failed", reason: cleared.reason, detail: cleared.detail };
+    const removed = await removeReminderEvent(WEBDEV_TENANT_ID, input.repUserId, input.existingEventId);
+    if (removed.ok) return { status: { state: "cleared" }, eventId: null };
+    if (removed.reason === "not_connected") {
+      return { status: { state: "not_connected" }, eventId: input.existingEventId };
+    }
+    // The event may still be live, so KEEP the stored id. Dropping it here
+    // would orphan a reminder that nothing could ever clear again.
+    return {
+      status: { state: "failed", reason: removed.reason, detail: removed.detail },
+      eventId: input.existingEventId,
+    };
   }
 
-  const result = await upsertCalendarEvent(WEBDEV_TENANT_ID, input.repUserId, {
+  const result = await writeReminderEvent(WEBDEV_TENANT_ID, input.repUserId, input.existingEventId, {
     summary: eventSummary(input.businessName),
     description: eventDescription({
-      businessName: input.businessName,
       disposition: input.disposition,
       phone: input.phone ?? null,
       note: input.note ?? null,
@@ -143,12 +142,21 @@ export async function pushNextActionToCalendar(input: {
     // Ten minutes' warning. A rep needs time to open the lead and read the
     // talking points before dialling, not a notification as it starts.
     reminderMinutes: 10,
-    idempotencyKey: key,
   });
 
-  if (result.ok) return { state: "synced", eventId: result.eventId, htmlLink: result.htmlLink };
-  if (result.reason === "not_connected") return { state: "not_connected" };
-  return { state: "failed", reason: result.reason, detail: result.detail };
+  if (result.ok) {
+    return {
+      status: { state: "synced", eventId: result.eventId, htmlLink: result.htmlLink },
+      eventId: result.eventId,
+    };
+  }
+  if (result.reason === "not_connected") {
+    return { status: { state: "not_connected" }, eventId: input.existingEventId };
+  }
+  return {
+    status: { state: "failed", reason: result.reason, detail: result.detail },
+    eventId: input.existingEventId,
+  };
 }
 
 /**

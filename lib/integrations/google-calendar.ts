@@ -88,38 +88,9 @@ export type CalendarEventInput = {
   /** Additional invitees. The connected user is the organizer and does not
    *  need to be listed. */
   attendeeEmails?: string[];
-  /**
-   * Stable de-duplication key. Google treats event ids as unique per calendar,
-   * so re-sending the same id UPDATES the event instead of creating a second
-   * one. This is what makes a retry safe: a rep who changes a callback time
-   * twice ends up with one event at the latest time, not three.
-   *
-   * Google requires ids to be base32hex (lowercase a-v and 0-9), 5-1024 chars,
-   * so callers should pass raw text and let encodeEventId below normalise it.
-   */
-  idempotencyKey?: string;
   /** Minutes before the event to pop a reminder. */
   reminderMinutes?: number;
 };
-
-/**
- * Google event ids accept only lowercase a-v and digits 0-9. A UUID contains
- * w/x/y/z and hyphens, and a lead id may contain anything at all, so a raw
- * value is rejected by the API with a 400 that reads like a bug in the caller.
- *
- * This maps arbitrary text into the legal alphabet deterministically -- the
- * same input always yields the same id, which is the entire point: that is what
- * makes a repeated push an update rather than a duplicate event.
- */
-export function encodeEventId(raw: string): string {
-  const ALPHABET = "0123456789abcdefghijklmnopqrstuv";
-  let out = "";
-  for (const ch of Buffer.from(raw, "utf8")) {
-    out += ALPHABET[ch >> 5] + ALPHABET[ch & 31];
-  }
-  // 5 char minimum, 1024 maximum.
-  return out.slice(0, 1024).padEnd(5, "0");
-}
 
 /**
  * A fresh access token for this user's calendar, refreshing and persisting if
@@ -196,22 +167,44 @@ export async function connectedCalendarAddress(tenantId: string, userId: string)
 }
 
 /**
- * Create or update an event on this user's primary calendar.
+ * Write this user's reminder event, creating it if we have never made one.
  *
- * UPSERT, NOT INSERT. When `idempotencyKey` is supplied this issues a PUT to a
- * deterministic event id, so calling it repeatedly for the same callback
- * converges on ONE event at the latest time. An insert-only implementation
- * would litter a rep's phone with every superseded callback time, and the rep
- * would learn to ignore the calendar -- which costs the whole feature.
+ * GOOGLE ASSIGNS THE ID; WE REMEMBER IT. `existingEventId` is whatever we
+ * stored last time, or null. On success the caller MUST persist the returned
+ * id, because that is the only handle this system will ever have on the event.
  *
- * `sendUpdates=none` on the write: this is the rep's own working calendar, and
- * emailing a prospect an invite they never agreed to is a different decision
- * with consent implications. Callers that genuinely need to invite an external
- * attendee must pass attendees explicitly AND own that decision.
+ * WHY IT WORKS THIS WAY, AND IT IS THE FIFTH ATTEMPT. Earlier versions derived
+ * a DETERMINISTIC id from the lead so no storage was needed. Five consecutive
+ * review rounds each found a defect in that approach, and every one had the
+ * same root: once an event with a caller-supplied id is deleted or cancelled,
+ * that id is ambiguous forever. It may name a live event, a retained tombstone
+ * with deletion semantics, or nothing, and Google answers 409/410/404 across
+ * those combinations in ways this codebase CANNOT VERIFY without a live
+ * account. Each patch guessed at one arm and broke another:
+ *
+ *   PUT-only                   404 on every first push
+ *   insert-then-update         410 against a cancelled tombstone
+ *   fall back to fresh insert  produced an event nothing could address
+ *   reinsert with same id      409 against a tombstone still holding it
+ *   revive via "confirmed"     cancelled single events may not be revivable
+ *
+ * Storing the id Google hands back removes the entire question. We never
+ * reuse an id after removing an event, never depend on tombstone behaviour,
+ * and every branch is one this code can actually reason about:
+ *
+ *   no stored id            -> plain insert, remember what comes back
+ *   stored id, update ok    -> done
+ *   stored id, 404/410      -> that event is gone; insert a fresh one and
+ *                              remember the new id
+ *
+ * The one cost is a small write-back per push, and a failed write-back is
+ * recoverable (at worst one orphaned event and a duplicate next time) rather
+ * than a reminder that can never be scheduled again.
  */
-export async function upsertCalendarEvent(
+export async function writeReminderEvent(
   tenantId: string,
   userId: string,
+  existingEventId: string | null,
   input: CalendarEventInput,
 ): Promise<CalendarResult<{ eventId: string; htmlLink: string | null }>> {
   const auth = await accessTokenFor(tenantId, userId);
@@ -240,21 +233,13 @@ export async function upsertCalendarEvent(
     body.attendees = input.attendeeEmails.map((email) => ({ email }));
   }
 
-  const eventId = input.idempotencyKey ? encodeEventId(input.idempotencyKey) : null;
-
   const collection = `${CALENDAR_API}/calendars/primary/events?sendUpdates=none`;
-  const single = eventId
-    ? `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
-    : null;
 
-  const send = async (url: string, method: "POST" | "PUT", payload: Record<string, unknown>) => {
+  const send = async (url: string, method: "POST" | "PUT") => {
     const r = await fetch(url, {
       method,
-      headers: {
-        authorization: `Bearer ${auth.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
+      headers: { authorization: `Bearer ${auth.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     const j = (await r.json().catch(() => ({}))) as {
@@ -266,104 +251,60 @@ export async function upsertCalendarEvent(
   };
 
   try {
-    // TWO STATES, NEVER THREE.
-    //
-    // This path was rebuilt on 2026-08-24 after four consecutive review rounds
-    // each found a defect created by the previous fix. The chain went:
-    // PUT-only (404s on every first push) -> insert-then-update (410s on a
-    // cancelled tombstone) -> fall back to a fresh insert (produced an event
-    // nothing could address) -> reinsert with the same id (409s against a
-    // tombstone that still holds it).
-    //
-    // Every one of those bugs came from the same root: DELETING an event makes
-    // its deterministic id ambiguous. Afterwards the id may be a live event, a
-    // retained tombstone, or free, and Google answers 409/410/404 for those in
-    // combinations this codebase cannot verify without a live account. Each
-    // patch guessed at one arm and broke another.
-    //
-    // So the deletion is gone (see cancelCalendarEvent below). An event is
-    // created ONCE per lead and thereafter only has its status changed. That
-    // leaves exactly two possibilities on write, both unambiguous:
-    //
-    //   the id is free   -> insert succeeds
-    //   the id is taken  -> 409, and update with status "confirmed" both
-    //                       edits a live event and revives a cancelled one
-    //
-    // No third branch exists to get wrong, and the id stays addressable for
-    // every later write, which is what keeps the phone matching the queue.
-    if (!eventId || !single) {
-      const r = await send(collection, "POST", body);
-      if (!r.ok || !r.body.id) {
-        return { ok: false, reason: "api_error", detail: r.body.error?.message || `HTTP ${r.status}` };
+    if (existingEventId) {
+      const updated = await send(
+        `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(existingEventId)}?sendUpdates=none`,
+        "PUT",
+      );
+      if (updated.ok && updated.body.id) {
+        return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
       }
-      return { ok: true, eventId: r.body.id, htmlLink: r.body.htmlLink || null };
+      // Anything other than "it is gone" is a real failure and must be
+      // reported, not papered over by silently creating a second event.
+      if (updated.status !== 404 && updated.status !== 410) {
+        return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
+      }
+      // 404/410: the rep deleted it by hand, or we removed it. Fall through and
+      // make a new one. No id is reused, so no tombstone question arises.
     }
 
-    const created = await send(collection, "POST", { ...body, id: eventId });
-    if (created.ok && created.body.id) {
-      return { ok: true, eventId: created.body.id, htmlLink: created.body.htmlLink || null };
-    }
-    // Anything other than "that id is taken" is a real failure. Retrying it as
-    // an update would report a genuine auth or quota error as a confusing 404.
-    if (created.status !== 409) {
+    const created = await send(collection, "POST");
+    if (!created.ok || !created.body.id) {
       return { ok: false, reason: "api_error", detail: created.body.error?.message || `HTTP ${created.status}` };
     }
-    // `status: "confirmed"` is load-bearing: it is what revives an event that
-    // cancelCalendarEvent previously stood down, as opposed to merely editing
-    // one that is still live. Both are 409s on insert and both land here.
-    const updated = await send(single, "PUT", { ...body, id: eventId, status: "confirmed" });
-    if (!updated.ok || !updated.body.id) {
-      return { ok: false, reason: "api_error", detail: updated.body.error?.message || `HTTP ${updated.status}` };
-    }
-    return { ok: true, eventId: updated.body.id, htmlLink: updated.body.htmlLink || null };
+    return { ok: true, eventId: created.body.id, htmlLink: created.body.htmlLink || null };
   } catch (err) {
     return { ok: false, reason: "network_error", detail: err instanceof Error ? err.message : String(err) };
   }
 }
 
 /**
- * Stand an event down so it stops appearing on the rep's phone.
+ * Take this user's reminder off their calendar.
  *
- * THIS IS AN UPDATE, NOT A DELETE, AND THAT IS THE WHOLE POINT. Deleting makes
- * the deterministic id ambiguous forever after -- it may then be a tombstone or
- * free, and Google's answers across 409/410/404 differ in ways this codebase
- * cannot verify without a live account. Four review rounds produced four
- * distinct bugs chasing those arms (see upsertCalendarEvent above).
- *
- * Setting `status: "cancelled"` removes the event from the calendar exactly as
- * a delete would, from the rep's point of view, while keeping the id present
- * and addressable. A later reschedule is then a plain update back to
- * "confirmed", with no branch that can guess wrong.
- *
- * A 404 means we never created one for this lead, which satisfies the intent
- * ("no reminder") and is reported as success. Treating it as a failure would
- * make the ordinary case -- a disposition logged on a lead that never had a
- * callback -- look broken.
+ * Addressed by the id we STORED, never by a derived one, so there is no
+ * question about what it names. A 404/410 means it is already gone, which is
+ * the end state we wanted, so both are success -- as is being asked to remove
+ * a reminder that was never created.
  */
-export async function cancelCalendarEvent(
+export async function removeReminderEvent(
   tenantId: string,
   userId: string,
-  idempotencyKey: string,
+  eventId: string | null,
 ): Promise<CalendarVoidResult> {
+  if (!eventId) return { ok: true };
+
   const auth = await accessTokenFor(tenantId, userId);
   if (!auth.ok) return auth;
 
-  const eventId = encodeEventId(idempotencyKey);
   try {
     const r = await fetch(
       `${CALENDAR_API}/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`,
       {
-        method: "PATCH",
-        headers: {
-          authorization: `Bearer ${auth.token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ status: "cancelled" }),
+        method: "DELETE",
+        headers: { authorization: `Bearer ${auth.token}` },
         signal: AbortSignal.timeout(TIMEOUT_MS),
       },
     );
-    // 404: never created. 410: already gone. Both mean "no reminder", which is
-    // the desired end state, so both are success.
     if (r.ok || r.status === 404 || r.status === 410) return { ok: true };
     return { ok: false, reason: "api_error", detail: `HTTP ${r.status}` };
   } catch (err) {

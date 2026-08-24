@@ -137,8 +137,24 @@ assert.match(
 );
 const updateCalls = libCode.match(/updateRecord\(\{[\s\S]{0,400}?\}\);/g) || [];
 assert.ok(updateCalls.length > 0, `${LIB} must call updateRecord() to apply the disposition`);
+// TWO legitimate lead writes live in this module, and no third:
+//
+//   1. the disposition patch, built entirely by the canonical seam;
+//   2. the calendar bookkeeping write, which stores the event id Google
+//      assigned to this lead's reminder so the next push updates that event
+//      instead of creating a second one.
+//
+// The second is deliberately allowed to be an inline object because it is ONE
+// mirror field with no lifecycle meaning -- but it is named explicitly here, so
+// a third inline patch cannot ride in beside it.
+const ALLOWED_INLINE = /patch:\s*\{\s*\[NEXT_ACTION_EVENT_ID_FIELD\]:/;
 for (const call of updateCalls) {
-  assert.match(call, /patch(:\s*patch)?\s*[,}]/, `${LIB}'s updateRecord() must pass the seam-built patch, not an inline object`);
+  const seamBuilt = /patch(:\s*patch)?\s*[,}]/.test(call);
+  const bookkeeping = ALLOWED_INLINE.test(call);
+  assert.ok(
+    seamBuilt || bookkeeping,
+    `${LIB}'s updateRecord() must pass the seam-built patch, or the one permitted calendar-id bookkeeping patch -- never a new inline object`,
+  );
   for (const forbiddenField of ["price", "commission", "setupAmount", "monthlyAmount", "collectedSetupAmount", "assigned_to"]) {
     assert.doesNotMatch(
       call,
@@ -147,6 +163,17 @@ for (const call of updateCalls) {
     );
   }
 }
+// The bookkeeping write must exist and must carry exactly one key. A second key
+// creeping in here would be a lifecycle write dressed as mirror bookkeeping.
+const bookkeepingCall = updateCalls.find((c) => ALLOWED_INLINE.test(c));
+assert.ok(bookkeepingCall, `${LIB} must persist the calendar event id back onto the lead`);
+const patchObject = bookkeepingCall!.match(/patch:\s*\{([\s\S]*?)\}/);
+assert.ok(patchObject, "the bookkeeping patch object must be readable");
+assert.equal(
+  (patchObject![1].match(/:/g) || []).length,
+  1,
+  "the calendar bookkeeping patch must carry exactly one field",
+);
 
 // And the seam itself must not emit a commercial field, which is what makes
 // the check above meaningful rather than merely structural. Asserted against

@@ -1,8 +1,12 @@
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
-import { encodeEventId, GOOGLE_CALENDAR_SCOPE, GOOGLE_CALENDAR_SERVICE } from "../lib/integrations/google-calendar";
-import { describeCalendarSync, nextActionEventKey, type CalendarSyncStatus } from "../lib/web-leads/calendar-sync";
+import { GOOGLE_CALENDAR_SCOPE, GOOGLE_CALENDAR_SERVICE } from "../lib/integrations/google-calendar";
+import {
+  describeCalendarSync,
+  NEXT_ACTION_EVENT_ID_FIELD,
+  type CalendarSyncStatus,
+} from "../lib/web-leads/calendar-sync";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
@@ -16,38 +20,85 @@ const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(
 // calendar is a MIRROR. A calendar problem must degrade the feature to "it is
 // in your queue but not on your phone" and must never lose a callback, fail a
 // logged call, or -- worst of all -- be reported as a success it was not.
+//
+// WHAT THIS FILE CANNOT DO, STATED UP FRONT: none of it exercises the HTTP
+// call. It proves the SHAPE of a request; only Google can say whether that
+// request is accepted. FIVE consecutive review rounds found five defects in
+// this integration, every one of them invisible to a green run of this suite.
+// A live connect test on a staging account is owed before any rep relies on a
+// phone reminder, and nothing below should be read as a substitute for it.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// 1. EVENT IDS. Google accepts base32hex only (0-9 and a-v), 5 to 1024 chars.
-// A raw UUID contains w/x/y/z and hyphens and is rejected with a 400 that reads
-// like a caller bug. Determinism is the load-bearing property: the same lead
-// must always map to the same id, because that is what turns a re-push into an
-// UPDATE instead of a second reminder on the rep's phone.
+// 1. GOOGLE NAMES THE EVENT; WE REMEMBER THE NAME.
+//
+// This is the fifth design, and the four before it failed the same way. Each
+// derived a DETERMINISTIC event id from the lead so nothing had to be stored,
+// and each broke because once an event with a caller-supplied id is deleted or
+// cancelled, that id is ambiguous forever after: it may name a live event, a
+// retained tombstone with deletion semantics, or nothing at all, and Google's
+// 409/410/404 answers across those combinations cannot be verified from this
+// repo. The chain, for anyone tempted to go back:
+//
+//   PUT-only                   404 on every first push, feature never worked
+//   insert-then-update         410 against a cancelled tombstone
+//   fall back to fresh insert  produced an event nothing could address again
+//   reinsert with same id      409 against a tombstone still holding it
+//   revive via "confirmed"     cancelled single events may not be revivable
+//
+// Storing the id Google hands back removes the question instead of guessing at
+// another arm of it: an id is never reused after its event is removed.
 // ---------------------------------------------------------------------------
-const LEGAL = /^[0-9a-v]+$/;
-for (const raw of [
-  "weblead-next-3f9a1c22-77bd-4e11-9c02-8a1d5f6e7b30",
-  "weblead-next-simple",
-  "UPPER-CASE-AND-Symbols!@#$%^&*()",
-  "unicode-café-über",
-  "x",
-]) {
-  const id = encodeEventId(raw);
-  assert.match(id, LEGAL, `encodeEventId(${raw}) must produce only Google-legal characters, got "${id}"`);
-  assert.ok(id.length >= 5, `event id must be at least 5 chars, got ${id.length} for "${raw}"`);
-  assert.ok(id.length <= 1024, `event id must be at most 1024 chars, got ${id.length}`);
-  assert.equal(encodeEventId(raw), id, "encodeEventId must be deterministic -- a re-push must UPDATE, never duplicate");
-}
+const calendarSrc = read("lib/integrations/google-calendar.ts");
+const calendar = stripComments(calendarSrc);
 
-// Different inputs must not collide, or two leads would fight over one event.
-const ids = new Set(["a", "b", "aa", "ab", "lead-1", "lead-2"].map(encodeEventId));
-assert.equal(ids.size, 6, "distinct keys must produce distinct event ids");
+assert.doesNotMatch(
+  calendar,
+  /encodeEventId/,
+  "deterministic event ids must stay retired -- reusing an id after removal is what produced five consecutive defects",
+);
+assert.doesNotMatch(
+  calendar,
+  /idempotencyKey/,
+  "a caller-supplied event id must not come back; Google assigns the id and we store it",
+);
+assert.equal(
+  NEXT_ACTION_EVENT_ID_FIELD,
+  "next_action_event_id",
+  "the stored id needs a stable field name -- renaming it silently orphans every existing reminder",
+);
 
-// The key is derived from the LEAD, not the call: one lead has at most one
-// outstanding "call them" reminder, so rescheduling replaces rather than adds.
-assert.equal(nextActionEventKey("abc"), nextActionEventKey("abc"), "the event key must be stable for a lead");
-assert.notEqual(nextActionEventKey("abc"), nextActionEventKey("abd"), "different leads must get different keys");
+// The write takes the id we stored and hands back the id to store next.
+const writeBody = calendarSrc.slice(calendarSrc.indexOf("export async function writeReminderEvent"));
+assert.match(writeBody, /existingEventId/, "the write must accept the id we stored last time");
+assert.match(writeBody, /eventId: created\.body\.id/, "a fresh insert must return the id Google assigned");
+// A 404/410 on the update means that event is gone (the rep deleted it by hand,
+// or we removed it). Making a NEW one is correct; reusing the old id is not.
+assert.match(
+  writeBody,
+  /updated\.status !== 404 && updated\.status !== 410/,
+  "only a gone event may fall through to a fresh insert -- any other failure must be reported, not papered over with a duplicate",
+);
+// The fresh insert must carry no id at all, so no tombstone question arises.
+assert.match(
+  writeBody,
+  /await send\(collection, "POST"\)/,
+  "the recreate must let Google name the event rather than reusing an id whose state we cannot determine",
+);
+
+// Removal is addressed by the STORED id, never a derived one.
+const removeBody = calendarSrc.slice(calendarSrc.indexOf("export async function removeReminderEvent"));
+assert.match(removeBody, /eventId: string \| null/, "removal must take the stored id");
+assert.match(
+  removeBody,
+  /if \(!eventId\) return \{ ok: true \}/,
+  "being asked to remove a reminder that never existed is success, not a failure",
+);
+assert.match(
+  removeBody,
+  /r\.status === 404 \|\| r\.status === 410/,
+  "an already-absent event satisfies 'no reminder' and must count as success",
+);
 
 // ---------------------------------------------------------------------------
 // 2. WHAT THE REP IS TOLD. Success is silent -- a notice on every successful
@@ -86,42 +137,50 @@ assert.match(
 //
 // history insert -> lead patch -> calendar push. If the push ever moved ahead
 // of the lead write, a calendar failure could abort a call that should have
-// been logged. This reads lib/web-leads/outcome.ts and requires the push to
-// appear AFTER the updateRecord call in logCallOutcome.
+// been logged.
 // ---------------------------------------------------------------------------
 const outcome = read("lib/web-leads/outcome.ts");
 const logFn = outcome.slice(outcome.indexOf("export async function logCallOutcome"));
 const insertAt = logFn.indexOf('.from("leadgen_call_outcomes")');
 const patchAt = logFn.indexOf("updateRecord({");
 const pushAt = logFn.indexOf("pushNextActionToCalendar(");
-assert.ok(insertAt > -1, "logCallOutcome must insert the history row");
-assert.ok(patchAt > -1, "logCallOutcome must patch the lead");
-assert.ok(pushAt > -1, "logCallOutcome must push to the calendar");
+assert.ok(insertAt > -1 && patchAt > -1 && pushAt > -1, "logCallOutcome must log, patch, and push");
 assert.ok(insertAt < patchAt, "the history row must be written before the lead patch");
 assert.ok(
   patchAt < pushAt,
   "the calendar push must come AFTER the lead write -- the queue is the source of truth and the calendar is a mirror",
 );
 
-// The push must not be able to fail the call. If it were awaited inside the
-// same try/catch that raises ScheduleNotAppliedError, a Google outage would be
-// reported to the rep as a failed queue write.
-const pushSlice = logFn.slice(pushAt - 400, pushAt);
+// The push must not be able to fail the call.
 assert.doesNotMatch(
-  pushSlice,
+  logFn.slice(pushAt - 400, pushAt),
   /throw new ScheduleNotAppliedError/,
   "a calendar failure must never be raised as a queue failure",
 );
+
+// The id write-back is bookkeeping and must not surface as a call failure
+// either: the call is logged, the queue is right, the reminder is on the phone.
+assert.match(
+  logFn.slice(pushAt),
+  /try \{[\s\S]{0,500}?updateRecord\(\{[\s\S]{0,400}?\}\);[\s\S]{0,200}?\} catch/,
+  "persisting the event id must be wrapped so a bookkeeping failure cannot fail a logged call",
+);
+assert.match(
+  logFn,
+  /\[NEXT_ACTION_EVENT_ID_FIELD\]: newEventId/,
+  "the id Google assigned must be written back to the lead, or the next push creates a duplicate",
+);
+// Only when it changed. An unconditional write would touch every lead on every
+// call for no reason.
+assert.match(logFn, /newEventId !== existingEventId/, "the id must be persisted only when it actually changed");
 
 // ---------------------------------------------------------------------------
 // 4. THE CALENDAR MODULE NEVER THROWS ITS OWN FAILURES.
 //
 // Every exported function returns a discriminated result. A throw here would
 // propagate into logCallOutcome and take a successfully logged call down with
-// it. Asserted structurally: every fetch in the module is inside a try, and the
-// catch returns rather than rethrows.
+// it.
 // ---------------------------------------------------------------------------
-const calendar = stripComments(read("lib/integrations/google-calendar.ts"));
 assert.doesNotMatch(calendar, /\bthrow\b/, "lib/integrations/google-calendar.ts must never throw -- it returns results");
 const catches = calendar.match(/catch\s*\([^)]*\)\s*\{[\s\S]{0,220}?\}/g) || [];
 assert.ok(catches.length >= 3, `expected a catch around each network call, saw ${catches.length}`);
@@ -131,15 +190,11 @@ for (const c of catches) {
 
 // "not connected" must stay distinguishable from "broken". One is a person's
 // job to do and must never be retried in a loop; the other is a real fault.
-// Collapsing them is how a missing credential turns into a 3am alert storm.
 assert.match(calendar, /reason:\s*"not_connected"/, "a missing connection must have its own reason code");
 assert.match(calendar, /reason:\s*"token_refresh_failed"/, "a revoked grant must be distinguishable from never-connected");
 
 // ---------------------------------------------------------------------------
 // 5. SCOPE MINIMALISM. The consent screen a rep reads must be small and true.
-// calendar.events can create and update events and nothing else. Asking for a
-// Gmail scope here would mean a rep who wants callbacks on their phone has to
-// hand over their inbox.
 // ---------------------------------------------------------------------------
 assert.equal(GOOGLE_CALENDAR_SCOPE, "https://www.googleapis.com/auth/calendar.events", "calendar must request events scope only");
 assert.equal(GOOGLE_CALENDAR_SERVICE, "google_calendar", "the calendar bundle must have its own service key, revocable alone");
@@ -152,8 +207,8 @@ assert.ok(calendarScopes, "the calendar target must declare its own scope list")
 assert.doesNotMatch(calendarScopes![0], /gmail/, "the calendar target must not request any Gmail scope");
 
 // The callback must VERIFY the grant. Google can return a subset of what was
-// requested, and storing a bundle whose scope does not authorize the feature
-// produces a connection that looks healthy in Settings and fails on first use.
+// requested, and a bundle whose scope does not authorize the feature produces a
+// connection that looks healthy in Settings and fails on first use.
 const cb = read("app/api/auth/google-oauth/callback/route.ts");
 assert.match(cb, /calendar:\s*"google_calendar"/, "the callback must map the calendar target");
 assert.match(cb, /calendar_scope_not_granted/, "the callback must refuse a calendar grant that lacks the events scope");
@@ -161,121 +216,40 @@ assert.match(cb, /calendar_scope_not_granted/, "the callback must refuse a calen
 // ---------------------------------------------------------------------------
 // 6. NO NEXT ACTION MEANS NO REMINDER, FOR EVERY DISPOSITION.
 //
-// REGRESSION (Codex review, 2026-08-24). This branch used to stand the event
-// down only for TERMINAL dispositions and merely skip otherwise. But
+// REGRESSION (Codex review, 2026-08-24). This branch used to remove the event
+// only for TERMINAL dispositions and merely skip otherwise. But
 // callDispositionPatch clears `next_action_at` for ANY disposition logged
 // without one, so a lead with a callback already on the rep's phone, later
 // logged `connected` or `interested` with no follow-up, kept ringing for a call
-// the queue no longer had. The mirror outlived what it mirrored -- the one
-// thing this module exists to prevent -- and the original assertion passed the
-// whole time because it only ever examined the terminal branch.
+// the queue no longer had. The original assertion passed the whole time,
+// because it only ever examined the terminal branch.
 //
 // The rule is now simply: the phone matches the queue.
 // ---------------------------------------------------------------------------
 const sync = stripComments(read("lib/web-leads/calendar-sync.ts"));
-assert.match(sync, /cancelCalendarEvent/, "clearing a next action must stand the reminder down, not merely skip the push");
-
-const guard = sync.match(/if\s*\(\s*!\s*input\.nextActionAt\s*\)\s*\{[\s\S]{0,400}?\}/);
-assert.ok(guard, "calendar-sync must branch on a bare !input.nextActionAt");
+assert.match(sync, /removeReminderEvent/, "clearing a next action must remove the reminder, not merely skip the push");
+const guardStart = sync.indexOf("if (!input.nextActionAt) {");
+assert.ok(guardStart > -1, "calendar-sync must branch on a bare !input.nextActionAt");
+const guard = sync.slice(guardStart, guardStart + 900);
 assert.match(
-  guard![0],
-  /cancelCalendarEvent/,
+  guard,
+  /removeReminderEvent/,
   "the no-next-action branch must clear the reminder for EVERY disposition, not only terminal ones",
 );
 assert.doesNotMatch(
   sync,
-  /if\s*\(\s*isTerminalDisposition\(input\.disposition\)\s*\)\s*\{[\s\S]{0,200}?cancelCalendarEvent/,
+  /if\s*\(\s*isTerminalDisposition\(input\.disposition\)\s*\)\s*\{[\s\S]{0,200}?removeReminderEvent/,
   "clearing must not be gated on the disposition being terminal -- that is the bug this replaced",
 );
 assert.doesNotMatch(sync, /state:\s*"skipped"/, "no push may end without either writing or clearing the reminder");
 
-// ---------------------------------------------------------------------------
-// 7. TWO STATES, NEVER THREE. THIS IS THE LOAD-BEARING ONE.
-//
-// FOUR consecutive review rounds each found a defect created by the previous
-// fix, and every one of them had the same root cause: DELETING an event makes
-// its deterministic id ambiguous. Afterwards the id may be a live event, a
-// retained cancelled tombstone, or free, and Google answers 409/410/404 across
-// those in combinations this repo cannot verify without a live account. Each
-// patch guessed at one arm and broke another:
-//
-//   PUT-only                  404 on every first push, feature never worked
-//   insert-then-update        410 against a cancelled tombstone
-//   fall back to fresh insert produced an event nothing could address again
-//   reinsert with same id     409 against a tombstone that still holds it
-//
-// The fix was to remove the ambiguity rather than chase its arms. Nothing is
-// ever deleted: an event is created ONCE per lead and thereafter only has its
-// status changed. That leaves exactly two possibilities on write --
-//
-//   id free  -> insert succeeds
-//   id taken -> 409 -> update with status "confirmed", which both edits a
-//               live event and revives a cancelled one
-//
-// -- and no third branch that can be got wrong.
-//
-// WHAT NO TEST HERE CAN DO: none of this exercises the HTTP call. This file
-// proves the SHAPE of a request; only Google can say whether it is accepted.
-// A live connect test on a staging account is owed before any rep relies on a
-// phone reminder. That gap is the reason four defects survived four green runs.
-// ---------------------------------------------------------------------------
-const calendarSrc = read("lib/integrations/google-calendar.ts");
-const upsertBody = calendarSrc.slice(calendarSrc.indexOf("export async function upsertCalendarEvent"));
-
-// Nothing may delete. A delete is what reintroduces the ambiguity.
-assert.doesNotMatch(
-  stripComments(calendarSrc),
-  /method:\s*"DELETE"/,
-  "this module must never DELETE an event -- that is what made the deterministic id ambiguous and produced four consecutive bugs",
-);
-assert.doesNotMatch(
-  stripComments(calendarSrc),
-  /export async function deleteCalendarEvent/,
-  "deleteCalendarEvent must stay retired in favour of cancelCalendarEvent",
-);
-
-// Standing an event down is an UPDATE that keeps the id addressable.
-const cancelBody = calendarSrc.slice(calendarSrc.indexOf("export async function cancelCalendarEvent"));
-assert.match(cancelBody, /status:\s*"cancelled"/, "cancelling must set status, not remove the event");
+// A FAILED removal must KEEP the stored id. Dropping it would orphan a
+// reminder nothing could ever clear again -- the same unaddressable-event
+// failure round three produced, arriving through a different door.
 assert.match(
-  cancelBody,
-  /r\.status === 404 \|\| r\.status === 410/,
-  "an absent event already satisfies 'no reminder' and must count as success",
-);
-
-// Insert before update: a PUT to an id that does not exist yet 404s, which is
-// what broke every first push.
-const postAt = upsertBody.indexOf('"POST"');
-const putAt = upsertBody.indexOf('"PUT"');
-assert.ok(postAt > -1 && putAt > -1, "upsertCalendarEvent must be able to both insert and update");
-assert.ok(postAt < putAt, "the insert must be attempted before the update");
-assert.match(upsertBody, /created\.status !== 409/, "a non-409 insert failure must return immediately, not retry as an update");
-
-// The revive. Without status:"confirmed" the update edits a live event but
-// cannot bring back one that cancelCalendarEvent stood down.
-assert.match(
-  upsertBody,
-  /status:\s*"confirmed"/,
-  'the update must send status:"confirmed" so it REVIVES a cancelled event, not only edits a live one',
-);
-
-// Exactly two write branches on the keyed path. A third is the shape every
-// previous bug took.
-const keyedPath = upsertBody.slice(upsertBody.indexOf("const created = await send("));
-const writes = keyedPath.match(/await send\(/g) || [];
-assert.equal(
-  writes.length,
-  2,
-  `the keyed path must make exactly two kinds of write (insert, then update-on-409); saw ${writes.length}`,
-);
-
-// And every one of them carries the deterministic id, so the event stays
-// addressable by every later write. An unaddressable event is a stale reminder
-// nobody can clear.
-assert.doesNotMatch(
-  keyedPath,
-  /send\(\s*collection,\s*"POST",\s*body\s*\)/,
-  "no write on the keyed path may omit the deterministic id",
+  guard,
+  /eventId: input\.existingEventId/,
+  "a failed removal must retain the stored id so the reminder stays clearable",
 );
 
 console.log("web-leads-calendar-sync ok");

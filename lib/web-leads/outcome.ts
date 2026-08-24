@@ -91,7 +91,11 @@ import {
 } from "@/lib/website-sales-workflow";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
-import { pushNextActionToCalendar, type CalendarSyncStatus } from "./calendar-sync";
+import {
+  pushNextActionToCalendar,
+  NEXT_ACTION_EVENT_ID_FIELD,
+  type CalendarSyncStatus,
+} from "./calendar-sync";
 
 /**
  * The API/UI vocabulary. Identical to the workflow module's CallDisposition --
@@ -226,7 +230,9 @@ export class ScheduleNotAppliedError extends Error {
  * columns on a row the caller has already established is visible to this
  * viewer, not a second authorization check.
  */
-async function leadRoutingInfo(id: string): Promise<{ businessId: string | null; stage: string | null }> {
+async function leadRoutingInfo(
+  id: string,
+): Promise<{ businessId: string | null; stage: string | null; eventId: string | null }> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("tenant_records")
@@ -236,13 +242,18 @@ async function leadRoutingInfo(id: string): Promise<{ businessId: string | null;
     .eq("id", id)
     .maybeSingle();
   if (error) throw new Error(`lead_data_read_failed: ${error.message}`);
-  if (!data) return { businessId: null, stage: null };
+  if (!data) return { businessId: null, stage: null, eventId: null };
   const row = data as { data: Record<string, unknown> };
   const businessId = row.data?.webdev_source_business_id;
   const stage = row.data?.stage;
+  // The id Google assigned to this lead's reminder, if we have ever made
+  // one. See lib/web-leads/calendar-sync.ts for why this is stored rather
+  // than derived.
+  const eventId = row.data?.[NEXT_ACTION_EVENT_ID_FIELD];
   return {
     businessId: typeof businessId === "string" && businessId.trim() ? businessId.trim() : null,
     stage: typeof stage === "string" && stage.trim() ? stage.trim() : null,
+    eventId: typeof eventId === "string" && eventId.trim() ? eventId.trim() : null,
   };
 }
 
@@ -329,7 +340,7 @@ export async function logCallOutcome(input: {
   const { leadId, lead, outcome, repUserId } = input;
   const note = boundedNote(input.note);
 
-  const { businessId, stage } = await leadRoutingInfo(leadId);
+  const { businessId, stage, eventId: existingEventId } = await leadRoutingInfo(leadId);
   // See the module header: a missing business_id pointer must not make a
   // real phone call unloggable, so this falls back to the lead's own id.
   const businessIdForWrite = safeFilterValue(businessId || leadId) || leadId;
@@ -386,15 +397,37 @@ export async function logCallOutcome(input: {
   // of the queue, not a second source of truth, so it is pushed last and its
   // failure is reported rather than thrown. A rep whose Google is not connected
   // still has a complete, working queue; they just do not get the phone alert.
-  const calendarSync = await pushNextActionToCalendar({
-    leadId,
+  const { status: calendarSync, eventId: newEventId } = await pushNextActionToCalendar({
     repUserId,
     businessName: lead.name,
     disposition: outcome,
     nextActionAt,
+    existingEventId,
     phone: lead.phone,
     note,
   });
+
+  // Remember what Google called it, so the next push updates that event
+  // instead of creating a second one. Written only when it actually changed,
+  // and in its own patch: this is mirror bookkeeping, and it must not be able
+  // to disturb the queue fields the call already committed above.
+  //
+  // A failure here is deliberately swallowed rather than surfaced. The call is
+  // logged, the queue is correct, and the reminder is on the phone -- the only
+  // cost is that a later reschedule may create a duplicate event, which is
+  // recoverable and strictly better than reporting a successful call as failed.
+  if (newEventId !== existingEventId) {
+    try {
+      await updateRecord({
+        tenant_id: WEBDEV_TENANT_ID,
+        entity: "lead",
+        id: leadId,
+        patch: { [NEXT_ACTION_EVENT_ID_FIELD]: newEventId },
+      });
+    } catch {
+      // Intentionally ignored. See above.
+    }
+  }
 
   return {
     record,
