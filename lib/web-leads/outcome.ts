@@ -91,6 +91,12 @@ import {
 } from "@/lib/website-sales-workflow";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
+import {
+  pushNextActionToCalendar,
+  rollBackReminder,
+  NEXT_ACTION_EVENT_ID_FIELD,
+  type CalendarSyncStatus,
+} from "./calendar-sync";
 
 /**
  * The API/UI vocabulary. Identical to the workflow module's CallDisposition --
@@ -225,7 +231,9 @@ export class ScheduleNotAppliedError extends Error {
  * columns on a row the caller has already established is visible to this
  * viewer, not a second authorization check.
  */
-async function leadRoutingInfo(id: string): Promise<{ businessId: string | null; stage: string | null }> {
+async function leadRoutingInfo(
+  id: string,
+): Promise<{ businessId: string | null; stage: string | null; eventId: string | null }> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("tenant_records")
@@ -235,13 +243,18 @@ async function leadRoutingInfo(id: string): Promise<{ businessId: string | null;
     .eq("id", id)
     .maybeSingle();
   if (error) throw new Error(`lead_data_read_failed: ${error.message}`);
-  if (!data) return { businessId: null, stage: null };
+  if (!data) return { businessId: null, stage: null, eventId: null };
   const row = data as { data: Record<string, unknown> };
   const businessId = row.data?.webdev_source_business_id;
   const stage = row.data?.stage;
+  // The id Google assigned to this lead's reminder, if we have ever made
+  // one. See lib/web-leads/calendar-sync.ts for why this is stored rather
+  // than derived.
+  const eventId = row.data?.[NEXT_ACTION_EVENT_ID_FIELD];
   return {
     businessId: typeof businessId === "string" && businessId.trim() ? businessId.trim() : null,
     stage: typeof stage === "string" && stage.trim() ? stage.trim() : null,
+    eventId: typeof eventId === "string" && eventId.trim() ? eventId.trim() : null,
   };
 }
 
@@ -321,11 +334,14 @@ export async function logCallOutcome(input: {
   record: CallOutcomeRecord;
   stageChangedTo: "connected" | "lost" | null;
   nextActionAt: string | null;
+  /** How the phone-side mirror went. NEVER affects whether the call was
+   *  logged -- see the ordering rule in lib/web-leads/calendar-sync.ts. */
+  calendarSync: CalendarSyncStatus;
 }> {
   const { leadId, lead, outcome, repUserId } = input;
   const note = boundedNote(input.note);
 
-  const { businessId, stage } = await leadRoutingInfo(leadId);
+  const { businessId, stage, eventId: existingEventId } = await leadRoutingInfo(leadId);
   // See the module header: a missing business_id pointer must not make a
   // real phone call unloggable, so this falls back to the lead's own id.
   const businessIdForWrite = safeFilterValue(businessId || leadId) || leadId;
@@ -378,10 +394,67 @@ export async function logCallOutcome(input: {
     throw new ScheduleNotAppliedError(record.id, err instanceof Error ? err.message : String(err));
   }
 
+  // STEP 3, AND ONLY AFTER STEPS 1 AND 2 SUCCEEDED. The calendar is a mirror
+  // of the queue, not a second source of truth, so it is pushed last and its
+  // failure is reported rather than thrown. A rep whose Google is not connected
+  // still has a complete, working queue; they just do not get the phone alert.
+  const { status: calendarSync, eventId: newEventId } = await pushNextActionToCalendar({
+    repUserId,
+    businessName: lead.name,
+    disposition: outcome,
+    nextActionAt,
+    existingEventId,
+    phone: lead.phone,
+    note,
+  });
+
+  // Remember what Google called it, so the next push updates that event
+  // instead of creating a second one. Written only when it actually changed,
+  // and in its own patch: this is mirror bookkeeping and it must not disturb
+  // the queue fields the call already committed above.
+  //
+  // THIS FAILURE IS NOT SWALLOWED (Codex review, sixth pass, 2026-08-24). An
+  // earlier version ignored it on the reasoning that the call was logged, the
+  // queue was right and the reminder was on the phone. That reasoning was
+  // wrong in the one case that matters most: if we created an event and then
+  // failed to record its id, the event is UNADDRESSABLE. A later disposition
+  // with no next action would pass a null id to the remover, get `ok` back
+  // (nothing to remove), report "cleared" -- and leave a live reminder ringing
+  // forever. For `do_not_call` that means a phone alert to ring a prospect who
+  // asked us never to be called again, which is the one outcome here with a
+  // legal edge on it.
+  //
+  // So a failed write-back ROLLS THE EVENT BACK using the id still held in
+  // memory, returning to the clean state of "no reminder", and reports the
+  // sync as failed. The rep is told their queue is saved but their phone is
+  // not, which is true. Only if the rollback ALSO fails is there an orphan,
+  // and that is reported rather than hidden.
+  let syncStatus = calendarSync;
+  if (newEventId !== existingEventId) {
+    try {
+      await updateRecord({
+        tenant_id: WEBDEV_TENANT_ID,
+        entity: "lead",
+        id: leadId,
+        patch: { [NEXT_ACTION_EVENT_ID_FIELD]: newEventId },
+      });
+    } catch (err) {
+      const rolledBack = await rollBackReminder(repUserId, newEventId);
+      syncStatus = {
+        state: "failed",
+        reason: "api_error",
+        detail: rolledBack
+          ? `event id not persisted, reminder rolled back: ${err instanceof Error ? err.message : String(err)}`
+          : `event id not persisted AND rollback failed -- an unaddressable reminder may be live on this rep's calendar: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
   return {
     record,
     stageChangedTo: (patch.stage as "connected" | "lost" | undefined) ?? null,
     nextActionAt,
+    calendarSync: syncStatus,
   };
 }
 

@@ -38,7 +38,9 @@ const SETTINGS_RETURN_PATH = "/settings#integrations";
 const MAILBOX_SERVICE: Record<string, string> = {
   work: "gmail_oauth",
   personal: "gmail_oauth_personal",
+  calendar: "google_calendar",
 };
+const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
 function settingsRedirect(req: NextRequest, params: Record<string, string>): NextResponse {
   const baseUrl =
@@ -157,16 +159,26 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Verify the granted scope covers what this mailbox needs. Google can
-  // grant a SUBSET of what we requested in edge cases. work needs send
-  // (load-bearing) + readonly (monitor); personal needs readonly (monitor).
+  // Verify the granted scope covers what this target needs. Google can grant a
+  // SUBSET of what we requested in edge cases, and storing a bundle whose scope
+  // does not actually authorize the feature produces a connection that LOOKS
+  // healthy in Settings and fails on first use -- the worst of both.
+  //
+  // work needs send (load-bearing) + readonly (monitor); personal needs
+  // readonly (monitor); calendar needs calendar.events and NEITHER gmail scope.
   const grantedScopes = (tokenResp.scope || "").split(" ");
-  const needSend = service === "gmail_oauth";
-  if (needSend && !grantedScopes.includes(GMAIL_SEND_SCOPE)) {
-    return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_send_scope_not_granted" });
-  }
-  if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
-    return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_readonly_scope_not_granted" });
+  if (service === "google_calendar") {
+    if (!grantedScopes.includes(CALENDAR_EVENTS_SCOPE)) {
+      return settingsRedirect(req, { gmail_oauth: "error", reason: "calendar_scope_not_granted" });
+    }
+  } else {
+    const needSend = service === "gmail_oauth";
+    if (needSend && !grantedScopes.includes(GMAIL_SEND_SCOPE)) {
+      return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_send_scope_not_granted" });
+    }
+    if (!grantedScopes.includes(GMAIL_READONLY_SCOPE)) {
+      return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_readonly_scope_not_granted" });
+    }
   }
 
   // Look up the operator's Gmail address. We requested `openid email`
@@ -202,6 +214,10 @@ export async function GET(req: NextRequest) {
     expires_at: expiresAt,
     scope: tokenResp.scope || GMAIL_READONLY_SCOPE,
     gmail_address: gmailAddress,
+    // The same address under a neutral key for the calendar connection, which
+    // is not a mailbox. Reading `gmail_address` to answer "which calendar are
+    // my callbacks going to" would work today and read as a bug forever.
+    ...(service === "google_calendar" ? { google_address: gmailAddress } : {}),
   };
 
   const setResult = await setUserIntegrationBundle(

@@ -206,6 +206,9 @@ const TESTS = [
   // `next_action_at`, and until 2026-08-23 nothing on the path reps call
   // from ever wrote it -- see lib/website-sales-workflow.ts's header.
   "tests/web-leads-next-action.test.ts",
+  // Callbacks reaching the rep's phone. The queue is the source of truth and
+  // the calendar is a mirror -- these pin the ordering that keeps it that way.
+  "tests/web-leads-calendar-sync.test.ts",
   // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
   // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
   // the pipeline route's read-only auth spine, agent-role scoping wiring,

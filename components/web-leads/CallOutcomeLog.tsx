@@ -160,6 +160,13 @@ export function CallOutcomeLog({ leadId, onLogged }: { leadId: string; onLogged?
   /** Set when the call was logged but its queue update was not applied. Holds
    *  the repair affordance; never rendered as a success. */
   const [needsRepair, setNeedsRepair] = useState(false);
+  /**
+   * A true statement about a DEGRADED success: the call and the callback are
+   * saved, but the phone alert is not. Deliberately separate state from
+   * `error` -- this is not a failure, and colouring it like one would teach
+   * reps that a successful save looks like a problem.
+   */
+  const [calendarNotice, setCalendarNotice] = useState<string | null>(null);
 
   const saveRef = useRef<HTMLButtonElement | null>(null);
 
@@ -183,6 +190,7 @@ export function CallOutcomeLog({ leadId, onLogged }: { leadId: string; onLogged?
     setStaged(null);
     setNextAction("");
     setNeedsRepair(false);
+    setCalendarNotice(null);
     loadHistory(() => ok);
     return () => { ok = false; };
   }, [leadId, loadHistory]);
@@ -250,6 +258,9 @@ export function CallOutcomeLog({ leadId, onLogged }: { leadId: string; onLogged?
       setNote("");
       setStaged(null);
       setNextAction("");
+      // Null when the mirror worked or had nothing to do, so the common case
+      // stays silent and the notice means something when it appears.
+      setCalendarNotice(body?.calendarNotice || null);
       loadHistory(() => true);
       // Let the parent refresh the list/detail so the new stage and callback
       // appear without a page reload.
@@ -375,6 +386,12 @@ export function CallOutcomeLog({ leadId, onLogged }: { leadId: string; onLogged?
             </button>
           </div>
         </div>
+      )}
+
+      {calendarNotice && !error && (
+        <p className="mt-2 rounded-md border border-bg-border bg-bg-deep/60 p-2 text-xs text-fg-muted">
+          {calendarNotice}
+        </p>
       )}
 
       {error && (

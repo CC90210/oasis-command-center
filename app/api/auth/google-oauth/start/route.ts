@@ -49,6 +49,31 @@ const OAUTH_SCOPES = [
 const MAILBOX_SERVICE: Record<string, string> = {
   work: "gmail_oauth",
   personal: "gmail_oauth_personal",
+  // 2026-08-23: not a mailbox at all, but the same machinery -- a per-user
+  // Google grant, stored in the same encrypted bundle table under its own
+  // service key, revocable on its own. Reps connect this so their callbacks
+  // appear on the phone in their pocket (lib/web-leads/calendar-sync.ts).
+  //
+  // SEPARATE SERVICE KEY, DELIBERATELY. Folding calendar scope into
+  // `gmail_oauth` would mean a rep who wants callbacks on their phone has to
+  // hand over their inbox too, and revoking one would revoke the other.
+  calendar: "google_calendar",
+};
+
+/**
+ * The scopes each target asks for. Calendar asks for calendar.events ONLY: it
+ * can create and update events on the user's calendars and nothing else -- it
+ * cannot read their mail, delete a calendar, or touch their contacts. A rep
+ * reads that consent screen before they grant it, and it should say something
+ * small and true.
+ *
+ * openid + email stay on every target because the callback resolves which
+ * Google account was connected, and showing a rep WHICH calendar their
+ * callbacks are landing on is the difference between trust and confusion when
+ * they have a personal and a work account signed in.
+ */
+const TARGET_SCOPES: Record<string, string> = {
+  calendar: ["openid", "email", "https://www.googleapis.com/auth/calendar.events"].join(" "),
 };
 
 export async function GET(req: Request) {
@@ -133,7 +158,7 @@ export async function GET(req: Request) {
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", OAUTH_SCOPES);
+  authUrl.searchParams.set("scope", TARGET_SCOPES[mailbox] || OAUTH_SCOPES);
   authUrl.searchParams.set("access_type", "offline"); // need refresh_token
   authUrl.searchParams.set("prompt", "consent"); // force refresh_token issuance
   authUrl.searchParams.set("state", state);

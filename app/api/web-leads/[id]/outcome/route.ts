@@ -45,6 +45,7 @@ import {
   ScheduleNotAppliedError,
 } from "@/lib/web-leads/outcome";
 import { WORKFLOW_ERRORS } from "@/lib/website-sales-workflow";
+import { describeCalendarSync } from "@/lib/web-leads/calendar-sync";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -110,7 +111,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   try {
-    const { record, stageChangedTo, nextActionAt } = await logCallOutcome({
+    const { record, stageChangedTo, nextActionAt, calendarSync } = await logCallOutcome({
       leadId: id,
       lead: auth.lead,
       outcome: body.outcome,
@@ -118,7 +119,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       nextActionAt: rawNext ?? null,
       repUserId: auth.session.userId,
     });
-    return NextResponse.json({ ok: true, outcome: record, stageChangedTo, nextActionAt });
+    // `calendarNotice` is null when the mirror worked or had nothing to do.
+    // A non-null value is a true statement about a DEGRADED success: the
+    // call and the callback are saved, the phone alert is not.
+    return NextResponse.json({
+      ok: true,
+      outcome: record,
+      stageChangedTo,
+      nextActionAt,
+      calendarSync: calendarSync.state,
+      calendarNotice: describeCalendarSync(calendarSync),
+    });
   } catch (err) {
     // The call IS logged; only the queue update failed. 409 rather than 500:
     // this is a state conflict the caller can resolve by retrying the repair,
