@@ -906,11 +906,34 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
           // the value that actually won so the notification never claims a
           // channel the lead does not carry.
           if (err instanceof RecordsError && err.code === "conflict") {
-            // Report the channel that actually won, and DROP our link: the
-            // winning writer's link is not ours to quote, and a channel paired
-            // with the wrong link is worse than a channel with none.
-            notifyVia = priorVia ?? notifyVia;
-            notifyLink = undefined;
+            // RE-READ, do not reuse priorVia. (Codex review 2026-08-24, P2.)
+            // priorVia is the value from BEFORE either competing write, so it
+            // is not the winner — reporting it would state a channel the lead
+            // does not carry, which is the precise failure this whole feature
+            // exists to prevent. Read what actually landed and quote that,
+            // link included, since the winner's link IS on the record.
+            const after = await db
+              .from("tenant_records")
+              .select("data")
+              .eq("id", link.lead_id)
+              .eq("tenant_id", form.tenant_id)
+              .maybeSingle();
+            const afterData = (after.data as { data?: Record<string, unknown> } | null)?.data;
+            if (!after.error && afterData) {
+              notifyVia =
+                typeof afterData[LAST_SUBMITTED_VIA_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_VIA_KEY] as string)
+                  : undefined;
+              notifyLink =
+                typeof afterData[LAST_SUBMITTED_LINK_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_LINK_KEY] as string)
+                  : undefined;
+            } else {
+              // Could not confirm what won. Say nothing rather than guess —
+              // the email falls back to the lead's stored value on its own.
+              notifyVia = undefined;
+              notifyLink = undefined;
+            }
           } else {
             console.error(
               "[forms.submit] channel stamp failed",
