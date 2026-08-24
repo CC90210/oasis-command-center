@@ -220,6 +220,13 @@ export function LeadSourceBreakdown() {
 
   useEffect(() => {
     const ac = new AbortController();
+    // `stale` rather than relying on ac.signal alone: aborting does NOT unwind a
+    // response that already finished reading, so on a fast range switch the
+    // older effect could still resolve and setLoad AFTER the newer one, leaving
+    // the chart showing the previous range's data under the new label. Every
+    // post-await write is gated on this. (CodeRabbit, PR #290.)
+    let stale = false;
+
     setLoad({ status: "loading" });
     (async () => {
       try {
@@ -228,26 +235,34 @@ export function LeadSourceBreakdown() {
           cache: "no-store",
         });
         const body = await res.json().catch(() => null);
+        if (stale) return;
         if (!res.ok || !body?.ok) {
           setLoad({
             status: "error",
+            // Deliberately the server's stable error CODE, not a driver
+            // message: the route no longer sends one, and rendering raw
+            // database text would leak schema into the operator's browser.
             message:
               body?.error === "unauthorized"
                 ? "Your session expired. Reload the page to sign back in."
-                : `${body?.error || `HTTP ${res.status}`}${body?.detail ? ` — ${body.detail}` : ""}`,
+                : String(body?.error || `HTTP ${res.status}`),
           });
           return;
         }
         setLoad({ status: "ready", data: body as MetricsResponse });
       } catch (err) {
-        if (ac.signal.aborted) return;
+        if (stale || ac.signal.aborted) return;
         setLoad({
           status: "error",
           message: err instanceof Error ? err.message : "Network request failed",
         });
       }
     })();
-    return () => ac.abort();
+
+    return () => {
+      stale = true;
+      ac.abort();
+    };
   }, [range, nonce]);
 
   return (

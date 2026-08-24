@@ -33,6 +33,11 @@ assert.equal(normalizeLeadSource("phone"), "dial");
 // string, a link shortener eating params, a typo, a copy-paste that lost the
 // value. Every one must yield a countable bucket.
 
+// Every one of these must land on EXACTLY "unknown". The original version of
+// this loop accepted `out === "text" || out === "unknown"`, which meant a
+// regression in trim handling would still pass — the assertion was weaker than
+// it looked, which is the same class of bug it exists to catch.
+// (CodeRabbit, PR #290.)
 for (const bad of [
   undefined,
   null,
@@ -40,7 +45,8 @@ for (const bad of [
   "   ",
   "e-mail",
   "carrier-pigeon",
-  "text ", // trailing space is fine, handled by trim
+  "te xt",
+  "text;dial",
   123,
   true,
   {},
@@ -53,9 +59,9 @@ for (const bad of [
 ]) {
   const out = normalizeLeadSource(bad as unknown);
   assert.equal(
-    out === "text" || out === "unknown",
-    true,
-    `normalizeLeadSource(${String(bad).slice(0, 20)}) must resolve, got ${out}`,
+    out,
+    "unknown",
+    `normalizeLeadSource(${String(bad).slice(0, 20)}) must be exactly "unknown", got ${out}`,
   );
   assert.equal(
     LEAD_SOURCE_ORDER.includes(out),
@@ -65,6 +71,12 @@ for (const bad of [
 }
 assert.equal(normalizeLeadSource(undefined), "unknown", "a missing param is Unknown, not an error");
 assert.equal(normalizeLeadSource("carrier-pigeon"), "unknown", "an unknown word is Unknown");
+
+// Whitespace around a REAL value is trimmed, not rejected — asserted exactly so
+// a trim regression fails here instead of silently degrading to Unknown.
+assert.equal(normalizeLeadSource("text "), "text", "a trailing space must still resolve to text");
+assert.equal(normalizeLeadSource(" dial"), "dial", "a leading space must still resolve to dial");
+assert.equal(normalizeLeadSource("\tTEXT\n"), "text", "tabs and newlines trim too");
 
 // ── 3. prototype pollution — the reason ALIASES is a Map ─────────────────────
 // An object-literal lookup would return Object.prototype for "__proto__" and a

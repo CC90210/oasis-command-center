@@ -62,13 +62,17 @@ export async function GET(req: NextRequest) {
     .limit(SCAN_CAP);
 
   if (res.error) {
-    // Fail loud. A zero-filled body here would render as a legitimate-looking
-    // "no leads" dashboard and hide the outage completely.
+    // Fail loud to the OPERATOR, quiet to the WIRE.
+    //
+    // Loud: a zero-filled body here would render as a legitimate-looking "no
+    // leads" dashboard and hide the outage completely, so this is a 502.
+    //
+    // Quiet: the driver's message can carry table names, column names and SQL
+    // fragments, and the client renders what it receives. It stays in the
+    // server log, which is where whoever debugs this actually looks.
+    // (CodeRabbit, PR #290.)
     console.error(`${LOG} query_failed tenant=${tenantId} days=${days}`, res.error);
-    return NextResponse.json(
-      { ok: false, error: "query_failed", detail: res.error.message ?? "unknown" },
-      { status: 502 },
-    );
+    return NextResponse.json({ ok: false, error: "query_failed" }, { status: 502 });
   }
 
   const rows = (res.data || []) as LeadRow[];
