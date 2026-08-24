@@ -50,7 +50,10 @@ type Props = {
    */
   token: string | null;
   // rep flows straight into submitBody.anonymous_init (per-agent routing).
-  anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string };
+  // `source` is the raw ?source= value (text | dial) from the shared link.
+  // Sent through verbatim; the submit route normalizes it and a bad value
+  // degrades to "unknown" rather than failing the submission.
+  anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string; source?: string };
   /**
    * Cross-form pre-fill (2026-06-20 — Ethan/Alex). When the form is opened from
    * a personalized lead link, the server loads the lead's existing data (name,

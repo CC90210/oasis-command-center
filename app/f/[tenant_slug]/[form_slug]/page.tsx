@@ -136,11 +136,17 @@ export default async function AnonymousFormPage({
   // interest form with their own rep param; the submit route resolves it to
   // assigned_to so the lead lands under that agent. Spoofing only reassigns
   // among real tenant members (resolved server-side), never an outsider.
-  searchParams?: Promise<{ rep?: string }>;
+  //
+  // ?source=<text|dial> — origination attribution. Orthogonal to ?rep: the same
+  // agent blasts texts AND dials, so both params travel together on a link.
+  // Passed through raw; lib/forms/lead-source.ts normalizes it server-side on
+  // submit, where a bad value becomes "unknown" instead of rejecting the lead.
+  searchParams?: Promise<{ rep?: string; source?: string }>;
 }) {
   const resolved = await params;
   const sp = (await searchParams) || {};
   const rep = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : undefined;
+  const source = typeof sp.source === "string" && sp.source.trim() ? sp.source.trim() : undefined;
   const result = await loadForm(resolved);
 
   if (!result.ok) {
@@ -166,6 +172,7 @@ export default async function AnonymousFormPage({
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,
         ...(rep ? { rep } : {}),
+        ...(source ? { source } : {}),
       }}
     />
   );
