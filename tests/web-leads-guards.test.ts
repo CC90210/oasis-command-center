@@ -195,10 +195,34 @@ assert.match(
 // assertion below is unchanged; only its line-ending assumption is.
 const fetchLeadsBody = code.match(/export async function fetchLeads\([\s\S]*?\r?\n\}\r?\n/);
 assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
+// RESTATED 2026-08-23, NOT RELAXED. This asserted `visibleToViewer` by name.
+// Ownership replaced that mechanism: a contractor must now be able to SEE the
+// claimable pool (unassigned leads are the inventory they are meant to claim --
+// Adon: "all the accounts can assign themselves the lead"), while still never
+// reading another rep's book. visibleToViewer, which hides every unassigned
+// lead from an agent, would have handed those reps an empty pool and a Claim
+// button that could not work.
+//
+// The property PR #237 actually protects is unchanged and is asserted directly
+// below: no caller ever receives a lead that belongs to someone else. It now
+// holds by construction rather than by a filter --
+//
+//   scope "mine" -> isInBookOf(.., viewer.userId), self-scoping by definition;
+//   scope "pool" -> isClaimable(..), which excludes every currently-held lead.
+//
+// Plus: a pool lead can still carry a PREVIOUS owner (an expired claim, a
+// recycled loss), so the owner id is nulled for anyone but that lead's own
+// holder or an admin -- otherwise the pool would quietly tell a contractor
+// which rep had which business.
 assert.match(
   fetchLeadsBody[0],
-  /visibleToViewer/,
-  "fetchLeads must apply visibleToViewer scoping to each row -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
+  /scope === "mine"\s*\?\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)\s*:\s*isClaimable\(/,
+  "fetchLeads must scope 'mine' to the caller's own book and 'pool' to unheld leads -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /assignedTo: ownedByViewer \|\| viewer\.isAdmin \? facts\.assignedTo : null/,
+  "fetchLeads must not surface another rep's user id on a pool lead -- an expired claim still names its previous owner",
 );
 
 // ---------------------------------------------------------------------------

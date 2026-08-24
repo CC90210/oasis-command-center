@@ -19,8 +19,17 @@
  * switched the same way every other filter here is: through the URL, so a
  * view survives a refresh, back/forward, and a shared link.
  */
-export type WebLeadView = "leads" | "pipeline" | "territories";
-const VALID_VIEWS: readonly WebLeadView[] = ["leads", "pipeline", "territories"];
+/**
+ * `pipeline` was a shared stage board showing every rep's leads mixed together.
+ * Adon, 2026-08-23: "You could remove the pipeline feature. I don't see any use
+ * for that." He was right, and why it was useless is worth recording: a board
+ * of everyone's leads answers a manager's question, and the people on this
+ * screen are reps, who only need to know what is in THEIR book. `mine` replaces
+ * it. Old `?view=pipeline` links fall through to the default rather than
+ * breaking, via the VALID_VIEWS check in parseFilters.
+ */
+export type WebLeadView = "leads" | "mine" | "territories";
+const VALID_VIEWS: readonly WebLeadView[] = ["leads", "mine", "territories"];
 
 /**
  * Score bands, as RANGES rather than judgements (2026-08-23).

@@ -30,6 +30,8 @@ import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
+import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
+import { isClaimable } from "./claim-ops";
 
 // Re-exported so every existing import site keeps working. They live in a leaf
 // module now so scores.ts can pin the same tenant and cap without creating an
@@ -111,7 +113,26 @@ export type WebLead = {
 export type WebLeadRow = WebLead & {
   score: number | null;
   scoreState: ScoreState;
+  /** Auth user id of the rep who holds it, or null when it is in the pool. */
+  assignedTo: string | null;
+  /** Current lifecycle stage, for My Leads. */
+  stage: string | null;
+  /** True when a rep nominally holds this lead but the claim has lapsed -- see
+   *  lib/web-leads/claim.ts. Rendered as a marker in the rep's own book rather
+   *  than by silently removing the row. */
+  released: boolean;
+  /** When the last call was logged, so a rep can see what they have not touched. */
+  lastCallAt: string | null;
 };
+
+/**
+ * Which slice of the world a list read is asking for.
+ *
+ *   "pool" — the shared Leads tab: only leads nobody currently holds. This is
+ *            what stops two reps dialling the same business.
+ *   "mine" — the caller's own book, including leads whose claim has lapsed.
+ */
+export type LeadScope = "pool" | "mine";
 
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
@@ -181,8 +202,14 @@ export async function fetchLeads(
   sheetIds: string[],
   viewer: Viewer,
   scoreIndex: ScoreIndex,
+  // `now` is injected, never read here, for the same reason claim.ts takes it
+  // as a parameter: ownership expiry is a pure derivation over timestamps, and
+  // one request must not see the clock move between filtering and paging.
+  { scope, now }: { scope: LeadScope; now: number },
 ): Promise<{ leads: WebLeadRow[]; total: number }> {
-  if (sheetIds.length === 0) return { leads: [], total: 0 };
+  // A rep's own book is not confined to the sheets the filters selected, so an
+  // empty sheet selection means "no leads" only for the shared pool.
+  if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0 };
   const db = getServiceSupabase();
   const { data, error, count } = await db
     .from("tenant_records")
@@ -212,11 +239,34 @@ export async function fetchLeads(
     // is deliberately not surfaced on WebLead (see the Viewer doc comment on
     // isScopedContractor -- a scoped viewer must never receive rows outside
     // their own book, not just have them hidden client-side).
+    /**
+     * OWNERSHIP AND VISIBILITY, resolved together rather than as two stacked
+     * filters -- because stacking them broke the feature.
+     *
+     * `visibleToViewer` hides every UNASSIGNED lead from an `agent`-role
+     * contractor (fail closed: see its doc comment). Run before the pool
+     * filter, that left exactly the people this feature is for -- outside
+     * contractors selling websites -- looking at an empty pool with a Claim
+     * button they could never use, because unassigned leads ARE the claimable
+     * inventory. Codex caught it (2026-08-23).
+     *
+     *   "mine"  — strictly the caller's own book. Self-scoping by
+     *             construction: isInBookOf compares against this viewer's id,
+     *             so a contractor cannot widen it and #237's leak stays shut.
+     *
+     *   "pool"  — every lead nobody currently holds, for everyone in the
+     *             tenant. This is a DELIBERATE widening for `agent`, and it is
+     *             what Adon asked for: "all the accounts can assign themselves
+     *             the lead." A claimable lead is in nobody's book, so there is
+     *             no rep's book to leak; what #237 actually closed was reading
+     *             other people's assigned leads, and that stays closed --
+     *             assigned leads are exactly what the pool excludes. Volume is
+     *             bounded separately by the 250-lead cap in claim.ts.
+     */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
-      visibleToViewer(
-        typeof r.data.assigned_to === "string" ? r.data.assigned_to : null,
-        viewer,
-      ),
+      scope === "mine"
+        ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+        : isClaimable(r.data || {}, now),
     )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
       const lead = toWebLead(r);
@@ -227,9 +277,29 @@ export async function fetchLeads(
       const bid = typeof r.data.webdev_source_business_id === "string"
         ? r.data.webdev_source_business_id
         : null;
-      return { ...lead, ...resolveScore(lead.websiteUrl, bid, scoreIndex) };
+      const facts = factsFrom(r.data || {});
+      const ownedByViewer = isInBookOf(facts, viewer.userId);
+      return {
+        ...lead,
+        ...resolveScore(lead.websiteUrl, bid, scoreIndex),
+        // A lead in the POOL can still carry a previous owner -- an expired
+        // claim or a 90-day-old loss is claimable while `assigned_to` still
+        // names whoever had it last. Surfacing that id would tell a contractor
+        // which rep held which business, which is the kind of cross-book
+        // information PR #237 closed. Non-admins see an owner id only for
+        // leads in their own book; everyone else gets null, and the lead is
+        // claimable either way.
+        assignedTo: ownedByViewer || viewer.isAdmin ? facts.assignedTo : null,
+        stage: facts.stage,
+        released: isReleasedFromBook(facts, now),
+        lastCallAt: facts.lastCallAt,
+      };
     })
-    .filter((l) => l.territoryId && wanted.has(l.territoryId))
+    // Sheet narrowing applies to the shared pool only. A rep's own book must
+    // show every lead they hold, including any whose territory sits outside
+    // the filters currently set on the Leads tab -- otherwise a rep changes a
+    // filter and leads they own disappear from their own page.
+    .filter((l) => (scope === "mine" ? true : l.territoryId && wanted.has(l.territoryId)))
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => matchesBand(l, f.band))
@@ -295,10 +365,41 @@ export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | n
   // doesn't exist -- returning null here (not a distinguishable error) is
   // what lets the route answer with a 404 instead of a 403, so a scoped
   // contractor can't use this endpoint to probe which ids exist tenant-wide.
-  if (!visibleToViewer(typeof row.data.assigned_to === "string" ? row.data.assigned_to : null, viewer)) {
-    return null;
-  }
+  //
+  // THIS MUST MATCH WHAT THE LIST SHOWS. fetchLeads' pool scope deliberately
+  // shows an `agent`-role contractor every claimable lead, and every by-id
+  // route -- detail, audit, outcome -- authorizes through here. Left as a bare
+  // visibleToViewer check, a contractor saw the pool, opened a lead, and got a
+  // 404; entered Call Mode and every disposition failed. A list you cannot
+  // click is worse than no list, because the rep only finds out mid-call.
+  // (Codex review, 2026-08-23.)
+  //
+  // So the two rules are the same rule: readable if it is in your book, or if
+  // it is claimable by anyone. Nothing widens beyond that -- a lead somebody
+  // else currently holds is still invisible, which is the property PR #237
+  // closed.
+  if (!canViewerRead(row.data || {}, viewer, Date.now())) return null;
   return toWebLead(row);
+}
+
+/**
+ * Whether `viewer` may read this lead at all, by id.
+ *
+ * The single definition of by-id readability, shared by fetchLead and anything
+ * else that authorizes one lead -- two independent answers to "may they see
+ * it" is how the list and the detail page drift apart, which is exactly the
+ * bug this replaced.
+ */
+export function canViewerRead(
+  data: Record<string, unknown>,
+  viewer: Viewer,
+  now: number,
+): boolean {
+  const facts = factsFrom(data);
+  // Unscoped roles (admins and every established role) are unchanged.
+  if (!isScopedContractor(viewer)) return true;
+  if (isInBookOf(facts, viewer.userId)) return true;
+  return isClaimable(data, now);
 }
 
 /**

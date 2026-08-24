@@ -185,6 +185,10 @@ const TESTS = [
   // the two can never contradict each other about a stranger's website -- and
   // that Call Mode cannot advance past a call it failed to record.
   "tests/web-leads-scores.test.ts",
+  // 2026-08-23 ownership pass: who holds a lead, and when that stops being
+  // true. Guards the two failures that are invisible on a screen -- two reps
+  // dialling the same business, and a pool that only ever drains.
+  "tests/web-leads-claim.test.ts",
   // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
   // from JARVIS's services/leadgen/lib/remedies.js.
   "tests/web-leads-remedies.test.ts",
@@ -202,11 +206,12 @@ const TESTS = [
   // lib/web-leads/outcome.ts's header for the full reasoning.
   "tests/web-leads-outcome.test.ts",
   "tests/web-leads-outcome-guards.test.ts",
-  // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
-  // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
-  // the pipeline route's read-only auth spine, agent-role scoping wiring,
-  // and that an unrecognised stage value is bucketed and shown, not dropped.
-  "tests/web-leads-pipeline.test.ts",
+  // (The shared pipeline board and its tests were removed 2026-08-23. It
+  // showed every rep's leads mixed together, which answers a manager's
+  // question on a screen only reps use -- Adon: "I don't see any use for
+  // that." Replaced by the per-rep My Leads view, covered by
+  // web-leads-claim.test.ts. CC's WEBSITE_SALES_STAGES remain the single
+  // lifecycle; nothing about that changed.)
   // Build B (2026-08-21): territory -> rep assignment. Admin-only enforcement,
   // tenant mismatch, propagation to the right leads, and the rule that an
   // unassign must never strip a lead's own data.assigned_to.

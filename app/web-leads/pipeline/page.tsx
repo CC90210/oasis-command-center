@@ -1,31 +1,22 @@
+/**
+ * /web-leads/pipeline — a redirect, kept alive on purpose.
+ *
+ * The standalone pipeline page was retired on 2026-08-23, and the shared stage
+ * board it linked to was deleted entirely (it showed every rep's leads mixed
+ * together -- a manager's question on a screen only reps use). Deleting this
+ * file too would 404 every link and bookmark anyone has already shared, which
+ * is a worse outcome than one three-line file: retiring a UI does not require
+ * breaking its URL. Codex flagged the removal (2026-08-23).
+ *
+ * Lands on My leads, which is the honest successor -- someone who bookmarked
+ * "the pipeline" wanted to see leads at their stages, and that is now their own
+ * book. `?rep=` is dropped rather than translated: a rep parameter selected
+ * SOMEONE ELSE's slice of the old shared board, and there is deliberately no
+ * longer a way to view another rep's book from this route.
+ */
+
 import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-/**
- * /web-leads/pipeline — retired as a standalone destination (2026-08-23
- * revamp). The operator said, verbatim, "Not a separate pipeline page":
- * Pipeline is now an in-page view inside /web-leads, reached through a
- * segmented control and carried in the URL as `?view=pipeline`
- * (lib/web-leads/filters.ts), the same way every other filter on that page
- * already works. The WEBDEV_NAV sidebar entry for this route is gone
- * (lib/nav-config.ts) -- but the route itself stays alive, purely as a
- * redirect, so no bookmark or shared link built against the old URL 404s.
- * Every search param this route received (rep, lead, ...) is forwarded
- * along with the new view param, so a deep link like
- * `/web-leads/pipeline?rep=<id>` still lands on the right slice of the board.
- */
-export default async function WebLeadsPipelineRedirect({
-  searchParams,
-}: {
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  const params = (await searchParams) || {};
-  const sp = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (typeof value === "string") sp.set(key, value);
-    else if (Array.isArray(value) && value.length > 0) sp.set(key, value[0]);
-  }
-  sp.set("view", "pipeline");
-  redirect(`/web-leads?${sp.toString()}`);
+export default function RetiredPipelinePage() {
+  redirect("/web-leads?view=mine");
 }

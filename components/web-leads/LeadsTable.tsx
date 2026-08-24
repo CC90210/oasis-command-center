@@ -39,6 +39,31 @@ import { useEffect, useRef } from "react";
 import { AlertCircle, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 
+/**
+ * Rep-facing names for CC's stage values.
+ *
+ * The raw values come from lib/website-sales.ts and are shared with the
+ * commission engine, so they are not ours to rename at the source. This maps
+ * them to what a rep would say out loud. Anything unmapped renders its raw
+ * value rather than a blank -- an unknown stage is information, not an error.
+ */
+const STAGE_LABEL: Record<string, string> = {
+  researched: "New",
+  assigned: "Mine, not called",
+  attempting_contact: "Trying to reach",
+  connected: "Spoke to them",
+  qualified: "Qualified",
+  founder_meeting_booked: "Meeting booked",
+  demo_completed: "Demo done",
+  proposal_sent: "Quote sent",
+  won: "Won",
+  lost: "Not interested",
+  onboarding: "Onboarding",
+  in_build: "Building",
+  client_review: "Client review",
+  launched: "Launched",
+};
+
 /** Matches the app's staggered animate-pulse-slow convention so the swap from
  *  skeleton to real rows is visually quiet. */
 function TableSkeleton({ rows = 12 }: { rows?: number }) {
@@ -94,6 +119,7 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
 
 export function LeadsTable({
   leads, total, page, onPage, onOpen, loading, error, emptyHint, pageSize,
+  selected, onToggle, onToggleAll, showStage,
 }: {
   leads: WebLeadRow[];
   total: number;
@@ -104,7 +130,16 @@ export function LeadsTable({
   error: string | null;
   emptyHint: string;
   pageSize: number;
+  /** Ids currently ticked. Selection lives in the parent so the toolbar's
+   *  "Claim N" button and this table cannot disagree about what is selected. */
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+  onToggleAll: (ids: string[], select: boolean) => void;
+  /** My Leads shows what stage each lead is at; the shared pool does not,
+   *  because every lead in the pool is at the same one. */
+  showStage: boolean;
 }) {
+  const allOnPageSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
   // pageSize is passed in rather than hardcoded: a literal 50 here would
   // silently disagree with PAGE_SIZE in data.ts the moment either changed, and
   // the pager would offer pages the API never returns.
@@ -159,8 +194,21 @@ export function LeadsTable({
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="sticky top-0 z-10 bg-bg-panel text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted shadow-[0_1px_0_0_rgb(34_38_46)]">
+              <th scope="col" className="w-9 pl-4 pr-0 py-3">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 rounded accent-accent align-middle"
+                  checked={allOnPageSelected}
+                  // Selects THIS PAGE, not the whole filtered set. A checkbox
+                  // that silently ticked 31,016 rows would let one click claim
+                  // far past a rep's cap and read as if it had worked.
+                  onChange={() => onToggleAll(leads.map((l) => l.id), !allOnPageSelected)}
+                  aria-label={allOnPageSelected ? "Clear selection on this page" : "Select every lead on this page"}
+                />
+              </th>
               <th scope="col" className="px-4 py-3 font-bold">Business</th>
               <th scope="col" className="px-4 py-3 font-bold">Phone</th>
+              {showStage && <th scope="col" className="px-4 py-3 font-bold">Stage</th>}
               <th scope="col" className="px-4 py-3 text-right font-bold">Website</th>
             </tr>
           </thead>
@@ -179,7 +227,17 @@ export function LeadsTable({
                 aria-label={`Open ${l.name}`}
                 className="group cursor-pointer border-t border-bg-border/50 transition-colors first:border-t-0 hover:bg-bg-hover focus-visible:bg-bg-hover focus-visible:outline-none"
               >
-                <td className="relative py-3 pl-4 pr-4 align-middle">
+                {/* stopPropagation: ticking a row must not also open it. */}
+                <td className="w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5 rounded accent-accent align-middle"
+                    checked={selected.has(l.id)}
+                    onChange={() => onToggle(l.id)}
+                    aria-label={`Select ${l.name}`}
+                  />
+                </td>
+                <td className="relative py-3 pr-4 align-middle">
                   {/* Left rail on hover/focus: shows which row is live without
                       moving anything, so the list does not jitter as the cursor
                       travels. */}
@@ -205,6 +263,19 @@ export function LeadsTable({
                     <span className="text-fg-faint">No number</span>
                   )}
                 </td>
+                {showStage && (
+                  <td className="px-4 py-3 align-middle">
+                    <span className="text-xs text-fg-muted">{STAGE_LABEL[l.stage || ""] || l.stage || "—"}</span>
+                    {/* A lapsed claim is SHOWN, not silently removed. A rep whose
+                        lead vanished overnight stops trusting the tool and
+                        starts keeping a private spreadsheet. */}
+                    {l.released && (
+                      <span className="mt-0.5 block text-[10px] text-fg-dim">
+                        Released — back in the pool
+                      </span>
+                    )}
+                  </td>
+                )}
                 <td className="w-44 px-4 py-3 align-middle">
                   <WebsiteCell lead={l} />
                 </td>

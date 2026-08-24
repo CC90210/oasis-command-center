@@ -19,7 +19,7 @@
  * BANDS ARE RANGES, NOT JUDGEMENTS. "Under 40", not "weak". See filters.ts.
  */
 
-import { Phone, Search, X } from "lucide-react";
+import { Loader2, Phone, Search, UserPlus, X } from "lucide-react";
 import type { LeadSort, ScoreBand, WebLeadFilters } from "@/lib/web-leads/filters";
 
 const BANDS: { key: ScoreBand; label: string; hint: string }[] = [
@@ -38,6 +38,7 @@ const SORTS: { key: LeadSort; label: string }[] = [
 
 export function LeadsToolbar({
   filters, onChange, total, loading, queryDraft, onQueryDraft, onStartCalling, canStartCalling,
+  selectedCount, onClaim, claiming, claimLabel,
 }: {
   filters: WebLeadFilters;
   onChange: (f: WebLeadFilters) => void;
@@ -47,6 +48,13 @@ export function LeadsToolbar({
   onQueryDraft: (v: string) => void;
   onStartCalling: () => void;
   canStartCalling: boolean;
+  selectedCount: number;
+  /** Claim into my book (shared pool) or release back to it (My Leads). The
+   *  parent owns which of the two this is, so the bar never has to know which
+   *  view it is rendered in. */
+  onClaim: () => void;
+  claiming: boolean;
+  claimLabel: string;
 }) {
   // Every control resets to page 1: changing what you are looking at while
   // staying on page 8 of the previous result set shows a rep an arbitrary
@@ -120,6 +128,17 @@ export function LeadsToolbar({
               <span className="tabular-nums font-bold text-fg">{total.toLocaleString()}</span>{" "}
               lead{total === 1 ? "" : "s"}
             </p>
+          )}
+          {selectedCount > 0 && (
+            <button
+              type="button"
+              onClick={onClaim}
+              disabled={claiming}
+              className="inline-flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3.5 py-2 text-sm font-bold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-50"
+            >
+              {claiming ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+              {claimLabel} {selectedCount}
+            </button>
           )}
           <button
             type="button"

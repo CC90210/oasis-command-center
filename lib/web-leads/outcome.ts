@@ -247,18 +247,45 @@ export async function logCallOutcome(input: {
     .single();
   if (ins.error) throw new Error(`outcome_insert_failed: ${ins.error.message}`);
 
-  // THE CONSTRAINED PART -- see nextStage()'s doc comment above. This is the
-  // ONLY tenant_records write in this module, and it only ever touches
-  // `data.stage`, and only to "connected" or "lost".
+  // THE CONSTRAINED PART -- see nextStage()'s doc comment above. This module's
+  // only tenant_records write, still touching no pricing, commission or other
+  // lifecycle field: `stage` (and only to "connected" or "lost"), plus the two
+  // ownership timestamps below.
+  //
+  // ═══ WHY last_call_at IS STAMPED ON EVERY OUTCOME, INCLUDING "no answer" ═══
+  //
+  // lib/web-leads/claim.ts expires a claim after 7 days with no call logged,
+  // and recycles a lost lead after 90. Both rules read fields that, until this
+  // change, NOTHING wrote. The result was not a small gap -- it inverted both
+  // rules:
+  //
+  //   - every claimed lead expired on day 7 no matter how hard the rep worked
+  //     it, because last_call_at was always null; and
+  //   - no lost lead ever recycled, because lost_at was always null and the
+  //     rule fails closed toward the prospect who said no.
+  //
+  // Codex caught it (2026-08-23). It is worth naming the shape: the claim
+  // rules were written, tested at exact instants against hand-made facts, and
+  // fully green -- while the fields those facts describe were never populated
+  // by any code path. Testing a rule in isolation proves the rule, not the
+  // system. Verify the contribution, not the presence.
+  //
+  // "no answer" stamps too, and deliberately: a rep who dials four times and
+  // reaches nobody is working that lead, and taking it off them on day 7
+  // punishes exactly the persistence this whole funnel depends on.
   const target = nextStage(stage, outcome);
-  if (target) {
-    await updateRecord({
-      tenant_id: WEBDEV_TENANT_ID,
-      entity: "lead",
-      id: leadId,
-      patch: { stage: target },
-    });
-  }
+  const patch: Record<string, unknown> = { last_call_at: nowIso };
+  if (target) patch.stage = target;
+  // Stamped only on the transition INTO lost, so a second "not interested" on
+  // an already-lost lead cannot keep pushing its 90-day recycle date forward
+  // and quietly pin it out of the pool forever.
+  if (target === "lost") patch.lost_at = nowIso;
+  await updateRecord({
+    tenant_id: WEBDEV_TENANT_ID,
+    entity: "lead",
+    id: leadId,
+    patch,
+  });
 
   return {
     record: toRecord(ins.data as { id: string; outcome: string; notes: string | null; rep_user_id: string; called_at: string }),

@@ -116,9 +116,41 @@ for (const forbidden of ["qualified", "founder_meeting_booked", "proposal_sent",
 // updateRecord() call's patch object rather than merely checking the word
 // "stage" appears somewhere in the file.
 // ---------------------------------------------------------------------------
+// RESTATED AS AN ALLOWLIST 2026-08-23, NOT RELAXED. This required the patch to
+// be literally `{ stage: target }`. Ownership expiry (lib/web-leads/claim.ts)
+// needs two timestamps stamped at exactly this moment -- last_call_at on every
+// logged call, lost_at on the transition into lost -- and until they were
+// written, BOTH recycling rules were inverted in production while every test
+// stayed green: claims expired on day 7 however hard a rep worked them, and
+// lost leads never returned to the pool at all.
+//
+// The protection this guard exists for is unchanged: this module must never
+// write a pricing, commission, or CC-owned lifecycle field. So instead of
+// naming one allowed shape, it now enumerates the ONLY three keys that may be
+// built into the patch, and fails on any fourth.
 const updateCall = libCode.match(/updateRecord\(\{[\s\S]{0,400}?\}\);/);
 assert.ok(updateCall, `${LIB} must call updateRecord() to advance the stage`);
-assert.match(updateCall![0], /patch:\s*\{\s*stage:\s*target\s*\}/, `${LIB}'s updateRecord() call must patch ONLY { stage: target }`);
+assert.match(updateCall![0], /patch,/, `${LIB} must pass the assembled patch object to updateRecord()`);
+
+{
+  // Every key assigned into the patch, wherever it is built in this module.
+  const declared = libCode.match(/const patch: Record<string, unknown> = \{([^}]*)\}/);
+  assert.ok(declared, `${LIB} must build its tenant_records patch in one place`);
+  const keys = new Set<string>();
+  for (const m of declared![1].matchAll(/(\w+):/g)) keys.add(m[1]);
+  for (const m of libCode.matchAll(/\bpatch\.(\w+)\s*=/g)) keys.add(m[1]);
+
+  const ALLOWED = new Set(["stage", "last_call_at", "lost_at"]);
+  for (const k of keys) {
+    assert.ok(
+      ALLOWED.has(k),
+      `${LIB} may only patch ${[...ALLOWED].join(", ")} on tenant_records -- found "${k}". Pricing, commission and CC-owned lifecycle fields are not this module's to write.`,
+    );
+  }
+  assert.ok(keys.has("stage"), `${LIB} must still advance the stage`);
+  assert.ok(keys.has("last_call_at"), `${LIB} must stamp last_call_at or claim expiry cannot see that a lead was worked`);
+  assert.ok(keys.has("lost_at"), `${LIB} must stamp lost_at or the 90-day recycle can never fire`);
+}
 for (const forbiddenField of ["price", "commission", "setupAmount", "monthlyAmount", "collectedSetupAmount", "assigned_to"]) {
   assert.doesNotMatch(
     updateCall![0],
