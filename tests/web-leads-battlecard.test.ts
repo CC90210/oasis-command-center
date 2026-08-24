@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  percentileAmong, median, bucketOf, distributionOf, chooseSlice, labelFor, MIN_SLICE, TOP_N,
+  percentileAmong, median, groupStats, bucketOf, distributionOf, chooseSlice, labelFor, MIN_SLICE, TOP_N,
 } from "../lib/web-leads/competitors";
 import { ANGLES, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
@@ -75,6 +75,27 @@ assert.deepEqual(percentileAmong([], 50), { lowerThanPct: 0, rank: 1, outOf: 1 }
 assert.equal(median([1, 2, 3]), 2);
 assert.equal(median([1, 2, 3, 4]), 3, "an even split rounds rather than returning a fraction of a point");
 assert.equal(median([]), 0);
+
+// THE EXTREMA DESCRIBE THE GROUP THE LEAD IS RANKED IN, not the peers alone.
+// The card renders "Rank 1 of 5. Best in that group scores 86" off these two
+// side by side; computed over peers only, a lead scoring 90 against a best peer
+// of 86 renders exactly that -- ranked first in a group whose stated best is
+// lower than it is. A prospect spots that without knowing any statistics.
+// (Codex review, 2026-08-24.)
+{
+  const peers = [86, 60, 40, 20];
+  const stats = groupStats(peers, 90);
+  assert.equal(stats.best, 90, "a lead above every peer IS the best of the group it is ranked in");
+  assert.equal(percentileAmong(peers, 90).rank, 1);
+  assert.ok(
+    stats.best >= 90,
+    "rank 1 with a stated group best below the lead's own score is a self-contradiction on screen",
+  );
+
+  const low = groupStats(peers, 5);
+  assert.equal(low.worst, 5, "a lead below every peer IS the lowest of the group it is ranked in");
+  assert.equal(low.best, 86);
+}
 
 // ---------------------------------------------------------------------------
 // 2. Bucketing, and the eleventh-bucket artefact it avoids.
@@ -427,6 +448,20 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // prefers-reduced-motion disables all of it. Non-negotiable: a rep on a call
   // does not need things moving.
   assert.match(src, /prefers-reduced-motion/, `${view} must honour prefers-reduced-motion`);
+
+  // "The best-scoring" is only ever said about the actual best-scoring site.
+  // buildHeadToHead falls through to the next candidate when the top one has no
+  // readable profile, and the card previously described whatever came back as
+  // the best in the slice -- a false claim about a named business, on a live
+  // call, in exactly the case the fallback exists to handle. (Codex review,
+  // 2026-08-24.) The superlative must sit behind the rank check.
+  assert.match(
+    src,
+    /headToHead\.rankInSlice === 1[\s\S]{0,200}?The best-scoring/,
+    `${view} must gate the "best-scoring" claim on the competitor actually being ranked first`,
+  );
+  const superlatives = (src.match(/The best-scoring of the/g) || []).length;
+  assert.equal(superlatives, 1, `${view} must not repeat the superlative outside the rank check`);
 
   // Hand-rolled SVG, on purpose. A chart library ships its own colour defaults
   // into a surface whose central rule is that no colour may be keyed to a

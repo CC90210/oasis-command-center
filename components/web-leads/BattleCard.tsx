@@ -983,10 +983,17 @@ function Competitors({
           <p className="text-sm font-semibold text-fg">
             {lead.name} against {headToHead.competitor.name}, area by area
           </p>
+          {/* "The best-scoring" is only said when it IS the best-scoring.
+              buildHeadToHead falls through to the next candidate when the top
+              one has no readable profile, and calling that one the best is a
+              false claim about a named business made on a live call -- in
+              exactly the case the fallback exists to handle. (Codex review,
+              2026-08-24.) */}
           <p className="mt-1 text-xs text-fg-dim">
-            The best-scoring of the {fmt(slice.peerCount)} {slice.label} we have measured, last checked{" "}
-            {formatDate(headToHead.measuredAt)}. It scores {headToHead.composite} where this one scores{" "}
-            {audit.composite}.
+            {headToHead.rankInSlice === 1
+              ? `The best-scoring of the ${fmt(slice.peerCount)} ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}.`
+              : `Among the top-scoring ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}. We do not hold an area-by-area breakdown for the highest-scoring one, so this is the closest that we do.`}{" "}
+            It scores {headToHead.composite} where this one scores {audit.composite}.
           </p>
           <ul className="mt-4 space-y-3">
             {headToHead.dimensions.map((d) => (

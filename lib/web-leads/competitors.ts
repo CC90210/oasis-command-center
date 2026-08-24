@@ -119,6 +119,17 @@ export type SliceSummary = {
 
 export type HeadToHead = {
   competitor: Competitor;
+  /**
+   * 1-based position of this competitor within the chosen slice, best first.
+   *
+   * EXISTS SO THE UI CANNOT LIE. buildHeadToHead() falls through to the next
+   * candidate when the top-scoring one has no readable profile, and the card
+   * used to describe whatever came back as "the best-scoring" site in the
+   * slice -- a false claim about a named business, said aloud on a call, in
+   * exactly the fallback case the loop was written to handle. Anything other
+   * than 1 must be worded differently. (Codex review, 2026-08-24.)
+   */
+  rankInSlice: number;
   composite: number;
   measuredAt: string;
   /** One row per dimension the LEAD has, in the lead's own order, so the
@@ -178,6 +189,26 @@ export function median(scores: number[]): number {
   const sorted = [...scores].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/**
+ * Best / worst / middle of the group the card actually RANKS the lead inside --
+ * the peers AND the lead, which is the same `outOf` the rank is quoted against.
+ *
+ * WHY NOT PEERS ONLY, which is the obvious reading of "the competition": the
+ * card renders "Rank 1 of 219. Best in that group scores 86" off these two
+ * numbers side by side. Computed over peers alone, a lead scoring 90 against a
+ * best peer of 86 renders exactly that pair -- ranked first in a group whose
+ * best is lower than it is. A prospect does not need to know statistics to spot
+ * that, and the rep has no answer. One group, one set of extrema. (Codex
+ * review, 2026-08-24.)
+ */
+export function groupStats(
+  peerScores: number[],
+  leadScore: number,
+): { best: number; worst: number; median: number } {
+  const all = [...peerScores, leadScore];
+  return { best: Math.max(...all), worst: Math.min(...all), median: median(all) };
 }
 
 /**
@@ -380,12 +411,18 @@ async function buildHeadToHead(
   candidates: CorpusEntry[],
   leadDimensions: DimensionProfile[],
 ): Promise<HeadToHead | null> {
-  for (const c of candidates) {
+  for (let i = 0; i < candidates.length; i += 1) {
+    const c = candidates[i];
     const profile = await fetchCompetitorProfile(c.businessId);
     if (!profile) continue;
     const leaderByKey = new Map(profile.dimensions.map((d) => [d.key, d.score]));
     return {
       competitor: { name: c.name, city: c.city, province: c.province, websiteUrl: c.websiteUrl, score: c.score },
+      // `candidates` is the slice ranked best-first, so the index IS the rank
+      // within the slice. Anything but 1 means we skipped a higher-scoring
+      // business whose profile we could not read, and the card must say so
+      // rather than call this one the best.
+      rankInSlice: i + 1,
       composite: profile.composite,
       measuredAt: profile.measuredAt,
       // Driven off the LEAD's dimension list, not the competitor's, so the
@@ -457,9 +494,10 @@ export async function fetchCompetitorContext(args: {
       kind: chosen.kind,
       label: chosen.label,
       peerCount: chosen.peers.length,
-      best: Math.max(...peerScores),
-      worst: Math.min(...peerScores),
-      median: median(peerScores),
+      // Over the peers AND this lead -- the same group the rank is quoted
+      // against. See groupStats() for the contradiction that separating them
+      // produced.
+      ...groupStats(peerScores, args.score),
     },
     rejected,
     percentile: percentileAmong(peerScores, args.score),
