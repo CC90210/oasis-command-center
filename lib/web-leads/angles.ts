@@ -248,9 +248,9 @@ export const ANGLES: Record<string, Angle> = {
     opener:
       "Give me twenty seconds. The reason I am calling is that I would like you to pull your own website up on your phone while we are talking, because I think you will see this faster than I can describe it.",
     diagnostic:
-      "Have a look at it now. Can you get to your phone number without pinching the screen?",
+      "Have a look at it now. Try getting to your opening hours and then to your phone number, the way somebody who had never been on it would. What did you have to do to get there?",
     cost:
-      "That is the whole thing, really. On a phone, a site built for a computer means dragging and pinching just to read one sentence, and nobody does that for a business they have not chosen yet. They go back to the search results and pick whoever came up properly. And most of the people seeing your site for the first time are seeing it exactly the way you are seeing it right now.",
+      "That is the part worth talking about. When a site was built for a computer, getting anywhere on a phone means dragging and pinching, and nobody does that for a business they have not chosen yet. They go back to the search results and pick whoever came up properly. And most of the people seeing your site for the first time are seeing it on exactly the screen you are holding.",
     objection: {
       says: "It looks fine on my phone.",
       response:
@@ -302,7 +302,7 @@ export const ANGLES: Record<string, Angle> = {
     opener:
       "Give me twenty seconds. The reason I am calling is about how somebody finds you when they do not already know your name.",
     diagnostic:
-      "Where do your new customers come from at the moment? And if somebody searched for the service rather than for you by name, would you come up?",
+      "Where do your new customers come from at the moment? And if somebody searched for the service you do rather than for you by name, where do you think you would land?",
     cost:
       "Right now the site is missing the pieces that tell a search engine and a map listing what you are and where you are. So you are relying on people already knowing to type your name in. Everybody searching for the service instead of the business never reaches you at all, and those are precisely the ones who have not already chosen somebody else.",
     objection: {
@@ -314,6 +314,32 @@ export const ANGLES: Record<string, Angle> = {
       "A title and a description written for every page, local business markup so the map listing and the site agree with each other, a sitemap so nothing gets missed, and analytics so you can finally see what is arriving.",
   },
 };
+
+/**
+ * What to do when the diagnostic comes back clean, rendered under every
+ * diagnostic on the card.
+ *
+ * ⚠️ THIS IS LOAD-BEARING, and it exists because of a real defect caught in
+ * review (Codex, 2026-08-24). A dimension score is a total across several
+ * checks, so a site can be losing this area badly on two checks and still pass
+ * the one thing the rep happened to ask about. Without this line, a rep reading
+ * straight down the card answers "yes, my number is right there" with "that is
+ * the part worth talking about" and then describes a problem the prospect has
+ * just demonstrated they do not have. That is a false claim made on a live call
+ * to a named business, which is the single worst thing this product can do.
+ *
+ * The obvious fix, picking the diagnostic from the failed checks per lead, was
+ * rejected: it is generation, and this whole file exists because generated
+ * sales copy eventually asserts a measurement we never took. The honest fix is
+ * to tell the rep what to do with an answer that does not go their way, which
+ * is also just better selling. The failed checks are already on the card, in
+ * order, under "what is worth fixing first".
+ *
+ * The diagnostics were also reworded to be open questions rather than yes-or-no
+ * ones, so that a good answer still moves the call somewhere.
+ */
+export const IF_THE_ANSWER_IS_CLEAN =
+  "If they do the thing and nothing is wrong with it, do not push. Say so out loud and give them the point, because arguing with an answer you asked for is how a call ends. This is one check out of several in an area they are losing, so take the next line under what is worth fixing first and ask about that instead.";
 
 /**
  * ═══ THE OBJECTION PANEL ════════════════════════════════════════════════════
@@ -377,11 +403,11 @@ export const OBJECTIONS: Objection[] = [
     meaning:
       "The politest way there is to end a call. Occasionally genuine. Treating it as genuine costs nothing, but get the consent properly on the way out.",
     response:
-      "Happy to. So that I am allowed to, I have to ask you straight out: is it alright if I email you about this, and who should I put it to? And before I let you go, so the email is actually worth opening, what is the one thing you would want it to answer?",
+      "Happy to, and I have to say three quick things first so that I am allowed to. It would come from me, at the same company and the same number I gave you when I rang. It would only ever be about your website, nothing else. And you can tell me to stop at any time and that is the end of it. With all that said, is it alright if I email you, and who should I put it to? And before I let you go, so it is actually worth opening, what is the one thing you would want it to answer?",
     prevent:
-      "This one is a legal step in Canada, not only a sales one. The call itself is fine: CASL governs commercial electronic messages, not voice calls, and business-to-business calls are exempt from the National DNCL. Emailing them afterwards is a different thing. It is a commercial electronic message and it needs consent. Spoken consent does count, but the onus of proving it sits on us under section 13, and the CRTC's position is that oral consent needs either a complete unedited recording or independent third-party verification. So ask in plain words, get an audible yes, and log it in the call outcome with the date and what they said. Never send off the back of a 'sure, send me something' you did not record.",
+      "This one is a legal step in Canada, not only a sales one, and the response above is longer than you would like for a reason. The call itself is fine: CASL governs commercial electronic messages, not voice calls, and business-to-business calls are exempt from the National DNCL. The email afterwards is a different thing and needs a consent basis. If you are relying on the yes they just gave you, that is express consent and it has a fixed shape. Section 10(1) says the request must set out the purpose, must identify who is asking using the contact details prescribed in the regulations, and must tell them they can withdraw, which is exactly what the three sentences above are doing. The onus of proving it is ours under section 13, and the CRTC's position is that oral consent needs either a complete unedited recording or independent third-party verification. So get an audible yes, log it in the call outcome with the date and their words, and never send off the back of a 'sure, send me something' you did not record. There is a second basis, implied consent by conspicuous publication under section 10(9)(b), where a business has published an address without saying it does not want to be contacted and the message is relevant to what they do. Do not treat that as a licence to email any address found online: the CRTC has said in enforcement decisions that it is a higher bar than public availability and is judged case by case. None of this is legal advice. If we start leaning on the spoken script at any volume, have counsel read it first.",
     source:
-      "CASL s.13 (onus of proof on the sender); CRTC Enforcement Advisory, Keeping Records of Consent under CASL; CRTC Unsolicited Telecommunications Rules (business-to-business DNCL exemption).",
+      "CASL s.10(1) and the Electronic Commerce Protection Regulations (purpose, prescribed identifying and contact information, right to withdraw); s.10(9)(b) conspicuous publication, as narrowed by CRTC enforcement decisions (Blackstone 2015, CompuFinder 2017); s.13 (onus of proof on the sender); CRTC Enforcement Advisory, Keeping Records of Consent under CASL; CRTC Unsolicited Telecommunications Rules (business-to-business DNCL exemption).",
   },
   {
     says: "We are not interested.",
@@ -471,5 +497,5 @@ export function selectAngle(
   return { key: winner.key, label: winner.label, angle: ANGLES[winner.key] };
 }
 
-const anglesModule = { ANGLES, OBJECTIONS, selectAngle };
+const anglesModule = { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle };
 export default anglesModule;

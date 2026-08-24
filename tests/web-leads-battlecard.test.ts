@@ -31,7 +31,7 @@ import path from "node:path";
 import {
   percentileAmong, median, groupStats, bucketOf, distributionOf, chooseSlice, labelFor, MIN_SLICE, TOP_N,
 } from "../lib/web-leads/competitors";
-import { ANGLES, OBJECTIONS, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
+import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
@@ -221,6 +221,36 @@ for (const key of DIMENSION_KEYS) {
   // exact pitch the SMB web-design field research says loses the call.
   assert.ok(a.diagnostic.length >= 30, `${key}: diagnostic is a stub`);
   assert.ok(a.diagnostic.includes("?"), `${key}: the diagnostic must actually be a question`);
+  // OPEN, never yes-or-no. A dimension score is a total across several checks,
+  // so a site can be losing an area badly and still pass the single thing the
+  // rep asked about. A closed question invites the "yes, that works fine" that
+  // makes the very next line on the card a false statement about a named
+  // business on a live call. An open question survives a good answer.
+  // (Codex review, 2026-08-24: the mobile diagnostic used to read "Can you get
+  // to your phone number without pinching?" and the teach after it opened "That
+  // is the whole thing, really.")
+  //
+  // Tested on the QUESTION SENTENCE, not on the whole string. A diagnostic may
+  // legitimately open with an imperative ("Have a look at it now."), and a
+  // whole-string match on a leading auxiliary flags that as closed when the
+  // actual question three sentences later is "What did you have to do to get
+  // there?". Split first, then judge only the parts that end in a question
+  // mark.
+  const questions = a.diagnostic.split(/(?<=[.?!])\s+/).filter((s) => s.trim().endsWith("?"));
+  assert.ok(questions.length >= 1, `${key}: the diagnostic contains no question sentence`);
+  for (const q of questions) {
+    assert.doesNotMatch(
+      q,
+      /^(can|could|do|does|did|is|are|was|were|am|have|has|had|will|would|shall|should|may|might|must)\b/i,
+      `${key}: "${q}" is answerable yes or no, so a clean answer makes the next line on the card a false claim`,
+    );
+  }
+  // And it must actually open something up, not merely avoid a closed verb.
+  assert.match(
+    a.diagnostic,
+    /\b(what|where|when|how|why|who|which|walk me through|tell me)\b/i,
+    `${key}: the diagnostic asks nothing open`,
+  );
   assert.ok(a.cost.length >= 40, `${key}: cost is a stub`);
   assert.ok(a.objection.says.length >= 8, `${key}: objection is a stub`);
   assert.ok(a.objection.response.length >= 30, `${key}: objection response is a stub`);
@@ -251,6 +281,22 @@ assert.equal(Object.keys(ANGLES).length, DIMENSION_KEYS.length, "one angle per d
   // month" is the most persuasive sentence available and we cannot back one
   // word of it.
   assert.doesNotMatch(all, /[$£€]\s?\d|\bdollars?\b|\bper month in\b/i, "a spoken line puts money on a cost we never measured");
+}
+
+// The open question is only half the fix. A rep still needs to be told what to
+// do with an answer that does not go his way, because the alternative is that
+// he reads the next line anyway. This must exist, must be substantial, and must
+// actually reach the card (asserted in section 8 below).
+{
+  assert.ok(IF_THE_ANSWER_IS_CLEAN.length >= 120, "the clean-answer instruction is a stub");
+  assert.ok(!IF_THE_ANSWER_IS_CLEAN.includes("—"), "no em dashes in anything a rep reads");
+  // It must send the rep somewhere real rather than just saying "back off".
+  // "What is worth fixing first" is a panel that is already on the card.
+  assert.match(
+    IF_THE_ANSWER_IS_CLEAN,
+    /what is worth fixing first/i,
+    "the clean-answer instruction must route the rep to the ranked list already on the card",
+  );
 }
 
 // Every proof is optional, but a proof WITHOUT a source is worse than no proof:
@@ -341,6 +387,30 @@ assert.ok(OBJECTIONS.length >= 8, "the objection panel must cover at least the e
   assert.match(email.prevent, /CASL/, "the email objection must flag the consent requirement to the rep");
   assert.match(email.prevent, /log it|record/i, "spoken consent we cannot evidence is consent we do not have");
   assert.ok((email.source || "").length >= 20, "the CASL note must cite where the rule comes from");
+
+  // A yes is not consent unless the ASK was properly formed. CASL s.10(1)
+  // requires a request for express consent to set out the purpose, to identify
+  // who is asking with the contact information prescribed in the regulations,
+  // and to say the person may withdraw. A script that skips those collects a
+  // yes and still leaves us sending on defective consent, which is worse than
+  // not asking, because the card told the rep it was handled. (Codex review,
+  // 2026-08-24, confirmed against CASL s.10(1) and the ECPR before fixing.)
+  assert.match(
+    email.response,
+    /same company and the same number/i,
+    "the consent request must identify who is asking and how to reach them",
+  );
+  assert.match(
+    email.response,
+    /only ever be about your website/i,
+    "the consent request must state the purpose it is being sought for",
+  );
+  assert.match(
+    email.response,
+    /tell me to stop at any time/i,
+    "the consent request must state that consent can be withdrawn",
+  );
+  assert.match(email.source || "", /10\(1\)/, "the source must cite the section that sets the shape of the request");
 }
 
 // Weighted, not raw. A conversion 50 (weight 0.28) is losing 14 composite
@@ -593,7 +663,7 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // manufactures the objection to it.
   assert.match(
     src,
-    /angle\.angle\.opener[\s\S]{0,600}?angle\.angle\.diagnostic[\s\S]{0,600}?angle\.angle\.cost/,
+    /angle\.angle\.opener[\s\S]{0,900}?angle\.angle\.diagnostic[\s\S]{0,1200}?angle\.angle\.cost/,
     `${view} must render opener, then diagnostic, then cost, in that order`,
   );
   // The reserve statistic never renders without the source beside it.
@@ -604,6 +674,16 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   );
   // The standing brush-offs are on the card, not in a rep's memory.
   assert.match(src, /<ObjectionPanel \/>/, `${view} must render the objection panel`);
+
+  // The clean-answer instruction sits WITH the question, before the teach. A
+  // rep reads down this card in real time, so the order on screen is the order
+  // he speaks: if this lands after the cost block it arrives one sentence too
+  // late to stop the false claim it exists to prevent.
+  assert.match(
+    src,
+    /angle\.angle\.diagnostic[\s\S]{0,700}?IF_THE_ANSWER_IS_CLEAN[\s\S]{0,700}?angle\.angle\.cost/,
+    `${view} must render the clean-answer instruction between the diagnostic and the teach`,
+  );
 }
 
 // The panel itself renders every field of every objection. Asserting the data

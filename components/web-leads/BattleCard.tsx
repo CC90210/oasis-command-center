@@ -67,7 +67,7 @@ import type { CompetitorContext } from "@/lib/web-leads/competitors";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
-import { selectAngle, recoverablePoints } from "@/lib/web-leads/angles";
+import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
@@ -768,6 +768,12 @@ function ScoredBody({
           <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
             &ldquo;{angle.angle.diagnostic}&rdquo;
           </p>
+          {/* Rendered with the question, never below the fold of it. A rep who
+              reads straight down this card after a clean answer describes a
+              problem the prospect has just demonstrated they do not have, which
+              is a false claim on a live call. A dimension is several checks and
+              this is one of them. (Codex review, 2026-08-24.) */}
+          <p className="mt-2 max-w-4xl text-xs leading-relaxed text-fg-muted">{IF_THE_ANSWER_IS_CLEAN}</p>
 
           <div className="mt-6 grid gap-5 border-t border-bg-border pt-5 md:grid-cols-3">
             <div>
