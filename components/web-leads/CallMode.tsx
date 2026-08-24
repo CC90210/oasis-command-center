@@ -43,6 +43,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, ExternalLink, Loader2, Phone, X } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import type { CallOutcome } from "@/lib/web-leads/outcome";
+// Value import, and safe: lib/website-sales-workflow.ts is pure (no imports
+// of its own) and is the single owner of the disposition vocabulary, the
+// spacing between attempts, and which outcomes need a time. Call Mode asking
+// a second source for any of those is how two vocabularies grew apart once
+// already -- see that module's header.
+import {
+  isTerminalDisposition,
+  requiresNextAction,
+  suggestedNextActionAt,
+} from "@/lib/website-sales-workflow";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { useAudit, biggestGaps, SCORE_STATE_WORDS } from "./useAudit";
@@ -57,10 +67,73 @@ import { useAudit, biggestGaps, SCORE_STATE_WORDS } from "./useAudit";
  */
 const OUTCOMES: { key: CallOutcome; label: string; digit: string }[] = [
   { key: "no_answer", label: "No answer", digit: "1" },
-  { key: "connected", label: "Connected", digit: "2" },
-  { key: "interested", label: "Interested", digit: "3" },
-  { key: "not_interested", label: "Not interested", digit: "4" },
+  { key: "voicemail", label: "Left voicemail", digit: "2" },
+  { key: "gatekeeper", label: "Gatekeeper", digit: "3" },
+  { key: "connected", label: "Connected", digit: "4" },
+  { key: "callback", label: "Callback requested", digit: "5" },
+  { key: "interested", label: "Interested", digit: "6" },
+  { key: "not_interested", label: "Not interested", digit: "7" },
+  { key: "do_not_call", label: "Do not call", digit: "8" },
 ];
+
+/**
+ * WHY EIGHT KEYS AND NOT FOUR (2026-08-23).
+ *
+ * Four was not a simplification, it was a loss. "No answer" was doing the work
+ * of three completely different situations -- nobody picked up, a machine
+ * picked up, a person picked up who was not the decision maker -- and a manager
+ * looking at a rep who is not connecting could not tell which problem they had.
+ * The database CHECK constraint has permitted all eight since the territories
+ * migration; only the screen was narrow.
+ *
+ * THE ORDER IS THE CALL, NOT THE ALPHABET. 1-3 are the ways a call ends without
+ * reaching anyone, in the order a rep meets them. 4-8 are what happens once
+ * someone is on the phone, running from best to worst. A rep never hunts.
+ *
+ * ONE KEYSTROKE STILL LOGS AND ADVANCES. That is the whole design of this
+ * screen and widening the vocabulary must not cost it. The next attempt is
+ * therefore SHOWN on the key itself (see the aside below) rather than asked for
+ * in a dialog: the rep can read what will be scheduled before they press, which
+ * is the operator's "suggest, the rep confirms" rule honoured without putting a
+ * modal in front of a rep on call 140 of 200.
+ *
+ * `callback` is the one exception, by nature: the prospect named a specific
+ * time, so the system has nothing to suggest and pressing 5 opens the field
+ * rather than logging. See onCallbackKey below.
+ */
+
+/**
+ * An instant -> the value <input type="datetime-local"> wants, in the REP'S OWN
+ * timezone. Slicing an ISO string would show them UTC, and a rep would schedule
+ * a 2pm callback for 9am.
+ */
+function toLocalDatetimeInput(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** The reverse. Null for empty or unparseable, never an Invalid Date. */
+function fromLocalDatetimeInput(v: string): string | null {
+  if (!v) return null;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+/** When the next attempt lands, in words a rep reads at a glance. Rendered on
+ *  the key itself so the scheduled time is visible BEFORE the press, which is
+ *  what makes a one-keystroke log still a confirmed one. */
+function shortWhen(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return null;
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (sameDay) return `today ${time}`;
+  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  if (d.toDateString() === tomorrow.toDateString()) return `tomorrow ${time}`;
+  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${time}`;
+}
 
 /** A keyboard hint rendered as a key cap, so the shortcut is discoverable
  *  without a help screen -- reps learn these in the first ten calls. */
@@ -187,6 +260,9 @@ export function CallMode({
   const [i, setI] = useState(0);
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<CallOutcome | null>(null);
+  /** Set only while the rep is entering the time a prospect named. Null the
+   *  rest of the time, so every other key stays one-press. */
+  const [callbackAt, setCallbackAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastLogged, setLastLogged] = useState<{ label: string; business: string } | null>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -226,8 +302,23 @@ export function CallMode({
   }, []);
 
   const log = useCallback(
-    async (outcome: CallOutcome) => {
+    async (outcome: CallOutcome, explicitNextActionAt?: string | null) => {
       if (!lead || pending) return;
+
+      // The time that will be scheduled, decided the same way the server will
+      // decide it. A terminal outcome never carries one: a prospect who said
+      // never call again must not surface in tomorrow's queue.
+      const nextActionAt = isTerminalDisposition(outcome)
+        ? null
+        : explicitNextActionAt !== undefined
+          ? explicitNextActionAt
+          : suggestedNextActionAt(outcome);
+
+      if (requiresNextAction(outcome) && !nextActionAt) {
+        setError("Pick the time they asked you to call back.");
+        return;
+      }
+
       setPending(outcome);
       setError(null);
       const business = lead.name;
@@ -236,9 +327,17 @@ export function CallMode({
         const r = await fetch(`/api/web-leads/${encodeURIComponent(lead.id)}/outcome`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ outcome, note: note.trim() || undefined }),
+          body: JSON.stringify({ outcome, note: note.trim() || undefined, nextActionAt }),
         });
         if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          // A 409 means the call IS recorded and only the queue update failed.
+          // Advancing would strand it; telling the rep it was not recorded
+          // would make them log the same call twice. Say the precise thing.
+          if (r.status === 409 && body?.logged) {
+            setError("Call logged, but it did not reach your queue. Tell an admin before you keep dialling.");
+            return;
+          }
           // Do NOT advance on a failed write. Advancing here would lose the
           // call silently: the rep saw the queue move, so they believe it was
           // recorded, and nothing was. Staying put with a visible error is the
@@ -246,6 +345,7 @@ export function CallMode({
           setError("Could not log that. The call was not recorded, try again.");
           return;
         }
+        setCallbackAt(null);
         setLastLogged({ label, business });
         next();
       } catch {
@@ -311,7 +411,17 @@ export function CallMode({
       if (e.key === "ArrowRight" || e.key.toLowerCase() === "s") { e.preventDefault(); next(); return; }
       if (e.key === "ArrowLeft" || e.key.toLowerCase() === "b") { e.preventDefault(); prev(); return; }
       const hit = OUTCOMES.find((o) => o.digit === e.key);
-      if (hit) { e.preventDefault(); void log(hit.key); }
+      if (hit) {
+        e.preventDefault();
+        // `callback` is the one outcome the system cannot suggest a time for --
+        // the prospect named it. Pressing 5 opens the field instead of logging,
+        // and the field's own Enter submits. Every other key stays one-press.
+        if (requiresNextAction(hit.key)) {
+          setCallbackAt((prev) => prev ?? toLocalDatetimeInput(new Date(Date.now() + 24 * 60 * 60 * 1000)));
+          return;
+        }
+        void log(hit.key);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -453,21 +563,71 @@ export function CallMode({
           <aside className="shrink-0 border-t border-bg-border bg-bg-panel/50 px-6 py-6 lg:w-80 lg:border-l lg:border-t-0 lg:px-6 lg:py-9">
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">Log this call</p>
             <div className="mt-3 space-y-2">
-              {OUTCOMES.map((o) => (
-                <button
-                  key={o.key}
-                  type="button"
-                  disabled={pending !== null}
-                  onClick={() => void log(o.key)}
-                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-panel px-3.5 py-3 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <span className="flex items-center gap-2">
-                    {pending === o.key && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    {o.label}
-                  </span>
-                  <Key>{o.digit}</Key>
-                </button>
-              ))}
+              {OUTCOMES.map((o) => {
+                // The time this key will schedule, shown ON the key. This is
+                // what keeps one-keystroke logging honest: the rep reads what
+                // is about to be written before writing it, rather than finding
+                // out later from their queue.
+                const when = requiresNextAction(o.key) ? null : shortWhen(suggestedNextActionAt(o.key));
+                return (
+                  <button
+                    key={o.key}
+                    type="button"
+                    disabled={pending !== null}
+                    onClick={() => {
+                      if (requiresNextAction(o.key)) {
+                        setCallbackAt((prev) => prev ?? toLocalDatetimeInput(new Date(Date.now() + 24 * 60 * 60 * 1000)));
+                        return;
+                      }
+                      void log(o.key);
+                    }}
+                    className="flex w-full items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-panel px-3.5 py-2.5 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <span className="flex min-w-0 flex-col items-start">
+                      <span className="flex items-center gap-2">
+                        {pending === o.key && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                        {o.label}
+                      </span>
+                      {when && <span className="text-[10px] font-normal text-fg-faint">retry {when}</span>}
+                    </span>
+                    <Key>{o.digit}</Key>
+                  </button>
+                );
+              })}
+
+              {/* The one outcome the system cannot suggest a time for: the
+                  prospect named it. Opens on 5, submits on Enter, so it costs
+                  the rep one extra keystroke and only on the calls that earned
+                  it. */}
+              {callbackAt !== null && (
+                <div className="rounded-lg border border-accent/40 bg-bg-deep/60 p-3">
+                  <label className="block text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+                    They asked us to call back
+                  </label>
+                  <input
+                    type="datetime-local"
+                    autoFocus
+                    value={callbackAt}
+                    onChange={(e) => setCallbackAt(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); void log("callback", fromLocalDatetimeInput(callbackAt)); }
+                      if (e.key === "Escape") { e.preventDefault(); setCallbackAt(null); }
+                    }}
+                    className="mt-1.5 w-full rounded-md border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg focus:border-accent focus:outline-none"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={pending !== null}
+                      onClick={() => void log("callback", fromLocalDatetimeInput(callbackAt))}
+                      className="rounded-md border border-accent/50 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-fg transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:opacity-50"
+                    >
+                      Save callback
+                    </button>
+                    <span className="text-[10px] text-fg-faint"><Key>Enter</Key> saves, <Key>Esc</Key> cancels</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <textarea

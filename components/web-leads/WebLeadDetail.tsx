@@ -55,10 +55,33 @@ function HeaderSkeleton() {
   );
 }
 
-export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: () => void }) {
+export function WebLeadDetail({
+  leadId,
+  onClose,
+  onLogged,
+}: {
+  leadId: string;
+  onClose: () => void;
+  /**
+   * Fired after a call outcome is successfully saved. The panel re-reads its
+   * own lead, and the parent re-reads the list, so the new stage and the new
+   * callback are on screen immediately.
+   *
+   * WHY THIS IS NOT OPTIONAL POLISH: logging a disposition changes the lead's
+   * stage and its place in the rep's queue. Without a refresh the rep sees the
+   * OLD stage sitting under the button they just pressed, which reads as "it
+   * did not save" -- so they press it again, and the append-only history now
+   * has two calls where one happened.
+   */
+  onLogged?: () => void;
+}) {
   const [lead, setLead] = useState<WebLead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  /** Bumped after a successful log so this panel re-reads its own lead.
+   *  A counter rather than a boolean: two logs in a row must both
+   *  refetch, and a boolean that is already true would not fire again. */
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -86,7 +109,11 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
       })
       .catch(() => { if (alive) setError("Could not load this lead."); });
     return () => { alive = false; };
-  }, [leadId]);
+    // `reloadNonce` re-runs this after a logged call, so the panel shows the
+    // stage the disposition just moved the lead to. Without it the rep reads
+    // the OLD stage under the button they pressed, which looks like a failed
+    // save and invites them to log the same call twice.
+  }, [leadId, reloadNonce]);
 
   // Esc to close + body scroll lock + focus the close button on mount,
   // matching LeadDetailDrawer: without these, a drawer traps keyboard users
@@ -187,7 +214,10 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                 <Row icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
               </div>
 
-              <CallOutcomeLog leadId={leadId} />
+              <CallOutcomeLog
+                leadId={leadId}
+                onLogged={() => { setReloadNonce((n) => n + 1); onLogged?.(); }}
+              />
             </>
           )}
         </div>

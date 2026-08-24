@@ -1,16 +1,25 @@
 /**
  * /api/web-leads/[id]/outcome
  *
- *   POST — log a call outcome. Body: { outcome: "no_answer" | "connected" |
- *     "interested" | "not_interested", note?: string }. Writes an
- *     APPEND-ONLY row to leadgen_call_outcomes (who logged it and when),
- *     and as a byproduct of the outcome -- never a separate action --
- *     advances the lead's stage through lib/web-leads/outcome.ts's
- *     nextStage(). See that module's header for the real schema this writes
- *     against and the constrained stage logic. There is no PUT/PATCH/DELETE
- *     on this route and no update() call anywhere in this file or
- *     lib/web-leads/outcome.ts -- a mis-click is corrected by logging a
- *     later outcome, not by editing history.
+ *   POST — log a call outcome. Body: { outcome: CallOutcome, note?: string,
+ *     nextActionAt?: string | null }. Writes an APPEND-ONLY row to
+ *     leadgen_call_outcomes (who logged it, when, and the next action they
+ *     set), then patches the lead with the stage, `last_disposition`,
+ *     `last_contact_at` and `next_action_at` that Rep Today ranks and labels
+ *     on. Both halves are decided by lib/website-sales-workflow.ts, the single
+ *     owner of what a disposition means -- see its header for why there used
+ *     to be two of those and what it cost. There is no PUT/PATCH/DELETE on
+ *     this route and no update() call against the history table anywhere: a
+ *     mis-click is corrected by logging a later outcome, not by editing
+ *     history.
+ *
+ *     The REPAIR for a `schedule_not_applied` response is a POST to the
+ *     sibling route outcome/reconcile. It deliberately does not live here as a
+ *     PATCH: this route is append-only history, and it keeps a guard saying so
+ *     (tests/web-leads-outcome-guards.test.ts asserts no PUT/PATCH/DELETE is
+ *     exported). Repairing the lead's queue fields is a different operation on
+ *     a different table, and giving it its own door keeps that guard honest
+ *     rather than widening it.
  *
  *   GET — this lead's recent outcome history, most recent first. Read-only.
  *
@@ -22,13 +31,20 @@
  * (isScopedContractor in lib/web-leads/data.ts) that the sibling routes use,
  * and returns null for a lead outside the viewer's scope exactly as it does
  * for one that doesn't exist at all -- so a scoped-out id 404s here too,
- * never 403, and cannot be used to probe what exists.
+ * never 403, and cannot be used to probe what exists. Every method below,
+ * including the repair path, goes through the same authorize().
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { fetchLead, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
-import { isCallOutcome, logCallOutcome, fetchRecentOutcomes } from "@/lib/web-leads/outcome";
+import {
+  isCallOutcome,
+  logCallOutcome,
+  fetchRecentOutcomes,
+  ScheduleNotAppliedError,
+} from "@/lib/web-leads/outcome";
+import { WORKFLOW_ERRORS } from "@/lib/website-sales-workflow";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,7 +91,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const auth = await authorize(id);
   if (!auth.ok) return auth.res;
 
-  let body: { outcome?: unknown; note?: unknown };
+  let body: { outcome?: unknown; note?: unknown; nextActionAt?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -86,19 +102,49 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: false, error: "invalid_outcome" }, { status: 400 });
   }
 
+  // A next action is either absent or a string. Anything else is a client bug,
+  // and coercing it would produce an Invalid Date that silently becomes null.
+  const rawNext = body.nextActionAt;
+  if (rawNext !== undefined && rawNext !== null && typeof rawNext !== "string") {
+    return NextResponse.json({ ok: false, error: "invalid_next_action_at" }, { status: 400 });
+  }
+
   try {
-    const { record, stageChangedTo } = await logCallOutcome({
+    const { record, stageChangedTo, nextActionAt } = await logCallOutcome({
       leadId: id,
       lead: auth.lead,
       outcome: body.outcome,
       note: body.note,
+      nextActionAt: rawNext ?? null,
       repUserId: auth.session.userId,
     });
-    return NextResponse.json({ ok: true, outcome: record, stageChangedTo });
+    return NextResponse.json({ ok: true, outcome: record, stageChangedTo, nextActionAt });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : "outcome_log_failed" },
-      { status: 500 },
-    );
+    // The call IS logged; only the queue update failed. 409 rather than 500:
+    // this is a state conflict the caller can resolve by retrying the repair,
+    // not a request the caller got wrong and not an outage. `logged: true` is
+    // what lets the UI say the true thing -- the call was recorded, the
+    // callback was not scheduled -- instead of a bare failure that invites a
+    // rep to log the same call a second time.
+    if (err instanceof ScheduleNotAppliedError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "schedule_not_applied",
+          logged: true,
+          outcomeId: err.outcomeId,
+          detail: err.cause,
+        },
+        { status: 409 },
+      );
+    }
+    // Validation refusals from the workflow seam are the caller's to fix, and
+    // are distinguishable so the form can point at the right field rather than
+    // showing a generic failure.
+    const message = err instanceof Error ? err.message : "outcome_log_failed";
+    if (message === WORKFLOW_ERRORS.nextActionRequired || message === WORKFLOW_ERRORS.nextActionMustBeFuture) {
+      return NextResponse.json({ ok: false, error: message }, { status: 400 });
+    }
+    return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
 }
