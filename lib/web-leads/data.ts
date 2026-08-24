@@ -32,6 +32,7 @@ import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "
 import { memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
+import { leadHours } from "./hours";
 import { isClaimable } from "./claim-ops";
 
 // Re-exported so every existing import site keeps working. They live in a leaf
@@ -96,6 +97,12 @@ export type WebLead = {
   territoryName: string | null;
   osmCategory: string | null;
   firstSeen: string | null;
+  /** The OpenStreetMap `opening_hours` value, VERBATIM. See toWebLead. */
+  openingHoursRaw: string | null;
+  /** JARVIS's parsed grid. Decoded by lib/web-leads/hours.ts, never here. */
+  openingHours: unknown;
+  /** When Overpass was last asked. Null means nobody has ever looked. */
+  openingHoursCheckedAt: string | null;
 };
 
 /**
@@ -161,6 +168,18 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     territoryName: str(d.webdev_territory),
     osmCategory: str(d.webdev_osm_category),
     firstSeen: str(d.first_seen_at),
+    // OPENING HOURS. The raw string is the load-bearing one and is carried
+    // VERBATIM for the same reason websiteCondition is: JARVIS's parser
+    // deliberately refuses forms it cannot read exactly (seasonal rules,
+    // `sunrise-sunset`, "by appointment"), and a rep reading the recorded
+    // string beats a rep reading a confident wrong parse. `openingHours` is
+    // left as `unknown` on purpose -- lib/web-leads/hours.ts owns decoding it,
+    // and a type assertion here would let a future schema version through
+    // unchecked. Absent on ~74% of the corpus (measured 2026-08-24), which
+    // renders as a SENTENCE, never a blank and never an assumption of open.
+    openingHoursRaw: str(d.webdev_opening_hours_raw),
+    openingHours: d.webdev_opening_hours ?? null,
+    openingHoursCheckedAt: str(d.webdev_opening_hours_checked_at),
   };
 }
 
@@ -321,6 +340,25 @@ export async function fetchLeads(
     .filter((l) => (scope === "mine" ? true : l.territoryId && wanted.has(l.territoryId)))
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
+    // OPEN NOW, in the BUSINESS's time zone, evaluated against this request's
+    // clock rather than anything cached. `now` is already injected for the
+    // claim-expiry rules, so the whole page still sees one instant.
+    //
+    // Only "open" survives. A lead whose hours we do not hold is excluded --
+    // see the openNow doc comment in ./filters for why an unknown is not a
+    // maybe here.
+    .filter((l) =>
+      f.openNow
+        ? leadHours(
+          {
+            province: l.province,
+            openingHours: l.openingHours,
+            openingHoursRaw: l.openingHoursRaw,
+          },
+          new Date(now),
+        ).state === "open"
+        : true,
+    )
     .filter((l) => matchesBand(l, f.band))
     .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true))
     .sort(comparatorFor(f.sort));

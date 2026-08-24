@@ -238,6 +238,10 @@ export function WebLeadsBrowser() {
     if (filters.cities.length) parts.push(`in ${filters.cities.join(" or ")}`);
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
+    // Named explicitly because this is the filter most likely to have emptied
+    // the page for a reason that has nothing to do with the rep's targeting:
+    // it is 7am where they are, or the directory holds no hours for any of them.
+    if (filters.openNow) parts.push("open right now in their own time zone");
     if (filters.band === "under40") parts.push("scoring under 40");
     if (filters.band === "mid") parts.push("scoring 40 to 59");
     if (filters.band === "sixty_plus") parts.push("scoring 60 and up");

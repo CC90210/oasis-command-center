@@ -19,7 +19,7 @@
  * BANDS ARE RANGES, NOT JUDGEMENTS. "Under 40", not "weak". See filters.ts.
  */
 
-import { Loader2, Phone, Search, UserPlus, X } from "lucide-react";
+import { Clock, Loader2, Phone, Search, UserPlus, X } from "lucide-react";
 import type { LeadSort, ScoreBand, WebLeadFilters } from "@/lib/web-leads/filters";
 
 const BANDS: { key: ScoreBand; label: string; hint: string }[] = [
@@ -66,11 +66,12 @@ export function LeadsToolbar({
     ...filters.cities.map((c) => ({ label: c, clear: () => set({ cities: filters.cities.filter((x) => x !== c) }) })),
     ...filters.industries.map((i) => ({ label: i, clear: () => set({ industries: filters.industries.filter((x) => x !== i) }) })),
     ...(filters.noSiteOnly ? [{ label: "No website found yet", clear: () => set({ noSiteOnly: false }) }] : []),
+    ...(filters.openNow ? [{ label: "Open right now", clear: () => set({ openNow: false }) }] : []),
     ...(filters.query ? [{ label: `"${filters.query}"`, clear: () => { onQueryDraft(""); set({ query: "" }); } }] : []),
   ];
 
   const clearAll = () =>
-    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, band: "all", query: "" });
+    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, openNow: false, band: "all", query: "" });
 
   return (
     <div className="space-y-3">
@@ -109,6 +110,28 @@ export function LeadsToolbar({
             </button>
           ))}
         </div>
+
+        {/* OPEN NOW. A plain toggle rather than a third state in the band
+            group, because it answers a different question: the bands are about
+            which prospect is worth calling, this is about which one will pick
+            up. Deliberately NOT on by default -- roughly three-quarters of the
+            corpus has no hours in the directory, and defaulting this on would
+            hide most of a rep's territory to make a smaller list look tidier.
+            The title spells out what it excludes, because a filter that quietly
+            drops unknowns is the kind a rep stops trusting. */}
+        <button
+          type="button"
+          aria-pressed={filters.openNow}
+          title="Only businesses whose recorded hours say they are open right now, in their own time zone. Leads with no hours on file are hidden while this is on."
+          onClick={() => set({ openNow: !filters.openNow })}
+          className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+            filters.openNow
+              ? "border-accent/40 bg-accent/15 text-accent"
+              : "border-bg-border bg-bg-panel text-fg-dim hover:border-accent/40 hover:text-fg"
+          }`}
+        >
+          <Clock className="h-3.5 w-3.5" />Open now
+        </button>
 
         <label className="sr-only" htmlFor="lead-sort">Sort</label>
         <select

@@ -67,6 +67,22 @@ export type WebLeadFilters = {
   cities: string[];
   industries: string[];
   noSiteOnly: boolean;
+  /**
+   * Only businesses OPEN RIGHT NOW, in their own time zone.
+   *
+   * Evaluated per request against a fresh clock (see fetchLeads), never baked
+   * into the memoised lead list -- a cached "open now" is a claim that decays
+   * into a lie every minute it sits there, and the entire point of this filter
+   * is that somebody picks up the phone.
+   *
+   * A lead whose hours we do not hold is EXCLUDED while this is on, and that
+   * direction is deliberate. The filter answers "who can I reach in the next
+   * ten minutes", and an unknown is not a maybe, it is not an answer. Roughly
+   * three-quarters of the corpus has no hours in the directory (measured
+   * 2026-08-24), and all of it stays reachable with the filter off, which is
+   * the default.
+   */
+  openNow: boolean;
   band: ScoreBand;
   sort: LeadSort;
   query: string;
@@ -87,6 +103,7 @@ export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
   noSiteOnly: false,
+  openNow: false,
   band: "all",
   sort: "opportunity",
   query: "",
@@ -120,6 +137,7 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
+    openNow: sp.get("open") === "1",
     // Unrecognised values fall back to the default rather than throwing: these
     // come from a URL a rep can hand-edit or a stale bookmark, and a filter
     // page that 500s on a typo is worse than one that shows everything.
@@ -147,6 +165,7 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   put("city", f.cities);
   put("ind", f.industries);
   if (f.noSiteOnly) sp.set("nosite", "1");
+  if (f.openNow) sp.set("open", "1");
   if (f.query) sp.set("q", f.query);
   if (f.page > 1) sp.set("page", String(f.page));
   if (f.leadId) sp.set("lead", f.leadId);
