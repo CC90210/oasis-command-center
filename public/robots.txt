@@ -1,0 +1,361 @@
+# robots.txt — oasisai.work
+#
+# THE APP IS PRIVATE; THE MARKETING SITE IS NOT.
+# Almost every path here is an authenticated operator surface holding merchant
+# PII. So the posture is default-deny: `Disallow: /` first, then allow back the
+# nine public marketing pages by name. Adding a page to lib/marketing/routes.ts
+# does NOT publish it to crawlers — this file has to say so too, and
+# tests/robots-tiers.test.ts fails if the two drift apart.
+#
+# 🚨 THE NAMED-GROUP TRAP, WHICH IS WHY THIS FILE LOOKS REPETITIVE
+# A crawler that matches a named `User-agent` group ignores `User-agent: *`
+# ENTIRELY. It does not merge, it does not inherit. So a tier-2 group written as
+# the obvious two lines:
+#
+#     User-agent: GPTBot
+#     Allow: /
+#
+# does not mean "GPTBot is welcome on the public pages". It means "GPTBot may
+# crawl the entire authenticated application", because every Disallow in the
+# wildcard group vanished for that one crawler. The full rule set is therefore
+# RESTATED verbatim in every named group. Do not "tidy" this into one group.
+#
+# Content-Signal (contentsignals.org, draft) is a stated preference, not
+# enforcement. It does not block anything and must never be described to a
+# client as blocking AI training.
+Content-Signal: ai-train=no, search=yes, ai-input=yes
+
+# ---------------------------------------------------------------- tier 1: all
+User-agent: *
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+# /unsubscribe carries the recipient's address in the query string. Crawling it
+# would put merchant email addresses into a search index, and following it would
+# fire opt-outs we never received. Never allow.
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+# ------------------------------------------- tier 2: assistants that cite back
+# These power user-facing assistants that produce citations and referral
+# traffic. Same rules as tier 1, restated in full (see the trap above).
+
+User-agent: GPTBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: OAI-SearchBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: ChatGPT-User
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: ClaudeBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: Claude-User
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: Claude-SearchBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: PerplexityBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: Perplexity-User
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: Google-Extended
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: Applebot-Extended
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: DuckAssistBot
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+User-agent: MistralAI-User
+Disallow: /
+Allow: /$
+Allow: /home
+Allow: /fleet
+Allow: /work
+Allow: /about
+Allow: /contact
+Allow: /start
+Allow: /privacy
+Allow: /terms
+Allow: /dmca
+Disallow: /unsubscribe
+Disallow: /api/
+Disallow: /t/
+Disallow: /f/
+Disallow: /embed/
+Disallow: /demo/
+Disallow: /login
+Disallow: /signup
+Disallow: /invite
+Disallow: /forgot-password
+Disallow: /auth/
+
+# ------------------------------------------ tier 3: bulk scrapers, no citation
+# Training-only crawlers with no assistant surface and no referral traffic.
+# `anthropic-ai` is the legacy training UA and is deliberately separate from
+# ClaudeBot above, which is the one that drives Claude citations.
+User-agent: CCBot
+Disallow: /
+
+User-agent: Bytespider
+Disallow: /
+
+User-agent: anthropic-ai
+Disallow: /
+
+Sitemap: https://oasisai.work/sitemap.xml

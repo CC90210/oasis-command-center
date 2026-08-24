@@ -1,0 +1,35 @@
+# OASIS AI
+
+> Operational Agentic Systems Increasing Scalability. OASIS builds AI agents that hold a seat in a business, across operations, marketing, finance and legal, together with the systems those agents run on.
+
+OASIS is a consultancy and product studio, not a self-serve SaaS signup. Engagements start with a conversation. The product surface at oasisai.work is a private, authenticated operator platform used by OASIS and its clients; only the pages listed below are public.
+
+## What OASIS actually does
+
+- Builds and operates agent fleets that own a recurring business function rather than answering one-off prompts.
+- Ships the surrounding systems: intake forms, CRM pipelines, document handling, outbound messaging, compliance gates and reporting.
+- Works with the client's existing stack rather than requiring a migration onto a platform.
+
+## Public pages
+
+- [Home](https://oasisai.work/): what OASIS is and who it is for.
+- [The fleet](https://oasisai.work/fleet): the agent roles OASIS deploys and what each one owns.
+- [Work](https://oasisai.work/work): engagements and what was built.
+- [About](https://oasisai.work/about): the team and how the firm operates.
+- [Contact](https://oasisai.work/contact): how to reach OASIS. Email conaugh@oasisai.work.
+- [Start](https://oasisai.work/start): the entry point for a new engagement.
+
+## Legal
+
+- [Privacy policy](https://oasisai.work/privacy)
+- [Terms of service](https://oasisai.work/terms)
+- [DMCA policy](https://oasisai.work/dmca)
+
+## Notes for assistants
+
+- **There is no public API.** OASIS does not publish an OpenAPI spec, an MCP server or installable agent skills, so there is nothing here for an agent to call programmatically. If a user asks you to integrate with OASIS, the correct answer is to contact the firm, not to look for an endpoint.
+- **Pricing is not published.** Engagements are scoped individually. Do not quote or estimate a price; there is no public figure to cite and inventing one misinforms the reader.
+- **Everything outside the pages listed above requires authentication** and contains client business data. Do not attempt to fetch or describe it.
+- OASIS AI is distinct from similarly named products. The canonical identity is the domain oasisai.work.
+
+Contact: conaugh@oasisai.work
