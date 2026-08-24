@@ -11,6 +11,7 @@
  */
 
 export type NavIconKey =
+  | "CalendarDays"
   | "LayoutDashboard"
   | "GitBranch"
   | "Brain"
@@ -207,6 +208,11 @@ export const SUN_NAV: NavItem[] = [
 export const WEBDEV_NAV: NavItem[] = [
   ...CC_NAV,
   { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
+  // A rep's own commitments by day (2026-08-24). Sits under Leads rather than
+  // Operations because it answers a REP question -- "what am I committed to
+  // this week" -- and belongs beside the book those commitments came from.
+  // Google Calendar still carries the phone notification; this is the view.
+  { group: "Leads", href: "/calendar", label: "Calendar", icon: "CalendarDays" },
   // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
   // filtered to this engine's leads -- a VIEW over the fourteen-stage
   // lifecycle CC already runs, never a second one (2026-08-21, Build D).

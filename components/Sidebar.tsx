@@ -24,6 +24,7 @@ import {
   History,
   Inbox,
   Landmark,
+  CalendarDays,
   LayoutDashboard,
   LogOut,
   Mail,
@@ -51,6 +52,7 @@ import { CC_NAV, type NavIconKey, type NavItem } from "@/lib/nav-config";
 import { demoHref } from "@/lib/demo-href";
 
 const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
+  CalendarDays,
   Activity,
   BadgeDollarSign,
   BarChart3,

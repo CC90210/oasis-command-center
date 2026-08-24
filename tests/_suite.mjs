@@ -209,6 +209,9 @@ const TESTS = [
   // Callbacks reaching the rep's phone. The queue is the source of truth and
   // the calendar is a mirror -- these pin the ordering that keeps it that way.
   "tests/web-leads-calendar-sync.test.ts",
+  // The in-app calendar. Pure grouping, so the local-day boundary that would
+  // file a 9pm callback under tomorrow is testable without a clock.
+  "tests/rep-calendar-schedule.test.ts",
   // Build D (2026-08-21 leads-to-pipeline-design spec, section 6): a VIEW
   // over CC's existing WEBSITE_SALES_STAGES, never a second engine -- covers
   // the pipeline route's read-only auth spine, agent-role scoping wiring,

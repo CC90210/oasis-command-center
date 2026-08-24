@@ -490,6 +490,22 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // exposes no colleague's pipeline. It is what makes self-sourcing possible,
   // which is the track that pays them 25/40/70 rather than 20/30.
   "/web-leads",
+  // The rep's own commitments by day (2026-08-24). Callbacks they promised and
+  // meetings that got booked, scoped to their own book by the fetch.
+  //
+  // WITHOUT THIS LINE THE FEATURE IS INVISIBLE TO THE ONLY PEOPLE IT IS FOR.
+  // The nav list in lib/nav-config.ts is filtered through this allowlist per
+  // persona, so a row added there and not here renders for nobody in sales --
+  // the page works, the link is silently dropped, and nothing fails. Caught by
+  // an independent review, not by a test, which is why the surface test now
+  // covers it too.
+  //
+  // NOT the same thing as `/schedule` above, and the names are close enough to
+  // be worth saying so: `/schedule` is a personal week-planner of time blocks
+  // held in localStorage. `/calendar` is real lead commitments read from the
+  // rep's book. One is where a rep decides when to work; the other is what they
+  // have promised to people.
+  "/calendar",
 ];
 
 /**
