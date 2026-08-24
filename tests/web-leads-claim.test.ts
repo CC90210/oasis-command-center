@@ -67,6 +67,22 @@ assert.equal(
 
 assert.equal(availability(base, NOW).reason, "unclaimed", "an unowned lead is claimable");
 
+// "NOT INTERESTED" IS A FACT ABOUT THE CONVERSATION, NOT ABOUT WHO HOLDS THE
+// RECORD. A first draft checked "nobody holds it" before the lost branch, which
+// made the 90-day rule unreachable for any lost lead with no owner: a business
+// that said no yesterday was immediately callable again, by anyone, forever.
+// (Codex review, 2026-08-23.)
+assert.equal(
+  availability(f({ stage: "lost", lostAt: iso(1 * DAY) }), NOW).available,
+  false,
+  "an UNOWNED lead lost yesterday must not be callable again -- ownership is irrelevant to whether they said no",
+);
+assert.equal(
+  availability(f({ stage: "lost", lostAt: iso((LOST_RECYCLE_DAYS + 1) * DAY) }), NOW).reason,
+  "lost_recycled",
+  "and after 90 days it comes back, still without an owner",
+);
+
 assert.equal(
   availability(f({ assignedTo: "rep-a", claimedAt: iso(1 * DAY) }), NOW).reason,
   "held",
@@ -418,6 +434,47 @@ assert.equal(
     /reason: "at_capacity" as const/,
     "leads given back to the cap must be reported as capacity refusals, not silently dropped",
   );
+}
+
+// ---------------------------------------------------------------------------
+// 13. You cannot call what you do not hold.
+//
+//     Call Mode used to open straight off the shared pool, which defeated the
+//     whole claim system: two reps on the same filtered view both pressed Start
+//     calling and dialled the same businesses, because calling a pool lead
+//     assigned it to nobody. Every guarantee elsewhere was intact and the one
+//     path a rep actually uses went around all of them.
+// ---------------------------------------------------------------------------
+
+{
+  const ui = fs.readFileSync(path.join(process.cwd(), "components/web-leads/WebLeadsBrowser.tsx"), "utf8");
+
+  assert.match(
+    ui,
+    /onStartCalling=\{startCalling\}/,
+    "Start calling must go through the claiming path, not straight into Call Mode",
+  );
+  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[mine, leads, push, filters\]\);/);
+  assert.ok(fn, "startCalling must be findable");
+  assert.match(
+    fn![0],
+    /if \(mine\) \{ setCalling\(true\); return; \}/,
+    "My leads opens Call Mode directly -- those leads are already the rep's",
+  );
+  assert.match(
+    fn![0],
+    /"\/api\/web-leads\/claim"/,
+    "from the shared pool, Start calling must claim before it opens the queue",
+  );
+  assert.match(
+    fn![0],
+    /if \(got\.length === 0\) \{/,
+    "an empty grant must be reported, never opened as an empty queue for the rep to discover",
+  );
+  // The queue opens only after a successful claim.
+  const claimIdx = fn![0].indexOf("/api/web-leads/claim");
+  const openIdx = fn![0].lastIndexOf("setCalling(true)");
+  assert.ok(openIdx > claimIdx, "Call Mode must open only after the claim returns");
 }
 
 console.log("web-leads-claim ok");

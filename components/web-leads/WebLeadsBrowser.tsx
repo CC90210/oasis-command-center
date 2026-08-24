@@ -323,6 +323,64 @@ export function WebLeadsBrowser() {
     }
   }, [selected, mine, router, push, filters]);
 
+  /**
+   * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
+   *
+   * Call Mode used to open straight off the shared pool. That quietly defeated
+   * the entire claim system: two reps on the same filtered view -- "Toronto
+   * salons under 40", the obvious Monday queue -- both pressed Start calling
+   * and dialled the same businesses, because nothing about calling a pool lead
+   * assigned it to anyone. Every guarantee elsewhere in this feature was intact
+   * and the one path a rep actually uses went around all of it. (Codex review,
+   * 2026-08-23.)
+   *
+   * From the pool, Start calling now CLAIMS this page first and enters Call
+   * Mode on what was actually granted. From My leads it opens directly -- those
+   * are already yours.
+   *
+   * Claiming the page rather than all 3,760 matches is deliberate: a rep works
+   * a page at a time, and locking thousands of leads behind one button press
+   * would drain the pool for everyone else in a single click.
+   */
+  const startCalling = useCallback(async () => {
+    if (mine) { setCalling(true); return; }
+    const ids = leads.map((l) => l.id);
+    if (ids.length === 0) return;
+    setClaiming(true);
+    setClaimNote(null);
+    try {
+      const r = await fetch("/api/web-leads/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leadIds: ids }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setClaimNote(body?.error ? `Could not start: ${body.error}` : "Could not start calling. Try again.");
+        return;
+      }
+      const got: string[] = body.claimed || [];
+      if (got.length === 0) {
+        // Never open an empty queue and let the rep discover it. Say why.
+        setClaimNote(
+          `Nothing to call — these were all taken by someone else, or you are at your ${body.cap} lead limit. You hold ${body.held}.`,
+        );
+        return;
+      }
+      setClaimNote(
+        `Claimed ${got.length} of ${ids.length}. You now hold ${body.held} of ${body.cap}. They are yours until you release them.`,
+      );
+      // Land in My leads: the queue a rep works is their own book, and the
+      // claimed leads have by definition just left the pool this view shows.
+      push({ ...filters, view: "mine", page: 1 });
+      setCalling(true);
+    } catch {
+      setClaimNote("Could not reach the server. Nothing was claimed.");
+    } finally {
+      setClaiming(false);
+    }
+  }, [mine, leads, push, filters]);
+
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -356,8 +414,8 @@ export function WebLeadsBrowser() {
           loading={loading}
           queryDraft={queryDraft}
           onQueryDraft={setQueryDraft}
-          onStartCalling={() => setCalling(true)}
-          canStartCalling={!loading && leads.length > 0}
+          onStartCalling={startCalling}
+          canStartCalling={!loading && leads.length > 0 && !claiming}
           selectedCount={selected.size}
           onClaim={runClaim}
           claiming={claiming}
