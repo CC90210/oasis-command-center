@@ -40,6 +40,7 @@ import Link from "next/link";
 import { AlertCircle, ExternalLink, Phone, BarChart3 } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { OpenNowCell, useNow } from "./OpeningHours";
 
 /**
  * Rep-facing names for CC's stage values.
@@ -244,6 +245,9 @@ export function LeadsTable({
   // the pager would offer pages the API never returns.
   const pages = Math.max(1, Math.ceil(total / pageSize));
   const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
+  // ONE clock for the whole page. Read per-cell, fifty rows could straddle a
+  // minute boundary and show two different "now"s in one screenful.
+  const now = useNow();
 
   // A bookmarked `?page=8` can outlive the result set it pointed to (filters
   // changed, data shrank). Left alone, the header still reports the real total
@@ -307,6 +311,13 @@ export function LeadsTable({
               </th>
               <th scope="col" className="pl-3 pr-4 py-3 font-bold">Business</th>
               <th scope="col" className="px-4 py-3 font-bold">Phone</th>
+              {/* Beside the phone number on purpose. A rep reads the number and
+                  the reachability together, or they dial a business that is
+                  shut -- which wastes the dial AND burns the lead, because
+                  nobody answers, a no-answer is logged, and the expiry clock
+                  resets. Operator, 2026-08-24: "we need to see the times that
+                  they're able to actually reach out." */}
+              <th scope="col" className="px-4 py-3 font-bold">Reachable</th>
               {showStage && <th scope="col" className="px-4 py-3 font-bold">Stage</th>}
               <th scope="col" className="px-4 py-3 text-right font-bold">Website</th>
             </tr>
@@ -364,6 +375,9 @@ export function LeadsTable({
                   ) : (
                     <span className="text-fg-faint">No number</span>
                   )}
+                </td>
+                <td className="w-44 px-4 py-3 align-middle">
+                  <OpenNowCell lead={l} now={now} />
                 </td>
                 {showStage && (
                   <td className="px-4 py-3 align-middle">

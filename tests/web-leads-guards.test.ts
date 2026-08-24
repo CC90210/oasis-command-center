@@ -353,6 +353,18 @@ for (const view of [
   // red -- one edit here would colour a judgement onto every screen in the
   // feature at once.
   "components/web-leads/BusinessFacts.tsx",
+  // Added 2026-08-24 with opening hours. The open/closed indicator is the single
+  // most tempting place in this feature to reach for green and red, and because
+  // open/closed is factual state rather than a judgement, the temptation feels
+  // harmless. It is not: a green dot two columns from a website score teaches
+  // the eye that colour means quality on this screen, and the next person tints
+  // the score. So the state is carried by WORDS and by SHAPE -- filled dot,
+  // ring, dash -- which also survives greyscale and colour blindness, and the
+  // only colour in the file is the neutral accent. Proved to fire against this
+  // file by planting `bg-green-500 text-red-400` on the open-state dot once
+  // (2026-08-24): the assertion failed as intended, and the classes were
+  // reverted.
+  "components/web-leads/OpeningHours.tsx",
 ]) {
   const src = read(view);
 

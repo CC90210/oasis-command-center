@@ -226,6 +226,13 @@ const TESTS = [
   // the new endpoint, and the rule that a competitor is a measurement of a
   // public business, never a lead out of another rep's book.
   "tests/web-leads-battlecard.test.ts",
+  // Opening hours and the CRTC calling window (2026-08-24). Canada has six time
+  // zones, Saskatchewan refuses daylight saving, Newfoundland is offset by half
+  // an hour, and Rule 23 measures the legal calling window in the RECIPIENT's
+  // local time -- so a Toronto rep dialling Vancouver at 9am is calling at 6am,
+  // which is a violation at up to $15,000 per call. This pins all four of those
+  // against fixed instants on both sides of a DST transition.
+  "tests/web-leads-hours.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
