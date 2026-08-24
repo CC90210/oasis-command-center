@@ -17,8 +17,13 @@
  */
 
 import { OASIS_LEAD_STAGE_KEYS } from "@/lib/oasis-stage-meta";
+import { OASIS_WEBSITE_SALES_PROGRAM } from "@/lib/oasis-sales-pipeline-policy";
 
-export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
+// Re-exported, not redeclared. This module tells other writers not to restate
+// its rules; declaring a second copy of the program string here would have
+// been the same mistake in miniature — two spellings of the marker the board
+// filters on, free to drift apart.
+export { OASIS_WEBSITE_SALES_PROGRAM };
 
 /**
  * The research fields that make a lead a website-sales lead. Presence of ANY
