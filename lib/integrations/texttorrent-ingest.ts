@@ -23,6 +23,7 @@ import {
   type TtInboxMessage,
 } from "@/lib/integrations/texttorrent";
 import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -39,6 +40,14 @@ export function textTorrentMessageFingerprint(m: TtInboxMessage): string {
   return `tt-fp:${createHash("sha256").update(material).digest("hex")}`;
 }
 
+function realMessageTouchAt(m: TtInboxMessage): string | null {
+  if (!m.created_at || !Number.isFinite(Date.parse(m.created_at))) return null;
+  if (m.direction === "outbound" && /fail|reject|undeliver|cancel/i.test(m.sendStatus || "")) {
+    return null;
+  }
+  return new Date(m.created_at).toISOString();
+}
+
 /** Best-effort lead match by the inbound `from` phone (mirrors the webhook). */
 async function findLeadByPhone(db: Db, tenantId: string, phone: string): Promise<string | null> {
   const l10 = last10(phone);
@@ -51,9 +60,11 @@ async function findLeadByPhone(db: Db, tenantId: string, phone: string): Promise
       .eq("entity_type", "lead")
       .filter("data->>phone", "ilike", `%${l10}%`)
       .limit(1);
+    if (r.error) throw new Error(`lead_lookup_failed:${r.error.message}`);
     return ((r.data || []) as { id: string }[])[0]?.id || null;
-  } catch {
-    return null;
+  } catch (err) {
+    console.error("[tt-ingest] lead lookup failed", err);
+    throw err;
   }
 }
 
@@ -94,14 +105,23 @@ export async function ingestTtInboxMessages(
         .eq("channel", "sms")
         .or(`from_phone.ilike.%${k}%,to_phone.ilike.%${k}%`)
         .limit(500);
+      if (existing.error) throw new Error(existing.error.message);
       for (const r of (existing.data || []) as Array<{ direction: string | null; content: string | null; content_preview: string | null }>) {
         seen.add(sig(r.direction || "", r.content || r.content_preview || ""));
       }
-    } catch {
-      // If the lookup fails, fall through — worst case a duplicate, never a crash.
+    } catch (err) {
+      console.error("[tt-ingest] existing interaction lookup failed", err);
+      skipped += msgs.length;
+      continue;
     }
 
-    const leadId = await findLeadByPhone(db, tenantId, k);
+    let leadId: string | null;
+    try {
+      leadId = await findLeadByPhone(db, tenantId, k);
+    } catch {
+      skipped += msgs.length;
+      continue;
+    }
     const toInsert: Record<string, unknown>[] = [];
     for (const m of msgs) {
       const dir = m.direction; // already "inbound" | "outbound"
@@ -139,6 +159,24 @@ export async function ingestTtInboxMessages(
         skipped += toInsert.length;
       } else {
         inserted += toInsert.length;
+        if (leadId) {
+          const newestTouchAt = msgs
+            .map(realMessageTouchAt)
+            .filter((value): value is string => Boolean(value))
+            .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+          if (newestTouchAt) {
+            try {
+              await persistCanonicalLeadTouch(db, {
+                tenantId,
+                leadId,
+                occurredAt: newestTouchAt,
+              });
+            } catch (err) {
+              console.error("[tt-ingest] canonical touch update failed", err);
+              skipped++;
+            }
+          }
+        }
         // Re-read every inbound identity in this provider thread, including
         // rows inserted by an earlier run whose work enqueue failed. This
         // makes queue repair deterministic on every poll.
@@ -242,7 +280,7 @@ export async function ingestTtInboxMessages(
             }
           }
           if (unmapped.length) {
-            await db.from("agent_events").insert(unmapped.map((row) => ({
+            const eventWrite = await db.from("agent_events").insert(unmapped.map((row) => ({
               event_type: "TEXTTORRENT_UNMAPPED_DID", publisher_agent: "texttorrent",
               severity: "warn", correlation_id: tenantId,
               payload: {
@@ -250,6 +288,10 @@ export async function ingestTtInboxMessages(
                 provider_message_id: row.provider_message_id,
               },
             })));
+            if (eventWrite.error) {
+              console.error("[tt-ingest] unmapped DID event write failed", eventWrite.error.message);
+              skipped += unmapped.length;
+            }
           }
         }
       }

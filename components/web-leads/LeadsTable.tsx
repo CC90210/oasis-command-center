@@ -219,7 +219,7 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
 
 export function LeadsTable({
   leads, total, page, onPage, onOpen, loading, error, emptyHint, pageSize,
-  selected, onToggle, onToggleAll, showStage,
+  selected, onToggle, onToggleAll, showStage, canSelect,
 }: {
   leads: WebLeadRow[];
   total: number;
@@ -238,6 +238,9 @@ export function LeadsTable({
   /** My Leads shows what stage each lead is at; the shared pool does not,
    *  because every lead in the pool is at the same one. */
   showStage: boolean;
+  /** False for read-only/non-sales accounts: selection exists only to mutate
+   *  ownership, so its checkboxes are not read controls. */
+  canSelect: boolean;
 }) {
   const allOnPageSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
   // pageSize is passed in rather than hardcoded: a literal 50 here would
@@ -297,19 +300,21 @@ export function LeadsTable({
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="sticky top-0 z-10 bg-bg-panel text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted shadow-[0_1px_0_0_rgb(34_38_46)]">
-              <th scope="col" className="w-9 pl-4 pr-0 py-3">
-                <input
-                  type="checkbox"
-                  className="h-3.5 w-3.5 rounded accent-accent align-middle"
-                  checked={allOnPageSelected}
-                  // Selects THIS PAGE, not the whole filtered set. A checkbox
-                  // that silently ticked 31,016 rows would let one click claim
-                  // far past a rep's cap and read as if it had worked.
-                  onChange={() => onToggleAll(leads.map((l) => l.id), !allOnPageSelected)}
-                  aria-label={allOnPageSelected ? "Clear selection on this page" : "Select every lead on this page"}
-                />
-              </th>
-              <th scope="col" className="pl-3 pr-4 py-3 font-bold">Business</th>
+              {canSelect && (
+                <th scope="col" className="w-9 pl-4 pr-0 py-3">
+                  <input
+                    type="checkbox"
+                    className="h-3.5 w-3.5 rounded accent-accent align-middle"
+                    checked={allOnPageSelected}
+                    // Selects THIS PAGE, not the whole filtered set. A checkbox
+                    // that silently ticked 31,016 rows would let one click claim
+                    // far past a rep's cap and read as if it had worked.
+                    onChange={() => onToggleAll(leads.map((l) => l.id), !allOnPageSelected)}
+                    aria-label={allOnPageSelected ? "Clear selection on this page" : "Select every lead on this page"}
+                  />
+                </th>
+              )}
+              <th scope="col" className={`${canSelect ? "pl-3" : "pl-4"} pr-4 py-3 font-bold`}>Business</th>
               <th scope="col" className="px-4 py-3 font-bold">Phone</th>
               {/* Beside the phone number on purpose. A rep reads the number and
                   the reachability together, or they dial a business that is
@@ -338,7 +343,7 @@ export function LeadsTable({
                 className="group cursor-pointer border-t border-bg-border/50 transition-[background-color,box-shadow] duration-150 first:border-t-0 hover:bg-bg-raised hover:shadow-[inset_0_0_0_1px_rgba(59,130,246,0.16)] focus-visible:bg-bg-raised focus-visible:shadow-[inset_0_0_0_1px_rgba(59,130,246,0.45)] focus-visible:outline-none"
               >
                 {/* stopPropagation: ticking a row must not also open it. */}
-                <td className="w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
+                {canSelect && <td className="w-9 py-3 pl-4 pr-0 align-middle" onClick={(e) => e.stopPropagation()}>
                   {/* NO HOVER BAR. There was a 3px accent rail here; moving it
                       off the name cell was not enough, because the problem was
                       never where it sat -- a hard vertical line beside a row of
@@ -356,15 +361,15 @@ export function LeadsTable({
                     onChange={() => onToggle(l.id)}
                     aria-label={`Select ${l.name}`}
                   />
-                </td>
-                <td className="py-3.5 pl-3 pr-4 align-middle">
+                </td>}
+                <td className={`py-3.5 ${canSelect ? "pl-3" : "pl-4"} pr-4 align-middle`}>
                   <span className="block truncate text-[15px] font-semibold leading-tight tracking-[-0.01em] text-fg">{l.name}</span>
                   <span className="mt-1 block truncate text-xs text-fg-dim">
                     {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
                   </span>
                 </td>
                 <td className="px-4 py-3 align-middle">
-                  {l.phone ? (
+                  {l.phone && showStage && canSelect ? (
                     <a
                       href={`tel:${l.phone}`}
                       onClick={(e) => e.stopPropagation()}
@@ -372,6 +377,8 @@ export function LeadsTable({
                     >
                       <Phone className="h-3 w-3 shrink-0" />{l.phone}
                     </a>
+                  ) : l.phone ? (
+                    <span className="tabular-nums text-fg-muted">{l.phone}</span>
                   ) : (
                     <span className="text-fg-faint">No number</span>
                   )}

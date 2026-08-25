@@ -25,6 +25,11 @@ import {
 } from "./manifest/data";
 import { resolveClientProfileSlug } from "./client-profiles";
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES } from "./lead-scope";
+import { isWebsiteSalesTenantSlug } from "./leads/canonical-lead-fields";
+import {
+  ownsOasisSalesRecord,
+  rejectedOasisGenericPatchKeys,
+} from "./oasis-sales-pipeline-policy";
 import type { ManifestEntityDef, TenantManifest } from "./manifest/schema";
 
 export type ActionContext = {
@@ -208,6 +213,9 @@ const ACTIONS: Record<string, Handler> = {
     if (!ctxResolved.ok) return { ok: false, type: "create_record", error: ctxResolved.error };
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "create_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
+    if (entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug)) {
+      return { ok: false, type: "create_record", error: "use_website_sales_workflow" };
+    }
 
     const validated = validateAgainstEntity(entityDef, data as Record<string, unknown>, { requireAll: true });
     if (!validated.ok) return { ok: false, type: "create_record", error: validated.error };
@@ -262,7 +270,8 @@ const ACTIONS: Record<string, Handler> = {
       // be asked to dump another rep's leads. The arbitrary field `where` is
       // dropped for scoped entities (security > filter flexibility; the model
       // can still reason over the scoped set). Admins / system callers see all.
-      const scoped = SCOPED_ENTITIES.has(entityName) && leadScopingEnabled();
+      const scoped =
+        SCOPED_ENTITIES.has(entityName) && (!ctx.isAdmin || leadScopingEnabled());
       const result = scoped
         ? await listByAssignedScope({
             tenant_id: ctx.tenantId,
@@ -318,6 +327,33 @@ const ACTIONS: Record<string, Handler> = {
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "update_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
 
+    const isOasisSalesLead =
+      entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug);
+    if (isOasisSalesLead) {
+      const protectedKeys = rejectedOasisGenericPatchKeys(
+        patch as Record<string, unknown>,
+      );
+      if (protectedKeys.length > 0) {
+        return {
+          ok: false,
+          type: "update_record",
+          error: "use_website_sales_workflow",
+        };
+      }
+
+      // Generic chat edits may correct safe profile facts, but they may never
+      // become a cross-rep write path. Admins can correct any lead; everyone
+      // else must own or collaborate on this exact record.
+      const existing = await getRecord({
+        tenant_id: ctx.tenantId,
+        entity: entityName,
+        id,
+      }).catch(() => null);
+      if (!existing || (!ctx.isAdmin && !ownsOasisSalesRecord(existing, ctx.userId ?? null))) {
+        return { ok: false, type: "update_record", error: "record_not_found" };
+      }
+    }
+
     const validated = validateAgainstEntity(entityDef, patch as Record<string, unknown>, { requireAll: false });
     if (!validated.ok) return { ok: false, type: "update_record", error: validated.error };
 
@@ -358,6 +394,9 @@ const ACTIONS: Record<string, Handler> = {
     if (!ctxResolved.ok) return { ok: false, type: "delete_record", error: ctxResolved.error };
     const entityDef = findEntity(ctxResolved.manifest, entityName);
     if (!entityDef) return { ok: false, type: "delete_record", error: unknownEntityError(ctxResolved.manifest, entityName) };
+    if (entityName === "lead" && isWebsiteSalesTenantSlug(ctxResolved.slug)) {
+      return { ok: false, type: "delete_record", error: "use_website_sales_workflow" };
+    }
 
     // Look up the row first so we can include a meaningful label in the
     // result summary; the toast tells the operator what got destroyed,

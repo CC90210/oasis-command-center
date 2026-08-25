@@ -63,7 +63,7 @@ export function InlineStageControl({ recordId, stage, stageMap, entity, menuAlig
       const res = await fetch(`/api/leads/${recordId}/set-stage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ stage: key, entity }),
+        body: JSON.stringify({ stage: key, entity, requestId: crypto.randomUUID() }),
       });
       const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !json.ok) {

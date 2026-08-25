@@ -11,7 +11,7 @@
  */
 
 import type { ConversationMessage } from "@/lib/conversation-threading";
-import { Mail, MessageSquare, Phone, Voicemail, Clock, Check, CheckCheck, AlertTriangle } from "lucide-react";
+import { Mail, MessageSquare, Phone, Voicemail, Clock, CheckCheck, AlertTriangle } from "lucide-react";
 import { relTime } from "./format";
 import { Tag } from "@/components/Card";
 

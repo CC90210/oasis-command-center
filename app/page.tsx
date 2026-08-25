@@ -181,6 +181,7 @@ export default async function TodayPage() {
         viewerName={viewerName}
         readOnly={surface.persona === "readonly"}
         teamRole={surface.teamRole}
+        viewerUserId={surface.userId}
       />
     );
   }

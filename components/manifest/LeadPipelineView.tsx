@@ -107,6 +107,27 @@ type Props = {
    * agents, so there is zero change to the non-manager view.
    */
   canManage?: boolean;
+  /**
+   * Exact server-side totals + navigation for a bounded result window.
+   * Omitted by legacy/SunBiz callers, which continue to render their complete
+   * in-memory row set exactly as before.
+   */
+  resultWindow?: {
+    exactStageCounts: Record<string, number>;
+    exactTotal: number;
+    activeStage: string | null;
+    page: number;
+    pageSize: number;
+    shownFrom: number;
+    shownTo: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+    truncatedStages: string[];
+    stageHrefs: Record<string, string>;
+    allStagesHref: string;
+    previousHref: string | null;
+    nextHref: string | null;
+  };
 };
 
 type TenantMember = {
@@ -122,7 +143,7 @@ const SUN_GRID_STYLE: CSSProperties = {
 
 const OASIS_GRID_STYLE: CSSProperties = {
   gridTemplateColumns:
-    "minmax(160px,1.6fr) minmax(140px,1.2fr) minmax(110px,1fr) 56px 100px 88px",
+    "minmax(160px,1.5fr) minmax(140px,1.15fr) minmax(110px,.9fr) minmax(120px,1fr) 100px 88px",
 };
 
 // Tenant-variant config struct picked at the top of the component.
@@ -196,6 +217,7 @@ export function LeadPipelineView({
   basePath,
   variant = "sunbiz",
   canManage = false,
+  resultWindow,
 }: Props) {
   const router = useRouter();
   const [collapsedStages, setCollapsedStages] = useState<Record<string, boolean>>({});
@@ -265,8 +287,26 @@ export function LeadPipelineView({
       if (t > mostRecentUpdate) mostRecentUpdate = t;
     }
 
+    // A bounded server window cannot derive global totals from the rows it
+    // happens to carry. Stage totals are exact DB counts; active/hot/ready are
+    // exact sums of those counts. Cold remains a row-level calculation and is
+    // explicitly labelled as the loaded-window value below when truncated.
+    if (resultWindow) {
+      const exactStageCounts = resultWindow.exactStageCounts;
+      active = Object.entries(exactStageCounts).reduce(
+        (sum, [stage, count]) => sum + (cfg.active.has(stage) ? count : 0),
+        0,
+      );
+      hot = exactStageCounts[hotStageKey] || 0;
+      ready = Object.entries(exactStageCounts).reduce(
+        (sum, [stage, count]) => sum + (cfg.readyToAdvance.has(stage) ? count : 0),
+        0,
+      );
+      return { stageCounts: exactStageCounts, active, hot, cold, ready, mostRecentUpdate };
+    }
+
     return { stageCounts, active, hot, cold, ready, mostRecentUpdate };
-  }, [rows, stageField, cfg, hotStageKey]);
+  }, [rows, stageField, cfg, hotStageKey, resultWindow]);
 
   const renderedRows = stageFilter
     ? rows.filter((r) => String(r.data[stageField] || "") === stageFilter)
@@ -283,6 +323,12 @@ export function LeadPipelineView({
       ? rowsIn.filter((r) => rowMissing(r).some((t) => docFilter.has(t)))
       : rowsIn;
   const touchFirst = pickTouchFirst(renderedRows, stageField, stages, cfg);
+  const windowIsIncomplete = Boolean(
+    resultWindow &&
+      (resultWindow.truncatedStages.length > 0 ||
+        (resultWindow.activeStage &&
+          (resultWindow.exactStageCounts[resultWindow.activeStage] || 0) > renderedRows.length)),
+  );
 
   useEffect(() => {
     setCollapsedStages({});
@@ -419,6 +465,7 @@ export function LeadPipelineView({
         updated?: number;
         skipped?: number;
         failed?: number;
+        trackingFailed?: number;
         error?: string;
       };
       if (!r.ok || !body.ok) {
@@ -428,6 +475,7 @@ export function LeadPipelineView({
       const bits = [`${body.updated ?? 0} ${verb}`];
       if (body.skipped) bits.push(`${body.skipped} skipped`);
       if (body.failed) bits.push(`${body.failed} failed`);
+      if (body.trackingFailed) bits.push(`${body.trackingFailed} tracking alerts`);
       setBulkMsg(bits.join(" · "));
       setSelected(new Set());
       router.refresh();
@@ -465,7 +513,7 @@ export function LeadPipelineView({
             <span className={stats.cold > 0 ? "font-semibold text-red-300" : "text-fg-muted"}>
               {stats.cold}
             </span>{" "}
-            going cold
+            {windowIsIncomplete ? "going cold in shown rows" : "going cold"}
             <span className="mx-1.5 text-fg-dim">/</span>
             <span className="font-semibold text-emerald-300">{stats.ready}</span> ready to advance
           </div>
@@ -538,7 +586,13 @@ export function LeadPipelineView({
           <PageSearchBar entityLabel={entityLabel} />
         </div>
         <div className="whitespace-nowrap text-[10.5px] text-fg-dim">
-          {stages.length} stages / {renderedRows.length} visible
+          {resultWindow
+            ? `${stages.length} stages / ${renderedRows.length} shown / ${
+                resultWindow.activeStage
+                  ? resultWindow.exactStageCounts[resultWindow.activeStage] || 0
+                  : resultWindow.exactTotal
+              } matches`
+            : `${stages.length} stages / ${renderedRows.length} visible`}
         </div>
         <div className="whitespace-nowrap font-mono text-[10.5px] text-fg-dim">
           updated{" "}
@@ -551,19 +605,16 @@ export function LeadPipelineView({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
         {stages.map((stage) => {
           const count = stats.stageCounts[stage.key] || 0;
-          const collapsed = collapsedStages[stage.key] ?? true;
+          const collapsed =
+            collapsedStages[stage.key] ?? (resultWindow?.activeStage === stage.key ? false : true);
           const selected = stageFilter === stage.key;
-          return (
-            <button
-              key={stage.key}
-              type="button"
-              onClick={() => toggleStage(stage.key)}
-              className={`min-h-[56px] min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
-                selected
-                  ? "border-accent bg-accent/10"
-                  : "border-bg-border bg-bg-deep/45 hover:border-fg-dim hover:bg-bg-elev/40"
-              }`}
-            >
+          const className = `min-h-[56px] min-w-0 rounded-md border px-3 py-2 text-left transition-colors ${
+            selected
+              ? "border-accent bg-accent/10"
+              : "border-bg-border bg-bg-deep/45 hover:border-fg-dim hover:bg-bg-elev/40"
+          }`;
+          const content = (
+            <>
               <div className="flex items-center gap-2">
                 <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: stage.bg }} />
                 <span className="min-w-0 flex-1 text-[11px] font-bold uppercase leading-tight tracking-wide text-fg-muted">
@@ -576,6 +627,15 @@ export function LeadPipelineView({
                 )}
               </div>
               <div className="mt-1 font-mono text-[12px] text-fg">{count}</div>
+            </>
+          );
+          return resultWindow?.activeStage ? (
+            <Link key={stage.key} href={resultWindow.stageHrefs[stage.key] || basePath} className={className}>
+              {content}
+            </Link>
+          ) : (
+            <button key={stage.key} type="button" onClick={() => toggleStage(stage.key)} className={className}>
+              {content}
             </button>
           );
         })}
@@ -640,7 +700,7 @@ export function LeadPipelineView({
         >
           <div className="flex flex-wrap items-center gap-3">
             <span className="rounded bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
-              Touch first
+              {windowIsIncomplete ? "Touch first in shown rows" : "Touch first"}
             </span>
             <span className="text-[13px] font-medium text-fg">{touchFirst.name}</span>
             <span className="text-[12px] text-amber-200/90">
@@ -698,7 +758,15 @@ export function LeadPipelineView({
             entityName={entityName}
             stage={stage}
             rows={stageRows}
-            collapsed={collapsedStages[stage.key] ?? true}
+            totalCount={resultWindow ? resultWindow.exactStageCounts[stage.key] || 0 : stageRows.length}
+            browseHref={
+              resultWindow?.truncatedStages.includes(stage.key)
+                ? resultWindow.stageHrefs[stage.key] || null
+                : null
+            }
+            collapsed={
+              collapsedStages[stage.key] ?? (resultWindow?.activeStage === stage.key ? false : true)
+            }
             onToggle={() => toggleStage(stage.key)}
             variant={variant}
             cfg={cfg}
@@ -711,6 +779,57 @@ export function LeadPipelineView({
           />
         );
       })}
+
+      {resultWindow?.activeStage && (
+        <nav
+          aria-label="Pipeline result pages"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-deep/35 px-4 py-3 text-[11px] text-fg-muted"
+        >
+          <Link href={resultWindow.allStagesHref} className="font-semibold text-accent hover:text-accent/80">
+            All stages
+          </Link>
+          <span className="tabular-nums">
+            {resultWindow.shownFrom > 0
+              ? `Showing ${resultWindow.shownFrom}-${resultWindow.shownTo} of ${
+                  resultWindow.exactStageCounts[resultWindow.activeStage] || 0
+                }`
+              : "No matches"}
+          </span>
+          <span className="flex items-center gap-2">
+            {resultWindow.previousHref ? (
+              <Link
+                href={resultWindow.previousHref}
+                className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
+              >
+                Previous
+              </Link>
+            ) : (
+              <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
+                Previous
+              </span>
+            )}
+            <span className="font-mono text-fg-dim">Page {resultWindow.page}</span>
+            {resultWindow.nextHref ? (
+              <Link
+                href={resultWindow.nextHref}
+                className="rounded-md border border-bg-border px-2.5 py-1 font-semibold text-fg hover:border-accent/50"
+              >
+                Next
+              </Link>
+            ) : (
+              <span className="rounded-md border border-bg-border/50 px-2.5 py-1 text-fg-dim opacity-50">
+                Next
+              </span>
+            )}
+          </span>
+        </nav>
+      )}
+
+      {resultWindow && !resultWindow.activeStage && resultWindow.truncatedStages.length > 0 && (
+        <p className="text-center text-[10.5px] text-fg-dim">
+          Showing the newest {resultWindow.pageSize} matches per busy stage. Use View all to reach every older deal.
+        </p>
+      )}
 
       <BulkEmailDialog
         open={emailDialogOpen}
@@ -735,9 +854,13 @@ export function LeadPipelineView({
           onRetryMembers={retryMembers}
           busy={bulkBusy}
           onAssign={(uid) => runBulk({ op: "assign", assigned_to: uid }, "assigned")}
-          onStage={(stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")}
+          onStage={
+            variant === "oasis"
+              ? undefined
+              : (stageKey) => runBulk({ op: "stage", stage: stageKey, entity: entityName }, "moved")
+          }
           onDecline={
-            entityName === "lead"
+            variant !== "oasis" && entityName === "lead"
               ? () => {
                   if (
                     window.confirm(
@@ -790,7 +913,7 @@ function BulkActionBar({
   onRetryMembers: () => void;
   busy: boolean;
   onAssign: (assignedTo: string | null) => void;
-  onStage: (stageKey: string) => void;
+  onStage?: (stageKey: string) => void;
   onDecline?: () => void;
   onOpenEmail: () => void;
   onCcBlast: (templateId: string) => void;
@@ -815,7 +938,7 @@ function BulkActionBar({
             onClick={onRetryMembers}
             className="rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-200 hover:bg-red-500/20"
           >
-            Couldn't load agents — retry
+            Couldn&apos;t load agents — retry
           </button>
         ) : (
           <select
@@ -840,8 +963,9 @@ function BulkActionBar({
         )}
       </label>
 
-      <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
-        Move to
+      {onStage && (
+        <label className="flex items-center gap-1.5 text-[11px] text-fg-muted">
+          Move to
         <select
           defaultValue=""
           disabled={busy}
@@ -849,7 +973,7 @@ function BulkActionBar({
             const v = e.target.value;
             e.currentTarget.selectedIndex = 0;
             if (v === "__decline") onDecline?.();
-            else if (v) onStage(v);
+            else if (v) onStage?.(v);
           }}
           className="rounded-md border border-bg-border bg-bg-deep px-2 py-1 text-[12px] text-fg focus:border-accent focus:outline-none disabled:opacity-60"
         >
@@ -863,7 +987,8 @@ function BulkActionBar({
             <option value="__decline">Decline → Applications</option>
           )}
         </select>
-      </label>
+        </label>
+      )}
 
       {/* Bulk email. Opens the full composer (preflight + template or
           write-your-own + live send status) rather than firing from a bare
@@ -961,6 +1086,8 @@ function StageSection({
   entityName,
   stage,
   rows,
+  totalCount,
+  browseHref,
   collapsed,
   onToggle,
   variant,
@@ -976,6 +1103,8 @@ function StageSection({
   entityName: "lead" | "application";
   stage: StageMeta;
   rows: Row[];
+  totalCount: number;
+  browseHref: string | null;
   collapsed: boolean;
   onToggle: () => void;
   variant: PipelineVariant;
@@ -1010,7 +1139,7 @@ function StageSection({
             <span className="truncate text-[11px] font-bold uppercase tracking-wider" style={{ color: stage.bg }}>
               {stage.label}
             </span>
-            <span className="font-mono text-[11px] text-fg-dim">{rows.length}</span>
+            <span className="font-mono text-[11px] text-fg-dim">{totalCount}</span>
           </div>
           {targetLabel && (
             <span className="shrink-0 rounded bg-bg-deep/60 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-fg-dim">
@@ -1018,6 +1147,14 @@ function StageSection({
             </span>
           )}
         </button>
+        {browseHref && (
+          <Link
+            href={browseHref}
+            className="mr-3 shrink-0 rounded-md border border-bg-border bg-bg-deep/50 px-2 py-1 text-[10px] font-semibold text-accent hover:border-accent/50"
+          >
+            View all {totalCount}
+          </Link>
+        )}
         {onAddLead && stage.key === "sent_application" && (
           <button
             type="button"
@@ -1046,7 +1183,7 @@ function StageSection({
                   <HeaderCell>Lead</HeaderCell>
                   <HeaderCell>Email</HeaderCell>
                   <HeaderCell>Phone</HeaderCell>
-                  <HeaderCell>Score</HeaderCell>
+                  <HeaderCell>Website</HeaderCell>
                   <HeaderCell>Last Touch</HeaderCell>
                   <HeaderCell>Created</HeaderCell>
                 </>
@@ -1426,25 +1563,38 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const email = str(d.email) || "";
   const phone = formatPhone(str(d.phone) || "");
   const assignedRep = str(d.assigned_to_name) || (str(d.assigned_to) ? "Assigned agent" : "Unassigned");
-  const aiScoreRaw = typeof d.ai_score === "number" ? d.ai_score : null;
-  const scoreRaw = typeof d.score === "number" ? d.score : null;
-  const scoreNum = aiScoreRaw ?? scoreRaw;
-  const touchIso = lastTouchIso(row);
-  const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchIso);
-  const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
+  const touchAnchorIso = lastTouchIso(row);
+  const explicitTouchIso = lastTouchIso({ data: d, created_at: null });
+  const cold = d.docs_on_file !== true && isGoingColdVariant(cfg, stage.key, touchAnchorIso);
+  const lastTouchLabel = explicitTouchIso ? relTime(explicitTouchIso) : "Never";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
+  // Hostname only. On a website-sales board the site IS the qualifier, and a
+  // rep triaging thirty rows shouldn't have to open each one to see whether
+  // there's a site to talk about. Full URL would swamp the cell.
+  const websiteHost = hostOf(str(d.website) || "");
   return {
     name,
     company,
     email,
     phone,
     assignedRep,
-    score: scoreNum,
     cold,
     lastTouchLabel,
     createdLabel,
+    websiteHost,
   };
+}
+
+/** "https://www.expertvelo.com/x" → "expertvelo.com". "" when unparseable. */
+function hostOf(raw: string): string {
+  if (!raw.trim()) return "";
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw.trim()) ? raw.trim() : `https://${raw.trim()}`;
+    return new URL(withScheme).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
 }
 
 function OasisDesktopRow({
@@ -1485,18 +1635,7 @@ function OasisDesktopRow({
       </Cell>
       <Cell title={m.email}>{m.email || "-"}</Cell>
       <Cell title={m.phone} mono>{m.phone || "-"}</Cell>
-      <Cell>
-        {m.score != null ? (
-          <span
-            className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full bg-accent/15 px-1.5 font-mono text-[10px] font-bold text-accent"
-            title="AI score (0-100)"
-          >
-            {m.score}
-          </span>
-        ) : (
-          "-"
-        )}
-      </Cell>
+      <Cell title={m.websiteHost}>{m.websiteHost || "-"}</Cell>
       <Cell className={m.cold ? "font-semibold text-red-300" : ""}>{m.lastTouchLabel}</Cell>
       <Cell>{m.createdLabel}</Cell>
     </Link>
@@ -1533,7 +1672,7 @@ function OasisMobileRow({
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
             <MiniMetric label="Email" value={m.email || "-"} />
             <MiniMetric label="Phone" value={m.phone || "-"} mono />
-            <MiniMetric label="Score" value={m.score != null ? String(m.score) : "-"} mono />
+            <MiniMetric label="Website" value={m.websiteHost || "-"} />
             <MiniMetric label="Last touch" value={m.lastTouchLabel} />
             <MiniMetric label="Created" value={m.createdLabel} />
           </div>
@@ -1677,16 +1816,6 @@ function leadPotentialUsd(row: Row): number | null {
   return null;
 }
 
-/** OASIS qualification proxy — used when value_estimate isn't populated
- *  yet (most cold-outreach leads). Prefers ai_score over the manual
- *  score; both are 0-100 so they're directly comparable. */
-function leadQualificationScore(row: Row): number {
-  const d = row.data;
-  if (typeof d.ai_score === "number") return d.ai_score;
-  if (typeof d.score === "number") return d.score;
-  return 0;
-}
-
 function pickTouchFirst(
   rows: Row[],
   stageField: string,
@@ -1702,15 +1831,9 @@ function pickTouchFirst(
     if (r.data.docs_on_file === true || !isGoingColdVariant(cfg, stageKey, lastTouch)) continue;
     const days = daysSince(lastTouch) - (cfg.slaDays[stageKey] ?? 7);
     const potential = leadPotentialUsd(r);
-    // Ranking tuple — highest wins, evaluated left to right:
-    //   1. dollar potential (when known)
-    //   2. qualification score (the meaningful signal for OASIS pre-revenue)
-    //   3. days overdue (longer overdue = more urgent tie-break)
-    const rank: [number, number, number] = [
-      potential ?? 0,
-      leadQualificationScore(r),
-      days,
-    ];
+    // The banner says "Touch first": longest overdue wins. Estimated
+    // potential only breaks a tie; retired score fields never shape the queue.
+    const rank: [number, number, number] = [days, potential ?? 0, 0];
     if (!best || !bestRank || rankGreater(rank, bestRank)) {
       best = {
         id: r.id,

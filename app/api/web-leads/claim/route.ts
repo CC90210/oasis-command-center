@@ -2,10 +2,11 @@
  * POST /api/web-leads/claim    — take leads into the caller's own book
  * POST /api/web-leads/claim?release=1 — put them back in the pool
  *
- * SELF-SERVICE ON PURPOSE. Any signed-in member of this tenant may claim a
- * lead for THEMSELVES. There is no `userId` in the request body and no way to
- * claim on someone else's behalf through this route -- the owner is always the
- * resolved session. Admin bulk-assignment to a named rep is a separate,
+ * SELF-SERVICE ON PURPOSE. A sales-capable member of this tenant may claim a
+ * lead for THEMSELVES. Read-only and non-sales accounts may still browse but
+ * cannot mutate ownership. There is no `userId` in the request body and no way
+ * to claim on someone else's behalf through this route -- the owner is always
+ * the resolved session. Admin bulk-assignment to a named rep is a separate,
  * admin-gated route; keeping the two apart means a compromised or
  * misunderstood client cannot quietly move leads between reps' books.
  *
@@ -18,6 +19,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { claimLeads, releaseLeads } from "@/lib/web-leads/claim-ops";
+import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,6 +36,9 @@ export async function POST(req: NextRequest) {
   }
   if (session.tenantId !== WEBDEV_TENANT_ID) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
+  if (!mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) {
+    return NextResponse.json({ ok: false, error: "sales_role_required" }, { status: 403 });
   }
 
   let body: unknown;

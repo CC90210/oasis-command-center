@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createClient } from "@libsql/client";
 import { readFileSync } from "node:fs";
 import {
-  close_website_deal,
+  close_website_deal as closeWebsiteDealRpc,
   refund_website_deal,
   CLAWBACK_WINDOW_DAYS,
   TURSO_RPC_SHIM,
@@ -42,8 +42,24 @@ const CLOSER = "u-closer";
 const OPENER = "u-opener";
 const BUILDER = "u-builder";
 const MANAGER = "u-manager";
+const BUILD_BRIEF = {
+  version: 1,
+  status: "ready_for_pricing",
+  businessGoal: "Generate qualified calls",
+  targetAudience: "Local business customers",
+  mustHavePages: "Home, services, contact",
+  requiredFeatures: "Quote form and analytics",
+  integrations: "GA4",
+  contentAndAssets: "Logo ready; copy to draft",
+  domainAndAccess: "Client owns domain",
+  launchTiming: "Four weeks",
+  decisionProcess: "Owner approves launch",
+  transcriptNotes: "",
+  capturedAt: "2026-08-24T00:00:00.000Z",
+  capturedBy: FOUNDER,
+};
 
-const client = createClient({ url: ":memory:" });
+const client = createClient({ url: "file::memory:?cache=shared" });
 
 async function exec(sql: string) {
   for (const stmt of sql.split(/;\s*\n/).map((s) => s.trim()).filter((s) => s && !/^--/.test(s))) {
@@ -57,6 +73,11 @@ async function setup() {
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT, entity_type TEXT, data TEXT,
       updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE user_profiles (auth_user_id TEXT, tenant_id TEXT, team_role TEXT, is_owner INTEGER DEFAULT 0);
+    CREATE TABLE lead_interactions (
+      id TEXT PRIMARY KEY, tenant_id TEXT, lead_id TEXT, type TEXT, channel TEXT,
+      direction TEXT, agent_source TEXT, actor_user_id TEXT, subject TEXT,
+      content TEXT, content_preview TEXT, metadata TEXT, created_at TEXT
+    );
     CREATE TABLE schema_migrations (filename TEXT PRIMARY KEY, checksum TEXT, applied_at TEXT, statements INTEGER);
   `);
   // The real v3 tables, straight from the migration file — no hand-rewritten
@@ -66,6 +87,18 @@ async function setup() {
     .split(/;\s*\n/)
     .filter((s) => /^\s*CREATE TABLE "website_(deals|sales_commissions|onboarding)"/m.test(s));
   for (const stmt of created) await client.execute(stmt);
+  const paymentMigration = readFileSync("database/turso/160_website_sales_payment_receipts.turso.sql", "utf8");
+  const receiptTable = paymentMigration.match(
+    /CREATE TABLE IF NOT EXISTS "website_sales_payment_receipts"[\s\S]*?\n\);/,
+  )?.[0];
+  assert.ok(receiptTable, "migration 160 must define the verified-payment receipt table");
+  await client.execute(receiptTable);
+  for (const match of paymentMigration.matchAll(/ALTER TABLE "website_deals" ADD COLUMN[\s\S]*?;/g)) {
+    await client.execute(match[0].slice(0, -1));
+  }
+  await client.executeMultiple(
+    readFileSync("database/turso/164_website_sales_installment_ledger.turso.sql", "utf8"),
+  );
 
   await client.execute({ sql: `INSERT INTO tenants VALUES (?, 'oasis-webdev')`, args: [TENANT] });
   for (const [u, role] of [[FOUNDER, "owner"], [CLOSER, "closer"], [OPENER, "opener"], [BUILDER, "builder"], [MANAGER, "manager"]] as const) {
@@ -76,10 +109,70 @@ async function setup() {
   }
 }
 
-async function seedLead(id: string, assignedTo: string) {
+async function seedLead(id: string, assignedTo: string, attributedRepUserId?: string, stage = "qualified") {
   await client.execute({
     sql: `INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?,?, 'lead', ?)`,
-    args: [id, TENANT, JSON.stringify({ assigned_to: assignedTo, stage: "qualified" })],
+    args: [
+      id,
+      TENANT,
+      JSON.stringify({
+        assigned_to: assignedTo,
+        stage,
+        build_brief: BUILD_BRIEF,
+        ...(attributedRepUserId ? { attributed_rep_user_id: attributedRepUserId } : {}),
+      }),
+    ],
+  });
+}
+
+async function close_website_deal(db: typeof client, args: Record<string, unknown>) {
+  const reference = String(args.p_payment_reference);
+  const paymentPlanId = typeof args.p_payment_plan_id === "string"
+    ? args.p_payment_plan_id
+    : `plan-${reference}`;
+  const receiptId = `receipt-${reference}`;
+  const collectedAmount = Number(args.p_collected_amount ?? args.p_setup_amount);
+  await db.execute({
+    sql: `INSERT OR IGNORE INTO website_sales_payment_receipts
+            (id, tenant_id, lead_id, provider, provider_reference, status,
+             amount_cents, currency, provider_status, verification_source,
+             verified_by, verified_at, payment_plan_id, payment_token,
+             installment_kind, summary)
+          VALUES (?, ?, ?, 'manual', ?, 'verified', ?, ?, 'founder_confirmed_collected',
+                  'founder_manual', ?, ?, ?, ?, 'full', '{}')`,
+    args: [
+      receiptId,
+      String(args.p_tenant_id),
+      String(args.p_lead_id),
+      reference,
+      Math.round(collectedAmount * 100),
+      String(args.p_currency),
+      FOUNDER,
+      new Date().toISOString(),
+      paymentPlanId,
+      `token-${reference}`,
+    ],
+  });
+  return closeWebsiteDealRpc(db, {
+    ...args,
+    p_payment_provider: "manual",
+    p_verified_payment_id: receiptId,
+    p_payment_plan_id: paymentPlanId,
+    p_expected_stage: args.p_expected_stage ?? "qualified",
+    p_expected_owner_id: args.p_expected_owner_id ?? args.p_rep_user_id,
+    p_request_id: args.p_request_id ?? `close-${reference}`,
+    p_occurred_at: args.p_occurred_at ?? new Date().toISOString(),
+    p_actor_user_id: args.p_actor_user_id ?? FOUNDER,
+    p_interaction_subject: "Payment verified and builder assigned",
+    p_interaction_content: `Verified ${reference}`,
+    p_interaction_metadata: {},
+    p_lead_patch: {
+      closed_by_user_id: args.p_rep_user_id,
+      payment_verified_by: FOUNDER,
+      ...(args.p_builder_user_id
+        ? { assigned_to: args.p_builder_user_id, fulfillment_owner_id: args.p_builder_user_id }
+        : {}),
+    },
   });
 }
 
@@ -88,6 +181,36 @@ const roleOf = (r: unknown, role: string) => lines(r).find((l) => l.role === rol
 
 async function main() {
   await setup();
+
+  await seedLead("lead-unverified", CLOSER);
+  await assert.rejects(
+    closeWebsiteDealRpc(client, {
+      p_tenant_id: TENANT,
+      p_lead_id: "lead-unverified",
+      p_rep_user_id: CLOSER,
+      p_founder_user_id: FOUNDER,
+      p_package_id: "starter",
+      p_currency: "CAD",
+      p_setup_amount: 500,
+      p_monthly_amount: 0,
+      p_payment_reference: "pay-unverified",
+      p_payment_provider: "manual",
+      p_verified_payment_id: "missing-receipt",
+      p_payment_plan_id: "plan-pay-unverified",
+      p_closed_by_rep: true,
+      p_expected_stage: "qualified",
+      p_expected_owner_id: CLOSER,
+      p_request_id: "close-pay-unverified",
+      p_occurred_at: new Date().toISOString(),
+      p_actor_user_id: FOUNDER,
+      p_interaction_subject: "Payment verified",
+      p_interaction_content: "Payment verified",
+      p_interaction_metadata: {},
+      p_lead_patch: {},
+    }),
+    /verified_payment_required/,
+    "the ledger must reject a close that has no verified cash receipt",
+  );
 
   /* ── 1. A $500 deal must BOOK. Migration 147 threw here. ─────────────────*/
   await seedLead("lead-500", CLOSER);
@@ -102,7 +225,7 @@ async function main() {
   assert.equal(roleOf(small, "full_stack")?.user_id, CLOSER);
 
   /* ── 2. FOUR PAYEES ON ONE PAYMENT — the point of migration 154. ─────────*/
-  await seedLead("lead-8k", CLOSER);
+  await seedLead("lead-8k", CLOSER, OPENER);
   const big = await close_website_deal(client, {
     p_tenant_id: TENANT, p_lead_id: "lead-8k", p_rep_user_id: CLOSER,
     p_founder_user_id: FOUNDER, p_package_id: "authority", p_currency: "CAD",
@@ -116,6 +239,18 @@ async function main() {
   assert.equal(roleOf(big, "closer")?.amount_cents, 240_000, "closer 30% of $8,000");
   assert.equal(roleOf(big, "builder")?.amount_cents, 100_000, "builder flat $1,000 for authority");
   assert.ok((roleOf(big, "manager")?.amount_cents ?? 0) > 0, "the manager earns an override");
+
+  /* Founder closes after one opener books the meeting: opener 20%, never the
+   * 40% full-stack line. This is the ordinary OASIS handoff, not an edge case. */
+  await seedLead("lead-founder-close", OPENER, OPENER);
+  const founderClose = await close_website_deal(client, {
+    p_tenant_id: TENANT, p_lead_id: "lead-founder-close", p_rep_user_id: OPENER,
+    p_founder_user_id: FOUNDER, p_package_id: "authority", p_currency: "CAD",
+    p_setup_amount: 8000, p_monthly_amount: 500, p_payment_reference: "pay-founder-close",
+    p_closed_by_rep: false, p_lead_source_track: "company",
+  });
+  assert.deepEqual(lines(founderClose).map((line) => line.role), ["opener"]);
+  assert.equal(roleOf(founderClose, "opener")?.amount_cents, 160_000, "founder close pays opener 20%");
 
   const stored = await client.execute({
     sql: `SELECT party_role, amount_cents, comp_version, clawback_deadline_at FROM website_sales_commissions
@@ -161,7 +296,7 @@ async function main() {
       p_builder_user_id: BUILDER, p_manager_user_id: MANAGER, p_lead_source_track: "company",
     });
   } catch (err) {
-    rejected = /deal_already_closed_mismatch/.test(String(err));
+    rejected = /deal_already_closed_mismatch|opener_does_not_match_frozen_attribution/.test(String(err));
   }
   assert.equal(rejected, true, "a replay that CHANGES the parties must be rejected as a mismatch");
   const afterDrift = await client.execute(`SELECT COUNT(*) c FROM website_sales_commissions WHERE payment_reference = 'pay-8k'`);
@@ -221,6 +356,119 @@ async function main() {
   /* ── 4. A rep hired as `closer` can close. ───────────────────────────────
    * 147 gated on team_role='agent'; migration 153 introduced the job titles,
    * which would have made every new hire unable to close anything. */
+  /* Until a remaining-balance ledger exists, a partial deposit cannot open
+   * fulfillment or accrue commission. Failing closed avoids representing the
+   * unpaid balance as a fully won deal. */
+  await seedLead("lead-deposit", CLOSER, OPENER);
+  await assert.rejects(
+    close_website_deal(client, {
+      p_tenant_id: TENANT, p_lead_id: "lead-deposit", p_rep_user_id: CLOSER,
+      p_founder_user_id: FOUNDER, p_package_id: "authority", p_currency: "CAD",
+      p_setup_amount: 8000, p_collected_amount: 4000, p_monthly_amount: 500,
+      p_payment_reference: "pay-deposit", p_closed_by_rep: true,
+      p_opener_user_id: OPENER, p_builder_user_id: BUILDER,
+      p_lead_source_track: "company",
+    }),
+    /collected_amount_must_equal_quoted_setup/,
+  );
+  const partialWrites = await client.execute({
+    sql: `SELECT
+            (SELECT COUNT(*) FROM website_deals WHERE lead_id = ?) AS deals,
+            (SELECT COUNT(*) FROM website_sales_commissions WHERE payment_reference = ?) AS commissions,
+            (SELECT COUNT(*) FROM website_onboarding WHERE lead_id = ?) AS onboarding`,
+    args: ["lead-deposit", "pay-deposit", "lead-deposit"],
+  });
+  assert.deepEqual(
+    {
+      deals:Number(partialWrites.rows[0].deals),
+      commissions:Number(partialWrites.rows[0].commissions),
+      onboarding:Number(partialWrites.rows[0].onboarding),
+    },
+    { deals:0, commissions:0, onboarding:0 },
+    "a partial deposit creates no financial or fulfillment truth",
+  );
+
+  /* A competing Lost transition that wins the write lock must make the close
+   * return a stage conflict with zero deal/commission/onboarding writes. This
+   * exercises two real libSQL connections against one shared database rather
+   * than faking the conflict in a unit stub. */
+  await seedLead("lead-close-race", CLOSER, OPENER, "proposal_sent");
+  await client.execute({
+    sql: `INSERT INTO website_sales_payment_receipts
+            (id, tenant_id, lead_id, provider, provider_reference, status,
+             amount_cents, currency, provider_status, verification_source,
+             verified_by, verified_at, payment_plan_id, payment_token,
+             installment_kind, summary)
+          VALUES ('receipt-race', ?, 'lead-close-race', 'manual', 'pay-race', 'verified',
+                  800000, 'CAD', 'founder_confirmed_collected', 'founder_manual', ?, ?,
+                  'plan-pay-race', 'token-pay-race', 'full', '{}')`,
+    args: [TENANT, FOUNDER, new Date().toISOString()],
+  });
+  const racingClient = createClient({ url: "file::memory:?cache=shared" });
+  const lossTx = await racingClient.transaction("write");
+  await lossTx.execute({
+    sql: `UPDATE tenant_records
+          SET data = json_set(data, '$.stage', 'lost', '$.loss_reason', 'Declined during payment')
+          WHERE tenant_id = ? AND id = 'lead-close-race'`,
+    args: [TENANT],
+  });
+  const racedClosePromise = closeWebsiteDealRpc(client, {
+    p_tenant_id:TENANT,
+    p_lead_id:"lead-close-race",
+    p_rep_user_id:CLOSER,
+    p_opener_user_id:OPENER,
+    p_founder_user_id:FOUNDER,
+    p_package_id:"authority",
+    p_automation_ids:[],
+    p_currency:"CAD",
+    p_setup_amount:8000,
+    p_collected_amount:8000,
+    p_monthly_amount:500,
+    p_payment_reference:"pay-race",
+    p_payment_provider:"manual",
+    p_verified_payment_id:"receipt-race",
+    p_payment_plan_id:"plan-pay-race",
+    p_closed_by_rep:true,
+    p_builder_user_id:BUILDER,
+    p_expected_stage:"proposal_sent",
+    p_expected_owner_id:CLOSER,
+    p_request_id:"close-pay-race",
+    p_occurred_at:new Date().toISOString(),
+    p_actor_user_id:FOUNDER,
+    p_interaction_subject:"Payment verified",
+    p_interaction_content:"Payment verified",
+    p_interaction_metadata:{},
+    p_lead_patch:{assigned_to:BUILDER,fulfillment_owner_id:BUILDER},
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await lossTx.commit();
+  lossTx.close();
+  const racedClose = await racedClosePromise as Record<string, unknown>;
+  assert.deepEqual(
+    { ok:racedClose.ok, error:racedClose.error, current_stage:racedClose.current_stage },
+    { ok:false, error:"stage_conflict", current_stage:"lost" },
+    "the Lost writer wins and the financial close reports a clean conflict",
+  );
+  const racedWrites = await client.execute({
+    sql: `SELECT
+            (SELECT COUNT(*) FROM website_deals WHERE lead_id = 'lead-close-race') AS deals,
+            (SELECT COUNT(*) FROM website_sales_commissions WHERE payment_reference = 'pay-race') AS commissions,
+            (SELECT COUNT(*) FROM website_onboarding WHERE lead_id = 'lead-close-race') AS onboarding,
+            (SELECT COUNT(*) FROM lead_interactions WHERE lead_id = 'lead-close-race') AS interactions`,
+    args: [],
+  });
+  assert.deepEqual(
+    {
+      deals:Number(racedWrites.rows[0].deals),
+      commissions:Number(racedWrites.rows[0].commissions),
+      onboarding:Number(racedWrites.rows[0].onboarding),
+      interactions:Number(racedWrites.rows[0].interactions),
+    },
+    { deals:0, commissions:0, onboarding:0, interactions:0 },
+    "a lifecycle conflict rolls back every financial, fulfillment, and timeline write",
+  );
+  racingClient.close();
+
   const closerProfile = await client.execute({
     sql: `SELECT team_role FROM user_profiles WHERE auth_user_id = ?`, args: [CLOSER],
   });

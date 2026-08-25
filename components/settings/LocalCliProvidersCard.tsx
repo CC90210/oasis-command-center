@@ -12,24 +12,27 @@
  * Codex / Gemini parity.
  *
  * Detection flow:
- *   1. Component mounts → POST to localhost:9100/exec-tool with
+ *   1. Component mounts → probes the shared bridge route (same-origin proxy
+ *      on a hosted dashboard; localhost only on a loopback dashboard), then
+ *      POSTs to /exec-tool with
  *      {name: "cli_status", input: {}}
  *   2. Bridge runs `claude --version`, scripts/codex_health.py --json,
  *      `gemini --version` + auth checks in parallel
  *   3. Returns {claude, codex, gemini: {installed, authenticated,
  *      version, install_hint_url}}
- *   4. Each card renders one of: Ready / Needs auth / Not installed /
- *      Bridge offline.
+ *   4. Each card renders one of: Ready / Needs auth / Not installed.
  *
- * Bridge-offline state is its own banner (not a per-card error) since
- * none of the cards can self-detect without it.
+ * Reachability and heartbeat are separate signals. A fresh tenant heartbeat
+ * renders "online, inventory unavailable" if this browser's probe fails;
+ * "offline" appears only when both signals are down.
  */
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Loader2, CheckCircle2, AlertCircle, Terminal, RefreshCw } from "lucide-react";
 import { Card, Tag } from "@/components/Card";
-import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import { bridgeClientUrl, isProxyModeRuntime } from "@/lib/bridge-client-routing";
+import { deriveDropdownState } from "@/lib/bridge-dropdown-state";
 import {
   readCliRuntime,
   writeCliRuntime,
@@ -51,7 +54,7 @@ type CliStatusResponse = {
 
 type ProbeState =
   | { kind: "loading" }
-  | { kind: "bridge_offline" }
+  | { kind: "bridge_unreachable" }
   | { kind: "error"; message: string }
   | { kind: "ok"; data: CliStatusResponse };
 
@@ -88,15 +91,20 @@ const CARDS: Array<{
 async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
   let healthOk = false;
   try {
-    const h = await fetch(`${BRIDGE_CHAT_BASE}/health`, { signal });
-    healthOk = h.ok;
+    const h = await fetch(bridgeClientUrl("health"), { signal });
+    if (isProxyModeRuntime()) {
+      const body = (await h.json().catch(() => null)) as { ok?: boolean } | null;
+      healthOk = h.ok && body?.ok === true;
+    } else {
+      healthOk = h.ok;
+    }
   } catch {
-    return { kind: "bridge_offline" };
+    return { kind: "bridge_unreachable" };
   }
-  if (!healthOk) return { kind: "bridge_offline" };
+  if (!healthOk) return { kind: "bridge_unreachable" };
 
   try {
-    const r = await fetch(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+    const r = await fetch(bridgeClientUrl("exec-tool"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tool_name: "cli_status", input: {} }),
@@ -115,13 +123,13 @@ async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
     // AbortError fires when the 10s timeout in the caller elapses. The
     // previous return `{ kind: "loading" }` left the spinner forever
     // because the parent state never moved off "loading" — exactly the
-    // perpetual-spinner bug CC reported. Surface as bridge_offline
+    // perpetual-spinner bug CC reported. Surface as bridge_unreachable
     // instead: if the probe couldn't complete in 10s the local bridge
     // is effectively unreachable from the operator's POV, and the
     // bridge-offline card already has the right "install + refresh"
     // affordance.
     if ((err as Error).name === "AbortError") {
-      return { kind: "bridge_offline" };
+      return { kind: "bridge_unreachable" };
     }
     return { kind: "error", message: (err as Error).message };
   }
@@ -147,7 +155,11 @@ type Busy =
 // own reader, synchronised with ChatWidget by a comment — a contract enforced
 // by a comment is not enforced.
 
-export function LocalCliProvidersCard() {
+export function LocalCliProvidersCard({
+  serverBridgeOnline,
+}: {
+  serverBridgeOnline: boolean;
+}) {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
   const [actionMessage, setActionMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -185,7 +197,7 @@ export function LocalCliProvidersCard() {
     // returns immediately. 5.5 min ceiling covers both.
     const timer = setTimeout(() => ctl.abort(), 330_000);
     try {
-      const r = await fetch(`${BRIDGE_CHAT_BASE}/exec-tool`, {
+      const r = await fetch(bridgeClientUrl("exec-tool"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ tool_name: toolName, input: { provider } }),
@@ -288,11 +300,29 @@ export function LocalCliProvidersCard() {
         </div>
       )}
 
-      {state.kind === "bridge_offline" && (
+      {state.kind === "bridge_unreachable" && deriveDropdownState(false, serverBridgeOnline) === "degraded" && (
+        <div className="flex items-start gap-2 text-sm text-accent bg-accent/5 border border-accent/30 rounded-lg p-3">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div>
+            <div className="font-bold">Bridge online · CLI inventory unavailable here</div>
+            <p className="mt-1 text-xs text-fg-muted leading-relaxed">
+              The paired bridge has a fresh tenant heartbeat, matching the sidebar. This browser could not reach its authenticated CLI probe, so installed and signed-in status is unknown—not offline.
+            </p>
+            <Link
+              href="/settings#devices"
+              className="mt-2 inline-flex text-xs font-bold text-accent hover:text-accent-bright"
+            >
+              View paired devices →
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {state.kind === "bridge_unreachable" && deriveDropdownState(false, serverBridgeOnline) === "offline" && (
         <div className="flex items-start gap-2 text-sm text-status-warm bg-status-warm/5 border border-status-warm/30 rounded-lg p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
-            <div className="font-bold">Local bridge offline</div>
+            <div className="font-bold">Bridge offline</div>
             <p className="mt-1 text-xs text-fg-muted leading-relaxed">
               These cards probe your machine for installed CLIs, which needs the bridge
               running here. Until it is, the dashboard can&apos;t tell which CLIs you have —

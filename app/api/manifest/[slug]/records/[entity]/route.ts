@@ -27,8 +27,20 @@ import {
   listRecords,
   listByAssignedScope,
   updateRecord,
+  getRecord,
 } from "@/lib/manifest/data";
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
+import {
+  ownsOasisSalesRecord,
+  rejectedOasisGenericPatchKeys,
+  rejectedRepPatchKeys,
+  roleMayOperateOasisSalesLead,
+  roleMaySelfEditLead,
+} from "@/lib/oasis-sales-pipeline-policy";
+import {
+  OASIS_WEBSITE_SALES_PROGRAM,
+  isWebsiteSalesTenantSlug,
+} from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
@@ -43,15 +55,19 @@ async function resolveContext(
   entity: string
 ): Promise<
   | { ok: true; tenant_id: string; is_admin: boolean; team_role: string }
-  | { ok: false; status: number; error: string }
+  | { ok: false; status: number; error: string; message: string }
 > {
-  if (!SLUG_RE.test(slug)) return { ok: false, status: 400, error: "invalid_slug" };
-  if (!ENTITY_RE.test(entity)) return { ok: false, status: 400, error: "invalid_entity" };
-  if (!(await manifestExists(slug))) return { ok: false, status: 404, error: "unknown_tenant" };
+  if (!SLUG_RE.test(slug))
+    return { ok: false, status: 400, error: "invalid_slug", message: "That workspace address isn't valid." };
+  if (!ENTITY_RE.test(entity))
+    return { ok: false, status: 400, error: "invalid_entity", message: "That record type isn't valid." };
+  if (!(await manifestExists(slug)))
+    return { ok: false, status: 404, error: "unknown_tenant", message: "No workspace found at that address." };
 
   const manifest = await getManifest(slug);
   const known = (manifest.data_model || []).some((e) => e.name === entity);
-  if (!known) return { ok: false, status: 404, error: "unknown_entity" };
+  if (!known)
+    return { ok: false, status: 404, error: "unknown_entity", message: `This workspace has no "${entity}" records.` };
 
   const service = getServiceSupabase();
   const profileQuery = await service
@@ -62,7 +78,13 @@ async function resolveContext(
   const profile = profileQuery.data as
     | { tenant_id: string | null; team_role: string; is_owner: boolean; admin_access: boolean | null }
     | null;
-  if (!profile?.tenant_id) return { ok: false, status: 403, error: "no_tenant" };
+  if (!profile?.tenant_id)
+    return {
+      ok: false,
+      status: 403,
+      error: "no_tenant",
+      message: "This account isn't attached to a workspace yet.",
+    };
 
   // Cross-tenant write/read guard — the caller must own this slug
   // (either via tenant_manifests.tenant_id match OR seed-slug fallback).
@@ -71,7 +93,12 @@ async function resolveContext(
   // resolveDataTenant returns null when the slug isn't owned by the caller.
   const dataTenant = await resolveDataTenant(slug, profile.tenant_id);
   if (!dataTenant) {
-    return { ok: false, status: 403, error: "slug_not_owned" };
+    return {
+      ok: false,
+      status: 403,
+      error: "slug_not_owned",
+      message: "This record belongs to a workspace this account can't write to.",
+    };
   }
 
   return {
@@ -120,7 +147,7 @@ export async function GET(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const { slug, entity } = await ctx.params;
   const r = await resolveContext(user, slug.toLowerCase(), entity.toLowerCase());
-  if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status });
+  if (!r.ok) return NextResponse.json({ ok: false, error: r.error, message: r.message }, { status: r.status });
 
   const sp = req.nextUrl.searchParams;
   const rawLimit = Number(sp.get("limit") || "100");
@@ -171,7 +198,7 @@ export async function POST(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const { slug, entity } = await ctx.params;
   const r = await resolveContext(user, slug.toLowerCase(), entity.toLowerCase());
-  if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status });
+  if (!r.ok) return NextResponse.json({ ok: false, error: r.error, message: r.message }, { status: r.status });
   if (!r.is_admin) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   let body: { data?: Record<string, unknown> };
@@ -182,6 +209,33 @@ export async function POST(
   }
   if (!body.data || typeof body.data !== "object") {
     return NextResponse.json({ ok: false, error: "data_required" }, { status: 400 });
+  }
+  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
+  if (isOasisSalesLead) {
+    const requestedStage = body.data.stage;
+    if (requestedStage !== "researched") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          message: "Create new OASIS leads in Researched, then move them through the guided lifecycle.",
+        },
+        { status: 409 },
+      );
+    }
+    const protectedKeys = rejectedOasisGenericPatchKeys(body.data).filter(
+      (key) => key !== "stage" && key !== "sales_program",
+    );
+    if (
+      protectedKeys.length > 0 ||
+      (body.data.sales_program !== undefined &&
+        body.data.sales_program !== OASIS_WEBSITE_SALES_PROGRAM)
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "protected_lifecycle_fields", fields: protectedKeys },
+        { status: 409 },
+      );
+    }
   }
 
   try {
@@ -204,8 +258,7 @@ export async function PATCH(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const { slug, entity } = await ctx.params;
   const r = await resolveContext(user, slug.toLowerCase(), entity.toLowerCase());
-  if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status });
-  if (!r.is_admin) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!r.ok) return NextResponse.json({ ok: false, error: r.error, message: r.message }, { status: r.status });
 
   const id = req.nextUrl.searchParams.get("id");
   if (!id) return NextResponse.json({ ok: false, error: "id_required" }, { status: 400 });
@@ -218,6 +271,68 @@ export async function PATCH(
   }
   if (!body.patch || typeof body.patch !== "object") {
     return NextResponse.json({ ok: false, error: "patch_required" }, { status: 400 });
+  }
+
+  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
+  if (isOasisSalesLead) {
+    const protectedKeys = rejectedOasisGenericPatchKeys(body.patch);
+    if (protectedKeys.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          message: `Use the guided lifecycle action for ${protectedKeys.join(", ")}.`,
+          fields: protectedKeys,
+        },
+        { status: 409 },
+      );
+    }
+  }
+
+  // A rep may correct the facts of a lead they own; only an admin may reshape
+  // the pipeline around it. Before 2026-08-24 this was a flat admin gate, so a
+  // closer could open the edit form, type into it, and get a 403 on save.
+  if (!r.is_admin) {
+    if (entity.toLowerCase() !== "lead") {
+      return NextResponse.json(
+        { ok: false, error: "forbidden", message: "Your role can't edit these records." },
+        { status: 403 },
+      );
+    }
+    // Ownership AND a role floor. Ownership alone would let a `read_only`
+    // account write to any deal it is merely attached to, which is the one
+    // thing that role name promises it cannot do.
+    const roleMayEdit = isOasisSalesLead
+      ? roleMayOperateOasisSalesLead(r.team_role)
+      : roleMaySelfEditLead(r.team_role);
+    if (!roleMayEdit) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden", message: "Your role can't edit lead fields." },
+        { status: 403 },
+      );
+    }
+    const existing = await getRecord({ tenant_id: r.tenant_id, entity: "lead", id }).catch(() => null);
+    // Ownership, not board visibility: ownsOasisSalesRecord has no role
+    // shortcut, so the wide `member` default role cannot edit leads that
+    // merely happen to be visible to it.
+    const mine = existing && ownsOasisSalesRecord(existing, user.id);
+    if (!mine) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden", message: "You can only edit leads assigned to you." },
+        { status: 403 },
+      );
+    }
+    const rejected = rejectedRepPatchKeys(body.patch);
+    if (rejected.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "forbidden_fields",
+          message: `Your role can't change ${rejected.join(", ")}. Ask an admin to move or reassign this lead.`,
+        },
+        { status: 403 },
+      );
+    }
   }
 
   try {
@@ -254,7 +369,7 @@ export async function DELETE(
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const { slug, entity } = await ctx.params;
   const r = await resolveContext(user, slug.toLowerCase(), entity.toLowerCase());
-  if (!r.ok) return NextResponse.json({ ok: false, error: r.error }, { status: r.status });
+  if (!r.ok) return NextResponse.json({ ok: false, error: r.error, message: r.message }, { status: r.status });
   if (!r.is_admin) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   const id = req.nextUrl.searchParams.get("id");

@@ -44,7 +44,15 @@ function HeaderSkeleton() {
   );
 }
 
-export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: () => void }) {
+export function WebLeadDetail({
+  leadId,
+  onClose,
+  canMutate,
+}: {
+  leadId: string;
+  onClose: () => void;
+  canMutate: boolean;
+}) {
   const [lead, setLead] = useState<WebLead | null>(null);
   const [error, setError] = useState<string | null>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -130,14 +138,18 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
           {lead && (
             <>
               <div className="flex flex-col gap-2 sm:flex-row">
-                {lead.phone && (
+                {lead.phone && canMutate ? (
                   <a
                     href={`tel:${lead.phone}`}
                     className="flex flex-1 items-center justify-center gap-2 rounded-md bg-gradient-to-br from-accent to-accent-muted px-4 py-2.5 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.4)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                   >
                     <Phone className="h-4 w-4" />Call {lead.phone}
                   </a>
-                )}
+                ) : lead.phone ? (
+                  <p className="flex flex-1 items-center justify-center rounded-md border border-bg-border px-4 py-2.5 text-sm tabular-nums text-fg-muted">
+                    {lead.phone}
+                  </p>
+                ) : null}
                 {/* safeExternalUrl adds a scheme to bare domains (217 of our
                     stored websites have none -- a bare string in an href is
                     app-relative and would navigate inside our own dashboard)
@@ -178,7 +190,7 @@ export function WebLeadDetail({ leadId, onClose }: { leadId: string; onClose: ()
                 <BusinessFacts lead={lead} layout="stack" />
               </div>
 
-              <CallOutcomeLog leadId={leadId} />
+              <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
             </>
           )}
         </div>

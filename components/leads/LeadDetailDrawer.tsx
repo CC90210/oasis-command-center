@@ -17,7 +17,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { X } from "lucide-react";
 import { LeadFileBody, resolveTitle } from "./LeadFileBody";
 import type { DetailPayload, DocRow } from "./LeadFileBody";

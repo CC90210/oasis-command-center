@@ -16,7 +16,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canWriteCrm } from "@/lib/role-gates";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { recommendNextAction, type InteractionSnapshot } from "@/lib/ai-next-action";
 
 export const runtime = "nodejs";
@@ -66,16 +66,26 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  if (!canWriteCrm(sess.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't run this." },
-      { status: 403 },
-    );
-  }
   const tenantId = sess.tenantId;
   const { id: leadId } = await ctx.params;
   if (!leadId) {
     return NextResponse.json({ ok: false, error: "missing_id" }, { status: 400 });
+  }
+  // Extended 2026-08-24: the OASIS sales roles may run this on their OWN leads.
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
   }
 
   const db = getServiceSupabase();

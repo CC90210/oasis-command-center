@@ -53,7 +53,6 @@ const TURSO = "C:/Users/echel/JARVIS/scripts/turso_sql.mjs";
 const TENANT = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 const SEQ_ID = "a9e5f000-5b0c-4e00-0000-000000000001";
 const STAGE = "apex_smoke_test";
-const TPL_A = "a9e5f000-0000-4e00-0000-0000000000aa";
 const TPL_B = "a9e5f000-0000-4e00-0000-0000000000bb";
 const TPL_OPENER = "a9e5f000-0000-4e00-0000-0000000000cc";
 const TPL_RETIRED = "a9e5f000-0000-4e00-0000-0000000000dd";

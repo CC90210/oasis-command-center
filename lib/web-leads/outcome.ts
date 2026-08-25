@@ -16,14 +16,14 @@
  *
  * TENANT SCOPING IS THE AUTHORIZATION BOUNDARY, same as lib/web-leads/data.ts
  * and lib/web-leads/audit.ts: libSQL has no row-level security, so every
- * read and write here pins WEBDEV_TENANT_ID explicitly. This module does not
- * re-derive viewer authorization -- callers pass in a `lead` already
- * resolved by fetchLead(id, viewer) for that same id, same convention
- * fetchAudit() uses, so authorization happens exactly once per request.
+ * read and write here pins WEBDEV_TENANT_ID explicitly. Callers pass a `lead`
+ * already resolved by fetchLead(id, viewer), while the POST route separately
+ * proves sales role plus ownership. The owner is then frozen on the durable
+ * outcome row and included in each context/stage CAS so a concurrent transfer
+ * cannot turn a valid authorization check into a write on somebody else's lead.
  *
- * THE REAL leadgen_call_outcomes SCHEMA (verified against
- * services/leadgen/migrations/003_territories.sql in JARVIS, not assumed --
- * the table exists and is empty, so there was nothing live to introspect):
+ * THE REAL leadgen_call_outcomes SCHEMA (verified against the live Turso
+ * table, with the retry columns added by migration 158):
  *
  *   id             text primary key   -- generated here, randomUUID()
  *   tenant_id      text not null
@@ -39,6 +39,10 @@
  *   called_at      text not null
  *   next_action_at text               -- unused by this build
  *   created_at     text not null
+ *   request_id     text               -- client-stable UUID; unique per tenant
+ *   stage_from     text               -- decision snapshot for retry resumption
+ *   stage_to       text               -- nullable target chosen on first write
+ *   owner_user_id  text               -- assigned owner frozen with the call
  *
  * THE VOCABULARY MISMATCH THIS FORCED: the design spec's four-button model
  * (no_answer / connected / interested / not_interested) does not match that
@@ -64,8 +68,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { updateRecord } from "@/lib/manifest/data";
+import { RecordsError, updateRecord } from "@/lib/manifest/data";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { WEBSITE_SALES_STAGES, type WebsiteSalesStage } from "@/lib/website-sales";
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
@@ -101,39 +107,40 @@ const UI_OUTCOME_FROM_DB: Partial<Record<string, CallOutcome>> = {
  * THE CONSTRAINED PART -- read this before changing it.
  *
  * CC's engine (lib/website-sales.ts) owns the full fourteen-stage lifecycle
- * and the commission model built on top of it. We asked Bravo (agent_activity
- * row 5daa4bd1, 2026-08-21) for the supported way to advance a stage from
- * here and have not received a usable answer, so this function is
- * DELIBERATELY restricted to the early funnel only. It must NEVER produce
+ * and the commission model built on top of it. This call-disposition surface
+ * is DELIBERATELY restricted to the early funnel: it gets a claimed cold lead
+ * through a first attempt and connection, then Pipeline's explicit lifecycle
+ * actions take over for qualification and the founder-meeting handoff. It must
+ * NEVER produce
  * `qualified`, `founder_meeting_booked`, `proposal_sent`, `won`,
  * `onboarding`, `in_build`, `client_review`, `launched`, or anything else
  * downstream -- those are CC's to move, and commission accrual and stage
- * hooks key off them. This function's return type is a plain union of
- * `"connected" | "lost" | null`, not a search over the full stage list, so
- * "no stage beyond these two can ever be produced" holds by construction,
- * not by a runtime check that could later be loosened. This is pending CC's
- * answer -- once it lands, THIS function is what gets replaced, not its
- * callers.
+ * hooks key off them. Its only possible moves are the first-attempt edge to
+ * `attempting_contact`, a successful connection to `connected`, or a clear
+ * rejection to `lost`.
  *
  * FORWARD ONLY, AND ONLY WITHIN OUR ZONE. A lead's position is looked up in
- * WEBSITE_SALES_STAGES and compared against `connected`'s position: anything
- * AT OR BEYOND `connected` (including `connected` itself, and everything
- * CC's engine has since moved it to) returns null unconditionally, whatever
- * the outcome -- so this can never regress a lead CC has already advanced,
- * and never touches a lead outside the early funnel this build owns. An
+ * WEBSITE_SALES_STAGES and compared against `connected`'s position. Anything
+ * beyond `connected` returns null unconditionally, so this can never regress a
+ * lead CC has already advanced. At `connected`, the only remaining lifecycle
+ * edge this surface owns is an explicit `not_interested` rejection to `lost`;
+ * successful outcomes are no-ops until Pipeline performs qualification. An
  * unrecognized current stage (null, or a value not in WEBSITE_SALES_STAGES)
- * fails the same way: never guess-advance a stage this function cannot
- * place.
+ * also fails closed: never guess-advance a stage this function cannot place.
  *
- * Within that zone: `no_answer` never advances anything. `connected` and
- * `interested` both land on `connected` -- the qualification call is CC's
- * to make, not ours. `not_interested` lands on `lost`.
+ * Within that zone: a first `no_answer` moves researched/assigned leads to
+ * `attempting_contact`, but a later no-answer never advances or regresses the
+ * lead. `connected` and `interested` both land on `connected` -- the
+ * qualification call is CC's to make, not ours. `not_interested` lands on
+ * `lost`.
  *
  * PURE -- no I/O, so this is fully testable without a DB. See
  * tests/web-leads-outcome.test.ts.
  */
 export function nextStage(current: string | null | undefined, outcome: CallOutcome): WebsiteSalesStage | null {
-  if (outcome === "no_answer") return null;
+  if (outcome === "no_answer") {
+    return current === "researched" || current === "assigned" ? "attempting_contact" : null;
+  }
 
   const stages: readonly string[] = WEBSITE_SALES_STAGES;
   const connectedIndex = stages.indexOf("connected");
@@ -155,24 +162,60 @@ export type CallOutcomeRecord = {
   calledAt: string;
 };
 
-const MAX_NOTE_LENGTH = 4000;
+export const MAX_CALL_NOTE_LENGTH = 4000;
+const CALL_OUTCOME_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function boundedNote(v: unknown): string | null {
-  if (typeof v !== "string") return null;
-  const trimmed = v.trim();
-  if (!trimmed) return null;
-  return trimmed.slice(0, MAX_NOTE_LENGTH);
+export function isCallOutcomeRequestId(value: unknown): value is string {
+  return typeof value === "string" && CALL_OUTCOME_REQUEST_ID.test(value.trim());
+}
+
+/** True once this call, or a chronologically newer call, owns Last Touch. */
+export function outcomeTouchAlreadyApplied(lastCallAt: string | null | undefined, calledAt: string): boolean {
+  const calledMs = Date.parse(calledAt);
+  if (!Number.isFinite(calledMs)) return false;
+  const lastMs = typeof lastCallAt === "string" ? Date.parse(lastCallAt) : Number.NaN;
+  return Number.isFinite(lastMs) && lastMs >= calledMs;
+}
+
+/** A later call owns mutable disposition/note context. Older retries still
+ * repair their append-only ledger rows, but never overwrite that newer call. */
+export function outcomeContextSuperseded(lastCallAt: string | null | undefined, calledAt: string): boolean {
+  const calledMs = Date.parse(calledAt);
+  const lastMs = typeof lastCallAt === "string" ? Date.parse(lastCallAt) : Number.NaN;
+  return Number.isFinite(calledMs) && Number.isFinite(lastMs) && lastMs > calledMs;
+}
+
+export type CallOutcomeNoteValidation =
+  | { ok: true; note: string | null }
+  | { ok: false; error: "reason_required" | "note_too_long" };
+
+/**
+ * Keep the HTTP route and both client surfaces on one validation contract.
+ * A rejection changes lifecycle state and therefore needs a durable reason;
+ * silently truncating that reason would make the closed-loop handoff false.
+ */
+export function validateCallOutcomeNote(outcome: CallOutcome, value: unknown): CallOutcomeNoteValidation {
+  const note = typeof value === "string" ? value.trim() : "";
+  if (outcome === "not_interested" && !note) return { ok: false, error: "reason_required" };
+  if (note.length > MAX_CALL_NOTE_LENGTH) return { ok: false, error: "note_too_long" };
+  return { ok: true, note: note || null };
 }
 
 /**
- * The `leadgen_businesses.id` this lead was promoted from, and its CURRENT
- * `stage`, read off the same tenant_records row in one query. Mirrors
+ * The routing, lifecycle, touch and owner facts needed to resume this call,
+ * read off the same tenant_records row in one query. Mirrors
  * businessIdForLead in audit.ts (see this module's header, and that one's,
  * for why the lead id is not the business id) -- a plain read of two more
  * columns on a row the caller has already established is visible to this
- * viewer, not a second authorization check.
+ * viewer. The POST route owns authorization; the owner returned here becomes
+ * an atomic write precondition so that authorization cannot race a transfer.
  */
-async function leadRoutingInfo(id: string): Promise<{ businessId: string | null; stage: string | null }> {
+async function leadRoutingInfo(id: string): Promise<{
+  businessId: string | null;
+  stage: string | null;
+  lastCallAt: string | null;
+  assignedTo: string | null;
+}> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("tenant_records")
@@ -182,13 +225,17 @@ async function leadRoutingInfo(id: string): Promise<{ businessId: string | null;
     .eq("id", id)
     .maybeSingle();
   if (error) throw new Error(`lead_data_read_failed: ${error.message}`);
-  if (!data) return { businessId: null, stage: null };
+  if (!data) return { businessId: null, stage: null, lastCallAt: null, assignedTo: null };
   const row = data as { data: Record<string, unknown> };
   const businessId = row.data?.webdev_source_business_id;
   const stage = row.data?.stage;
+  const lastCallAt = row.data?.last_call_at;
+  const assignedTo = row.data?.assigned_to;
   return {
     businessId: typeof businessId === "string" && businessId.trim() ? businessId.trim() : null,
     stage: typeof stage === "string" && stage.trim() ? stage.trim() : null,
+    lastCallAt: typeof lastCallAt === "string" && lastCallAt.trim() ? lastCallAt.trim() : null,
+    assignedTo: typeof assignedTo === "string" && assignedTo.trim() ? assignedTo.trim() : null,
   };
 }
 
@@ -209,9 +256,9 @@ function toRecord(row: { id: string; outcome: string; notes: string | null; rep_
  * resolves it once for its own 404 check and passes it through), so
  * authorization happens exactly once per request, not twice.
  *
- * Never writes anything to tenant_records except `data.stage` -- no
- * pricing, commission, or other lifecycle field. See nextStage()'s doc
- * comment for the full constraint.
+ * Alongside the constrained stage edge, every result stamps the canonical
+ * touch/disposition fields used by Pipeline. A supplied note becomes the
+ * handoff note, and a first transition to lost also records the loss reason.
  */
 export async function logCallOutcome(input: {
   leadId: string;
@@ -219,21 +266,35 @@ export async function logCallOutcome(input: {
   outcome: CallOutcome;
   note?: unknown;
   repUserId: string;
-}): Promise<{ record: CallOutcomeRecord; stageChangedTo: WebsiteSalesStage | null }> {
+  requestId: string;
+}): Promise<{
+  record: CallOutcomeRecord;
+  stageChangedTo: WebsiteSalesStage | null;
+  trackingWarning: "timeline_tracking_failed" | null;
+  idempotent: boolean;
+  saveState: CallOutcomeSaveState;
+}> {
   const { leadId, lead, outcome, repUserId } = input;
-  const note = boundedNote(input.note);
+  const requestId = input.requestId.trim().toLowerCase();
+  if (!isCallOutcomeRequestId(requestId)) throw new Error("invalid_request_id");
+  const noteResult = validateCallOutcomeNote(outcome, input.note);
+  if (!noteResult.ok) throw new Error(noteResult.error);
+  const note = noteResult.note;
 
-  const { businessId, stage } = await leadRoutingInfo(leadId);
+  const initialRouting = await leadRoutingInfo(leadId);
   // See the module header: a missing business_id pointer must not make a
   // real phone call unloggable, so this falls back to the lead's own id.
-  const businessIdForWrite = safeFilterValue(businessId || leadId) || leadId;
+  const businessIdForWrite = safeFilterValue(initialRouting.businessId || leadId) || leadId;
 
   const nowIso = new Date().toISOString();
+  const initialTarget = nextStage(initialRouting.stage, outcome);
   const db = getServiceSupabase();
+  const selectColumns = "id, request_id, business_id, outcome, notes, rep_user_id, called_at, stage_from, stage_to, owner_user_id";
   const ins = await db
     .from("leadgen_call_outcomes")
     .insert({
       id: randomUUID(),
+      request_id: requestId,
       tenant_id: WEBDEV_TENANT_ID,
       business_id: businessIdForWrite,
       territory_id: lead.territoryId,
@@ -242,15 +303,63 @@ export async function logCallOutcome(input: {
       notes: note,
       called_at: nowIso,
       created_at: nowIso,
+      stage_from: initialRouting.stage,
+      stage_to: initialTarget,
+      owner_user_id: initialRouting.assignedTo,
     })
-    .select("id, outcome, notes, rep_user_id, called_at")
+    .select(selectColumns)
     .single();
-  if (ins.error) throw new Error(`outcome_insert_failed: ${ins.error.message}`);
+  let stored: StoredCallOutcome;
+  let idempotent = false;
+  if (!ins.error && ins.data) {
+    stored = ins.data as StoredCallOutcome;
+  } else if (ins.error && isUniqueViolationError(ins.error)) {
+    const replay = await db
+      .from("leadgen_call_outcomes")
+      .select(selectColumns)
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("request_id", requestId)
+      .maybeSingle();
+    if (replay.error || !replay.data) {
+      throw new CallOutcomeSaveError(
+        "resume_failed",
+        // A unique error normally means this request-id row won the race, but
+        // until that exact row is read back we have not proved which unique
+        // constraint fired. Report only confirmed durability to the client.
+        { outcomeSaved: false, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+        `outcome_replay_read_failed:${replay.error?.message || "row_missing"}`,
+      );
+    }
+    stored = replay.data as StoredCallOutcome;
+    idempotent = true;
+  } else {
+    throw new Error(`outcome_insert_failed:${ins.error?.message || "missing_inserted_row"}`);
+  }
 
-  // THE CONSTRAINED PART -- see nextStage()'s doc comment above. This module's
-  // only tenant_records write, still touching no pricing, commission or other
-  // lifecycle field: `stage` (and only to "connected" or "lost"), plus the two
-  // ownership timestamps below.
+  if (!sameLogicalOutcome(stored, { businessId: businessIdForWrite, fallbackLeadId: leadId, repUserId, outcome, note })) {
+    throw new CallOutcomeSaveError(
+      "request_id_conflict",
+      { outcomeSaved: false, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+      "request_id_already_used_for_different_outcome",
+    );
+  }
+
+  const calledAt = stored.called_at;
+  const stageFrom = stored.stage_from;
+  const target = websiteSalesStage(stored.stage_to);
+  const expectedOwner = stored.owner_user_id;
+  if (stored.stage_to && !target) {
+    throw new CallOutcomeSaveError(
+      "resume_failed",
+      { outcomeSaved: true, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+      `invalid_stored_stage_to:${stored.stage_to}`,
+    );
+  }
+
+  // THE CONSTRAINED PART -- see nextStage()'s doc comment above. These guarded
+  // tenant_records writes touch only the early-funnel stage plus canonical
+  // touch, disposition and handoff facts. Pricing and commission remain owned
+  // by the downstream website-sales lifecycle.
   //
   // ═══ WHY last_call_at IS STAMPED ON EVERY OUTCOME, INCLUDING "no answer" ═══
   //
@@ -273,24 +382,283 @@ export async function logCallOutcome(input: {
   // "no answer" stamps too, and deliberately: a rep who dials four times and
   // reaches nobody is working that lead, and taking it off them on day 7
   // punishes exactly the persistence this whole funnel depends on.
-  const target = nextStage(stage, outcome);
-  const patch: Record<string, unknown> = { last_call_at: nowIso };
-  if (target) patch.stage = target;
-  // Stamped only on the transition INTO lost, so a second "not interested" on
-  // an already-lost lead cannot keep pushing its 90-day recycle date forward
-  // and quietly pin it out of the pool forever.
-  if (target === "lost") patch.lost_at = nowIso;
-  await updateRecord({
-    tenant_id: WEBDEV_TENANT_ID,
-    entity: "lead",
-    id: leadId,
-    patch,
-  });
+  const MAX_CONTEXT_ATTEMPTS = 3;
+
+  // Settle the frozen stage decision first. Stage and owner are conditions on
+  // the SAME update, so a lifecycle move or transfer that wins the race cannot
+  // be overwritten by a late retry.
+  let stageSaved = target === null;
+  let stageChangedTo: WebsiteSalesStage | null = null;
+  for (let attempt = 0; target && attempt < MAX_CONTEXT_ATTEMPTS; attempt += 1) {
+    const current = await routingAfterOutcomeSaved(leadId, {
+      outcomeSaved: true,
+      stageSaved: false,
+      leadContextSaved: false,
+      touchSaved: false,
+      trackingSaved: false,
+    });
+    if (current.assignedTo !== expectedOwner) {
+      throw new CallOutcomeSaveError(
+        "ownership_changed",
+        { outcomeSaved: true, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+        "lead_owner_changed_after_call_was_logged",
+      );
+    }
+    if (current.stage !== stageFrom) {
+      stageSaved = true;
+      break;
+    }
+
+    const stagePatch: Record<string, unknown> = { stage: target };
+    if (target === "lost") {
+      stagePatch.lost_at = calledAt;
+      stagePatch.loss_reason = note;
+    }
+    try {
+      await updateRecord({
+        tenant_id: WEBDEV_TENANT_ID,
+        entity: "lead",
+        id: leadId,
+        patch: stagePatch,
+        ifMatchAll: [
+          { field: "stage", value: current.stage },
+          { field: "assigned_to", value: expectedOwner },
+        ],
+      });
+      stageSaved = true;
+      stageChangedTo = target;
+      break;
+    } catch (error) {
+      if (error instanceof RecordsError && error.code === "conflict") continue;
+      throw new CallOutcomeSaveError(
+        "lead_update_failed",
+        { outcomeSaved: true, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+        `lead_stage_write_failed:${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (!stageSaved) {
+    throw new CallOutcomeSaveError(
+      "lead_update_failed",
+      { outcomeSaved: true, stageSaved: false, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+      "lead_stage_write_conflict",
+    );
+  }
+
+  // Touch first. Its monotonic timestamp becomes the CAS token for mutable
+  // context. If a newer call lands, an older retry yields instead of replacing
+  // the newer disposition/note. No-answer counts because the rep did the work.
+  let touchSaved = false;
+  try {
+    await persistCanonicalLeadTouch(db, {
+      tenantId: WEBDEV_TENANT_ID,
+      leadId,
+      occurredAt: calledAt,
+      isCall: true,
+      expectedOwnerId: expectedOwner,
+    });
+    touchSaved = true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("record_lead_touch: owner_conflict")) {
+      throw new CallOutcomeSaveError(
+        "ownership_changed",
+        { outcomeSaved: true, stageSaved, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+        "lead_owner_changed_before_call_touch_was_saved",
+      );
+    }
+    throw new CallOutcomeSaveError(
+      "lead_update_failed",
+      { outcomeSaved: true, stageSaved, leadContextSaved: false, touchSaved: false, trackingSaved: false },
+      message,
+    );
+  }
+
+  let leadContextSaved = false;
+  for (let attempt = 0; attempt < MAX_CONTEXT_ATTEMPTS; attempt += 1) {
+    const current = await routingAfterOutcomeSaved(leadId, {
+      outcomeSaved: true,
+      stageSaved,
+      leadContextSaved: false,
+      touchSaved,
+      trackingSaved: false,
+    });
+    if (current.assignedTo !== expectedOwner) {
+      throw new CallOutcomeSaveError(
+        "ownership_changed",
+        { outcomeSaved: true, stageSaved, leadContextSaved: false, touchSaved, trackingSaved: false },
+        "lead_owner_changed_before_call_context_was_saved",
+      );
+    }
+    if (outcomeContextSuperseded(current.lastCallAt, calledAt)) {
+      leadContextSaved = true;
+      break;
+    }
+    if (!outcomeTouchAlreadyApplied(current.lastCallAt, calledAt)) continue;
+
+    const contextPatch: Record<string, unknown> = {
+      last_disposition: outcome,
+      ...(note ? { last_handoff_note: note, last_handoff_note_at: calledAt } : {}),
+    };
+    try {
+      await updateRecord({
+        tenant_id: WEBDEV_TENANT_ID,
+        entity: "lead",
+        id: leadId,
+        patch: contextPatch,
+        ifMatchAll: [
+          { field: "last_call_at", value: calledAt },
+          { field: "assigned_to", value: expectedOwner },
+        ],
+      });
+      leadContextSaved = true;
+      break;
+    } catch (error) {
+      if (error instanceof RecordsError && error.code === "conflict") continue;
+      throw new CallOutcomeSaveError(
+        "lead_update_failed",
+        { outcomeSaved: true, stageSaved, leadContextSaved: false, touchSaved, trackingSaved: false },
+        `lead_context_write_failed:${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  if (!leadContextSaved) {
+    throw new CallOutcomeSaveError(
+      "lead_update_failed",
+      { outcomeSaved: true, stageSaved, leadContextSaved: false, touchSaved, trackingSaved: false },
+      "lead_context_write_conflict",
+    );
+  }
+
+  const summary = `Call disposition: ${outcome.replaceAll("_", " ")}.`;
+  const content = note ? `${summary}\n\n${note}` : summary;
+  let trackingSaved = false;
+  try {
+    const interaction = await db.from("lead_interactions").upsert({
+      tenant_id: WEBDEV_TENANT_ID,
+      lead_id: leadId,
+      type: "call_disposition",
+      channel: "phone",
+      direction: "outbound",
+      agent_source: "web_leads_outcome",
+      actor_user_id: repUserId,
+      subject: "Call disposition",
+      content,
+      content_preview: content.slice(0, 1024),
+      disposition: DB_OUTCOME[outcome],
+      call_outcome: outcome,
+      provider: "web_leads_outcome",
+      provider_message_id: requestId,
+      created_at: calledAt,
+      metadata: {
+        request_id: requestId,
+        outcome,
+        stage_changed: stageChangedTo !== null,
+        from: stageChangedTo ? stageFrom : null,
+        to: stageChangedTo,
+        business_id: businessIdForWrite,
+      },
+    }, { onConflict: "provider,provider_message_id", ignoreDuplicates: true });
+    if (interaction.error) throw new Error(interaction.error.message);
+    trackingSaved = true;
+  } catch (error) {
+    // The append-only outcome and canonical lead patch are already durable,
+    // and requestId now makes the retry safe. Fail this request visibly so the
+    // client retains that same id and the next attempt repairs the timeline
+    // instead of abandoning a closed-loop metric behind a success response.
+    console.error("[web-leads.outcome] lead_interactions insert failed after outcome was saved", {
+      leadId,
+      repUserId,
+      outcome,
+      stageChangedTo,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new CallOutcomeSaveError(
+      "tracking_failed",
+      { outcomeSaved: true, stageSaved, leadContextSaved: true, touchSaved: true, trackingSaved: false },
+      `timeline_tracking_failed:${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   return {
-    record: toRecord(ins.data as { id: string; outcome: string; notes: string | null; rep_user_id: string; called_at: string }),
-    stageChangedTo: target,
+    record: toRecord(stored),
+    stageChangedTo,
+    trackingWarning: null,
+    idempotent,
+    saveState: {
+      outcomeSaved: true,
+      stageSaved,
+      leadContextSaved,
+      touchSaved,
+      trackingSaved,
+    },
   };
+}
+
+type StoredCallOutcome = {
+  id: string;
+  request_id: string;
+  business_id: string;
+  outcome: string;
+  notes: string | null;
+  rep_user_id: string;
+  called_at: string;
+  stage_from: string | null;
+  stage_to: string | null;
+  owner_user_id: string | null;
+};
+
+export type CallOutcomeSaveState = {
+  outcomeSaved: boolean;
+  stageSaved: boolean;
+  leadContextSaved: boolean;
+  touchSaved: boolean;
+  trackingSaved: boolean;
+};
+
+/** A retry-safe partial failure: callers may repeat the SAME requestId. */
+export class CallOutcomeSaveError extends Error {
+  constructor(
+    public readonly code: "request_id_conflict" | "resume_failed" | "lead_update_failed" | "tracking_failed" | "ownership_changed",
+    public readonly state: CallOutcomeSaveState,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CallOutcomeSaveError";
+  }
+}
+
+async function routingAfterOutcomeSaved(
+  leadId: string,
+  state: CallOutcomeSaveState,
+): ReturnType<typeof leadRoutingInfo> {
+  try {
+    return await leadRoutingInfo(leadId);
+  } catch (error) {
+    throw new CallOutcomeSaveError(
+      "resume_failed",
+      state,
+      `lead_resume_read_failed:${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+function websiteSalesStage(value: string | null): WebsiteSalesStage | null {
+  return value && (WEBSITE_SALES_STAGES as readonly string[]).includes(value)
+    ? (value as WebsiteSalesStage)
+    : null;
+}
+
+function sameLogicalOutcome(
+  row: StoredCallOutcome,
+  expected: { businessId: string; fallbackLeadId: string; repUserId: string; outcome: CallOutcome; note: string | null },
+): boolean {
+  return (
+    (row.business_id === expected.businessId || row.business_id === expected.fallbackLeadId) &&
+    row.rep_user_id === expected.repUserId &&
+    row.outcome === DB_OUTCOME[expected.outcome] &&
+    row.notes === expected.note
+  );
 }
 
 /**
@@ -300,14 +668,19 @@ export async function logCallOutcome(input: {
  */
 export async function fetchRecentOutcomes(leadId: string, limit = 20): Promise<CallOutcomeRecord[]> {
   const { businessId } = await leadRoutingInfo(leadId);
-  const key = safeFilterValue(businessId || leadId) || leadId;
+  // Calls made before the source-business pointer was backfilled used leadId
+  // as their safe fallback. Read both keys so pointer repair never makes that
+  // earlier history disappear.
+  const keys = Array.from(new Set([businessId, leadId]
+    .map((value) => safeFilterValue(value || ""))
+    .filter((value): value is string => Boolean(value))));
 
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("leadgen_call_outcomes")
     .select("id, outcome, notes, rep_user_id, called_at")
     .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("business_id", key)
+    .in("business_id", keys)
     .order("called_at", { ascending: false })
     .limit(limit);
   if (error) throw new Error(`outcome_history_read_failed: ${error.message}`);

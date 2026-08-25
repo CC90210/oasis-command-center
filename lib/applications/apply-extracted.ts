@@ -32,6 +32,10 @@ const LEAD_IDENTITY_KEYS = [
   "business_state",
   "industry",
   "requested_amount",
+  // extractAppFields has always pulled the website off a dropped application,
+  // but it stopped at the application record — the lead the rep actually opens
+  // never received it.
+  "website",
 ] as const;
 
 export type ApplyExtractedResult =

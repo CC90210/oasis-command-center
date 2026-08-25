@@ -6,7 +6,17 @@ import { BOOKING_URL } from "../lib/marketing/routes";
 
 assert.equal(OASIS_WEBSITE_TENANT_SLUG, "oasis-webdev");
 assert.equal(existsSync("app/sales-engine/page.tsx"), false);
-assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, ["assigned", "attempting_contact", "connected", "qualified", "founder_meeting_booked"]);
+assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, [
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+  "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
+  "won",
+  "onboarding",
+]);
 assert(BOOKING_URL.startsWith("https://calendar.app.google/"));
 
 const rows = [
@@ -15,7 +25,7 @@ const rows = [
   { id: "theirs", data: { sales_program: "website_sales_v1", stage: "assigned", assigned_to: "rep-b" } },
   { id: "internal", data: { sales_program: "website_sales_v1", stage: "proposal_sent", assigned_to: "rep-a" } },
 ];
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-a" }).map((row) => row.id), ["mine"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-a" }).map((row) => row.id), ["mine", "internal"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "admin", userId: "admin" }).map((row) => row.id), ["mine", "theirs", "internal"]);
 
 const now = "2026-08-19T12:00:00.000Z";
@@ -25,7 +35,8 @@ assert.throws(() => dispositionPatch("voicemail", "2026-08-18T12:00:00.000Z", no
 const route = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
 assert(route.includes("request_id_required"));
 assert(route.includes("idempotency_check_failed"));
-assert(route.includes("interaction_log_failed"));
+assert(route.includes("lifecycle_transition_failed"));
+assert(route.includes('rpc("transition_pipeline_lead"'));
 assert(route.includes('from("lead_interactions")'));
 
 const intake = readFileSync("lib/leads-import-service.ts", "utf8");

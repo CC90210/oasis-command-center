@@ -32,6 +32,8 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { appendSignatureAndFooter } from "@/lib/config/email-signature";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -140,6 +142,21 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
+  }
 
   let body: { to_email?: unknown; subject?: unknown; body?: unknown };
   try {
@@ -222,6 +239,21 @@ export async function POST(
   if (ins.error) {
     return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
   }
+  const trackingWarnings: string[] = [];
+  const queuedAt =
+    typeof ins.data.created_at === "string" && Number.isFinite(Date.parse(ins.data.created_at))
+      ? new Date(ins.data.created_at).toISOString()
+      : new Date().toISOString();
+  try {
+    await persistCanonicalLeadTouch(db, {
+      tenantId: sess.tenantId,
+      leadId,
+      occurredAt: queuedAt,
+    });
+  } catch (err) {
+    trackingWarnings.push("canonical_touch_failed");
+    console.error("[leads.email] canonical touch update failed", err);
+  }
 
   // Phase 3 spine live-refresh (plan §7): the insert above just fired the
   // conv_thread_upsert trigger (when the migration is applied), so nudge any
@@ -252,11 +284,18 @@ export async function POST(
   // assigned → attempting_contact. The dispatcher picks the right rules
   // based on tenant.
   // Engine guards manual overrides so an operator-set stage isn't yanked.
-  const stageEvent = await dispatchLeadStageEvent({
-    type: "outbound_email_queued",
-    tenantId: sess.tenantId,
-    leadId,
-  });
+  let stageBumped: string | null = null;
+  try {
+    const stageEvent = await dispatchLeadStageEvent({
+      type: "outbound_email_queued",
+      tenantId: sess.tenantId,
+      leadId,
+    });
+    stageBumped = stageEvent.fired ? stageEvent.to : null;
+  } catch (err) {
+    trackingWarnings.push("stage_dispatch_failed");
+    console.error("[leads.email] stage dispatch failed", err);
+  }
 
   // Resolve tenant slug → brand for the auto-trigger. send_gateway
   // defaults to OASIS brand if unset, which would ship a SunBiz lead
@@ -266,6 +305,10 @@ export async function POST(
     .select("slug")
     .eq("id", sess.tenantId)
     .maybeSingle();
+  if (tenantRes.error) {
+    trackingWarnings.push("tenant_brand_lookup_failed");
+    console.error("[leads.email] tenant brand lookup failed", tenantRes.error);
+  }
   const tenantSlug = (tenantRes.data as { slug: string } | null)?.slug || "";
   const brand =
     tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined;
@@ -372,7 +415,7 @@ export async function POST(
   // If the send actually fired, flip the queued row to sent so the timeline
   // reflects reality and the daemon doesn't double-send. Non-fatal on failure.
   if (sendResult.status === "sent") {
-    await db
+    const statusUpdate = await db
       .from("lead_interactions")
       .update({
         metadata: {
@@ -388,13 +431,18 @@ export async function POST(
       })
       .eq("id", ins.data.id)
       .eq("tenant_id", sess.tenantId);
+    if (statusUpdate.error) {
+      trackingWarnings.push("interaction_status_update_failed");
+      console.error("[leads.email] sent status update failed", statusUpdate.error);
+    }
   }
 
   return NextResponse.json({
     ok: true,
     interaction_id: ins.data.id,
     queued_at: ins.data.created_at,
-    stage_bumped: stageEvent.fired ? stageEvent.to : null,
+    stage_bumped: stageBumped,
+    tracking_warning: trackingWarnings.length ? trackingWarnings.join(",") : null,
     // Real send outcome — UI uses this to render "Sent" vs "Queued
     // (retrying)" vs the explicit error reason.
     send_status: sendResult,

@@ -24,6 +24,7 @@
  */
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Plus, Lock, Loader2, CheckCircle2, X, AlertCircle } from "lucide-react";
 import { AGENT_REGISTRY, getAgentInfo, FAMILY_AGENT_KEYS } from "@/lib/agents";
 
@@ -41,6 +42,7 @@ type Props = {
 };
 
 export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
+  const router = useRouter();
   const [agents, setAgents] = useState<ManifestAgent[]>(initialAgents);
   const [busySlug, setBusySlug] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +76,11 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
         return;
       }
       if (out.agents) setAgents(out.agents);
+      // Refresh server siblings (Profile primary picker, provider overrides,
+      // chat shell props) from the same manifest mutation. Without this, the
+      // Workspace card changed immediately while the rest of Settings kept the
+      // previous roster until a full page reload.
+      router.refresh();
       setFlash(
         body.action === "add"
           ? `Added ${getAgentInfo(body.slug).label} to the workspace`

@@ -14,6 +14,7 @@ import { OASIS_SEED } from "@/lib/manifest/seeds";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -45,6 +46,23 @@ export default async function PipelineNewLeadPage() {
     );
   }
 
+  // The slug this operator owns — not the literal "oasis", which no OASIS
+  // workspace is slugged and which 403'd every create with slug_not_owned.
+  const ownedSlug = await resolveOwnedSlug(tenantId);
+  if (!ownedSlug) {
+    return (
+      <div className="space-y-4 animate-fade-in">
+        <PageHeader title="New lead" subtitle="No workspace namespace for this account." />
+        <Card>
+          <div className="text-sm text-fg-muted">
+            This account has no resolvable tenant slug, so a lead can&apos;t be
+            created here. Ask an admin to finish tenant setup.
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
@@ -61,7 +79,7 @@ export default async function PipelineNewLeadPage() {
         }
       />
       <ManifestRecordForm
-        tenantSlug="oasis"
+        tenantSlug={ownedSlug}
         entity={leadEntity}
         backPath="pipeline"
         backHref="/pipeline"

@@ -192,10 +192,6 @@ export function ImportWizard() {
   }, [parsed]);
 
   // ---- handlers ----
-  async function handleFile(file: File) {
-    await handleFiles([file]);
-  }
-
   // Multi-file import (2026-06-19): operators routinely split an export into
   // several CSVs and want to drag/select them all at once. Read every file and
   // concatenate the data rows under one header (repeated identical headers are

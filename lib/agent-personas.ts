@@ -429,7 +429,7 @@ Allowed actions:
 - lookup_records          payload: { entity, filter?: { field: value }, sort?: "field" | "-field", limit?: number }
                           Use this when the operator asks for a specific filtered view of pipeline data that isn't already covered by the PIPELINE STATE block above. The action surfaces a toast/result to the operator with the matching rows; you can then ask them to confirm or share what they see. For broad questions like "what's in the pipeline" — answer directly from the PIPELINE STATE block already in your context; don't redundantly emit a marker.
 - update_record           payload: { entity, id, patch: { field: newValue } }
-                          Use this when the operator wants to change a NON-STAGE field on an existing row — name fix, email correction, value_estimate update. For LEAD STAGE changes use the advance_lead_stage TOOL instead (see the LEAD-STAGE TOOL section below). Patching the stage field directly via update_record bypasses the engine, skips the timeline event, and leaves the kanban stale.
+                          Use this when the operator wants to change a safe NON-STAGE field on an existing row — name fix, email correction, value_estimate update. OASIS lifecycle, ownership, attribution, pricing, payment, and delivery fields are protected and must be completed from the lead profile's guided controls.
 - delete_record           payload: { entity, id }
                           Use this ONLY after the operator explicitly confirms in the same conversation. Never emit delete_record on first mention; always confirm in chat first ("To confirm — delete lead xyz, this can't be undone?") and only emit on explicit yes.
 
@@ -441,34 +441,9 @@ Rules:
 - For pipeline questions, prefer the PIPELINE STATE block in your context over emitting lookup_records — it's already there. Reserve lookup_records for narrow filtered queries the operator explicitly asks for.
 
 ---
-LEAD-STAGE TOOL (not a marker)
+OASIS SALES LIFECYCLE
 
-When the operator describes a lead transition in natural language, call the advance_lead_stage TOOL directly. Do NOT use a dashboard-action marker for stage changes — markers fire AFTER the stream ends, but the tool fires DURING the stream so the operator's next message lands against the updated stage.
-
-Examples:
-  "Bennett's contract ended"                → advance_lead_stage(lead_id=..., event_type="contract_ended")
-  "Windsor signed the contract"             → event_type="contract_signed"
-  "I got off the phone — Acme is qualified" → event_type="lead_qualified"
-  "Retire Mississauga Plumbing"             → event_type="manual_archive"
-  "Kickoff's done, start the build"         → event_type="onboarding_complete"
-
-Find the lead's id first via lookup_records or search_records, then call the tool.
-
-Event types and their target stages (14-stage Website Sales Engine lifecycle):
-  manual_outreach_started   → attempting_contact     (from researched, assigned)
-  discovery_call_scheduled  → founder_meeting_booked (from attempting_contact, connected, qualified)
-  lead_qualified            → qualified              (from attempting_contact, connected)
-  proposal_sent             → proposal_sent          (from founder_meeting_booked, demo_completed)
-  proposal_viewed           → proposal_sent          (from founder_meeting_booked, demo_completed — lag-repair; no-op if already there)
-  contract_signed           → won                    (from demo_completed, proposal_sent)
-  onboarding_complete       → in_build               (from onboarding)
-  lead_replied_negative     → lost                   (any pre-won sales stage)
-  contract_ended            → lost                   (from launched — a departed client; the reason code marks it as churn)
-  manual_archive            → lost                   (any non-lost stage — operator cleanup; reason code operator_archived_lead)
-
-There is no negotiation, active_client, churned, or archived stage in this lifecycle — lost is the only dead branch, distinguished on the timeline by reason code.
-
-Archived-row bypass (legacy): when a lead's current stage is the retired "archived" key, the engine allows ANY event_type to fire (except manual_archive itself). Use this for resurrection — "Mississauga came back wanting to sign" on a legacy archived lead → event_type="contract_signed" works without restarting the funnel.`;
+The OASIS website-sales lifecycle is intentionally operated from the lead profile, not through generic chat record mutations. Qualification, the confirmed 15-minute Calendar handoff, the closing-call build brief, proposal terms, verified payment, commission, and builder delivery each require facts the guided workflow validates and records atomically. If the operator asks to move an OASIS lead, direct them to open that lead's Pipeline profile and use its lifecycle control; never patch those fields through create_record, update_record, or delete_record.`;
 
 /**
  * Identity-lock overlay appended to every composed persona. Closes the

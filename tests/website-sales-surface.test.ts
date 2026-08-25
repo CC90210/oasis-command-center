@@ -15,6 +15,11 @@ for (const phrase of ["Your job is not to close", "Say this", "If the conversati
   assert(script.includes(phrase), `rep guide includes: ${phrase}`);
 }
 assert(workflowRoute.includes("request_id_required") && workflowRoute.includes('from("lead_interactions")'), "rep actions are idempotent and use the existing interaction ledger");
-assert(workflowRoute.includes("idempotency_check_failed") && workflowRoute.includes("interaction_log_failed"), "pipeline failures surface correlation-aware errors");
+assert(
+  workflowRoute.includes("idempotency_check_failed") &&
+    workflowRoute.includes("lifecycle_transition_failed") &&
+    workflowRoute.includes("correlationId:requestId"),
+  "atomic pipeline failures surface correlation-aware errors",
+);
 
 console.log("website-sales-surface ok");

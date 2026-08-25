@@ -426,7 +426,7 @@ function NotScored({ audit }: { audit: AuditResult }) {
 // The card
 // ───────────────────────────────────────────────────────────────────────────
 
-export function BattleCard({ leadId }: { leadId: string }) {
+export function BattleCard({ leadId, canMutate }: { leadId: string; canMutate: boolean }) {
   const [state, setState] = useState<Fetched>({ status: "loading" });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
@@ -472,7 +472,7 @@ export function BattleCard({ leadId }: { leadId: string }) {
 
   return (
     <div className="min-h-screen bg-bg">
-      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} />
+      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} />
       <div className="mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8">
         {/* FIRST PANEL ON THE PAGE, ABOVE EVERY CHART, and deliberately not
             behind a disclosure. A rep confirms who they are calling before
@@ -513,7 +513,7 @@ export function BattleCard({ leadId }: { leadId: string }) {
               would be a second place for that rule to drift. It brings its own
               "Log this call" heading, so this panel deliberately does not add
               a second one above it. */}
-          <CallOutcomeLog leadId={leadId} />
+          <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
         </Panel>
       </div>
     </div>
@@ -559,13 +559,14 @@ function CardSkeleton() {
  * one sentence that makes the score mean something.
  */
 function Hero({
-  lead, audit, competitors, drawn, reduced,
+  lead, audit, competitors, drawn, reduced, canMutate,
 }: {
   lead: WebLead;
   audit: AuditResult;
   competitors: CompetitorContext | null;
   drawn: boolean;
   reduced: boolean;
+  canMutate: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
   return (
@@ -593,13 +594,15 @@ function Hero({
               {[lead.industry, fullAddress(lead)].filter(Boolean).join(" · ") || "No location on file"}
             </p>
             <div className="mt-5 flex flex-wrap gap-2.5">
-              {lead.phone ? (
+              {lead.phone && canMutate ? (
                 <a
                   href={`tel:${lead.phone}`}
                   className="inline-flex items-center gap-2.5 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 py-3 text-base font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter,transform] hover:brightness-110 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none"
                 >
                   <Phone className="h-4 w-4" />{lead.phone}
                 </a>
+              ) : lead.phone ? (
+                <p className="rounded-lg border border-bg-border px-5 py-3 text-base tabular-nums text-fg-muted">{lead.phone}</p>
               ) : (
                 <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">No phone number on file</p>
               )}
