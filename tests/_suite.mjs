@@ -34,6 +34,7 @@ const TESTS = [
   "tests/atomic-pipeline-lifecycle.test.ts",
   "tests/oasis-pipeline-query.test.ts",
   "tests/oasis-sales-motion-split.test.ts",
+  "tests/oasis-claim-touch-cutover.test.ts",
   "tests/canonical-touch-concurrency.test.ts",
   "tests/pipeline-lead-mutation-access.test.ts",
   "tests/bulk-email-canonical-touch.test.ts",
