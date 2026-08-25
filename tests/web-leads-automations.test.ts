@@ -376,11 +376,23 @@ for (const audit of [
   // the order inside it: a bare indexOf over the whole file compares against
   // ObjectionPanel's position in ScoredBody, which is declared further down the
   // file than the component that renders it, so the naive check reads backwards.
-  const mainReturn = card.slice(
-    card.indexOf('{audit.state !== "scored" ? ('),
-    card.indexOf("<CallOutcomeLog"),
+  //
+  // BOTH boundaries are asserted before the slice, and that is not defensive
+  // padding. `card.indexOf("<CallOutcomeLog")` returns -1 the moment that
+  // component is renamed, `slice(start, -1)` then hands back nearly the whole
+  // file INCLUDING ScoredBody's body, `mainReturn.length > 0` still passes, and
+  // the two ordering assertions below quietly revert to the whole-file
+  // comparison this isolation exists to avoid -- green the entire time.
+  // (CodeRabbit, PR #301.) The other direction already failed loudly: a changed
+  // ternary marker yields an empty slice.
+  const branchStart = card.indexOf('{audit.state !== "scored" ? (');
+  const branchEnd = card.indexOf("<CallOutcomeLog");
+  assert.ok(branchStart >= 0, "must find the main component's audit-state branch");
+  assert.ok(
+    branchEnd > branchStart,
+    "must find <CallOutcomeLog> after the audit-state branch -- without it this slice silently becomes the whole file",
   );
-  assert.ok(mainReturn.length > 0, "must find the main component's audit-state branch");
+  const mainReturn = card.slice(branchStart, branchEnd);
   assert.ok(
     mainReturn.indexOf("<ScoredBody") < mainReturn.indexOf("<AutomationPanel"),
     "the automations panel must render after the whole website case, it is the save and not the opener",

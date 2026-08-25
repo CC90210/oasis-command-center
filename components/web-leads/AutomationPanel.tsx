@@ -45,6 +45,19 @@
 import type { AuditResult } from "@/lib/web-leads/audit";
 import { selectAutomations, type SelectedAutomation } from "@/lib/web-leads/automations";
 
+/**
+ * One automation, as a rep reads it mid-call.
+ *
+ * The four lines are ordered by what a rep needs first: the spoken line is
+ * visually dominant because it is the only part said out loud, `gets` sits
+ * under it as the thing being bought, `why` is the coaching note that makes it
+ * land for this trade, and the brush-off it answers is quietest because it is
+ * read between calls rather than during one.
+ *
+ * The absence marker is the only thing here derived from data, and it is drawn
+ * with a word and a hollow ring rather than a colour -- see rule 1 in the file
+ * header.
+ */
 function Card({ item }: { item: SelectedAutomation }) {
   return (
     <li className="rounded-lg border border-bg-border bg-bg-raised/60 p-4">
@@ -74,6 +87,23 @@ function Card({ item }: { item: SelectedAutomation }) {
   );
 }
 
+/**
+ * The whole panel: what else we can build for this business, in two groups.
+ *
+ * Takes the lead's raw `industry` string and the audit, and does no selection
+ * of its own -- `selectAutomations` owns which cards apply, which are cleared
+ * to render, and what order they go in. That split matters because the
+ * ordering rule is the only per-lead behaviour in the feature and it is
+ * separately tested; a component that re-sorted here would be a second opinion
+ * about the same lead.
+ *
+ * Renders for EVERY audit state. A lead with no website found still gets the
+ * full panel, with nothing marked missing, because that is the lead most likely
+ * to need it.
+ *
+ * @param industry the lead's industry as stored, free text, may be null
+ * @param audit the 49-check result, scored or not
+ */
 export function AutomationPanel({ industry, audit }: { industry: string | null; audit: AuditResult }) {
   const { industryLabel, isFallback, attached, later } = selectAutomations(industry, audit);
 
