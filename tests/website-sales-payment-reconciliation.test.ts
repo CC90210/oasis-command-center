@@ -182,6 +182,7 @@ async function seed(input: SeedInput) {
 }
 
 const refunded = await seed({ suffix: "refund" });
+const partiallyRefunded = await seed({ suffix: "partial-refund" });
 const disputed = await seed({ tenantId: "tenant-two", suffix: "dispute" });
 const healthy = await seed({ suffix: "healthy" });
 const failed = await seed({ suffix: "provider-failure" });
@@ -205,6 +206,7 @@ const verifyPayment: typeof verifyStripeWebsitePayment = async (input) => {
   assert.equal(input.expectedLeadId, `lead-${input.reference.replace(/^cs_live_/, "")}`);
   assert.equal(input.expectedPaymentToken, `token-${input.reference.replace(/^cs_live_/, "")}`);
   assert.equal(input.expectedPaymentPlanId, `plan-${input.reference.replace(/^cs_live_/, "")}`);
+  if (input.reference.includes("partial-refund")) throw new Error("payment_partially_refunded:25000");
   if (input.reference.includes("refund")) throw new Error("payment_refunded");
   if (input.reference.includes("dispute")) throw new Error("payment_disputed");
   if (input.reference.includes("rollback")) throw new Error("payment_refunded");
@@ -228,10 +230,11 @@ const result = await reconcileWebsiteSalesPayments(db, {
 });
 assert.deepEqual(
   { scanned: result.scanned, healthy: result.healthy, refunded: result.refunded, disputed: result.disputed },
-  { scanned: 6, healthy: 1, refunded: 1, disputed: 1 },
+  { scanned: 7, healthy: 1, refunded: 1, disputed: 1 },
   "Stripe receipts are re-fetched; manual receipts never enter the unattended loop",
 );
-assert.equal(result.errors.length, 3, "invalid rows, provider failures, and atomic-write failures are returned per receipt, not hidden as success");
+assert.equal(result.errors.length, 4, "partial refunds, invalid rows, provider failures, and atomic-write failures are returned per receipt, not hidden as success");
+assert.ok(result.errors.some((row) => row.receiptId === partiallyRefunded.receiptId && row.error === "payment_partially_refunded:25000"));
 assert.ok(result.errors.some((row) => row.receiptId === failed.receiptId && row.error === "stripe_verification_failed"));
 assert.ok(result.errors.some((row) => row.receiptId === rollback.receiptId && row.error.includes("synthetic interaction failure")));
 assert.ok(result.errors.some((row) => row.receiptId === missingDeal.receiptId && row.error.includes("missing_closed_deal")));
@@ -311,6 +314,21 @@ const failedReceipt = await one(
 assert.equal(failedReceipt.status, "verified");
 assert.equal(failedReceipt.last_reconciled_at, null, "a failed Stripe fetch remains due for retry");
 assert.equal(failedReceipt.last_reconciliation_error, "stripe_verification_failed");
+
+const partialReceipt = await one(
+  "SELECT status, last_reconciled_at, last_reconciliation_error FROM website_sales_payment_receipts WHERE id = ?",
+  [partiallyRefunded.receiptId],
+);
+assert.equal(partialReceipt.status, "verified", "a partial refund must not become a full terminal reversal");
+assert.equal(partialReceipt.last_reconciled_at, null, "a partial refund remains open for operator settlement");
+assert.equal(partialReceipt.last_reconciliation_error, "payment_partially_refunded:25000", "the exact refunded amount is preserved");
+assert.equal((await one("SELECT status FROM website_deals WHERE id = ?", [partiallyRefunded.dealId])).status, "won");
+assert.equal((await one("SELECT status FROM website_onboarding WHERE deal_id = ?", [partiallyRefunded.dealId])).status, "in_build");
+assert.equal((await one("SELECT status FROM website_sales_commissions WHERE id = ?", ["commission-partial-refund"])).status, "accrued");
+assert.equal(Number((await one(
+  "SELECT COUNT(*) AS count FROM website_sales_commissions WHERE deal_id = ? AND entry_type = 'refund_offset'",
+  [partiallyRefunded.dealId],
+)).count), 0, "a partial refund cannot offset the full commission accrual");
 
 const manualReceipt = await one(
   "SELECT reconciliation_attempts FROM website_sales_payment_receipts WHERE id = ?",

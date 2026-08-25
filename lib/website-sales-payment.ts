@@ -40,23 +40,31 @@ function stripeCheckoutFacts(row: StripeObject): {
   status: string;
   amountCents: number | null;
   currency: "CAD" | "USD" | null;
-  refunded: boolean | null;
+  refundStatus: "none" | "partial" | "full" | null;
+  refundedAmountCents: number | null;
   disputed: boolean | null;
 } {
   const status = typeof row.status === "string" ? row.status : "unknown";
   const paymentStatus = typeof row.payment_status === "string" ? row.payment_status : status;
   const paymentIntent = asObject(row.payment_intent);
   const charge = asObject(paymentIntent?.latest_charge);
-  const refunded = charge
-    ? charge.refunded === true || (asInteger(charge.amount_refunded) ?? 0) > 0
+  const amountCents = asInteger(row.amount_total);
+  const refundedAmountCents = charge ? asInteger(charge.amount_refunded) : null;
+  const refundStatus = charge && typeof charge.refunded === "boolean" && refundedAmountCents !== null
+    ? charge.refunded === true || (amountCents !== null && refundedAmountCents >= amountCents)
+      ? "full"
+      : refundedAmountCents > 0
+        ? "partial"
+        : "none"
     : null;
   const disputed = charge ? charge.disputed === true : null;
   return {
     paid: paymentStatus === "paid",
     status: paymentStatus,
-    amountCents: asInteger(row.amount_total),
+    amountCents,
     currency: normalizeCurrency(row.currency),
-    refunded,
+    refundStatus,
+    refundedAmountCents,
     disputed,
   };
 }
@@ -197,16 +205,24 @@ export async function verifyStripeWebsitePayment(input: {
   }
   const facts = stripeCheckoutFacts(body);
   if (!facts.paid) throw new Error("payment_not_collected");
-  if (facts.refunded === null) throw new Error("stripe_payment_refund_state_unavailable");
+  if (facts.refundStatus === null || facts.refundedAmountCents === null) {
+    throw new Error("stripe_payment_refund_state_unavailable");
+  }
   if (facts.disputed === null) throw new Error("stripe_payment_dispute_state_unavailable");
-  if (facts.refunded) throw new Error("payment_refunded");
-  if (facts.disputed) throw new Error("payment_disputed");
   if (facts.amountCents === null || facts.currency === null) {
     throw new Error("stripe_payment_missing_amount");
   }
   if (facts.amountCents !== input.expectedAmountCents || facts.currency !== input.expectedCurrency) {
     throw new Error("payment_does_not_match_proposal");
   }
+  if (facts.refundStatus === "full") throw new Error("payment_refunded");
+  if (facts.refundStatus === "partial") {
+    // A partial refund is not a terminal reversal. Preserve its exact amount in
+    // the reconciliation error so an operator can settle the remaining balance
+    // without offsetting the full receipt or every commission accrual.
+    throw new Error(`payment_partially_refunded:${facts.refundedAmountCents}`);
+  }
+  if (facts.disputed) throw new Error("payment_disputed");
   return {
     provider: "stripe",
     reference,
@@ -218,6 +234,7 @@ export async function verifyStripeWebsitePayment(input: {
       object: typeof body.object === "string" ? body.object : null,
       livemode: body.livemode === true,
       provider_status: facts.status,
+      refunded_amount_cents: facts.refundedAmountCents,
       payment_plan_id: input.expectedPaymentPlanId,
       payment_token: input.expectedPaymentToken,
     },

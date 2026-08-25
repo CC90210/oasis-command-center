@@ -132,6 +132,16 @@ for (const [name, body, expected] of [
     /payment_refunded/,
   ],
   [
+    "partially refunded money",
+    {
+      payment_status: "paid", amount_total: 100_000, currency: "cad", livemode: true,
+      client_reference_id: LEAD_ID,
+      metadata: { oasis_tenant_id: TENANT_ID, oasis_lead_id: LEAD_ID, oasis_payment_token: PAYMENT_TOKEN, oasis_payment_plan_id: PAYMENT_PLAN_ID },
+      payment_intent: { latest_charge: { refunded: false, amount_refunded: 25_000, disputed: false } },
+    },
+    /payment_partially_refunded:25000/,
+  ],
+  [
     "disputed money",
     {
       payment_status: "paid", amount_total: 100_000, currency: "cad", livemode: true,
