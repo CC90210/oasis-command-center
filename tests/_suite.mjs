@@ -257,6 +257,25 @@ const TESTS = [
   // which is a violation at up to $15,000 per call. This pins all four of those
   // against fixed instants on both sides of a DST transition.
   "tests/web-leads-hours.test.ts",
+  // The ONLY web-leads test that touches a database. Everything else here
+  // covers a pure rule module, so the read/filter/sort/page path that decides
+  // what a rep actually sees had no coverage at all until 2026-08-25. Runs
+  // against a real in-memory libSQL file, and was watched to fail against both
+  // a dead phase-2 read and a reverted selectCol().
+  "tests/web-leads-list-read.test.ts",
+  // The PostgREST adapter's own conformance suite, against a real in-memory
+  // libSQL database. It existed since the adapter was written and was never in
+  // this list, so nothing ran it but a human remembering to.
+  //
+  // Added 2026-08-25 because the Web Leads list read now depends on one of its
+  // guarantees: lib/web-leads/data.ts projects JSON paths in `select()`, and
+  // that is only safe because selectCol() names the output column the way
+  // PostgREST does. Unpinned, a change to the select compiler would break the
+  // leads list on the supabase-js path only -- silently, and nowhere near the
+  // file that got edited. This is the same failure shape as
+  // `.is("profile","not.null")` (lib/web-leads/scores.ts), which is exactly the
+  // bug class the adapter tests exist to catch.
+  "lib/__tests__/turso-postgrest.test.mjs",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

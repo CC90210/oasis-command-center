@@ -297,7 +297,23 @@ export function LeadsTable({
   return (
     <div>
       <div className="overflow-hidden rounded-xl border border-bg-border">
-        <table className="w-full border-collapse text-sm">
+        {/* TABLE-FIXED, AND THAT IS THE WHOLE FIX FOR THE GAP.
+            Operator, 2026-08-25: "There is a huge gap of space between business
+            name and phone number in terms of the reachability."
+            With auto layout the Business column had no width, so it absorbed
+            every spare pixel on the screen -- on a wide monitor the name sat
+            hard left and the phone was shoved most of a screen away, and the
+            three facts a rep reads together (who they are, the number, whether
+            anyone is there) stopped reading as one row.
+            Fixed layout with explicit widths pins Business to a readable
+            measure and lets the slack fall in the Website column instead, whose
+            contents are right-aligned and therefore stay pinned to the right
+            edge where the eye already expects them. The columns a rep reads as
+            a unit end up adjacent.
+            Fixed layout also means cells no longer stretch to fit their
+            contents, so every cell that can overflow truncates -- the name and
+            its secondary line already did. */}
+        <table className="w-full table-fixed border-collapse text-sm">
           <thead>
             <tr className="sticky top-0 z-10 bg-bg-panel text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted shadow-[0_1px_0_0_rgb(34_38_46)]">
               {canSelect && (
@@ -314,16 +330,23 @@ export function LeadsTable({
                   />
                 </th>
               )}
-              <th scope="col" className={`${canSelect ? "pl-3" : "pl-4"} pr-4 py-3 font-bold`}>Business</th>
-              <th scope="col" className="px-4 py-3 font-bold">Phone</th>
+              {/* Bounded rather than greedy. ~22rem holds the longest business
+                  names in the corpus and truncates the rest, which is what
+                  keeps the phone number beside the name instead of a screen
+                  away from it. */}
+              <th scope="col" className={`w-[22rem] ${canSelect ? "pl-3" : "pl-4"} pr-4 py-3 font-bold`}>Business</th>
+              <th scope="col" className="w-[10.5rem] px-4 py-3 font-bold">Phone</th>
               {/* Beside the phone number on purpose. A rep reads the number and
                   the reachability together, or they dial a business that is
                   shut -- which wastes the dial AND burns the lead, because
                   nobody answers, a no-answer is logged, and the expiry clock
                   resets. Operator, 2026-08-24: "we need to see the times that
                   they're able to actually reach out." */}
-              <th scope="col" className="px-4 py-3 font-bold">Reachable</th>
-              {showStage && <th scope="col" className="px-4 py-3 font-bold">Stage</th>}
+              <th scope="col" className="w-44 px-4 py-3 font-bold">Reachable</th>
+              {showStage && <th scope="col" className="w-[10rem] px-4 py-3 font-bold">Stage</th>}
+              {/* The ONLY column left without a width, so it takes the slack.
+                  Its contents are justify-end, so growing it moves nothing --
+                  the score and the two buttons stay against the right edge. */}
               <th scope="col" className="px-4 py-3 text-right font-bold">Website</th>
             </tr>
           </thead>
@@ -383,7 +406,10 @@ export function LeadsTable({
                     <span className="text-fg-faint">No number</span>
                   )}
                 </td>
-                <td className="w-44 px-4 py-3 align-middle">
+                {/* Widths live on the <thead> cells now; table-fixed reads the
+                    first row and ignores widths further down, so repeating them
+                    here would only be something to keep in sync and get wrong. */}
+                <td className="px-4 py-3 align-middle">
                   <OpenNowCell lead={l} now={now} />
                 </td>
                 {showStage && (
@@ -399,10 +425,10 @@ export function LeadsTable({
                     )}
                   </td>
                 )}
-                {/* Widened from w-44 with the battle-card link: three controls
-                    at 11px need the room, and a column that wraps mid-row is
-                    what makes a 50-row page unreadable at the bottom. */}
-                <td className="w-72 px-4 py-3 align-middle">
+                {/* Takes the table's slack (see the <thead> note). Three
+                    controls at 11px need room, and a column that wraps mid-row
+                    is what makes a long page unreadable at the bottom. */}
+                <td className="px-4 py-3 align-middle">
                   <WebsiteCell lead={l} />
                 </td>
               </tr>
