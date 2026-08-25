@@ -5,7 +5,7 @@ import {
   PROVINCE_ZONES, DAY_CODES, CALL_WINDOW,
   zoneForProvince, localClock, readStoredHours, intervalsFor,
   openState, nextTransition, formatMinutes, formatDay, weekRows,
-  callWindowState, leadHours,
+  callWindowState, leadHours, readHoursSource,
 } from "../lib/web-leads/hours";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
@@ -391,6 +391,85 @@ const NOON_ET = new Date("2026-07-15T16:00:00Z");
     }
   }
   assert.deepEqual([...seen].sort(), ["Closed now", "Hours unknown", "Open now"]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROVENANCE. A rep is about to repeat these hours to a stranger, so they get
+// told whether the value was published as machine-readable data or lifted off
+// the words on a page.
+// ═══════════════════════════════════════════════════════════════════════════
+
+{
+  assert.equal(readHoursSource("osm")!.weak, false, "a curated directory value is not weak evidence");
+  assert.equal(readHoursSource("site-jsonld")!.weak, false, "schema.org data was written to be parsed");
+  assert.equal(readHoursSource("site-microdata")!.weak, false);
+  assert.equal(readHoursSource("site-text")!.weak, true, "a line read off the page is a hint, not a fact");
+  assert.match(readHoursSource("osm")!.label, /OpenStreetMap/);
+  assert.match(readHoursSource("site-jsonld")!.label, /own website/);
+
+  // An unrecognised key is null, never a guessed label. A collector whose
+  // confidence we do not know must not be presented as one we do.
+  assert.equal(readHoursSource("scraped-from-facebook"), null);
+  assert.equal(readHoursSource(""), null);
+  assert.equal(readHoursSource(null), null);
+  assert.equal(readHoursSource(42), null);
+
+  // Provenance rides along on a lead that has hours...
+  const withHours = leadHours(
+    { province: "ON", openingHours: NINE_TO_FIVE, openingHoursRaw: "Mo-Fr 09:00-17:00", openingHoursSource: "site-text" },
+    NOON_ET,
+  );
+  assert.equal(withHours.source!.key, "site-text");
+  assert.equal(withHours.source!.weak, true);
+
+  // ...and is suppressed on a lead that has none, even if a stale key survives
+  // on the row. "Hours from their website" printed above "we have no hours" is
+  // the same confusing-but-confident output this whole change removes.
+  const withoutHours = leadHours(
+    { province: "ON", openingHours: null, openingHoursRaw: null, openingHoursSource: "site-jsonld" },
+    NOON_ET,
+  );
+  assert.equal(withoutHours.state, "unknown");
+  assert.equal(withoutHours.source, null, "no hours means no provenance line");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE TWO KINDS OF UNKNOWN, AND THE LEGAL WINDOW THAT IS NOT ABOUT THEM.
+//
+// The operator's defect: "I don't know what these Calling Hours mean. They're
+// completely hallucinating that you didn't take any of their actual business
+// work hours." Every lead carried no hours, so the only times on the card were
+// the CRTC constants, under a heading a rep reads as that shop's hours.
+// ═══════════════════════════════════════════════════════════════════════════
+
+{
+  // Never looked is a different fact from looked-and-found-nothing.
+  const never = leadHours(
+    { province: "ON", openingHours: null, openingHoursRaw: null, openingHoursCheckedAt: null },
+    NOON_ET,
+  );
+  const looked = leadHours(
+    { province: "ON", openingHours: null, openingHoursRaw: null, openingHoursCheckedAt: "2026-08-25T12:00:00Z" },
+    NOON_ET,
+  );
+  assert.equal(never.headline, "Hours unknown");
+  assert.equal(looked.headline, "Hours unknown");
+  assert.match(never.detail, /Nobody has checked/);
+  assert.match(looked.detail, /We looked and found no published hours/);
+  assert.notEqual(never.detail, looked.detail, "the two unknowns must not collapse into one sentence");
+
+  // Neither one may quote the legal window. That is the whole defect: a rep
+  // reading a business-hours block must not find 9:00 am to 9:30 pm in it.
+  for (const h of [never, looked]) {
+    assert.doesNotMatch(h.detail, /9:30|9:00 am to 9:30/, "the business-hours sentence must not carry the CRTC window");
+    assert.equal(h.week.length, 0, "no invented week grid when we hold nothing");
+    assert.equal(h.raw, null);
+  }
+
+  // The window itself now names whose rule it is, so it cannot be read as a
+  // claim about the prospect.
+  const outside = callWindowState(clockAt("mo", 7 * 60)) as { allowed: false; reason: string };
+  assert.match(outside.reason, /Canadian telemarketing rules/, "the caution must attribute the rule to us, not to them");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
