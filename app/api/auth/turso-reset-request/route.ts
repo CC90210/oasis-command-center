@@ -1,14 +1,9 @@
 /**
- * Password reset, step 1 — request a reset link (Turso auth mode).
+ * Turso password-reset request.
  *
- * Replaces supabase.auth.resetPasswordForEmail, which is one of the eight
- * surfaces still tying this dashboard to Supabase Auth. Until all of them move,
- * cancelling the Supabase subscription locks every operator out.
- *
- * Always returns 200 whether or not the account exists — a reset endpoint that
- * answers differently for real and fake addresses is an account-enumeration
- * oracle. When the account does exist, a single-use token (sha256 stored, raw
- * emailed) valid for one hour lands in _auth_tokens.
+ * Unauthenticated responses stay uniform to prevent account enumeration. A
+ * signed-in user requesting their own reset may receive a delivery/config error
+ * because the session has already proven that account exists.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@libsql/client";
@@ -16,16 +11,24 @@ import { createHash, randomBytes } from "node:crypto";
 import { rateLimit } from "@/lib/rate-limit";
 import { tursoAuthActive } from "@/lib/turso-auth";
 import { sendAuthEmail } from "@/lib/auth-email";
+import { getSessionUser } from "@/lib/supabase-server";
 
 export const runtime = "nodejs";
+
+function unavailableForAuthenticatedSelf(isAuthenticatedSelf: boolean) {
+  return isAuthenticatedSelf
+    ? NextResponse.json(
+        { error: "Account-security email is unavailable. Please try again later." },
+        { status: 503 },
+      )
+    : NextResponse.json({ ok: true });
+}
 
 export async function POST(req: NextRequest) {
   if (!tursoAuthActive()) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-  // Uniform 200 even when throttled — a 429 here would leak that the address
-  // was worth throttling.
   const gate = rateLimit({ key: `reset-req:${ip}`, capacity: 5, refillPerSec: 5 / 900 });
   if (!gate.allowed) return NextResponse.json({ ok: true });
 
@@ -38,9 +41,12 @@ export async function POST(req: NextRequest) {
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   if (!email || !email.includes("@")) return NextResponse.json({ ok: true });
 
+  const sessionUser = await getSessionUser().catch(() => null);
+  const isAuthenticatedSelf =
+    !!sessionUser?.email && sessionUser.email.trim().toLowerCase() === email;
   const url = process.env.TURSO_DATABASE_URL;
   const authToken = process.env.TURSO_AUTH_TOKEN;
-  if (!url || !authToken) return NextResponse.json({ ok: true });
+  if (!url || !authToken) return unavailableForAuthenticatedSelf(isAuthenticatedSelf);
   const db = createClient({ url, authToken });
 
   await db.execute(`CREATE TABLE IF NOT EXISTS "_auth_tokens" (
@@ -54,24 +60,47 @@ export async function POST(req: NextRequest) {
   });
 
   if (user.rows.length) {
+    const issuedAt = new Date().toISOString();
+    // Keep one active reset capability per account. Repeated clicks invalidate
+    // older messages before the new token is issued.
+    await db.execute({
+      sql: `UPDATE "_auth_tokens" SET used_at = ?
+            WHERE lower(email) = ? AND purpose = 'password_reset' AND used_at IS NULL`,
+      args: [issuedAt, email],
+    });
+
     const raw = randomBytes(32).toString("base64url");
     const hash = createHash("sha256").update(raw).digest("hex");
     await db.execute({
       sql: `INSERT INTO "_auth_tokens" (token_hash, email, purpose, expires_at, created_at)
             VALUES (?, ?, 'password_reset', ?, ?)`,
-      args: [hash, email,
-             new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-             new Date().toISOString()],
+      args: [hash, email, new Date(Date.now() + 60 * 60 * 1000).toISOString(), issuedAt],
     });
+
     const base = process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin;
     const link = `${base}/auth/reset-password?turso_token=${raw}`;
-    await sendAuthEmail({
+    const delivery = await sendAuthEmail({
       to: email,
-      subject: "Reset your password",
-      text: `A password reset was requested for this address.\n\n`
-        + `Reset link (valid 1 hour, single use):\n${link}\n\n`
-        + `If you didn't request this, ignore this email — your password is unchanged.`,
+      subject: "Reset your OASIS AI password",
+      text:
+        `A password reset was requested for your OASIS AI account.\n\n` +
+        `Reset link (valid 1 hour, single use):\n${link}\n\n` +
+        `If you didn't request this, ignore this email — your password is unchanged.`,
     });
+    if (!delivery.ok) {
+      // Delivery failed: immediately consume the token so an undelivered secret
+      // never remains active in the credential table.
+      await db.execute({
+        sql: `UPDATE "_auth_tokens" SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`,
+        args: [new Date().toISOString(), hash],
+      });
+      console.error("[turso-reset-request] auth mail delivery failed", {
+        code: delivery.code,
+        authenticatedSelf: isAuthenticatedSelf,
+      });
+      return unavailableForAuthenticatedSelf(isAuthenticatedSelf);
+    }
   }
+
   return NextResponse.json({ ok: true });
 }
