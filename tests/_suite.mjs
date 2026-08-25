@@ -23,6 +23,7 @@ const TESTS = [
   "tests/lead-source-rollup.test.ts",
   "tests/sunbiz-form-templates.test.ts",
   "tests/public-form-resolver.test.ts",
+  "tests/public-form-origin.test.ts",
   "tests/sunbiz-import-routing.test.ts",
   "tests/lead-transfer-canonical.test.ts",
   "tests/pipeline-turnkey-lifecycle.test.ts",

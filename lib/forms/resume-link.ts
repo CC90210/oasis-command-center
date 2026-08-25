@@ -33,6 +33,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { signFormLink } from "@/lib/form-links";
 import { publishAgentEvent } from "@/lib/manifest/events";
+import { publicFormOrigin } from "@/lib/forms/public-origin";
 
 /** Tenant context needed for the email body branding + the link URL. */
 export type ResumeEmailTenantCtx = {
@@ -170,10 +171,10 @@ export async function queueResumeEmail(
     return { ok: false, error: "form_links_subsystem_unconfigured" };
   }
 
-  const appBaseUrl =
-    input.app_base_url ||
-    process.env.PUBLIC_APP_URL ||
-    "https://oasisai.work";
+  const appBaseUrl = publicFormOrigin({
+    tenantSlug: input.tenant.tenant_slug,
+    requestOrigin: input.app_base_url,
+  });
   const resumeUrl = buildResumeUrl({
     appBaseUrl,
     tenantSlug: input.tenant.tenant_slug,
