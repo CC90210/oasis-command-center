@@ -91,6 +91,26 @@ for (const [id, cap] of Object.entries(CAPABILITIES)) {
   }
 }
 
+// AND THE CRAWLER ONLY EVER LOOKED AT A WEBSITE. This is the structural half
+// of the rule above, and it is here because the judgement-call half already
+// failed once: missed-call text-back pointed at `multi_route` and review
+// requests pointed at `testimonials`, so a site that simply did not LIST a
+// second contact method or DISPLAY its reviews would have had a rep telling
+// the owner we knew their phone system did not text back. We did not look at
+// their phone system. Nothing can look at their phone system.
+//
+// A `site-build` capability is a thing that goes ON the website, which is the
+// one place the crawler has been. Everything else is a back-office workflow
+// and renders no marker at all. (Codex review, 2026-08-25.)
+for (const [id, cap] of Object.entries(CAPABILITIES)) {
+  if (cap.provenBy.length === 0) continue;
+  assert.equal(
+    cap.source,
+    "site-build",
+    `${id}: only something built ON the site can be proven absent BY the site -- a crawler cannot observe a back-office workflow`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // COPY HYGIENE. Everything below is read aloud to a stranger on a live call.
 // ---------------------------------------------------------------------------
@@ -243,10 +263,15 @@ assert.equal(selectAutomations("  pet services  ", SCORED).isFallback, false, "i
 // consulted or not, and deleting the entire ranking function left the test
 // green. Proved by planting exactly that deletion (2026-08-25).
 //
-// `review_requests` is declared FIFTH for salons and `online_booking` FIRST.
-// Marking reviews absent and booking present therefore forces the two orders
-// apart: only a selector that actually reads the audit puts reviews on top.
-const SCORED_REVIEWS_MISSING: AuditResult = {
+// `web_chat` is declared FOURTH for salons and `online_booking` FIRST. Marking
+// chat absent and booking present therefore forces the two orders apart: only
+// a selector that actually reads the audit puts chat on top.
+//
+// (An earlier draft used review_requests here, off the `testimonials` check.
+// That mapping has since been deleted as a fabricated absence claim -- see the
+// crawler-scope rule above -- so this fixture now uses two capabilities the
+// crawler genuinely does measure.)
+const SCORED_CHAT_MISSING: AuditResult = {
   state: "scored",
   url: "https://example.com",
   measuredAt: "2026-08-25T00:00:00.000Z",
@@ -257,34 +282,26 @@ const SCORED_REVIEWS_MISSING: AuditResult = {
       label: "Conversion",
       score: 60,
       weight: 30,
-      checks: [{ code: "booking", label: "Online booking", points: 5, has: true }],
-      missing: [],
-    },
-    {
-      key: "trust",
-      label: "Trust",
-      score: 20,
-      weight: 20,
       checks: [
-        { code: "testimonials", label: "Testimonials", points: 4, has: false },
-        { code: "review_platform", label: "Review platform", points: 4, has: false },
+        { code: "booking", label: "Online booking", points: 5, has: true },
+        { code: "chat", label: "Live chat", points: 3, has: false },
       ],
-      missing: ["testimonials", "review_platform"],
+      missing: ["chat"],
     },
   ],
 };
 
 {
-  const sel = selectAutomations("Salons & Personal Care", SCORED_REVIEWS_MISSING);
+  const sel = selectAutomations("Salons & Personal Care", SCORED_CHAT_MISSING);
   const ids = sel.attached.map((c) => c.id);
-  const iReviews = ids.indexOf("review_requests");
+  const iChat = ids.indexOf("web_chat");
   const iBooking = ids.indexOf("online_booking");
-  assert.ok(iReviews >= 0 && iBooking >= 0, "expected both reviews and booking in the salon set");
+  assert.ok(iChat >= 0 && iBooking >= 0, "expected both chat and booking in the salon set");
   assert.ok(
-    iReviews < iBooking,
+    iChat < iBooking,
     "a capability this site lacks must outrank one it already has, even when the hand-authored order says otherwise",
   );
-  assert.equal(sel.attached[iReviews].missingHere, true, "reviews are absent from this site and must be marked");
+  assert.equal(sel.attached[iChat].missingHere, true, "chat is absent from this site and must be marked");
   assert.equal(sel.attached[iBooking].missingHere, false, "booking is present on this site and must not be marked");
 
   // Among cards with the same missing status, the hand-authored priority is
@@ -334,14 +351,50 @@ for (const audit of [
   assert.match(panel, /later/, "the panel must render the later group");
 
   const card = read("components/web-leads/BattleCard.tsx");
-  assert.match(card, /<AutomationPanel/, "the battle card must render the panel");
   assert.match(card, /import \{ AutomationPanel \} from "\.\/AutomationPanel"/, "the battle card must import the panel");
+
+  // EVERY AUDIT STATE GETS THE PANEL. It first shipped inside ScoredBody, so
+  // the no_website / not_scored / unreachable leads -- the ones where "maybe
+  // the website is not what you want" is MOST likely to be the conversation --
+  // rendered no automations at all, while the selector and its tests handled
+  // all three states correctly. Nothing said so. (Codex review, 2026-08-25.)
+  //
+  // Asserting it renders exactly once, from the main component's own return
+  // rather than from either branch, is what actually pins that: a copy pushed
+  // back down into ScoredBody would satisfy a bare "is it referenced" check
+  // while quietly dropping three states again.
+  assert.equal(
+    (card.match(/<AutomationPanel/g) || []).length,
+    1,
+    "the panel must render from exactly one place -- two render sites are two things that can drift",
+  );
+
   // Placement is load-bearing, not cosmetic. Adon's framing is the save when
   // the website pitch is dying, and the upsell ladder says do not lead with
-  // this. Rendering it above the objections turns a fallback into an opener.
+  // this, so it renders after the ENTIRE website case (which for a scored lead
+  // contains the objections). Isolate the main component's return and assert
+  // the order inside it: a bare indexOf over the whole file compares against
+  // ObjectionPanel's position in ScoredBody, which is declared further down the
+  // file than the component that renders it, so the naive check reads backwards.
+  const mainReturn = card.slice(
+    card.indexOf('{audit.state !== "scored" ? ('),
+    card.indexOf("<CallOutcomeLog"),
+  );
+  assert.ok(mainReturn.length > 0, "must find the main component's audit-state branch");
   assert.ok(
-    card.indexOf("<ObjectionPanel") < card.indexOf("<AutomationPanel"),
-    "the automations panel must sit BELOW the objections, it is the save and not the opener",
+    mainReturn.indexOf("<ScoredBody") < mainReturn.indexOf("<AutomationPanel"),
+    "the automations panel must render after the whole website case, it is the save and not the opener",
+  );
+  assert.ok(
+    mainReturn.indexOf("<NotScored") < mainReturn.indexOf("<AutomationPanel"),
+    "the automations panel must render after the not-scored branch too",
+  );
+  // And ObjectionPanel stays where it was, inside the scored body, so "after
+  // ScoredBody" really does mean "after the objections" for a scored lead.
+  assert.match(
+    card.slice(card.indexOf("function ScoredBody")),
+    /<ObjectionPanel \/>/,
+    "the objections must still render inside ScoredBody",
   );
 }
 

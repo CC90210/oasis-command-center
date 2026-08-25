@@ -93,10 +93,21 @@ export type Capability = {
   source: CapabilitySource;
   /**
    * Check codes from the quality model whose absence proves this business
-   * lacks the thing. Empty means the audit cannot see it, which is honest:
-   * most of these are about what happens after someone contacts them, and a
-   * crawler cannot observe that. Every code here is verified against
-   * REMEDIES by the test.
+   * lacks the thing.
+   *
+   * 🚨 ONLY A `site-build` CAPABILITY MAY CARRY THESE, and the test enforces
+   * it. The crawler looks at a website. It can prove a site has no booking
+   * widget, because it went and looked for one. It cannot prove anything about
+   * what happens after somebody phones, emails or walks in, so every backend
+   * workflow here leaves this empty and renders no marker at all.
+   *
+   * This started out looser and was wrong: missed-call text-back pointed at
+   * `multi_route` and review requests pointed at `testimonials`, which turned
+   * "their site does not list a second contact method" into "they do not text
+   * their missed callers" -- a claim about a stranger's phone system that
+   * nothing measured, printed on a card, read aloud on a live call. Codex
+   * review, 2026-08-25. The rule is now structural rather than a judgement
+   * call per card, because the judgement call is what failed.
    */
   provenBy: string[];
 };
@@ -168,14 +179,23 @@ export const CAPABILITIES: Record<string, Capability> = {
     gets: "A text to every missed caller within seconds, so the ones you could not pick up for do not just move on.",
     group: "attached",
     source: "ladder",
-    provenBy: ["multi_route"],
+    // EMPTY ON PURPOSE, and it used to say ["multi_route"]. Codex review
+    // 2026-08-25 caught it. `multi_route` measures how many ways the SITE
+    // offers to get in touch; it says nothing about what the phone system does
+    // with a call nobody answers. Marking this card "not on their site" off
+    // that check is a rep telling a stranger we know something about their
+    // phone that we never looked at.
+    provenBy: [],
   },
   review_requests: {
     says: "Every happy customer gets asked for a review at the moment they are happiest.",
     gets: "A message that goes out after the job asking for a review, with the link already in it.",
     group: "attached",
     source: "modules",
-    provenBy: ["testimonials", "review_platform"],
+    // Same correction. A site with no testimonials block and no review link is
+    // a site that does not DISPLAY social proof. Plenty of businesses ask for
+    // reviews diligently and never put them on the website.
+    provenBy: [],
   },
   appointment_reminders: {
     says: "Nobody forgets an appointment, and the ones who cannot make it tell you early enough to refill it.",
