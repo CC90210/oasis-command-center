@@ -249,29 +249,76 @@ export async function fetchSheets(): Promise<Sheet[]> {
  * app/api/web-leads/route.ts.
  */
 /**
- * Every lead row for this tenant, memoised for a few seconds.
+ * The FIFTEEN keys of `data` that filtering, sorting and counting actually
+ * read. Derived from the call graph, not guessed:
  *
- * THIS READ IS THE 5-7 SECOND PAGE LOAD Adon reported. ~31,000 rows, each
- * carrying its full `data` JSON blob, pulled across HTTP to render fifty of
- * them. It cannot move server-side: territory, city and industry live inside
- * that blob and are free text ("Québec", "Restaurants & Bars"), and those
- * values must never enter a PostgREST filter string. That rule is a real
- * injection defence and is not being traded away for latency.
+ *   toWebLead's filterable fields  business_name, name, phone, website,
+ *                                  webdev_territory_id, state,
+ *                                  webdev_opening_hours(+_raw)
+ *   resolveScore                   website, webdev_source_business_id
+ *   factsFrom (claim.ts)           assigned_to, claimed_at, last_call_at,
+ *                                  stage, lost_at, dnc
  *
- * What CAN change is how OFTEN the read happens. Caching a lead list would
- * normally be alarming -- a rep could see a lead somebody already claimed --
- * except that claiming is a compare-and-swap (claim-ops.ts). A stale pool
- * cannot produce a duplicate call; it can only produce a claim that fails, and
- * failing tells the rep the truth. Worst case is one wasted click, never a
- * wasted phone call. Full argument in lib/web-leads/cache.ts; writes invalidate
- * it immediately.
+ * `->` AND NOT `->>`, DELIBERATELY, AND THIS IS THE SUBTLE ONE. PostgREST's
+ * `->>` yields TEXT: `dnc` would arrive as the string "true" on the supabase-js
+ * path and as the number 1 on ours, and factsFrom's deliberately strict
+ * `data.dnc === true || data.dnc === 1` would read the string as FALSE --
+ * silently dropping a do-not-call flag on one backend only. `->` yields JSON on
+ * both: supabase-js parses it to a real boolean, our adapter's json_extract
+ * returns 1, and those are exactly the two shapes factsFrom already accepts. So
+ * every field keeps the same JS type it has today, on both backends, and
+ * factsFrom needs no change. Nothing here widens or relaxes the dnc test.
+ */
+const FILTER_KEYS = [
+  "business_name", "name", "phone", "website", "webdev_territory_id",
+  "webdev_source_business_id", "state",
+  "webdev_opening_hours", "webdev_opening_hours_raw",
+  "assigned_to", "claimed_at", "last_call_at", "stage", "lost_at", "dnc",
+] as const;
+
+const FILTER_SELECT = `id,${FILTER_KEYS.map((k) => `data->${k}`).join(",")}`;
+
+/**
+ * Every lead for this tenant, PROJECTED to the fields that decide whether it is
+ * on the page -- memoised for a few seconds.
+ *
+ * ═══ THIS READ WAS THE 15-SECOND PAGE LOAD ══════════════════════════════════
+ *
+ * Measured against live production data, 2026-08-25:
+ *
+ *   SELECT id,data   31,034 rows   37.8 MB   4.4s - 18.0s across six samples
+ *   this projection  31,034 rows   15.7 MB   1.8s -  3.6s
+ *
+ * Not 31,000 rows of overhead: 31,000 rows carrying the WHOLE `data` blob --
+ * 57 distinct keys, averaging 1,111 bytes -- pulled across a WAN to render
+ * fifty. The blob's biggest fields (`tags`, `webdev_dedupe_key`, `source`,
+ * `company`, `icp_track`, `audit_findings`, `business_address`) are read by
+ * NOTHING on this path. The transfer is the cost and it is wildly variable,
+ * which is why the same page felt like five seconds one day and fifteen the
+ * next.
+ *
+ * The projection does NOT relax the injection rule. Territory, city and
+ * industry are still free text ("Québec", "Restaurants & Bars") and still never
+ * enter a filter string -- they are still compared IN MEMORY. What changed is
+ * only which COLUMNS come back, and the key list is a compile-time constant
+ * with no caller input anywhere near it.
+ *
+ * Rows still arrive shaped `{ id, data }` so the mapping below is unchanged;
+ * `data` is simply narrower. The full blob for the ~100 rows that survive
+ * filtering is fetched separately -- see fetchPageData().
+ *
+ * WHY A CACHE IS SAFE HERE: claiming is a compare-and-swap (claim-ops.ts), so a
+ * stale pool cannot produce a duplicate call, only a claim that fails and tells
+ * the rep the truth. Worst case is one wasted click, never a wasted phone call.
+ * Full argument in lib/web-leads/cache.ts; writes invalidate it immediately.
+ * IF THE SWAP EVER GOES, THIS CACHE MUST GO WITH IT.
  */
 async function allTenantLeads(): Promise<{ id: string; data: Record<string, unknown> }[]> {
   return memo("web-leads:leads", TTL.LEADS, async () => {
     const db = getServiceSupabase();
     const { data, error, count } = await db
       .from("tenant_records")
-      .select("id,data", { count: "exact" })
+      .select(FILTER_SELECT, { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("entity_type", "lead")
       .limit(LEAD_READ_CAP);
@@ -282,8 +329,58 @@ async function allTenantLeads(): Promise<{ id: string; data: Record<string, unkn
     // for, and a cap comparison passes silently when that binds first. See
     // assertCompleteRead() in ./tenant.
     assertCompleteRead("leads_read", data || [], count);
-    return (data || []) as { id: string; data: Record<string, unknown> }[];
+    // Re-nest the flat projection back under `data`. Both backends return one
+    // column per path named after its last segment (ours via selectCol() in
+    // lib/turso-postgrest.ts, PostgREST natively), so this is a rename, not a
+    // reinterpretation -- every value keeps the type the JSON held.
+    // supabase-js parses the select STRING at the type level to infer a row
+    // shape, and its parser does not model JSON-path projection -- it widens
+    // any select it cannot parse to GenericStringError[]. That is a limitation
+    // of the type, not of the query: both backends return one column per path
+    // (see FILTER_SELECT). The cast is confined to this one line and the loop
+    // below reads only names from FILTER_KEYS, so nothing downstream depends on
+    // a shape the compiler was never able to check.
+    const rows = (data || []) as unknown as Record<string, unknown>[];
+    return rows.map((r) => {
+      const d: Record<string, unknown> = {};
+      for (const k of FILTER_KEYS) d[k] = r[k];
+      return { id: String(r.id), data: d };
+    });
   });
+}
+
+/**
+ * The FULL `data` blob for one page of leads, keyed by id.
+ *
+ * Phase two of the split above. Filtering and sorting need fifteen fields
+ * across all 31,034 leads; RENDERING needs the whole blob for the ~100 that
+ * actually reach the screen. Fetching the blob for all of them to show a
+ * hundred is what made this page slow, and fetching it for a hundred costs
+ * 0.12 MB (measured).
+ *
+ * `.in("id", ids)` carries no free text: these are ids this function just read
+ * out of the database itself, never anything a caller typed.
+ *
+ * NOT MEMOISED. It is per-page and already cheap, and a lead's rendered detail
+ * is exactly the thing a rep expects to be current after they act on it.
+ */
+async function fetchPageData(ids: string[]): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  if (ids.length === 0) return out;
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select("id,data", { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .in("id", ids)
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`lead_page_read_failed: ${error.message}`);
+  assertCompleteRead("lead_page_read", data || [], count);
+  for (const r of (data || []) as { id: string; data: Record<string, unknown> }[]) {
+    out.set(r.id, r.data || {});
+  }
+  return out;
 }
 
 export async function fetchLeads(
@@ -395,7 +492,38 @@ export async function fetchLeads(
     .sort(comparatorFor(f.sort));
 
   const start = (f.page - 1) * PAGE_SIZE;
-  return { leads: all.slice(start, start + PAGE_SIZE), total: all.length };
+  const page = all.slice(start, start + PAGE_SIZE);
+
+  // PHASE TWO. Everything above ran on the fifteen projected fields, which is
+  // all that filtering, sorting and counting need. The rows that survived now
+  // get their full blob so the list can render city, industry and the verbatim
+  // websiteCondition -- fetched for ~100 leads instead of 31,034.
+  const full = await fetchPageData(page.map((l) => l.id));
+  const leads = page.map((l): WebLeadRow => {
+    const blob = full.get(l.id);
+    // A lead deleted between the two reads keeps the row built from the
+    // projection rather than vanishing from a page whose `total` still counts
+    // it. Its display-only fields then fall back to toWebLead's honest
+    // defaults ("Not checked" / "Not audited yet - confirm on the call"),
+    // which is the same sentence a never-audited lead shows. Nothing is
+    // invented to fill the gap.
+    if (!blob) return l;
+    return {
+      ...toWebLead({ id: l.id, data: blob }),
+      // Recomputing these from the blob would be redundant work over identical
+      // values -- every field they derive from is in FILTER_KEYS. Carried
+      // across so the score and ownership a rep sees are exactly the ones the
+      // filter, the sort and the band selection just agreed on.
+      score: l.score,
+      scoreState: l.scoreState,
+      assignedTo: l.assignedTo,
+      stage: l.stage,
+      released: l.released,
+      lastCallAt: l.lastCallAt,
+    };
+  });
+
+  return { leads, total: all.length };
 }
 
 /**

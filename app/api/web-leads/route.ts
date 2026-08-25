@@ -60,15 +60,44 @@ export async function GET(req: NextRequest) {
     // filter would return nothing, and a rep would work a queue that silently
     // excluded exactly the prospects they asked for. Nothing on screen would
     // say so. An error the operator can see is the honest failure here.
+    //
+    // TIMING IS MEASURED, NOT INFERRED. This route was reported at "15 seconds"
+    // and the cause turned out not to be where it looked: the score index (three
+    // whole-table reads) is ~1.3s, while the single lead read was 4.4-18.0s
+    // because it pulled 37.8 MB of JSON blob to render one page. Guessing which
+    // half is slow is how that went unfixed; a Server-Timing header means the
+    // next person reads the answer off the response instead. Visible in the
+    // browser's network panel under Timing, and in `curl -i`.
+    const t0 = Date.now();
     const [sheets, scoreIndex] = await Promise.all([fetchSheets(), fetchScoreIndex()]);
+    const tIndex = Date.now() - t0;
     const ids = selectSheetIds(sheets, filters);
     // scope=mine returns the caller's OWN book (including lapsed claims);
     // the default pool excludes every lead somebody currently holds, which is
     // what stops two reps dialling the same business. One clock for the whole
     // request so the expiry rules cannot see time move mid-read.
     const scope = req.nextUrl.searchParams.get("scope") === "mine" ? "mine" : "pool";
+    const t1 = Date.now();
     const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, { scope, now: Date.now() });
-    return NextResponse.json({ leads, total, page: filters.page, pageSize: PAGE_SIZE });
+    const tLeads = Date.now() - t1;
+    return NextResponse.json(
+      { leads, total, page: filters.page, pageSize: PAGE_SIZE },
+      {
+        headers: {
+          // Both legs plus the total, so a slow page can be attributed without
+          // reproducing it locally. Cache state is what separates a cold
+          // instance from a warm one, and it is the difference that matters:
+          // the memo (lib/web-leads/cache.ts) is per-instance, so on Vercel a
+          // fresh instance pays full price no matter how warm its neighbours
+          // are.
+          "Server-Timing": [
+            `index;desc="sheets+scores";dur=${tIndex}`,
+            `leads;desc="filter+page";dur=${tLeads}`,
+            `total;dur=${Date.now() - t0}`,
+          ].join(", "),
+        },
+      },
+    );
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "leads_failed" },
