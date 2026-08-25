@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getClientProfileSlugForBrand, resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOperatorEmail } from "@/lib/operator-credentials";
+import { safeInternalPath } from "@/lib/turso-auth-admin";
 
 type ProfileRouteRow = {
   id: string;
@@ -32,15 +33,6 @@ function cleanSlug(value: string | null | undefined): string | null {
   return slug || null;
 }
 
-function safeInternalPath(raw: string | null | undefined): string {
-  const value = (raw || "/").trim();
-  if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "/";
-  if (value.startsWith("/auth/callback") || value.startsWith("/auth/land") || value.startsWith("/login")) {
-    return "/";
-  }
-  return value || "/";
-}
-
 function tenantSlugFromPath(path: string): string | null {
   const match = path.match(/^\/t\/([a-z0-9][a-z0-9_-]{1,62})(?:\/|$)/i);
   return match ? match[1].toLowerCase() : null;
@@ -58,6 +50,13 @@ export function normalizePostLoginRedirect(
   ctx: PostLoginTenantContext,
 ): string {
   const safeNext = safeInternalPath(requestedNext);
+  if (
+    safeNext.startsWith("/auth/callback")
+    || safeNext.startsWith("/auth/land")
+    || safeNext.startsWith("/login")
+  ) {
+    return homePathForTenant(ctx);
+  }
   if (safeNext.startsWith("/demo/")) return homePathForTenant(ctx);
   // A bare-root next ("/" — the default whenever there's no explicit ?next=,
   // and what safeInternalPath collapses login-loop / auth-callback values to)

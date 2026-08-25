@@ -22,19 +22,23 @@ export const dynamic = "force-dynamic";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams?: Promise<{ next?: string }>;
+  searchParams?: Promise<{ next?: string; invite?: string }>;
 }) {
   const params = (await searchParams) || {};
   const user = await getSessionUser().catch(() => null);
+  const invite = typeof params.invite === "string" ? params.invite.trim() : "";
   const next = typeof params.next === "string" && params.next.startsWith("/")
     ? params.next
     : "/";
   if (user) {
-    redirect(`/auth/land?next=${encodeURIComponent(next)}`);
+    redirect(invite ? `/invite/${encodeURIComponent(invite)}` : `/auth/land?next=${encodeURIComponent(next)}`);
   }
+  const authDestination = invite
+    ? `/invite/${encodeURIComponent(invite)}`
+    : `/auth/land?next=${encodeURIComponent(next)}`;
   return (
     <>
-      <AuthRedirectGuard to={`/auth/land?next=${encodeURIComponent(next)}`} />
+      <AuthRedirectGuard to={authDestination} />
       <LoginForm />
     </>
   );

@@ -65,10 +65,24 @@ export type AuthUserRecord = {
  * is directly testable; route.ts files can only export HTTP verbs.
  */
 export function safeInternalPath(raw: string | null | undefined): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
-  // Backslashes are treated as slashes by some browsers ("/\evil.com").
-  if (raw.startsWith("/\\")) return "/";
-  return raw;
+  if (!raw || raw.length > 2048 || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  // Backslashes may be normalized into slashes by browsers. Control characters
+  // are not meaningful application routes and create parser disagreement.
+  if (raw.includes("\\") || /[\u0000-\u001F\u007F]/u.test(raw)) return "/";
+  try {
+    const base = new URL("https://oasis.invalid");
+    const parsed = new URL(raw, base);
+    if (parsed.origin !== base.origin) return "/";
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return "/";
+  }
+}
+
+/** Recover only the opaque base64url token shape used by `/invite/[token]`. */
+export function inviteTokenFromPath(path: string): string | null {
+  const match = path.match(/^\/invite\/([A-Za-z0-9_-]{16,512})$/u);
+  return match?.[1] ?? null;
 }
 
 export type AdminResult<T> =
@@ -246,7 +260,7 @@ export async function mintSessionLinkToken(
  */
 export async function consumeSessionLinkToken(
   rawToken: string,
-): Promise<{ id: string; email: string } | null> {
+): Promise<{ id: string; email: string; sessionVersion: number } | null> {
   if (!rawToken) return null;
   const client = getTursoClient();
   const hash = createHash("sha256").update(rawToken).digest("hex");
@@ -261,7 +275,7 @@ export async function consumeSessionLinkToken(
   if (!claim.rowsAffected) return null;
 
   const res = await client.execute({
-    sql: `SELECT u.id AS id, u.email AS email
+    sql: `SELECT u.id AS id, u.email AS email, u.session_version AS session_version
           FROM ${AUTH_TOKENS} t
           JOIN ${AUTH_USERS} u ON lower(u.email) = lower(t.email)
           WHERE t.token_hash = ?
@@ -270,7 +284,13 @@ export async function consumeSessionLinkToken(
           LIMIT 1`,
     args: [hash, now],
   });
-  const row = res.rows[0] as { id?: unknown; email?: unknown } | undefined;
+  const row = res.rows[0] as {
+    id?: unknown;
+    email?: unknown;
+    session_version?: unknown;
+  } | undefined;
   if (!row || !row.id || !row.email) return null;
-  return { id: String(row.id), email: String(row.email) };
+  const sessionVersion = Number(row.session_version ?? 0);
+  if (!Number.isSafeInteger(sessionVersion) || sessionVersion < 0) return null;
+  return { id: String(row.id), email: String(row.email), sessionVersion };
 }

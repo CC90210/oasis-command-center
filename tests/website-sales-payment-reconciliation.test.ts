@@ -187,8 +187,38 @@ const disputed = await seed({ tenantId: "tenant-two", suffix: "dispute" });
 const healthy = await seed({ suffix: "healthy" });
 const failed = await seed({ suffix: "provider-failure" });
 const rollback = await seed({ suffix: "rollback" });
-const missingDeal = await seed({ suffix: "missing-deal" });
-await db.execute({ sql: "DELETE FROM website_deals WHERE id = ?", args: [missingDeal.dealId] });
+// A deposit is verified before a deal, commission, or fulfillment row exists.
+// The unattended worker must still detect a refund or the later balance could
+// close against money that is no longer collected.
+const refundedDeposit = await seed({ suffix: "deposit-refund" });
+await db.batch([
+  { sql: "DELETE FROM website_sales_commissions WHERE deal_id = ?", args: [refundedDeposit.dealId] },
+  { sql: "DELETE FROM website_onboarding WHERE deal_id = ?", args: [refundedDeposit.dealId] },
+  { sql: "DELETE FROM website_deals WHERE id = ?", args: [refundedDeposit.dealId] },
+  {
+    sql: "UPDATE website_sales_payment_receipts SET amount_cents = 100000, installment_kind = 'deposit' WHERE id = ?",
+    args: [refundedDeposit.receiptId],
+  },
+  {
+    sql: "UPDATE tenant_records SET data = ? WHERE id = ?",
+    args: [
+      JSON.stringify({
+        stage: "proposal_sent",
+        assigned_to: "founder-one",
+        proposal_payment_token: refundedDeposit.paymentToken,
+        payment_plan_id: refundedDeposit.paymentPlanId,
+        payment_verified: true,
+        payment_plan_status: "deposit_collected",
+        quoted_setup_amount: 4000,
+        collected_setup_amount: 1000,
+        setup_balance_due: 3000,
+        payment_due_amount: 3000,
+        last_contacted_at: "2026-08-20T00:00:00.000Z",
+      }),
+      refundedDeposit.leadId,
+    ],
+  },
+], "write");
 const manual = await seed({ suffix: "manual", provider: "manual" });
 
 await db.execute(`
@@ -230,14 +260,14 @@ const result = await reconcileWebsiteSalesPayments(db, {
 });
 assert.deepEqual(
   { scanned: result.scanned, healthy: result.healthy, refunded: result.refunded, disputed: result.disputed },
-  { scanned: 7, healthy: 1, refunded: 1, disputed: 1 },
+  { scanned: 7, healthy: 1, refunded: 2, disputed: 1 },
   "Stripe receipts are re-fetched; manual receipts never enter the unattended loop",
 );
-assert.equal(result.errors.length, 4, "partial refunds, invalid rows, provider failures, and atomic-write failures are returned per receipt, not hidden as success");
+assert.equal(result.errors.length, 3, "partial refunds, provider failures, and atomic-write failures are returned per receipt, not hidden as success");
 assert.ok(result.errors.some((row) => row.receiptId === partiallyRefunded.receiptId && row.error === "payment_partially_refunded:25000"));
 assert.ok(result.errors.some((row) => row.receiptId === failed.receiptId && row.error === "stripe_verification_failed"));
 assert.ok(result.errors.some((row) => row.receiptId === rollback.receiptId && row.error.includes("synthetic interaction failure")));
-assert.ok(result.errors.some((row) => row.receiptId === missingDeal.receiptId && row.error.includes("missing_closed_deal")));
+assert.equal(result.errors.some((row) => row.receiptId === refundedDeposit.receiptId), false);
 
 async function one(sql: string, args: unknown[] = []) {
   const rs = await db.execute({ sql, args: args as Array<string | number | null> });
@@ -335,6 +365,35 @@ const manualReceipt = await one(
   [manual.receiptId],
 );
 assert.equal(Number(manualReceipt.reconciliation_attempts), 0, "founder-confirmed manual payments are never auto-reconciled");
+
+const depositReceipt = await one(
+  "SELECT status, terminal_reason, last_reconciled_at FROM website_sales_payment_receipts WHERE id = ?",
+  [refundedDeposit.receiptId],
+);
+assert.equal(depositReceipt.status, "refunded", "a pre-close deposit refund is not skipped for lacking a deal row");
+assert.equal(depositReceipt.terminal_reason, "stripe_refunded");
+assert.equal(depositReceipt.last_reconciled_at, NOW.toISOString());
+const depositLead = object((await one(
+  "SELECT data FROM tenant_records WHERE id = ?",
+  [refundedDeposit.leadId],
+)).data);
+assert.equal(depositLead.payment_verified, false);
+assert.equal(depositLead.payment_plan_status, "payment_issue");
+assert.equal(depositLead.collected_setup_amount, 0);
+assert.equal(depositLead.setup_balance_due, 4000);
+assert.equal(depositLead.last_contacted_at, NOW.toISOString(), "a deposit reversal updates canonical Last Touch");
+assert.equal(Number((await one(
+  "SELECT COUNT(*) AS count FROM website_deals WHERE lead_id = ?",
+  [refundedDeposit.leadId],
+)).count), 0, "deposit reconciliation cannot fabricate a closed deal");
+assert.equal(Number((await one(
+  "SELECT COUNT(*) AS count FROM website_sales_commissions WHERE deal_id = ?",
+  [refundedDeposit.dealId],
+)).count), 0, "deposit reconciliation cannot accrue commission");
+assert.equal(Number((await one(
+  "SELECT COUNT(*) AS count FROM website_onboarding WHERE lead_id = ?",
+  [refundedDeposit.leadId],
+)).count), 0, "deposit reconciliation cannot open fulfillment");
 
 // The interaction insert failed after every preceding domain write. The write
 // transaction must roll all of them back; only the separate attempt diagnostic

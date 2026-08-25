@@ -9,6 +9,7 @@ import {
   isInvitableRole,
   isTrueAdminRole,
   listActiveInvites,
+  normalizeInviteEmail,
   tenantSlugFor,
 } from "@/lib/team";
 import { isOasisSalesRole } from "@/lib/team-roles";
@@ -69,7 +70,10 @@ export async function POST(req: NextRequest) {
   if (role === "admin" && !isTrueAdminRole(ctx.teamRole, ctx.isOwner)) {
     return bad(403, "forbidden");
   }
-  const email = body.email?.trim() || null;
+  // Every invite is a bearer credential. Pinning it to one normalized mailbox
+  // prevents a forwarded/leaked link from enrolling an unrelated account.
+  const email = normalizeInviteEmail(body.email);
+  if (!email) return bad(400, "valid teammate email required");
 
   try {
     const invite = await createInvite({

@@ -19,6 +19,12 @@ import {
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+function grantedScopes(scope: string | undefined): Set<string> {
+  return new Set((scope || "").split(/\s+/u).filter(Boolean));
+}
+
 export async function GET() {
   const user = await getSessionUser();
   if (!user) {
@@ -28,10 +34,13 @@ export async function GET() {
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("tenant_id")
+    .select("tenant_id,email")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
+  const expectedWorkEmail = String(
+    (profile.data as { email?: string | null } | null)?.email || "",
+  ).trim().toLowerCase();
   if (!tenantId) {
     return NextResponse.json({ ok: true, statuses: [] });
   }
@@ -45,19 +54,37 @@ export async function GET() {
     if (!services[row.service]) services[row.service] = { connected: false };
     if (row.has_value) services[row.service].connected = true;
   }
+  // Always return the work connection's readiness shape. A missing row means
+  // disconnected; a refresh token without Calendar scope means reconnect once.
+  if (!services.gmail_oauth) services.gmail_oauth = { connected: false };
 
   // Hydrate user-visible Gmail fields (address, expiry) for the panel
   // without leaking the tokens themselves. Bundle returns plaintext —
   // we filter down to just the non-sensitive bits.
   const statuses = await Promise.all(
     Object.entries(services).map(async ([service, { connected }]) => {
-      if (service === "gmail_oauth" && connected) {
+      if (service === "gmail_oauth") {
         const bundle = await getUserIntegrationBundle(tenantId, user.id, "gmail_oauth");
+        const workspaceConnected = Boolean(bundle.refresh_token);
+        const calendarConnected =
+          workspaceConnected &&
+          grantedScopes(bundle.scope).has(CALENDAR_EVENTS_SCOPE) &&
+          Boolean(expectedWorkEmail) &&
+          String(bundle.gmail_address || "").trim().toLowerCase() === expectedWorkEmail;
+        const calendarIdentityMismatch =
+          workspaceConnected &&
+          Boolean(expectedWorkEmail) &&
+          Boolean(bundle.gmail_address) &&
+          String(bundle.gmail_address).trim().toLowerCase() !== expectedWorkEmail;
         return {
           service,
-          connected: true,
+          connected: workspaceConnected,
           gmail_address: bundle.gmail_address || null,
           expires_at: bundle.expires_at || null,
+          calendar_connected: calendarConnected,
+          calendar_reconnect_required: workspaceConnected && !calendarConnected,
+          calendar_identity_mismatch: calendarIdentityMismatch,
+          expected_work_email: expectedWorkEmail || null,
         };
       }
       return { service, connected };

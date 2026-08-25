@@ -329,9 +329,12 @@ async function makeAuthedSupabase() {
 export async function getSessionUser() {
   if (process.env.EMPIRE_AUTH_BACKEND === "turso" && process.env.AUTH_SESSION_SECRET) {
     const { cookies } = await import("next/headers");
-    const { verifySession, SESSION_COOKIE } = await import("@/lib/turso-auth");
+    const { verifySessionAgainstDb, SESSION_COOKIE } = await import("@/lib/turso-auth");
     const store = await cookies();
-    const session = verifySession(store.get(SESSION_COOKIE)?.value);
+    const session = await verifySessionAgainstDb(
+      getTursoClient(),
+      store.get(SESSION_COOKIE)?.value,
+    );
     if (!session) return null;
     // user_metadata is present-but-empty: callers optional-chain into it for
     // display names and fall back to the email local-part, which is exactly

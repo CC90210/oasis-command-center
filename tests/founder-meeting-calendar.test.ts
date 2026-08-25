@@ -1,0 +1,677 @@
+import assert from "node:assert/strict";
+import {
+  cancelGoogleFounderMeeting,
+  createGoogleFounderMeeting,
+  founderMeetingConferenceRequestId,
+  founderMeetingEventId,
+  operatorCalendarStatus,
+  updateGoogleFounderMeeting,
+  type GoogleCalendarDependencies,
+} from "../lib/integrations/google-calendar";
+
+const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+const NOW = Date.parse("2026-08-25T14:00:00.000Z");
+const START_AT = "2026-08-26T20:00:00.000Z";
+const TENANT_ID = "tenant-oasis";
+const ORGANIZER_USER_ID = "user-founder";
+const BOOKING_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
+
+type FetchCall = { url: string; init?: RequestInit };
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function deterministicEventId(
+  requestId = BOOKING_REQUEST_ID,
+  tenantId = TENANT_ID,
+  hostUserId = ORGANIZER_USER_ID,
+): string {
+  return founderMeetingEventId(tenantId, hostUserId, requestId);
+}
+
+function deterministicConferenceId(
+  requestId = BOOKING_REQUEST_ID,
+  tenantId = TENANT_ID,
+  hostUserId = ORGANIZER_USER_ID,
+): string {
+  return founderMeetingConferenceRequestId(tenantId, hostUserId, requestId);
+}
+
+function eventResponse(eventId: string, meetUrl = "https://meet.google.com/abc-defg-hij") {
+  return {
+    id: eventId,
+    status: "confirmed",
+    summary: "OASIS 15-minute website audit — Lakeside Montessori School",
+    description:
+      "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nReview online enrolment and booking requirements.\n\nWebsite: https://lakesidemontessori.example/",
+    attendees: [{ email: "owner@example.com", responseStatus: "needsAction" }],
+    htmlLink: `https://calendar.google.com/calendar/event?eid=${eventId}`,
+    iCalUID: `${eventId}@google.com`,
+    hangoutLink: meetUrl,
+    organizer: { email: "founder@oasisai.work" },
+    start: { dateTime: START_AT, timeZone: "America/Toronto" },
+    end: { dateTime: "2026-08-26T20:15:00.000Z", timeZone: "America/Toronto" },
+  };
+}
+
+function freshBundle() {
+  return {
+    refresh_token: "refresh-token",
+    access_token: "fresh-access-token",
+    expires_at: "2026-08-25T16:00:00.000Z",
+    scope: `openid https://www.googleapis.com/auth/gmail.send ${CALENDAR_EVENTS_SCOPE}`,
+    gmail_address: "founder@oasisai.work",
+  };
+}
+
+function baseDependencies(
+  fetchImpl: GoogleCalendarDependencies["fetchImpl"],
+  overrides: Partial<GoogleCalendarDependencies> = {},
+): GoogleCalendarDependencies {
+  return {
+    fetchImpl,
+    getBundle: async () => freshBundle(),
+    setValue: async () => ({ ok: true, id: "credential" }),
+    now: () => NOW,
+    sleep: async () => undefined,
+    pollAttempts: 2,
+    pollIntervalMs: 0,
+    oauthClientId: "google-client-id",
+    oauthClientSecret: "google-client-secret",
+    ...overrides,
+  };
+}
+
+function requestArgs() {
+  return {
+    tenantId: TENANT_ID,
+    hostUserId: ORGANIZER_USER_ID,
+    expectedOrganizerEmail: "founder@oasisai.work",
+    requestId: BOOKING_REQUEST_ID,
+    meetingAt: START_AT,
+    timezone: "America/Toronto",
+    durationMinutes: 15,
+    clientEmail: "owner@example.com",
+    clientName: "Morgan Owner",
+    company: "Lakeside Montessori School",
+    website: "https://lakesidemontessori.example",
+    clientAgenda: "Review online enrolment and booking requirements.",
+  };
+}
+
+function updateArgs(eventId = deterministicEventId()) {
+  return {
+    tenantId: TENANT_ID,
+    hostUserId: ORGANIZER_USER_ID,
+    expectedOrganizerEmail: "founder@oasisai.work",
+    eventId,
+    meetingAt: "2026-08-27T18:30:00.000Z",
+    timezone: "America/Toronto",
+    durationMinutes: 15,
+    clientEmail: "new-owner@example.com",
+    clientName: "Morgan Owner",
+    company: "Lakeside Montessori School",
+    website: "https://lakesidemontessori.example/new-audit",
+    clientAgenda: "Confirm the revised audit time and review online enrolment.",
+  };
+}
+
+async function testCreatesFifteenMinuteMeetInviteWithoutInternalNotes() {
+  const calls: FetchCall[] = [];
+  let requestedService = "";
+  const secretHandoff = "Internal only: owner is nervous about budget.";
+  const args = { ...requestArgs(), internalHandoffNotes: secretHandoff };
+
+  const receipt = await createGoogleFounderMeeting(
+    args,
+    baseDependencies(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, init });
+      const payload = JSON.parse(String(init?.body)) as { id: string };
+      return jsonResponse(eventResponse(payload.id));
+    }, {
+      getBundle: async (_tenantId, _userId, service) => {
+        requestedService = service;
+        return freshBundle();
+      },
+    }),
+  );
+
+  assert.equal(requestedService, "gmail_oauth", "Calendar must use the work OAuth bundle");
+  assert.equal(calls.length, 1);
+  const createCall = calls[0];
+  const createUrl = new URL(createCall.url);
+  assert.equal(createCall.init?.method, "POST");
+  assert.equal(createUrl.pathname, "/calendar/v3/calendars/primary/events");
+  assert.equal(createUrl.searchParams.get("sendUpdates"), "all");
+  assert.equal(createUrl.searchParams.get("conferenceDataVersion"), "1");
+  assert.equal((createCall.init?.headers as Record<string, string>).authorization, "Bearer fresh-access-token");
+
+  const payload = JSON.parse(String(createCall.init?.body)) as {
+    id: string;
+    summary: string;
+    description: string;
+    attendees: Array<{ email: string; displayName?: string }>;
+    start: { dateTime: string; timeZone: string };
+    end: { dateTime: string; timeZone: string };
+    conferenceData: { createRequest: { requestId: string; conferenceSolutionKey: { type: string } } };
+  };
+  assert.match(payload.id, /^[0-9a-v]{5,1024}$/, "Google custom event IDs must use base32hex characters");
+  assert.equal(payload.id, deterministicEventId());
+  assert.equal(payload.summary, "OASIS 15-minute website audit — Lakeside Montessori School");
+  assert.deepEqual(payload.attendees, [{ email: "owner@example.com", displayName: "Morgan Owner" }]);
+  assert.equal(payload.start.dateTime, START_AT);
+  assert.equal(payload.start.timeZone, "America/Toronto");
+  assert.equal(Date.parse(payload.end.dateTime) - Date.parse(payload.start.dateTime), 15 * 60 * 1000);
+  assert.equal(payload.end.timeZone, "America/Toronto");
+  assert.equal(payload.conferenceData.createRequest.conferenceSolutionKey.type, "hangoutsMeet");
+  assert.equal(payload.conferenceData.createRequest.requestId, deterministicConferenceId());
+  assert.notEqual(
+    deterministicConferenceId(),
+    deterministicConferenceId("22222222-2222-4222-8222-222222222222"),
+    "each booking must have a unique Meet createRequest ID",
+  );
+  assert.ok(!JSON.stringify(payload).includes(secretHandoff), "internal handoff notes must never reach Google");
+  assert.equal(
+    payload.description,
+    "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nReview online enrolment and booking requirements.\n\nWebsite: https://lakesidemontessori.example/",
+  );
+
+  assert.deepEqual(receipt, {
+    calendarId: "primary",
+    eventId: payload.id,
+    htmlLink: `https://calendar.google.com/calendar/event?eid=${payload.id}`,
+    meetLink: "https://meet.google.com/abc-defg-hij",
+    iCalUID: `${payload.id}@google.com`,
+    organizerEmail: "founder@oasisai.work",
+  });
+}
+
+async function testRejectsBundleWithoutCalendarScope() {
+  let fetchCount = 0;
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () => {
+        fetchCount += 1;
+        return jsonResponse({});
+      }, {
+        getBundle: async () => ({ ...freshBundle(), scope: "https://www.googleapis.com/auth/gmail.send" }),
+      }),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "calendar_scope_required",
+  );
+  assert.equal(fetchCount, 0, "a Gmail-only token must fail before calling Google Calendar");
+}
+
+async function testRejectsWrongGoogleIdentityBeforeProviderCall() {
+  let fetchCount = 0;
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () => {
+        fetchCount += 1;
+        return jsonResponse({});
+      }, {
+        getBundle: async () => ({ ...freshBundle(), gmail_address: "personal@gmail.com" }),
+      }),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "calendar_organizer_mismatch",
+  );
+  assert.equal(fetchCount, 0, "a personal Google identity must fail before any Calendar mutation");
+}
+
+async function testRefreshesExpiredAccessTokenAndPersistsIt() {
+  const calls: FetchCall[] = [];
+  const persisted: Array<{ service: string; fieldKey: string; value: string }> = [];
+  const eventId = deterministicEventId();
+
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse({ access_token: "refreshed-access-token", expires_in: 3600 });
+      }
+      return jsonResponse(eventResponse(eventId));
+    }, {
+      getBundle: async () => ({
+        ...freshBundle(),
+        access_token: "expired-token",
+        expires_at: "2026-08-25T13:59:00.000Z",
+      }),
+      setValue: async (_tenantId, _userId, service, fieldKey, value) => {
+        persisted.push({ service, fieldKey, value });
+        return { ok: true, id: fieldKey };
+      },
+    }),
+  );
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, "https://oauth2.googleapis.com/token");
+  const tokenBody = new URLSearchParams(String(calls[0].init?.body));
+  assert.equal(tokenBody.get("grant_type"), "refresh_token");
+  assert.equal(tokenBody.get("refresh_token"), "refresh-token");
+  assert.equal(tokenBody.get("client_id"), "google-client-id");
+  assert.equal(tokenBody.get("client_secret"), "google-client-secret");
+  assert.equal((calls[1].init?.headers as Record<string, string>).authorization, "Bearer refreshed-access-token");
+  assert.deepEqual(persisted, [
+    { service: "gmail_oauth", fieldKey: "access_token", value: "refreshed-access-token" },
+    { service: "gmail_oauth", fieldKey: "expires_at", value: "2026-08-25T15:00:00.000Z" },
+  ]);
+  assert.equal(receipt.eventId, eventId);
+}
+
+async function testRefreshesAndRetriesOnceAfterCalendarRejectsFreshToken() {
+  const calls: FetchCall[] = [];
+  const eventId = deterministicEventId();
+  let calendarAttempts = 0;
+
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse({ access_token: "replacement-token", expires_in: 3600 });
+      }
+      calendarAttempts += 1;
+      if (calendarAttempts === 1) return jsonResponse({ error: "invalid_token" }, 401);
+      return jsonResponse(eventResponse(eventId));
+    }),
+  );
+
+  assert.equal(calendarAttempts, 2, "a 401 should receive exactly one refreshed retry");
+  assert.equal(calls.filter((call) => call.url === "https://oauth2.googleapis.com/token").length, 1);
+  assert.equal((calls[0].init?.headers as Record<string, string>).authorization, "Bearer fresh-access-token");
+  assert.equal((calls[2].init?.headers as Record<string, string>).authorization, "Bearer replacement-token");
+  assert.equal(receipt.eventId, eventId);
+}
+
+async function testReconcilesConflictByReadingDeterministicEvent() {
+  const calls: FetchCall[] = [];
+  const eventId = deterministicEventId();
+
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (input, init) => {
+      calls.push({ url: String(input), init });
+      if (init?.method === "POST") return new Response("already exists", { status: 409 });
+      return jsonResponse(eventResponse(eventId));
+    }),
+  );
+
+  assert.equal(calls.filter((call) => call.init?.method === "POST").length, 1);
+  assert.equal(calls.filter((call) => call.init?.method === "GET").length, 1);
+  assert.match(calls[1].url, new RegExp(`/events/${eventId}$`));
+  assert.equal(receipt.eventId, eventId);
+}
+
+async function testRejectsMismatchedEventOnConflictReconciliation() {
+  const eventId = deterministicEventId();
+  const wrongAttendee = {
+    ...eventResponse(eventId),
+    attendees: [{ email: "different-client@example.com", responseStatus: "accepted" }],
+  };
+  const wrongTime = {
+    ...eventResponse(eventId),
+    start: { dateTime: "2026-08-26T21:00:00.000Z", timeZone: "America/Toronto" },
+    end: { dateTime: "2026-08-26T21:15:00.000Z", timeZone: "America/Toronto" },
+  };
+
+  for (const mismatchedEvent of [wrongAttendee, wrongTime]) {
+    await assert.rejects(
+      createGoogleFounderMeeting(
+        requestArgs(),
+        baseDependencies(async (_input, init) => {
+          if (init?.method === "POST") return new Response("already exists", { status: 409 });
+          return jsonResponse(mismatchedEvent);
+        }),
+      ),
+      (error: unknown) => error instanceof Error && error.message === "calendar_reconcile_failed",
+    );
+  }
+}
+
+async function testRejectsInvalidNormalCreateReceipt() {
+  const eventId = deterministicEventId();
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () =>
+        jsonResponse({ ...eventResponse(eventId), status: "cancelled" }),
+      ),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "calendar_create_failed",
+  );
+}
+
+async function testAmbiguousCreateCarriesDeterministicEventIdForCompensation() {
+  let caught: unknown;
+  try {
+    await createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async () => {
+        throw new TypeError("simulated network interruption");
+      }),
+    );
+  } catch (error) {
+    caught = error;
+  }
+  assert(caught instanceof Error);
+  assert.equal(caught.message, "calendar_create_failed");
+  assert.equal(
+    (caught as Error & { eventId?: string }).eventId,
+    deterministicEventId(),
+    "a caller can cancel the exact deterministic event even when POST outcome is ambiguous",
+  );
+}
+
+function testNamespacesDeterministicIdsByTenantAndHost() {
+  const otherTenant = "tenant-other";
+  const otherHost = "user-other-founder";
+  assert.equal(deterministicEventId(), deterministicEventId());
+  assert.equal(deterministicConferenceId(), deterministicConferenceId());
+  assert.notEqual(
+    deterministicEventId(BOOKING_REQUEST_ID, TENANT_ID, ORGANIZER_USER_ID),
+    deterministicEventId(BOOKING_REQUEST_ID, otherTenant, ORGANIZER_USER_ID),
+    "the same request ID in another tenant must not reuse the Calendar event ID",
+  );
+  assert.notEqual(
+    deterministicEventId(BOOKING_REQUEST_ID, TENANT_ID, ORGANIZER_USER_ID),
+    deterministicEventId(BOOKING_REQUEST_ID, TENANT_ID, otherHost),
+    "the same request ID under another host must not reuse the Calendar event ID",
+  );
+  assert.notEqual(
+    deterministicConferenceId(BOOKING_REQUEST_ID, TENANT_ID, ORGANIZER_USER_ID),
+    deterministicConferenceId(BOOKING_REQUEST_ID, otherTenant, ORGANIZER_USER_ID),
+    "the same request ID in another tenant must not reuse the Meet request ID",
+  );
+  assert.notEqual(
+    deterministicConferenceId(BOOKING_REQUEST_ID, TENANT_ID, ORGANIZER_USER_ID),
+    deterministicConferenceId(BOOKING_REQUEST_ID, TENANT_ID, otherHost),
+    "the same request ID under another host must not reuse the Meet request ID",
+  );
+}
+
+async function testPollsForMeetProvisioning() {
+  const eventId = deterministicEventId();
+  let getCount = 0;
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (_input, init) => {
+      if (init?.method === "POST") {
+        const withoutMeet = eventResponse(eventId);
+        delete (withoutMeet as Partial<typeof withoutMeet>).hangoutLink;
+        return jsonResponse(withoutMeet);
+      }
+      getCount += 1;
+      const polled = eventResponse(eventId);
+      if (getCount === 1) delete (polled as Partial<typeof polled>).hangoutLink;
+      return jsonResponse(polled);
+    }),
+  );
+  assert.equal(getCount, 2);
+  assert.equal(receipt.meetLink, "https://meet.google.com/abc-defg-hij");
+}
+
+async function testFailsExplicitlyWhenMeetNeverAppears() {
+  const eventId = deterministicEventId();
+  let getCount = 0;
+  await assert.rejects(
+    createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(async (_input, init) => {
+        const withoutMeet = eventResponse(eventId);
+        delete (withoutMeet as Partial<typeof withoutMeet>).hangoutLink;
+        if (init?.method === "GET") getCount += 1;
+        return jsonResponse(withoutMeet);
+      }),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "google_meet_link_missing",
+  );
+  assert.equal(getCount, 2);
+}
+
+async function testReschedulesExistingMeetAndSendsUpdatedInvite() {
+  const calls: FetchCall[] = [];
+  const eventId = deterministicEventId();
+  const secretHandoff = "Internal only: budget objection and rep coaching note.";
+  const input = { ...updateArgs(eventId), internalHandoffNotes: secretHandoff };
+  const updatedEvent = {
+    ...eventResponse(eventId),
+    description:
+      "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nConfirm the revised audit time and review online enrolment.\n\nWebsite: https://lakesidemontessori.example/new-audit",
+    attendees: [{ email: "new-owner@example.com", responseStatus: "needsAction" }],
+    start: { dateTime: input.meetingAt, timeZone: input.timezone },
+    end: { dateTime: "2026-08-27T18:45:00.000Z", timeZone: input.timezone },
+  };
+
+  const receipt = await updateGoogleFounderMeeting(
+    input,
+    baseDependencies(async (request, init) => {
+      calls.push({ url: String(request), init });
+      return jsonResponse(updatedEvent);
+    }),
+  );
+
+  assert.equal(calls.length, 1);
+  const patchCall = calls[0];
+  const patchUrl = new URL(patchCall.url);
+  assert.equal(patchCall.init?.method, "PATCH");
+  assert.match(patchUrl.pathname, new RegExp(`/events/${eventId}$`));
+  assert.equal(patchUrl.searchParams.get("sendUpdates"), "all");
+  assert.equal(patchUrl.searchParams.get("conferenceDataVersion"), "1");
+  assert.equal((patchCall.init?.headers as Record<string, string>).authorization, "Bearer fresh-access-token");
+
+  const payload = JSON.parse(String(patchCall.init?.body)) as {
+    summary: string;
+    description: string;
+    attendees: Array<{ email: string; displayName?: string }>;
+    start: { dateTime: string; timeZone: string };
+    end: { dateTime: string; timeZone: string };
+    conferenceData?: unknown;
+  };
+  assert.equal(payload.summary, "OASIS 15-minute website audit — Lakeside Montessori School");
+  assert.deepEqual(payload.attendees, [{ email: "new-owner@example.com", displayName: "Morgan Owner" }]);
+  assert.equal(payload.start.dateTime, input.meetingAt);
+  assert.equal(payload.start.timeZone, input.timezone);
+  assert.equal(Date.parse(payload.end.dateTime) - Date.parse(payload.start.dateTime), 15 * 60 * 1000);
+  assert.equal(payload.end.timeZone, input.timezone);
+  assert.equal(payload.conferenceData, undefined, "rescheduling must preserve the existing Meet room");
+  assert.ok(!JSON.stringify(payload).includes(secretHandoff), "internal handoff notes must never reach Google");
+  assert.equal(
+    payload.description,
+    "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nConfirm the revised audit time and review online enrolment.\n\nWebsite: https://lakesidemontessori.example/new-audit",
+  );
+  assert.deepEqual(receipt, {
+    calendarId: "primary",
+    eventId,
+    htmlLink: `https://calendar.google.com/calendar/event?eid=${eventId}`,
+    meetLink: "https://meet.google.com/abc-defg-hij",
+    iCalUID: `${eventId}@google.com`,
+    organizerEmail: "founder@oasisai.work",
+  });
+}
+
+async function testRescheduleFailsIfExistingMeetCannotBeVerified() {
+  const eventId = deterministicEventId();
+  const input = updateArgs(eventId);
+  let getCount = 0;
+  await assert.rejects(
+    updateGoogleFounderMeeting(
+      input,
+      baseDependencies(async (_request, init) => {
+        const withoutMeet = {
+          ...eventResponse(eventId),
+          description:
+            "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nConfirm the revised audit time and review online enrolment.\n\nWebsite: https://lakesidemontessori.example/new-audit",
+          attendees: [{ email: "new-owner@example.com", responseStatus: "needsAction" }],
+          start: { dateTime: input.meetingAt, timeZone: input.timezone },
+          end: { dateTime: "2026-08-27T18:45:00.000Z", timeZone: input.timezone },
+        };
+        delete (withoutMeet as Partial<typeof withoutMeet>).hangoutLink;
+        if (init?.method === "GET") getCount += 1;
+        return jsonResponse(withoutMeet);
+      }),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "google_meet_link_missing",
+  );
+  assert.equal(getCount, 2, "reschedule must briefly poll before declaring the Meet receipt missing");
+}
+
+async function testRejectsMismatchedRescheduleReceipt() {
+  const eventId = deterministicEventId();
+  const input = updateArgs(eventId);
+  const expected = {
+    ...eventResponse(eventId),
+    description:
+      "A 15-minute website audit with OASIS AI Solutions.\n\nAgenda:\nConfirm the revised audit time and review online enrolment.\n\nWebsite: https://lakesidemontessori.example/new-audit",
+    attendees: [{ email: "new-owner@example.com", responseStatus: "needsAction" }],
+    start: { dateTime: input.meetingAt, timeZone: input.timezone },
+    end: { dateTime: "2026-08-27T18:45:00.000Z", timeZone: input.timezone },
+  };
+  const wrongAttendee = {
+    ...expected,
+    attendees: [{ email: "different-client@example.com", responseStatus: "accepted" }],
+  };
+  const wrongTime = {
+    ...expected,
+    start: { dateTime: "2026-08-27T19:30:00.000Z", timeZone: input.timezone },
+    end: { dateTime: "2026-08-27T19:45:00.000Z", timeZone: input.timezone },
+  };
+
+  for (const mismatchedEvent of [wrongAttendee, wrongTime]) {
+    await assert.rejects(
+      updateGoogleFounderMeeting(
+        input,
+        baseDependencies(async () => jsonResponse(mismatchedEvent)),
+      ),
+      (error: unknown) => error instanceof Error && error.message === "calendar_update_failed",
+    );
+  }
+}
+
+async function testCancelSendsUpdatesAndTreatsMissingEventAsSuccess() {
+  const eventId = deterministicEventId();
+  const statuses = [204, 404, 410];
+  for (const status of statuses) {
+    const calls: FetchCall[] = [];
+    await cancelGoogleFounderMeeting(
+      { tenantId: TENANT_ID, hostUserId: ORGANIZER_USER_ID, expectedOrganizerEmail: "founder@oasisai.work", eventId },
+      baseDependencies(async (request, init) => {
+        calls.push({ url: String(request), init });
+        return new Response(null, { status });
+      }),
+    );
+    assert.equal(calls.length, 1);
+    const cancelUrl = new URL(calls[0].url);
+    assert.equal(calls[0].init?.method, "DELETE");
+    assert.match(cancelUrl.pathname, new RegExp(`/events/${eventId}$`));
+    assert.equal(cancelUrl.searchParams.get("sendUpdates"), "all");
+    assert.equal((calls[0].init?.headers as Record<string, string>).authorization, "Bearer fresh-access-token");
+  }
+}
+
+async function testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope() {
+  const eventId = deterministicEventId();
+  const calls: FetchCall[] = [];
+  await cancelGoogleFounderMeeting(
+    { tenantId: TENANT_ID, hostUserId: ORGANIZER_USER_ID, expectedOrganizerEmail: "founder@oasisai.work", eventId },
+    baseDependencies(async (request, init) => {
+      const url = String(request);
+      calls.push({ url, init });
+      if (url === "https://oauth2.googleapis.com/token") {
+        return jsonResponse({ access_token: "cancel-token", expires_in: 3600 });
+      }
+      return new Response(null, { status: 204 });
+    }, {
+      getBundle: async () => ({
+        ...freshBundle(),
+        access_token: "expired-token",
+        expires_at: "2026-08-25T13:59:00.000Z",
+      }),
+    }),
+  );
+  assert.equal(calls[0].url, "https://oauth2.googleapis.com/token");
+  assert.equal((calls[1].init?.headers as Record<string, string>).authorization, "Bearer cancel-token");
+
+  let fetchCount = 0;
+  await assert.rejects(
+    cancelGoogleFounderMeeting(
+      { tenantId: TENANT_ID, hostUserId: ORGANIZER_USER_ID, expectedOrganizerEmail: "founder@oasisai.work", eventId },
+      baseDependencies(async () => {
+        fetchCount += 1;
+        return new Response(null, { status: 204 });
+      }, {
+        getBundle: async () => ({
+          ...freshBundle(),
+          scope: "https://www.googleapis.com/auth/gmail.send",
+        }),
+      }),
+    ),
+    (error: unknown) => error instanceof Error && error.message === "calendar_scope_required",
+  );
+  assert.equal(fetchCount, 0);
+}
+
+async function main() {
+  const connected = await operatorCalendarStatus(
+    TENANT_ID,
+    ORGANIZER_USER_ID,
+    { getBundle: async () => freshBundle() },
+  );
+  assert.deepEqual(connected, {
+    connected: true,
+    address: "founder@oasisai.work",
+  });
+  const needsScope = await operatorCalendarStatus(
+    TENANT_ID,
+    ORGANIZER_USER_ID,
+    {
+      getBundle: async () => ({
+        ...freshBundle(),
+        scope: "https://www.googleapis.com/auth/gmail.send",
+      }),
+    },
+  );
+  assert.deepEqual(needsScope, {
+    connected: false,
+    reason: "calendar_scope_required",
+    address: "founder@oasisai.work",
+  });
+  testNamespacesDeterministicIdsByTenantAndHost();
+  assert.equal(deterministicEventId(), deterministicEventId());
+  assert.notEqual(
+    deterministicEventId(),
+    deterministicEventId("22222222-2222-4222-8222-222222222222"),
+  );
+  await testCreatesFifteenMinuteMeetInviteWithoutInternalNotes();
+  await testRejectsBundleWithoutCalendarScope();
+  await testRejectsWrongGoogleIdentityBeforeProviderCall();
+  await testRefreshesExpiredAccessTokenAndPersistsIt();
+  await testRefreshesAndRetriesOnceAfterCalendarRejectsFreshToken();
+  await testReconcilesConflictByReadingDeterministicEvent();
+  await testRejectsMismatchedEventOnConflictReconciliation();
+  await testRejectsInvalidNormalCreateReceipt();
+  await testAmbiguousCreateCarriesDeterministicEventIdForCompensation();
+  await testPollsForMeetProvisioning();
+  await testFailsExplicitlyWhenMeetNeverAppears();
+  await testReschedulesExistingMeetAndSendsUpdatedInvite();
+  await testRejectsMismatchedRescheduleReceipt();
+  await testRescheduleFailsIfExistingMeetCannotBeVerified();
+  await testCancelSendsUpdatesAndTreatsMissingEventAsSuccess();
+  await testCancelRefreshesTokenAndFailsClosedWithoutCalendarScope();
+  console.log("founder-meeting-calendar: OK");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

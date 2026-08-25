@@ -91,6 +91,82 @@ export type MemberRow = {
   joined_at: string;
 };
 
+function cleanMemberName(value: string | null | undefined): string | null {
+  const normalized = String(value || "").trim();
+  // Several legacy profiles stored the email address (and, in one import,
+  // the email plus "00") as the person's name. Never render that as identity.
+  if (!normalized || normalized.includes("@")) return null;
+  return normalized.slice(0, 120);
+}
+
+function nameFromMemberEmail(email: string): string {
+  const local = email.split("@")[0]?.trim() || "Team member";
+  return local
+    .split(/[._-]+/u)
+    .filter(Boolean)
+    .map((part) =>
+      part.length <= 2
+        ? part.toUpperCase()
+        : `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`,
+    )
+    .join(" ") || "Team member";
+}
+
+function memberPreferenceScore(member: MemberRow): number {
+  return (
+    (member.is_owner ? 1_000 : 0) +
+    (member.team_role === "owner" ? 500 : 0) +
+    (member.admin_access ? 200 : 0) +
+    (member.auth_user_id ? 50 : 0) +
+    (cleanMemberName(member.display_name) ? 20 : 0) +
+    (cleanMemberName(member.full_name) ? 10 : 0)
+  );
+}
+
+/**
+ * Return one deterministic, human-readable row per real teammate.
+ *
+ * Turso contains a small amount of pre-cutover profile debt: duplicate rows
+ * can share an auth id or email, and some names are email-shaped. Choosing a
+ * row by database return order made Team and Activity disagree between loads.
+ * Prefer the highest-authority/richest row, use the primary key as the stable
+ * tiebreaker, and normalize only the returned view (no destructive data edit).
+ */
+export function canonicalizeTenantMembers(rows: MemberRow[]): MemberRow[] {
+  const ordered = [...rows].sort(
+    (left, right) =>
+      memberPreferenceScore(right) - memberPreferenceScore(left) ||
+      left.id.localeCompare(right.id),
+  );
+  const seenAuthIds = new Set<string>();
+  const seenEmails = new Set<string>();
+  const canonical: MemberRow[] = [];
+
+  for (const row of ordered) {
+    const authId = row.auth_user_id?.trim() || null;
+    const email = row.email.trim().toLowerCase();
+    if ((authId && seenAuthIds.has(authId)) || (email && seenEmails.has(email))) continue;
+    if (authId) seenAuthIds.add(authId);
+    if (email) seenEmails.add(email);
+
+    const displayName = cleanMemberName(row.display_name);
+    const fullName = cleanMemberName(row.full_name) || nameFromMemberEmail(email);
+    canonical.push({
+      ...row,
+      email,
+      display_name: displayName,
+      full_name: fullName,
+    });
+  }
+
+  return canonical.sort(
+    (left, right) =>
+      Number(right.is_owner) - Number(left.is_owner) ||
+      left.joined_at.localeCompare(right.joined_at) ||
+      left.id.localeCompare(right.id),
+  );
+}
+
 export type InviteRow = {
   id: string;
   tenant_id: string;
@@ -157,17 +233,25 @@ export function generateInviteToken(): { raw: string; hash: string } {
   return { raw, hash: hashInviteToken(raw) };
 }
 
-function normalizeEmail(email: string | null | undefined): string {
-  return (email || "").trim().toLowerCase();
+const TEAM_INVITE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Normalize a teammate address or fail closed when it cannot pin an invite. */
+export function normalizeInviteEmail(email: unknown): string | null {
+  if (typeof email !== "string") return null;
+  const normalized = email.trim().toLowerCase();
+  if (!normalized || normalized.length > 254 || !TEAM_INVITE_EMAIL_RE.test(normalized)) {
+    return null;
+  }
+  return normalized;
 }
 
 export function inviteEmailMatchesUser(
   inviteEmail: string | null | undefined,
   userEmail: string | null | undefined,
 ): boolean {
-  const pinned = normalizeEmail(inviteEmail);
-  if (!pinned) return true;
-  return pinned === normalizeEmail(userEmail);
+  const pinned = normalizeInviteEmail(inviteEmail);
+  const user = normalizeInviteEmail(userEmail);
+  return pinned !== null && user !== null && pinned === user;
 }
 
 export async function getSessionContext(): Promise<SessionContext | null> {
@@ -201,7 +285,7 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
     .order("is_owner", { ascending: false })
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getTenantMembers", error);
-  return (data ?? []) as MemberRow[];
+  return canonicalizeTenantMembers((data ?? []) as MemberRow[]);
 }
 
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {
@@ -225,7 +309,7 @@ export async function createInvite(
     tenantId: string;
     role: Exclude<TeamRole, "owner">;
     createdBy: string;
-    email?: string | null;
+    email: string;
   },
   /**
    * Injectable for tests ONLY; every caller in the app omits it.
@@ -239,12 +323,14 @@ export async function createInvite(
   db: ReturnType<typeof getServiceSupabase> = getServiceSupabase(),
 ): Promise<{ id: string; rawToken: string; expiresAt: string }> {
   const supa = db;
+  const email = normalizeInviteEmail(args.email);
+  if (!email) throw new Error("invite_email_required");
   const { raw, hash } = generateInviteToken();
   const { data, error } = await supa
     .from("tenant_invites")
     .insert({
       tenant_id: args.tenantId,
-      email: args.email ?? null,
+      email,
       team_role: args.role,
       token_hash: hash,
       created_by: args.createdBy,
@@ -288,7 +374,13 @@ export async function redeemInvite(
   rawToken: string,
   redeemerAuthId: string
 ): Promise<
-  | { ok: true; tenantId: string; teamRole: TeamRole; idempotent?: boolean }
+  | {
+      ok: true;
+      tenantId: string;
+      teamRole: TeamRole;
+      idempotent?: boolean;
+      alreadyMember?: boolean;
+    }
   | { ok: false; error: string }
 > {
   const supa = getServiceSupabase();
@@ -349,7 +441,12 @@ export async function redeemInvite(
   });
   if (error) return { ok: false, error: error.message };
   if (!data?.ok) return { ok: false, error: data?.error ?? "invalid_or_expired" };
-  return { ok: true, tenantId: data.tenant_id, teamRole: data.team_role as TeamRole };
+  return {
+    ok: true,
+    tenantId: data.tenant_id,
+    teamRole: data.team_role as TeamRole,
+    alreadyMember: data.already_member === true,
+  };
 }
 
 export async function setMemberRole(args: {

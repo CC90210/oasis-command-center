@@ -9,7 +9,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getTenantMembers, type MemberRow } from "@/lib/team";
+import { canonicalizeTenantMembers, getTenantMembers, type MemberRow } from "@/lib/team";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
@@ -43,9 +43,7 @@ export function memberActivityLabel(
 
 /** Build authoritative identity maps from this tenant's actual members. */
 export function buildHumanActorMaps(
-  members: Array<
-    Pick<MemberRow, "id" | "auth_user_id" | "email" | "full_name" | "display_name">
-  >,
+  members: MemberRow[],
 ): {
   actors: ActivityActor[];
   byEmail: Map<string, ActivityActor>;
@@ -54,7 +52,7 @@ export function buildHumanActorMaps(
   const actors: ActivityActor[] = [];
   const byEmail = new Map<string, ActivityActor>();
   const byId = new Map<string, ActivityActor>();
-  for (const member of members) {
+  for (const member of canonicalizeTenantMembers(members)) {
     const actor: ActivityActor = {
       key: `human:${member.id}`,
       label: memberActivityLabel(member),
@@ -105,6 +103,7 @@ export function resolveActivityAgent(
     return bySlug.get("helios") || null;
   }
   if (
+    normalized.includes("sunbiz") ||
     normalized.includes("follow_up") ||
     normalized.includes("daily_plan") ||
     normalized.includes("underwriting") ||
@@ -127,6 +126,23 @@ export function sourceNamesDisabledAgent(
   const enabled = new Set(
     enabledAgents.map((agent) => resolveAgentKey(agent.key.replace(/^agent:/, "")).toLowerCase()),
   );
+  const familyAgent =
+    normalized.includes("cold_outreach") ||
+    normalized.includes("sequence") ||
+    normalized.includes("drip") ||
+    normalized.includes("form_intake") ||
+    normalized.includes("texttorrent")
+      ? "helios"
+      : normalized.includes("sunbiz") ||
+          normalized.includes("follow_up") ||
+          normalized.includes("daily_plan") ||
+          normalized.includes("underwriting") ||
+          normalized.includes("classifier") ||
+          normalized.includes("renewal") ||
+          normalized.includes("shop_out_sender")
+        ? "solara"
+        : null;
+  if (familyAgent && !enabled.has(familyAgent)) return true;
   return Object.keys(AGENT_REGISTRY).some((key) => {
     const resolved = resolveAgentKey(key).toLowerCase();
     const boundary = new RegExp(`(^|[^a-z0-9])${escapeRegex(key.toLowerCase())}([^a-z0-9]|$)`);

@@ -20,11 +20,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { redeemInvite } from "@/lib/team";
-import { resolveClientProfileSlug } from "@/lib/client-profiles";
+import { finalizeInviteProfile } from "@/lib/invite-profile-finalization";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { getManifest } from "@/lib/manifest/loader";
-import { defaultAgentsForRole } from "@/lib/role-agent-defaults";
-import type { TeamRole } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,8 +51,11 @@ export async function POST(req: NextRequest) {
   // to the inviter's tenant + assigns the invite's team_role.
   const result = await redeemInvite(rawToken, user.id);
   if (!result.ok) {
+    const message = result.error === "already_member_of_another_tenant"
+      ? "This account already belongs to another workspace. Sign out and use the email this invite was sent to, or ask an admin for help."
+      : result.error;
     return NextResponse.json(
-      { ok: false, error: "redeem_failed", message: result.error },
+      { ok: false, error: "redeem_failed", message },
       { status: 400 },
     );
   }
@@ -86,40 +86,22 @@ export async function POST(req: NextRequest) {
   // along with any future client-tenant mappings.
   let tenantSlug: string | null = null;
   try {
-    const db = getServiceSupabase();
-    const { data: tenant } = await db
-      .from("tenants")
-      .select("slug, custom_fields")
-      .eq("id", result.tenantId)
-      .maybeSingle();
-    if (tenant) tenantSlug = resolveClientProfileSlug(tenant);
-  } catch {
-    // Soft-fail — null tenantSlug just routes the caller through "/" which
-    // the layout will handle.
-  }
-
-  // Stamp role-based default agents on the newly-redeemed profile (the
-  // SQL redeem_tenant_invite function leaves agents_enabled NULL).
-  // Existing profiles keep whatever they had — `is null` clause means
-  // re-redeem doesn't overwrite explicit user choices. Soft-fail: a
-  // missing manifest or unresolvable slug shouldn't block the redeem.
-  try {
-    const db = getServiceSupabase();
-    const manifest = tenantSlug ? await getManifest(tenantSlug).catch(() => null) : null;
-    const defaults = defaultAgentsForRole({
-      tenantSlug,
-      role: (result.teamRole as TeamRole) || null,
-      manifest,
+    ({ tenantSlug } = await finalizeInviteProfile({
+      tenantId: result.tenantId,
+      authUserId: user.id,
+      teamRole: result.teamRole,
+      preserveExistingMember: result.alreadyMember === true,
+    }));
+  } catch (error) {
+    console.error("[auth.redeem-invite] profile finalization failed", {
+      tenantId: result.tenantId,
+      userId: user.id,
+      error: error instanceof Error ? error.message : "profile_finalize_failed",
     });
-    if (defaults.length > 0) {
-      await db
-        .from("user_profiles")
-        .update({ agents_enabled: defaults })
-        .eq("auth_user_id", user.id)
-        .is("agents_enabled", null);
-    }
-  } catch {
-    // soft-fail
+    return NextResponse.json(
+      { ok: false, error: "profile_finalize_failed" },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({

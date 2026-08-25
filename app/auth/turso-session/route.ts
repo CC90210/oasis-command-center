@@ -76,6 +76,7 @@ export async function GET(req: NextRequest) {
       sub: user.id,
       email: user.email,
       exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+      ver: user.sessionVersion,
     }),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",

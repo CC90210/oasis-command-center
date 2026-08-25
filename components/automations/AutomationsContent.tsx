@@ -112,9 +112,9 @@ export async function AutomationsContent({
           ) : (
             <>
               <span className="text-fg-muted font-bold">Computer not connected yet.</span>{" "}
-              Jobs you create here are saved, but they won&apos;t start running until you pair a
-              machine. Click <span className="text-fg font-medium">Install bridge</span> —
-              it takes about a minute, one command to copy-paste, and you&apos;re live.
+              Local agent jobs are paused until a machine is paired. Cloud sales workers, including
+              founder-meeting invitations and reminders, continue independently. Click{" "}
+              <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
             </>
           )}
         </div>
@@ -137,9 +137,9 @@ export async function AutomationsContent({
         </summary>
         <div className="mt-3 space-y-3 text-fg-muted leading-relaxed">
           <p>
-            <span className="text-fg font-bold">Where they run.</span> Each automation runs on
-            the connected machine, not the cloud. The machine wakes up every minute, checks the
-            schedule, and runs anything that&apos;s due — quietly in the background.
+            <span className="text-fg font-bold">Where they run.</span> Calendar invitations and
+            meeting reminders run in the cloud, so they do not depend on anyone&apos;s laptop. Agent
+            scripts that need local files or CLIs run through the connected machine.
           </p>
           <p>
             <span className="text-fg font-bold">What it costs.</span> Most jobs are free

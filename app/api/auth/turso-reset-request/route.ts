@@ -12,6 +12,7 @@ import { rateLimit } from "@/lib/rate-limit";
 import { tursoAuthActive } from "@/lib/turso-auth";
 import { sendAuthEmail } from "@/lib/auth-email";
 import { getSessionUser } from "@/lib/supabase-server";
+import { validateActiveInviteForEmail } from "@/lib/invite-account-recovery";
 
 export const runtime = "nodejs";
 
@@ -32,7 +33,7 @@ export async function POST(req: NextRequest) {
   const gate = rateLimit({ key: `reset-req:${ip}`, capacity: 5, refillPerSec: 5 / 900 });
   if (!gate.allowed) return NextResponse.json({ ok: true });
 
-  let body: { email?: string };
+  let body: { email?: string; invite_token?: string };
   try {
     body = await req.json();
   } catch {
@@ -60,6 +61,23 @@ export async function POST(req: NextRequest) {
   });
 
   if (user.rows.length) {
+    const requestedInvite = typeof body.invite_token === "string"
+      ? body.invite_token.trim()
+      : "";
+    let verifiedInvite = "";
+    if (requestedInvite) {
+      const validation = await validateActiveInviteForEmail(db, {
+        rawToken: requestedInvite,
+        email,
+      });
+      // Deliberately do not expose whether the token or email pin failed.
+      // Password reset still proceeds; only the tenant continuation is dropped.
+      // Auto-continuation is restricted to an invite explicitly pinned to
+      // this address. An open invite remains usable through its original link,
+      // but cannot be injected into an unrelated account-security email.
+      if (validation.ok && validation.emailPinned) verifiedInvite = requestedInvite;
+    }
+
     const issuedAt = new Date().toISOString();
     // Keep one active reset capability per account. Repeated clicks invalidate
     // older messages before the new token is issued.
@@ -78,7 +96,11 @@ export async function POST(req: NextRequest) {
     });
 
     const base = process.env.NEXT_PUBLIC_APP_URL || new URL(req.url).origin;
-    const link = `${base}/auth/reset-password?turso_token=${raw}`;
+    const resetUrl = new URL("/auth/reset-password", base);
+    resetUrl.searchParams.set("turso_token", raw);
+    resetUrl.searchParams.set("email", email);
+    if (verifiedInvite) resetUrl.searchParams.set("invite", verifiedInvite);
+    const link = resetUrl.toString();
     const delivery = await sendAuthEmail({
       to: email,
       subject: "Reset your OASIS AI password",

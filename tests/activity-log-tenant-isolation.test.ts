@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   buildHumanActorMaps,
   getActivityFeed,
@@ -7,7 +8,7 @@ import {
   type ActivityActor,
 } from "@/lib/audit/activity-feed";
 import { buildEmployeeActivityRollup } from "@/lib/audit/employee-rollup";
-import type { MemberRow } from "@/lib/team";
+import { canonicalizeTenantMembers, type MemberRow } from "@/lib/team";
 
 type Row = Record<string, unknown>;
 
@@ -141,6 +142,18 @@ const db = fakeDatabase({
       created_at: now,
     },
     {
+      id: "interaction-stale-sunbiz-family",
+      tenant_id: "oasis-tenant",
+      actor_user_id: null,
+      metadata: {},
+      type: "outbound.recorded",
+      channel: "email",
+      direction: "outbound",
+      agent_source: "sunbiz-sequence-runner",
+      to_email: "merchant@sunbiz.test",
+      created_at: now,
+    },
+    {
       id: "interaction-other-tenant",
       tenant_id: "sunbiz-tenant",
       actor_user_id: "user-rep",
@@ -235,7 +248,47 @@ assert.equal(
   "a SunBiz source family is not attributed when Helios is not enabled",
 );
 assert.equal(sourceNamesDisabledAgent("helios", oasisAgents), true);
+for (const foreignFamily of [
+  "sunbiz-sequence-runner",
+  "cold_outreach",
+  "sequence",
+  "texttorrent",
+  "follow_up",
+  "underwriting",
+]) {
+  assert.equal(
+    sourceNamesDisabledAgent(foreignFamily, oasisAgents),
+    true,
+    `${foreignFamily} must not be relabelled System when its owning agent is disabled`,
+  );
+}
 assert.equal(sourceNamesDisabledAgent("bravo-scheduler", oasisAgents), false);
+
+const canonicalMembers = canonicalizeTenantMembers([
+  ...members,
+  {
+    ...members[1],
+    id: "profile-rep-duplicate",
+    full_name: "rep@oasis.test00",
+    display_name: null,
+    joined_at: "2026-08-21T00:00:00.000Z",
+  },
+]);
+assert.equal(canonicalMembers.length, 2, "duplicate auth/email profiles render as one teammate");
+assert.equal(
+  canonicalMembers.find((member) => member.auth_user_id === "user-rep")?.id,
+  "profile-rep",
+  "the richer deterministic profile wins over a malformed duplicate",
+);
+
+const normalizedLegacyMember = canonicalizeTenantMembers([
+  {
+    ...members[1],
+    full_name: "rep@oasis.test00",
+    display_name: null,
+  },
+])[0];
+assert.equal(normalizedLegacyMember.full_name, "Rep", "email-shaped names become a human label");
 
 const feed = await getActivityFeed("oasis-tenant", {
   members,
@@ -253,6 +306,10 @@ assert.equal(
 assert.ok(
   !feed.rows.some((row) => row.id === "li:interaction-stale-helios"),
   "a disabled foreign persona's interaction is dropped, not relabelled with its target intact",
+);
+assert.ok(
+  !feed.rows.some((row) => row.id === "li:interaction-stale-sunbiz-family"),
+  "a disabled foreign agent family is dropped before its target can leak under System",
 );
 assert.ok(!feed.rows.some((row) => row.id.includes("sunbiz") || row.action === "must.not.leak"));
 assert.ok(!feed.rows.some((row) => row.actor === "Helios" || row.target.includes("Helios")));
@@ -301,6 +358,24 @@ assert.equal(rollup.find((row) => row.profileId === "profile-rep")?.call_actions
 assert.equal(rollup.find((row) => row.profileId === "profile-rep")?.recent_actions, 2);
 assert.equal(rollup.find((row) => row.profileId === "profile-cc")?.email_sends, 1);
 assert.ok(!rollup.some((row) => row.email.includes("sunbiz")), "foreign metadata cannot add a rep");
+
+const operationsPanel = readFileSync(
+  new URL("../components/settings/OperationsTrackerPanel.tsx", import.meta.url),
+  "utf8",
+);
+assert.ok(
+  !operationsPanel.includes(".limit(1_000)"),
+  "seven-day rep totals must not silently stop at the first database page",
+);
+assert.equal(
+  operationsPanel.match(/\.order\("id", \{ ascending: true \}\)\s*\.range\(/gu)?.length,
+  2,
+  "both metric sources must page in a stable primary-key order",
+);
+assert.ok(
+  operationsPanel.includes("no partial totals are being shown"),
+  "a failed metrics page must be disclosed instead of rendering false zeroes",
+);
 
 console.log("activity log tenant isolation: ok");
 }

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
+import { getUserIntegrationBundle } from "@/lib/user-integration-store";
 import {
   canManageTeam,
   isTrueAdminRole,
@@ -20,18 +21,66 @@ const ROLE_VALUES: TeamRole[] = [
   "agent",
 ];
 
+const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+async function calendarReadiness(tenantId: string, userId: string | null, profileEmail: string | null) {
+  if (!userId) {
+    return {
+      calendar_connected: false,
+      calendar_reconnect_required: false,
+      calendar_identity_mismatch: false,
+      connected_google_address: null,
+    };
+  }
+  try {
+    const bundle = await getUserIntegrationBundle(tenantId, userId, "gmail_oauth");
+    const workspaceConnected = Boolean(bundle.refresh_token);
+    const scopes = new Set((bundle.scope || "").split(/\s+/u).filter(Boolean));
+    const connectedAddress = String(bundle.gmail_address || "").trim().toLowerCase();
+    const expectedAddress = String(profileEmail || "").trim().toLowerCase();
+    const identityMatches = Boolean(connectedAddress && expectedAddress && connectedAddress === expectedAddress);
+    const calendarConnected = workspaceConnected && scopes.has(CALENDAR_EVENTS_SCOPE) && identityMatches;
+    return {
+      calendar_connected: calendarConnected,
+      calendar_reconnect_required: workspaceConnected && !calendarConnected,
+      calendar_identity_mismatch: workspaceConnected && Boolean(connectedAddress && expectedAddress) && !identityMatches,
+      connected_google_address: connectedAddress || null,
+    };
+  } catch (err) {
+    // Host readiness fails closed. Never include decrypted bundle fields in
+    // either the log or the response.
+    console.error("[team.members] Google Workspace readiness lookup failed", {
+      tenantId,
+      userId,
+      error: err instanceof Error ? err.message : "lookup_failed",
+    });
+    return {
+      calendar_connected: false,
+      calendar_reconnect_required: false,
+      calendar_identity_mismatch: false,
+      connected_google_address: null,
+    };
+  }
+}
+
 export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
   const members = await getTenantMembers(ctx.tenantId);
   const canManage = canManageTeam(ctx.teamRole, ctx.adminAccess);
+  const membersWithCalendar = await Promise.all(
+    members.map(async (member) => ({
+      member,
+      readiness: await calendarReadiness(ctx.tenantId, member.auth_user_id, member.email),
+    })),
+  );
   return NextResponse.json({
     ok: true,
     self_profile_id: ctx.profileId,
     self_role: ctx.teamRole,
     self_is_owner: ctx.isOwner,
     can_manage: canManage,
-    members: members.map((m) => ({
+    members: membersWithCalendar.map(({ member: m, readiness }) => ({
       id: m.id,
       // auth_user_id is required by the lead-drawer "Assign to" dropdown
       // (Phase 3 of multi-employee personalization, 2026-05-29). Safe to
@@ -47,6 +96,10 @@ export async function GET() {
       team_role: m.team_role,
       is_owner: m.is_owner,
       joined_at: m.joined_at,
+      calendar_connected: readiness.calendar_connected,
+      calendar_reconnect_required: readiness.calendar_reconnect_required,
+      calendar_identity_mismatch: readiness.calendar_identity_mismatch,
+      connected_google_address: readiness.connected_google_address,
     })),
   });
 }

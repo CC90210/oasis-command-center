@@ -12,13 +12,11 @@
  * Codex / Gemini parity.
  *
  * Detection flow:
- *   1. Component mounts → probes the shared bridge route (same-origin proxy
- *      on a hosted dashboard; localhost only on a loopback dashboard), then
- *      POSTs to /exec-tool with
- *      {name: "cli_status", input: {}}
- *   2. Bridge runs `claude --version`, scripts/codex_health.py --json,
- *      `gemini --version` + auth checks in parallel
- *   3. Returns {claude, codex, gemini: {installed, authenticated,
+ *   1. The paired bridge runs `claude --version`,
+ *      scripts/codex_health.py --json, and `gemini --version` locally.
+ *   2. Its pairing-token-authenticated heartbeat publishes a safe snapshot.
+ *   3. Component mounts → GET /api/bridge/cli-status, which returns
+ *      {claude, codex, gemini: {installed, authenticated,
  *      version, install_hint_url}}
  *   4. Each card renders one of: Ready / Needs auth / Not installed.
  *
@@ -89,36 +87,20 @@ const CARDS: Array<{
 ];
 
 async function probeCliStatus(signal: AbortSignal): Promise<ProbeState> {
-  let healthOk = false;
   try {
-    const h = await fetch(bridgeClientUrl("health"), { signal });
-    if (isProxyModeRuntime()) {
-      const body = (await h.json().catch(() => null)) as { ok?: boolean } | null;
-      healthOk = h.ok && body?.ok === true;
-    } else {
-      healthOk = h.ok;
-    }
-  } catch {
-    return { kind: "bridge_unreachable" };
-  }
-  if (!healthOk) return { kind: "bridge_unreachable" };
-
-  try {
-    const r = await fetch(bridgeClientUrl("exec-tool"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tool_name: "cli_status", input: {} }),
-      signal,
-    });
+    const r = await fetch("/api/bridge/cli-status", { signal, cache: "no-store" });
     if (!r.ok) {
       return { kind: "error", message: `bridge returned ${r.status}` };
     }
-    const body = (await r.json()) as { output?: string; is_error?: boolean };
-    if (body.is_error || !body.output) {
-      return { kind: "error", message: "bridge cli_status returned no output" };
+    const body = (await r.json()) as {
+      ok?: boolean;
+      data?: CliStatusResponse;
+      reason?: string;
+    };
+    if (!body.ok || !body.data) {
+      return { kind: "bridge_unreachable" };
     }
-    const data = JSON.parse(body.output) as CliStatusResponse;
-    return { kind: "ok", data };
+    return { kind: "ok", data: body.data };
   } catch (err) {
     // AbortError fires when the 10s timeout in the caller elapses. The
     // previous return `{ kind: "loading" }` left the spinner forever
@@ -162,12 +144,19 @@ export function LocalCliProvidersCard({
 }) {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
+  const [localActionsAvailable, setLocalActionsAvailable] = useState(false);
   const [actionMessage, setActionMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   // Persistent CLI selection — same key the ChatWidget reads. Selecting
   // a CLI here flips the chat header dropdown on next render too.
   const [activeCli, setActiveCli] = useState<CliRuntime>("claude");
   useEffect(() => {
     setActiveCli(readCliRuntime());
+    // A hosted dashboard can read the outbound, pairing-authenticated
+    // heartbeat, but it cannot prove that a tenant bridge proxy points back
+    // to the same paired machine. Only allow install/auth mutations when the
+    // dashboard itself is loaded on loopback, where /exec-tool necessarily
+    // targets this browser's machine.
+    setLocalActionsAvailable(!isProxyModeRuntime());
   }, []);
 
   function chooseCli(next: CliRuntime) {
@@ -180,7 +169,6 @@ export function LocalCliProvidersCard({
   async function refresh() {
     setState({ kind: "loading" });
     const ctl = new AbortController();
-    // 10s ceiling — the codex_health probe is the slowest, ~3-5s.
     const timer = setTimeout(() => ctl.abort(), 10_000);
     const next = await probeCliStatus(ctl.signal);
     clearTimeout(timer);
@@ -192,6 +180,12 @@ export function LocalCliProvidersCard({
    * parsed result. Shared by Install + Sign-in buttons.
    */
   async function runBridgeTool(toolName: "install_cli" | "cli_auth_start", provider: keyof CliStatusResponse) {
+    if (!localActionsAvailable) {
+      return {
+        ok: false as const,
+        text: "For safety, hosted Settings cannot run commands on an unverified tenant bridge. Run the shown command on the paired machine, then click Refresh.",
+      };
+    }
     const ctl = new AbortController();
     // npm install can take up to 5 minutes on first run; auth_start
     // returns immediately. 5.5 min ceiling covers both.
@@ -280,7 +274,7 @@ export function LocalCliProvidersCard({
   return (
     <Card
       title="Local AI CLIs"
-      subtitle="Install + sign in to Claude Code, Codex, or Gemini directly from here. Once a CLI is Ready, use the chat header's CLI selector to choose which local subscription powers that conversation."
+      subtitle="See the CLIs reported by your paired machine and choose which one powers local-bridge chat. Setup commands run directly only when this dashboard is opened on that machine; hosted Settings fails closed and shows the exact local command instead."
       action={
         <button
           type="button"
@@ -304,9 +298,9 @@ export function LocalCliProvidersCard({
         <div className="flex items-start gap-2 text-sm text-accent bg-accent/5 border border-accent/30 rounded-lg p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
-            <div className="font-bold">Bridge online · CLI inventory unavailable here</div>
+            <div className="font-bold">Bridge online · CLI inventory syncing</div>
             <p className="mt-1 text-xs text-fg-muted leading-relaxed">
-              The paired bridge has a fresh tenant heartbeat, matching the sidebar. This browser could not reach its authenticated CLI probe, so installed and signed-in status is unknown—not offline.
+              The paired bridge is online, matching the sidebar, but its latest CLI inventory has not reached this workspace yet. Refresh after the next heartbeat; installed status is unknown—not offline.
             </p>
             <Link
               href="/settings#devices"
@@ -454,45 +448,53 @@ export function LocalCliProvidersCard({
                 {!info.installed && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-fg-muted leading-relaxed">
-                      Click Install — bridge runs <code className="text-fg-dim">{card.install_command}</code> on this machine.
+                      {localActionsAvailable ? "Click Install to run " : "Run "}
+                      <code className="text-fg-dim">{card.install_command}</code>
+                      {localActionsAvailable ? " on this machine." : " on the paired machine, then click Refresh."}
                     </p>
-                    <button
-                      type="button"
-                      disabled={busy.kind !== "idle"}
-                      onClick={() => void handleInstall(card.key)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
-                    >
-                      {busy.kind === "installing" && busy.provider === card.key ? (
-                        <>
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Installing…
-                        </>
-                      ) : (
-                        <>Install</>
-                      )}
-                    </button>
+                    {localActionsAvailable && (
+                      <button
+                        type="button"
+                        disabled={busy.kind !== "idle"}
+                        onClick={() => void handleInstall(card.key)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-accent text-bg-deep hover:bg-accent-bright disabled:opacity-50"
+                      >
+                        {busy.kind === "installing" && busy.provider === card.key ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Installing…
+                          </>
+                        ) : (
+                          <>Install</>
+                        )}
+                      </button>
+                    )}
                   </div>
                 )}
                 {info.installed && !info.authenticated && (
                   <div className="space-y-1.5">
                     <p className="text-[11px] text-status-warm leading-relaxed">
-                      Installed. Click Sign in — your browser opens for the OAuth flow.
+                      {localActionsAvailable
+                        ? "Installed. Click Sign in — your browser opens for the OAuth flow."
+                        : `Installed. Sign in from a terminal on the paired machine, then click Refresh.`}
                     </p>
-                    <button
-                      type="button"
-                      disabled={busy.kind !== "idle"}
-                      onClick={() => void handleSignIn(card.key)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-status-warm/20 text-status-warm border border-status-warm/40 hover:bg-status-warm/30 disabled:opacity-50"
-                    >
-                      {busy.kind === "authing" && busy.provider === card.key ? (
-                        <>
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          Waiting for sign-in…
-                        </>
-                      ) : (
-                        <>Sign in</>
-                      )}
-                    </button>
+                    {localActionsAvailable && (
+                      <button
+                        type="button"
+                        disabled={busy.kind !== "idle"}
+                        onClick={() => void handleSignIn(card.key)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1.5 rounded-md bg-status-warm/20 text-status-warm border border-status-warm/40 hover:bg-status-warm/30 disabled:opacity-50"
+                      >
+                        {busy.kind === "authing" && busy.provider === card.key ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Waiting for sign-in…
+                          </>
+                        ) : (
+                          <>Sign in</>
+                        )}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

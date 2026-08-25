@@ -175,9 +175,11 @@ export async function GET() {
     const rep = profilesById.get(commission.rep_user_id);
     const paymentVerified = receipt?.status === "verified";
     const amountCents = cents(commission.amount_cents, commission.amount);
-    const collectedAmountCents = receipt
-      ? Number(receipt.amount_cents)
-      : cents(null, commission.collected_setup_amount);
+    // The deal's verified_payment_id is the latest receipt, not the full
+    // payment-plan total. The commission ledger freezes the aggregate cash
+    // collected when the deal closes, so it remains authoritative for split
+    // deposit + balance plans (and is negative on refund-offset entries).
+    const collectedAmountCents = cents(null, commission.collected_setup_amount);
     const rateBps = commission.rate_bps !== null && commission.rate_bps !== undefined && Number.isInteger(Number(commission.rate_bps))
       ? Number(commission.rate_bps)
       : Math.round(Number(commission.rate) * 10_000);

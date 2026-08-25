@@ -75,8 +75,8 @@ export default async function TeamPage() {
           title="Invite a teammate"
           subtitle={
             seatWarning && seatWarning.status === "ok"
-              ? `${seatWarning.message} Generate a one-time invite link.`
-              : "Generate a one-time invite link."
+              ? `${seatWarning.message} Generate a one-time link pinned to the teammate's email.`
+              : "Generate a one-time link pinned to the teammate's email."
           }
         >
           <TeamInviteActions roleOptions={roleOptions} activeInvites={invites.map((i) => ({

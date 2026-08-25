@@ -32,6 +32,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { CLI_INVENTORY_SERVICE } from "@/lib/bridge-cli-status";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -82,8 +83,19 @@ export async function POST(req: NextRequest) {
       .from("user_profiles")
       .select("id")
       .eq("auth_user_id", pairing.data.user_id)
+      .eq("tenant_id", pairing.data.tenant_id)
       .maybeSingle();
     profileId = pf.data?.id || null;
+  }
+  if (!profileId) {
+    // integrations_health is profile-scoped. Accepting a heartbeat without a
+    // resolvable profile makes the tenant look online while the signed-in
+    // user's CLI inventory can never be read. Fail closed instead of
+    // stamping a false-success marker on the daemon.
+    return NextResponse.json(
+      { ok: false, error: "bridge_profile_unresolved" },
+      { status: 409 },
+    );
   }
 
   let body: {
@@ -122,6 +134,7 @@ export async function POST(req: NextRequest) {
   const tenantId = pairing.data.tenant_id;
   const services = body.services || {};
   let recorded = 0;
+  let cliInventoryPersistFailed = false;
   for (const [service, report] of Object.entries(services)) {
     if (!service) continue;
     const status = (report.status || "unconfigured") as
@@ -138,7 +151,22 @@ export async function POST(req: NextRequest) {
     const r = await db
       .from("integrations_health")
       .upsert(payload, { onConflict: "profile_id,service" });
-    if (!r.error) recorded += 1;
+    if (!r.error) {
+      recorded += 1;
+    } else if (service === CLI_INVENTORY_SERVICE) {
+      cliInventoryPersistFailed = true;
+    }
+  }
+
+  if (cliInventoryPersistFailed) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "cli_inventory_persist_failed",
+        services_recorded: recorded,
+      },
+      { status: 503 },
+    );
   }
 
   return NextResponse.json({

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { getBrowserSupabase } from "@/lib/supabase-browser";
 import { confirmPasswordReset } from "@/lib/auth-client";
 import { OasisLogo } from "@/components/brand/OasisLogo";
@@ -15,7 +15,6 @@ import { validatePassword, PASSWORD_HINT } from "@/lib/password-validation";
  * the new password.
  */
 export default function ResetPasswordPage() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [pwd, setPwd] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -29,6 +28,8 @@ export default function ResetPasswordPage() {
   //   Supabase #access_token=...   — a recovery session the browser client
   //                                  picks up from the URL fragment
   const tursoToken = searchParams.get("turso_token");
+  const inviteToken = (searchParams.get("invite") || "").trim();
+  const emailHint = (searchParams.get("email") || "").trim();
 
   useEffect(() => {
     if (tursoToken) {
@@ -84,11 +85,38 @@ export default function ResetPasswordPage() {
           return;
         }
       }
+      if (inviteToken) {
+        const redeem = await fetch("/api/auth/redeem-invite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ raw_token: inviteToken }),
+        });
+        const body = (await redeem.json().catch(() => ({}))) as {
+          ok?: boolean;
+          error?: string;
+          message?: string;
+          tenant_slug?: string | null;
+        };
+        setDone(true);
+        if (!redeem.ok || !body.ok) {
+          setErr(
+            "Your password was updated, but the workspace invite could not be completed. " +
+              "Open the invite again while signed in, or ask your admin for a fresh link."
+          );
+          return;
+        }
+        const slug = body.tenant_slug?.trim();
+        setTimeout(
+          () => window.location.assign(slug ? `/t/${slug}` : "/auth/land?next=%2F"),
+          900,
+        );
+        return;
+      }
+
       setDone(true);
-      // Supabase's recovery flow leaves you signed in; the Turso flow does not
-      // (the token is a credential for ONE action, not a session), so send
-      // those users to /login rather than bouncing them off a guarded page.
-      setTimeout(() => router.push(tursoToken ? "/login" : "/"), 1200);
+      // Both recovery backends establish an authenticated session after a
+      // successful password change, so tenant-aware landing is deterministic.
+      setTimeout(() => window.location.assign("/auth/land?next=%2F"), 900);
     } finally {
       setBusy(false);
     }
@@ -122,8 +150,24 @@ export default function ResetPasswordPage() {
             </div>
           ) : done ? (
             <div className="text-sm text-status-engaged bg-status-engaged/10 border border-status-engaged/30 rounded-md px-3 py-3">
-              {tursoToken ? "Password updated. Taking you to sign in…"
-                          : "Password updated. Signing you in…"}
+              {err ? (
+                <>
+                  <div className="font-semibold text-fg">Password updated.</div>
+                  <div className="mt-1 text-xs text-fg-muted">{err}</div>
+                  {inviteToken && (
+                    <Link
+                      href={`/invite/${encodeURIComponent(inviteToken)}`}
+                      className="mt-2 inline-block font-semibold text-accent hover:underline"
+                    >
+                      Continue with invite →
+                    </Link>
+                  )}
+                </>
+              ) : inviteToken ? (
+                "Password updated. Joining your workspace…"
+              ) : (
+                "Password updated. Signing you in…"
+              )}
             </div>
           ) : !sessionReady ? (
             <div className="text-sm text-fg-muted text-center py-3">
@@ -176,7 +220,15 @@ export default function ResetPasswordPage() {
         </div>
 
         <p className="text-center text-sm text-fg-muted mt-6">
-          <Link href="/login" className="text-accent hover:underline font-medium">
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              if (inviteToken) query.set("invite", inviteToken);
+              if (emailHint) query.set("email", emailHint);
+              return query.size ? `/login?${query.toString()}` : "/login";
+            })()}
+            className="text-accent hover:underline font-medium"
+          >
             Back to sign in
           </Link>
         </p>
