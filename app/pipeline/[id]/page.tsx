@@ -11,7 +11,7 @@
 
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, BarChart3, ExternalLink } from "lucide-react";
 import { notFound } from "next/navigation";
 import { PageHeader, Card } from "@/components/Card";
 import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
@@ -25,6 +25,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { formatMoney, nonEmptyString, relTime } from "@/lib/format-helpers";
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { ScoreLeadButton } from "./ScoreLeadButton";
 import { NextActionButton } from "./NextActionButton";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
@@ -136,6 +137,7 @@ export default async function PipelineLeadDetailPage({
         collapsedPreview={renderContactPreview(activeRecord.data)}
       >
         <LeadContactBand data={activeRecord.data} />
+        <LeadBusinessBand data={activeRecord.data} id={activeRecord.id} />
       </CollapsibleSection>
       <LeadMetricsBand metrics={metrics} />
       <LeadActionToolbar
@@ -293,6 +295,91 @@ function LeadContactBand({ data }: { data: Record<string, unknown> }) {
       <ContactCell label="Company" value={company} />
       <ContactCell label="Email" value={email} mono />
       <ContactCell label="Phone" value={phone} mono />
+    </div>
+  );
+}
+
+/**
+ * LeadBusinessBand — the business itself, on the CRM record.
+ *
+ * Adon, 2026-08-25: "you should also be able to click and view the website as
+ * well as see all of the leads information, just like on the leads tab, but on
+ * the pipeline tab, which is our CRM."
+ *
+ * WHY NONE OF THIS NEEDED A QUERY. /pipeline and /web-leads render the SAME
+ * `tenant_records` rows in the SAME tenant (ef8d389e, slug `oasis-ai-cc`).
+ * Every field below was already sitting on this record and simply never
+ * rendered here, which is why a rep who opened a lead from the CRM saw four
+ * contact fields and no business at all.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: a website score. It lives in
+ * leadgen_site_audits, not on the lead, and resolving it needs the memoised
+ * index. The battle card already does that properly, so this links to it rather
+ * than growing a second, thinner version that could disagree with it.
+ */
+function LeadBusinessBand({ data, id }: { data: Record<string, unknown>; id: string }) {
+  const city = nonEmptyString(data.business_city);
+  const province = nonEmptyString(data.state);
+  const industry = nonEmptyString(data.webdev_industry) || nonEmptyString(data.industry);
+  const address = nonEmptyString(data.business_address);
+  const postal = nonEmptyString(data.business_zip);
+  const territory = nonEmptyString(data.webdev_territory);
+  const websiteUrl = nonEmptyString(data.website);
+  const href = preferredSiteUrl(websiteUrl);
+  // VERBATIM, both. `website_condition` is OpenStreetMap's own hedged wording
+  // and `audit_findings` is the crawler's. Never shortened, re-worded or turned
+  // into a badge: a missing website tag means nobody mapped one, not that no
+  // site exists, and a rep reading a fabricated finding aloud on a live call is
+  // the worst thing this system can produce.
+  const condition = nonEmptyString(data.website_condition);
+  const findings = nonEmptyString(data.audit_findings);
+  const place = [city, province].filter(Boolean).join(", ");
+
+  // Nothing web-lead-shaped on this record: an ordinary CRM lead renders
+  // nothing here rather than a band of six empty placeholders.
+  if (!place && !industry && !address && !websiteUrl && !condition) return null;
+
+  return (
+    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <ContactCell label="Location" value={place || null} />
+        <ContactCell label="Industry" value={industry} />
+        <ContactCell label="Address" value={[address, postal].filter(Boolean).join(", ") || null} />
+        <ContactCell label="Territory" value={territory} />
+      </div>
+      <div className="mt-3 border-t border-bg-border/60 pt-3">
+        <div className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">Website</div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2">
+          {href && (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open this website in a new tab"
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:bg-accent/10 hover:text-accent"
+            >
+              <ExternalLink className="h-3 w-3" />View site
+            </a>
+          )}
+          <Link
+            href={`/web-leads/${encodeURIComponent(id)}`}
+            title="Open the full battle card: score, competitors, sales angles, objections"
+            className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:bg-accent/10 hover:text-accent"
+          >
+            <BarChart3 className="h-3 w-3" />Battle card
+          </Link>
+          {websiteUrl && (
+            <span className="min-w-0 truncate font-mono text-[11px] text-fg-dim" title={websiteUrl}>
+              {websiteUrl}
+            </span>
+          )}
+        </div>
+        {/* Both sentences, in every state. They once rendered only when a lead
+            was NOT scored, which meant a scored lead showed neither, exactly
+            when a rep has a confident number and most needs the hedge. */}
+        {condition && <p className="mt-2 text-[11px] leading-snug text-fg-muted">{condition}</p>}
+        {findings && <p className="mt-1 text-[11px] italic leading-snug text-fg-dim">{findings}</p>}
+      </div>
     </div>
   );
 }

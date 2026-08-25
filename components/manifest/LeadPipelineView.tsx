@@ -12,9 +12,11 @@ import {
   type ReactNode,
 } from "react";
 import {
+  BarChart3,
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   History,
   Loader2,
   Mail,
@@ -25,6 +27,11 @@ import {
   Zap,
 } from "lucide-react";
 import type { StageMeta } from "@/lib/sunbiz-stage-meta";
+// Shared with the /web-leads list so one hardening rule covers both surfaces:
+// 217 stored websites have no scheme (a bare domain in an href navigates inside
+// our own dashboard) and these values come from OpenStreetMap, which anyone can
+// edit, so a `javascript:` href would run in our origin.
+import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { AcceleratedToggle } from "@/components/manifest/AcceleratedToggle";
 import {
   SUNBIZ_BULK_SAFE_TEMPLATES,
@@ -120,9 +127,15 @@ const SUN_GRID_STYLE: CSSProperties = {
     "minmax(150px,1.6fr) minmax(92px,.9fr) minmax(108px,.9fr) 30px 56px 38px minmax(104px,1fr) 68px 112px 34px 42px 76px 58px",
 };
 
+// Seven columns as of 2026-08-25. `Email` became `Address` and a `Website`
+// column was added -- see PipelineWebsiteCell and the Lead-cell comment for the
+// measurements behind both. Website is the widest new slot because it carries
+// two controls plus either a number or a full sentence; the sentence is the
+// point (a non-scored state must never render as a dash), and wrapping it to
+// three lines would make the row heights ragged.
 const OASIS_GRID_STYLE: CSSProperties = {
   gridTemplateColumns:
-    "minmax(160px,1.6fr) minmax(140px,1.2fr) minmax(110px,1fr) 56px 100px 88px",
+    "minmax(170px,1.5fr) minmax(140px,1.1fr) minmax(110px,.9fr) minmax(150px,1.1fr) 56px 100px 88px",
 };
 
 // Tenant-variant config struct picked at the top of the component.
@@ -1044,8 +1057,9 @@ function StageSection({
               {variant === "oasis" ? (
                 <>
                   <HeaderCell>Lead</HeaderCell>
-                  <HeaderCell>Email</HeaderCell>
+                  <HeaderCell>Address</HeaderCell>
                   <HeaderCell>Phone</HeaderCell>
+                  <HeaderCell>Website</HeaderCell>
                   <HeaderCell>Score</HeaderCell>
                   <HeaderCell>Last Touch</HeaderCell>
                   <HeaderCell>Created</HeaderCell>
@@ -1434,6 +1448,42 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const lastTouchLabel = touchIso ? relTime(touchIso) : "-";
   const createdIso = row.created_at || null;
   const createdLabel = createdIso ? formatShortDate(createdIso) : "-";
+  // ═══ THE WEB-LEAD HALF (2026-08-25) ═════════════════════════════════════
+  //
+  // Adon: "you can see [it] on the leads tab but you should also be able to
+  // click and view the website as well as see all of the leads information...
+  // on the pipeline tab, which is our CRM."
+  //
+  // These fields were already on every row and simply never read here. The CRM
+  // board and the /web-leads list are the same `tenant_records` rows in the
+  // same tenant, so this reads the lead's own stored values rather than
+  // deriving anything new. `industry` falls back across the two spellings the
+  // ingest writes; `webdev_industry` is the rep-facing collapse of 212 raw OSM
+  // categories into 18, so it is preferred when present.
+  const websiteUrl = str(d.website);
+  const city = str(d.business_city);
+  const province = str(d.state);
+  const industry = str(d.webdev_industry) || str(d.industry);
+  const address = str(d.business_address);
+  // VERBATIM, both of them, in every state. These once rendered only in the
+  // non-scored branch, which meant a scored lead showed neither -- exactly when
+  // a rep has a confident number and most needs the hedge. Never shortened,
+  // re-worded, or turned into a badge.
+  const websiteCondition = str(d.website_condition);
+  const auditFindings = str(d.audit_findings);
+  // Resolved server-side by lib/web-leads/attach-scores.ts against the same
+  // memoised index the leads tab uses, so the two screens cannot disagree.
+  // Absent (undefined) means nobody attached it -- a caller that did not opt in
+  // -- which is NOT the same as "not scored" and must not render as a number.
+  const webScoreRaw = d.derived_website_score;
+  const webScore = typeof webScoreRaw === "number" ? webScoreRaw : null;
+  const webScoreState =
+    typeof d.derived_website_score_state === "string"
+      ? (d.derived_website_score_state as WebScoreState)
+      : null;
+  // "City, PROV · Industry" -- whichever parts exist, never a lone separator.
+  const place = [city, province].filter(Boolean).join(", ");
+  const businessLine = [place, industry].filter(Boolean).join(" · ");
   return {
     name,
     company,
@@ -1444,7 +1494,96 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     cold,
     lastTouchLabel,
     createdLabel,
+    websiteUrl,
+    city,
+    province,
+    industry,
+    address,
+    websiteCondition,
+    auditFindings,
+    webScore,
+    webScoreState,
+    businessLine,
   };
+}
+
+/** Mirrors ScoreState in lib/web-leads/scores.ts. Declared locally rather than
+ *  imported so this client component does not pull in the server-only score
+ *  module (it reaches getServiceSupabase) just to name a union. */
+type WebScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
+
+/**
+ * The website block on a CRM row: open the site, open the battle card, and the
+ * honest state of what we know about it.
+ *
+ * ═══ NO COLOUR IS KEYED TO THE SCORE, ANYWHERE IN HERE ═══════════════════
+ * Not on the number, not on a bar, not on a marker. A red 22 renders a
+ * judgement the measurement does not support, and a rep who sees red says
+ * something on a live call they cannot back up. The number is `text-fg` and the
+ * track is one neutral fill whether the score is 4 or 94. This is pinned by
+ * tests/web-leads-guards.test.ts, which bans the colour utilities on every
+ * audit-rendering component by name -- this one included.
+ */
+function PipelineWebsiteCell({
+  m,
+  leadId,
+}: {
+  m: ReturnType<typeof oasisRowModel>;
+  leadId: string;
+}) {
+  const href = preferredSiteUrl(m.websiteUrl);
+  // THE THREE NON-SCORED STATES RENDER AS SENTENCES, never a zero, a dash, a
+  // blank or an empty chart. `no_website` uses the lead's OWN stored wording,
+  // which is OpenStreetMap's hedge -- absence of a website tag means nobody
+  // mapped one, not that no site exists.
+  const sentence =
+    m.webScoreState === "unreachable"
+      ? "We could not check this site"
+      : m.webScoreState === "not_scored"
+        ? "Not scored yet"
+        : m.webScoreState === "no_website"
+          ? m.websiteCondition || "No website found yet, needs checking"
+          : null;
+  return (
+    <div className="flex min-w-0 flex-col items-start gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {/* Both are real links so they middle-click and cmd-click into a new
+            tab. A rep queueing three sites before a call block is the normal
+            case. z-10 lifts them above the row's stretched overlay link. */}
+        {href && (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open ${m.name}'s website in a new tab`}
+            className="relative z-10 inline-flex shrink-0 items-center gap-1 rounded-md border border-bg-border/70 px-2 py-1 text-[10px] font-semibold text-fg-dim opacity-80 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+          >
+            <ExternalLink className="h-3 w-3" />View site
+          </a>
+        )}
+        <Link
+          href={`/web-leads/${encodeURIComponent(leadId)}`}
+          title={`Open the full battle card for ${m.name}`}
+          className="relative z-10 inline-flex shrink-0 items-center gap-1 rounded-md border border-bg-border/70 px-2 py-1 text-[10px] font-semibold text-fg-dim opacity-80 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+        >
+          <BarChart3 className="h-3 w-3" />Battle card
+        </Link>
+      </div>
+      {m.webScoreState === "scored" && m.webScore != null ? (
+        <div className="flex w-full items-center gap-2">
+          <span className="text-sm font-bold leading-none tabular-nums text-fg">{m.webScore}</span>
+          <span className="block h-1.5 w-full max-w-[4rem] overflow-hidden rounded-full bg-bg-border/80" aria-hidden>
+            <span
+              className="block h-full rounded-full bg-fg-muted"
+              style={{ width: `${Math.min(100, Math.max(0, m.webScore))}%` }}
+            />
+          </span>
+        </div>
+      ) : sentence ? (
+        <span className="block text-[10px] italic leading-snug text-fg-dim">{sentence}</span>
+      ) : null}
+    </div>
+  );
 }
 
 function OasisDesktopRow({
@@ -1460,11 +1599,35 @@ function OasisDesktopRow({
 }) {
   const m = oasisRowModel(row, cfg, stage);
   return (
-    <Link
-      href={`${basePath}/${row.id}`}
-      className="grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
+    // ═══ WHY THIS IS NO LONGER A <Link> WRAPPING THE WHOLE ROW ═════════════
+    //
+    // It used to be, and that made the row a single anchor. The moment this row
+    // gained its own "View site" and "Battle card" links, that shape became an
+    // anchor inside an anchor -- which is invalid HTML, and browsers do not
+    // render it as written: the parser closes the outer <a> early and the row
+    // silently comes apart. React will happily emit it and nothing throws.
+    //
+    // The fix is the stretched-link pattern: the row is a plain grid, and ONE
+    // absolutely-positioned link covers it. The row still behaves exactly as
+    // before, including middle-click and cmd-click into a new tab, which a
+    // router.push on a div would have thrown away -- and reps queue leads that
+    // way before a call block. The inner links sit at z-10, above the overlay.
+    <div
+      className="group relative grid border-b border-bg-border/40 text-[11px] transition-colors last:border-b-0 hover:bg-bg-elev/40"
       style={cfg.gridStyle}
     >
+      <Link
+        href={`${basePath}/${row.id}`}
+        aria-label={`Open ${m.name}`}
+        // The overlay paints above the static cells, so THEIR `title` tooltips
+        // no longer fire -- the topmost element under the cursor owns the
+        // tooltip and this is it. The cell titles are left in place (they work
+        // again if this ever stops being an overlay), and the facts a rep would
+        // have hovered for are gathered here instead, so the row now yields
+        // MORE on hover than it did as a plain link, not less.
+        title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
+        className="absolute inset-0 z-0 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      />
       <Cell>
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
@@ -1474,17 +1637,39 @@ function OasisDesktopRow({
             <span className="block truncate font-semibold text-fg" title={m.name}>
               {m.name}
             </span>
-            {m.company && (
+            {m.company && m.company !== m.name && (
               <span className="block truncate text-[10px] text-fg-dim" title={m.company}>
                 {m.company}
+              </span>
+            )}
+            {/* The business itself: where it is and what it does. A rep opening
+                a CRM row should not have to leave for the one fact that decides
+                how the call opens. */}
+            {m.businessLine && (
+              <span className="block truncate text-[10px] text-fg-muted" title={m.address ? `${m.businessLine} — ${m.address}` : m.businessLine}>
+                {m.businessLine}
+              </span>
+            )}
+            {/* The Email COLUMN was replaced by Address on this board, measured
+                2026-08-25: 4 of 31,034 leads carry an email, 26,800 carry an
+                address. A column empty for 99.99% of rows was holding the
+                second-widest slot on the grid. The four are not lost -- an
+                email renders here whenever one exists, and the detail page
+                shows it unconditionally. */}
+            {m.email && (
+              <span className="block truncate text-[10px] text-fg-dim" title={m.email}>
+                {m.email}
               </span>
             )}
             <span className="block truncate text-[10px] text-accent/80" title={m.assignedRep}>Assigned: {m.assignedRep}</span>
           </span>
         </div>
       </Cell>
-      <Cell title={m.email}>{m.email || "-"}</Cell>
+      <Cell title={m.address || ""}>{m.address || "-"}</Cell>
       <Cell title={m.phone} mono>{m.phone || "-"}</Cell>
+      <Cell>
+        <PipelineWebsiteCell m={m} leadId={row.id} />
+      </Cell>
       <Cell>
         {m.score != null ? (
           <span
@@ -1499,7 +1684,7 @@ function OasisDesktopRow({
       </Cell>
       <Cell className={m.cold ? "font-semibold text-red-300" : ""}>{m.lastTouchLabel}</Cell>
       <Cell>{m.createdLabel}</Cell>
-    </Link>
+    </div>
   );
 }
 
@@ -1515,8 +1700,17 @@ function OasisMobileRow({
   basePath: string;
 }) {
   const m = oasisRowModel(row, cfg, stage);
+  // Same stretched-link restructure as the desktop row, and for the same
+  // reason: the website and battle-card links are real anchors, so the card can
+  // no longer BE one. See OasisDesktopRow's comment.
   return (
-    <Link href={`${basePath}/${row.id}`} className="block px-4 py-3 transition-colors hover:bg-bg-elev/40">
+    <div className="group relative px-4 py-3 transition-colors hover:bg-bg-elev/40">
+      <Link
+        href={`${basePath}/${row.id}`}
+        aria-label={`Open ${m.name}`}
+        title={[m.name, m.businessLine, m.address].filter(Boolean).join(" · ")}
+        className="absolute inset-0 z-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+      />
       <div className="flex items-start gap-3">
         <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-elev text-[10px] font-bold uppercase text-fg-muted">
           {initialsOf(m.name)}
@@ -1525,21 +1719,31 @@ function OasisMobileRow({
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-fg">{m.name}</div>
-              <div className="truncate text-[11px] text-fg-dim">{m.company || m.email || "-"}</div>
+              {/* Where it is and what it does, ahead of the contact details --
+                  on a phone this is the line that tells a rep whether to call
+                  now, and it used to be absent entirely. */}
+              <div className="truncate text-[11px] text-fg-muted">{m.businessLine || m.company || m.email || "-"}</div>
               <div className="truncate text-[10px] text-accent/80">Assigned: {m.assignedRep}</div>
             </div>
             <StageChip stage={stage} />
           </div>
           <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-fg-muted">
-            <MiniMetric label="Email" value={m.email || "-"} />
             <MiniMetric label="Phone" value={m.phone || "-"} mono />
+            <MiniMetric label="Address" value={m.address || "-"} />
             <MiniMetric label="Score" value={m.score != null ? String(m.score) : "-"} mono />
             <MiniMetric label="Last touch" value={m.lastTouchLabel} />
             <MiniMetric label="Created" value={m.createdLabel} />
+            {m.email && <MiniMetric label="Email" value={m.email} />}
+          </div>
+          {/* The whole website block, controls and all. Sits below the metrics
+              rather than inside the two-column grid because the non-scored
+              sentence is a full clause and would be crushed into a 50% column. */}
+          <div className="mt-2.5">
+            <PipelineWebsiteCell m={m} leadId={row.id} />
           </div>
         </div>
       </div>
-    </Link>
+    </div>
   );
 }
 

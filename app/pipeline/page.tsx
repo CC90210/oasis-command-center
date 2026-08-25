@@ -37,6 +37,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
+import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
@@ -142,6 +143,17 @@ export default async function PipelinePage({
   // Optional ?q= filter — match across the operator-relevant fields.
   // Kept server-side so /pipeline?q=acme returns ~5 rows instead of
   // shipping 500 and filtering in the browser.
+  // The website score, joined on server-side (2026-08-25).
+  //
+  // Adon asked for the leads-tab information on the CRM board. Every business
+  // fact -- address, city, industry, website, the condition sentence -- was
+  // already on these rows and simply unread. The SCORE is the one exception: it
+  // lives in leadgen_site_audits, not on the lead, so it needs this join.
+  //
+  // Attached AFTER scoping, deliberately. Scoping is the security boundary and
+  // must narrow the set first; enriching rows a viewer may not see would be
+  // work done on their behalf that they never earned the right to. It also
+  // means a rep's board resolves eleven rows rather than thirty-one thousand.
   const namedRows = await attachAssignedNames(allRows, tenantId);
   const scopedRows = session.ok
     ? filterWebsiteSalesRows(
@@ -205,7 +217,23 @@ export default async function PipelinePage({
           .toLowerCase();
         return hay.includes(query.toLowerCase());
       })
-    : scopedRows;
+    // FIXED 2026-08-25: this read `: scopedRows`, so BOTH filters built
+    // immediately above only took effect when a rep typed something into the
+    // search box. With an empty box the board fell back to the pre-filter set,
+    // which still carries the researched prospect pool and ignores ?rep=
+    // entirely. The researched rows stayed invisible by luck rather than by
+    // design -- `stages` drops the researched COLUMN, so they had nowhere to
+    // render -- but the admin rep-filter silently did nothing, and any future
+    // count taken over `rows` would have been wrong by ~30,000.
+    //
+    // Not a leak: filterWebsiteSalesRows already narrowed a non-admin to their
+    // own rows further up, and ?rep= only ever subtracts from that.
+    : repScopedRows;
+  // Website scores, resolved against the same memoised index /web-leads uses.
+  // Last, on the smallest set: after scoping, after the researched cut, after
+  // the rep filter and after the search. Eleven rows on a rep's board today.
+  const rowsWithScores = await attachWebsiteScores(rows);
+
   // The STAGE LIST has to drop researched too, not just the rows. Filtering one
   // without the other leaves a permanently-empty "Researched" column on the
   // board — which reads as "we have no prospects" when the truth is the
@@ -268,7 +296,7 @@ export default async function PipelinePage({
         entityLabel="Lead"
         stages={stages}
         stageField="stage"
-        rows={rows}
+        rows={rowsWithScores}
         stageFilter={stageFilter}
         query={query}
         basePath="/pipeline"
