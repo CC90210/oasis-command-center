@@ -37,10 +37,10 @@ const localCliCard = readFileSync(
   join(ROOT, "components", "settings", "LocalCliProvidersCard.tsx"),
   "utf8",
 );
-assert.ok(localCliCard.includes('bridgeClientUrl("health")'));
+assert.ok(localCliCard.includes('fetch("/api/bridge/cli-status"'));
 assert.ok(localCliCard.includes('bridgeClientUrl("exec-tool")'));
 assert.ok(localCliCard.includes("serverBridgeOnline"));
-assert.ok(localCliCard.includes("Bridge online · CLI inventory unavailable here"));
+assert.ok(localCliCard.includes("Bridge online · CLI inventory syncing"));
 assert.ok(
   !localCliCard.includes("Local bridge offline"),
   "Settings must not contradict a fresh sidebar heartbeat",
@@ -58,7 +58,7 @@ assert.ok(
 const chatWidget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
 assert.ok(
   chatWidget.includes('import { isProxyModeRuntime } from "@/lib/bridge-client-routing"'),
-  "chat and Settings must share hosted-vs-local bridge routing",
+  "chat must retain authenticated hosted-vs-local bridge routing",
 );
 assert.ok(
   !chatWidget.includes("function isProxyModeRuntime()"),

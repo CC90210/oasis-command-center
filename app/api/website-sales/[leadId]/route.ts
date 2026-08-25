@@ -39,6 +39,15 @@ import {
 } from "@/lib/leads/canonical-lead-fields";
 import { normalizeCollaborators } from "@/lib/lead-scope";
 import { mayOperateOasisDeliveryStage, ownsOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  activateVerifiedFounderMeeting,
+  cancelVerifiedFounderMeeting,
+  closeVerifiedFounderMeeting,
+  createVerifiedFounderMeeting,
+  prepareVerifiedFounderMeetingCancellation,
+  rescheduleVerifiedFounderMeeting,
+  type VerifiedFounderMeeting,
+} from "@/lib/website-sales-founder-meeting";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STRUCTURED_STAGE_TARGETS = new Set([
@@ -167,6 +176,155 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       if (metadata?.action !== undefined && metadata.action !== body.action) {
         return NextResponse.json({ok:false,error:"request_id_reused_for_different_action"},{status:409});
       }
+      if (
+        body.action === "deal_outcome" &&
+        metadata?.deal_outcome !== undefined &&
+        metadata.deal_outcome !== body.outcome
+      ) {
+        return NextResponse.json({ok:false,error:"request_id_reused_for_different_outcome"},{status:409});
+      }
+      if (body.action === "book_founder") {
+        const founderUserId = typeof body.founderUserId === "string" ? body.founderUserId.trim() : "";
+        const meetingAt = typeof body.meetingAt === "string" ? body.meetingAt.trim() : "";
+        const promisedDemo = typeof body.promisedDemo === "string" ? body.promisedDemo.trim() : "";
+        const handoffNote = typeof body.note === "string" ? body.note.trim() : "";
+        const expectedOrganizerEmail = typeof current.audit_host_email === "string"
+          ? current.audit_host_email.trim()
+          : "";
+        const confirmations = body.confirmations && typeof body.confirmations === "object" && !Array.isArray(body.confirmations)
+          ? body.confirmations as Record<string, unknown>
+          : null;
+        const contact = body.contact && typeof body.contact === "object" && !Array.isArray(body.contact)
+          ? body.contact as Record<string, unknown>
+          : {};
+        if (
+          !UUID.test(founderUserId) ||
+          !meetingAt ||
+          !promisedDemo ||
+          !handoffNote ||
+          !expectedOrganizerEmail ||
+          !confirmations ||
+          confirmations.contactConfirmed !== true ||
+          confirmations.clientAgreedToTime !== true ||
+          confirmations.handoffComplete !== true
+        ) {
+          return NextResponse.json({ok:false,error:"booking_request_mismatch"},{status:409});
+        }
+        let existingMeeting: VerifiedFounderMeeting;
+        try {
+          existingMeeting = await createVerifiedFounderMeeting({
+            tenantId:session.tenantId,
+            leadId,
+            actorUserId:session.userId,
+            hostUserId:founderUserId,
+            requestId,
+            meetingAt,
+            contact,
+            clientAgenda:promisedDemo,
+            handoffNote,
+            smsConsent:body.smsConsent === true,
+            expectedOrganizerEmail,
+            confirmations:{
+              contactConfirmed:true,
+              clientAgreedToTime:true,
+              handoffComplete:true,
+            },
+          });
+          await activateVerifiedFounderMeeting(session.tenantId, existingMeeting.appointmentId);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "booking_request_mismatch";
+          return NextResponse.json({
+            ok:false,
+            error:detail.split(":",1)[0],
+            detail,
+            stageUpdated:true,
+          },{status:detail.startsWith("booking_request_mismatch") ? 409 : 503});
+        }
+        return NextResponse.json({
+          ok:true,
+          idempotent:true,
+          meeting:{
+            appointmentId:existingMeeting.appointmentId,
+            meetingAt:existingMeeting.meetingAt,
+            timezone:existingMeeting.timezone,
+            eventId:existingMeeting.receipt.eventId,
+            calendarUrl:existingMeeting.receipt.htmlLink,
+            meetLink:existingMeeting.receipt.meetLink,
+          },
+        });
+      }
+      if (body.action === "deal_outcome" && body.outcome === "reschedule") {
+        const appointmentId = typeof current.calendar_appointment_id === "string"
+          ? current.calendar_appointment_id.trim()
+          : "";
+        if (!UUID.test(appointmentId)) {
+          return NextResponse.json({ok:false,error:"verified_meeting_receipt_missing"},{status:409});
+        }
+        const existingMeeting = await db.from("call_appointments")
+          .select("id,scheduled_for,timezone,google_event_id,google_event_html_link,google_meet_link,calendar_status,last_reschedule_request_id,pending_request_id")
+          .eq("tenant_id",session.tenantId)
+          .eq("lead_id",leadId)
+          .eq("id",appointmentId)
+          .maybeSingle();
+        const meeting = existingMeeting.data as Record<string, unknown> | null;
+        if (
+          existingMeeting.error ||
+          !meeting ||
+          meeting.calendar_status !== "verified" ||
+          ![meeting.last_reschedule_request_id, meeting.pending_request_id].includes(requestId)
+        ) {
+          return NextResponse.json({ok:false,error:"verified_meeting_receipt_missing"},{status:409});
+        }
+        try {
+          await activateVerifiedFounderMeeting(session.tenantId, appointmentId);
+        } catch (error) {
+          return NextResponse.json({
+            ok:false,
+            error:"meeting_activation_failed",
+            detail:error instanceof Error ? error.message : "meeting_activation_failed",
+            stageUpdated:true,
+          },{status:503});
+        }
+        return NextResponse.json({
+          ok:true,
+          idempotent:true,
+          meeting:{
+            appointmentId,
+            meetingAt:meeting.scheduled_for,
+            timezone:meeting.timezone,
+            eventId:meeting.google_event_id,
+            calendarUrl:meeting.google_event_html_link,
+            meetLink:meeting.google_meet_link,
+          },
+        });
+      }
+      if (body.action === "deal_outcome" && body.outcome === "lost") {
+        const appointmentId = typeof current.calendar_appointment_id === "string"
+          ? current.calendar_appointment_id.trim()
+          : "";
+        if (UUID.test(appointmentId)) {
+          try {
+            const cancellation = await cancelVerifiedFounderMeeting({
+              tenantId:session.tenantId,
+              leadId,
+              appointmentId,
+              requestId,
+            });
+            return NextResponse.json({
+              ok:true,
+              idempotent:true,
+              cancellationDisposition:cancellation.disposition,
+            });
+          } catch (error) {
+            return NextResponse.json({
+              ok:false,
+              error:"calendar_cancel_failed",
+              detail:error instanceof Error ? error.message : "calendar_cancel_failed",
+              stageUpdated:true,
+            },{status:503});
+          }
+        }
+      }
       const checkout = body.action === "create_payment_link" ? storedCheckout(current) : null;
       return NextResponse.json({
         ok:true,
@@ -190,6 +348,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     return NextResponse.json({ok:false,error:"transition_note_too_long"},{status:400});
   }
   let patch: Record<string,unknown> = {};
+  let verifiedMeeting: VerifiedFounderMeeting | null = null;
+  let cancellationAfterTransition: { appointmentId: string; requestId: string } | null = null;
+  let cancellationDisposition: "cancelled" | "preserved" | "pending" | null = null;
   if (body.action === "disposition") {
     const disposition = String(body.disposition || "");
     const allowed = ["attempted", "voicemail", "connected", "lost"];
@@ -213,17 +374,23 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     if (!mayAgentBookFounder(currentStage, qualificationIncluded)) {
       return NextResponse.json({ok:false,error:"qualify_before_booking"},{status:409});
     }
+    const confirmations = body.confirmations && typeof body.confirmations === "object" && !Array.isArray(body.confirmations)
+      ? body.confirmations as Record<string, unknown>
+      : null;
+    if (
+      !confirmations ||
+      confirmations.contactConfirmed !== true ||
+      confirmations.clientAgreedToTime !== true ||
+      confirmations.handoffComplete !== true
+    ) {
+      return NextResponse.json({ok:false,error:"booking_confirmations_required"},{status:400});
+    }
     const qualifiedDuringHandoff = currentStage !== "qualified";
-    if (qualifiedDuringHandoff && !transitionNote) {
-      return NextResponse.json({ok:false,error:"qualification_context_required"},{status:400});
-    }
-    if (body.calendarConfirmed !== true) {
-      return NextResponse.json({ok:false,error:"calendar_confirmation_required"},{status:400});
-    }
+    if (!transitionNote) return NextResponse.json({ok:false,error:"handoff_note_required"},{status:400});
     const founderUserId = typeof body.founderUserId === "string" ? body.founderUserId.trim() : "";
     const meetingAt = typeof body.meetingAt === "string" ? body.meetingAt.trim() : "";
     const promisedDemo = typeof body.promisedDemo === "string" ? body.promisedDemo.trim() : "";
-    if (!UUID.test(founderUserId) || !meetingAt || !promisedDemo) return NextResponse.json({ok:false,error:"invalid_handoff"},{status:400});
+    if (!UUID.test(founderUserId) || !meetingAt || !promisedDemo || !requestId) return NextResponse.json({ok:false,error:"invalid_handoff"},{status:400});
     if (!Number.isFinite(Date.parse(meetingAt)) || Date.parse(meetingAt) <= Date.now()) return NextResponse.json({ok:false,error:"meeting_must_be_in_future"},{status:400});
     if (promisedDemo.length > 500) return NextResponse.json({ok:false,error:"promised_demo_too_long"},{status:400});
     const auditHost = await db.from("user_profiles").select("id,is_owner,team_role,email").eq("tenant_id",session.tenantId).eq("auth_user_id",founderUserId).maybeSingle();
@@ -237,6 +404,38 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const auditHostEmail = typeof auditHost.data.email === "string" ? auditHost.data.email.trim() : "";
     if (!auditHostEmail || !auditHostEmail.includes("@")) {
       return NextResponse.json({ok:false,error:"audit_host_email_required"},{status:409});
+    }
+    const contact = body.contact && typeof body.contact === "object" && !Array.isArray(body.contact)
+      ? body.contact as Record<string,unknown>
+      : {};
+    try {
+      verifiedMeeting = await createVerifiedFounderMeeting({
+        tenantId:session.tenantId,
+        leadId,
+        actorUserId:session.userId,
+        hostUserId:founderUserId,
+        requestId,
+        meetingAt,
+        contact,
+        clientAgenda:promisedDemo,
+        handoffNote:transitionNote,
+        smsConsent:body.smsConsent === true,
+        expectedOrganizerEmail:auditHostEmail,
+        confirmations:{
+          contactConfirmed:true,
+          clientAgreedToTime:true,
+          handoffComplete:true,
+        },
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "calendar_create_failed";
+      const code = detail.split(":",1)[0];
+      const status = ["client_email_required","invalid_client_phone","invalid_client_website","client_agenda_required","handoff_note_required","sms_consent_requires_phone","meeting_must_be_in_future","booking_request_mismatch"].includes(code)
+        ? 400
+        : ["google_calendar_not_connected","calendar_scope_required","calendar_organizer_mismatch"].includes(code)
+          ? 409
+          : 503;
+      return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
     }
     const existingRep = resolveWebsiteSalesHandoffRep(
       current.attributed_rep_user_id,
@@ -264,13 +463,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       audit_host_email:auditHostEmail,
       audit_host_role:String(auditHost.data.team_role || (auditHost.data.is_owner ? "owner" : "closer")),
       audit_duration_minutes:15,
-      calendar_event_status:"operator_confirmed",
-      calendar_confirmation_method:"operator_asserted_prefilled_google_calendar",
+      calendar_event_status:"verified",
+      calendar_confirmation_method:"server_google_calendar_api",
       calendar_confirmed_at:occurredAt,
       calendar_confirmed_by:session.userId,
+      calendar_appointment_id:verifiedMeeting.appointmentId,
+      google_calendar_id:verifiedMeeting.receipt.calendarId,
+      google_calendar_event_id:verifiedMeeting.receipt.eventId,
+      google_calendar_event_url:verifiedMeeting.receipt.htmlLink,
+      google_meet_link:verifiedMeeting.receipt.meetLink,
+      google_ical_uid:verifiedMeeting.receipt.iCalUID || null,
       founder_meeting_at:meetingAt,
       next_action_at:meetingAt,
       promised_demo:promisedDemo,
+      founder_handoff_note:transitionNote,
+      founder_handoff_note_at:occurredAt,
+      name:verifiedMeeting.contact.name,
+      company:verifiedMeeting.contact.company,
+      email:verifiedMeeting.contact.email,
+      phone:verifiedMeeting.contact.phone,
+      website:verifiedMeeting.contact.website,
+      founder_meeting_sms_consent:body.smsConsent === true,
+      founder_contact_confirmed_at:occurredAt,
+      founder_time_confirmed_at:occurredAt,
+      founder_handoff_confirmed_at:occurredAt,
+      founder_booking_confirmed_by:session.userId,
       attributed_rep_user_id:existingRep,
       attribution_frozen_at:current.attribution_frozen_at || occurredAt,
       assigned_to:founderUserId,
@@ -286,6 +503,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const normalized = normalizeWebsiteBuildBrief(body.buildBrief, session.userId, occurredAt);
     if (!normalized.ok) {
       return NextResponse.json({ok:false,error:normalized.error},{status:400});
+    }
+    const appointmentId = typeof current.calendar_appointment_id === "string"
+      ? current.calendar_appointment_id.trim()
+      : "";
+    if (UUID.test(appointmentId)) {
+      try {
+        await closeVerifiedFounderMeeting({
+          tenantId:session.tenantId,
+          leadId,
+          appointmentId,
+          outcome:"completed",
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "meeting_close_failed";
+        return NextResponse.json({ok:false,error:detail.split(":",1)[0],detail,correlationId:requestId},{status:503});
+      }
     }
     patch = {
       stage:"demo_completed",
@@ -304,10 +537,37 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     if (!["lost", "no_show", "reschedule", "follow_up"].includes(outcome)) {
       return NextResponse.json({ok:false,error:"invalid_deal_outcome"},{status:400});
     }
+    if (body.outcomeConfirmed !== true) {
+      return NextResponse.json({ok:false,error:"outcome_confirmation_required"},{status:400});
+    }
+    if (outcome !== "lost" && !transitionNote) {
+      return NextResponse.json({ok:false,error:"outcome_note_required"},{status:400});
+    }
     if (outcome === "lost") {
       const lossReason = typeof body.lossReason === "string" ? body.lossReason.trim() : "";
       if (!lossReason || lossReason.length > 500) {
         return NextResponse.json({ok:false,error:"loss_reason_required"},{status:400});
+      }
+      const appointmentId = typeof current.calendar_appointment_id === "string"
+        ? current.calendar_appointment_id.trim()
+        : "";
+      if (UUID.test(appointmentId) && requestId) {
+        try {
+          const reservation = await prepareVerifiedFounderMeetingCancellation({
+            tenantId:session.tenantId,
+            leadId,
+            appointmentId,
+            requestId,
+          });
+          cancellationDisposition = reservation.disposition;
+          if (reservation.disposition === "pending") {
+            cancellationAfterTransition = { appointmentId, requestId };
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "meeting_cancel_reservation_failed";
+          const code = detail.split(":",1)[0];
+          return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status:409});
+        }
       }
       patch = {
         stage:"lost",
@@ -315,11 +575,58 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         deal_outcome_at:occurredAt,
         loss_reason:lossReason,
         next_action_at:null,
+        ...(UUID.test(appointmentId)
+          ? { founder_meeting_status:"closed_lost", calendar_event_status:"closed_lost" }
+          : {}),
       };
     } else {
       const nextActionAt = typeof body.nextActionAt === "string" ? body.nextActionAt.trim() : "";
       if (!Number.isFinite(Date.parse(nextActionAt)) || Date.parse(nextActionAt) <= Date.now()) {
         return NextResponse.json({ok:false,error:"next_action_must_be_in_future"},{status:400});
+      }
+      const appointmentId = typeof current.calendar_appointment_id === "string"
+        ? current.calendar_appointment_id.trim()
+        : "";
+      if (outcome === "reschedule") {
+        if (!UUID.test(appointmentId) || !requestId) {
+          return NextResponse.json({ok:false,error:"verified_meeting_required"},{status:409});
+        }
+        try {
+          verifiedMeeting = await rescheduleVerifiedFounderMeeting({
+            tenantId:session.tenantId,
+            leadId,
+            appointmentId,
+            requestId,
+            meetingAt:nextActionAt,
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "calendar_update_failed";
+          const code = detail.split(":",1)[0];
+          const status = [
+            "meeting_must_be_in_future",
+            "reschedule_request_mismatch",
+          ].includes(code) ? 400 : [
+            "verified_meeting_required",
+            "meeting_no_longer_reschedulable",
+            "meeting_transition_pending",
+            "google_calendar_not_connected",
+            "calendar_scope_required",
+          ].includes(code) ? 409 : 503;
+          return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
+        }
+      } else if (outcome === "no_show" && UUID.test(appointmentId)) {
+        try {
+          await closeVerifiedFounderMeeting({
+            tenantId:session.tenantId,
+            leadId,
+            appointmentId,
+            outcome:"no_show",
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "meeting_close_failed";
+          const code = detail.split(":",1)[0];
+          return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status:code === "meeting_not_started" ? 409 : 503});
+        }
       }
       patch = {
         stage:currentStage,
@@ -328,7 +635,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         next_action_at:nextActionAt,
         ...(outcome === "no_show" ? { founder_meeting_status:"no_show" } : {}),
         ...(outcome === "reschedule"
-          ? { founder_meeting_status:"rescheduled", founder_meeting_at:nextActionAt }
+          ? {
+              founder_meeting_status:"rescheduled",
+              calendar_appointment_id:appointmentId,
+              founder_meeting_at:verifiedMeeting?.meetingAt || nextActionAt,
+              calendar_event_status:"verified",
+              google_calendar_id:verifiedMeeting?.receipt.calendarId,
+              google_calendar_event_id:verifiedMeeting?.receipt.eventId,
+              google_calendar_event_url:verifiedMeeting?.receipt.htmlLink,
+              google_meet_link:verifiedMeeting?.receipt.meetLink,
+              google_ical_uid:verifiedMeeting?.receipt.iCalUID || null,
+              calendar_appointment_revision:verifiedMeeting?.revision,
+            }
           : {}),
         ...(outcome === "follow_up" ? { proposal_status:"follow_up_pending" } : {}),
       };
@@ -926,7 +1244,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       : `Lifecycle action: ${action.replaceAll("_", " ")}.`,
     body.action === "disposition" ? `Call result: ${String(body.disposition || "unknown")}.` : "",
     body.action === "book_founder"
-      ? `${priorStage === "qualified" ? "" : "Qualification completed during handoff. "}Operator confirmed the prefilled Google Calendar event was saved for the 15-minute audit: ${String(body.meetingAt || "")}. Promised demo: ${String(body.promisedDemo || "")}.`
+      ? `${priorStage === "qualified" ? "" : "Qualification completed during handoff. "}Google Calendar verified the 15-minute audit, sent the client invitation, and returned a unique Meet link for ${String(body.meetingAt || "")}. Promised demo: ${String(body.promisedDemo || "")}.`
       : "",
     body.action === "complete_audit" ? "Founder/closer audit completed and builder brief captured." : "",
     body.action === "proposal" ? `Proposal frozen with ${String(patch.currency)} ${String(patch.payment_due_amount)} due now.` : "",
@@ -961,8 +1279,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       build_handoff_status:patch.build_handoff_status || null,
       calendar_event_status:patch.calendar_event_status || null,
       calendar_confirmation_method:patch.calendar_confirmation_method || null,
+      calendar_appointment_id:patch.calendar_appointment_id || null,
+      google_calendar_event_id:patch.google_calendar_event_id || null,
+      google_meet_link:patch.google_meet_link || null,
       qualification_source:patch.qualification_source || null,
       deal_outcome:patch.deal_outcome || null,
+      booking_confirmations:body.action === "book_founder" ? body.confirmations || null : null,
+      booking_request_id:body.action === "book_founder" ? requestId : null,
+      outcome_request_id:body.action === "deal_outcome" ? requestId : null,
       payment_due_amount:patch.payment_due_amount || null,
       checkout_reference:patch.stripe_checkout_session_id || null,
     },
@@ -988,6 +1312,38 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       correlationId:requestId,
     },{status:409});
   }
+  if (verifiedMeeting) {
+    try {
+      await activateVerifiedFounderMeeting(session.tenantId, verifiedMeeting.appointmentId);
+    } catch (error) {
+      return NextResponse.json({
+        ok:false,
+        error:"meeting_activation_failed",
+        detail:error instanceof Error ? error.message : "meeting_activation_failed",
+        correlationId:requestId,
+        stageUpdated:true,
+      },{status:503});
+    }
+  }
+  if (cancellationAfterTransition) {
+    try {
+      const cancellation = await cancelVerifiedFounderMeeting({
+        tenantId:session.tenantId,
+        leadId,
+        appointmentId:cancellationAfterTransition.appointmentId,
+        requestId:cancellationAfterTransition.requestId,
+      });
+      cancellationDisposition = cancellation.disposition;
+    } catch (error) {
+      return NextResponse.json({
+        ok:false,
+        error:"calendar_cancel_failed",
+        detail:error instanceof Error ? error.message : "calendar_cancel_failed",
+        correlationId:requestId,
+        stageUpdated:true,
+      },{status:503});
+    }
+  }
   // This route patches the record directly instead of going through
   // updateRecord(), so nothing here fires the portal stage hooks on its own.
   // That silence is why the qualified -> booking-link email never sent from a
@@ -1012,6 +1368,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     data:transitionResult?.data ?? { ...current, ...patch },
     touchAt:occurredAt,
     idempotent:transitionResult?.idempotent === true,
+    ...(verifiedMeeting ? {
+      meeting:{
+        appointmentId:verifiedMeeting.appointmentId,
+        meetingAt:verifiedMeeting.meetingAt,
+        timezone:verifiedMeeting.timezone,
+        eventId:verifiedMeeting.receipt.eventId,
+        calendarUrl:verifiedMeeting.receipt.htmlLink,
+        meetLink:verifiedMeeting.receipt.meetLink,
+      },
+    } : {}),
+    ...(cancellationDisposition ? { cancellationDisposition } : {}),
+    ...(cancellationDisposition === "pending" ? {
+      warning:"The lead was updated. Calendar cancellation is safely reserved and the background worker is finishing it.",
+    } : {}),
     ...(checkout ? { checkoutReference:checkout.reference, checkoutUrl:checkout.url } : {}),
   });
 }

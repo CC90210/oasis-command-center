@@ -25,6 +25,18 @@ type Founder = {
   display_name: string | null;
   team_role: string;
   is_owner: boolean;
+  calendar_ready?: boolean | null;
+  calendar_connected?: boolean | null;
+  calendar_identity_mismatch?: boolean | null;
+  connected_google_address?: string | null;
+};
+
+type FounderBookingContact = {
+  name: string;
+  company: string;
+  email: string;
+  phone: string;
+  website: string;
 };
 
 type InitialOffer = {
@@ -70,9 +82,174 @@ type WorkflowResponse = {
 
 const INPUT =
   "w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg outline-none transition focus:border-accent/70 focus:ring-1 focus:ring-accent/30";
+const FOUNDER_TIMEZONE = "America/Toronto";
+const FOUNDER_TIME_OPTIONS = Array.from({ length: 96 }, (_, index) => {
+  const hours = Math.floor(index / 4);
+  const minutes = (index % 4) * 15;
+  const value = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+  const labelHours = hours % 12 || 12;
+  const suffix = hours < 12 ? "a.m." : "p.m.";
+  return { value, label: `${labelHours}:${String(minutes).padStart(2, "0")} ${suffix}` };
+});
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function defaultDepositAmount(setupAmount: number): number {
   return Math.ceil(Math.max(0, setupAmount) * 100 / 2) / 100;
+}
+
+function founderDateChoice(daysFromToday: number): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: FOUNDER_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const shifted = new Date(
+    Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day) + daysFromToday),
+  );
+  return shifted.toISOString().slice(0, 10);
+}
+
+function founderMeetingIso(date: string, time: string): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(time);
+  if (!match || !timeMatch) return null;
+
+  const target = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: Number(timeMatch[1]),
+    minute: Number(timeMatch[2]),
+  };
+  const targetStamp = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute,
+  );
+  let instant = targetStamp;
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: FOUNDER_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parts = Object.fromEntries(
+      formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+    );
+    const observedStamp = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+    );
+    instant += targetStamp - observedStamp;
+  }
+
+  const verified = Object.fromEntries(
+    formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+  );
+  if (
+    Number(verified.year) !== target.year ||
+    Number(verified.month) !== target.month ||
+    Number(verified.day) !== target.day ||
+    Number(verified.hour) !== target.hour ||
+    Number(verified.minute) !== target.minute
+  ) {
+    return null;
+  }
+  return new Date(instant).toISOString();
+}
+
+function founderMeetingPreview(iso: string | null): string | null {
+  if (!iso) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: FOUNDER_TIMEZONE,
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(iso));
+}
+
+function LifecycleDateTimeFields({
+  label,
+  date,
+  time,
+  onDateChange,
+  onTimeChange,
+}: {
+  label: string;
+  date: string;
+  time: string;
+  onDateChange: (value: string) => void;
+  onTimeChange: (value: string) => void;
+}) {
+  const iso = founderMeetingIso(date, time);
+  const preview = founderMeetingPreview(iso);
+  const future = Boolean(iso && Date.parse(iso) > Date.now());
+  return (
+    <div className="space-y-2">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs font-semibold text-fg-muted">
+          {label} date
+          <input
+            type="date"
+            value={date}
+            min={founderDateChoice(0)}
+            onChange={(event) => onDateChange(event.target.value)}
+            className={`${INPUT} mt-1.5`}
+          />
+        </label>
+        <label className="text-xs font-semibold text-fg-muted">
+          Time (15-minute intervals)
+          <select
+            value={time}
+            onChange={(event) => onTimeChange(event.target.value)}
+            className={`${INPUT} mt-1.5`}
+          >
+            <option value="">Select a time</option>
+            {FOUNDER_TIME_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {[{ label: "Today", days: 0 }, { label: "Tomorrow", days: 1 }, { label: "In 2 days", days: 2 }].map(
+          (choice) => (
+            <button
+              key={choice.label}
+              type="button"
+              onClick={() => onDateChange(founderDateChoice(choice.days))}
+              className="rounded-md border border-bg-border bg-bg-deep px-2.5 py-1 text-[11px] font-semibold text-fg-muted transition hover:border-accent/50 hover:text-fg"
+            >
+              {choice.label}
+            </button>
+          ),
+        )}
+        <span className="text-[11px] text-fg-dim">America/Toronto (Eastern Time)</span>
+      </div>
+      {preview && future ? (
+        <div className="text-xs font-semibold text-accent">Scheduled: {preview}</div>
+      ) : preview ? (
+        <div className="text-xs text-amber-200">That time has already passed. Choose a future time.</div>
+      ) : date && time ? (
+        <div className="text-xs text-amber-200">That local time is not available. Choose another time.</div>
+      ) : null}
+    </div>
+  );
 }
 
 const DIRECT_ADVANCE_LABELS: Record<string, string> = {
@@ -109,17 +286,31 @@ export function LeadLifecycleActions({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [transitionNote, setTransitionNote] = useState("");
-  const [nextActionAt, setNextActionAt] = useState("");
+  const [nextActionDate, setNextActionDate] = useState(() => founderDateChoice(0));
+  const [nextActionTime, setNextActionTime] = useState("");
   const [lossReason, setLossReason] = useState("");
   const [dealOutcome, setDealOutcome] = useState<"follow_up" | "no_show" | "reschedule" | "lost">("follow_up");
+  const [outcomeConfirmed, setOutcomeConfirmed] = useState(false);
+  const [dealOutcomeRequestId, setDealOutcomeRequestId] = useState(() => crypto.randomUUID());
   const [checks, setChecks] = useState([false, false, false, false]);
   const [founders, setFounders] = useState<Founder[]>([]);
   const [builders, setBuilders] = useState<Founder[]>([]);
   const [founderUserId, setFounderUserId] = useState("");
-  const [meetingAt, setMeetingAt] = useState("");
+  const [meetingDate, setMeetingDate] = useState(() => founderDateChoice(1));
+  const [meetingTime, setMeetingTime] = useState("");
   const [promisedDemo, setPromisedDemo] = useState("");
-  const [calendarDraftOpened, setCalendarDraftOpened] = useState(false);
-  const [calendarRequestId, setCalendarRequestId] = useState<string | null>(null);
+  const [founderBookingRequestId, setFounderBookingRequestId] = useState(() => crypto.randomUUID());
+  const [bookingContact, setBookingContact] = useState<FounderBookingContact>({
+    name: leadName || "",
+    company: leadCompany || "",
+    email: leadEmail || "",
+    phone: leadPhone || "",
+    website: leadWebsite || "",
+  });
+  const [contactConfirmed, setContactConfirmed] = useState(false);
+  const [clientAgreedToTime, setClientAgreedToTime] = useState(false);
+  const [handoffComplete, setHandoffComplete] = useState(false);
+  const [smsConsent, setSmsConsent] = useState(false);
   const initialPackageId =
     initialOffer?.packageId && initialOffer.packageId in WEBSITE_PACKAGES
       ? (initialOffer.packageId as WebsitePackageId)
@@ -185,6 +376,32 @@ export function LeadLifecycleActions({
     currentStage,
   );
   const schedulingAlsoQualifies = currentStage !== "qualified";
+  const selectedFounder = founders.find((founder) => founder.auth_user_id === founderUserId) || null;
+  const selectedFounderCalendarReady =
+    selectedFounder?.calendar_ready ?? selectedFounder?.calendar_connected ?? null;
+  const founderMeetingAt = founderMeetingIso(meetingDate, meetingTime);
+  const nextActionAt = founderMeetingIso(nextActionDate, nextActionTime);
+  const founderMeetingLabel = founderMeetingPreview(founderMeetingAt);
+  const founderMeetingIsFuture =
+    Boolean(founderMeetingAt) && new Date(founderMeetingAt as string).getTime() > Date.now();
+  const founderContactValid =
+    Boolean(bookingContact.name.trim() || bookingContact.company.trim()) &&
+    EMAIL_PATTERN.test(bookingContact.email.trim());
+  const founderQualification = {
+    authorityConfirmed: currentStage === "qualified" ? true : checks[0],
+    websiteProblemConfirmed: currentStage === "qualified" ? true : checks[1],
+    timingConfirmed: currentStage === "qualified" ? true : checks[2],
+    minimumInvestmentConfirmed: currentStage === "qualified" ? true : checks[3],
+  };
+  const founderBookingReady =
+    Boolean(founderUserId && founderMeetingAt && promisedDemo.trim() && transitionNote.trim()) &&
+    founderMeetingIsFuture &&
+    founderContactValid &&
+    Object.values(founderQualification).every(Boolean) &&
+    contactConfirmed &&
+    clientAgreedToTime &&
+    handoffComplete &&
+    selectedFounderCalendarReady !== false;
   const postFounderRep =
     !canManage && !canRunDeal && !canRunDelivery &&
     ["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review"].includes(
@@ -254,64 +471,77 @@ export function LeadLifecycleActions({
     );
   }
 
-  function invalidateCalendarDraft() {
-    setCalendarDraftOpened(false);
-    setCalendarRequestId(null);
+  function renewFounderBookingRequest() {
+    setFounderBookingRequestId(crypto.randomUUID());
+  }
+
+  function renewDealOutcomeRequest() {
+    setDealOutcomeRequestId(crypto.randomUUID());
+  }
+
+  function updateNextActionDate(value: string) {
+    setNextActionDate(value);
+    setOutcomeConfirmed(false);
+    renewDealOutcomeRequest();
+  }
+
+  function updateNextActionTime(value: string) {
+    setNextActionTime(value);
+    setOutcomeConfirmed(false);
+    renewDealOutcomeRequest();
   }
 
   function setQualificationCheck(index: number, checked: boolean) {
     setChecks((previous) =>
       previous.map((value, itemIndex) => (itemIndex === index ? checked : value)),
     );
-    invalidateCalendarDraft();
+    renewFounderBookingRequest();
   }
 
-  function openCalendarDraft() {
-    const start = new Date(meetingAt);
-    const hostEmail = founders.find((founder) => founder.auth_user_id === founderUserId)?.email || null;
-    if (!founderUserId || !hostEmail || Number.isNaN(start.getTime()) || !promisedDemo.trim()) return;
-    const calendarUrl = googleCalendarAuditUrl({
-      at:start,
-      leadName,
-      company:leadCompany,
-      email:leadEmail,
-      phone:leadPhone,
-      website:leadWebsite,
-      promisedDemo:promisedDemo.trim(),
-      handoffNote:transitionNote.trim(),
-      hostEmail,
-    });
-    window.open(calendarUrl, "_blank", "noopener,noreferrer");
-    setCalendarRequestId(crypto.randomUUID());
-    setCalendarDraftOpened(true);
+  function updateBookingContact(field: keyof FounderBookingContact, value: string) {
+    setBookingContact((current) => ({ ...current, [field]: value }));
+    setContactConfirmed(false);
+    if (field === "phone") setSmsConsent(false);
+    renewFounderBookingRequest();
   }
 
-  async function confirmCalendarHandoff() {
-    const start = new Date(meetingAt);
-    if (!calendarDraftOpened || !calendarRequestId || Number.isNaN(start.getTime())) return;
-    await patch(
+  async function bookFounderMeeting() {
+    if (!founderMeetingAt || !founderBookingReady) return;
+    const result = await patch(
       {
         action: "book_founder",
-        requestId: calendarRequestId,
+        requestId: founderBookingRequestId,
         founderUserId,
-        meetingAt: start.toISOString(),
+        meetingAt: founderMeetingAt,
+        timezone: FOUNDER_TIMEZONE,
         promisedDemo: promisedDemo.trim(),
-        calendarConfirmed: true,
-        ...(schedulingAlsoQualifies
-          ? {
-              qualification: {
-                authorityConfirmed: true,
-                websiteProblemConfirmed: true,
-                timingConfirmed: true,
-                minimumInvestmentConfirmed: true,
-              },
-            }
-          : {}),
+        note: transitionNote.trim(),
+        contact: {
+          name: bookingContact.name.trim(),
+          company: bookingContact.company.trim(),
+          email: bookingContact.email.trim(),
+          phone: bookingContact.phone.trim(),
+          website: bookingContact.website.trim(),
+        },
+        qualification: {
+          authorityConfirmed: founderQualification.authorityConfirmed,
+          websiteProblemConfirmed: founderQualification.websiteProblemConfirmed,
+          timingConfirmed: founderQualification.timingConfirmed,
+          minimumInvestmentConfirmed: founderQualification.minimumInvestmentConfirmed,
+        },
+        confirmations: {
+          contactConfirmed,
+          clientAgreedToTime,
+          handoffComplete,
+        },
+        smsConsent: Boolean(bookingContact.phone.trim() && smsConsent),
       },
       schedulingAlsoQualifies
-        ? "Qualification and Calendar handoff confirmed. The lead is now in Founder Meeting."
-        : "Calendar event confirmed. The audit is now assigned to the selected host.",
+        ? "Meeting booked, Google invite sent, and qualification handed to the founder."
+        : "Meeting booked and the verified Google invite was sent to the client.",
     );
+    if (!result) return;
+    setFounderBookingRequestId(crypto.randomUUID());
   }
 
   async function createPaymentLink() {
@@ -321,6 +551,29 @@ export function LeadLifecycleActions({
     );
     if (result?.checkoutReference) setPaymentReference(result.checkoutReference);
     if (result?.checkoutUrl) setCheckoutUrl(result.checkoutUrl);
+  }
+
+  async function recordDealOutcome() {
+    const result = await patch(
+      {
+        action: "deal_outcome",
+        requestId: dealOutcomeRequestId,
+        outcome: dealOutcome,
+        outcomeConfirmed,
+        nextActionAt: dealOutcome === "lost" ? undefined : nextActionAt,
+        lossReason: dealOutcome === "lost" ? lossReason.trim() : undefined,
+      },
+      dealOutcome === "lost"
+        ? "Deal closed as lost. Any active future invite was cancelled; completed meeting history was preserved."
+        : dealOutcome === "reschedule"
+          ? "The existing Google invite was updated and reminders now use the new time."
+          : dealOutcome === "no_show"
+            ? "No-show recorded, remaining meeting reminders stopped, and follow-up scheduled."
+            : "Outcome recorded and the next action scheduled.",
+    );
+    if (!result) return;
+    setOutcomeConfirmed(false);
+    renewDealOutcomeRequest();
   }
 
   async function copyPaymentLink() {
@@ -360,13 +613,20 @@ export function LeadLifecycleActions({
       <div className="space-y-5 p-5">
         <label className="block">
           <span className="mb-1.5 block text-xs font-semibold text-fg-muted">
-            Outcome and handoff note
+            {mayScheduleFounderAudit ? "Internal founder handoff note" : "Outcome and handoff note"}
           </span>
           <textarea
             value={transitionNote}
             onChange={(event) => {
               setTransitionNote(event.target.value);
-              if (mayScheduleFounderAudit) invalidateCalendarDraft();
+              if (mayScheduleFounderAudit) {
+                setHandoffComplete(false);
+                renewFounderBookingRequest();
+              }
+              if (canRunDeal && ["founder_meeting_booked", "demo_completed", "proposal_sent"].includes(currentStage)) {
+                setOutcomeConfirmed(false);
+                renewDealOutcomeRequest();
+              }
             }}
             maxLength={4000}
             rows={3}
@@ -374,7 +634,9 @@ export function LeadLifecycleActions({
             className={INPUT}
           />
           <span className="mt-1 block text-[10px] text-fg-dim">
-            Saved with the lifecycle event so the next owner sees why the lead moved.
+            {mayScheduleFounderAudit
+              ? "Required for the founder handoff. This internal context is saved to the lead and never sent to the client."
+              : "Saved with the lifecycle event so the next owner sees why the lead moved."}
           </span>
         </label>
 
@@ -412,15 +674,15 @@ export function LeadLifecycleActions({
             <legend className="px-2 text-xs font-bold uppercase tracking-wider text-fg-muted">
               Record call outcome
             </legend>
-            <label className="block text-xs text-fg-muted">
-              Next follow-up time
-              <input
-                type="datetime-local"
-                value={nextActionAt}
-                onChange={(event) => setNextActionAt(event.target.value)}
-                className={`${INPUT} mt-1.5 sm:max-w-xs`}
+            <div className="block text-xs text-fg-muted">
+              <LifecycleDateTimeFields
+                label="Next follow-up"
+                date={nextActionDate}
+                time={nextActionTime}
+                onDateChange={updateNextActionDate}
+                onTimeChange={updateNextActionTime}
               />
-            </label>
+            </div>
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
@@ -430,7 +692,7 @@ export function LeadLifecycleActions({
                     {
                       action: "disposition",
                       disposition: "attempted",
-                      nextActionAt: new Date(nextActionAt).toISOString(),
+                      nextActionAt,
                     },
                     "No answer recorded and follow-up scheduled.",
                   )
@@ -447,7 +709,7 @@ export function LeadLifecycleActions({
                     {
                       action: "disposition",
                       disposition: "voicemail",
-                      nextActionAt: new Date(nextActionAt).toISOString(),
+                      nextActionAt,
                     },
                     "Voicemail recorded and follow-up scheduled.",
                   )
@@ -550,9 +812,8 @@ export function LeadLifecycleActions({
             <div className="flex items-start gap-2 text-xs leading-5 text-fg-muted">
               <Clock3 className="h-4 w-4 text-accent" aria-hidden />
               <span>
-                Open the prefilled event, save it in Google Calendar, then confirm the handoff here.
-                The app cannot verify a prefilled Calendar event automatically, so ownership transfers
-                only after your explicit confirmation.
+                Confirm the client, host, date, and handoff once. The server creates the Google Calendar
+                event and Meet link, sends the client invite, records the touch, and then moves the lead.
               </span>
             </div>
             {schedulingAlsoQualifies ? (
@@ -561,7 +822,7 @@ export function LeadLifecycleActions({
                   <div className="text-xs font-semibold text-fg">Scheduling will also mark this lead qualified</div>
                   <p className="mt-1 text-xs leading-5 text-fg-muted">
                     Confirm every gate and write the client context in the handoff note above. Nothing moves
-                    until the Calendar event is saved and you complete step 2.
+                    until the booking and invite are verified by the server.
                   </p>
                 </div>
                 {currentStage === "connected" ? (
@@ -597,83 +858,243 @@ export function LeadLifecycleActions({
                 ) : null}
               </div>
             ) : null}
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="text-xs text-fg-muted">
-                Audit host
-                <select
-                  value={founderUserId}
-                  onChange={(event) => {
-                    setFounderUserId(event.target.value);
-                    invalidateCalendarDraft();
-                  }}
-                  className={`${INPUT} mt-1.5`}
-                >
-                  <option value="">Select founder or closer</option>
-                  {founders.map(
-                    (founder) =>
-                      founder.auth_user_id && (
-                        <option key={founder.auth_user_id} value={founder.auth_user_id}>
-                          {founder.display_name || founder.full_name}
+            <div className="grid gap-4 rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+              <div>
+                <label className="text-xs font-semibold text-fg-muted">
+                  Founder or closer hosting
+                  <select
+                    value={founderUserId}
+                    onChange={(event) => {
+                      setFounderUserId(event.target.value);
+                      renewFounderBookingRequest();
+                    }}
+                    className={`${INPUT} mt-1.5`}
+                  >
+                    <option value="">Select founder or closer</option>
+                    {founders.map(
+                      (founder) =>
+                        founder.auth_user_id && (
+                          <option key={founder.auth_user_id} value={founder.auth_user_id}>
+                            {founder.display_name || founder.full_name}
+                          </option>
+                        ),
+                    )}
+                  </select>
+                </label>
+                {typeof selectedFounderCalendarReady === "boolean" ? (
+                  <div
+                    className={`mt-2 rounded-md border px-2.5 py-2 text-[11px] ${
+                      selectedFounderCalendarReady
+                        ? "border-emerald-400/25 bg-emerald-400/5 text-emerald-200"
+                        : "border-amber-400/30 bg-amber-400/5 text-amber-200"
+                    }`}
+                  >
+                    {selectedFounderCalendarReady
+                      ? "Google Calendar is ready for this host."
+                      : selectedFounder?.calendar_identity_mismatch
+                        ? `This host connected ${selectedFounder.connected_google_address || "a different Google account"}. They must reconnect with ${selectedFounder.email || "their OASIS work email"} before client invitations can be sent.`
+                        : "This host needs to reconnect Google Calendar before a booking can be created."}
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)]">
+                  <label className="text-xs font-semibold text-fg-muted">
+                    Meeting date
+                    <input
+                      type="date"
+                      value={meetingDate}
+                      min={founderDateChoice(0)}
+                      onChange={(event) => {
+                        setMeetingDate(event.target.value);
+                        setClientAgreedToTime(false);
+                        renewFounderBookingRequest();
+                      }}
+                      className={`${INPUT} mt-1.5`}
+                    />
+                  </label>
+                  <label className="text-xs font-semibold text-fg-muted">
+                    Time (15-minute intervals)
+                    <select
+                      value={meetingTime}
+                      onChange={(event) => {
+                        setMeetingTime(event.target.value);
+                        setClientAgreedToTime(false);
+                        renewFounderBookingRequest();
+                      }}
+                      className={`${INPUT} mt-1.5`}
+                    >
+                      <option value="">Select a time</option>
+                      {FOUNDER_TIME_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
                         </option>
-                      ),
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[{ label: "Today", days: 0 }, { label: "Tomorrow", days: 1 }, { label: "In 2 days", days: 2 }].map(
+                    (choice) => (
+                      <button
+                        key={choice.label}
+                        type="button"
+                        onClick={() => {
+                          setMeetingDate(founderDateChoice(choice.days));
+                          setClientAgreedToTime(false);
+                          renewFounderBookingRequest();
+                        }}
+                        className="rounded-md border border-bg-border bg-bg-deep px-2.5 py-1 text-[11px] font-semibold text-fg-muted transition hover:border-accent/50 hover:text-fg"
+                      >
+                        {choice.label}
+                      </button>
+                    ),
                   )}
-                </select>
-              </label>
-              <label className="text-xs text-fg-muted">
-                Meeting date and time
-                <input
-                  type="datetime-local"
-                  value={meetingAt}
-                  onChange={(event) => {
-                    setMeetingAt(event.target.value);
-                    invalidateCalendarDraft();
-                  }}
-                  className={`${INPUT} mt-1.5`}
-                />
-              </label>
+                  <span className="text-[11px] text-fg-dim">America/Toronto (Eastern Time)</span>
+                </div>
+                {founderMeetingLabel && founderMeetingIsFuture ? (
+                  <div className="text-xs font-semibold text-accent">Booking: {founderMeetingLabel}</div>
+                ) : founderMeetingLabel ? (
+                  <div className="text-xs text-amber-200">That time has already passed. Choose a future time.</div>
+                ) : meetingDate && meetingTime ? (
+                  <div className="text-xs text-amber-200">That local time is not available. Choose another time.</div>
+                ) : null}
+              </div>
             </div>
-            <label className="block text-xs text-fg-muted">
-              Promised audit or demo
+
+            <div className="space-y-3 rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3">
+              <div>
+                <div className="text-xs font-semibold text-fg">Confirm contact and business</div>
+                <p className="mt-1 text-[11px] leading-5 text-fg-muted">
+                  Correct anything the opener learned on the call. These details are saved with the handoff and
+                  the email address receives the Calendar invite.
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <BookingContactField
+                  label="Contact name"
+                  value={bookingContact.name}
+                  onChange={(value) => updateBookingContact("name", value)}
+                />
+                <BookingContactField
+                  label="Business"
+                  value={bookingContact.company}
+                  onChange={(value) => updateBookingContact("company", value)}
+                />
+                <BookingContactField
+                  label="Email for invite"
+                  value={bookingContact.email}
+                  type="email"
+                  required
+                  onChange={(value) => updateBookingContact("email", value)}
+                />
+                <BookingContactField
+                  label="Phone"
+                  value={bookingContact.phone}
+                  type="tel"
+                  onChange={(value) => updateBookingContact("phone", value)}
+                />
+                <BookingContactField
+                  label="Website"
+                  value={bookingContact.website}
+                  type="url"
+                  onChange={(value) => updateBookingContact("website", value)}
+                  className="sm:col-span-2"
+                />
+              </div>
+              {bookingContact.email.trim() && !EMAIL_PATTERN.test(bookingContact.email.trim()) ? (
+                <div className="text-xs text-amber-200">Enter a valid client email so the invite can be delivered.</div>
+              ) : null}
+            </div>
+
+            <label className="block text-xs font-semibold text-fg-muted">
+              Client-facing meeting agenda
               <textarea
                 value={promisedDemo}
                 onChange={(event) => {
                   setPromisedDemo(event.target.value);
-                  invalidateCalendarDraft();
+                  renewFounderBookingRequest();
                 }}
                 maxLength={500}
-                rows={2}
-                placeholder="What must the founder show or prepare?"
+                rows={3}
+                placeholder="What will the founder review or demonstrate on the call?"
                 className={`${INPUT} mt-1.5`}
               />
+              <span className="mt-1 block text-[10px] font-normal text-fg-dim">
+                This is safe for the client to see and is included in the Calendar invite.
+              </span>
             </label>
-            {!founders.find((founder) => founder.auth_user_id === founderUserId)?.email && founderUserId ? (
-              <div className="rounded-lg border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
-                This host has no account email. Choose another founder or closer before booking.
+
+            <div className="rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3">
+              <div className="text-xs font-semibold text-fg">Internal founder handoff note</div>
+              <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-fg-muted">
+                {transitionNote.trim() || "Add the client needs, objections, timing, and sales context in the note above."}
+              </p>
+              <div className="mt-2 text-[10px] text-fg-dim">
+                This is visible to your team and never sent to the client.
               </div>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={contactConfirmed}
+                  onChange={(event) => setContactConfirmed(event.target.checked)}
+                  className="mt-1"
+                />
+                I confirmed the client&apos;s contact details and email.
+              </label>
+              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={clientAgreedToTime}
+                  onChange={(event) => setClientAgreedToTime(event.target.checked)}
+                  className="mt-1"
+                />
+                The client agreed to this date and time.
+              </label>
+              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={handoffComplete}
+                  disabled={!transitionNote.trim()}
+                  onChange={(event) => setHandoffComplete(event.target.checked)}
+                  className="mt-1"
+                />
+                The internal founder handoff note is complete.
+              </label>
+            </div>
+
+            {bookingContact.phone.trim() ? (
+              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={smsConsent}
+                  onChange={(event) => {
+                    setSmsConsent(event.target.checked);
+                    renewFounderBookingRequest();
+                  }}
+                  className="mt-1"
+                />
+                Client consented to SMS meeting reminders at {bookingContact.phone.trim()} (optional; used only
+                when SMS delivery is enabled).
+              </label>
             ) : null}
-            <div className="flex flex-wrap gap-2">
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-bg-border/70 pt-4">
+              <div className="text-[11px] leading-5 text-fg-dim">
+                Booking is blocked until the email, qualification gates, handoff note, and confirmations are complete.
+              </div>
               <button
                 type="button"
-                disabled={
-                  disabled ||
-                  !founderUserId ||
-                  !meetingAt ||
-                  !promisedDemo.trim() ||
-                  (schedulingAlsoQualifies && (!checks.every(Boolean) || !transitionNote.trim())) ||
-                  !founders.find((founder) => founder.auth_user_id === founderUserId)?.email
-                }
-                onClick={openCalendarDraft}
-                className="btn-secondary !px-4 !py-2 text-sm"
+                disabled={disabled || !founderBookingReady}
+                onClick={() => void bookFounderMeeting()}
+                className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
               >
-                1. Open prefilled Google Calendar
-              </button>
-              <button
-                type="button"
-                disabled={disabled || !calendarDraftOpened || !calendarRequestId}
-                onClick={() => void confirmCalendarHandoff()}
-                className="btn-primary !px-4 !py-2 text-sm"
-              >
-                2. I saved the event - complete handoff
+                <CheckCircle2 className="h-4 w-4" aria-hidden />
+                {"Book meeting & send invite"}
               </button>
             </div>
           </fieldset>
@@ -706,9 +1127,11 @@ export function LeadLifecycleActions({
                 Outcome
                 <select
                   value={dealOutcome}
-                  onChange={(event) =>
-                    setDealOutcome(event.target.value as "follow_up" | "no_show" | "reschedule" | "lost")
-                  }
+                  onChange={(event) => {
+                    setDealOutcome(event.target.value as "follow_up" | "no_show" | "reschedule" | "lost");
+                    setOutcomeConfirmed(false);
+                    renewDealOutcomeRequest();
+                  }}
                   className={`${INPUT} mt-1.5`}
                 >
                   <option value="follow_up">Follow-up required</option>
@@ -718,44 +1141,58 @@ export function LeadLifecycleActions({
                 </select>
               </label>
               {dealOutcome !== "lost" ? (
-                <label className="text-xs text-fg-muted">
-                  Next follow-up or meeting
-                  <input
-                    type="datetime-local"
-                    value={nextActionAt}
-                    onChange={(event) => setNextActionAt(event.target.value)}
-                    className={`${INPUT} mt-1.5`}
-                  />
-                </label>
+                <LifecycleDateTimeFields
+                  label={dealOutcome === "reschedule" ? "New meeting" : "Next follow-up"}
+                  date={nextActionDate}
+                  time={nextActionTime}
+                  onDateChange={updateNextActionDate}
+                  onTimeChange={updateNextActionTime}
+                />
               ) : (
                 <label className="text-xs text-fg-muted">
                   Loss reason
                   <input
                     value={lossReason}
-                    onChange={(event) => setLossReason(event.target.value)}
+                    onChange={(event) => {
+                      setLossReason(event.target.value);
+                      setOutcomeConfirmed(false);
+                      renewDealOutcomeRequest();
+                    }}
                     maxLength={500}
                     className={`${INPUT} mt-1.5`}
                   />
                 </label>
               )}
             </div>
+            {dealOutcome === "reschedule" ? (
+              <div className="rounded-lg border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-fg-muted">
+                Rescheduling updates the existing Google invite, preserves its Meet link, and replaces the old
+                reminder time after Google verifies the change.
+              </div>
+            ) : null}
+            <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+              <input
+                type="checkbox"
+                checked={outcomeConfirmed}
+                onChange={(event) => setOutcomeConfirmed(event.target.checked)}
+                className="mt-1"
+              />
+              {dealOutcome === "lost"
+                ? "I confirmed the loss reason and understand any active future invite will be cancelled while completed meeting history stays intact."
+                : dealOutcome === "reschedule"
+                  ? "I confirmed this new date and time with the client."
+                  : dealOutcome === "no_show"
+                    ? "I confirmed the client did not attend and the old meeting reminders should stop."
+                    : "I confirmed the follow-up time and recorded the necessary context in the note above."}
+            </label>
             <button
               type="button"
-              disabled={disabled || (dealOutcome === "lost" ? !lossReason.trim() : !nextActionAt)}
-              onClick={() =>
-                void patch(
-                  {
-                    action: "deal_outcome",
-                    outcome: dealOutcome,
-                    nextActionAt:
-                      dealOutcome === "lost" ? undefined : new Date(nextActionAt).toISOString(),
-                    lossReason: dealOutcome === "lost" ? lossReason.trim() : undefined,
-                  },
-                  dealOutcome === "lost"
-                    ? "Deal closed as lost with the reason preserved."
-                    : "Outcome recorded and the next action scheduled.",
-                )
+              disabled={
+                disabled ||
+                !outcomeConfirmed ||
+                (dealOutcome === "lost" ? !lossReason.trim() : !nextActionAt || !transitionNote.trim())
               }
+              onClick={() => void recordDealOutcome()}
               className="btn-secondary !px-4 !py-2 text-sm"
             >
               Record outcome
@@ -1240,7 +1677,29 @@ function readableError(code: string): string {
     qualify_before_booking: "Complete all four qualification gates before booking the founder audit.",
     meeting_must_be_in_future: "The founder meeting must be in the future.",
     invalid_handoff: "Choose a founder, meeting time, and promised demo.",
-    calendar_confirmation_required: "Save the prefilled Google Calendar event before completing the handoff.",
+    client_email_required: "Enter a valid client email so Google can deliver the invitation.",
+    invalid_client_phone: "Enter a valid phone number or leave it blank.",
+    invalid_client_website: "Enter a valid website address or leave it blank.",
+    handoff_note_required: "Complete the internal founder handoff note.",
+    booking_confirmations_required: "Confirm the client contact, agreed time, and internal handoff before booking.",
+    outcome_confirmation_required: "Confirm the selected outcome before saving it.",
+    sms_consent_requires_phone: "Add a valid client phone number before recording SMS consent.",
+    google_calendar_not_connected: "The selected host must connect their work Google account in Settings.",
+    calendar_scope_required: "The selected host must reconnect Google once to approve Calendar access.",
+    calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
+    google_meet_link_missing: "Google created the event but has not returned its Meet link yet. Retry this booking; it will reconcile the same event.",
+    calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
+    calendar_update_failed: "Google Calendar could not verify the new time, so the lead was not changed. Check the host connection and retry.",
+    calendar_cancel_failed: "The deal outcome was saved, but Google could not finish the invitation cleanup. Retry the same action; the background worker will also reconcile it.",
+    verified_meeting_required: "This older booking has no verified Calendar receipt. Return it to Qualified and book it through the guided handoff.",
+    meeting_no_longer_reschedulable: "This meeting is already completed or cancelled and cannot be rescheduled.",
+    meeting_transition_pending: "A Calendar change is already waiting for its lifecycle update. Refresh and retry the same action.",
+    outcome_note_required: "Add the outcome and handoff context in the note above before saving.",
+    meeting_close_failed: "The meeting outcome could not close its reminder queue. Refresh and retry before moving on.",
+    meeting_not_started: "A no-show cannot be recorded before the scheduled meeting time.",
+    booking_request_mismatch: "This booking request changed after it was submitted. Refresh and create a new booking request.",
+    verified_meeting_receipt_missing: "The saved lifecycle event is missing its Google receipt. Ask an admin to review it.",
+    meeting_activation_failed: "The meeting exists, but its reminder queue needs to be reactivated. Retry the same booking.",
     transition_note_required: "Explain the reason before applying an admin stage correction.",
     use_structured_lifecycle_action: "Use the structured action for this phase.",
     founder_only: "A founder or authorized closer must complete this action.",
@@ -1280,37 +1739,34 @@ function readableError(code: string): string {
   return known[code] || code.replaceAll("_", " ");
 }
 
-function googleCalendarAuditUrl(input: {
-  at: Date;
-  leadName: string | null;
-  company: string | null;
-  email: string | null;
-  phone: string | null;
-  website: string | null;
-  promisedDemo: string;
-  handoffNote: string;
-  hostEmail: string;
-}): string {
-  const end = new Date(input.at.getTime() + 15 * 60_000);
-  const stamp = (date: Date) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const label = input.company || input.leadName || "Lead";
-  const details = [
-    "15-minute OASIS website audit",
-    input.leadName ? `Contact: ${input.leadName}` : null,
-    input.phone ? `Phone: ${input.phone}` : null,
-    input.website ? `Website: ${input.website}` : null,
-    `Prepare: ${input.promisedDemo}`,
-    input.handoffNote ? `Opener handoff: ${input.handoffNote}` : null,
-  ].filter((value): value is string => Boolean(value)).join("\n");
-  const params = new URLSearchParams({
-    action:"TEMPLATE",
-    text:`OASIS audit — ${label}`,
-    dates:`${stamp(input.at)}/${stamp(end)}`,
-    details,
-  });
-  if (input.email) params.append("add", input.email);
-  params.append("add", input.hostEmail);
-  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+function BookingContactField({
+  label,
+  value,
+  onChange,
+  type = "text",
+  required = false,
+  className = "",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: "text" | "email" | "tel" | "url";
+  required?: boolean;
+  className?: string;
+}) {
+  return (
+    <label className={`text-xs text-fg-muted ${className}`}>
+      {label}
+      {required ? <span className="ml-1 text-amber-200">Required</span> : null}
+      <input
+        type={type}
+        value={value}
+        required={required}
+        onChange={(event) => onChange(event.target.value)}
+        className={`${INPUT} mt-1.5`}
+      />
+    </label>
+  );
 }
 
 function safeStripeCheckoutUrl(value: string): string | null {

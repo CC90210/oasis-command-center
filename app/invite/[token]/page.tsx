@@ -101,18 +101,6 @@ export default async function InviteLanding({
         ) : (
           <ValidCard token={token} preview={preview} />
         )}
-
-        {!user && (
-          <div className="text-center text-[11px] text-fg-dim mt-6">
-            Already have an account?{" "}
-            <Link
-              href={`/login?invite=${encodeURIComponent(token)}`}
-              className="text-accent hover:text-accent/80 underline underline-offset-2"
-            >
-              Sign in
-            </Link>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -203,9 +191,41 @@ function ValidCard({ token, preview }: { token: string; preview: Preview }) {
         })()}
         className="block w-full text-center rounded-lg bg-accent text-bg-deep font-bold py-2.5 text-sm hover:bg-accent/90 transition-colors"
       >
-        Continue → Create account
+        Create a new account
         <ArrowRight className="w-4 h-4 inline-block ml-1.5 align-text-bottom" />
       </Link>
+
+      <div className="rounded-lg border border-bg-border bg-bg-panel/60 p-3 space-y-2">
+        <div className="text-xs font-semibold text-fg">Already use OASIS?</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              query.set("invite", token);
+              if (preview.email_pinned) query.set("email", preview.email_pinned);
+              return `/login?${query.toString()}`;
+            })()}
+            className="rounded-md border border-accent/40 px-3 py-2 text-center text-xs font-bold text-accent hover:bg-accent/10"
+          >
+            Sign in &amp; join
+          </Link>
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              query.set("invite", token);
+              if (preview.email_pinned) query.set("email", preview.email_pinned);
+              query.set("workspace", preview.tenant_name);
+              return `/forgot-password?${query.toString()}`;
+            })()}
+            className="rounded-md border border-bg-border px-3 py-2 text-center text-xs font-bold text-fg hover:border-accent/50"
+          >
+            Reset password
+          </Link>
+        </div>
+        <p className="text-[11px] text-fg-dim">
+          Resetting keeps your existing account and returns you here to finish joining.
+        </p>
+      </div>
 
       <p className="text-[11px] text-fg-dim leading-relaxed">
         By accepting, you&apos;ll join {preview.tenant_name} with {roleLabel} permissions. You can leave

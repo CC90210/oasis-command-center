@@ -28,12 +28,14 @@ export default function SignupPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [accountExists, setAccountExists] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setErr(null);
     setInfo(null);
+    setAccountExists(false);
     try {
       // Client-side password floor. Supabase will also reject weak
       // passwords server-side but its error copy is generic
@@ -55,11 +57,29 @@ export default function SignupPage() {
         const r = await fetch("/api/auth/turso-signup", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password, full_name: fullName.trim() }),
+          body: JSON.stringify({
+            email,
+            password,
+            full_name: fullName.trim(),
+            invite_token: inviteToken || undefined,
+          }),
         });
-        const b = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        const b = (await r.json().catch(() => ({}))) as {
+          ok?: boolean;
+          code?: string;
+          error?: string;
+        };
         if (!r.ok || !b.ok) {
-          setErr(b.error || "Could not create your account.");
+          if (r.status === 409 && b.code === "account_exists") {
+            setAccountExists(true);
+            setErr(
+              inviteToken
+                ? "This email already has an OASIS account. Keep that account and authenticate it to accept this workspace invite."
+                : "This email already has an OASIS account. Sign in or reset its password."
+            );
+          } else {
+            setErr(b.error || "Could not create your account.");
+          }
           return;
         }
         if (inviteToken) {
@@ -322,7 +342,17 @@ export default function SignupPage() {
         <div className="bg-bg-panel border border-bg-border rounded-xl p-6 shadow-card">
           <form onSubmit={onSubmit} className="space-y-3">
             <Field label="Full name" value={fullName} onChange={setFullName} required autoComplete="name" />
-            <Field label="Email" type="email" value={email} onChange={setEmail} required autoComplete="email" />
+            <Field
+              label="Email"
+              type="email"
+              value={email}
+              onChange={(value) => {
+                setEmail(value);
+                setAccountExists(false);
+              }}
+              required
+              autoComplete="email"
+            />
             <Field
               label="Brand or company name"
               value={brand}
@@ -343,6 +373,38 @@ export default function SignupPage() {
             {err && (
               <div className="text-sm text-status-hot bg-status-hot/10 border border-status-hot/30 rounded-md px-3 py-2">
                 {err}
+              </div>
+            )}
+            {accountExists && (
+              <div className="rounded-lg border border-accent/35 bg-accent/5 p-3 space-y-2.5">
+                <div className="text-xs font-semibold text-fg">
+                  Your account is safe — it does not need to be deleted or recreated.
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Link
+                    href={(() => {
+                      const query = new URLSearchParams();
+                      if (inviteToken) query.set("invite", inviteToken);
+                      if (email.trim()) query.set("email", email.trim());
+                      return `/login?${query.toString()}`;
+                    })()}
+                    className="rounded-md bg-accent px-3 py-2 text-center text-xs font-bold text-bg hover:bg-accent-muted"
+                  >
+                    Sign in &amp; accept
+                  </Link>
+                  <Link
+                    href={(() => {
+                      const query = new URLSearchParams();
+                      if (inviteToken) query.set("invite", inviteToken);
+                      if (email.trim()) query.set("email", email.trim());
+                      if (workspaceHint) query.set("workspace", workspaceHint);
+                      return `/forgot-password?${query.toString()}`;
+                    })()}
+                    className="rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-center text-xs font-bold text-fg hover:border-accent/60"
+                  >
+                    Reset password
+                  </Link>
+                </div>
               </div>
             )}
             {info && (
@@ -401,7 +463,13 @@ export default function SignupPage() {
         <p className="text-center text-sm text-fg-muted mt-6">
           Already have an account?{" "}
           <Link
-            href={inviteToken ? `/login?invite=${encodeURIComponent(inviteToken)}` : "/login"}
+            href={(() => {
+              if (!inviteToken && !email.trim()) return "/login";
+              const query = new URLSearchParams();
+              if (inviteToken) query.set("invite", inviteToken);
+              if (email.trim()) query.set("email", email.trim());
+              return `/login?${query.toString()}`;
+            })()}
             className="text-accent hover:underline font-medium"
           >
             Sign in

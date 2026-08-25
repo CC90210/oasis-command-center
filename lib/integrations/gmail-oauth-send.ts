@@ -17,6 +17,7 @@
  */
 
 import "server-only";
+import { createHash } from "node:crypto";
 import { getUserIntegrationBundle, setUserIntegrationValue } from "@/lib/user-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // Per-rep sign-off + canonical legal footer (2026-07-10). Replaces the local
@@ -33,7 +34,7 @@ export type GmailOAuthSendResult =
   | {
       ok: false;
       provider: "gmail_oauth";
-      reason: "not_connected" | "refresh_failed" | "send_failed" | "suppressed" | "suppression_error";
+      reason: "not_connected" | "refresh_failed" | "send_failed" | "delivery_unknown" | "suppressed" | "suppression_error" | "sender_mismatch";
       error: string;
       http_status?: number;
     };
@@ -93,13 +94,33 @@ function encodeHeader(value: string): string {
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
 }
 
+export function gmailMessageIdForIdempotencyKey(idempotencyKey: string): string {
+  const digest = createHash("sha256").update(idempotencyKey, "utf8").digest("hex");
+  return `<oasis-${digest}@oasisai.work>`;
+}
+
+export function gmailAddressesMatch(actual: string, expected: string): boolean {
+  return actual.trim().toLowerCase() === expected.trim().toLowerCase();
+}
+
+export function gmailFailureReason(status: number): "send_failed" | "delivery_unknown" {
+  return status === 0 || status >= 500 ? "delivery_unknown" : "send_failed";
+}
+
 /** Build a base64url RFC-822 message (text/plain, UTF-8, base64 body). */
-function buildRawMessage(args: { from: string; to: string; subject: string; body: string }): string {
+export function buildGmailRawMessage(args: {
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  messageId?: string;
+}): string {
   const bodyB64 = Buffer.from(args.body, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n");
   const headers = [
     `From: ${args.from}`,
     `To: ${args.to}`,
     `Subject: ${encodeHeader(args.subject)}`,
+    ...(args.messageId ? [`Message-ID: ${args.messageId}`] : []),
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "Content-Transfer-Encoding: base64",
@@ -146,6 +167,8 @@ export async function sendGmailAsOperator(args: {
   subject: string;
   body: string;
   signer?: EmailSigner | null;
+  expectedFromAddress?: string | null;
+  idempotencyKey?: string;
 }): Promise<GmailOAuthSendResult> {
   // Opt-out gate FIRST — before any token work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -162,6 +185,15 @@ export async function sendGmailAsOperator(args: {
   if (!refreshToken || !fromAddress) {
     return { ok: false, provider: "gmail_oauth", reason: "not_connected", error: "no gmail_oauth bundle" };
   }
+  const expectedFromAddress = args.expectedFromAddress?.trim().toLowerCase();
+  if (expectedFromAddress && !gmailAddressesMatch(fromAddress, expectedFromAddress)) {
+    return {
+      ok: false,
+      provider: "gmail_oauth",
+      reason: "sender_mismatch",
+      error: `connected mailbox does not match approved sender ${expectedFromAddress}`,
+    };
+  }
 
   // Use the stored access token if still fresh; else refresh.
   let accessToken = bundle.access_token || "";
@@ -174,11 +206,14 @@ export async function sendGmailAsOperator(args: {
     accessToken = ref.accessToken;
   }
 
-  const raw = buildRawMessage({
+  const raw = buildGmailRawMessage({
     from: fromAddress,
     to: args.to,
     subject: args.subject,
     body: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
+    messageId: args.idempotencyKey
+      ? gmailMessageIdForIdempotencyKey(args.idempotencyKey)
+      : undefined,
   });
 
   let res = await gmailSend(accessToken, raw);
@@ -191,7 +226,8 @@ export async function sendGmailAsOperator(args: {
     res = await gmailSend(ref.accessToken, raw);
   }
   if (!res.ok) {
-    return { ok: false, provider: "gmail_oauth", reason: "send_failed", error: res.error, http_status: res.status };
+    const reason = gmailFailureReason(res.status);
+    return { ok: false, provider: "gmail_oauth", reason, error: res.error, http_status: res.status };
   }
   return {
     ok: true,

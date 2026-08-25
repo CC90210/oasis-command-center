@@ -554,6 +554,9 @@ function HandoffSummary({
     (assignedId ? memberNames.get(assignedId) || assignedId : null);
   const founder = founderId ? memberNames.get(founderId) || founderId : null;
   const meetingAt = nonEmptyString(data.founder_meeting_at);
+  const calendarUrl = safeExternalUrl(nonEmptyString(data.google_calendar_event_url));
+  const meetUrl = safeExternalUrl(nonEmptyString(data.google_meet_link));
+  const calendarStatus = humanize(nonEmptyString(data.calendar_event_status));
   return (
     <section className="rounded-2xl border border-bg-border bg-bg-deep/50 p-5">
       <div className="mb-4">
@@ -566,7 +569,7 @@ function HandoffSummary({
         <SummaryCell label="Assigned rep" value={assigned} />
         <SummaryCell label="Audit host" value={founder} />
         <SummaryCell label="15-minute audit (ET)" value={meetingAt ? formatDateTime(meetingAt) : null} />
-        <SummaryCell label="Last outcome" value={humanize(nonEmptyString(data.last_disposition))} />
+        <SummaryCell label="Calendar invite" value={calendarStatus} />
       </div>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <SummaryCell
@@ -575,14 +578,30 @@ function HandoffSummary({
           roomy
         />
         <SummaryCell
-          label="Latest handoff note"
-          value={nonEmptyString(data.last_handoff_note) || nonEmptyString(data.notes)}
+          label="Founder handoff note"
+          value={nonEmptyString(data.founder_handoff_note) || nonEmptyString(data.last_handoff_note) || nonEmptyString(data.notes)}
           roomy
         />
         {nonEmptyString(data.loss_reason) && (
           <SummaryCell label="Loss reason" value={nonEmptyString(data.loss_reason)} roomy />
         )}
       </div>
+      {(calendarUrl || meetUrl) && (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {meetUrl && (
+            <a href={meetUrl} target="_blank" rel="noopener noreferrer" className="btn-primary inline-flex items-center gap-2 !px-3 !py-2 text-xs">
+              Join Google Meet
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            </a>
+          )}
+          {calendarUrl && (
+            <a href={calendarUrl} target="_blank" rel="noopener noreferrer" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-2 text-xs">
+              Open Calendar event
+              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
+            </a>
+          )}
+        </div>
+      )}
       {websiteBuildBriefIsReady(data.build_brief) && (
         <div className="mt-4 rounded-xl border border-accent/20 bg-accent/[0.035] p-4">
           <div className="mb-3 text-[10px] font-bold uppercase tracking-[0.16em] text-accent">

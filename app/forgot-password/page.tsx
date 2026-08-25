@@ -2,10 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { requestPasswordReset } from "@/lib/auth-client";
 
 export default function ForgotPasswordPage() {
-  const [email, setEmail] = useState("");
+  const params = useSearchParams();
+  const inviteToken = (params.get("invite") || "").trim();
+  const workspaceHint = (params.get("workspace") || "").trim().slice(0, 80);
+  const [email, setEmail] = useState((params.get("email") || "").trim());
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -15,8 +19,12 @@ export default function ForgotPasswordPage() {
     setBusy(true);
     setErr(null);
     try {
+      const redirect = new URL("/auth/reset-password", window.location.origin);
       const res = await requestPasswordReset(
-        email, `${window.location.origin}/auth/reset-password`);
+        email,
+        redirect.toString(),
+        { inviteToken: inviteToken || undefined },
+      );
       if (!res.ok) {
         setErr(res.error ?? "could not send reset email");
         return;
@@ -33,7 +41,9 @@ export default function ForgotPasswordPage() {
         <div className="text-center mb-8">
           <h1 className="text-2xl font-bold text-fg">Reset your password</h1>
           <p className="text-fg-muted text-sm mt-2">
-            We&apos;ll email you a link to set a new one.
+            {inviteToken
+              ? `We'll email you a secure link, then continue ${workspaceHint ? `into ${workspaceHint}` : "with your workspace invite"}.`
+              : "We'll email you a link to set a new one."}
           </p>
         </div>
 
@@ -41,6 +51,11 @@ export default function ForgotPasswordPage() {
           {sent ? (
             <div className="text-sm text-status-engaged bg-status-engaged/10 border border-status-engaged/30 rounded-md px-3 py-3">
               Check your inbox for a password-reset link.
+              {inviteToken && (
+                <div className="mt-1 text-xs text-fg-muted">
+                  An invite pinned to this email will continue automatically after you set the new password.
+                </div>
+              )}
             </div>
           ) : (
             <form onSubmit={onSubmit} className="space-y-3">
@@ -74,7 +89,15 @@ export default function ForgotPasswordPage() {
         </div>
 
         <p className="text-center text-sm text-fg-muted mt-6">
-          <Link href="/login" className="text-accent hover:underline font-medium">
+          <Link
+            href={(() => {
+              const query = new URLSearchParams();
+              if (inviteToken) query.set("invite", inviteToken);
+              if (email.trim()) query.set("email", email.trim());
+              return query.size ? `/login?${query.toString()}` : "/login";
+            })()}
+            className="text-accent hover:underline font-medium"
+          >
             Back to sign in
           </Link>
         </p>

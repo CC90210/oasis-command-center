@@ -2424,6 +2424,8 @@ export async function preview_tenant_invite(
             AND ti.redeemed_at IS NULL
             AND ti.revoked_at IS NULL
             AND ti.expires_at > ?
+            AND ti.email IS NOT NULL
+            AND trim(ti.email) <> ''
           LIMIT 1`,
     args: [p_token_hash, nowIso],
   });
@@ -2942,6 +2944,7 @@ export async function redeem_tenant_invite(
     typeof args["p_redeemer_full_name"] === "string"
       ? (args["p_redeemer_full_name"] as string)
       : null;
+  const verifiedFullName = redeemerFullName?.trim() || "";
 
   // PG now() is transaction-fixed — capture once, reuse everywhere.
   const nowIso = new Date().toISOString();
@@ -3006,34 +3009,83 @@ export async function redeem_tenant_invite(
   // trim() in PG strips spaces only — replicate exactly (JS .trim() is wider).
   const pgTrimLower = (s: string) => s.replace(/^ +| +$/g, "").toLowerCase();
   const inviteEmail = invite["email"];
+  if (inviteEmail === null || inviteEmail === undefined || pgTrimLower(String(inviteEmail)) === "") {
+    return { ok: false, error: "email_pin_required" };
+  }
   if (
-    inviteEmail !== null &&
-    inviteEmail !== undefined &&
     pgTrimLower(String(inviteEmail)) !== pgTrimLower(redeemerEmail)
   ) {
     return { ok: false, error: "email_mismatch" };
   }
 
-  const existingProfileId = await profileIdOf();
   const inviteId = String(invite["id"]);
   const tenantId = String(invite["tenant_id"]);
   const teamRole = String(invite["team_role"]);
   const createdBy = String(invite["created_by"]);
 
-  // The profile statement runs second in the same transactional batch;
-  // changes() at that point is the claim UPDATE's affected-row count, so the
-  // profile mutation applies ONLY when this call actually won the redemption.
-  // A lost race therefore mutates nothing — mirroring PG, where the profile
-  // upsert sits behind the FOR UPDATE lock.
+  const existingProfileQuery = await client.execute({
+    sql: `SELECT "id", "tenant_id", "team_role" FROM "user_profiles"
+          WHERE "auth_user_id" = ? LIMIT 1`,
+    args: [redeemerAuthId],
+  });
+  const existingProfile = existingProfileQuery.rows[0] as
+    | { id?: unknown; tenant_id?: unknown; team_role?: unknown }
+    | undefined;
+  const existingProfileId = existingProfile?.id ? String(existingProfile.id) : null;
+  const existingTenantId = existingProfile?.tenant_id
+    ? String(existingProfile.tenant_id)
+    : null;
+
+  // One auth identity currently owns one Command Center profile. Never move a
+  // live profile between tenants as a side effect of opening an invite link:
+  // that would replace the user's authorization boundary and make the old
+  // workspace disappear. Detached/orphan profiles (tenant_id NULL) remain
+  // recoverable, which is the intended existing-account onboarding path.
+  if (existingTenantId) {
+    if (existingTenantId !== tenantId) {
+      return { ok: false, error: "already_member_of_another_tenant" };
+    }
+    return {
+      ok: true,
+      tenant_id: existingTenantId,
+      team_role: String(existingProfile?.team_role ?? "member"),
+      profile_id: existingProfileId,
+      already_member: true,
+    };
+  }
+
+  // The profile pre-read above is only an early diagnostic. The authorization
+  // boundary is re-checked INSIDE the write transaction below. Without that
+  // second check, two different tenant invites could both observe one detached
+  // profile, both claim their token, and the last profile UPDATE would win.
+  //
+  // The invite claim is conditional on the profile still being detached. An
+  // existing same-tenant member returned above without consuming the invite or
+  // changing their role. The profile mutation has the same tenant CAS
+  // and is gated by changes() from that claim. SQLite serializes these write
+  // batches, so only one competing tenant can attach the identity and the
+  // losing invite remains untouched.
   let newProfileId: string | null = null;
+  const profileClaimGuard = existingProfileId === null
+    ? `AND NOT EXISTS (
+         SELECT 1 FROM "user_profiles" p WHERE p."auth_user_id" = ?
+       )`
+    : `AND EXISTS (
+         SELECT 1 FROM "user_profiles" p
+         WHERE p."id" = ? AND p."tenant_id" IS NULL
+       )`;
+  const profileClaimArgs = existingProfileId === null
+    ? [redeemerAuthId]
+    : [existingProfileId];
   const statements: Array<{ sql: string; args: Array<string | number> }> = [
     {
       // Compare-and-swap claim: re-asserts every predicate the PG SELECT
       // evaluated under lock. rowsAffected === 0 -> lost the race.
       sql:
         `UPDATE "tenant_invites" SET "redeemed_at" = ?, "redeemed_by" = ? ` +
-        `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL AND ${notExpired}`,
-      args: [nowIso, redeemerAuthId, inviteId, nowIso],
+        `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL ` +
+        `AND ${notExpired} ${profileClaimGuard}`,
+      args: [nowIso, redeemerAuthId, inviteId, nowIso, ...profileClaimArgs],
     },
   ];
 
@@ -3067,9 +3119,20 @@ export async function redeem_tenant_invite(
     statements.push({
       sql:
         `UPDATE "user_profiles" SET "tenant_id" = ?, "team_role" = ?, "invited_by" = ?, ` +
+        `"email" = ?, ` +
+        `"full_name" = CASE WHEN trim(?) <> '' THEN ? ELSE "full_name" END, ` +
         `"joined_at" = COALESCE("joined_at", ?), "is_owner" = 0 ` +
-        `WHERE "id" = ? AND changes() = 1`,
-      args: [tenantId, teamRole, createdBy, nowIso, existingProfileId],
+        `WHERE "id" = ? AND "tenant_id" IS NULL AND changes() = 1`,
+      args: [
+        tenantId,
+        teamRole,
+        createdBy,
+        redeemerEmail,
+        verifiedFullName,
+        verifiedFullName,
+        nowIso,
+        existingProfileId,
+      ],
     });
   }
 
@@ -3082,6 +3145,24 @@ export async function redeem_tenant_invite(
     // friendly response if this same user already redeemed it, else invalid.
     const again = await retrySelect();
     if (again !== null) return alreadyRedeemedResponse(again);
+    const currentProfile = await client.execute({
+      sql: `SELECT "id", "tenant_id", "team_role" FROM "user_profiles"
+            WHERE "auth_user_id" = ? LIMIT 1`,
+      args: [redeemerAuthId],
+    });
+    const currentTenant = currentProfile.rows[0]?.tenant_id;
+    if (currentTenant) {
+      if (String(currentTenant) !== tenantId) {
+        return { ok: false, error: "already_member_of_another_tenant" };
+      }
+      return {
+        ok: true,
+        tenant_id: String(currentTenant),
+        team_role: String(currentProfile.rows[0]?.team_role ?? "member"),
+        profile_id: String(currentProfile.rows[0]?.id ?? ""),
+        already_member: true,
+      };
+    }
     return { ok: false, error: "invalid_or_expired" };
   }
 

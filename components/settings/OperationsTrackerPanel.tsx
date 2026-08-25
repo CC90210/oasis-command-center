@@ -39,34 +39,58 @@ function iconForAction(actionType: string | null) {
 async function loadEmployeeRollup(
   tenantId: string,
   members: MemberRow[],
-): Promise<EmployeeRollup[]> {
+): Promise<{ rows: EmployeeRollup[]; error: string | null }> {
   try {
     const db = getServiceSupabase();
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const [interactionResult, auditResult] = await Promise.all([
-      db
-        .from("lead_interactions")
-        .select("channel, direction, actor_user_id, metadata")
-        .eq("tenant_id", tenantId)
-        .gte("created_at", since)
-        .limit(1_000),
-      db
-        .from("tenant_audit_log")
-        .select("actor_email, actor_user_id")
-        .eq("tenant_id", tenantId)
-        .gte("created_at", since)
-        .limit(1_000),
-    ]);
-    if (interactionResult.error) throw new Error(interactionResult.error.message);
-    if (auditResult.error) throw new Error(auditResult.error.message);
-    return buildEmployeeActivityRollup(
+    const pageSize = 500;
+
+    const loadInteractions = async (): Promise<EmployeeInteractionMetric[]> => {
+      const rows: EmployeeInteractionMetric[] = [];
+      for (let from = 0; ; from += pageSize) {
+        const result = await db
+          .from("lead_interactions")
+          .select("id, channel, direction, actor_user_id, metadata")
+          .eq("tenant_id", tenantId)
+          .gte("created_at", since)
+          .order("id", { ascending: true })
+          .range(from, from + pageSize - 1);
+        if (result.error) throw new Error(result.error.message);
+        const page = (result.data || []) as EmployeeInteractionMetric[];
+        rows.push(...page);
+        if (page.length < pageSize) return rows;
+      }
+    };
+
+    const loadAudits = async (): Promise<EmployeeAuditMetric[]> => {
+      const rows: EmployeeAuditMetric[] = [];
+      for (let from = 0; ; from += pageSize) {
+        const result = await db
+          .from("tenant_audit_log")
+          .select("id, actor_email, actor_user_id")
+          .eq("tenant_id", tenantId)
+          .gte("created_at", since)
+          .order("id", { ascending: true })
+          .range(from, from + pageSize - 1);
+        if (result.error) throw new Error(result.error.message);
+        const page = (result.data || []) as EmployeeAuditMetric[];
+        rows.push(...page);
+        if (page.length < pageSize) return rows;
+      }
+    };
+
+    const [interactions, audits] = await Promise.all([loadInteractions(), loadAudits()]);
+    return { rows: buildEmployeeActivityRollup(
       members,
-      (interactionResult.data || []) as EmployeeInteractionMetric[],
-      (auditResult.data || []) as EmployeeAuditMetric[],
-    );
+      interactions,
+      audits,
+    ), error: null };
   } catch (error) {
     console.error("[OperationsTrackerPanel.loadEmployeeRollup]", error);
-    return buildEmployeeActivityRollup(members, [], []);
+    return {
+      rows: [],
+      error: "Team metrics are temporarily unavailable; no partial totals are being shown.",
+    };
   }
 }
 
@@ -89,10 +113,11 @@ export async function OperationsTrackerPanel({
     console.error("[OperationsTrackerPanel.getTenantMembers]", error);
     return [] as MemberRow[];
   });
-  const [{ rows: recentActivity }, rollup] = await Promise.all([
+  const [{ rows: recentActivity }, rollupState] = await Promise.all([
     getActivityFeed(tenantId, { limit: 15, members }),
     loadEmployeeRollup(tenantId, members),
   ]);
+  const rollup = rollupState.rows;
   const workspaceLabel = tenantName || "this workspace";
 
   return (
@@ -138,7 +163,11 @@ export async function OperationsTrackerPanel({
           <div className="text-[10px] uppercase tracking-wider text-fg-dim font-semibold mb-1.5">
             Team activity — last 7 days
           </div>
-          {rollup.length === 0 ? (
+          {rollupState.error ? (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[11.5px] text-amber-200">
+              {rollupState.error}
+            </div>
+          ) : rollup.length === 0 ? (
             <div className="rounded-md border border-bg-border bg-bg-deep/30 px-3 py-2.5 text-[11.5px] text-fg-dim italic">
               No team members are connected to this workspace yet.
             </div>

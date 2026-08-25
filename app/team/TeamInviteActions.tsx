@@ -33,16 +33,23 @@ export function TeamInviteActions({
   const [issuedExpiry, setIssuedExpiry] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const normalizedEmail = email.trim().toLowerCase();
+  const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    && normalizedEmail.length <= 254;
 
   async function generate() {
     setError(null);
     setIssuedToken(null);
     setCopied(false);
+    if (!emailIsValid) {
+      setError("Enter the teammate's valid work email.");
+      return;
+    }
     try {
       const res = await fetch("/api/team/invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, email: email.trim() || null }),
+        body: JSON.stringify({ role, email: normalizedEmail }),
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
@@ -78,10 +85,12 @@ export function TeamInviteActions({
       <div className="grid grid-cols-[1fr_12rem_8rem] gap-3 items-end">
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-fg-dim">
-            Email (optional)
+            Work email
           </span>
           <input
             type="email"
+            required
+            maxLength={254}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="teammate@company.com"
@@ -110,7 +119,7 @@ export function TeamInviteActions({
         <button
           type="button"
           onClick={generate}
-          disabled={pending}
+          disabled={pending || !emailIsValid}
           className="bg-accent text-bg font-semibold py-2 px-3 rounded text-sm hover:opacity-90 disabled:opacity-50"
         >
           {pending ? "..." : "Generate link"}
@@ -174,7 +183,7 @@ export function TeamInviteActions({
                 className="grid grid-cols-[1fr_8rem_8rem_5rem] gap-3 py-2 items-center"
               >
                 <span className="text-sm text-fg">
-                  {inv.email || "(open link)"}
+                  {inv.email || "(invalid legacy invite)"}
                 </span>
                 <span className="text-sm text-fg-muted">{inv.team_role}</span>
                 <span className="text-xs text-fg-dim">

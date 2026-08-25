@@ -153,22 +153,30 @@ assert(
   "two-person closes preserve opener attribution while paying the assigned closer",
 );
 assert(
-  lifecycle.includes("15 * 60_000") &&
-    lifecycle.includes("googleCalendarAuditUrl") &&
-    lifecycle.includes("calendarDraftOpened") &&
-    lifecycle.includes("calendarRequestId") &&
-    lifecycle.includes("calendarConfirmed: true") &&
+  lifecycle.includes("Book meeting & send invite") &&
+    lifecycle.includes("founderMeetingIso") &&
+    lifecycle.includes("founderBookingRequestId") &&
+    lifecycle.includes("contactConfirmed") &&
+    lifecycle.includes("clientAgreedToTime") &&
+    lifecycle.includes("handoffComplete") &&
+    !lifecycle.includes("calendarConfirmed") &&
+    !lifecycle.includes("googleCalendarAuditUrl") &&
     lifecycle.includes("schedulingAlsoQualifies") &&
     lifecycle.includes("qualification: {") &&
     !lifecycle.includes("BOOKING_URL") &&
     workflowRoute.includes("mayAgentBookFounder(currentStage, qualificationIncluded)") &&
-    workflowRoute.includes('error:"qualification_context_required"') &&
+    workflowRoute.includes("createVerifiedFounderMeeting") &&
+    workflowRoute.includes('error:"booking_confirmations_required"') &&
+    workflowRoute.includes("expectedOrganizerEmail:auditHostEmail") &&
+    workflowRoute.includes('error:"handoff_note_required"') &&
     workflowRoute.includes("audit_duration_minutes:15") &&
-    workflowRoute.includes("calendar_event_status:\"operator_confirmed\"") &&
-    workflowRoute.includes('calendar_confirmation_method:"operator_asserted_prefilled_google_calendar"') &&
+    workflowRoute.includes("calendar_event_status:\"verified\"") &&
+    workflowRoute.includes('calendar_confirmation_method:"server_google_calendar_api"') &&
+    workflowRoute.includes("google_calendar_event_id") &&
+    workflowRoute.includes("google_meet_link") &&
     workflowRoute.includes("next_action_at:meetingAt") &&
     workflowRoute.includes("assigned_to:founderUserId"),
-  "the pre-Founder handoff requires explicit qualification/context, opens a prefilled 15-minute event, and transfers ownership only after a retry-safe operator confirmation",
+  "the pre-Founder handoff requires explicit qualification/context and transfers ownership only after a retry-safe provider-verified event and Meet receipt",
 );
 assert(
   workflowRoute.includes('.eq("agent_source","website_sales_pipeline")') &&
@@ -176,8 +184,11 @@ assert(
   "lifecycle retries use the durable tenant-wide request marker instead of a lossy recent-row scan",
 );
 assert(
-  teamMembersRoute.includes("email: m.email") && lifecycle.includes("hostEmail"),
-  "the selected founder/closer is added to the prefilled event instead of leaving the audit on the opener's calendar",
+  teamMembersRoute.includes("email: m.email") &&
+    teamMembersRoute.includes("calendar_connected") &&
+    teamMembersRoute.includes("calendar_identity_mismatch") &&
+    lifecycle.includes("selectedFounderCalendarReady"),
+  "the host picker exposes Google Calendar readiness while keeping the host's email tenant-scoped",
 );
 assert(
   buildBriefForm.includes("Closing-call build brief") &&

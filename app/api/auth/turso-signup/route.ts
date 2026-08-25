@@ -19,7 +19,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@libsql/client";
 import { randomUUID } from "node:crypto";
 import { rateLimit } from "@/lib/rate-limit";
-import { SESSION_COOKIE, signSession, tursoAuthActive } from "@/lib/turso-auth";
+import {
+  SESSION_COOKIE,
+  signSession,
+  signupUserMetadata,
+  tursoAuthActive,
+} from "@/lib/turso-auth";
+import { validateActiveInviteForEmail } from "@/lib/invite-account-recovery";
 
 export const runtime = "nodejs";
 
@@ -35,7 +41,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "too many attempts" }, { status: 429 });
   }
 
-  let body: { email?: string; password?: string; full_name?: string };
+  let body: { email?: string; password?: string; full_name?: string; invite_token?: string };
   try {
     body = await req.json();
   } catch {
@@ -43,6 +49,7 @@ export async function POST(req: NextRequest) {
   }
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
+  const rawUserMetadata = signupUserMetadata(body.full_name);
   if (!email.includes("@") || password.length < 8) {
     return NextResponse.json(
       { error: "a valid email and an 8+ character password are required" }, { status: 400 });
@@ -55,6 +62,22 @@ export async function POST(req: NextRequest) {
   }
   const db = createClient({ url, authToken });
 
+  const inviteToken = typeof body.invite_token === "string" ? body.invite_token.trim() : "";
+  if (inviteToken) {
+    const invite = await validateActiveInviteForEmail(db, { rawToken: inviteToken, email });
+    if (!invite.ok) {
+      return NextResponse.json(
+        {
+          code: invite.error === "email_mismatch" ? "invite_email_mismatch" : "invite_invalid",
+          error: invite.error === "email_mismatch"
+            ? "this invite was sent to a different email address"
+            : "this invite is no longer active — ask your admin for a new link",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
   const existing = await db.execute({
     sql: `SELECT id FROM "_supabase_auth_users"
           WHERE lower(email) = ? AND deleted_at IS NULL LIMIT 1`,
@@ -65,7 +88,10 @@ export async function POST(req: NextRequest) {
     // the honest, actionable message is worth more here than a fiction that
     // sends a real user in circles.
     return NextResponse.json(
-      { error: "an account with this email already exists — try signing in" },
+      {
+        code: "account_exists",
+        error: "an account with this email already exists — sign in or reset its password",
+      },
       { status: 409 });
   }
 
@@ -78,9 +104,10 @@ export async function POST(req: NextRequest) {
   try {
     await db.execute({
       sql: `INSERT INTO "_supabase_auth_users"
-              (id, email, encrypted_password, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)`,
-      args: [id, email, encrypted, now, now],
+              (id, email, encrypted_password, raw_user_meta_data,
+               created_at, updated_at, session_version)
+            VALUES (?, ?, ?, ?, ?, ?, 0)`,
+      args: [id, email, encrypted, rawUserMetadata, now, now],
     });
   } catch (e) {
     // A UNIQUE violation here means someone registered the same address between
@@ -89,7 +116,10 @@ export async function POST(req: NextRequest) {
     const msg = e instanceof Error ? e.message : "insert failed";
     if (/UNIQUE|constraint/i.test(msg)) {
       return NextResponse.json(
-        { error: "an account with this email already exists — try signing in" },
+        {
+          code: "account_exists",
+          error: "an account with this email already exists — sign in or reset its password",
+        },
         { status: 409 });
     }
     console.error("[turso-signup] insert failed:", msg);
@@ -99,7 +129,12 @@ export async function POST(req: NextRequest) {
   const res = NextResponse.json({ ok: true, user: { id, email } });
   res.cookies.set({
     name: SESSION_COOKIE,
-    value: signSession({ sub: id, email, exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S }),
+    value: signSession({
+      sub: id,
+      email,
+      exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+      ver: 0,
+    }),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",

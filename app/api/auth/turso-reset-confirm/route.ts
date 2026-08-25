@@ -15,11 +15,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { rateLimit } from "@/lib/rate-limit";
-import { tursoAuthActive } from "@/lib/turso-auth";
+import { SESSION_COOKIE, signSession, tursoAuthActive } from "@/lib/turso-auth";
 
 export const runtime = "nodejs";
 
 const MIN_PASSWORD = 8;
+const SESSION_TTL_S = 60 * 60 * 24 * 7;
 
 export async function POST(req: NextRequest) {
   if (!tursoAuthActive()) {
@@ -86,12 +87,33 @@ export async function POST(req: NextRequest) {
   // preserved from Supabase, which are $2a$.
   const encrypted = bcrypt.hashSync(password, 10).replace(/^\$2b\$/, "$2a$");
 
-  const upd = await db.execute({
-    sql: `UPDATE "_supabase_auth_users" SET encrypted_password = ?
-          WHERE lower(email) = ? AND deleted_at IS NULL`,
-    args: [encrypted, email.toLowerCase()],
+  const account = await db.execute({
+    sql: `SELECT id, email, session_version FROM "_supabase_auth_users"
+          WHERE lower(email) = ? AND deleted_at IS NULL LIMIT 1`,
+    args: [email.toLowerCase()],
   });
-  if (!upd.rowsAffected) {
+  const authUser = account.rows[0] as {
+    id?: unknown;
+    email?: unknown;
+    session_version?: unknown;
+  } | undefined;
+  const authUserId = typeof authUser?.id === "string" ? authUser.id : "";
+  const canonicalEmail = typeof authUser?.email === "string"
+    ? authUser.email.trim().toLowerCase()
+    : "";
+  if (!authUserId || !canonicalEmail) {
+    return NextResponse.json({ error: "account not found" }, { status: 400 });
+  }
+
+  const upd = await db.execute({
+    sql: `UPDATE "_supabase_auth_users"
+          SET encrypted_password = ?, updated_at = ?, session_version = session_version + 1
+          WHERE id = ? AND deleted_at IS NULL
+          RETURNING session_version`,
+    args: [encrypted, now, authUserId],
+  });
+  const newSessionVersion = Number(upd.rows[0]?.session_version);
+  if (!upd.rowsAffected || !Number.isSafeInteger(newSessionVersion) || newSessionVersion < 1) {
     return NextResponse.json({ error: "account not found" }, { status: 400 });
   }
 
@@ -103,5 +125,24 @@ export async function POST(req: NextRequest) {
     args: [now, email.toLowerCase()],
   });
 
-  return NextResponse.json({ ok: true });
+  // A valid single-use reset token proves control of this account. Issuing the
+  // normal session here closes the recovery loop: the browser can redeem a
+  // still-active workspace invite immediately instead of asking for the new
+  // password a second time.
+  const response = NextResponse.json({ ok: true });
+  response.cookies.set({
+    name: SESSION_COOKIE,
+    value: signSession({
+      sub: authUserId,
+      email: canonicalEmail,
+      exp: Math.floor(Date.now() / 1000) + SESSION_TTL_S,
+      ver: newSessionVersion,
+    }),
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: SESSION_TTL_S,
+  });
+  return response;
 }

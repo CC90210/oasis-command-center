@@ -406,6 +406,16 @@ async function main() {
     assert(clientUi.includes(control), `the founder payout UI renders ${control}`);
   }
   assert(clientUi.includes("Full quote") && clientUi.includes("Verified collection"), "the portal compares the full quote with exact collected cash");
+  assert.match(
+    route,
+    /const collectedAmountCents = cents\(null, commission\.collected_setup_amount\)/,
+    "split-payment deals show the aggregate collection frozen in the commission ledger, not only the latest receipt",
+  );
+  assert.doesNotMatch(
+    route,
+    /const collectedAmountCents = receipt\s*\?/,
+    "the latest balance receipt cannot replace the full verified collection total",
+  );
 
   await client.close();
   console.log("commission-payout-workflow: OK");

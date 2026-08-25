@@ -27,7 +27,13 @@ export function LoginForm() {
         ? "That invite link has expired or was already used. Sign in with your existing account or ask for a fresh invite."
         : errCode === "invite_redeem_failed"
           ? "We couldn't complete the invite. Sign in below if you already have an account, or ask your admin to resend the invite."
-          : null
+          : errCode === "oauth_denied"
+            ? "Google sign-in was cancelled. Your workspace invite is still here when you're ready to try again."
+            : errCode === "no_account"
+              ? "That Google account does not have a Command Center login yet. Use the invited email below, or reset its password."
+              : errCode.startsWith("oauth_") || errCode === "auth_backend_unavailable"
+                ? "Google sign-in couldn't be completed. Your workspace invite was preserved; try again or use your password."
+                : null
     : null;
   // If there's an invite, post-login routes through the welcome wizard
   // (Phase C) so the new teammate sets their personal preferences before
@@ -152,7 +158,13 @@ export function LoginForm() {
       // half-migrated auth that looks fine until an OAuth user signs in.
       if ((await authMode()) === "turso") {
         const start = new URL("/api/auth/google/start", window.location.origin);
-        start.searchParams.set("next", next);
+        // Return to the authenticated invite landing page, not the generic
+        // welcome screen. The landing page performs the same email-pinned,
+        // tenant-scoped redemption as password login.
+        start.searchParams.set(
+          "next",
+          inviteToken ? `/invite/${encodeURIComponent(inviteToken)}` : next,
+        );
         window.location.assign(start.toString());
         return;
       }
@@ -227,7 +239,12 @@ export function LoginForm() {
                   Password
                 </label>
                 <Link
-                  href="/forgot-password"
+                  href={(() => {
+                    const query = new URLSearchParams();
+                    if (inviteToken) query.set("invite", inviteToken);
+                    if (email.trim()) query.set("email", email.trim());
+                    return query.size ? `/forgot-password?${query.toString()}` : "/forgot-password";
+                  })()}
                   className="text-xs text-accent hover:underline"
                 >
                   Forgot?

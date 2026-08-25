@@ -132,7 +132,14 @@ async function loadCandidates(
       if (!receiptId || !tenantId || !leadId || !reference) {
         throw new Error("stripe_receipt_identity_incomplete");
       }
-      if (!dealId) throw new Error("missing_closed_deal");
+      // A verified Stripe receipt legitimately exists before website_deals for
+      // deposits, and can also exist briefly while a full-payment close waits
+      // for its builder assignment. Those receipts still need unattended
+      // refund/dispute detection; applyStripeReceiptTerminalState has a
+      // transaction-safe pre-close branch for exactly that state.
+      if (row.lead_data === null || row.lead_data === undefined) {
+        throw new Error("missing_lead_record");
+      }
       const lead = objectFromJson(row.lead_data, "lead_data");
       paymentToken = typeof row.payment_token === "string" && row.payment_token.trim()
         ? row.payment_token.trim()
@@ -140,6 +147,9 @@ async function loadCandidates(
           ? lead.proposal_payment_token.trim()
           : "";
       if (!paymentPlanId) throw new Error(`stripe_receipt_missing_payment_plan:${receiptId}`);
+      if (!dealId && lead.payment_plan_id !== paymentPlanId) {
+        throw new Error(`lead_payment_plan_binding_mismatch:${receiptId}`);
+      }
       if (!paymentToken) throw new Error(`stripe_receipt_missing_payment_binding:${receiptId}`);
       if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
         throw new Error(`stripe_receipt_invalid_amount:${receiptId}`);

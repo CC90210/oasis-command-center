@@ -156,8 +156,10 @@ export async function SettingsContent({
           error sent you for stays hidden. This opens it. */}
       <OpenSectionOnHash />
 
-      {/* Batch 4: self-serve Telegram linking for per-lead application alerts. */}
-      <TelegramLinkCard />
+      {/* This bot is a SunBiz application-upload integration. Mounting it in
+          OASIS exposed SunBiz wording and a foreign workflow in the wrong
+          tenant's Settings surface. */}
+      {manifestSlug === "sun" && <TelegramLinkCard />}
 
       {!profile ? (
         <Card title="No profile loaded">

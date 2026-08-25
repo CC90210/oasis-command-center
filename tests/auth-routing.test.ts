@@ -40,6 +40,20 @@ assert.equal(
   "External redirects are rejected",
 );
 
+for (const unsafeNext of [
+  "//evil.example/steal",
+  "/\\evil.example/steal",
+  "/\t/evil.example",
+  "/\n/evil.example",
+  "/\r/evil.example",
+]) {
+  assert.equal(
+    normalizePostLoginRedirect(unsafeNext, { isEmpireOperator: true }),
+    "/",
+    `${JSON.stringify(unsafeNext)} cannot escape /auth/land`,
+  );
+}
+
 assert.equal(
   normalizePostLoginRedirect("/login?next=/t/sun", {
     tenantSlug: "oasis-ai-cc",

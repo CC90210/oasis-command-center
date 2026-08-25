@@ -13,7 +13,12 @@
  * route whose whole job is answering an unauthenticated question.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE, tursoAuthActive, verifySession } from "@/lib/turso-auth";
+import {
+  SESSION_COOKIE,
+  tursoAuthActive,
+  verifySessionAgainstDb,
+} from "@/lib/turso-auth";
+import { getTursoClient } from "@/lib/turso";
 
 export const runtime = "nodejs";
 
@@ -23,7 +28,10 @@ export async function GET(req: NextRequest) {
     // should fall back to its Supabase path rather than treat this as failure.
     return NextResponse.json({ user: null, mode: "supabase" });
   }
-  const session = verifySession(req.cookies.get(SESSION_COOKIE)?.value);
+  const session = await verifySessionAgainstDb(
+    getTursoClient(),
+    req.cookies.get(SESSION_COOKIE)?.value,
+  );
   return NextResponse.json({
     mode: "turso",
     user: session ? { id: session.sub, email: session.email } : null,

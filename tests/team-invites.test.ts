@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { INVITE_TTL_DAYS, createInvite, inviteEmailMatchesUser } from "@/lib/team";
+import { readFileSync } from "node:fs";
+import {
+  INVITE_TTL_DAYS,
+  createInvite,
+  inviteEmailMatchesUser,
+  normalizeInviteEmail,
+} from "@/lib/team";
 import {
   INVITABLE_ROLES,
   INVITABLE_ROLE_OPTIONS,
@@ -20,8 +26,8 @@ assert.equal(
 
 assert.equal(
   inviteEmailMatchesUser(null, "jordan@sunbizfunding.com"),
-  true,
-  "open invites without a pinned email remain redeemable",
+  false,
+  "legacy open invites must fail closed",
 );
 
 assert.equal(
@@ -29,6 +35,15 @@ assert.equal(
   false,
   "pinned invite must not be redeemable by a different signed-in email",
 );
+
+assert.equal(normalizeInviteEmail("  David@OasisAI.Work "), "david@oasisai.work");
+for (const invalidEmail of [null, undefined, "", "david@", "@oasisai.work", "david oasisai.work"]) {
+  assert.equal(
+    normalizeInviteEmail(invalidEmail),
+    null,
+    `${String(invalidEmail)} cannot pin a teammate invite`,
+  );
+}
 
 // ── the role allowlist is the ONLY thing enforcing the enum ─────────────────
 // 2026-08-21: the live Turso user_profiles DDL is `"team_role" TEXT NOT NULL
@@ -96,7 +111,14 @@ for (const option of INVITABLE_ROLE_OPTIONS) {
 // the only code that touches the schema had no seam. So the fake below encodes
 // the table's ACTUAL required columns — read from the live DDL — and rejects an
 // insert that omits one, exactly as the database does.
-const TENANT_INVITES_REQUIRED = ["tenant_id", "team_role", "token_hash", "created_by", "expires_at"];
+const TENANT_INVITES_REQUIRED = [
+  "tenant_id",
+  "email",
+  "team_role",
+  "token_hash",
+  "created_by",
+  "expires_at",
+];
 
 async function insertContractChecks() {
   const seen: Record<string, unknown>[] = [];
@@ -161,6 +183,32 @@ async function insertContractChecks() {
     `expires_at should be ~${INVITE_TTL_DAYS} days out, got ${seen[0].expires_at}`,
   );
 
+  // This guard is below the role/permission layer and therefore protects every
+  // caller (owner/admin/member-with-admin-access) even if a request bypasses
+  // the browser form. No role can mint an unpinned bearer invite.
+  for (const role of ["admin", "opener", "member"] as const) {
+    let missingEmail: unknown = null;
+    try {
+      await createInvite(
+        { tenantId: "t-1", role, createdBy: `u-${role}`, email: "" },
+        fakeDb,
+      );
+    } catch (error) {
+      missingEmail = error;
+    }
+    assert.match(
+      missingEmail instanceof Error ? missingEmail.message : "",
+      /invite_email_required/,
+      `${role} cannot create an invite without an email pin`,
+    );
+  }
+
+  const inviteRoute = readFileSync("app/api/team/invites/route.ts", "utf8");
+  assert(
+    inviteRoute.includes('return bad(400, "valid teammate email required")'),
+    "the HTTP boundary rejects an unpinned invite as a client error",
+  );
+
   // A failed insert must carry WHY. Returning the bare code is what turned a
   // one-line schema bug into an opaque screen.
   const brokenDb = {
@@ -180,7 +228,10 @@ async function insertContractChecks() {
 
   let caught: unknown = null;
   try {
-    await createInvite({ tenantId: "t-1", role: "member", createdBy: "u-1" }, brokenDb);
+    await createInvite(
+      { tenantId: "t-1", role: "member", createdBy: "u-1", email: "x@example.com" },
+      brokenDb,
+    );
   } catch (e) {
     caught = e;
   }

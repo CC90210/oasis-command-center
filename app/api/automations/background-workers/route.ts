@@ -306,6 +306,42 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     };
   });
 
+  // This is a cloud worker, not a local PM2 daemon. Keeping it separate from
+  // bridge health makes it clear that booked-client reminders do not depend on
+  // the operator's laptop being online.
+  if (!isSun) {
+    const cloudHealth = await db
+      .from("website_sales_meeting_worker_health")
+      .select("status,last_run_at,processed,failed,last_error")
+      .eq("id", 1)
+      .maybeSingle();
+    const health = cloudHealth.data as {
+      status: "healthy" | "degraded";
+      last_run_at: string;
+      processed: number;
+      failed: number;
+      last_error: string | null;
+    } | null;
+    const lastRunEpoch = health?.last_run_at ? Date.parse(health.last_run_at) : NaN;
+    const stale = Boolean(health) && (!Number.isFinite(lastRunEpoch) || now - lastRunEpoch > 10 * 60_000);
+    workers.push({
+      service: "cloud.founder-meeting-reminders",
+      label: "Founder meeting reminders",
+      purpose: "Sends consent-aware booking confirmations and 10-minute reminders from the verified Google Calendar handoff.",
+      status: !health ? "unconfigured" : stale ? "down" : health.status,
+      stale,
+      metadata: health ? {
+        processed_last_run: health.processed,
+        failed_last_run: health.failed,
+        last_error: health.last_error,
+        runtime: "cloud",
+      } : { runtime: "cloud", state: "waiting for first scheduled run" },
+      last_ping_at: health?.last_run_at || null,
+      manageable_via_pm2: false,
+      owner: "shared",
+    });
+  }
+
   return NextResponse.json({
     ok: true,
     bridge_online: bridgeOnline,

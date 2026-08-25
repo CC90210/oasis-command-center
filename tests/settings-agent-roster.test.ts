@@ -88,6 +88,24 @@ assert.ok(
   marketplace.includes("router.refresh()"),
   "Workspace agents must refresh every server-rendered roster consumer",
 );
+assert.ok(
+  !marketplace.includes("Ask Matt"),
+  "workspace controls must not name a person from a different tenant",
+);
+
+const kixie = readFileSync(
+  join(ROOT, "components", "settings", "KixieWebhookSyncCard.tsx"),
+  "utf8",
+);
+assert.ok(
+  !kixie.includes("Ask Matt"),
+  "integration controls must use the signed-in workspace role, not a hardcoded SunBiz owner",
+);
+
+assert.ok(
+  settings.includes('manifestSlug === "sun" && <TelegramLinkCard />'),
+  "the SunBiz application-alert bot must never mount in OASIS Settings",
+);
 
 const chatShell = readFileSync(join(ROOT, "lib", "chat-shell-props.ts"), "utf8");
 assert.ok(

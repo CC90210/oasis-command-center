@@ -114,6 +114,7 @@ jobs:
             "*/5 * * * *")
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email" ;;
             "*/10 * * * *")
@@ -158,6 +159,7 @@ jobs:
               echo "manual run: driving the fast paths + health-check"
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
+                      /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email
                       /api/cron/health-check" ;;

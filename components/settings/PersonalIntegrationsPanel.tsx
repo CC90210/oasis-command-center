@@ -30,6 +30,10 @@ type PersonalStatus = {
   connected: boolean;
   gmail_address?: string | null;
   expires_at?: string | null;
+  calendar_connected?: boolean;
+  calendar_reconnect_required?: boolean;
+  calendar_identity_mismatch?: boolean;
+  expected_work_email?: string | null;
 };
 
 export function PersonalIntegrationsPanel({
@@ -78,6 +82,7 @@ export function PersonalIntegrationsPanel({
   const oauthFlash = searchParams.get("gmail_oauth");
   const oauthReason = searchParams.get("reason");
   const oauthEmail = searchParams.get("gmail");
+  const oauthMailbox = searchParams.get("mailbox");
 
   async function refresh() {
     try {
@@ -332,7 +337,7 @@ export function PersonalIntegrationsPanel({
   }
 
   async function disconnectGmail() {
-    if (!confirm("Disconnect Gmail? Sends from your seat will fall back to the workspace default sender.")) return;
+    if (!confirm("Disconnect Google Workspace? Email sends will fall back to the workspace default sender, and this host will no longer be able to create founder meetings.")) return;
     setBusyService("gmail_oauth");
     try {
       const r = await fetch("/api/integrations/personal/disconnect", {
@@ -353,6 +358,9 @@ export function PersonalIntegrationsPanel({
 
   const gmailStatus = statuses?.find((s) => s.service === "gmail_oauth");
   const gmailConnected = gmailStatus?.connected === true;
+  const calendarConnected = gmailStatus?.calendar_connected === true;
+  const calendarReconnectRequired = gmailStatus?.calendar_reconnect_required === true;
+  const calendarIdentityMismatch = gmailStatus?.calendar_identity_mismatch === true;
 
   return (
     <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-5 space-y-4">
@@ -370,7 +378,9 @@ export function PersonalIntegrationsPanel({
         <div className="flex items-start gap-2 text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-md p-3">
           <Check className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
-            Gmail connected{oauthEmail ? ` (${oauthEmail})` : ""}. Your future sends will come from your address.
+            {oauthMailbox === "personal"
+              ? `Personal Gmail connected${oauthEmail ? ` (${oauthEmail})` : ""}. This mailbox is kept separate from client Calendar invitations.`
+              : `Google Workspace connected${oauthEmail ? ` (${oauthEmail})` : ""}. Gmail and founder-meeting Calendar access are ready after the work-address identity check.`}
           </span>
         </div>
       )}
@@ -378,7 +388,7 @@ export function PersonalIntegrationsPanel({
         <div className="flex items-start gap-2 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-md p-3">
           <X className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
-            Gmail connection cancelled{oauthReason ? ` (${oauthReason})` : ""}. You can try again any time.
+            Google Workspace connection cancelled{oauthReason ? ` (${oauthReason})` : ""}. You can try again any time.
           </span>
         </div>
       )}
@@ -386,7 +396,7 @@ export function PersonalIntegrationsPanel({
         <div className="flex items-start gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-md p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>
-            Gmail connection failed{oauthReason ? `: ${oauthReason}` : ""}. Reach out to support if it persists.
+            Google Workspace connection failed{oauthReason ? `: ${oauthReason}` : ""}. Reach out to support if it persists.
           </span>
         </div>
       )}
@@ -410,11 +420,18 @@ export function PersonalIntegrationsPanel({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-fg">Gmail</span>
-                  {gmailConnected ? (
+                  <span className="font-semibold text-sm text-fg">Google Workspace (Gmail + Calendar)</span>
+                  {calendarConnected ? (
                     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                       <Check className="w-3 h-3" />
                       Connected
+                    </span>
+                  ) : calendarIdentityMismatch ? (
+                    <span className="badge badge-danger">Wrong Google account</span>
+                  ) : calendarReconnectRequired ? (
+                    <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                      <AlertCircle className="w-3 h-3" />
+                      Reconnect once
                     </span>
                   ) : (
                     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-bg-elev/60 text-fg-dim border border-bg-border">
@@ -423,13 +440,27 @@ export function PersonalIntegrationsPanel({
                   )}
                 </div>
                 <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-                  {gmailConnected
-                    ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}. Outbound sends come from your address; the email agent monitors this inbox (read-only).`
-                    : "Connect your Gmail so sends come from your address and the email agent can monitor deal email (read-only). Connect a personal inbox too if you want it monitored."}
+                  {calendarConnected
+                    ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}. Gmail sends and read-only monitoring are active, and this host can create Google Calendar invites with Meet links.`
+                    : calendarIdentityMismatch
+                      ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this profile must send client invitations as ${gmailStatus?.expected_work_email || "its OASIS work email"}. Reconnect with the matching work account.`
+                    : calendarReconnectRequired
+                      ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Founder hosts reconnect once to enable Calendar invites and Google Meet.`
+                      : "Connect your work Google account for Gmail sends, read-only deal-email monitoring, and founder-owned Calendar invites with Google Meet."}
                 </div>
               </div>
               <div className="shrink-0 flex flex-col gap-1.5">
-                {gmailConnected ? (
+                {calendarReconnectRequired ? (
+                  <button
+                    type="button"
+                    onClick={() => connectGmail("work")}
+                    disabled={busyService === "gmail_oauth"}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
+                  >
+                    {busyService === "gmail_oauth" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    Reconnect once
+                  </button>
+                ) : gmailConnected ? (
                   <button
                     type="button"
                     onClick={disconnectGmail}
@@ -447,7 +478,17 @@ export function PersonalIntegrationsPanel({
                     className="inline-flex items-center gap-1.5 rounded-md bg-accent text-bg-deep px-3 py-1.5 text-[12.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
                   >
                     {busyService === "gmail_oauth" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-                    Connect work Gmail
+                    Connect Google Workspace
+                  </button>
+                )}
+                {calendarReconnectRequired && (
+                  <button
+                    type="button"
+                    onClick={disconnectGmail}
+                    disabled={busyService === "gmail_oauth"}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11.5px] font-semibold text-fg-muted hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
+                  >
+                    Disconnect
                   </button>
                 )}
                 <button
@@ -456,7 +497,7 @@ export function PersonalIntegrationsPanel({
                   disabled={busyService === "gmail_oauth"}
                   className="inline-flex items-center gap-1.5 rounded-md border border-bg-border bg-bg-elev px-3 py-1.5 text-[11.5px] font-semibold text-fg-muted hover:text-fg hover:border-accent/40 disabled:opacity-50 transition-colors"
                 >
-                  Connect personal Gmail (monitor)
+                  Connect personal Gmail (monitor only)
                 </button>
               </div>
             </div>
