@@ -53,7 +53,7 @@ export type Rollup = {
   outOfWindow: number;
 };
 
-export const emptyTotals = (): Totals => ({ text: 0, dial: 0, unknown: 0 });
+export const emptyTotals = (): Totals => ({ text: 0, dial: 0, email: 0, unknown: 0 });
 
 /** en-CA is the locale whose short date IS ISO order, so this yields YYYY-MM-DD. */
 const dayFormatter = new Intl.DateTimeFormat("en-CA", {
@@ -115,8 +115,15 @@ export function percentages(totals: Totals, total: number): Totals {
   if (total <= 0) return out;
 
   const SCALE = 10; // one decimal place
+  // `?? 0` is load-bearing, not defensive noise. When the "email" channel was
+  // added, a Totals literal missing that key made `totals[k]` undefined, which
+  // made `exact` NaN, which made the deficit NaN — and `deficit <= 0` is FALSE
+  // for NaN, so the apportionment loop handed a tenth to every bucket and
+  // returned percentages summing to 100.2. It did not throw. Adding a channel
+  // must never be able to produce a plausible-looking wrong number.
   const parts = LEAD_SOURCE_ORDER.map((k) => {
-    const exact = (totals[k] / total) * 100 * SCALE;
+    const count = Number(totals[k]) || 0;
+    const exact = (count / total) * 100 * SCALE;
     const floor = Math.floor(exact);
     return { k, floor, remainder: exact - floor };
   });
@@ -170,7 +177,10 @@ export function rollup(rows: LeadRow[], axis: string[]): Rollup {
 
   const daily: DailyRow[] = axis.map((date) => {
     const t = perDay.get(date) ?? emptyTotals();
-    return { date, ...t, total: t.text + t.dial + t.unknown };
+    // Sum over the canonical list, never a hand-written channel sum: adding
+    // "email" to LEAD_SOURCE_CHANNELS must not silently drop it from the bars.
+    const total = LEAD_SOURCE_ORDER.reduce((n, k) => n + (Number(t[k]) || 0), 0);
+    return { date, ...t, total };
   });
 
   return { axis, totals, daily, counted, undated, outOfWindow };

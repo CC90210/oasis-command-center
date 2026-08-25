@@ -26,6 +26,7 @@
  */
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
@@ -54,10 +55,31 @@ export { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP };
  */
 export type Viewer = { userId: string; teamRole: string; isAdmin: boolean };
 
-/** True for the commission-only outside-contractor role that must always be
- *  scoped to its own leads -- see the Viewer doc comment above. */
+/**
+ * True for any role that must always be scoped to its own leads -- see the
+ * Viewer doc comment above.
+ *
+ * WIDENED 2026-08-24, AND THIS WAS A LIVE LEAK. It read `teamRole === "agent"`
+ * and nothing else. `agent` is the LEGACY contractor role; the 2026-08-21 job
+ * titles replaced it with `opener` and `closer`, which are what the invite menu
+ * actually offers. lib/role-surfaces.ts already gives all three the SAME "sales"
+ * persona -- own book, own commission, no company money -- but this predicate
+ * never learned about the two new ones.
+ *
+ * So a rep invited as Opener or Closer was not scoped here at all, and the Web
+ * Leads browser handed them every lead in the tenant. That is precisely the leak
+ * PR #237 closed for `agent`, reopened by the roles that replaced it. The set
+ * lives in lib/team-roles.ts so the manifest records route and this one cannot
+ * drift apart again.
+ *
+ * MADE FAIL-CLOSED 2026-08-24, after review. This asked `isSelfScopedRole`,
+ * which is a membership test: an unrecognised role answered `false` and was
+ * served the whole tenant. Now it asks `mustSeeOwnRecordsOnly`, which confines
+ * anything not on the explicit tenant-wide allowlist. Deny-by-default has to be
+ * an allowlist of who may see everything, never a denylist of who may not.
+ */
 export function isScopedContractor(viewer: Viewer): boolean {
-  return !viewer.isAdmin && viewer.teamRole === "agent";
+  return !viewer.isAdmin && mustSeeOwnRecordsOnly(viewer.teamRole);
 }
 
 /**

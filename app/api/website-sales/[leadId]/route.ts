@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -135,13 +136,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
-  // Sales reps and closers may run proposal + close themselves on
-  // their own leads (assigned or frozen-attributed). Founder approval still
-  // gates the commission PAYOUT — closing only accrues.
-  // Frozen attribution keeps opener credit and read access after handoff; it
-  // does not grant closer powers. Post-handoff actions belong to the currently
-  // assigned closer (or a founder/admin).
-  const repMayRunDeal = ["agent", "closer"].includes(session.teamRole) && assignedToUser;
+  // Role and ownership are both load-bearing. Explicit closers and legacy
+  // full-stack agents may quote or close; explicit openers cannot. Ownership
+  // may come from current assignment or frozen attribution, so a legacy
+  // full-stack rep keeps the ability to close a deal they originated.
+  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser);
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
   if (builderMayRunDelivery && body.action !== "advance") {

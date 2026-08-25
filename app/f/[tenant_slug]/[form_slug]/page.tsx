@@ -168,6 +168,23 @@ export default async function AnonymousFormPage({
       // actually shown. No Bluerise-hosted form exists yet, so this resolves to
       // SunBiz today; the slug check means standing one up needs no code change.
       brand={consentBrandForTenant(result.tenant_slug, result.form.slug)}
+      // Channel on EVERY submit, not only inside anonymous_init.
+      //
+      // Codex review 2026-08-24 (P2, confirmed): a form whose step 0 is a
+      // direct-to-storage upload calls ensureTokenForUpload() first, which
+      // POSTs initialize_only:true. That request carries anonymous_init.source
+      // but RETURNS at the token mint, before the submission row (and the
+      // channel record) exists. Every later submit then has a token, so it
+      // omits anonymous_init entirely — and the channel was lost, leaving the
+      // completion email reporting Unknown for exactly the bank-statement
+      // upload flow.
+      //
+      // Passing it here as well makes the anonymous page symmetric with the
+      // token page: submission_source rides on every request regardless of
+      // which auth shape that request uses. anonymousInit.source stays because
+      // it feeds a DIFFERENT thing — lead_source origination at lead creation.
+      submissionSource={source}
+      submissionPath={`/f/${result.tenant_slug}/${result.form.slug}`}
       anonymousInit={{
         tenant_slug: result.tenant_slug,
         form_slug: result.form.slug,

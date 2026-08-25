@@ -190,11 +190,6 @@ export const SUN_NAV: NavItem[] = [
   { group: "System", href: "/team", label: "Team", icon: "UsersRound" },
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
-  // Metrics — /analytics shipped with CC's nav only, so for SunBiz the page
-  // existed but had no way in: the pipeline funnel, the lead-sources card and
-  // now the Text-vs-Dial origination chart were all operator-invisible on this
-  // tenant. Labeled "Metrics" because that is what the team calls the surface.
-  { group: "System", href: "/analytics", label: "Metrics", icon: "BarChart3" },
   { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
 ];

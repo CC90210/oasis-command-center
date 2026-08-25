@@ -5,8 +5,14 @@
  *
  * Renders GET /api/metrics/lead-sources as a segmented donut (share of leads by
  * channel) plus a stacked daily bar chart (volume over time). Client-fetched
- * because the range selector is interactive; the endpoint is `no-store` so
- * every range switch reads live.
+ * because the range is interactive; the endpoint is `no-store` so every range
+ * switch reads live.
+ *
+ * CONTROLLED vs STANDALONE:
+ *   Mounted on the Metrics dashboard it is passed `days`, so the shared 7/30/90
+ *   control at the top of that page drives it like every other tab and the user
+ *   never meets two range selectors disagreeing on the same screen. Mounted
+ *   anywhere else with no `days`, it owns its own selector.
  *
  * FOUR STATES, ALL DISTINCT ON PURPOSE:
  *   loading   — skeleton
@@ -22,6 +28,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import {
   LEAD_SOURCE_ORDER,
+  LEAD_SOURCE_CHANNELS,
   LEAD_SOURCE_LABELS,
   type LeadSource,
 } from "@/lib/forms/lead-source";
@@ -35,6 +42,7 @@ import {
 const COLORS: Record<LeadSource, string> = {
   text: "#3b82f6", // accent (OASIS blue)
   dial: "#10b981", // status-engaged
+  email: "#a855f7", // violet - distinct from both at a glance and in the bars
   unknown: "#4b5563", // status-dormant
 };
 
@@ -211,10 +219,14 @@ function DailyStack({ daily }: { daily: DailyRow[] }) {
 // Main
 // ---------------------------------------------------------------------------
 
-export function LeadSourceBreakdown() {
-  const [range, setRange] = useState<Range>(30);
+export function LeadSourceBreakdown({ days: controlledDays }: { days?: number } = {}) {
+  const [ownRange, setOwnRange] = useState<Range>(30);
   const [load, setLoad] = useState<Load>({ status: "loading" });
   const [nonce, setNonce] = useState(0);
+
+  // When a parent supplies `days` we follow it and hide our own selector.
+  const controlled = typeof controlledDays === "number";
+  const range = controlled ? (controlledDays as number) : ownRange;
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -267,22 +279,30 @@ export function LeadSourceBreakdown() {
 
   return (
     <div className="space-y-5">
-      {/* Range selector ---------------------------------------------------- */}
+      {/* Range selector ----------------------------------------------------
+          Suppressed when a parent owns the range: two selectors on one screen
+          that can disagree is worse than none. */}
       <div className="flex items-center justify-between gap-3">
-        <div className="inline-flex overflow-hidden rounded-md border border-bg-border text-[11px]">
-          {RANGES.map((r, i) => (
-            <button
-              key={r}
-              type="button"
-              onClick={() => setRange(r)}
-              className={`px-3 py-1.5 font-bold transition-colors ${
-                i > 0 ? "border-l border-bg-border" : ""
-              } ${range === r ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
-            >
-              {r}d
-            </button>
-          ))}
-        </div>
+        {controlled ? (
+          <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-dim">
+            Last {range} days
+          </div>
+        ) : (
+          <div className="inline-flex overflow-hidden rounded-md border border-bg-border text-[11px]">
+            {RANGES.map((r, i) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => setOwnRange(r)}
+                className={`px-3 py-1.5 font-bold transition-colors ${
+                  i > 0 ? "border-l border-bg-border" : ""
+                } ${range === r ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
+              >
+                {r}d
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           onClick={refresh}
@@ -315,7 +335,7 @@ export function LeadSourceBreakdown() {
   );
 }
 
-function Ready({ data, range }: { data: MetricsResponse; range: Range }) {
+function Ready({ data, range }: { data: MetricsResponse; range: number }) {
   const { totals, percentages, daily, meta } = data;
 
   if (totals.total === 0) {
@@ -324,14 +344,17 @@ function Ready({ data, range }: { data: MetricsResponse; range: Range }) {
         <div className="text-xs font-bold text-fg-muted">No leads in the last {range} days</div>
         <div className="mx-auto mt-2 max-w-md text-xs leading-relaxed text-fg-dim">
           Once a merchant submits through a tagged link, their channel shows up here. Grab the
-          Text and Dial links from the Forms page.
+          Text, Dial and Email links from the Forms page.
         </div>
       </div>
     );
   }
 
   const segments = LEAD_SOURCE_ORDER.map((k) => ({ key: k, pct: percentages[k] }));
-  const tagged = totals.text + totals.dial;
+  // "Tagged" = every REAL channel, derived from the canonical list. Hardcoding
+  // text+dial here would have quietly reported an emailed application as
+  // untagged the moment the email channel landed.
+  const tagged = LEAD_SOURCE_CHANNELS.reduce((n, k) => n + totals[k], 0);
   const coverage = totals.total > 0 ? (tagged / totals.total) * 100 : 0;
 
   return (

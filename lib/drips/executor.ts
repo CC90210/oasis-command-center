@@ -51,6 +51,7 @@ import { AI_WIRE_REP_KEY, aiWireNumbers, isSmsOnly } from "@/lib/drips/ai-wire-c
 import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from "@/lib/drips/sms-pacing-core";
 import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
 import { getChannelLimits } from "@/lib/drips/channel-limits";
+import { withLeadSourceParam } from "@/lib/forms/lead-source";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -738,7 +739,14 @@ function isOptedOutOrDead(data: LeadData): boolean {
  *     rep_name from assigned_to, so this is populated for all but the rare
  *     fully-unassigned lead), else a brand-safe "your funding specialist".
  *     Exposed under BOTH names the seeded sequences reference. */
-function buildContext(data: LeadData): Record<string, unknown> {
+function buildContext(
+  data: LeadData,
+  // Which channel is carrying THIS render. The same application_url goes out
+  // over sms AND email steps, so the channel tag has to be applied here rather
+  // than baked into the stored link — otherwise every drip-SMS application
+  // reports as Email, or every emailed one reports as nothing.
+  channel: "sms" | "email",
+): Record<string, unknown> {
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
   const rawContact = str(data.contact_name);
   const contactName = rawContact || "there";
@@ -751,7 +759,10 @@ function buildContext(data: LeadData): Record<string, unknown> {
   // hot_lead/follow_up lead. Env-overridable base for domain changes.
   const repSlug = repName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, "") || "team";
   const intakeBase = process.env.DRIP_INTAKE_URL || "https://oasisai.work/f/submissions/initial-lead-capture";
-  const applyUrl = str(data.application_url) || `${intakeBase}?rep=${repSlug}`;
+  const baseApplyUrl = str(data.application_url) || `${intakeBase}?rep=${repSlug}`;
+  // sms -> "text", email -> "email": the two names this codebase already uses
+  // for those channels (lib/forms/lead-source.ts).
+  const applyUrl = withLeadSourceParam(baseApplyUrl, channel === "sms" ? "text" : "email");
   return {
     lead: {
       ...data,
@@ -1121,7 +1132,7 @@ async function processSmsStep(
     stage: typeof data.stage === "string" ? data.stage : undefined,
     pool: run.templatePoolByTenant.get(row.tenant_id) ?? [],
   });
-  const rendered = renderTemplate(copy.body, buildContext(data));
+  const rendered = renderTemplate(copy.body, buildContext(data, "sms"));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
@@ -1589,7 +1600,7 @@ async function processEmailStep(
     }
   }
 
-  const ctx = buildContext(data);
+  const ctx = buildContext(data, "email");
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
   const renderedCustomHtml = copy.bodyHtml ? renderTemplate(copy.bodyHtml, ctx) : "";

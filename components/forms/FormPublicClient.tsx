@@ -54,6 +54,12 @@ type Props = {
   // Sent through verbatim; the submit route normalizes it and a bad value
   // degrades to "unknown" rather than failing the submission.
   anonymousInit?: { tenant_slug: string; form_slug: string; rep?: string; source?: string };
+  /** ?source= on a TOKEN link (drip / rep-sent application). Distinct from
+   *  anonymousInit.source, which only exists on the new-lead path. */
+  submissionSource?: string;
+  /** Path the merchant landed on, token segment included — redacted before it
+   *  reaches any email. Used only for the operator notification. */
+  submissionPath?: string;
   /**
    * Cross-form pre-fill (2026-06-20 — Ethan/Alex). When the form is opened from
    * a personalized lead link, the server loads the lead's existing data (name,
@@ -99,6 +105,8 @@ export function FormPublicClient({
   redirectUrl,
   token: initialToken,
   anonymousInit,
+  submissionSource,
+  submissionPath,
   prefill,
   brand,
 }: Props) {
@@ -432,6 +440,13 @@ export function FormPublicClient({
         payload: built.payload,
         file_attachments: built.file_attachments,
       };
+
+      // Channel of THIS submission. Sent on every step so the operator
+      // notification (which fires on the LAST step) still knows how the
+      // merchant arrived, even though the query string was only present when
+      // they first landed. Anonymous links carry it in anonymous_init instead.
+      if (submissionSource) submitBody.submission_source = submissionSource;
+      if (submissionPath) submitBody.submission_path = submissionPath;
 
       // CONSENT EVIDENCE. Sealed from the BROWSER, because the evidence is only
       // worth having if it records the merchant's own IP — a call from our API

@@ -231,10 +231,20 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
 
 export default async function PublicFormPage({
   params,
+  searchParams,
 }: {
   params: Promise<RouteParams>;
+  // ?source=<text|dial|email> — which link the merchant actually clicked.
+  // The drip engine and rep-sent applications both arrive here, so without this
+  // every emailed application was attributed to nothing. Untrusted: normalized
+  // server-side on submit, where a bad value becomes "unknown" and never
+  // rejects the application.
+  searchParams?: Promise<{ source?: string }>;
 }) {
   const resolved = await params;
+  const sp = (await searchParams) || {};
+  const source =
+    typeof sp.source === "string" && sp.source.trim() ? sp.source.trim() : undefined;
   const result = await loadAndVerify(resolved);
 
   if (!result.ok) {
@@ -256,6 +266,11 @@ export default async function PublicFormPage({
       redirectUrl={result.form.redirect_url}
       token={result.token}
       prefill={result.prefill}
+      // Channel + the path they landed on, so the operator notification can say
+      // HOW this application arrived. The token segment is redacted before it
+      // ever reaches an email (lib/forms/lead-source.ts describeSubmissionLink).
+      submissionSource={source}
+      submissionPath={`/f/${resolved.tenant_slug}/${resolved.form_slug}/${resolved.lead_token}`}
       // Same brand resolution as the anonymous page. Omitting it here would seal
       // a Bluerise merchant's consent under SunBiz's site key and disclosure —
       // an evidence record stating they were shown wording they never saw.

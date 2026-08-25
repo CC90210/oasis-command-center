@@ -73,8 +73,12 @@ import { resolveRepAssignment, mintFullApplicationLink, findExistingLead } from 
 import {
   adoptLeadSource,
   normalizeLeadSource,
+  recordSubmissionChannel,
+  redactSubmissionPath,
   LEAD_SOURCE_KEY,
   LEAD_SOURCE_AT_KEY,
+  LAST_SUBMITTED_VIA_KEY,
+  LAST_SUBMITTED_LINK_KEY,
 } from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
@@ -129,6 +133,13 @@ type SubmitBody = {
     // malformed value resolves to "unknown", it never rejects the submission.
     source?: string;
   };
+  /** ?source= on a TOKEN link (drip / rep-sent application). The anonymous
+   *  path carries its own copy inside anonymous_init; this one covers the
+   *  EXISTING-lead path, which had no channel at all before 2026-08-24. */
+  submission_source?: string;
+  /** Path the merchant landed on. The token segment is redacted before this
+   *  ever reaches an email — see describeSubmissionLink. */
+  submission_path?: string;
   /** Mint the anonymous lead/token without recording a form step. Used only
    * when step 0 itself is a direct-to-storage upload and therefore needs the
    * token before the file can be selected. */
@@ -190,7 +201,17 @@ export async function POST(req: NextRequest) {
       errorStack: err instanceof Error ? (err.stack ?? null) : null,
       // The signed lead token is a credential; the recovery record needs the
       // merchant's ANSWERS, not the ability to submit as them.
-      payload: { ...(rawBody as Record<string, unknown>), token: body?.token ? "<redacted>" : undefined },
+      payload: {
+        ...(rawBody as Record<string, unknown>),
+        token: body?.token ? "<redacted>" : undefined,
+        // submission_path is `/f/<tenant>/<form>/<TOKEN>` on the token route,
+        // so spreading rawBody persisted a live bearer credential for that
+        // merchant's form into the failure-capture store. The email path was
+        // already careful about this; this path was not. (CodeRabbit, PR #294.)
+        submission_path: body?.submission_path
+          ? redactSubmissionPath(body.submission_path)
+          : undefined,
+      },
       userAgent: req.headers.get("user-agent"),
     });
     return NextResponse.json({ ok: false, error: "server_error" }, { status: 500 });
@@ -776,7 +797,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
       // full application happens to carry statements — that's Form 2).
       if (form.slug === "bank-statement-upload") {
         after(() =>
-          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin }),
+          sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 3, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
         );
       }
     }
@@ -819,6 +840,114 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     );
   }
   const submissionId = (insertRes.data as { id: string }).id;
+
+  // ---------------------------------------------------------------------
+  // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if
+  // it was an application coming in from a lead through text, through calls,
+  // or an email link").
+  //
+  // Two entry points feed it: anonymous_init.source on the NEW-lead path, and
+  // submission_source on the TOKEN path (the drip / rep-sent application,
+  // which carried no channel at all before this). Whichever is present wins.
+  //
+  // Deliberately SEPARATE from lead_source. lead_source is origination and is
+  // immutable first-touch; this is latest-wins and answers a different
+  // question. A merchant found by text who applies from a drip email is
+  // origination=text, this-application=email, and both facts are true.
+  // ---------------------------------------------------------------------
+  const submissionChannelRaw = body.submission_source || body.anonymous_init?.source;
+  const submissionUrl = body.submission_path
+    ? `${req.nextUrl.origin}${body.submission_path}`
+    : undefined;
+  const channelPatch = recordSubmissionChannel(
+    submissionChannelRaw,
+    submissionUrl,
+    new Date().toISOString(),
+  );
+  let notifyVia = channelPatch?.[LAST_SUBMITTED_VIA_KEY];
+  let notifyLink = channelPatch?.[LAST_SUBMITTED_LINK_KEY];
+
+  if (channelPatch) {
+    // A hand-rolled read-modify-write here could LOSE an update: two
+    // submissions read the same document, and a delayed earlier request then
+    // writes its older channel over a newer one — or worse, writes back a
+    // stale copy of every OTHER field on the lead. (CodeRabbit, PR #294.)
+    //
+    // updateRecord's ifMatch is real optimistic concurrency: it guards on the
+    // field AND pins updated_at as a row version, both riding on the same
+    // statement as the write. A conflict means somebody else wrote a channel
+    // at least as fresh as ours, so losing our write is the CORRECT outcome
+    // and we swallow it rather than retrying into a fight.
+    const cur = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("id", link.lead_id)
+      .eq("tenant_id", form.tenant_id)
+      .maybeSingle();
+    const curData = (cur.data as { data?: Record<string, unknown> } | null)?.data;
+    if (!cur.error && curData) {
+      const priorVia =
+        typeof curData[LAST_SUBMITTED_VIA_KEY] === "string"
+          ? (curData[LAST_SUBMITTED_VIA_KEY] as string)
+          : null;
+      const unchanged =
+        priorVia === channelPatch[LAST_SUBMITTED_VIA_KEY] &&
+        curData[LAST_SUBMITTED_LINK_KEY] === channelPatch[LAST_SUBMITTED_LINK_KEY];
+      // Skip the write entirely when nothing changed. A multi-step form
+      // submits the same channel on every step; writing each time multiplies
+      // the collision window for no gain.
+      if (!unchanged) {
+        try {
+          await updateRecord({
+            tenant_id: form.tenant_id,
+            entity: "lead",
+            id: link.lead_id,
+            patch: channelPatch,
+            ifMatch: { field: LAST_SUBMITTED_VIA_KEY, value: priorVia },
+          });
+        } catch (err) {
+          // Conflict is expected under concurrency and is not an error. Report
+          // the value that actually won so the notification never claims a
+          // channel the lead does not carry.
+          if (err instanceof RecordsError && err.code === "conflict") {
+            // RE-READ, do not reuse priorVia. (Codex review 2026-08-24, P2.)
+            // priorVia is the value from BEFORE either competing write, so it
+            // is not the winner — reporting it would state a channel the lead
+            // does not carry, which is the precise failure this whole feature
+            // exists to prevent. Read what actually landed and quote that,
+            // link included, since the winner's link IS on the record.
+            const after = await db
+              .from("tenant_records")
+              .select("data")
+              .eq("id", link.lead_id)
+              .eq("tenant_id", form.tenant_id)
+              .maybeSingle();
+            const afterData = (after.data as { data?: Record<string, unknown> } | null)?.data;
+            if (!after.error && afterData) {
+              notifyVia =
+                typeof afterData[LAST_SUBMITTED_VIA_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_VIA_KEY] as string)
+                  : undefined;
+              notifyLink =
+                typeof afterData[LAST_SUBMITTED_LINK_KEY] === "string"
+                  ? (afterData[LAST_SUBMITTED_LINK_KEY] as string)
+                  : undefined;
+            } else {
+              // Could not confirm what won. Say nothing rather than guess —
+              // the email falls back to the lead's stored value on its own.
+              notifyVia = undefined;
+              notifyLink = undefined;
+            }
+          } else {
+            console.error(
+              "[forms.submit] channel stamp failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+      }
+    }
+  }
 
   // Stage transition — if step_outcomes has a target for this step,
   // patch the lead via updateRecord. Phase 2's BRAVO_RECORD_STATUS_CHANGED
@@ -1096,7 +1225,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 1 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 1, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   } else if (isLastStep && form.slug === "full-application") {
@@ -1175,7 +1304,7 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Email the assigned agent + submissions@ that Form 2 was completed.
     if (isFundingTenant(link.tenant)) {
       after(() =>
-        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin }),
+        sendFormCompletionEmail({ db, tenantId: form.tenant_id, leadId: link.lead_id, formNumber: 2, origin: req.nextUrl.origin, submittedVia: notifyVia, submittedLink: notifyLink }),
       );
     }
   }
