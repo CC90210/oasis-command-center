@@ -35,7 +35,27 @@
  *    tests/web-leads-guards.test.ts alongside the battle card, because a green
  *    dot beside a score is exactly how "no colour keyed to a score" erodes.
  *
- * 4. THE CALLING-HOURS CAUTION WARNS, IT NEVER BLOCKS. CRTC Rule 23 restricts
+ * 4. THE BUSINESS'S HOURS AND THE LEGAL CALLING WINDOW ARE TWO DIFFERENT
+ *    THINGS AND NEVER SHARE A BOX OR A LABEL.
+ *
+ *    This is the defect the operator caught, and it is worth stating plainly
+ *    because the first version of this file looked correct in review. Under a
+ *    heading a rep reads as "this shop's hours", the only concrete times on the
+ *    card were 9:00 a.m. to 9:30 p.m. -- the CRTC window, byte for byte
+ *    identical on all 31,034 leads. His words: "I don't know what these Calling
+ *    Hours mean. They're completely hallucinating." He was right. A generic
+ *    legal constant, rendered in the slot reserved for facts about the
+ *    prospect, IS fabricated data about the prospect however carefully the
+ *    surrounding sentence is worded.
+ *
+ *    So: `BusinessHoursPanel` contains ONLY that business's own hours and says
+ *    so in a sentence when we have none. `CallingWindowNotice` is a separate
+ *    sibling element, it names the rule as ours rather than theirs, and it
+ *    appears ONLY while the rep is actually outside the window. Nothing about
+ *    the law renders inside the hours block, ever.
+ *    Pinned by tests/web-leads-guards.test.ts.
+ *
+ * 5. THE CALLING-HOURS CAUTION WARNS, IT NEVER BLOCKS. CRTC Rule 23 restricts
  *    calls to 9:00 a.m.-9:30 p.m. weekdays and 10:00 a.m.-6:00 p.m. weekends
  *    IN THE RECIPIENT'S TIME ZONE. A Toronto rep dialling Vancouver at 9:00 is
  *    calling at 6:00 a.m., which is a violation at up to $15,000 per call. But
@@ -46,7 +66,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Clock } from "lucide-react";
+import { Clock, Scale } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 import { leadHours, type LeadHours } from "@/lib/web-leads/hours";
 
@@ -135,7 +155,7 @@ export function OpenNowCell({ lead, now }: { lead: WebLead; now: Date | null }) 
  * different clocks for two leads a millisecond apart, and so the whole surface
  * is testable at a fixed instant.
  */
-export function OpeningHoursPanel({
+export function BusinessHoursPanel({
   lead,
   now,
   layout = "stack",
@@ -153,7 +173,7 @@ export function OpeningHoursPanel({
       <div className={`flex gap-3 border-b border-bg-border/60 py-2.5 ${wide}`}>
         <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden><Clock className="h-4 w-4" /></div>
         <div className="min-w-0 flex-1">
-          <p className={LABEL}>Opening hours</p>
+          <p className={LABEL}>Business hours</p>
           <p className="mt-1.5 text-sm leading-relaxed text-fg-muted">
             Working out the local time where this business is.
           </p>
@@ -170,7 +190,10 @@ export function OpeningHoursPanel({
         <Clock className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1">
-        <p className={LABEL}>Opening hours</p>
+        {/* "Business hours", not "Opening hours" and never "Calling hours".
+            This block answers exactly one question: when is THIS shop open.
+            Nothing about telemarketing law is allowed in here -- see rule 4. */}
+        <p className={LABEL}>Business hours</p>
 
         {/* Headline + the business's own clock, on one line. */}
         <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -188,17 +211,10 @@ export function OpeningHoursPanel({
         {/* Always a full sentence, in every state. */}
         <p className="mt-1.5 text-sm leading-relaxed text-fg-muted">{h.detail}</p>
 
-        {/* CRTC Rule 23. A caution, never a gate -- see rule 4 in the header. */}
-        {h.call.allowed === false && (
-          <p className="mt-2 rounded-md border border-accent/40 bg-bg-raised px-2.5 py-2 text-xs leading-relaxed text-fg">
-            <span className="font-semibold">Outside calling hours.</span> {h.call.reason}
-          </p>
-        )}
-        {h.call.allowed === null && (
-          <p className="mt-2 rounded-md border border-bg-border bg-bg-raised px-2.5 py-2 text-xs leading-relaxed text-fg-muted">
-            {h.call.reason}
-          </p>
-        )}
+        {/* NOTHING ABOUT CRTC RULE 23 GOES HERE. It used to, and a legal
+            constant printed under a hours heading is what the operator read as
+            invented data about the prospect. It now renders as a separate
+            sibling, CallingWindowNotice, below this block. */}
 
         {/* The week. Seven rows, always -- a missing Monday and a Monday that
             says Closed look identical at a glance and mean opposite things. */}
@@ -228,8 +244,21 @@ export function OpeningHoursPanel({
             every other unverified directory value. */}
         {h.raw && (
           <p className="mt-1.5 break-words font-mono text-[11px] leading-relaxed text-fg-dim">
-            <span className="font-sans not-italic">As recorded in the directory: </span>
+            <span className="font-sans not-italic">Recorded as: </span>
             {h.raw}
+          </p>
+        )}
+
+        {/* WHERE IT CAME FROM. A schema.org openingHoursSpecification was
+            written to be parsed; a line lifted out of visible page text was
+            written to be looked at, and might be a seasonal notice or the
+            kitchen's hours rather than the shop's. The rep is about to say this
+            to a stranger, so they get told which one they are holding instead
+            of both arriving as one equally confident line. */}
+        {h.source && (
+          <p className="mt-1.5 text-[11px] leading-relaxed text-fg-dim">
+            Hours from {h.source.label}.
+            {h.source.weak && " Read off the page rather than published as data, so treat it as a hint and confirm on the call."}
           </p>
         )}
 
@@ -244,6 +273,70 @@ export function OpeningHoursPanel({
   );
 }
 
+/**
+ * CRTC Rule 23, as a caution about US, rendered on its own.
+ *
+ * ═══ WHY THIS IS A SEPARATE COMPONENT ═══════════════════════════════════════
+ *
+ * Because when it was a paragraph inside the hours block it became, in effect,
+ * a claim about the prospect. Every lead in the corpus carried no hours, so the
+ * only times on the card were 9:00 a.m. and 9:30 p.m., in the slot a rep reads
+ * for that shop's hours, identical on all 31,034 of them. Separating the
+ * element is not cosmetic: it is what makes the sentence legible as a rule we
+ * are subject to rather than a fact we are asserting about them.
+ *
+ * ═══ AND WHY IT IS MOSTLY INVISIBLE ═════════════════════════════════════════
+ *
+ * It renders ONLY when the rep is actually outside the window right now, or
+ * when we cannot work out the business's zone at all. A caution a rep sees on
+ * every card all day is a caution they stop reading by Tuesday. Showing it at
+ * the moment it changes their next action is the whole value.
+ *
+ * `allowed === null` is NOT permission. It is "we do not know", said in those
+ * words, because a warning that only ever appears when we happen to have a
+ * province would train reps to read its absence as an all-clear.
+ *
+ * It never disables anything. Our province-to-zone mapping has stated
+ * ambiguities (Northwestern Ontario, Nunavut), and a hard block built on a
+ * derived zone would refuse legitimate calls without explaining itself.
+ */
+export function CallingWindowNotice({
+  lead,
+  now,
+  layout = "stack",
+}: {
+  lead: WebLead;
+  now: Date | null;
+  layout?: "stack" | "grid";
+}) {
+  const wide = layout === "grid" ? "sm:col-span-2 lg:col-span-3" : "";
+  if (!now) return null;
+  const { call } = hoursFor(lead, now);
+  // Inside the window: render nothing at all. Not a green tick, not an
+  // "allowed" badge -- there is no state to report, and a permanent all-clear
+  // is exactly the always-on element that made the old block read as data.
+  if (call.allowed === true) return null;
+
+  return (
+    <div className={`flex gap-3 border-b border-bg-border/60 py-2.5 ${wide}`}>
+      <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden>
+        <Scale className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        {/* The label names the rule as ours. "Calling hours" alone was the word
+            that read as the prospect's opening times. */}
+        <p className={LABEL}>Canadian calling rules, about us</p>
+        <p className="mt-1.5 text-sm leading-relaxed text-fg-muted">
+          {call.allowed === false && (
+            <span className="font-semibold text-fg">Do not dial yet. </span>
+          )}
+          {call.reason}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /** One resolution point, so no two surfaces can disagree about one business. */
 function hoursFor(lead: WebLead, now: Date): LeadHours {
   return leadHours(
@@ -252,6 +345,7 @@ function hoursFor(lead: WebLead, now: Date): LeadHours {
       openingHours: lead.openingHours,
       openingHoursRaw: lead.openingHoursRaw,
       openingHoursCheckedAt: lead.openingHoursCheckedAt,
+      openingHoursSource: lead.openingHoursSource,
     },
     now,
   );

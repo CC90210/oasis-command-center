@@ -123,8 +123,16 @@ export type WebLead = {
   openingHoursRaw: string | null;
   /** JARVIS's parsed grid. Decoded by lib/web-leads/hours.ts, never here. */
   openingHours: unknown;
-  /** When Overpass was last asked. Null means nobody has ever looked. */
+  /** When we last looked for hours, whatever the answer. Null means never. */
   openingHoursCheckedAt: string | null;
+  /**
+   * WHICH collector produced the hours: "osm", "site-jsonld", "site-microdata"
+   * or "site-text". Decoded by lib/web-leads/hours.ts, and shown to the rep,
+   * because a value read out of visible page text is weaker evidence than a
+   * schema.org openingHoursSpecification and they are about to repeat it to a
+   * stranger. Null on rows written before the collector recorded provenance.
+   */
+  openingHoursSource: string | null;
 };
 
 /**
@@ -202,6 +210,7 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     openingHoursRaw: str(d.webdev_opening_hours_raw),
     openingHours: d.webdev_opening_hours ?? null,
     openingHoursCheckedAt: str(d.webdev_opening_hours_checked_at),
+    openingHoursSource: str(d.webdev_opening_hours_source),
   };
 }
 

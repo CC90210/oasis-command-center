@@ -51,7 +51,7 @@
 import { Building2, ExternalLink, Globe, Map as MapIcon, MapPin, Phone, Tag } from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
-import { OpeningHoursPanel, useNow } from "./OpeningHours";
+import { BusinessHoursPanel, CallingWindowNotice, useNow } from "./OpeningHours";
 
 /**
  * The one place the address is assembled, so the drawer and the page can never
@@ -165,13 +165,20 @@ export function BusinessFacts({ lead, layout = "stack" }: { lead: WebLead; layou
       <WebsiteFact lead={lead} />
       <Fact icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
       <Fact icon={<MapIcon className="h-4 w-4" />} label="Territory" value={lead.territoryName} />
-      {/* WHEN they can be reached, full width, directly under WHERE they are.
+      {/* WHEN THIS BUSINESS IS OPEN, full width, directly under WHERE they are.
           A rep decides in this order -- who, where, and then whether it is even
           worth dialling right now -- so the hours sit inside the identity block
           rather than below the charts. Full width because it carries a seven-row
-          week and, when the local time is outside CRTC calling hours, a caution
-          that must not be squeezed into a third of a column. */}
-      <OpeningHoursPanel lead={lead} now={now} layout={layout} />
+          week.
+
+          TWO SEPARATE ROWS, DELIBERATELY. The first is a fact about THEM. The
+          second is a rule about US, and it only appears when the rep is
+          actually outside the window. They were one block until the operator
+          read the legal constant as fabricated data about the prospect: see
+          rule 4 in OpeningHours.tsx. Do not merge them back, and do not give
+          them a shared heading. */}
+      <BusinessHoursPanel lead={lead} now={now} layout={layout} />
+      <CallingWindowNotice lead={lead} now={now} layout={layout} />
       {/* VERBATIM. See rule 1 in the module header. Last, and full width,
           because they are sentences rather than fields -- but still inside the
           identity block, never behind a disclosure. */}
