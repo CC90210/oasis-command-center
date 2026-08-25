@@ -291,18 +291,47 @@ async function run() {
       "the pipeline lead page must render the battle card",
     );
 
-    // Gated: an ordinary CRM lead has no audit and the endpoint would 404.
+    // ─── NOBODY EVER GETS NEITHER ─────────────────────────────────────────
+    //
+    // Found in review 2026-08-25. This page admits a viewer via
+    // `canOpenOasisSalesRecord`, which accepts the assignee OR a listed
+    // COLLABORATOR -- that is what makes the opener-to-closer handoff work.
+    // The battle card fetches through `visibleToViewer`, which accepts the
+    // assignee ONLY and has no collaborator concept. So a collaborator opens
+    // the record and the card inside it 404s.
+    //
+    // On its own that is a survivable error message. Combined with suppressing
+    // the business band whenever a card is EXPECTED, it left exactly those
+    // people with no business details at all -- worse than the state this whole
+    // change set out to fix. Both gates now ask the same question.
     assert.match(
       detail,
-      /\{webLeadBusinessId && \(/,
-      "the battle card must be gated on the lead actually being a web-lead",
+      /import \{ visibleToViewer \} from "@\/lib\/web-leads\/data";/,
+      "the page must ask the SAME visibility function the battlecard API asks",
     );
-    // And the compact business band must NOT render alongside it -- the card
-    // carries BusinessFacts, the fuller record of the same fields.
     assert.match(
+      detail,
+      /const willRenderBattleCard = Boolean\(\s*webLeadBusinessId && cardViewer && visibleToViewer\(assignedTo, cardViewer\),/,
+      "the card gate must combine 'is a web-lead' with the API's own visibility rule",
+    );
+    assert.match(
+      detail,
+      /\{willRenderBattleCard && \(/,
+      "the battle card must render only when the API will actually serve it",
+    );
+    // THE COMPLEMENT, and this is the assertion that matters: the fallback band
+    // must key on the SAME boolean, so the two branches are exhaustive. If one
+    // gate says `willRenderBattleCard` and the other says `webLeadBusinessId`,
+    // a collaborator falls through both and sees nothing.
+    assert.match(
+      detail,
+      /\{!willRenderBattleCard && <LeadBusinessBand/,
+      "the fallback band must key on the SAME boolean as the card, or a viewer can get neither",
+    );
+    assert.doesNotMatch(
       detail,
       /\{!webLeadBusinessId && <LeadBusinessBand/,
-      "the summary band and the battle card must never render together",
+      "the fallback must not key on web-lead-ness alone -- that is the gap that left collaborators with nothing",
     );
 
     // The card is READ, not hidden behind a click. A card a rep has to expand

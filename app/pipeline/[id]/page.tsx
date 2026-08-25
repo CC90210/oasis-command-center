@@ -27,6 +27,7 @@ import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { formatMoney, nonEmptyString, relTime } from "@/lib/format-helpers";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { BattleCard } from "@/components/web-leads/BattleCard";
+import { visibleToViewer } from "@/lib/web-leads/data";
 import { ScoreLeadButton } from "./ScoreLeadButton";
 import { NextActionButton } from "./NextActionButton";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
@@ -122,6 +123,43 @@ export default async function PipelineLeadDetailPage({
   // /api/web-leads/[id]/battlecard would 404 for it.
   const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
 
+  /**
+   * ═══ TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (found in review 2026-08-25) ═
+   *
+   * This page admits a viewer via `canOpenOasisSalesRecord`, which accepts the
+   * assignee OR anyone listed in `collaborators` -- that is what makes the
+   * opener-to-closer handoff work, and the comp plan pays both.
+   *
+   * The battle card fetches /api/web-leads/[id]/battlecard, whose scoping runs
+   * through `visibleToViewer`, and that one accepts the assignee ONLY. It has
+   * no collaborator concept at all.
+   *
+   * So a collaborator can open this record and the card inside it 404s. Left
+   * alone that would be a degraded-but-survivable error message -- except this
+   * page also suppresses LeadBusinessBand whenever a card is expected, which
+   * would have left exactly those people with NO business details at all. That
+   * is worse than the state Adon asked me to fix.
+   *
+   * Rather than widen a live authorization boundary at the end of a long
+   * session, this asks the SAME function the API asks. Whatever
+   * `visibleToViewer` decides, this page agrees with by construction: a viewer
+   * who will get the card gets the card, and a viewer who will not keeps the
+   * compact band instead of losing both.
+   *
+   * ▶ FOLLOW-UP, deliberately not done here: `visibleToViewer` should probably
+   * learn about collaborators so the two doors genuinely match, rather than
+   * this page routing around the gap. That is a change to the boundary PR #237
+   * established and deserves its own review, not a footnote in this one.
+   */
+  const cardViewer =
+    session.ok && session.userId
+      ? { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin }
+      : null;
+  const assignedTo = nonEmptyString(activeRecord.data.assigned_to);
+  const willRenderBattleCard = Boolean(
+    webLeadBusinessId && cardViewer && visibleToViewer(assignedTo, cardViewer),
+  );
+
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
@@ -148,7 +186,7 @@ export default async function PipelineLeadDetailPage({
             carries BusinessFacts -- the full directory record -- and rendering
             a four-cell summary of the same fields directly above it is one
             business's address written on the page twice. */}
-        {!webLeadBusinessId && <LeadBusinessBand data={activeRecord.data} id={activeRecord.id} />}
+        {!willRenderBattleCard && <LeadBusinessBand data={activeRecord.data} id={activeRecord.id} />}
       </CollapsibleSection>
       <LeadMetricsBand metrics={metrics} />
       <LeadActionToolbar
@@ -208,7 +246,7 @@ export default async function PipelineLeadDetailPage({
         Gated on webdev_source_business_id: an ordinary CRM lead has no audit,
         and the endpoint would 404. Non-web-leads keep LeadBusinessBand above.
       */}
-      {webLeadBusinessId && (
+      {willRenderBattleCard && (
         <CollapsibleSection
           title="Website battle card"
           subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
