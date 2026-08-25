@@ -221,6 +221,11 @@ const TESTS = [
   // JARVIS, keeps unverified capabilities off the screen, and holds the
   // copy to the rep card's rules -- no technology named, no price quoted.
   "tests/web-leads-automations.test.ts",
+  // 2026-08-25: phone trust. Every lead carried a hardcoded confidence of 50
+  // that nothing rendered, so a number nobody had checked looked exactly like
+  // one that had been. Pins that a tier LABELS and ORDERS but never hides a
+  // number, and that an unassessed lead never claims a tier it does not have.
+  "tests/web-leads-phone-trust.test.ts",
   // Task 3 hotfix (2026-08-21): proves the Turso adapter's object-vs-string
   // profile decoding is handled -- see coerceProfile() in lib/web-leads/audit.ts.
   "tests/web-leads-audit.test.ts",

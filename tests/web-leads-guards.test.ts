@@ -374,6 +374,12 @@ for (const view of [
   // on the marker once (2026-08-25): the assertion failed as intended, and
   // the classes were reverted.
   "components/web-leads/AutomationPanel.tsx",
+  // Added 2026-08-25 with the phone trust tiers. A red phone number is the
+  // single most tempting tint left in this feature and the most misleading:
+  // a rep who sees red hears "bad lead", when what we actually know is that
+  // ANOTHER business in our list claims the same number. That is a fact about
+  // our data, not a verdict on the business. Carried by a word and a shape.
+  "components/web-leads/PhoneTrust.tsx",
 ]) {
   const src = read(view);
 

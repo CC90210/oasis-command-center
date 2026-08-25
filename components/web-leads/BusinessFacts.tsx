@@ -52,6 +52,7 @@ import { Building2, ExternalLink, Globe, Map as MapIcon, MapPin, Phone, Tag } fr
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { OpeningHoursPanel, useNow } from "./OpeningHours";
+import { PhoneTrust } from "./PhoneTrust";
 
 /**
  * The one place the address is assembled, so the drawer and the page can never
@@ -160,7 +161,23 @@ export function BusinessFacts({ lead, layout = "stack" }: { lead: WebLead; layou
           BEFORE they pitch, which is the whole reason this block sits at the
           top of the card rather than under the charts. */}
       <Fact icon={<MapPin className="h-4 w-4" />} label="Address" value={fullAddress(lead)} />
-      <Fact icon={<Phone className="h-4 w-4" />} label="Phone" value={lead.phone} />
+      {/* The number AND what we know about it. Until 2026-08-25 this was a
+          bare value: every lead carried a hardcoded confidence of 50 that
+          nothing on screen read, so a number nobody had checked looked
+          exactly like one that had been, and reps burned calls on numbers
+          that belonged to another business. The tier NEVER hides the number
+          -- it is still rendered in full and still dialable. */}
+      <div className="flex gap-3 border-b border-bg-border py-3.5">
+        <span className="mt-0.5 shrink-0 text-fg-faint">
+          <Phone className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Phone</p>
+          <div className="mt-1.5">
+            <PhoneTrust lead={lead} />
+          </div>
+        </div>
+      </div>
       <Fact icon={<Building2 className="h-4 w-4" />} label="Industry" value={lead.industry} />
       <WebsiteFact lead={lead} />
       <Fact icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
