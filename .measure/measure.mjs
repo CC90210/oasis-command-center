@@ -104,6 +104,12 @@ const PROBE = () => {
   const out = {
     docScrollWidth: document.documentElement.scrollWidth,
     docClientWidth: document.documentElement.clientWidth,
+    // A modal that hides itself with CSS while keeping the body scroll lock is
+    // an unscrollable page with nothing on screen to blame. Codex found exactly
+    // that on the filter sheet across `2xl` (2026-08-25); this is what proves
+    // the fix, at a real viewport width rather than by reading the source.
+    bodyOverflow: document.body.style.overflow || getComputedStyle(document.body).overflowY,
+    filterSheetOpen: Boolean(document.querySelector("[role='dialog'][aria-label='Filters']")),
     boxes: {},
     overflowing: [],
     clipped: [],
@@ -267,13 +273,14 @@ async function main() {
       page.on("pageerror", (e) => errors.push(String(e)));
       await page.goto(url(surface));
       // React mount + the audit fetch the stub resolves immediately.
+      // The list always renders; the sheet may legitimately be closed already at
+      // `2xl`, which is the whole point of the assertion below. So both list
+      // surfaces wait on the list, never on the overlay.
       await page.waitForFunction(
         (s) =>
           (s === "call"
             ? document.querySelector("[role='dialog']")
-            : s === "sheet"
-              ? document.querySelector("[aria-label='Filters']")
-              : document.querySelector("#pool table, #pool [data-mobile-cards]")) !== null,
+            : document.querySelector("#pool table, #pool [data-mobile-cards]")) !== null,
         surface,
         { timeout: 15000 },
       );
@@ -284,8 +291,35 @@ async function main() {
       await ctx.close();
     }
   }
+  /**
+   * THE ACTUAL REPORTED PATH: open the sheet on a phone, then cross `2xl`.
+   *
+   * Every measurement above is a fresh load at a fixed width, which exercises
+   * the mount-time close and not the resize listener. Codex's P2 was
+   * specifically a RESIZE -- a rep rotating a tablet or docking a laptop -- so
+   * this drives that transition and reads the body back afterwards.
+   */
+  let resize = null;
+  if (process.env.HARNESS_ENTRY !== "entry-baseline.tsx") {
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 900 }, isMobile: true, hasTouch: true });
+    const page = await ctx.newPage();
+    await page.goto(url("sheet"));
+    await page.waitForSelector("[role='dialog'][aria-label='Filters']", { timeout: 15000 });
+    const before = await page.evaluate(() => document.body.style.overflow);
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.waitForTimeout(300);
+    resize = await page.evaluate(() => ({
+      sheetPresent: Boolean(document.querySelector("[role='dialog'][aria-label='Filters']")),
+      railPresent: Boolean(document.querySelector("#pool aside")),
+      bodyOverflow: document.body.style.overflow,
+      pageScrolls: document.documentElement.scrollHeight > window.innerHeight,
+    }));
+    resize.before = before;
+    await ctx.close();
+  }
+
   await browser.close();
-  fs.writeFileSync(path.join(here, `results-${label}.json`), JSON.stringify(results, null, 2));
+  fs.writeFileSync(path.join(here, `results-${label}.json`), JSON.stringify({ results, resize }, null, 2));
 
   let failures = 0;
   for (const r of results) {
@@ -321,6 +355,24 @@ async function main() {
         console.log(`      FAIL above the thumb half (viewport 900, need top >= 450): ${high.map((x) => `${x.label}@${x.top}`).join(", ")}`);
       }
     }
+    if (r.surface === "sheet") {
+      // Below 1536 the sheet is the only way to the filters and must be there.
+      // At 1536 and above the rail has taken over, so the sheet must have
+      // CLOSED ITSELF -- not merely gone `display:none` while still holding the
+      // body scroll lock, which is the Codex P2 this asserts against.
+      const railWidth = r.width >= 1536;
+      const wantOpen = !railWidth;
+      const locked = r.bodyOverflow === "hidden";
+      console.log(`  filter sheet       ${r.filterSheetOpen ? "open" : "closed"}, body overflow "${r.bodyOverflow}"`);
+      if (r.filterSheetOpen !== wantOpen) {
+        failures++;
+        console.log(`      FAIL expected the sheet ${wantOpen ? "open" : "closed"} at ${r.width}px`);
+      }
+      if (!wantOpen && locked) {
+        failures++;
+        console.log(`      FAIL the sheet closed but left the page scroll-locked -- nothing on screen can release it`);
+      }
+    }
     const docOverflow = r.docScrollWidth - r.docClientWidth;
     console.log(`  page overflow      ${docOverflow > 0 ? `FAIL +${docOverflow}px` : "0px"}`);
     if (docOverflow > 0) failures++;
@@ -348,6 +400,15 @@ async function main() {
       console.log(`  tap targets        ${r.targetCount} controls (not a touch width, not asserted)`);
     }
   }
+  if (resize) {
+    console.log(`\n=== resize 390 -> 1600 with the filter sheet OPEN ===`);
+    console.log(`  before             body overflow "${resize.before}", sheet open`);
+    console.log(`  after              sheet ${resize.sheetPresent ? "STILL MOUNTED" : "closed"}, rail ${resize.railPresent ? "shown" : "absent"}, body overflow "${resize.bodyOverflow}"`);
+    if (resize.sheetPresent) { failures++; console.log("      FAIL the sheet survived the breakpoint it is supposed to hand over at"); }
+    if (resize.bodyOverflow === "hidden") { failures++; console.log("      FAIL the page is still scroll-locked and no visible control can release it"); }
+    if (!resize.railPresent) { failures++; console.log("      FAIL the rail did not take over, so the filters are now unreachable"); }
+  }
+
   console.log(`\n${failures === 0 ? "PASS" : `FAIL -- ${failures} failing assertions`}`);
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -292,9 +292,32 @@ export function FilterSheet({
     document.body.style.overflow = "hidden";
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); onClose(); } };
     document.addEventListener("keydown", onKey);
+
+    /**
+     * 🚨 THE BREAKPOINT CLOSES THE SHEET, NOT JUST HIDES IT. (Codex review,
+     * 2026-08-25, P2.)
+     *
+     * `2xl:hidden` on the container below is CSS, and CSS cannot change React
+     * state. So a rep who opened the sheet and then crossed 1536 -- rotating a
+     * tablet, dragging a window, docking a laptop -- got the desktop rail on a
+     * page whose body was STILL `overflow: hidden`, held by this effect, with
+     * the only control that could release it now `display: none`. The page
+     * stops scrolling and there is nothing on screen to blame.
+     *
+     * Keyed to the same 1536 the class is, and it runs once on mount too, so
+     * opening the sheet at a width where the rail already exists is a no-op
+     * rather than a lock. The `2xl:hidden` class stays as belt and braces for
+     * the frame before this runs, but it is no longer the mechanism.
+     */
+    const rail = window.matchMedia("(min-width: 1536px)");
+    const closeIfRailTakesOver = () => { if (rail.matches) onClose(); };
+    closeIfRailTakesOver();
+    rail.addEventListener("change", closeIfRailTakesOver);
+
     return () => {
       document.body.style.overflow = prevOverflow;
       document.removeEventListener("keydown", onKey);
+      rail.removeEventListener("change", closeIfRailTakesOver);
     };
   }, [open, onClose]);
 
