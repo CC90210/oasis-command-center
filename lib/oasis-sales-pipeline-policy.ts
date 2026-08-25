@@ -195,7 +195,12 @@ export function roleMayOperateOasisSalesLead(teamRole: string | null | undefined
 export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return true;
   if (viewer.role.trim().toLowerCase() === "builder") {
-    return ownsOasisDeliveryRecord(row, viewer.userId);
+    // Read must never sit BELOW write. Since 2026-08-25 a builder may mutate
+    // rows he is a named collaborator on (ownsOasisSalesRecord), so the read
+    // predicate honours the same field — otherwise such a row opens as "Lead
+    // not found" while its owner edits it through tools that only ask
+    // assertMayWorkLead. Delivery allocation stays an independent OR.
+    return ownsOasisDeliveryRecord(row, viewer.userId) || ownsOasisSalesRecord(row, viewer.userId);
   }
   return ownsOasisSalesRecord(row, viewer.userId);
 }
@@ -447,9 +452,11 @@ export function filterWebsiteSalesRows<T extends PipelineRow>(
   const allowedStages = stageSetForOasisRole(viewer.role);
   return programRows.filter((row) => {
     const assignedTo = typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : "";
+    // Same predicate pair as canOpenOasisSalesRecord's builder branch: board,
+    // record read, and per-lead writes cannot disagree about whose row this is.
     const owned =
       viewer.role.trim().toLowerCase() === "builder"
-        ? ownsOasisDeliveryRecord(row, userId)
+        ? ownsOasisDeliveryRecord(row, userId) || ownsOasisSalesRecord(row, userId)
         : assignedTo === userId;
     return owned && allowedStages.has(String(row.data.stage || ""));
   });

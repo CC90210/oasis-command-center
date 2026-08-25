@@ -129,19 +129,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     return NextResponse.json({ok:false,error:"not_cold_outbound_lead"},{status:409});
   }
   const currentStage = typeof current.stage === "string" ? current.stage : "";
+  const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
+  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
   const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
   const builderOwnsDelivery = builderMayRunDelivery && ownsOasisSalesRecord(
     { id:row.id, data:current },
     session.userId,
   );
-  if (mayBeDeliveryOperator && (!builderMayRunDelivery || !builderOwnsDelivery)) {
+  // CC, 2026-08-25: a builder working HIS OWN sales lead (assigned, or frozen
+  // attribution) walks the normal rep path through this route. The delivery
+  // lane below exists for his BUILD work; letting it intercept the selling
+  // half 403'd every structured sales action a selling builder clicked.
+  const builderOnOwnSalesLead = mayBeDeliveryOperator && (assignedToUser || attributedToUser);
+  if (mayBeDeliveryOperator && !builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)) {
     return NextResponse.json({
       ok:false,
       error:builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only",
     },{status:403});
   }
-  const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
-  const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
   if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
@@ -152,7 +157,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser);
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
-  if (builderMayRunDelivery && body.action !== "advance") {
+  if (builderMayRunDelivery && !builderOnOwnSalesLead && body.action !== "advance") {
     return NextResponse.json({ok:false,error:"builder_delivery_action_only"},{status:403});
   }
   const trackedAction = ["advance","disposition","qualify","book_founder","complete_audit","set_stage","proposal","create_payment_link","deal_outcome","record_payment"].includes(body.action);

@@ -30,6 +30,7 @@ import {
   mayOperateOasisDeliveryStage,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
+import { mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
@@ -116,8 +117,9 @@ export default async function PipelineLeadDetailPage({
     assignedTo === session.userId.toLowerCase();
   const canRunDeal =
     session.ok &&
-    // builder joined the closing seats 2026-08-25 (CC) — mirrors DEAL_CLOSING_ROLES
-    (session.isTrueAdmin || (["agent", "closer", "builder"].includes(session.teamRole.toLowerCase()) && repOwnsDeal));
+    // ONE list (DEAL_CLOSING_ROLES via mayQuoteAndClose) — a hand-copied array
+    // here is how UI and API drifted apart before. Ownership stays separate.
+    (session.isTrueAdmin || (mayQuoteAndClose(session.teamRole) && repOwnsDeal));
   const canRunDelivery =
     session.ok && mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey);
   const canWorkLifecycle =
