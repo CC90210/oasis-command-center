@@ -23,6 +23,7 @@ import "server-only";
 import { getTenantMembers } from "@/lib/team";
 import { signFormLink } from "@/lib/form-links";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { publicFormOrigin } from "@/lib/forms/public-origin";
 
 export type RepAssignment = { auth_user_id: string; name: string };
 
@@ -167,7 +168,8 @@ export async function mintFormLinkBySlug(
   const form = res.data as { id: string; slug: string };
   const token = signFormLink({ tenant: tenantSlug, form_id: form.id, lead_id: leadId });
   if (!token) return null;
-  return `${origin}/f/${tenantSlug}/${form.slug}/${token}`;
+  const publicOrigin = publicFormOrigin({ tenantSlug, requestOrigin: origin });
+  return `${publicOrigin}/f/${tenantSlug}/${form.slug}/${token}`;
 }
 
 /**

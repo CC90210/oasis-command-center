@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { signFormLink } from "@/lib/form-links";
+import { publicFormOrigin } from "@/lib/forms/public-origin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -112,7 +113,10 @@ export async function POST(
     );
   }
 
-  const origin = req.nextUrl.origin;
+  const origin = publicFormOrigin({
+    tenantSlug: tenant.tenant_slug,
+    requestOrigin: req.nextUrl.origin,
+  });
   const url = `${origin}/f/${tenant.tenant_slug}/${form.slug}/${token}`;
   const expiresAt = new Date(Date.now() + DEFAULT_TTL_DAYS * 86400 * 1000).toISOString();
 

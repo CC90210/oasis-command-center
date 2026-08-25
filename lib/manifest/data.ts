@@ -33,6 +33,7 @@ import { detectStatusTransitions, publishStatusChange } from "./events";
 // executor.ts imports THIS file.)
 import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
 import { signFormLink } from "@/lib/form-links";
+import { publicFormOrigin } from "@/lib/forms/public-origin";
 // The Leads-board visibility rule. Was two duplicated string literals in this
 // file until 2026-08-11, which is exactly how the drip engine came to be
 // selecting an audience the board does not show. See lib/leads/board-visibility.ts.
@@ -459,10 +460,7 @@ export async function maybeMintApplicationUrl(
     lead_id: recordId,
   });
   if (!token) return null; // HMAC key missing in production — fail-closed
-  const origin =
-    process.env.OASIS_PUBLIC_ORIGIN ||
-    process.env.NEXT_PUBLIC_SITE_URL ||
-    "https://oasisai.work";
+  const origin = publicFormOrigin({ tenantSlug: form.tenant_slug });
   return `${origin.replace(/\/$/, "")}/f/${form.tenant_slug}/${form.slug}/${token}`;
 }
 
