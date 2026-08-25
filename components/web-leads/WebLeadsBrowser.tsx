@@ -38,10 +38,11 @@
  * lead lands on the exact same panel.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/Card";
 import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
+import { hasNoFilters, readRememberedFilters, rememberFilters } from "@/lib/web-leads/filter-memory";
 import type { Facets } from "@/lib/web-leads/queries";
 // TYPE-ONLY. `lib/web-leads/data.ts` imports getServiceSupabase() -> next/headers
 // (server-only). A *value* import of PAGE_SIZE from there -- as a prior draft of
@@ -163,6 +164,49 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
     const qs = filtersToParams(f).toString();
     router.push(qs ? `/web-leads?${qs}` : "/web-leads", { scroll: false });
   }, [router]);
+
+  /**
+   * ═══ FILTERS SURVIVE LEAVING THE PAGE (Adon, 2026-08-25) ══════════════════
+   *
+   * "once you click the filters until you un-click the filters, it's going to
+   * stay on that filter no matter where you go."
+   *
+   * Filters live in the URL, which makes them exact and shareable and also
+   * makes them die the moment a rep opens a battle card or any sidebar tab.
+   * Coming back lands on a bare /web-leads, so a rep claiming fifty Toronto
+   * salons re-picked province, city and industry after every single lead.
+   *
+   * TWO EFFECTS, IN THIS ORDER, AND THE ORDER MATTERS.
+   *
+   * The restore runs ONCE, on mount, and only when the URL carries no filters
+   * -- so it can never fight a rep who is actively filtering, and never
+   * overrides a link somebody was sent. `router.replace`, not `push`, so the
+   * bare URL does not become a back-button stop that bounces them straight
+   * forward again.
+   *
+   * The remember runs on every change AFTER that, never before: writing on the
+   * first render would overwrite a real memory with the empty URL we are about
+   * to replace, which is the whole bug in miniature.
+   */
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const current = sp.toString();
+    if (!hasNoFilters(current)) return;
+    const remembered = readRememberedFilters();
+    if (!remembered) return;
+    // Carry an open drawer through: a rep who deep-linked to one lead keeps it
+    // open, with the filters it was found under restored around it.
+    const leadId = new URLSearchParams(current).get("lead");
+    const target = leadId ? `${remembered}&lead=${encodeURIComponent(leadId)}` : remembered;
+    router.replace(`/web-leads?${target}`, { scroll: false });
+  }, [sp, router]);
+
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    rememberFilters(sp.toString());
+  }, [sp]);
 
   // Switching views keeps every other field (filters, page, an open lead)
   // intact -- Leads' own filters simply go unread by Pipeline/Territories, so a

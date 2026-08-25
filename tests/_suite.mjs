@@ -202,6 +202,7 @@ const TESTS = [
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
   "tests/pipeline-web-lead-facts.test.ts",
+  "tests/web-leads-filter-memory.test.ts",
   "tests/parked-domains.test.ts",
   "tests/web-leads-scope.test.ts",
   // Openers and closers. The 2026-08-21 job titles replaced `agent`, but the
