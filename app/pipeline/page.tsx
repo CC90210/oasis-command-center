@@ -41,6 +41,8 @@ import {
   stagesForOasisRole,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
+import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 import {
   OASIS_COLD_OUTBOUND_MOTION,
@@ -202,7 +204,33 @@ export default async function PipelinePage({
     );
   }
 
-  const rows = await attachAssignedNames(pipelineWindow.rows, tenantId);
+  const named = await attachAssignedNames(pipelineWindow.rows, tenantId);
+  /**
+   * The website score, joined server-side.
+   *
+   * Every other business fact -- address, city, industry, website, the
+   * condition sentence -- was already on these rows and simply never read by
+   * the board's row model. The SCORE is the one exception: it lives in
+   * leadgen_site_audits keyed by webdev_source_business_id, not on the lead.
+   *
+   * Resolved against the SAME memoised index /web-leads uses, so the CRM board
+   * and the leads list cannot report different numbers for one business.
+   *
+   * GATED ON THE TENANT. Three slugs render this page (`oasis`, `oasis-ai-cc`,
+   * `oasis-webdev`) but every query inside fetchScoreIndex is pinned to
+   * WEBDEV_TENANT_ID, which is `oasis-ai-cc`. Ungated, another tenant's board
+   * would resolve its rows against a DIFFERENT tenant's audit index: a miss
+   * renders "Not scored yet" on a lead that may be scored, and a colliding
+   * business id would show one tenant a number measured from another tenant's
+   * website. `oasis-webdev` holds 53 real leads, so this was live, not
+   * theoretical. A positive check on the id we know, never a denylist.
+   *
+   * Applied to `pipelineWindow.rows`, which the database has already scoped,
+   * de-researched, rep-filtered and paged -- so this resolves one screen of
+   * rows rather than thirty-one thousand.
+   */
+  const rows =
+    tenantId === WEBDEV_TENANT_ID ? await attachWebsiteScores(named) : named;
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.

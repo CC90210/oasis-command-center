@@ -396,9 +396,13 @@ function NotScored({ audit }: { audit: AuditResult }) {
   const sentence =
     audit.state === "no_website"
       ? "No website found yet, needs checking"
-      : audit.state === "unreachable"
-        ? "We could not check this site."
-        : "Not scored yet.";
+      : // Their domain is for sale. Not a hedge like the others around it: this
+        // is a measured fact and the strongest opener on the card.
+        audit.state === "parked"
+        ? "Their domain has lapsed and is listed for sale, so they have no live site."
+        : audit.state === "unreachable"
+          ? "We could not check this site."
+          : "Not scored yet.";
   return (
     <Panel>
       <SectionTitle>Their website</SectionTitle>
@@ -426,7 +430,37 @@ function NotScored({ audit }: { audit: AuditResult }) {
 // The card
 // ───────────────────────────────────────────────────────────────────────────
 
-export function BattleCard({ leadId, canMutate }: { leadId: string; canMutate: boolean }) {
+/**
+ * `embedded` renders the SAME card inside another page, for /pipeline/[id].
+ *
+ * WHY THE SAME COMPONENT RATHER THAN A PIPELINE-SHAPED COPY (Adon, 2026-08-25):
+ * "we have to ensure that the leads tab and the pipeline are completely
+ * synonymous... as soon as you claim a lead, you're losing a lot of the
+ * information that we have on the leads tab. We need to ensure that this is not
+ * done because that's just completely dysfunctional."
+ *
+ * A second rendering of one business's failings is two things that can disagree
+ * mid-call -- the same argument BusinessFacts already settles between the drawer
+ * and this card. So the pipeline gets this component, reading the same
+ * /api/web-leads/[id]/battlecard payload through the same authorization
+ * boundary. There is no pipeline variant of the score, the competitors, the
+ * angles or the objections, because there is no second implementation of them.
+ *
+ * Embedded only changes CHROME, never content: it drops the full-viewport
+ * background (it sits inside a page that already has one) and the "Back to
+ * leads" link (that page has its own "Back to pipeline", and sending a rep from
+ * the pipeline to the leads pool is the wrong door). `canMutate` is orthogonal
+ * and stays required -- whether a viewer may WRITE is not a layout question.
+ */
+export function BattleCard({
+  leadId,
+  canMutate,
+  embedded = false,
+}: {
+  leadId: string;
+  canMutate: boolean;
+  embedded?: boolean;
+}) {
   const [state, setState] = useState<Fetched>({ status: "loading" });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
@@ -458,22 +492,30 @@ export function BattleCard({ leadId, canMutate }: { leadId: string; canMutate: b
 
   if (state.status === "error") {
     const error = state.message;
+    // The banner's className below stays a STATIC string, never a template
+    // literal. tests/web-leads-guards.test.ts exempts the repo-wide
+    // fetch-failure banner from the no-colour rule by matching a quoted amber
+    // class list around a literal error node; interpolating that class list
+    // broke the match and flagged this whole file for colour it attaches to no
+    // score. Spacing that varies goes on the wrapper instead.
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
-        <BackLink />
-        <p className="mt-6 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">{error}</p>
+      <div className={embedded ? "" : "mx-auto max-w-3xl px-6 py-10"}>
+        {!embedded && <BackLink />}
+        <div className={embedded ? "" : "mt-6"}>
+          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">{error}</p>
+        </div>
       </div>
     );
   }
 
-  if (state.status === "loading") return <CardSkeleton />;
+  if (state.status === "loading") return <CardSkeleton embedded={embedded} />;
 
   const { lead, audit, competitors, signals } = state.payload;
 
   return (
-    <div className="min-h-screen bg-bg">
-      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} />
-      <div className="mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8">
+    <div className={embedded ? "" : "min-h-screen bg-bg"}>
+      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
+      <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
         {/* FIRST PANEL ON THE PAGE, ABOVE EVERY CHART, and deliberately not
             behind a disclosure. A rep confirms who they are calling before
             they pitch, and the card shipped on 2026-08-24 without this block
@@ -531,9 +573,9 @@ function BackLink() {
   );
 }
 
-function CardSkeleton() {
+function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
   return (
-    <div className="min-h-screen bg-bg">
+    <div className={embedded ? "" : "min-h-screen bg-bg"}>
       <div className="border-b border-bg-border bg-bg-panel/60 px-4 py-8 lg:px-8">
         <div className="mx-auto max-w-6xl space-y-3" aria-busy="true" aria-live="polite">
           <div className="h-3 w-24 rounded bg-bg-elev animate-pulse-slow" />
@@ -559,7 +601,7 @@ function CardSkeleton() {
  * one sentence that makes the score mean something.
  */
 function Hero({
-  lead, audit, competitors, drawn, reduced, canMutate,
+  lead, audit, competitors, drawn, reduced, canMutate, embedded = false,
 }: {
   lead: WebLead;
   audit: AuditResult;
@@ -567,6 +609,7 @@ function Hero({
   drawn: boolean;
   reduced: boolean;
   canMutate: boolean;
+  embedded?: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
   return (
@@ -579,9 +622,9 @@ function Hero({
         className="pointer-events-none absolute inset-0 opacity-70"
         style={{ background: "radial-gradient(60% 120% at 15% -10%, rgba(59,130,246,0.10), transparent 70%)" }}
       />
-      <div className="relative mx-auto max-w-6xl px-4 py-7 lg:px-8 lg:py-9">
-        <BackLink />
-        <div className="mt-4 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+      <div className={embedded ? "relative px-4 py-6 lg:px-6" : "relative mx-auto max-w-6xl px-4 py-7 lg:px-8 lg:py-9"}>
+        {!embedded && <BackLink />}
+        <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between`}>
           <div className="min-w-0">
             <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg lg:text-4xl">{lead.name}</h1>
             {/* The FULL address, street and postal code included -- not just
@@ -641,9 +684,11 @@ function Hero({
               <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
                 {audit.state === "no_website"
                   ? "No website found yet, needs checking"
-                  : audit.state === "unreachable"
-                    ? "We could not check this site."
-                    : "Not scored yet."}
+                  : audit.state === "parked"
+                    ? "Their domain has lapsed and is listed for sale, so they have no live site."
+                    : audit.state === "unreachable"
+                      ? "We could not check this site."
+                      : "Not scored yet."}
               </p>
             )}
           </div>

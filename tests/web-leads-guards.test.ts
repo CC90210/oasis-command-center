@@ -365,6 +365,13 @@ for (const view of [
   // (2026-08-24): the assertion failed as intended, and the classes were
   // reverted.
   "components/web-leads/OpeningHours.tsx",
+  // Added 2026-08-25 when the website block reached the CRM board. This page
+  // renders the same website_condition / audit_findings sentences the battle
+  // card does, on the screen a rep actually works from, so the same rule
+  // applies to it. Whole-file ban is safe here: the page carries no colour of
+  // its own. Proved to fire by planting `text-green-400` on the condition
+  // paragraph once; the assertion failed as intended and it was reverted.
+  "app/pipeline/[id]/page.tsx",
 ]) {
   const src = read(view);
 
@@ -394,6 +401,64 @@ for (const view of [
       `${view} must not attach ${cls} to audit/score content -- a colour keyed to a score renders a judgement the number does not support`,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// THE SAME RULE, SCOPED TO ONE FUNCTION, ON A FILE THAT LEGITIMATELY USES RED.
+//
+// components/manifest/LeadPipelineView.tsx grew a website block on 2026-08-25
+// (Adon: "you should also be able to click and view the website as well as see
+// all of the leads information... on the pipeline tab, which is our CRM").
+//
+// It cannot join the whole-file list above. That file has carried `text-red-300`
+// on the going-cold SLA marker and a red destructive-action button since long
+// before any of this, and those are not judgements about a website -- an SLA
+// breach is a fact about US, not a verdict on the prospect.
+//
+// So the ban is scoped to the function that renders audit content. This is the
+// weaker form and it is used ONLY because the stronger one is unavailable: if a
+// future website control is added OUTSIDE PipelineWebsiteCell, this will not see
+// it. The extraction below therefore fails loudly if the function disappears or
+// is renamed, rather than silently checking an empty string and passing --
+// which is the exact way a guard stops guarding.
+// ---------------------------------------------------------------------------
+{
+  const PIPELINE_VIEW = "components/manifest/LeadPipelineView.tsx";
+  const src = read(PIPELINE_VIEW);
+  const start = src.indexOf("function PipelineWebsiteCell(");
+  assert.notEqual(
+    start,
+    -1,
+    `${PIPELINE_VIEW} must still define PipelineWebsiteCell -- if the website block moved or was renamed, re-aim this guard at wherever it lives now instead of deleting it`,
+  );
+  // To the next top-level declaration: every brace in between belongs to it.
+  const rest = src.slice(start);
+  const endRel = rest.indexOf("\nfunction ");
+  const body = endRel === -1 ? rest : rest.slice(0, endRel);
+  assert.ok(
+    body.length > 500,
+    `extracted PipelineWebsiteCell body is only ${body.length} chars -- the extraction broke, and a guard checking an empty string passes while protecting nothing`,
+  );
+  // It really is the audit-rendering block, not some unrelated slice.
+  assert.match(body, /webScoreState/, "extracted body must be the website block");
+
+  for (const cls of ["text-red-", "bg-red-", "text-green-", "bg-green-", "bg-amber-"]) {
+    assert.doesNotMatch(
+      body,
+      new RegExp(cls.replace(/-/g, "\\-")),
+      `PipelineWebsiteCell must not attach ${cls} to audit/score content -- a colour keyed to a score renders a judgement the number does not support, and a rep who sees red says something on a live call they cannot back up`,
+    );
+  }
+  // The three non-scored states are SENTENCES on this surface too. A rep
+  // triaging the CRM board must never see a bare zero or a dash where a site
+  // our crawler was blocked from should read "We could not check this site".
+  assert.match(body, /We could not check this site/, "unreachable must render as a sentence on the pipeline board");
+  assert.match(body, /Not scored yet/, "not_scored must render as a sentence on the pipeline board");
+  assert.match(
+    body,
+    /websiteCondition/,
+    "no_website must fall back to the lead's own verbatim website_condition, not a fabricated verdict",
+  );
 }
 
 // The hedged phrasing is what must actually appear where a bare "No website"

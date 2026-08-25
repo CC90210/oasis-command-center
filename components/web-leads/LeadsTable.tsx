@@ -194,9 +194,14 @@ function WebsiteCell({ lead }: { lead: WebLeadRow }) {
   const text =
     lead.scoreState === "no_website"
       ? lead.websiteCondition
-      : lead.scoreState === "unreachable"
-        ? "We could not check this site"
-        : "Not scored yet";
+      : // Their domain is for sale. Distinct from "unreachable" on purpose: we
+        // reached it perfectly and got a broker's listing, so saying we could
+        // not check it would replace one false statement with another.
+        lead.scoreState === "parked"
+        ? "Domain listed for sale, no live site"
+        : lead.scoreState === "unreachable"
+          ? "We could not check this site"
+          : "Not scored yet";
 
   // An unreachable or unscored site can still HAVE a URL worth glancing at --
   // "we could not check this" is a statement about our crawler, not about

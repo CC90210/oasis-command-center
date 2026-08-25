@@ -331,6 +331,19 @@ async function loadCorpus(): Promise<CorpusEntry[]> {
     // duplicate import). Counting it twice inflates the peer group and shifts
     // every percentile computed against it.
     if (seen.has(businessId)) continue;
+    // A DOMAIN FOR SALE IS NOT A COMPETITOR.
+    //
+    // Belt and braces: loadScoreIndex already withholds a score from these, so
+    // the `typeof score !== "number"` line below would drop them anyway. This
+    // check stays because THIS is the module where the damage happened and the
+    // cost of the two disagreeing is not a blank cell -- it is a rep telling a
+    // prospect that a domain-broker landing page is their best-performing
+    // competitor, at 82, on a live call (2026-08-25).
+    //
+    // Peer groups take the BEST-scoring sites in a city and industry, and every
+    // parking page scores 82, so these were not merely included: they outranked
+    // real businesses and were preferentially surfaced.
+    if (scoreIndex.parked.has(businessId)) continue;
     const score = scoreIndex.scored.get(businessId);
     // Never invent a competitor. An unscored or unreachable business is not a
     // zero and is not a peer -- it is a business we have not measured, and it

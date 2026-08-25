@@ -20,6 +20,8 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { nonEmptyString, relTime } from "@/lib/format-helpers";
+import { BattleCard } from "@/components/web-leads/BattleCard";
+import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
 import { resolveSessionContext } from "@/lib/api-auth";
 import {
@@ -121,6 +123,44 @@ export default async function PipelineLeadDetailPage({
     (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
     canRunDelivery;
 
+  // Is this a web-lead, i.e. does a battle card exist for it? Keyed on the
+  // pointer JARVIS's crm-sink stamps at promotion time, the same field the
+  // audit and score lookups key on. An ordinary CRM lead has no audit and
+  // /api/web-leads/[id]/battlecard would 404 for it.
+  const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
+
+  /**
+   * ═══ TWO DOORS, TWO RULES, AND THEY DO NOT AGREE (review, 2026-08-25) ══════
+   *
+   * This page admits a viewer through `canOpenOasisSalesRecord`, which accepts
+   * the assignee OR anyone listed in `collaborators` -- that is what makes the
+   * opener-to-closer handoff work, and the comp plan pays both people.
+   *
+   * The battle card fetches /api/web-leads/[id]/battlecard, whose scoping runs
+   * through `visibleToViewer`, and that one accepts the assignee ONLY. It has
+   * no collaborator concept at all. So a collaborator opens this record and the
+   * card inside it 404s.
+   *
+   * NOBODY IS LEFT WITH NOTHING, and that is why this is a gate rather than an
+   * error left to happen: `LeadWebsiteAuditBand` renders UNCONDITIONALLY above,
+   * carrying the website, the industry, the condition and the findings for
+   * every viewer. So a collaborator who cannot load the card still sees the
+   * business; asking the same function the API asks just means they are not
+   * shown a panel that would only render an error.
+   *
+   * ▶ FOLLOW-UP, deliberately not done here: teach `visibleToViewer` about
+   * collaborators so the two doors genuinely match rather than this page
+   * routing around the gap. That widens the boundary PR #237 established and
+   * deserves its own review.
+   */
+  const cardViewer =
+    session.ok && session.userId
+      ? { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin }
+      : null;
+  const willRenderBattleCard = Boolean(
+    webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
+  );
+
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
@@ -195,6 +235,47 @@ export default async function PipelineLeadDetailPage({
             Your account can review this lead, but only an assigned sales rep or admin can change its stage.
           </div>
         </Card>
+      ) : null}
+
+      {/*
+        ═══ THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) ═════════════
+        "we have to ensure that the leads tab and the pipeline are completely
+        synonymous... The pipeline is how we're going to track whose lead is
+        who. It should be what's going to be used more than the leads tab...
+        Right now as soon as you claim a lead, you're losing a lot of the
+        information that we have on the leads tab."
+
+        He was right, and the loss was STRUCTURAL rather than a missing field.
+        Claiming a lead moves it OUT of the /web-leads pool and onto the
+        pipeline, and this page rendered a CRM workspace -- so the score, the
+        percentile, the seven-axis profile, the named competitors, the
+        everything-wrong list, the sales angles and the objection panel all
+        disappeared at precisely the moment a rep committed to calling.
+
+        THE SAME COMPONENT, NOT A PIPELINE-SHAPED COPY. It reads the same
+        /api/web-leads/[id]/battlecard payload through the same authorization
+        boundary, so there is no second implementation of any of it to drift.
+        A second rendering of one business's failings is two things that can
+        disagree mid-call.
+
+        Placed AFTER the lifecycle actions on purpose: logging a call and
+        advancing a stage are what the pipeline is FOR, and burying those
+        controls under a full-height card would trade one dysfunction for
+        another. Open by default -- a card behind a click is a card a rep does
+        not read while a stranger is waiting.
+      */}
+      {willRenderBattleCard ? (
+        <CollapsibleSection
+          title="Website battle card"
+          subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
+          storageKey="oasis.pipeline.battleCard.collapsed"
+          defaultCollapsed={false}
+        >
+          {/* `canMutate` mirrors the page: the card owns write controls (the
+              call-outcome log), and a viewer who may not mutate this lead here
+              must not be handed a writeable one inside it. */}
+          <BattleCard leadId={id} canMutate={canMutateLead} embedded />
+        </CollapsibleSection>
       ) : null}
 
       <HandoffSummary data={activeRecord.data} memberNames={memberNames} />

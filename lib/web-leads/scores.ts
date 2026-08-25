@@ -62,18 +62,41 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, MODEL_VERSION, assertCompleteRead } from "./tenant";
 import { memo, TTL } from "./cache";
+import { parkedSignalsOrFilter } from "./parked-domains";
 
-/** The four honest states, identical to audit.ts's AuditResult discriminant. */
-export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
+/** The five honest states. The first four match audit.ts's AuditResult
+ *  discriminant; `parked` was added 2026-08-25 -- see ScoreIndex.parked. */
+export type ScoreState = "scored" | "unreachable" | "not_scored" | "no_website" | "parked";
 
 export type ScoreIndex = {
   /** business_id -> composite, newest audit only, profile-backed rows only. */
   scored: Map<string, number>;
   /** business_id of every site we tried and failed to reach. NEVER a score. */
   unreachable: Set<string>;
+  /**
+   * business_id of every "site" that turned out to be a domain FOR SALE.
+   *
+   * Added 2026-08-25, after a rep-facing battle card offered two competitors
+   * whose links opened hugedomains.com. The links were the symptom; the SCORE
+   * was the defect. All 53 parking pages in the corpus scored EXACTLY 82, and
+   * every one of them landed in the top tier. A parking page is one template,
+   * so it scores once and repeats, and it scores WELL because it genuinely is
+   * fast, HTTPS, mobile-friendly, and has a phone link, a form and testimonials
+   * -- the very things the 49 checks measure. The crawler was not broken. It
+   * faithfully measured a page belonging to a domain broker.
+   *
+   * Competitor selection takes the BEST-scoring peers in a city and industry,
+   * so an 82 outranked almost every real site: parked domains were not merely
+   * included, they were preferentially surfaced. NEVER a score, never a peer.
+   */
+  parked: Set<string>;
 };
 
-export const EMPTY_SCORE_INDEX: ScoreIndex = { scored: new Map(), unreachable: new Set() };
+export const EMPTY_SCORE_INDEX: ScoreIndex = {
+  scored: new Map(),
+  unreachable: new Set(),
+  parked: new Set(),
+};
 
 /**
  * Both score tables for this tenant, in two narrow reads.
@@ -96,7 +119,7 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
 async function loadScoreIndex(): Promise<ScoreIndex> {
   const db = getServiceSupabase();
 
-  const [allAudits, scoredAudits, unreachable] = await Promise.all([
+  const [allAudits, scoredAudits, unreachable, parkedRes] = await Promise.all([
     // EVERY audit row, so the newest one per business can be identified before
     // anything is filtered out -- see the newest-row comment below for why that
     // order matters. `profile` is never selected: it is the full 49-check
@@ -133,11 +156,29 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .limit(LEAD_READ_CAP),
+    // PARKED DOMAINS. Matched in the DATABASE against the stored `finalUrl`
+    // inside `signals`, and only business_id comes back -- 54 rows today.
+    // Selecting `signals` for all 23,200 audits to filter in JS would move tens
+    // of megabytes through a memoised index to answer a question about ~0.2% of
+    // it. The filter string is generated from PARKING_HOSTS so the list and the
+    // query cannot drift apart.
+    db
+      .from("leadgen_site_audits")
+      .select("business_id", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .or(parkedSignalsOrFilter())
+      .limit(LEAD_READ_CAP),
   ]);
 
   if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
   if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
   if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
+  // Fails LOUD like its siblings. A parked-domain read that quietly returned
+  // nothing would put every for-sale page straight back into the peer groups at
+  // score 82, which is the exact defect this read exists to stop -- and it would
+  // look completely normal on screen.
+  if (parkedRes.error) throw new Error(`parked_index_read_failed: ${parkedRes.error.message}`);
 
   const allRows = (allAudits.data || []) as { business_id: string; fetched_at: string }[];
   const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
@@ -152,6 +193,12 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
   assertCompleteRead("audit_index", allRows, allAudits.count);
   assertCompleteRead("audit_index_scored", scoredRows, scoredAudits.count);
   assertCompleteRead("unreachable_index", unreachableRows, unreachable.count);
+  // Proved complete for the same reason as its siblings, and the consequence of
+  // skipping it is the sharpest of the four: a truncated parked read leaves the
+  // parking pages it missed sitting in `scored` at 82, back at the top of every
+  // peer group, being offered to prospects as their best competitor. Nothing on
+  // screen would look wrong.
+  assertCompleteRead("parked_index", (parkedRes.data || []) as unknown[], parkedRes.count);
 
   /**
    * NEWEST ROW FIRST, THEN ASK WHETHER IT IS SCORED -- NOT THE OTHER WAY ROUND.
@@ -176,31 +223,51 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
     if (!prev || r.fetched_at > prev) newestAt.set(r.business_id, r.fetched_at);
   }
 
+  const parked = new Set((parkedRes.data || []).map((r: { business_id: string }) => r.business_id));
+
   const scored = new Map<string, number>();
   for (const r of scoredRows) {
     // Only if THIS row is the business's newest audit. Anything older is a
     // superseded crawl and the panel would not show it either.
     if (newestAt.get(r.business_id) !== r.fetched_at) continue;
     if (typeof r.quality_score !== "number") continue; // never invent a 0
+    // A domain that is FOR SALE never carries a score. Excluded HERE, at the
+    // one place scores are built, rather than filtered at each of the places
+    // they are read -- the leads table, the band filters, the percentile
+    // denominator and the competitor peer groups all consume this map, and a
+    // rule applied at four call sites is a rule that will be missed at a fifth.
+    if (parked.has(r.business_id)) continue;
     scored.set(r.business_id, r.quality_score);
   }
 
-  return { scored, unreachable: new Set(unreachableRows.map((r) => r.business_id)) };
+  return {
+    scored,
+    unreachable: new Set(unreachableRows.map((r) => r.business_id)),
+    parked,
+  };
 }
 
 /**
  * The state and number for one lead, applying audit.ts's precedence EXACTLY:
  *
  *   1. no website on the lead        -> no_website
- *   2. a site we could not reach     -> unreachable   (never a number)
- *   3. no profile-backed audit row   -> not_scored    (never a zero)
- *   4. otherwise                     -> scored
+ *   2. the domain is FOR SALE        -> parked        (never a number)
+ *   3. a site we could not reach     -> unreachable   (never a number)
+ *   4. no profile-backed audit row   -> not_scored    (never a zero)
+ *   5. otherwise                     -> scored
  *
  * `unreachable` is checked BEFORE `not_scored` for audit.ts's stated reason: a
  * known failure to reach a site must not be reported as "we haven't tried yet"
  * (reads as neutral) OR as a score (reads as a verdict about the business).
  * Both are wrong in different ways; only naming the failure is honest. A site
  * our crawler was blocked from may be perfectly good.
+ *
+ * `parked` is checked FIRST of the three, and it outranks `unreachable` on
+ * purpose. We did not fail to reach a parked domain -- we reached it perfectly
+ * and got a domain broker's sales page. Reporting that as "we could not check
+ * this site" would be a second false statement in place of the first, and it
+ * would throw away the strongest opener a rep has: their domain has lapsed and
+ * is currently for sale to anyone with a credit card.
  */
 export function resolveScore(
   websiteUrl: string | null,
@@ -209,6 +276,7 @@ export function resolveScore(
 ): { score: number | null; scoreState: ScoreState } {
   if (!websiteUrl) return { score: null, scoreState: "no_website" };
   if (!businessId) return { score: null, scoreState: "not_scored" };
+  if (index.parked.has(businessId)) return { score: null, scoreState: "parked" };
   if (index.unreachable.has(businessId)) return { score: null, scoreState: "unreachable" };
   const score = index.scored.get(businessId);
   if (typeof score !== "number") return { score: null, scoreState: "not_scored" };
