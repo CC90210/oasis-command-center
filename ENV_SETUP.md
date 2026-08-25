@@ -16,6 +16,25 @@ fully standalone.
 | `BRAVO_FIELD_ENCRYPTION_KEY` | random 32+ byte string | Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Rotating this orphans every encrypted DB field, so set once and treat like a master secret. |
 | `CRON_SECRET` | random secret | Required to authorize `/api/cron/*` requests in production |
 
+### Account-security email (required for Turso password reset)
+
+Password resets use a dedicated company-domain transactional identity. They do
+not fall back to e-sign, outreach, tenant SMTP, or personal Gmail credentials.
+When the dedicated `AUTH_*` set is absent, the existing company-domain
+`GMAIL_USER` + `GMAIL_APP_PASSWORD` Google Workspace identity is accepted as a
+strict compatibility path; consumer domains such as gmail.com are rejected.
+
+| Variable | Notes |
+|---|---|
+| `AUTH_SMTP_HOST` | SMTP host for the approved account-security mailbox/provider |
+| `AUTH_SMTP_PORT` | Usually `465` (TLS) or `587` (STARTTLS) |
+| `AUTH_SMTP_SECURE` | Optional; defaults to `true` for port 465 and `false` otherwise |
+| `AUTH_SMTP_USER` | Provider login; consumer-email identities are rejected |
+| `AUTH_SMTP_PASSWORD` | SMTP password/API credential |
+| `AUTH_FROM_EMAIL` | Approved company-domain From address, normally `security@oasisai.work` |
+| `AUTH_FROM_NAME` | Optional; defaults to `OASIS AI Account Security` |
+| `AUTH_ALLOWED_FROM_DOMAINS` | Optional comma-separated sender-domain allowlist for dedicated `AUTH_*` providers; defaults to `oasisai.work`. The `GMAIL_*` compatibility path remains pinned to `oasisai.work`. |
+
 `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are auto-derived
 from the `BRAVO_*` variants in [next.config.js](next.config.js); set them
 explicitly only if you want different values for browser vs server.
