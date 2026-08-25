@@ -116,7 +116,8 @@ export default async function PipelineLeadDetailPage({
     assignedTo === session.userId.toLowerCase();
   const canRunDeal =
     session.ok &&
-    (session.isTrueAdmin || (["agent", "closer"].includes(session.teamRole.toLowerCase()) && repOwnsDeal));
+    // builder joined the closing seats 2026-08-25 (CC) — mirrors DEAL_CLOSING_ROLES
+    (session.isTrueAdmin || (["agent", "closer", "builder"].includes(session.teamRole.toLowerCase()) && repOwnsDeal));
   const canRunDelivery =
     session.ok && mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey);
   const canWorkLifecycle =

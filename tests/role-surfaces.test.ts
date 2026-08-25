@@ -544,6 +544,28 @@ assert.equal(
   true,
   "CC 2026-08-21: this hire is a builder AND a marketing specialist",
 );
+// CC, 2026-08-25: he also sells. Own book only — "all" stays false.
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeOwnPipelineOnly,
+  true,
+  "the selling builder sees his OWN claimed deals",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeAllPipeline,
+  false,
+  "selling did not widen him to the tenant's book",
+);
+assert.equal(personaMayVisit("builder", "/pipeline"), true, "his own pipeline is his tool");
+assert.equal(
+  personaMayVisit("builder", "/web-leads"),
+  true,
+  "CC 2026-08-25: he sources from the same prospecting pool the reps claim from",
+);
+assert.equal(
+  capabilitiesFor("builder", OASIS).canSeeMarketing,
+  true,
+  "CC 2026-08-21: this hire is a builder AND a marketing specialist",
+);
 assert.equal(personaMayVisit("builder", "/automations"), false, "never the automation controls");
 assert.equal(personaMayVisit("builder", "/operations"), false, "never the internal ops surface");
 assert.equal(personaMayVisit("builder", "/settings"), false);

@@ -393,7 +393,10 @@ const BUILDER: SurfaceCapabilities = {
   canSeeCompanyFinancials: false,
   canSeeAllPipeline: false,
   canSeeTeamPipeline: false,
-  canSeeOwnPipelineOnly: false,
+  // CC, 2026-08-25: this hire now sells as well as builds and markets. Still
+  // OWN-book only — "all" stays false below, so what widened is his reach into
+  // his own claimed deals, never a view of anyone else's.
+  canSeeOwnPipelineOnly: true,
   canSeeOwnCommissionOnly: true,
   canSeeTeamCommission: false,
   canSeeCommissionLedger: false,
@@ -550,6 +553,9 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   "/pipeline",
   "/playbook",
   "/founders/marketing",
+  // CC, 2026-08-25: the builder/marketing hire also sells, so he sources from
+  // the same prospecting pool the reps do and claims into his own book.
+  "/web-leads",
 ];
 
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {

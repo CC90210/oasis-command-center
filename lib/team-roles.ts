@@ -215,6 +215,12 @@ export function mustSeeOwnRecordsOnly(role: unknown): boolean {
 export const DEAL_CLOSING_ROLES: ReadonlySet<string> = new Set([
   "closer",
   "agent",   // legacy, and grandfathered ON PURPOSE -- see above
+  // CC, 2026-08-25: the builder/marketing specialist also sells, so he quotes
+  // and closes his OWN book like a closer. Ownership is still enforced at
+  // every call site; this set only answers the role half. There is one live
+  // builder (schneur@oasisai.work) and this widening is deliberate for the
+  // seat, not a one-off account patch.
+  "builder",
 ]);
 
 /**

@@ -143,8 +143,8 @@ assert(
 assert(
   workflowRoute.includes("mayWorkWebsiteSalesLifecycle") &&
     workflowRoute.includes("forbidden_sales_role") &&
-    detail.includes('["agent", "closer"]'),
-  "only authorized sales roles can mutate lifecycle state, and assigned closers receive deal controls",
+    detail.includes('["agent", "closer", "builder"]'),
+  "only authorized sales roles can mutate lifecycle state, and assigned closers/builders receive deal controls (builder joined the closing seats 2026-08-25)",
 );
 assert(
   workflowRoute.includes("p_opener_user_id") &&

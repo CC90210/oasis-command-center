@@ -144,13 +144,21 @@ assert.ok(
 // Everyone else is refused, including roles that sound senior. A manager does
 // not close on a rep's book; an admin path exists separately and is checked by
 // `isTrueAdmin` at the call site, not by this predicate.
-for (const role of ["manager", "builder", "marketing", "member", "read_only", "loan_officer", "processor", "owner", "admin", ""]) {
+//
+// UPDATED 2026-08-25 (CC): `builder` LEFT this refused list — the
+// builder/marketing specialist sells his own book now, so he sits with the
+// closers. Manager still cannot: no live manager closes deals.
+for (const role of ["manager", "marketing", "member", "read_only", "loan_officer", "processor", "owner", "admin", ""]) {
   assert.equal(
     mayQuoteAndClose(role),
     false,
     `${role || "(empty)"} must not pass the rep quote/close role gate -- admins go through isTrueAdmin, not this`,
   );
 }
+assert.ok(
+  mayQuoteAndClose("builder"),
+  "CC 2026-08-25: the selling builder quotes and closes his OWN book -- ownership is enforced separately at every call site",
+);
 for (const junk of [null, undefined, 0, {}, []]) {
   assert.equal(mayQuoteAndClose(junk), false, `${JSON.stringify(junk)} must fail closed`);
 }
@@ -256,9 +264,16 @@ assert.ok(
   !mayQuoteAndClose("opener"),
   "an opener may not PERFORM a close even though they may be PAID on one",
 );
+// UPDATED 2026-08-25 (CC): builder may now both be PAID and RUN his own deals.
+// The payee/actor distinction below still holds for opener; manager remains
+// the role that is paid from the ledger but runs nothing.
 assert.ok(
-  !mayQuoteAndClose("builder") && !mayQuoteAndClose("manager"),
-  "builder and manager may be paid from the ledger but may not run a deal",
+  mayQuoteAndClose("builder"),
+  "the selling builder performs closes on his own book (CC 2026-08-25) -- the close RPC already listed builder as a legitimate payee",
+);
+assert.ok(
+  !mayQuoteAndClose("manager"),
+  "a manager may be paid from the ledger but may not run a deal",
 );
 // The RPC's own guard is defence in depth and must stay: the route gate is not
 // the only caller, and a server-side re-check is what makes a forged request
