@@ -173,7 +173,7 @@ export function LeadsToolbar({
           aria-pressed={filters.openNow}
           title="Only businesses whose recorded hours say they are open right now, in their own time zone. Leads with no hours on file are hidden while this is on."
           onClick={() => set({ openNow: !filters.openNow })}
-          className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-2 ${
+          className={`inline-flex min-h-12 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-2 ${
             filters.openNow
               ? "border-accent/40 bg-accent/15 text-accent"
               : "border-bg-border bg-bg-panel text-fg-dim hover:border-accent/40 hover:text-fg"
@@ -187,7 +187,7 @@ export function LeadsToolbar({
           id="lead-sort"
           value={filters.sort}
           onChange={(e) => set({ sort: e.target.value as LeadSort })}
-          className="min-h-11 rounded-lg border border-bg-border bg-bg-panel px-2.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 focus:border-accent focus:outline-none xl:min-h-0 xl:py-2"
+          className="min-h-12 rounded-lg border border-bg-border bg-bg-panel px-2.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 focus:border-accent focus:outline-none xl:min-h-0 xl:py-2"
         >
           {SORTS.map((s) => (
             <option key={s.key} value={s.key} className="bg-bg-panel text-fg">{s.label}</option>
