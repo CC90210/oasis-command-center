@@ -25,6 +25,7 @@ const TESTS = [
   "tests/public-form-resolver.test.ts",
   "tests/sunbiz-import-routing.test.ts",
   "tests/auth-routing.test.ts",
+  "tests/auth-email-sender.test.ts",
   "tests/middleware-prefix.test.ts",
   "tests/pipeline-inline-stage.test.ts",
   "tests/onboarding-gate.test.ts",
