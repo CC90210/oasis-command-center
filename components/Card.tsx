@@ -121,8 +121,18 @@ export function PageHeader({
   action?: ReactNode;
 }) {
   return (
-    <header className="mb-6 flex items-start justify-between gap-4">
-      <div>
+    // STACKS BELOW `lg`, and nothing at `lg` or above changes. The action slot
+    // (a segmented control on /web-leads) is ~200px wide, and the content box
+    // it shares is 358px on a 390px phone and only 464px at 768 -- MainShell's
+    // 240px sidebar margin starts at `md`, so a tablet is NARROWER for content
+    // than a phone is. Measured 2026-08-25: the subtitle wrapped into a
+    // nine-line sliver at 390 and a four-line one at 768. `lg` is the first
+    // width where both fit on one line (720px of content box).
+    // `lg:flex-row` restores the current layout exactly at every desktop width,
+    // so for the other pages using this header the change is stacking below
+    // 1024 and nothing else.
+    <header className="mb-6 flex flex-col items-start justify-between gap-3 lg:flex-row lg:gap-4">
+      <div className="min-w-0">
         <h1 className="text-2xl font-bold tracking-tight text-fg flex items-center gap-3">
           {title}
           <span className="h-px w-10 bg-gradient-to-r from-accent to-transparent" aria-hidden />
@@ -131,7 +141,7 @@ export function PageHeader({
           <div className="text-sm text-fg-muted mt-1.5">{subtitle}</div>
         )}
       </div>
-      {action && <div>{action}</div>}
+      {action && <div className="shrink-0">{action}</div>}
     </header>
   );
 }

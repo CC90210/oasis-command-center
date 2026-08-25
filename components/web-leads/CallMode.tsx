@@ -37,6 +37,34 @@
  * to the next call. Those belong to a dialler with telephony behind it; this
  * hands the rep a tel: link and gets out of the way. And no colour keyed to a
  * score, here as everywhere else in this feature -- see WebsiteComparison.tsx.
+ *
+ * ═══ 2026-08-25: THIS IS THE SURFACE A REP USES ON A PHONE ══════════════════
+ *
+ * Everything else in /web-leads is triage a rep can do at a desk. This is the
+ * one they open standing in a car park, and three of its assumptions were
+ * desktop assumptions:
+ *
+ * 1. THE DISPOSITIONS WERE AT THE TOP OF THE SCROLL. Below `lg` the log panel
+ *    was simply the second flex child of a single scrolling column, so the four
+ *    buttons sat under however long the talking points ran -- a scroll away
+ *    from the moment they are needed, which is the second the call ends. They
+ *    are now PINNED TO THE BOTTOM of the viewport, with only the talking points
+ *    scrolling. Phones are held low and worked with a thumb; the bottom of the
+ *    screen is the reachable part, and the top is the part you have to
+ *    re-grip for.
+ *
+ * 2. THE KEY CAPS WERE THE BUTTONS' ONLY WEIGHT. `1`-`4` is the fastest way to
+ *    log a call and it is meaningless on glass. Below `lg` the caps are hidden
+ *    and the four buttons become a 2x2 grid of 56px targets that carry
+ *    themselves. The keyboard handler is untouched -- it is the same code path
+ *    on both, so a disposition can never mean two different things.
+ *
+ * 3. THE CALL BUTTON WAS ONE OF THREE EQUAL PILLS. On the device that can
+ *    actually dial, it is the whole point of the screen: full width, 64px, and
+ *    first. "Their site" and "Full detail" sit under it at 44px.
+ *
+ * `tel:` IS THE ONE THING THAT GETS BETTER ON A PHONE -- on a desktop it opens
+ * whatever handler the OS guesses at; on the device a rep is holding, it dials.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -65,11 +93,19 @@ const OUTCOMES: { key: CallOutcome; label: string; digit: string }[] = [
 // Mirrors the server contract without value-importing its server-only module.
 const MAX_CALL_NOTE_LENGTH = 4000;
 
-/** A keyboard hint rendered as a key cap, so the shortcut is discoverable
- *  without a help screen -- reps learn these in the first ten calls. */
+/**
+ * A keyboard hint rendered as a key cap, so the shortcut is discoverable
+ * without a help screen -- reps learn these in the first ten calls.
+ *
+ * `hidden lg:inline-flex`: a key cap on a phone is not a hint, it is a claim
+ * about a keyboard that is not there. Every control that carries one also
+ * carries its own label, so nothing is lost by hiding it -- and the handler
+ * that reads the key is unchanged, so the shortcut still works the moment a
+ * keyboard exists.
+ */
 function Key({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded border border-bg-border bg-bg-deep px-1.5 font-mono text-[10px] font-semibold text-fg-dim">
+    <kbd className="hidden h-5 min-w-[1.25rem] items-center justify-center rounded border border-bg-border bg-bg-deep px-1.5 font-mono text-[10px] font-semibold text-fg-dim lg:inline-flex">
       {children}
     </kbd>
   );
@@ -381,9 +417,9 @@ export function CallMode({
             ref={exitRef}
             type="button"
             onClick={onExit}
-            className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+            className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md border border-bg-border px-3 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-1.5"
           >
-            <X className="h-3.5 w-3.5" />Exit <Key>Esc</Key>
+            <X className="h-4 w-4" />Exit <Key>Esc</Key>
           </button>
 
           <div className="min-w-0 flex-1">
@@ -424,7 +460,7 @@ export function CallMode({
                 <button
                   type="button"
                   onClick={onLoadMore}
-                  className="rounded-md bg-gradient-to-br from-accent to-accent-muted px-4 py-2.5 text-sm font-bold text-white transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  className="inline-flex min-h-11 items-center rounded-md bg-gradient-to-br from-accent to-accent-muted px-4 text-sm font-bold text-white transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                 >
                   Load the next page
                 </button>
@@ -432,14 +468,14 @@ export function CallMode({
               <button
                 type="button"
                 onClick={() => setI(0)}
-                className="rounded-md border border-bg-border px-4 py-2.5 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+                className="inline-flex min-h-11 items-center rounded-md border border-bg-border px-4 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
               >
                 Start over
               </button>
               <button
                 type="button"
                 onClick={onExit}
-                className="rounded-md border border-bg-border px-4 py-2.5 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+                className="inline-flex min-h-11 items-center rounded-md border border-bg-border px-4 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
               >
                 Back to the list
               </button>
@@ -453,34 +489,49 @@ export function CallMode({
           </p>
         </div>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:flex-row">
+        // THE SCROLLER MOVED FROM THIS ROW INTO <main>. It used to be
+        // `overflow-y-auto` here, which made the whole column one scroll
+        // region: on a phone the four disposition buttons were the bottom of
+        // that scroll, i.e. below however long the talking points ran. Scrolled
+        // to reach, at the exact moment a rep has a phone in one hand. With the
+        // scroll on <main> instead, <aside> is a sibling that keeps its own
+        // height and the buttons sit on the bottom edge of the viewport.
+        <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
           {/* ── The business, the number, the script ─────────────────────── */}
-          <main className="min-w-0 flex-1 px-6 py-7 lg:px-10 lg:py-9">
+          <main className="min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6 sm:py-7 lg:px-10 lg:py-9">
             <div className="mx-auto max-w-2xl">
               <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg lg:text-4xl">{lead.name}</h1>
               <p className="mt-2 text-sm text-fg-muted">
                 {[lead.industry, lead.city, lead.province].filter(Boolean).join(" · ") || "No location on file"}
               </p>
 
-              <div className="mt-6 flex flex-wrap gap-2.5">
+              {/* THE CALL BUTTON IS NOT ONE OF THREE EQUAL PILLS ANY MORE.
+                  Full width and 64px tall below `sm`, because on the device
+                  that can actually dial it is the whole reason this screen is
+                  open; the other two drop to a 44px row underneath it. On a
+                  desktop they go back to sitting in one line, where the call
+                  button opens whatever handler the OS guesses at and deserves
+                  no more room than its neighbours. */}
+              <div className="mt-6 flex flex-col gap-2.5 sm:flex-row sm:flex-wrap">
                 {lead.phone ? (
                   <a
                     href={`tel:${lead.phone}`}
-                    className="inline-flex items-center gap-2.5 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 py-3 text-base font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                    className="inline-flex min-h-16 w-full items-center justify-center gap-2.5 whitespace-nowrap rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 text-xl font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:min-h-0 sm:w-auto sm:py-3 sm:text-base"
                   >
-                    <Phone className="h-4.5 w-4.5" />{lead.phone}
+                    <Phone className="h-5 w-5 shrink-0" />{lead.phone}
                   </a>
                 ) : (
                   <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">
                     No phone number on file
                   </p>
                 )}
+                <div className="flex items-stretch gap-2.5 sm:contents">
                 {websiteHref && (
                   <a
                     href={websiteHref}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 py-3 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                    className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:flex-none sm:py-3"
                   >
                     <ExternalLink className="h-4 w-4" />Their site
                   </a>
@@ -498,10 +549,11 @@ export function CallMode({
                   href={`/web-leads/${encodeURIComponent(lead.id)}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 py-3 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+                  className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 sm:flex-none sm:py-3"
                 >
                   Full detail
                 </a>
+                </div>
               </div>
 
               {/* VERBATIM, and it stays next to the call button rather than
@@ -516,19 +568,45 @@ export function CallMode({
           </main>
 
           {/* ── What happened ────────────────────────────────────────────── */}
-          <aside className="shrink-0 border-t border-bg-border bg-bg-panel/50 px-6 py-6 lg:w-80 lg:border-l lg:border-t-0 lg:px-6 lg:py-9">
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">Log this call</p>
-            <div className="mt-3 space-y-2">
+          {/* `shrink-0` and NOT inside the scroller: this is the thumb-reachable
+              bottom of the phone, and it stays there while the talking points
+              scroll behind it. `pb-[env(safe-area-inset-bottom)]` keeps the
+              disposition row clear of the iOS home indicator, which otherwise
+              sits on top of the bottom 34px of a full-height overlay.
+
+              🚨 `max-h-[65vh] overflow-y-auto` IS NOT DECORATION. (Codex review,
+              2026-08-25, P2, then MEASURED.) Pinning this panel trades a scroll
+              for reach, and the trade goes bad the moment the panel is taller
+              than the screen: only <main> scrolls, the page behind is
+              scroll-locked by the overlay, so a `shrink-0` aside that overruns
+              pushes its own lower half past the bottom edge with nothing able
+              to bring it back. Measured on iPhone landscape (844x390) with the
+              "Add the reason before logging Not interested" banner up: the
+              panel wanted 348px of a 390px viewport and Back/Skip sat at
+              top 419 -- 29px below the screen, unreachable. Capping it means it
+              scrolls INSIDE itself instead, and because the dispositions are at
+              the top of the panel they stay visible while the note, the error
+              and Back/Skip become reachable. The cap does nothing on a normal
+              portrait phone (65vh of 844 is 548px against a 348px panel); it
+              only ever engages when the alternative was losing a control. */}
+          <aside className="max-h-[65vh] shrink-0 overflow-y-auto overscroll-contain border-t border-bg-border bg-bg-panel/50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0 lg:px-6 lg:py-9 lg:pb-9">
+            <p className="hidden text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted lg:block">Log this call</p>
+            {/* A 2x2 GRID BELOW `lg`, not a stack. Four full-width rows would
+                push the note box off a 390x844 screen; a grid keeps all four
+                dispositions AND the note above the fold, and 56px squares are
+                a thumb target rather than a cursor target. The key caps are
+                hidden here (see Key) -- the label carries the button. */}
+            <div className="grid grid-cols-2 gap-2 lg:mt-3 lg:grid-cols-1">
               {OUTCOMES.map((o) => (
                 <button
                   key={o.key}
                   type="button"
                   disabled={pending !== null}
                   onClick={() => void log(o.key)}
-                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-bg-border bg-bg-panel px-3.5 py-3 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-14 w-full items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-2 text-sm font-semibold text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50 lg:justify-between lg:gap-3 lg:px-3.5 lg:py-3"
                 >
-                  <span className="flex items-center gap-2">
-                    {pending === o.key && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span className="flex items-center gap-2 text-center lg:text-left">
+                    {pending === o.key && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />}
                     {o.label}
                   </span>
                   <Key>{o.digit}</Key>
@@ -541,24 +619,29 @@ export function CallMode({
               value={note}
               onChange={(e) => setNote(e.target.value)}
               maxLength={MAX_CALL_NOTE_LENGTH}
-              rows={3}
+              // Two rows on a phone, three at a desk. The box is required for
+              // "Not interested", so it cannot be collapsed behind a toggle --
+              // a rep who cannot see it reads the validation error as a bug.
+              rows={2}
               placeholder="Call note (required for Not interested)"
-              className="mt-3 w-full resize-y rounded-lg border border-bg-border bg-bg-deep px-3 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+              className="mt-2 w-full resize-y rounded-lg border border-bg-border bg-bg-deep px-3 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none lg:mt-3"
             />
+            {/* The keyboard sentence is desktop-only; the rest is true on both. */}
             <p className="mt-1.5 text-[11px] text-fg-dim">
-              <Key>N</Key> jumps here. A reason is required for Not interested. Logging moves to the next lead.
+              <span className="hidden lg:inline"><Key>N</Key> jumps here. </span>
+              A reason is required for Not interested. Logging moves to the next lead.
             </p>
 
             {error && <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">{error}</p>}
 
-            <div className="mt-5 flex items-center gap-2 border-t border-bg-border pt-4">
+            <div className="mt-2.5 flex items-stretch gap-2 lg:mt-5 lg:items-center lg:border-t lg:border-bg-border lg:pt-4">
               <button
                 type="button"
                 onClick={prev}
                 // Same rule as the keyboard handler: a successful log()
                 // advances on its own, so a second move mid-write skips a lead.
                 disabled={i === 0 || pending !== null}
-                className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+                className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-bg-border px-4 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40 xl:min-h-0 xl:px-2.5 xl:py-1.5"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />Back
               </button>
@@ -566,7 +649,7 @@ export function CallMode({
                 type="button"
                 onClick={next}
                 disabled={pending !== null}
-                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+                className="inline-flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-md border border-bg-border px-2.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40 xl:min-h-0 xl:py-1.5"
               >
                 Skip <Key>S</Key><ArrowRight className="h-3.5 w-3.5" />
               </button>

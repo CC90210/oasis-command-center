@@ -3,6 +3,34 @@
 /**
  * LeadsTable — the results list.
  *
+ * ═══ 2026-08-25: THE LIST HAS TWO SHAPES, AND THE SWITCH IS AT `xl` ═════════
+ *
+ * Adon, on where reps work: "I want them to have the freedom of being able to
+ * work from where they want in the world... ensuring that the software is very
+ * compatible with mobile... just as functional as Windows or any other
+ * software."
+ *
+ * Below `xl` this component renders LeadCards.tsx instead of the table, and a
+ * narrower table was never a candidate. The floor below is not a preference the
+ * browser can negotiate: MEASURED in Chrome (.measure/, `node
+ * .measure/measure.mjs`) the shared-pool table is 730px and My Leads is 828px,
+ * against 358px of content box on a 390px phone. That is 2.3x, and it fails
+ * SILENTLY -- the wrapper is `overflow-hidden` for its rounded corners, so
+ * "View site" and "Battle card" are not squeezed, they are gone.
+ *
+ * WHY `xl` (1280) AND NOT `lg` (1024). The content box is min(viewport - 240,
+ * 1280) - padding, so `lg` hands the results 720px for an 828px table -- still
+ * clipped, just less obviously. `xl` is the first breakpoint where the widest
+ * case fits: 976px of content box against 828px of table, 148px of headroom.
+ * Both numbers are measured, and both are re-measured on every harness run.
+ *
+ * AND WHY THE FILTER RAIL MOVED TO `2xl`. The arithmetic below was all measured
+ * on My Leads, which has no rail. The shared pool DOES, and the rail costs 256
+ * + a 28px gap, so at 1280 the pool's results column is 692px for a 730px table
+ * and production today clips "View site" on the operator's own laptop. The rail
+ * is now a sheet below `2xl` (see FilterRail.tsx), which gives the pool the
+ * full 976px at 1280 -- more room than it has ever had, not less.
+ *
  * TWO CHANGES OF SUBSTANCE IN THE 2026-08-23 pass, both of them about what a
  * rep can do rather than how it looks:
  *
@@ -104,10 +132,11 @@
  * one uniform row height. The surplus at 1536 lands as a few px on each column
  * rather than as one hole.
  *
- * The table's floor is 823px, so it clips below a ~1127px viewport with the
- * sidebar open (~887px with it collapsed). That is BETTER than what shipped
- * before this change, whose floor measured 958px: production today is 16px from
- * clipping at 1280 and clips outright on anything narrower.
+ * The table's floor is 823px (828px measured against the harness's deliberately
+ * long fixture names), so it clips below a ~1127px viewport with the sidebar
+ * open. That is why the card layout exists and why the switch is at `xl`: below
+ * that breakpoint no arrangement of these seven columns fits, so the list stops
+ * being a table rather than becoming a bad one.
  *
  * Business is the column that gives at the narrowest width, deliberately: it is
  * the only one whose content degrades gracefully. It truncates, it carries a
@@ -122,36 +151,14 @@
  */
 
 import { useEffect, useRef } from "react";
-import Link from "next/link";
-import { AlertCircle, ExternalLink, Phone, BarChart3 } from "lucide-react";
+import { AlertCircle, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
-import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { OpenNowCell, useNow } from "./OpeningHours";
-
-/**
- * Rep-facing names for CC's stage values.
- *
- * The raw values come from lib/website-sales.ts and are shared with the
- * commission engine, so they are not ours to rename at the source. This maps
- * them to what a rep would say out loud. Anything unmapped renders its raw
- * value rather than a blank -- an unknown stage is information, not an error.
- */
-const STAGE_LABEL: Record<string, string> = {
-  researched: "New",
-  assigned: "Mine, not called",
-  attempting_contact: "Trying to reach",
-  connected: "Spoke to them",
-  qualified: "Qualified",
-  founder_meeting_booked: "Meeting booked",
-  demo_completed: "Demo done",
-  proposal_sent: "Quote sent",
-  won: "Won",
-  lost: "Not interested",
-  onboarding: "Onboarding",
-  in_build: "Building",
-  client_review: "Client review",
-  launched: "Launched",
-};
+import { LeadCards } from "./LeadCards";
+// ONE renderer per fact, shared with the card layout. See LeadCells.tsx: two
+// copies of the score renderer is how a phone ends up showing a bare 0 on a
+// lead the desktop describes as "We could not check this site".
+import { RowActions, STAGE_LABEL, WebsiteCell } from "./LeadCells";
 
 /** Matches the app's staggered animate-pulse-slow convention so the swap from
  *  skeleton to real rows is visually quiet. */
@@ -167,183 +174,17 @@ function TableSkeleton({ rows = 12 }: { rows?: number }) {
           </div>
           {/* One block per column that follows the name, so the swap from
               skeleton to real rows does not visibly re-flow: phone,
-              reachability, score meter, actions. */}
-          <div className="h-3.5 w-28 shrink-0 rounded bg-bg-elev/70 animate-pulse-slow" style={{ animationDelay: `${i * 40}ms` }} />
-          <div className="h-3.5 w-20 shrink-0 rounded bg-bg-elev/60 animate-pulse-slow" style={{ animationDelay: `${i * 40}ms` }} />
-          <div className="h-3.5 w-16 shrink-0 rounded bg-bg-elev/50 animate-pulse-slow" style={{ animationDelay: `${i * 40}ms` }} />
-          <div className="h-3.5 w-44 shrink-0 rounded bg-bg-elev/40 animate-pulse-slow" style={{ animationDelay: `${i * 40}ms` }} />
+              reachability, score meter, actions. `hidden xl:block` because
+              below `xl` there are no columns to stand in for -- the real list
+              is cards, and four fixed-width blocks totalling 432px in a 358px
+              content box would make the LOADING state the one thing on this
+              screen that overflows. */}
+          <div className="hidden h-3.5 w-28 shrink-0 rounded bg-bg-elev/70 animate-pulse-slow xl:block" style={{ animationDelay: `${i * 40}ms` }} />
+          <div className="hidden h-3.5 w-20 shrink-0 rounded bg-bg-elev/60 animate-pulse-slow xl:block" style={{ animationDelay: `${i * 40}ms` }} />
+          <div className="hidden h-3.5 w-16 shrink-0 rounded bg-bg-elev/50 animate-pulse-slow xl:block" style={{ animationDelay: `${i * 40}ms` }} />
+          <div className="hidden h-3.5 w-44 shrink-0 rounded bg-bg-elev/40 animate-pulse-slow xl:block" style={{ animationDelay: `${i * 40}ms` }} />
         </div>
       ))}
-    </div>
-  );
-}
-
-/**
- * The website cell: a number when we measured one, an honest sentence when we
- * did not. Never a zero, never a dash, never a badge -- see the module header
- * and lib/web-leads/audit.ts.
- */
-/**
- * "View site" straight from the row, so a rep can look at what they are about
- * to talk about without opening the lead first. Adon: "you should be able to
- * view the website directly from that without having to click into the lead."
- *
- * Renders NOTHING when safeExternalUrl returns null rather than a dead or
- * dangerous control: 217 stored websites have no scheme (a bare domain in an
- * href navigates inside our own dashboard), and these values come from
- * OpenStreetMap, which anyone can edit, so a `javascript:` href would run in
- * our origin. rel="noopener noreferrer" for the same reason it is on the panel
- * button -- these are 27,000 sites we do not control, and without it the opened
- * page can reach back through window.opener.
- */
-function VisitSite({ url, name }: { url: string | null; name: string }) {
-  const href = preferredSiteUrl(url);
-  if (!href) return null;
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      // The row opens the lead; this must not. Same reason the phone link and
-      // the checkbox stop propagation.
-      onClick={(e) => e.stopPropagation()}
-      title={`Open ${name}'s website in a new tab`}
-      // Always present, never hover-revealed: a control that only exists while
-      // the mouse is over it is invisible to a keyboard and easy to miss. It
-      // sits back at low contrast and comes forward with the row instead, so
-      // the row still feels alive without hiding anything.
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-bg-border/70 px-2.5 py-1.5 text-[11px] font-semibold text-fg-dim opacity-70 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-    >
-      <ExternalLink className="h-3 w-3" />View site
-    </a>
-  );
-}
-
-/**
- * Straight to the battle card, without opening the drawer first.
- *
- * The row click still opens the 28rem panel, which is the right shape for
- * triage -- glance, decide, close. This is the other move: the rep has decided
- * to call this one and wants the whole case on one screen (percentile against
- * real local competitors, the head-to-head, every failed check with what it
- * costs). Making them open a drawer to find a link to the page is a click for
- * nothing.
- *
- * A real `<Link>` rather than a router push, so it middle-clicks and
- * cmd-clicks into a new tab like any other link -- a rep queueing up three
- * leads before a call block is the normal case, not an edge one.
- * stopPropagation for the same reason the phone link and the checkbox have it:
- * the row must not ALSO open behind it.
- */
-function BattleCardLink({ id, name }: { id: string; name: string }) {
-  return (
-    <Link
-      href={`/web-leads/${encodeURIComponent(id)}`}
-      onClick={(e) => e.stopPropagation()}
-      title={`Open the full battle card for ${name}`}
-      // Same always-present, low-contrast-until-hover treatment as "View site":
-      // a control that only exists while the mouse is over it is invisible to a
-      // keyboard and easy to miss.
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-bg-border/70 px-2.5 py-1.5 text-[11px] font-semibold text-fg-dim opacity-70 transition-all duration-150 group-hover:border-bg-border group-hover:text-fg-muted group-hover:opacity-100 hover:!border-accent/50 hover:!bg-accent/10 hover:!text-accent focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
-    >
-      <BarChart3 className="h-3 w-3" />Battle card
-    </Link>
-  );
-}
-
-/**
- * The website cell. THE SCORE AND THE ROW'S BUTTONS ARE NO LONGER THE SAME
- * COLUMN.
- *
- * They were, and the operator's screenshot shows what that cost: three
- * controls and a number sharing one cell meant the number lost, and the score
- * arrived on screen as a dot with its meter clipped off at the right edge. The
- * score is the single most useful targeting fact in the corpus and it was the
- * least legible thing in the row.
- *
- * Split out, this column holds nothing but the measurement, and it is the
- * column that takes the table's slack -- so on a wider screen the meter gets
- * LONGER rather than a gap opening up somewhere. Number beside the bar rather
- * than stacked above it: at 22rem of column the stacked form left the number
- * floating over a very long rule.
- *
- * Still colourless. One neutral fill whether the score is 4 or 94, because a
- * red 22 renders a judgement the measurement does not support and a rep who
- * sees red says something they cannot back up. See the module header.
- */
-function WebsiteCell({ lead }: { lead: WebLeadRow }) {
-  if (lead.scoreState === "scored" && lead.score !== null) {
-    return (
-      <div className="flex items-center gap-3">
-        {/* w-9 fits "100" at this size, so a three-digit score never nudges
-            the meter and the numbers keep one right edge down the page. */}
-        <span
-          className="w-9 shrink-0 text-right text-xl font-bold leading-none tracking-tight tabular-nums text-fg"
-          title={`Website score ${lead.score} out of 100`}
-        >
-          {lead.score}
-        </span>
-        {/* min-w keeps the bar a bar at the narrowest viewport instead of
-            collapsing to the hairline it used to be. 2.5rem, not more: this
-            min-width is part of the column's floor, and the floor is what
-            decides whether the row's controls clip. Measured 43px of meter at
-            1280 and 52px at 1536. */}
-        <span className="block h-1.5 min-w-[2.5rem] flex-1 overflow-hidden rounded-full bg-bg-border/80" aria-hidden>
-          <span
-            className="block h-full rounded-full bg-fg-muted transition-[width] duration-300"
-            style={{ width: `${Math.min(100, Math.max(0, lead.score))}%` }}
-          />
-        </span>
-      </div>
-    );
-  }
-
-  // VERBATIM for the no-website case: this is the OSM directory's own hedged
-  // wording, and it is the one statement `websiteCondition` describes
-  // correctly. Never shortened, never turned into a badge.
-  const text =
-    lead.scoreState === "no_website"
-      ? lead.websiteCondition
-      : // Their domain is for sale. Distinct from "unreachable" on purpose: we
-        // reached it perfectly and got a broker's listing, so saying we could
-        // not check it would replace one false statement with another.
-        lead.scoreState === "parked"
-        ? "Domain listed for sale, no live site"
-        : lead.scoreState === "unreachable"
-          ? "We could not check this site"
-          : "Not scored yet";
-
-  // A SENTENCE, never a zero, a dash or an empty meter. It reads on one line
-  // now that this column is not also carrying two buttons -- which is the
-  // whole point of the split: the honest hedge is as scannable as the number
-  // it replaces, instead of being the thing that got squeezed.
-  return <p className="text-[11px] italic leading-snug text-fg-dim">{text}</p>;
-}
-
-/**
- * The row's two controls, in a column of their own.
- *
- * They used to share the Website cell, which is how "Hours unknown" ended up
- * colliding with "Battle card" in the operator's screenshot: Reachable, the
- * score and both buttons were all competing for whatever was left after the
- * business name had taken the screen. A column each, with the buttons pinned
- * right where the eye already expects a row's actions.
- *
- * `whitespace-nowrap` on the group is what makes this safe under auto table
- * layout: it raises the column's minimum width to the buttons' real width, so
- * a narrow viewport shrinks the business name and the meter instead of ever
- * wrapping or clipping a control.
- *
- * VisitSite renders nothing when there is no safe URL, so a lead with no
- * website simply shows one button. Battle card is present for an unscored lead
- * too -- the card is honest about having no score, and everything else it holds
- * is still what a rep wants open.
- */
-function RowActions({ lead }: { lead: WebLeadRow }) {
-  return (
-    <div className="flex items-center justify-end gap-2 whitespace-nowrap">
-      <BattleCardLink id={lead.id} name={lead.name} />
-      <VisitSite url={lead.websiteUrl} name={lead.name} />
     </div>
   );
 }
@@ -427,7 +268,28 @@ export function LeadsTable({
 
   return (
     <div>
-      <div className="overflow-hidden rounded-xl border border-bg-border">
+      {/* Below `xl`, the same leads as cards. BOTH ARE IN THE DOM and the
+          breakpoint picks one with `display:none`, rather than a matchMedia
+          hook. Two reasons, and the second is the load-bearing one:
+            - a hook renders the wrong layout for one frame after mount and
+              again on every resize, and this list is the first thing a rep
+              sees on a cold open;
+            - `display:none` removes a subtree from the accessibility tree, so
+              a screen reader gets exactly one list. A hidden-by-opacity or
+              off-screen variant would announce all fifty leads twice.
+          The cost is 50 extra list items of DOM. That is real and it is worth
+          it; if the page size ever grows past a few hundred this is the first
+          thing to revisit. */}
+      <LeadCards
+        leads={leads}
+        onOpen={onOpen}
+        selected={selected}
+        onToggle={onToggle}
+        showStage={showStage}
+        canSelect={canSelect}
+        now={now}
+      />
+      <div className="hidden overflow-hidden rounded-xl border border-bg-border xl:block">
         {/* Auto layout, deliberately -- see the module header for why
             `table-fixed` was tried, clipped the row's controls below ~1000px
             and was reverted, and why `overflow-x-auto` on this wrapper would
@@ -591,7 +453,7 @@ export function LeadsTable({
                         starts keeping a private spreadsheet. */}
                     {l.released && (
                       <span className="mt-0.5 block text-[10px] text-fg-dim">
-                        Released — back in the pool
+                        Released, back in the pool
                       </span>
                     )}
                   </td>
@@ -620,7 +482,10 @@ export function LeadsTable({
               type="button"
               disabled={page <= 1}
               onClick={() => onPage(page - 1)}
-              className="rounded-md border border-bg-border px-3 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+              // 44px until `xl`, where the pager sits under a table a mouse is
+              // driving. The pager is the ONE control that renders under both
+              // layouts, so it is the one that has to answer for both.
+              className="min-h-11 rounded-md border border-bg-border px-4 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40 xl:min-h-0 xl:px-3 xl:py-1.5"
             >
               Previous
             </button>
@@ -628,7 +493,10 @@ export function LeadsTable({
               type="button"
               disabled={page >= pages}
               onClick={() => onPage(page + 1)}
-              className="rounded-md border border-bg-border px-3 py-1.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40"
+              // 44px until `xl`, where the pager sits under a table a mouse is
+              // driving. The pager is the ONE control that renders under both
+              // layouts, so it is the one that has to answer for both.
+              className="min-h-11 rounded-md border border-bg-border px-4 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:pointer-events-none disabled:opacity-40 xl:min-h-0 xl:px-3 xl:py-1.5"
             >
               Next
             </button>

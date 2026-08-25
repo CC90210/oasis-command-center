@@ -706,11 +706,28 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   const page = read("app/web-leads/[id]/page.tsx");
   assert.match(page, /BattleCard/, "the dynamic lead route must render the battle card");
 
+  // Re-aimed 2026-08-25 from LeadsTable.tsx to LeadCells.tsx, where
+  // BattleCardLink now lives. The results list grew a second layout (cards
+  // below `xl`, the table above) and the two share one link component -- so
+  // this one assertion now covers BOTH surfaces instead of the desktop table
+  // alone, which is stronger, not weaker. The other half of that guarantee is
+  // asserted below: both layouts must actually render it.
   assert.match(
-    read("components/web-leads/LeadsTable.tsx"),
+    read("components/web-leads/LeadCells.tsx"),
     /href=\{`\/web-leads\/\$\{encodeURIComponent\(id\)\}`\}/,
-    "LeadsTable must link each row to its battle card",
+    "LeadCells must link a lead to its battle card",
   );
+  // The table reaches it through RowActions (which pairs it with "View site");
+  // the card renders it directly, next to a differently-sized "View site". Both
+  // shapes are accepted, an absence in either is not: a rep on a phone must
+  // reach the battle card from the list exactly as on a desktop.
+  assert.match(read("components/web-leads/LeadCells.tsx"), /function RowActions/, "RowActions must live beside the link it wraps");
+  for (const [surface, needle] of [
+    ["components/web-leads/LeadsTable.tsx", /<RowActions /],
+    ["components/web-leads/LeadCards.tsx", /<BattleCardLink /],
+  ] as const) {
+    assert.match(read(surface), needle, `${surface} must give a rep a way into the battle card from the list`);
+  }
   assert.match(
     read("components/web-leads/CallMode.tsx"),
     /href=\{`\/web-leads\/\$\{encodeURIComponent\(lead\.id\)\}`\}/,

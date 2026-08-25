@@ -17,9 +17,26 @@
  * in a document nobody on a phone reads.
  *
  * BANDS ARE RANGES, NOT JUDGEMENTS. "Under 40", not "weak". See filters.ts.
+ *
+ * ═══ 2026-08-25, ON A PHONE ════════════════════════════════════════════════
+ *
+ * The sentence a rep composes is the same one; it just cannot be one row of
+ * controls at 358px. Three things change and nothing is removed:
+ *
+ *   - THE FILTERS BUTTON. Below `2xl` the province/city/industry rail is a
+ *     sheet (FilterRail.tsx explains why the breakpoint is 1536 and not 1024),
+ *     so this bar carries the way into it, with a count of how many of ITS
+ *     filters are on. The chips row underneath still names every one of them
+ *     individually, so the count is a summary of something visible rather than
+ *     the only trace of hidden state.
+ *   - EVERY CONTROL IS 44px UNTIL `xl`. A rep standing in a car park mis-taps a
+ *     28px segmented control, and one of the things next to it claims leads.
+ *   - THE TWO ACTIONS GO FULL WIDTH BELOW `sm`. "Start calling" is the whole
+ *     point of the screen on a phone; it should not be a 100px button that has
+ *     wrapped onto its own line anyway.
  */
 
-import { Clock, Loader2, Phone, Search, UserPlus, X } from "lucide-react";
+import { Clock, Loader2, Phone, Search, SlidersHorizontal, UserPlus, X } from "lucide-react";
 import type { LeadSort, ScoreBand, WebLeadFilters } from "@/lib/web-leads/filters";
 
 const BANDS: { key: ScoreBand; label: string; hint: string }[] = [
@@ -38,7 +55,7 @@ const SORTS: { key: LeadSort; label: string }[] = [
 
 export function LeadsToolbar({
   filters, onChange, total, loading, queryDraft, onQueryDraft, onStartCalling, canStartCalling,
-  selectedCount, onClaim, claiming, claimLabel, canMutate,
+  selectedCount, onClaim, claiming, claimLabel, canMutate, filterCount, onOpenFilters,
 }: {
   filters: WebLeadFilters;
   onChange: (f: WebLeadFilters) => void;
@@ -58,6 +75,15 @@ export function LeadsToolbar({
   /** Server-resolved sales mutation capability. Read-only viewers keep every
    *  targeting/read control but never receive claim or call affordances. */
   canMutate: boolean;
+  /** How many of the RAIL's filters are on, for the Filters button's badge.
+   *  Counted by FilterRail.activeFilterCount so the badge and the sheet can
+   *  never disagree about what "a filter" is. */
+  filterCount: number;
+  /** Opens the filter sheet. Null in My Leads, which has no rail: a rep's own
+   *  book is small enough to scan and filtering your own 100 leads by province
+   *  is a question nobody has. A null here removes the button rather than
+   *  disabling it -- a dead control is worse than an absent one. */
+  onOpenFilters: (() => void) | null;
 }) {
   // Every control resets to page 1: changing what you are looking at while
   // staying on page 8 of the previous result set shows a rep an arbitrary
@@ -79,7 +105,9 @@ export function LeadsToolbar({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2.5">
-        <div className="relative">
+        {/* Full width on a phone, where it is the first row and a 224px box
+            beside nothing just leaves a hole. */}
+        <div className="relative w-full sm:w-auto">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-dim" />
           <input
             type="search"
@@ -91,13 +119,31 @@ export function LeadsToolbar({
             onChange={(e) => onQueryDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") set({ query: queryDraft }); }}
             placeholder="Search name or phone"
-            className="w-56 rounded-lg border border-bg-border bg-bg-deep py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint transition-colors focus:border-accent focus:outline-none"
+            className="min-h-11 w-full rounded-lg border border-bg-border bg-bg-deep py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint transition-colors focus:border-accent focus:outline-none sm:w-56 xl:min-h-0"
           />
         </div>
 
-        <div className="h-6 w-px bg-bg-border" aria-hidden />
+        {/* THE WAY INTO THE RAIL, below `2xl`. Carries the count so a rep can
+            see that something is narrowing their pool without opening it --
+            the sheet's own footer then says how many leads that leaves. */}
+        {onOpenFilters && (
+          <button
+            type="button"
+            onClick={onOpenFilters}
+            aria-label={filterCount > 0 ? `Filters, ${filterCount} on` : "Filters"}
+            className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-3.5 text-sm font-semibold text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 2xl:hidden"
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+            Filters
+            {filterCount > 0 && (
+              <span className="rounded-full bg-accent/15 px-1.5 py-0.5 text-xs font-bold tabular-nums text-accent">{filterCount}</span>
+            )}
+          </button>
+        )}
 
-        <div role="group" aria-label="Website score" className="inline-flex items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
+        <div className="hidden h-6 w-px bg-bg-border sm:block" aria-hidden />
+
+        <div role="group" aria-label="Website score" className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
           {BANDS.map((b) => (
             <button
               key={b.key}
@@ -105,7 +151,7 @@ export function LeadsToolbar({
               title={b.hint}
               aria-pressed={filters.band === b.key}
               onClick={() => set({ band: b.key })}
-              className={`rounded-md px-2.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+              className={`inline-flex min-h-11 items-center rounded-md px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-1.5 ${
                 filters.band === b.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
               }`}
             >
@@ -127,7 +173,7 @@ export function LeadsToolbar({
           aria-pressed={filters.openNow}
           title="Only businesses whose recorded hours say they are open right now, in their own time zone. Leads with no hours on file are hidden while this is on."
           onClick={() => set({ openNow: !filters.openNow })}
-          className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+          className={`inline-flex min-h-12 items-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-2 ${
             filters.openNow
               ? "border-accent/40 bg-accent/15 text-accent"
               : "border-bg-border bg-bg-panel text-fg-dim hover:border-accent/40 hover:text-fg"
@@ -141,16 +187,18 @@ export function LeadsToolbar({
           id="lead-sort"
           value={filters.sort}
           onChange={(e) => set({ sort: e.target.value as LeadSort })}
-          className="rounded-lg border border-bg-border bg-bg-panel px-2.5 py-2 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 focus:border-accent focus:outline-none"
+          className="min-h-12 rounded-lg border border-bg-border bg-bg-panel px-2.5 text-xs font-semibold text-fg-muted transition-colors hover:border-accent/40 focus:border-accent focus:outline-none xl:min-h-0 xl:py-2"
         >
           {SORTS.map((s) => (
             <option key={s.key} value={s.key} className="bg-bg-panel text-fg">{s.label}</option>
           ))}
         </select>
 
-        <div className="ml-auto flex items-center gap-2.5">
+        {/* Full width below `sm` so "Start calling" is a thumb-sized bar rather
+            than a button that has wrapped onto its own line at 40% width. */}
+        <div className="flex w-full items-center gap-2.5 sm:ml-auto sm:w-auto">
           {!loading && (
-            <p className="text-sm text-fg-muted">
+            <p className="whitespace-nowrap text-sm text-fg-muted">
               <span className="tabular-nums font-bold text-fg">{total.toLocaleString()}</span>{" "}
               lead{total === 1 ? "" : "s"}
             </p>
@@ -160,7 +208,7 @@ export function LeadsToolbar({
               type="button"
               onClick={onClaim}
               disabled={claiming}
-              className="inline-flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3.5 py-2 text-sm font-bold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-50"
+              className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3.5 text-sm font-bold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-50 sm:flex-none xl:min-h-0 xl:py-2"
             >
               {claiming ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
               {claimLabel} {selectedCount}
@@ -171,7 +219,7 @@ export function LeadsToolbar({
               type="button"
               onClick={onStartCalling}
               disabled={!canStartCalling}
-              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-4 py-2 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.45)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-40"
+              className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-4 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.45)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-40 sm:flex-none xl:min-h-0 xl:py-2"
             >
               <Phone className="h-4 w-4" />Start calling
             </button>
@@ -186,15 +234,15 @@ export function LeadsToolbar({
               key={c.label}
               type="button"
               onClick={c.clear}
-              className="inline-flex items-center gap-1 rounded-full border border-bg-border bg-bg-panel px-2.5 py-1 text-xs text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-bg-border bg-bg-panel px-3 text-xs text-fg-muted transition-colors hover:border-accent/40 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2.5 xl:py-1"
             >
-              {c.label}<X className="h-3 w-3" />
+              {c.label}<X className="h-3.5 w-3.5 xl:h-3 xl:w-3" />
             </button>
           ))}
           <button
             type="button"
             onClick={clearAll}
-            className="rounded-full px-2 py-1 text-xs font-semibold text-fg-dim underline-offset-2 transition-colors hover:text-fg hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+            className="min-h-11 rounded-full px-3 text-xs font-semibold text-fg-dim underline-offset-2 transition-colors hover:text-fg hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:px-2 xl:py-1"
           >
             Clear all
           </button>

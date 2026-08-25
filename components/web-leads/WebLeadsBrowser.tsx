@@ -51,7 +51,7 @@ import type { Facets } from "@/lib/web-leads/queries";
 // read from the /api/web-leads response body instead, which is the same source
 // of truth without crossing the server/client line.
 import type { WebLeadRow } from "@/lib/web-leads/data";
-import { FilterRail } from "./FilterRail";
+import { activeFilterCount, FilterRail, FilterSheet } from "./FilterRail";
 import { LeadsTable } from "./LeadsTable";
 import { LeadsToolbar } from "./LeadsToolbar";
 import { WebLeadDetail } from "./WebLeadDetail";
@@ -77,7 +77,10 @@ function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v:
           role="tab"
           aria-selected={active === v.key}
           onClick={() => onChange(v.key)}
-          className={`rounded-md px-3.5 py-1.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+          // 44px until `xl`. This is the control that decides whether a rep is
+          // looking at the shared pool or their own book, and getting it wrong
+          // on a phone means claiming out of the wrong list.
+          className={`inline-flex min-h-11 items-center rounded-md px-3.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 xl:min-h-0 xl:py-1.5 ${
             active === v.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
           }`}
         >
@@ -125,6 +128,21 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
    * order) still travels; only the mode does not.
    */
   const [calling, setCalling] = useState(false);
+
+  /**
+   * The filter sheet, below `2xl`. LOCAL state and not a URL param, for the
+   * same reason Call Mode is: a `?filters=1` link would open a modal over
+   * somebody else's screen, and these links get pasted into chat. What the
+   * sheet SETS is entirely URL-driven, so the shareable part still travels.
+   *
+   * IT DELIBERATELY DOES NOT CLOSE ON A URL CHANGE, unlike `selected` below.
+   * Every tick inside it pushes a new URL, so closing on `sp` would slam the
+   * sheet shut the instant a rep chose their first province -- they would get
+   * exactly one filter per open. It closes on Escape, the backdrop, the footer
+   * button, and by unmounting when the view switches to My Leads (which has no
+   * rail; see `listBlock`).
+   */
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   /**
    * Ticked lead ids, and the result of the last claim.
@@ -462,12 +480,29 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
   }, []);
 
   const listBlock = (
-    <div className="flex gap-7">
+    // `2xl:flex` rather than `flex`: below 1536 the rail is a sheet, so there
+    // is no second column to lay out and the results take the full content box.
+    // See FilterRail.tsx for the arithmetic -- at 1280 a persistent rail leaves
+    // the pool 692px for a 730px table and clips a control out of an
+    // `overflow-hidden` wrapper, which is happening in production today.
+    <div className="2xl:flex 2xl:gap-7">
       {/* The rail narrows the shared pool. A rep's own book is small enough to
           scan and is not filtered by geography -- filtering your own 100 leads
           by province is a question nobody has. */}
       {!mine && (
-        <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
+        <>
+          <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
+          <FilterSheet
+            open={filtersOpen}
+            onClose={() => setFiltersOpen(false)}
+            facets={facets}
+            filters={filters}
+            onChange={push}
+            loading={!facets && !facetError}
+            error={facetError}
+            total={loading ? undefined : total}
+          />
+        </>
       )}
 
       <div className="min-w-0 flex-1 space-y-4">
@@ -485,6 +520,8 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
           claiming={claiming}
           claimLabel={mine ? "Release" : "Claim"}
           canMutate={canMutate}
+          filterCount={activeFilterCount(filters)}
+          onOpenFilters={mine ? null : () => setFiltersOpen(true)}
         />
 
         {claimNote && (
