@@ -74,9 +74,19 @@ export const PARKING_HOSTS: readonly string[] = [
   "buydomains.com",
   "domainmarket.com",
   "brandbucket.com",
+];
+
+/**
+ * Markers that identify a parking page by its PATH rather than its host.
+ *
+ * Separate from PARKING_HOSTS because they are matched differently: a host is
+ * compared against the parsed hostname on a label boundary, a path marker is a
+ * substring of the whole URL. Mixing the two into one list is what produced the
+ * false positive below.
+ */
+export const PARKING_PATH_MARKERS: readonly string[] = [
+  "/domain_profile.cfm", // HugeDomains' own page
   "namesilo.com/parked",
-  "domain_profile.cfm",  // HugeDomains' path, kept for corpus rows whose
-                          // finalUrl was captured before the host list existed
 ];
 
 /** The registrable-ish domain: last two labels, lowercased, `www.` dropped.
@@ -111,7 +121,41 @@ export function baseDomain(hostOrUrl: string | null | undefined): string | null 
 export function isParkedUrl(finalUrl: string | null | undefined): boolean {
   if (!finalUrl || typeof finalUrl !== "string") return false;
   const u = finalUrl.toLowerCase();
-  return PARKING_HOSTS.some((h) => u.includes(h));
+
+  // Path markers first: these identify the PAGE, wherever it is served from.
+  if (PARKING_PATH_MARKERS.some((m) => u.includes(m))) return true;
+
+  // ═══ HOST MATCHING IS ON A LABEL BOUNDARY, NOT A SUBSTRING ════════════════
+  //
+  // This was `PARKING_HOSTS.some((h) => u.includes(h))`, and it was wrong in
+  // the one direction that costs us real businesses.
+  //
+  // Caught 2026-08-25 before any data was rewritten: "Chez Jordan Corporation"
+  // at `https://www.chezjordan.com/` matched the entry `dan.com`, because
+  // "chezjor|dan.com" contains it. A real restaurant with a real website
+  // scoring 55 would have had its score stripped and been removed from every
+  // peer group -- and a shrinking peer group moves the percentiles a rep quotes
+  // out loud. `jordan.com`, `sudan.com` and `bogdan.com` are all the same trap.
+  //
+  // Comparing the parsed HOSTNAME, and requiring either an exact match or a
+  // `.`-prefixed suffix, means only a genuine subdomain of a parking service
+  // counts. Being wrong here in the permissive direction shows one bad
+  // competitor; being wrong in the strict direction silently deletes good ones.
+  const host = hostnameOf(u);
+  if (!host) return false;
+  return PARKING_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+/** The lowercased hostname, or null when the value is not a parseable URL.
+ *  Deliberately does NOT strip `www.`: the boundary check below treats
+ *  `www.dan.com` as a subdomain of `dan.com`, which is exactly right. */
+function hostnameOf(value: string): string | null {
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//.test(value) ? value : `https://${value}`;
+    return new URL(withScheme).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -152,5 +196,29 @@ export function finalUrlFromSignals(signals: unknown): string | null {
 /** The SQL `or(...)` filter that finds parked audits without transferring 23,200
  *  signals blobs. Kept beside the list so the two cannot drift apart. */
 export function parkedSignalsOrFilter(): string {
-  return PARKING_HOSTS.map((h) => `signals.like.*${h}*`).join(",");
+  return [...PARKING_HOSTS, ...PARKING_PATH_MARKERS]
+    .map((h) => `signals.like.*${h}*`)
+    .join(",");
+}
+
+/**
+ * ═══ THE SQL FILTER IS A NET, NOT A VERDICT ═════════════════════════════════
+ *
+ * `signals.like.*dan.com*` matches `chezjordan.com`, and SQL LIKE cannot
+ * express "on a hostname label boundary". So every row the query returns must
+ * be re-checked here with `isParkedUrl`, which parses the hostname properly.
+ *
+ * Callers that use the query result directly are wrong in the expensive
+ * direction: they strip the score from a real business and shrink the peer
+ * group behind every percentile. This helper exists so there is one obvious
+ * right way to consume that query.
+ */
+export function confirmParked(
+  rows: { business_id: string; signals?: unknown }[],
+): Set<string> {
+  const parked = new Set<string>();
+  for (const r of rows) {
+    if (isParkedUrl(finalUrlFromSignals(r.signals))) parked.add(r.business_id);
+  }
+  return parked;
 }

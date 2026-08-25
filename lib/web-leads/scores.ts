@@ -62,7 +62,7 @@
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, MODEL_VERSION, assertCompleteRead } from "./tenant";
 import { memo, TTL } from "./cache";
-import { parkedSignalsOrFilter } from "./parked-domains";
+import { parkedSignalsOrFilter, confirmParked } from "./parked-domains";
 
 /** The five honest states. The first four match audit.ts's AuditResult
  *  discriminant; `parked` was added 2026-08-25 -- see ScoreIndex.parked. */
@@ -164,7 +164,12 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
     // query cannot drift apart.
     db
       .from("leadgen_site_audits")
-      .select("business_id", { count: "exact" })
+      // `signals` comes back too, because the SQL filter is a NET, not a
+      // verdict: `signals.like.*dan.com*` also matches `chezjordan.com`, and
+      // LIKE cannot express "on a hostname label boundary". confirmParked()
+      // re-checks each candidate properly. ~54 rows, so the extra column costs
+      // nothing; getting this wrong strips a real business of its score.
+      .select("business_id,signals", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .or(parkedSignalsOrFilter())
@@ -223,7 +228,9 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
     if (!prev || r.fetched_at > prev) newestAt.set(r.business_id, r.fetched_at);
   }
 
-  const parked = new Set((parkedRes.data || []).map((r: { business_id: string }) => r.business_id));
+  // The precise decision, not the query's coarse guess -- see confirmParked().
+  const parkedCandidates = (parkedRes.data || []) as { business_id: string; signals: unknown }[];
+  const parked = confirmParked(parkedCandidates);
 
   const scored = new Map<string, number>();
   for (const r of scoredRows) {

@@ -35,7 +35,9 @@ import {
   baseDomain,
   finalUrlFromSignals,
   parkedSignalsOrFilter,
+  confirmParked,
   PARKING_HOSTS,
+  PARKING_PATH_MARKERS,
 } from "../lib/web-leads/parked-domains";
 
 const read = (p: string) => readFileSync(p, "utf8");
@@ -94,6 +96,65 @@ for (const host of PARKING_HOSTS) {
     true,
     `${host} is listed in PARKING_HOSTS but isParkedUrl does not match it`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// 1b. 🚨 THE REGRESSION THAT NEARLY REWROTE REAL DATA (2026-08-25).
+//
+// The first version of isParkedUrl was `PARKING_HOSTS.some(h => url.includes(h))`.
+// Caught while dry-running the corpus cleanup, one query BEFORE the write:
+//
+//   "Chez Jordan Corporation" — https://www.chezjordan.com/ — quality_score 55
+//
+// matched the entry `dan.com`, because "chezjor|dan.com" contains it. A real
+// restaurant with a real website would have had its score stripped and been
+// removed from every peer group — and a shrinking peer group moves the
+// percentiles a rep quotes out loud. This is the exact failure the module
+// header warns about, committed by the module itself.
+//
+// Host matching is now on a LABEL BOUNDARY: exact hostname, or a `.`-prefixed
+// suffix. These names are the trap, written out so it cannot come back.
+// ---------------------------------------------------------------------------
+for (const realSite of [
+  "https://www.chezjordan.com/",   // the one actually in the corpus
+  "https://jordan.com/",
+  "https://www.sudan.com/",
+  "https://bogdan.com/menu",
+  "https://mysedo.com/",           // not sedo.com
+  "https://abovegroundpools.com/", // not above.com
+  "https://dance.com/",
+]) {
+  assert.equal(
+    isParkedUrl(realSite),
+    false,
+    `${realSite} is a real business and must NEVER be treated as parked — a substring match is what broke this`,
+  );
+}
+// A genuine subdomain of a parking service still counts.
+assert.equal(isParkedUrl("https://www.dan.com/buy"), true, "www.dan.com IS dan.com");
+assert.equal(isParkedUrl("https://foo.sedo.com/x"), true, "a real subdomain still counts");
+
+// And the SQL prefilter must never be used as the verdict, because LIKE cannot
+// express a label boundary: the query WILL return chezjordan.com as a candidate.
+{
+  assert.match(
+    parkedSignalsOrFilter(),
+    /signals\.like\./,
+    "the SQL filter is a coarse net over the signals blob",
+  );
+  const candidates = [
+    { business_id: "real", signals: JSON.stringify({ finalUrl: "https://www.chezjordan.com/" }) },
+    { business_id: "parked", signals: JSON.stringify({ finalUrl: "https://www.hugedomains.com/domain_profile.cfm?d=x" }) },
+  ];
+  const confirmed = confirmParked(candidates);
+  assert.equal(confirmed.has("real"), false, "confirmParked must reject the SQL false positive");
+  assert.equal(confirmed.has("parked"), true, "and keep the genuine one");
+  assert.equal(confirmed.size, 1);
+
+  // The score index must consume the query through confirmParked, not directly.
+  const scores = read("lib/web-leads/scores.ts");
+  assert.match(scores, /confirmParked\(parkedCandidates\)/, "the index must re-check candidates");
+  assert.match(scores, /business_id,signals/, "which means it must select signals to re-check with");
 }
 
 // ---------------------------------------------------------------------------
@@ -225,12 +286,14 @@ for (const junk of ["", "not json", "{broken", null, undefined, 42, {}, { finalU
 
   const [c] = conds;
   // One LIKE per host, OR-joined, over the signals column.
+  // Hosts AND path markers: the net has to cast over both lists, or a parking
+  // page identified only by its path never becomes a candidate at all.
   assert.equal(
     c.args.length,
-    PARKING_HOSTS.length,
-    "every host must become a bound parameter -- a missing one is a parking page that keeps its 82",
+    PARKING_HOSTS.length + PARKING_PATH_MARKERS.length,
+    "every host and path marker must become a bound parameter -- a missing one is a parking page that keeps its 82",
   );
-  for (const host of PARKING_HOSTS) {
+  for (const host of [...PARKING_HOSTS, ...PARKING_PATH_MARKERS]) {
     assert.ok(
       c.args.includes(`%${host}%`),
       `${host} must reach the query as a bound LIKE parameter (dots intact, wildcards converted)`,
