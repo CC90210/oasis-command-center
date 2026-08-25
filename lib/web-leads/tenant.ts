@@ -27,7 +27,24 @@
  */
 export const WEBDEV_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
-export const PAGE_SIZE = 50;
+/**
+ * Leads per page.
+ *
+ * 50 -> 100 on 2026-08-25, at the operator's request: "We have to find a way to
+ * maybe load 100 leads at a time. To initially load the page you get the first
+ * 100 leads and then you're able to kind of go on multiple pages."
+ *
+ * This costs almost nothing. Filtering, sorting and counting always run over
+ * every lead in the tenant regardless of page size (see allTenantLeads); the
+ * page size only decides how many rows get their full blob fetched in phase
+ * two, which measured 0.12 MB for 100 rows. Doubling it halves the number of
+ * times a rep working a list has to reach for the pager.
+ *
+ * The client never hardcodes this -- WebLeadsBrowser reads pageSize off the API
+ * response, so the pager and the API cannot disagree about how many rows a page
+ * holds.
+ */
+export const PAGE_SIZE = 100;
 
 /**
  * Hard cap on rows read per bulk call (leads, audits, unreachable attempts).

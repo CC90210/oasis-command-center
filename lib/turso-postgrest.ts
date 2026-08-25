@@ -167,6 +167,49 @@ function q(col: string): string {
   return `"${bare}"`;
 }
 
+/**
+ * Compile ONE entry of a `select()` column list, aliased the way PostgREST
+ * names it.
+ *
+ * WHY THIS EXISTS, and why it is not cosmetic. `q()` compiles `data->>name` to
+ * `json_extract("data", '$.name')`, which is correct SQL — but libSQL then
+ * names the OUTPUT COLUMN after the expression text, so the row comes back as
+ * `{ 'json_extract("data", \'$.name\')': "Acme" }`. Real PostgREST names that
+ * same column `name`. Selecting a JSON path therefore produced rows whose KEYS
+ * DEPENDED ON THE BACKEND: code written against one silently read `undefined`
+ * on the other. That is the same class of defect as `.is("profile","not.null")`
+ * (see lib/web-leads/scores.ts) — it works here, 500s or returns nulls there —
+ * and it is why no call site could safely project JSON paths until now.
+ *
+ * PostgREST's naming rule, mirrored exactly:
+ *   `data->>name`        -> column `name`      (last path segment)
+ *   `label:data->>name`  -> column `label`     (explicit alias wins)
+ *   `id`                 -> column `id`        (plain identifier, no alias)
+ *
+ * The explicit `alias:` form is accepted for plain columns too, again because
+ * PostgREST accepts it; `q()` alone rejected the whole token as a hostile
+ * identifier.
+ *
+ * Aliases are validated against the same identifier charset as column names
+ * before being interpolated — a select list is caller-controlled, but so is a
+ * column name, and the existing guard on the latter exists for a reason.
+ *
+ * Proven by the "json path select" cases in lib/__tests__/turso-postgrest.test.mjs,
+ * each of which was watched to fail against the unaliased compiler first.
+ */
+function selectCol(col: string): string {
+  // Split a leading `alias:` off, but ONLY when what follows is a column or
+  // JSON path — never when the colon is part of something else.
+  const m = col.match(/^([\w$]+):([\w$.]+(?:->>?[\w$]+)*)$/);
+  const alias = m ? m[1] : null;
+  const expr = m ? m[2] : col;
+  const sql = q(expr);
+  if (alias) return `${sql} AS "${alias}"`;
+  if (!expr.includes("->")) return sql; // plain column already carries its name
+  const last = expr.split(/->>?/).pop()!;
+  return `${sql} AS "${last}"`;
+}
+
 function compileOp(col: string, op: string, value: unknown): Cond {
   if (op === "in") {
     const arr = Array.isArray(value) ? value : String(value).replace(/^\(|\)$/g, "").split(",");
@@ -398,7 +441,7 @@ export class TursoQueryBuilder implements PromiseLike<PgResponse<any>> {
     const colSql = !base.length || base.includes("*")
       ? "*"
       : [...new Set([...base, ...(embeds.length ? await this.embedKeyCols(embeds) : [])])]
-          .map(q).join(", ");
+          .map(selectCol).join(", ");
     let sql = `SELECT ${colSql} FROM "${this.table}"${where.sql}`;
     if (this.orderBys.length)
       sql += " ORDER BY " + this.orderBys.map((o) => `${q(o.col)} ${o.asc ? "ASC" : "DESC"}`).join(", ");
