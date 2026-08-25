@@ -46,6 +46,7 @@ import type { CallOutcome } from "@/lib/web-leads/outcome";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { useAudit, biggestGaps, SCORE_STATE_WORDS } from "./useAudit";
+import { PhoneTierBadge } from "./PhoneTrust";
 
 /**
  * The four outcomes, with the digit that logs each.
@@ -469,12 +470,36 @@ export function CallMode({
                     className="inline-flex items-center gap-2.5 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 py-3 text-base font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
                   >
                     <Phone className="h-4.5 w-4.5" />{lead.phone}
+                    {lead.phoneExt && (
+                      <span className="text-sm font-semibold opacity-90">ext. {lead.phoneExt}</span>
+                    )}
                   </a>
                 ) : (
                   <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">
                     No phone number on file
                   </p>
                 )}
+
+              {/* WHAT WE KNOW ABOUT THAT NUMBER, directly under the button that
+                  dials it. This screen is the last thing a rep reads before the
+                  call connects, so a warning anywhere else arrives too late.
+                  It never disables or hides the button: Adon's rule is that an
+                  uncertain number still reaches the rep, with a warning. */}
+              {lead.phone && (
+                <div className="mt-3">
+                  <PhoneTierBadge tier={lead.phoneTier} />
+                  {lead.phoneReasons.length > 0 && (
+                    <ul className="mt-2 space-y-1">
+                      {lead.phoneReasons.map((r) => (
+                        <li key={r} className="flex gap-2 text-xs leading-relaxed text-fg-muted">
+                          <span className="mt-1.5 inline-block h-1 w-1 shrink-0 rounded-full bg-fg-muted" aria-hidden />
+                          {r}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
                 {websiteHref && (
                   <a
                     href={websiteHref}

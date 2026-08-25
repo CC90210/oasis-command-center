@@ -39,6 +39,7 @@ import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { AlertCircle, ExternalLink, Phone, BarChart3 } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
+import { PhoneTierBadge } from "./PhoneTrust";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { OpenNowCell, useNow } from "./OpeningHours";
 
@@ -381,6 +382,15 @@ export function LeadsTable({
                     <span className="tabular-nums text-fg-muted">{l.phone}</span>
                   ) : (
                     <span className="text-fg-faint">No number</span>
+                  )}
+
+                  {/* A rep scanning two hundred rows must see which numbers are
+                      flagged WITHOUT opening each one. Compact: the badge only,
+                      the reasons live on the lead itself. */}
+                  {l.phone && l.phoneTier === "warned" && (
+                    <div className="mt-1">
+                      <PhoneTierBadge tier={l.phoneTier} />
+                    </div>
                   )}
                 </td>
                 <td className="w-44 px-4 py-3 align-middle">
