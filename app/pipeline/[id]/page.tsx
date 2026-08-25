@@ -26,6 +26,7 @@ import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
 import { formatMoney, nonEmptyString, relTime } from "@/lib/format-helpers";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
+import { BattleCard } from "@/components/web-leads/BattleCard";
 import { ScoreLeadButton } from "./ScoreLeadButton";
 import { NextActionButton } from "./NextActionButton";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
@@ -115,6 +116,12 @@ export default async function PipelineLeadDetailPage({
     `Lead ${id.slice(0, 8)}`;
   const metrics = await loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at);
 
+  // Is this a web-lead, i.e. does a battle card exist for it? Keyed on the
+  // pointer JARVIS's crm-sink stamps at promotion time, which is the same field
+  // the audit and score lookups key on. An ordinary CRM lead has no audit, and
+  // /api/web-leads/[id]/battlecard would 404 for it.
+  const webLeadBusinessId = nonEmptyString(activeRecord.data.webdev_source_business_id);
+
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
@@ -137,7 +144,11 @@ export default async function PipelineLeadDetailPage({
         collapsedPreview={renderContactPreview(activeRecord.data)}
       >
         <LeadContactBand data={activeRecord.data} />
-        <LeadBusinessBand data={activeRecord.data} id={activeRecord.id} />
+        {/* Only for leads with NO battle card below. For a web-lead the card
+            carries BusinessFacts -- the full directory record -- and rendering
+            a four-cell summary of the same fields directly above it is one
+            business's address written on the page twice. */}
+        {!webLeadBusinessId && <LeadBusinessBand data={activeRecord.data} id={activeRecord.id} />}
       </CollapsibleSection>
       <LeadMetricsBand metrics={metrics} />
       <LeadActionToolbar
@@ -166,6 +177,48 @@ export default async function PipelineLeadDetailPage({
         }
       />
       <LeadLifecycleActions leadId={id} currentStage={metrics.stageKey} canManage={session.ok && session.isAdmin} />
+
+      {/*
+        ═══ THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) ═════════════
+        "we have to ensure that the leads tab and the pipeline are completely
+        synonymous... The pipeline is how we're going to track whose lead is
+        who. It should be what's going to be used more than the leads tab...
+        Right now as soon as you claim a lead, you're losing a lot of the
+        information that we have on the leads tab."
+
+        That was exactly right, and it was structural rather than a missing
+        field. Claiming a lead moves it OUT of the /web-leads pool and onto the
+        pipeline, and the pipeline record rendered a CRM form -- so the score,
+        the percentile, the seven-axis profile, the named competitors, the
+        everything-wrong list, the sales angles and the objection panel all
+        disappeared at precisely the moment a rep committed to calling.
+
+        THE SAME COMPONENT, NOT A PIPELINE-SHAPED COPY. It reads the same
+        /api/web-leads/[id]/battlecard payload through the same authorization
+        boundary, so there is no second implementation of any of it to drift.
+        A second rendering of one business's failings is two things that can
+        disagree mid-call.
+
+        Placed AFTER the lifecycle actions on purpose: logging a call and
+        advancing a stage are what the pipeline is for, and burying those
+        controls under a full-height card would trade one dysfunction for
+        another. Open by default, because a card behind a click is a card a rep
+        does not read while a stranger is waiting.
+
+        Gated on webdev_source_business_id: an ordinary CRM lead has no audit,
+        and the endpoint would 404. Non-web-leads keep LeadBusinessBand above.
+      */}
+      {webLeadBusinessId && (
+        <CollapsibleSection
+          title="Website battle card"
+          subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
+          storageKey="oasis.pipeline.battleCard.collapsed"
+          defaultCollapsed={false}
+        >
+          <BattleCard leadId={id} embedded />
+        </CollapsibleSection>
+      )}
+
       <MCAProfilePanel data={activeRecord.data} />
       <LeadTimelinePanel leadId={id} />
       <CollapsibleSection

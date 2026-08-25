@@ -259,6 +259,87 @@ async function run() {
     assert.match(detail, /const href = preferredSiteUrl\(websiteUrl\);/);
   }
 
+  // ---------------------------------------------------------------------------
+  // 9. THE PIPELINE AND THE LEADS TAB ARE SYNONYMOUS.
+  //
+  // Adon, 2026-08-25: "we have to ensure that the leads tab and the pipeline are
+  // completely synonymous... The pipeline is how we're going to track whose lead
+  // is who. It should be what's going to be used more than the leads tab...
+  // Right now as soon as you claim a lead, you're losing a lot of the
+  // information that we have on the leads tab."
+  //
+  // The loss was structural, not a missing field. Claiming a lead moves it OUT
+  // of the /web-leads pool and onto the pipeline, and the pipeline record
+  // rendered a CRM form -- so the score, percentile, seven-axis profile, named
+  // competitors, everything-wrong list, sales angles and objection panel all
+  // vanished at exactly the moment a rep committed to calling.
+  // ---------------------------------------------------------------------------
+  {
+    const detail = read("app/pipeline/[id]/page.tsx");
+
+    // THE SAME COMPONENT. Not a pipeline-shaped copy: a second rendering of one
+    // business's failings is two things that can disagree mid-call, which is the
+    // argument BusinessFacts already settled between the drawer and the card.
+    assert.match(
+      detail,
+      /import \{ BattleCard \} from "@\/components\/web-leads\/BattleCard";/,
+      "the pipeline must import the REAL BattleCard, never reimplement it",
+    );
+    assert.match(
+      detail,
+      /<BattleCard leadId=\{id\} embedded \/>/,
+      "the pipeline lead page must render the battle card",
+    );
+
+    // Gated: an ordinary CRM lead has no audit and the endpoint would 404.
+    assert.match(
+      detail,
+      /\{webLeadBusinessId && \(/,
+      "the battle card must be gated on the lead actually being a web-lead",
+    );
+    // And the compact business band must NOT render alongside it -- the card
+    // carries BusinessFacts, the fuller record of the same fields.
+    assert.match(
+      detail,
+      /\{!webLeadBusinessId && <LeadBusinessBand/,
+      "the summary band and the battle card must never render together",
+    );
+
+    // The card is READ, not hidden behind a click. A card a rep has to expand
+    // is a card they will not open while a stranger is waiting.
+    assert.match(
+      detail,
+      /storageKey="oasis\.pipeline\.battleCard\.collapsed"[\s\S]{0,120}?defaultCollapsed=\{false\}/,
+      "the battle card must be open by default on the pipeline record",
+    );
+
+    // ─── EMBEDDED CHANGES CHROME, NEVER CONTENT ───────────────────────────
+    //
+    // The whole parity claim rests on this. If `embedded` ever gates a PANEL
+    // rather than a wrapper class, the pipeline silently becomes a reduced
+    // version of the leads tab again -- which is the exact complaint. So the
+    // flag may only appear on layout wrappers and the back link.
+    const card = read("components/web-leads/BattleCard.tsx");
+    for (const section of [
+      "Who you are calling",
+      "up against",
+      "<ObjectionPanel",
+      "<CallOutcomeLog",
+      "<BusinessFacts",
+    ]) {
+      assert.ok(card.includes(section), `${section} must still be in the card`);
+    }
+    // No panel may be conditional on `embedded`.
+    assert.doesNotMatch(
+      card,
+      /\{\s*!?embedded\s*&&\s*<(Panel|ObjectionPanel|CallOutcomeLog|BusinessFacts|Hero)/,
+      "embedded must not gate any CONTENT panel -- it exists for layout chrome only",
+    );
+    // It IS allowed to drop the back link, which points at the leads pool and is
+    // the wrong door from the pipeline (that page has its own Back to pipeline).
+    assert.match(card, /\{!embedded && <BackLink \/>\}/);
+  }
+
 
   console.log("pipeline-web-lead-facts ok — the CRM board carries the business, the website and an honest score");
 }
