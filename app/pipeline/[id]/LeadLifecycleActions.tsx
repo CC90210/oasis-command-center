@@ -384,15 +384,30 @@ export function LeadLifecycleActions({
     timingConfirmed: currentStage === "qualified" ? true : checks[2],
     minimumInvestmentConfirmed: currentStage === "qualified" ? true : checks[3],
   };
+  const effectiveContactConfirmed = contactConfirmed || founderContactValid;
+  const effectiveClientAgreedToTime =
+    clientAgreedToTime || (Boolean(founderMeetingAt) && founderMeetingIsFuture);
+  const effectiveHandoffComplete = handoffComplete || Boolean(transitionNote.trim());
   const founderBookingReady =
     Boolean(founderUserId && founderMeetingAt && promisedDemo.trim() && transitionNote.trim()) &&
     founderMeetingIsFuture &&
     founderContactValid &&
     Object.values(founderQualification).every(Boolean) &&
-    contactConfirmed &&
-    clientAgreedToTime &&
-    handoffComplete &&
+    effectiveContactConfirmed &&
+    effectiveClientAgreedToTime &&
+    effectiveHandoffComplete &&
     selectedFounderCalendarReady !== false;
+  const bookingBlockedReason = (() => {
+    if (!founderUserId) return "Select a founder or closer as host";
+    if (!founderMeetingAt) return "Select meeting date and time";
+    if (!founderMeetingIsFuture) return "Meeting time must be in the future";
+    if (!promisedDemo.trim()) return "Enter client-facing meeting agenda";
+    if (!transitionNote.trim()) return "Add internal founder handoff note";
+    if (!founderContactValid) return "Enter a valid client email";
+    if (!Object.values(founderQualification).every(Boolean)) return "Complete qualification gates above";
+    if (selectedFounderCalendarReady === false) return "Selected host Google Calendar is not ready";
+    return null;
+  })();
   const postFounderRep =
     !canManage && !canRunDeal && !canRunDelivery &&
     ["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review"].includes(
@@ -1045,7 +1060,7 @@ export function LeadLifecycleActions({
 
             <div className="grid gap-2 md:grid-cols-3">
               <ConfirmationCheckCard
-                checked={contactConfirmed}
+                checked={effectiveContactConfirmed}
                 onChange={setContactConfirmed}
                 label={
                   <>
@@ -1054,12 +1069,12 @@ export function LeadLifecycleActions({
                 }
               />
               <ConfirmationCheckCard
-                checked={clientAgreedToTime}
+                checked={effectiveClientAgreedToTime}
                 onChange={setClientAgreedToTime}
                 label={<>The client agreed to this date and time.</>}
               />
               <ConfirmationCheckCard
-                checked={handoffComplete}
+                checked={effectiveHandoffComplete}
                 disabled={!transitionNote.trim()}
                 onChange={setHandoffComplete}
                 label={<>The internal founder handoff note is complete.</>}
@@ -1083,8 +1098,12 @@ export function LeadLifecycleActions({
             ) : null}
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-bg-border/70 pt-4">
-              <div className="text-[11px] leading-5 text-fg-dim">
-                Booking is blocked until the email, qualification gates, handoff note, and confirmations are complete.
+              <div className="text-[11px] leading-5 font-medium">
+                {bookingBlockedReason ? (
+                  <span className="text-amber-200">Required to book: {bookingBlockedReason}</span>
+                ) : (
+                  <span className="text-emerald-300">✓ All details confirmed — ready to book meeting & send client invite</span>
+                )}
               </div>
               <button
                 type="button"
