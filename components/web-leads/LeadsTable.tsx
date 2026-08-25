@@ -297,23 +297,39 @@ export function LeadsTable({
   return (
     <div>
       <div className="overflow-hidden rounded-xl border border-bg-border">
-        {/* TABLE-FIXED, AND THAT IS THE WHOLE FIX FOR THE GAP.
+        {/* THE GAP, AND WHY THE OBVIOUS FIX IS THE WRONG ONE.
             Operator, 2026-08-25: "There is a huge gap of space between business
             name and phone number in terms of the reachability."
-            With auto layout the Business column had no width, so it absorbed
-            every spare pixel on the screen -- on a wide monitor the name sat
+            The cause: Business was the only column with no width, so in auto
+            layout it absorbed every spare pixel. On a wide monitor the name sat
             hard left and the phone was shoved most of a screen away, and the
             three facts a rep reads together (who they are, the number, whether
             anyone is there) stopped reading as one row.
-            Fixed layout with explicit widths pins Business to a readable
-            measure and lets the slack fall in the Website column instead, whose
-            contents are right-aligned and therefore stay pinned to the right
-            edge where the eye already expects them. The columns a rep reads as
-            a unit end up adjacent.
-            Fixed layout also means cells no longer stretch to fit their
-            contents, so every cell that can overflow truncates -- the name and
-            its secondary line already did. */}
-        <table className="w-full table-fixed border-collapse text-sm">
+
+            The tempting fix is `table-fixed` with explicit widths. It was tried
+            and REVERTED on review the same day. Fixed layout sizes the table to
+            the SUM of its column widths, so once the viewport is narrower than
+            that sum -- around 1,000px here, which is an ordinary laptop with
+            this app's sidebar open -- the table overflows a wrapper that is
+            `overflow-hidden` for its rounded corners, and the Website column's
+            "View site" and "Battle card" buttons are silently CLIPPED with no
+            way to scroll to them. Auto layout shrinks instead of overflowing,
+            which is why it must stay.
+
+            Making the wrapper `overflow-x-auto` instead is also wrong: an
+            auto-overflow ancestor becomes the scrollport for `position: sticky`,
+            and the header up there sticks against PAGE scroll. That is
+            load-bearing (see the module header) -- it is what keeps a long page
+            readable at the bottom.
+
+            So: auto layout kept, and the slack is redirected rather than
+            constrained. The Website column asks for `w-full`, which in auto
+            layout means "give me everything left over", so Business falls back
+            to sizing against its own content and the name, the number and the
+            reachability end up adjacent. Website's contents are right-aligned,
+            so the space it absorbs is invisible. Nothing can overflow, because
+            every width here is a preference the browser is free to shrink. */}
+        <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="sticky top-0 z-10 bg-bg-panel text-left text-[10px] uppercase tracking-[0.14em] text-fg-muted shadow-[0_1px_0_0_rgb(34_38_46)]">
               {canSelect && (
@@ -330,24 +346,27 @@ export function LeadsTable({
                   />
                 </th>
               )}
-              {/* Bounded rather than greedy. ~22rem holds the longest business
-                  names in the corpus and truncates the rest, which is what
-                  keeps the phone number beside the name instead of a screen
-                  away from it. */}
-              <th scope="col" className={`w-[22rem] ${canSelect ? "pl-3" : "pl-4"} pr-4 py-3 font-bold`}>Business</th>
-              <th scope="col" className="w-[10.5rem] px-4 py-3 font-bold">Phone</th>
+              {/* No width: it now sizes to its own content, bounded by the
+                  max-width on the cell contents below. */}
+              <th scope="col" className={`${canSelect ? "pl-3" : "pl-4"} pr-4 py-3 font-bold`}>Business</th>
+              <th scope="col" className="whitespace-nowrap px-4 py-3 font-bold">Phone</th>
               {/* Beside the phone number on purpose. A rep reads the number and
                   the reachability together, or they dial a business that is
                   shut -- which wastes the dial AND burns the lead, because
                   nobody answers, a no-answer is logged, and the expiry clock
                   resets. Operator, 2026-08-24: "we need to see the times that
                   they're able to actually reach out." */}
-              <th scope="col" className="w-44 px-4 py-3 font-bold">Reachable</th>
-              {showStage && <th scope="col" className="w-[10rem] px-4 py-3 font-bold">Stage</th>}
-              {/* The ONLY column left without a width, so it takes the slack.
-                  Its contents are justify-end, so growing it moves nothing --
-                  the score and the two buttons stay against the right edge. */}
-              <th scope="col" className="px-4 py-3 text-right font-bold">Website</th>
+              <th scope="col" className="w-44 whitespace-nowrap px-4 py-3 font-bold">Reachable</th>
+              {showStage && <th scope="col" className="whitespace-nowrap px-4 py-3 font-bold">Stage</th>}
+              {/* w-full is the whole mechanism: in auto layout a column asking
+                  for 100% takes everything the other columns did not need, so
+                  the slack collects HERE instead of behind the business name.
+                  Its contents are justify-end, so the space it absorbs is
+                  invisible -- the score and the two buttons stay against the
+                  right edge where the eye already expects them. It is still a
+                  preference, so a narrow viewport shrinks it rather than
+                  overflowing and clipping the buttons. */}
+              <th scope="col" className="w-full px-4 py-3 text-right font-bold">Website</th>
             </tr>
           </thead>
           <tbody>
@@ -386,10 +405,19 @@ export function LeadsTable({
                   />
                 </td>}
                 <td className={`py-3.5 ${canSelect ? "pl-3" : "pl-4"} pr-4 align-middle`}>
-                  <span className="block truncate text-[15px] font-semibold leading-tight tracking-[-0.01em] text-fg">{l.name}</span>
-                  <span className="mt-1 block truncate text-xs text-fg-dim">
-                    {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
-                  </span>
+                  {/* max-w on the CONTENTS, not the cell. In auto layout a
+                      table cell treats width and max-width as suggestions and
+                      will still stretch for a long word; a block inside it is
+                      ordinary flow content and obeys them, so this is what
+                      actually stops one 60-character business name from
+                      re-opening the gap this change closed. ~22rem holds the
+                      longest names in the corpus and truncates the rest. */}
+                  <div className="max-w-[22rem]">
+                    <span className="block truncate text-[15px] font-semibold leading-tight tracking-[-0.01em] text-fg">{l.name}</span>
+                    <span className="mt-1 block truncate text-xs text-fg-dim">
+                      {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
+                    </span>
+                  </div>
                 </td>
                 <td className="px-4 py-3 align-middle">
                   {l.phone && showStage && canSelect ? (
@@ -406,10 +434,7 @@ export function LeadsTable({
                     <span className="text-fg-faint">No number</span>
                   )}
                 </td>
-                {/* Widths live on the <thead> cells now; table-fixed reads the
-                    first row and ignores widths further down, so repeating them
-                    here would only be something to keep in sync and get wrong. */}
-                <td className="px-4 py-3 align-middle">
+                <td className="w-44 px-4 py-3 align-middle">
                   <OpenNowCell lead={l} now={now} />
                 </td>
                 {showStage && (
@@ -425,10 +450,11 @@ export function LeadsTable({
                     )}
                   </td>
                 )}
-                {/* Takes the table's slack (see the <thead> note). Three
-                    controls at 11px need room, and a column that wraps mid-row
-                    is what makes a long page unreadable at the bottom. */}
-                <td className="px-4 py-3 align-middle">
+                {/* Takes the table's slack -- see the w-full note on its
+                    header cell. Three controls at 11px need the room, and a
+                    column that wraps mid-row is what makes a long page
+                    unreadable at the bottom. */}
+                <td className="w-full px-4 py-3 align-middle">
                   <WebsiteCell lead={l} />
                 </td>
               </tr>
