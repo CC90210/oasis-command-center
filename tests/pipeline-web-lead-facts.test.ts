@@ -33,6 +33,7 @@ const read = (p: string) => readFileSync(p, "utf8");
 const index: ScoreIndex = {
   scored: new Map([["biz-scored", 41]]),
   unreachable: new Set(["biz-dead"]),
+  parked: new Set(["biz-parked"]),
 };
 
 const row = (data: Record<string, unknown>) => ({ id: "r1", data });
@@ -79,7 +80,7 @@ async function run() {
   // corpus -- which are precisely the ones a rep is meant to call.
   // ---------------------------------------------------------------------------
   {
-    const zeroIndex: ScoreIndex = { scored: new Map([["biz-zero", 0]]), unreachable: new Set() };
+    const zeroIndex: ScoreIndex = { scored: new Map([["biz-zero", 0]]), unreachable: new Set(), parked: new Set() };
     const [z] = await attachWebsiteScores(
       [row({ website: "https://z.example", webdev_source_business_id: "biz-zero" })],
       zeroIndex,
@@ -119,6 +120,30 @@ async function run() {
   assert.equal(scoreStateSentence("not_scored"), "Not scored yet");
   assert.equal(scoreStateSentence("no_website"), null, "no_website defers to the lead's verbatim condition");
   assert.equal(scoreStateSentence("scored"), null, "a scored lead renders its number, not a sentence");
+  // A domain that is FOR SALE. Its own sentence, not "unreachable" -- we
+  // reached it perfectly and got a broker's listing.
+  assert.equal(scoreStateSentence("parked"), "Domain listed for sale, no live site");
+
+  // ---------------------------------------------------------------------------
+  // 4b. A PARKED DOMAIN NEVER CARRIES A NUMBER.
+  //
+  // 2026-08-25: all 53 HugeDomains parking pages in the corpus scored EXACTLY
+  // 82 and every one landed in the top tier, because a parking page genuinely
+  // is fast, HTTPS, mobile-friendly and full of CTAs. Two of them reached a
+  // prospect as "best-scoring competitors" on a live battle card.
+  // ---------------------------------------------------------------------------
+  {
+    const [p] = await attachWebsiteScores(
+      [row({ website: "http://www.ambianceofindia.com", webdev_source_business_id: "biz-parked" })],
+      index,
+    );
+    assert.equal(p.data[DERIVED_SCORE_KEY], null, "a parked domain must never carry a score");
+    assert.equal(
+      p.data[DERIVED_SCORE_STATE_KEY],
+      "parked",
+      "a parked domain must say so, not hide behind 'not scored yet' or 'unreachable'",
+    );
+  }
 
   // ---------------------------------------------------------------------------
   // 5. THE BOARD ACTUALLY READS THE BUSINESS FIELDS.

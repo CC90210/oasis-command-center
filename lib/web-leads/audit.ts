@@ -62,6 +62,7 @@ import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 // (Codex review, 2026-08-23.)
 export { MODEL_VERSION } from "./tenant";
 import { MODEL_VERSION } from "./tenant";
+import { isParkedUrl, finalUrlFromSignals } from "./parked-domains";
 
 export type CheckResult = { code: string; label: string; points: number; has: boolean };
 
@@ -134,6 +135,21 @@ export type AuditResult =
   | { state: "no_website" }
   | { state: "not_scored" }
   | { state: "unreachable"; reason: string; lastAttemptedAt: string }
+  /**
+   * The domain is FOR SALE. Added 2026-08-25.
+   *
+   * Distinct from `unreachable`, and the distinction is the whole point: we
+   * reached it perfectly and were served a domain broker's listing. Reporting
+   * that as "we could not check this site" swaps one false statement for
+   * another and discards the strongest opener a rep has -- their web address
+   * has lapsed and anyone can buy it.
+   *
+   * Distinct from `scored` for a harder reason: it WAS scored, at 82, because a
+   * parking page really is fast, HTTPS, mobile-friendly and full of CTAs. The
+   * 49 checks worked exactly as designed on a page that has nothing to do with
+   * the business.
+   */
+  | { state: "parked"; url: string; finalUrl: string; measuredAt: string }
   | {
       state: "scored";
       url: string;
@@ -320,7 +336,10 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
 
   const audit = await db
     .from("leadgen_site_audits")
-    .select("url,fetched_at,profile")
+    // `signals` joins the select so the parked check below reads the SAME row
+    // the score comes from. Fetching it separately would let a re-crawl land in
+    // between and score one row while judging another.
+    .select("url,fetched_at,profile,signals")
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("business_id", bid)
     .eq("audit_version", MODEL_VERSION)
@@ -330,7 +349,24 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
   if (audit.error) throw new Error(`audit_read_failed: ${audit.error.message}`);
   if (!audit.data) return { state: "not_scored" }; // Rule 3: no audit row.
 
-  const row = audit.data as { url: string; fetched_at: string; profile: unknown };
+  const row = audit.data as { url: string; fetched_at: string; profile: unknown; signals: unknown };
+
+  // Rule 3b: THE DOMAIN IS FOR SALE, so there is no site to score.
+  //
+  // Checked BEFORE the profile, because a parked page has a perfectly good
+  // profile -- that is the entire problem. All 53 in the corpus scored exactly
+  // 82 and every one landed in the top tier, which is what put two of them in
+  // front of a prospect as "best-scoring competitors" (2026-08-25).
+  const finalUrl = finalUrlFromSignals(row.signals);
+  if (isParkedUrl(finalUrl)) {
+    return {
+      state: "parked",
+      url: row.url,
+      finalUrl: finalUrl as string,
+      measuredAt: row.fetched_at,
+    };
+  }
+
   if (!row.profile) return { state: "not_scored" }; // Rule 4: scored before profiles existed.
 
   const profile = coerceProfile(row.profile);

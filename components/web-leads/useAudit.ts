@@ -87,4 +87,10 @@ export const SCORE_STATE_WORDS: Record<string, string> = {
   no_website: "No website found yet, needs checking",
   not_scored: "Not scored yet",
   unreachable: "We could not check this site",
+  // Added 2026-08-25. NOT a hedge like the three above -- this one is a
+  // measured fact, and it is the strongest opener a rep has. Their domain has
+  // lapsed and a broker is selling it, which means anyone can buy the address
+  // their customers still type in. Phrased as what a rep can safely say out
+  // loud on a call, because that is exactly where it will be used.
+  parked: "Their domain has lapsed and is listed for sale, so they have no live site",
 };

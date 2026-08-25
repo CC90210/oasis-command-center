@@ -1518,7 +1518,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
 /** Mirrors ScoreState in lib/web-leads/scores.ts. Declared locally rather than
  *  imported so this client component does not pull in the server-only score
  *  module (it reaches getServiceSupabase) just to name a union. */
-type WebScoreState = "scored" | "unreachable" | "not_scored" | "no_website";
+type WebScoreState = "scored" | "unreachable" | "not_scored" | "no_website" | "parked";
 
 /**
  * The website block on a CRM row: open the site, open the battle card, and the
@@ -1545,13 +1545,15 @@ function PipelineWebsiteCell({
   // which is OpenStreetMap's hedge -- absence of a website tag means nobody
   // mapped one, not that no site exists.
   const sentence =
-    m.webScoreState === "unreachable"
-      ? "We could not check this site"
-      : m.webScoreState === "not_scored"
-        ? "Not scored yet"
-        : m.webScoreState === "no_website"
-          ? m.websiteCondition || "No website found yet, needs checking"
-          : null;
+    m.webScoreState === "parked"
+      ? "Domain listed for sale, no live site"
+      : m.webScoreState === "unreachable"
+        ? "We could not check this site"
+        : m.webScoreState === "not_scored"
+          ? "Not scored yet"
+          : m.webScoreState === "no_website"
+            ? m.websiteCondition || "No website found yet, needs checking"
+            : null;
   return (
     <div className="flex min-w-0 flex-col items-start gap-1.5">
       <div className="flex flex-wrap items-center gap-1.5">

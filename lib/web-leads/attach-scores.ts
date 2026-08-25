@@ -95,6 +95,11 @@ export async function attachWebsiteScores<
  */
 export function scoreStateSentence(state: ScoreState): string | null {
   switch (state) {
+    // A measured fact, not a hedge: their web address has lapsed and a broker
+    // is selling it. See lib/web-leads/parked-domains.ts for how 53 of these
+    // scored 82 and reached prospects as "best-scoring competitors".
+    case "parked":
+      return "Domain listed for sale, no live site";
     case "unreachable":
       return "We could not check this site";
     case "not_scored":

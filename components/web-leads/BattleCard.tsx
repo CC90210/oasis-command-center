@@ -396,9 +396,13 @@ function NotScored({ audit }: { audit: AuditResult }) {
   const sentence =
     audit.state === "no_website"
       ? "No website found yet, needs checking"
-      : audit.state === "unreachable"
-        ? "We could not check this site."
-        : "Not scored yet.";
+      : // Their domain is for sale. Not a hedge like the others around it: this
+        // is a measured fact and the strongest opener on the card.
+        audit.state === "parked"
+        ? "Their domain has lapsed and is listed for sale, so they have no live site."
+        : audit.state === "unreachable"
+          ? "We could not check this site."
+          : "Not scored yet.";
   return (
     <Panel>
       <SectionTitle>Their website</SectionTitle>
@@ -638,9 +642,11 @@ function Hero({
               <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
                 {audit.state === "no_website"
                   ? "No website found yet, needs checking"
-                  : audit.state === "unreachable"
-                    ? "We could not check this site."
-                    : "Not scored yet."}
+                  : audit.state === "parked"
+                    ? "Their domain has lapsed and is listed for sale, so they have no live site."
+                    : audit.state === "unreachable"
+                      ? "We could not check this site."
+                      : "Not scored yet."}
               </p>
             )}
           </div>
