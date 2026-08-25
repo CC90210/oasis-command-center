@@ -361,13 +361,19 @@ function LeadBusinessBand({ data, id }: { data: Record<string, unknown>; id: str
               <ExternalLink className="h-3 w-3" />View site
             </a>
           )}
-          <Link
-            href={`/web-leads/${encodeURIComponent(id)}`}
-            title="Open the full battle card: score, competitors, sales angles, objections"
-            className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:bg-accent/10 hover:text-accent"
-          >
-            <BarChart3 className="h-3 w-3" />Battle card
-          </Link>
+          {/* Only when this record IS a web-lead. /web-leads/<id> pins its
+              lookup to WEBDEV_TENANT_ID, so the link 404s for any other
+              tenant's row or a hand-typed CRM lead. Caught in review
+              2026-08-25; `oasis-webdev` holds 53 real leads, so it was live. */}
+          {nonEmptyString(data.webdev_source_business_id) && (
+            <Link
+              href={`/web-leads/${encodeURIComponent(id)}`}
+              title="Open the full battle card: score, competitors, sales angles, objections"
+              className="inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:bg-accent/10 hover:text-accent"
+            >
+              <BarChart3 className="h-3 w-3" />Battle card
+            </Link>
+          )}
           {websiteUrl && (
             <span className="min-w-0 truncate font-mono text-[11px] text-fg-dim" title={websiteUrl}>
               {websiteUrl}

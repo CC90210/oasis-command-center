@@ -183,6 +183,55 @@ async function run() {
     // Scores are attached to what is actually rendered, not to the wider set.
     assert.match(page, /attachWebsiteScores\(rows\)/, "scores must be attached to the final filtered rows");
     assert.match(page, /rows=\{rowsWithScores\}/, "the view must receive the enriched rows");
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 7. THE SCORE JOIN IS GATED ON THE TENANT.
+    //
+    // Caught by independent review 2026-08-25. THREE slugs render this page
+    // (`oasis`, `oasis-ai-cc`, `oasis-webdev`) but every query inside
+    // fetchScoreIndex is pinned to WEBDEV_TENANT_ID = oasis-ai-cc. Ungated,
+    // another tenant's board resolves its rows against a DIFFERENT tenant's
+    // audit index: a miss shows "Not scored yet" on a lead that may be scored,
+    // and a colliding business id would show one tenant a number measured from
+    // another tenant's website. `oasis-webdev` holds 53 real leads.
+    // ─────────────────────────────────────────────────────────────────────
+    assert.match(
+      page,
+      /tenantId === WEBDEV_TENANT_ID \? await attachWebsiteScores\(rows\) : rows/,
+      "the score join must be gated on the web-leads tenant -- fetchScoreIndex is pinned to it, so another tenant would resolve against the wrong index",
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. THE BATTLE CARD LINK ONLY APPEARS ON ROWS THAT HAVE ONE.
+  //
+  // /web-leads/<id> pins fetchLead to WEBDEV_TENANT_ID, so the link 404s for
+  // another tenant's row or for an ordinary CRM lead typed in by hand. A button
+  // that reliably 404s is worse than no button.
+  // ---------------------------------------------------------------------------
+  {
+    const view = read("components/manifest/LeadPipelineView.tsx");
+    assert.match(
+      view,
+      /str\(d\.webdev_source_business_id\)/,
+      "the row model must decide whether a row is a web-lead from its source business id",
+    );
+    assert.match(view, /isWebLead: Boolean\(webLeadBusinessId\)/);
+    assert.match(
+      view,
+      /\{m\.isWebLead && \(\s*<Link\s+href=\{`\/web-leads\//,
+      "the battle-card link must be gated on isWebLead",
+    );
+
+    const detail = read("app/pipeline/[id]/page.tsx");
+    assert.match(
+      detail,
+      /\{nonEmptyString\(data\.webdev_source_business_id\) && \(\s*<Link\s+href=\{`\/web-leads\//,
+      "the detail page's battle-card link must be gated the same way",
+    );
+    // The View site link is deliberately NOT gated: `website` is a generic CRM
+    // field and opening a URL works for any lead that has one.
+    assert.match(detail, /const href = preferredSiteUrl\(websiteUrl\);/);
   }
 
 

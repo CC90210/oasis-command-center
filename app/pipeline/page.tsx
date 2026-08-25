@@ -38,6 +38,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { OASIS_WEBSITE_SALES_PROGRAM, filterWebsiteSalesRows, stagesForOasisRole } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
@@ -232,7 +233,25 @@ export default async function PipelinePage({
   // Website scores, resolved against the same memoised index /web-leads uses.
   // Last, on the smallest set: after scoping, after the researched cut, after
   // the rep filter and after the search. Eleven rows on a rep's board today.
-  const rowsWithScores = await attachWebsiteScores(rows);
+  //
+  // ═══ GATED ON THE TENANT, AND THAT GATE IS NOT OPTIONAL ══════════════════
+  // Caught by independent review 2026-08-25. THREE slugs render this page --
+  // `oasis`, `oasis-ai-cc` and `oasis-webdev` (OASIS_PIPELINE_SLUGS above) --
+  // but every query inside fetchScoreIndex is pinned to WEBDEV_TENANT_ID,
+  // which is `oasis-ai-cc`. Ungated, a board rendered for another tenant would
+  // resolve its rows against a DIFFERENT tenant's audit index: business ids
+  // that miss produce a silent "Not scored yet" on leads that may well be
+  // scored, and an id that collided would show one tenant a number measured
+  // from another tenant's website. It also made those boards depend on three
+  // large unrelated reads that throw on a short read.
+  //
+  // Measured before fixing rather than assumed: `oasis-webdev` holds 53 real
+  // leads, so this was live, not theoretical. The slug `oasis` has no tenant
+  // row at all today, which is exactly the kind of thing that changes without
+  // anyone revisiting this line -- hence a positive check on the id we know,
+  // never a denylist of the ones we do not.
+  const rowsWithScores =
+    tenantId === WEBDEV_TENANT_ID ? await attachWebsiteScores(rows) : rows;
 
   // The STAGE LIST has to drop researched too, not just the rows. Filtering one
   // without the other leaves a permanently-empty "Researched" column on the

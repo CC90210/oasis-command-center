@@ -1475,6 +1475,13 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // memoised index the leads tab uses, so the two screens cannot disagree.
   // Absent (undefined) means nobody attached it -- a caller that did not opt in
   // -- which is NOT the same as "not scored" and must not render as a number.
+  // Is this row actually a web-lead? Caught by review 2026-08-25: the battle
+  // card lives at /web-leads/<id>, whose fetchLead is pinned to WEBDEV_TENANT_ID,
+  // so linking there from any other tenant's row -- or from an ordinary CRM lead
+  // typed in by hand -- hands a rep a button that always 404s. `oasis-webdev`
+  // holds 53 real leads, so this was live. Keyed on the business id the score
+  // join already needs, which is the same thing that makes a row a web-lead.
+  const webLeadBusinessId = str(d.webdev_source_business_id);
   const webScoreRaw = d.derived_website_score;
   const webScore = typeof webScoreRaw === "number" ? webScoreRaw : null;
   const webScoreState =
@@ -1504,6 +1511,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
     webScore,
     webScoreState,
     businessLine,
+    isWebLead: Boolean(webLeadBusinessId),
   };
 }
 
@@ -1561,6 +1569,9 @@ function PipelineWebsiteCell({
             <ExternalLink className="h-3 w-3" />View site
           </a>
         )}
+        {/* Only for rows that ARE web-leads -- see isWebLead in the row model.
+            A button that reliably 404s is worse than no button. */}
+        {m.isWebLead && (
         <Link
           href={`/web-leads/${encodeURIComponent(leadId)}`}
           title={`Open the full battle card for ${m.name}`}
@@ -1568,6 +1579,7 @@ function PipelineWebsiteCell({
         >
           <BarChart3 className="h-3 w-3" />Battle card
         </Link>
+        )}
       </div>
       {m.webScoreState === "scored" && m.webScore != null ? (
         <div className="flex w-full items-center gap-2">
