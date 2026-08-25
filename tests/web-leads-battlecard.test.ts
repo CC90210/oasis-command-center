@@ -773,10 +773,29 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     "lead.auditFindings",
     "lead.osmCategory",
     "lead.territoryName",
-    "lead.phone",
   ]) {
     assert.ok(src.includes(field), `${facts} must render ${field}`);
   }
+
+  // The phone is the one field that stopped being a bare value on 2026-08-25.
+  // It now delegates to PhoneTrust, which renders the number AND what we know
+  // about it, because every lead used to carry a hardcoded confidence of 50
+  // that nothing on screen read -- so a number nobody had checked looked
+  // exactly like one that had been, and reps burned calls on numbers that
+  // belonged to another business.
+  //
+  // The requirement is UNCHANGED and is asserted here rather than relaxed: the
+  // number must still reach this block. Delegation is only accepted to the ONE
+  // shared component, which is separately pinned (tests/web-leads-phone-trust
+  // .test.ts) to render the number in full and keep it dialable even when the
+  // tier is a warning. Accepting delegation without naming the target is how
+  // an empty component would satisfy this loop.
+  assert.match(
+    src,
+    /<PhoneTrust lead=\{lead\} \/>/,
+    `${facts} must render the phone through the shared PhoneTrust block`,
+  );
+  assert.match(src, /from "\.\/PhoneTrust"/, `${facts} must import the shared block, not re-implement it`);
 
   // VERBATIM, and not merely present. The two hedged directory strings must
   // reach the screen with no badge, no icon-as-verdict and no shortening --

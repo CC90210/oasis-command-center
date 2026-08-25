@@ -107,6 +107,23 @@ export type WebLead = {
   id: string;
   name: string;
   phone: string | null;
+  /**
+   * How much we trust that this number reaches THIS business.
+   *
+   * Until 2026-08-25 every lead carried a hardcoded confidence of 50 and
+   * nothing on screen read it, so a number nobody had checked looked exactly
+   * like one that had been. Adon: "If you're unsure, you still put the phone
+   * number but there's a warning that it might not be the right number."
+   *
+   * null means the lead predates the backfill, NOT that it is fine.
+   */
+  phoneTier: "verified" | "probable" | "warned" | null;
+  /** Hand-written, rep-facing, warnings first. Rendered verbatim. */
+  phoneReasons: string[];
+  /** Dial after connecting, or the call reaches the main line. */
+  phoneExt: string | null;
+  /** Other numbers the listing carried, for when the first one fails. */
+  phoneAlternates: string[];
   city: string | null;
   province: string | null;
   industry: string | null;
@@ -175,12 +192,40 @@ export type LeadScope = "pool" | "mine";
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
 
+/**
+ * A JSON array from the JARVIS side, reduced to sentences safe to print.
+ *
+ * Drops nullish and object entries BEFORE stringifying, because String(null)
+ * is the truthy string "null" and would reach a rep as a reason.
+ */
+function coerceStrings(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((x) => x !== null && x !== undefined && typeof x !== "object")
+    .map((x) => String(x).trim())
+    .filter(Boolean);
+}
+
 export function toWebLead(row: { id: string; data: Record<string, unknown> }): WebLead {
   const d = row.data || {};
   return {
     id: row.id,
     name: str(d.business_name) || str(d.name) || "Unnamed business",
     phone: str(d.phone),
+    // A tier of null is the honest answer for a lead the backfill has not
+    // reached yet. It must never be defaulted to "probable": that would
+    // reinstate the fabricated reassurance this whole change removes.
+    phoneTier: ((): WebLead["phoneTier"] => {
+      const t = str(d.webdev_phone_tier);
+      return t === "verified" || t === "probable" || t === "warned" ? t : null;
+    })(),
+    // Nullish and object entries are dropped BEFORE stringifying. String(null)
+    // is "null", which is truthy, so a naive map+filter(Boolean) renders the
+    // literal word "null" to a rep as a reason not to trust a phone number.
+    // Caught by tests/web-leads-phone-trust.test.ts.
+    phoneReasons: coerceStrings(d.webdev_phone_reasons),
+    phoneExt: str(d.webdev_phone_ext),
+    phoneAlternates: coerceStrings(d.webdev_phone_alternates),
     city: str(d.business_city),
     province: str(d.state),
     industry: str(d.webdev_industry) || str(d.industry),
@@ -551,10 +596,40 @@ function matchesBand(l: WebLeadRow, band: ScoreBand): boolean {
  * Unscored leads sort AFTER every scored lead in both score orders (not as a
  * zero, not as a 100). A missing score is not a low score -- see scores.ts.
  */
+/**
+ * How far down the queue a phone tier puts a lead.
+ *
+ * Adon, 2026-08-25: "For the numbers that you are 100% guaranteed on, we could
+ * have my reps dial them first." So a rep works confirmed numbers before
+ * doubtful ones and never has to notice they are doing it.
+ *
+ * THIS IS AN ORDERING, NOT A FILTER. A warned lead still appears, still
+ * carries its number, still dials. It sits at the back because a rep's first
+ * hour is worth more than their last, not because the lead is worthless.
+ *
+ * `null` (never assessed) ranks with `probable` rather than last: those leads
+ * are not suspected of anything, they simply predate the backfill, and burying
+ * them would quietly hide most of the book on the day this ships.
+ */
+const PHONE_TIER_RANK: Record<string, number> = {
+  verified: 0,
+  probable: 1,
+  warned: 2,
+};
+const phoneRank = (l: WebLeadRow) => PHONE_TIER_RANK[l.phoneTier ?? "probable"] ?? 1;
+
 function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number {
   const byName = (a: WebLeadRow, b: WebLeadRow) => a.name.localeCompare(b.name);
-  if (sort === "name") return byName;
-  return (a, b) => {
+  // Trust ranks FIRST in every sort, including by name. A rep who sorts
+  // alphabetically is still better served dialling numbers we believe in
+  // before ones we have flagged.
+  const byTrustThen = (next: (a: WebLeadRow, b: WebLeadRow) => number) =>
+    (a: WebLeadRow, b: WebLeadRow) => {
+      const d = phoneRank(a) - phoneRank(b);
+      return d !== 0 ? d : next(a, b);
+    };
+  if (sort === "name") return byTrustThen(byName);
+  return byTrustThen((a, b) => {
     const aHas = a.score !== null;
     const bHas = b.score !== null;
     if (aHas !== bHas) return aHas ? -1 : 1;
@@ -562,7 +637,7 @@ function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number
       return sort === "score_desc" ? b.score! - a.score! : a.score! - b.score!;
     }
     return byName(a, b);
-  };
+  });
 }
 
 export async function fetchLead(id: string, viewer: Viewer): Promise<WebLead | null> {

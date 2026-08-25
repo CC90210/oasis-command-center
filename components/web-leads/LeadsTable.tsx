@@ -153,6 +153,7 @@
 import { useEffect, useRef } from "react";
 import { AlertCircle, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
+import { PhoneTierBadge } from "./PhoneTrust";
 import { OpenNowCell, useNow } from "./OpeningHours";
 import { LeadCards } from "./LeadCards";
 // ONE renderer per fact, shared with the card layout. See LeadCells.tsx: two
@@ -440,6 +441,14 @@ export function LeadsTable({
                     <span className="whitespace-nowrap tabular-nums text-fg-muted">{l.phone}</span>
                   ) : (
                     <span className="text-fg-faint">No number</span>
+                  )}
+
+                  {/* A rep scanning two hundred rows must see which numbers are
+                      flagged WITHOUT opening each one. */}
+                  {l.phone && l.phoneTier === "warned" && (
+                    <div className="mt-1">
+                      <PhoneTierBadge tier={l.phoneTier} />
+                    </div>
                   )}
                 </td>
                 <td className="w-[8rem] px-4 py-3 align-middle">

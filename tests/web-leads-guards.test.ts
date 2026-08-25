@@ -365,6 +365,12 @@ for (const view of [
   // (2026-08-24): the assertion failed as intended, and the classes were
   // reverted.
   "components/web-leads/OpeningHours.tsx",
+  // Added 2026-08-25 with the phone trust tiers. A red phone number is the
+  // single most tempting tint left in this feature and the most misleading:
+  // a rep who sees red hears "bad lead", when what we actually know is that
+  // ANOTHER business in our list claims the same number. That is a fact about
+  // our data, not a verdict on the business. Carried by a word and a shape.
+  "components/web-leads/PhoneTrust.tsx",
   // Added 2026-08-25 with the mobile card layout. These two are the reason the
   // extraction happened at all: WebsiteCell -- the ONE renderer that decides
   // whether a lead shows a number or an honest sentence -- lived inside
