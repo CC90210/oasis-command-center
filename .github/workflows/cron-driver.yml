@@ -140,7 +140,8 @@ jobs:
                       /api/cron/sync-tt-inbox?account=followup" ;;
             "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;
             "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
-            "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry" ;;
+            "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry
+                                      /api/cron/reconcile-website-sales-payments" ;;
             "0 */6 * * *")   ROUTES="/api/cron/tps-backlog-watch" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
             "0 6,18 * * *")  ROUTES="/api/cron/sync-sms-numbers" ;;

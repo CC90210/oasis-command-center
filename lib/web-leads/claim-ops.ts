@@ -77,6 +77,9 @@ export type ClaimResult = {
    *  `refused` because the rep DID try and the answer changed underneath them,
    *  which is a different sentence on screen. */
   lostRace: string[];
+  /** Claims that landed but whose interaction-ledger insert failed. Never
+   * hidden: the caller can surface the tracking problem to an operator. */
+  trackingFailed: string[];
   held: number;
   cap: number;
 };
@@ -94,7 +97,7 @@ export async function claimLeads(
   now: number,
 ): Promise<ClaimResult> {
   if (leadIds.length === 0) {
-    return { claimed: [], refused: [], lostRace: [], held: await heldCount(userId), cap: MAX_LEADS_PER_REP };
+    return { claimed: [], refused: [], lostRace: [], trackingFailed: [], held: await heldCount(userId), cap: MAX_LEADS_PER_REP };
   }
   const db = getServiceSupabase();
 
@@ -102,14 +105,14 @@ export async function claimLeads(
   // so this is the one read here that does not scan.
   const { data, error } = await db
     .from("tenant_records")
-    .select("id,data")
+    .select("id,data,updated_at")
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
     .in("id", leadIds);
   if (error) throw new Error(`claim_read_failed: ${error.message}`);
 
-  const rows = (data || []) as { id: string; data: Record<string, unknown> }[];
-  const byId = new Map(rows.map((r) => [r.id, r.data || {}]));
+  const rows = (data || []) as { id: string; data: Record<string, unknown>; updated_at: string }[];
+  const byId = new Map(rows.map((r) => [r.id, r]));
 
   // An id that came back with no row does not exist (or is outside this
   // tenant). Report it rather than dropping it: a rep who selected 60 and is
@@ -134,7 +137,8 @@ export async function claimLeads(
     const chunk = plan.granted.slice(i, i + CHUNK);
     const results = await Promise.allSettled(
       chunk.map((id) => {
-        const raw = byId.get(id) || {};
+        const source = byId.get(id);
+        const raw = source?.data || {};
         // The owner we OBSERVED, which is what the swap tests against.
         const prevOwner = factsFrom(raw).assignedTo;
         let q = db
@@ -142,7 +146,11 @@ export async function claimLeads(
           .update({ data: { ...raw, ...claimPatch(userId, nowIso) }, updated_at: nowIso })
           .eq("id", id)
           .eq("tenant_id", WEBDEV_TENANT_ID)
-          .eq("entity_type", "lead");
+          .eq("entity_type", "lead")
+          // The JSON document is replaced as a whole. Pin its row version as
+          // well as owner so a concurrent website/contact/enrichment edit is
+          // never overwritten by the snapshot this claim read moments ago.
+          .eq("updated_at", source?.updated_at || "");
         // THE SWAP. One statement, so the test and the write cannot be
         // separated by another request. `.is(col, null)` compiles to
         // `IS NULL` on both backends; `.eq` to an equality on the extracted
@@ -212,6 +220,42 @@ export async function claimLeads(
     }
   }
 
+  let trackingFailed: string[] = [];
+  if (claimed.length > 0) {
+    const interactions = claimed.map((id) => {
+      const previousStage = factsFrom(byId.get(id)?.data || {}).stage;
+      const content = `Lead claimed and moved ${previousStage || "prospect pool"} → assigned.`;
+      return {
+        tenant_id: WEBDEV_TENANT_ID,
+        lead_id: id,
+        type: "stage_changed",
+        channel: "system",
+        direction: "internal",
+        agent_source: "web_leads_claim",
+        actor_user_id: userId,
+        subject: "Lead claimed",
+        content,
+        content_preview: content,
+        created_at: nowIso,
+        metadata: {
+          action: "claim",
+          from: previousStage,
+          to: "assigned",
+          assigned_to: userId,
+        },
+      };
+    });
+    const tracking = await db.from("lead_interactions").insert(interactions);
+    if (tracking.error) {
+      console.error("[web-leads.claim] claims saved but interaction tracking failed", {
+        leadIds: claimed,
+        userId,
+        error: tracking.error.message,
+      });
+      trackingFailed = [...claimed];
+    }
+  }
+
   return {
     claimed,
     refused: [
@@ -224,6 +268,7 @@ export async function claimLeads(
       ...missing.map((id) => ({ id, reason: "held" as const })),
     ],
     lostRace,
+    trackingFailed,
     held: held + claimed.length,
     cap: MAX_LEADS_PER_REP,
   };
@@ -248,13 +293,13 @@ export async function releaseLeads(
 
   const { data, error } = await db
     .from("tenant_records")
-    .select("id,data")
+    .select("id,data,updated_at")
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("entity_type", "lead")
     .in("id", leadIds);
   if (error) throw new Error(`release_read_failed: ${error.message}`);
 
-  const rows = (data || []) as { id: string; data: Record<string, unknown> }[];
+  const rows = (data || []) as { id: string; data: Record<string, unknown>; updated_at: string }[];
   const nowIso = new Date().toISOString();
   const released: string[] = [];
   const refused: string[] = [];
@@ -287,6 +332,10 @@ export async function releaseLeads(
           // observed means a release can only ever release what we still hold.
           // (Codex review, 2026-08-23.)
           .eq("data->>assigned_to", prevOwner as string)
+          // Preserve any concurrent contact/context correction too. Owner can
+          // remain unchanged while another request fixes the website or note;
+          // replacing that newer JSON with this older snapshot would lose it.
+          .eq("updated_at", r.updated_at)
           .select("id");
       }),
     );

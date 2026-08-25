@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
-import { canManageTeam, getSessionContext } from "@/lib/team";
-import { getActivityFeed, KNOWN_ACTORS } from "@/lib/audit/activity-feed";
+import { canManageTeam, type TeamRole } from "@/lib/team";
+import { getActivityFeed } from "@/lib/audit/activity-feed";
+import { getActiveProfile, getTenant } from "@/lib/queries";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,23 +23,59 @@ export default async function AuditLogPage({
 }: {
   searchParams?: Promise<{ actor?: string }>;
 }) {
-  const ctx = await getSessionContext();
-  if (!ctx) redirect("/login?next=/settings/audit-log");
-  if (!(ctx.isOwner || canManageTeam(ctx.teamRole, ctx.adminAccess))) redirect("/settings");
+  // Use the exact profile resolver as /settings. A separate maybeSingle()
+  // lookup can select a different workspace for users with legacy duplicate
+  // profile rows, which is how a tenant-scoped page can still show the wrong
+  // tenant's activity despite every downstream query having an eq(tenant_id).
+  const profile = await getActiveProfile();
+  if (!profile?.tenant_id) redirect("/login?next=/settings/audit-log");
+  const accessProfile = profile as typeof profile & {
+    is_owner?: boolean | null;
+    team_role?: TeamRole | null;
+    admin_access?: boolean | null;
+  };
+  if (
+    !(
+      accessProfile.is_owner ||
+      canManageTeam(accessProfile.team_role || "member", accessProfile.admin_access === true)
+    )
+  ) {
+    redirect("/settings");
+  }
 
   const params = (await searchParams) || {};
-  const actor = typeof params.actor === "string" ? params.actor.trim() : "";
+  const actorFilter = typeof params.actor === "string" ? params.actor.trim() : "";
+  const [{ rows, actors, errors }, tenant] = await Promise.all([
+    getActivityFeed(profile.tenant_id, { actor: actorFilter, limit: 200 }),
+    getTenant(profile.tenant_id).catch(() => null),
+  ]);
+  const selectedActor = actors.find(
+    (candidate) =>
+      candidate.key === actorFilter ||
+      candidate.label.toLowerCase() === actorFilter.toLowerCase(),
+  );
+  const peopleCount = actors.filter((candidate) => candidate.type === "human").length;
+  const agentCount = actors.filter((candidate) => candidate.type === "agent").length;
+  const rosterSummary = [
+    peopleCount > 0
+      ? `${peopleCount} team member${peopleCount === 1 ? "" : "s"}`
+      : null,
+    agentCount > 0
+      ? `${agentCount} enabled agent${agentCount === 1 ? "" : "s"}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" and ");
+  const workspaceLabel = tenant?.name || "this workspace";
 
-  const { rows, errors } = await getActivityFeed(ctx.tenantId, { actor, limit: 200 });
-
-  const toneFor = (t: "human" | "agent" | "system") =>
-    t === "agent" ? "engaged" : t === "human" ? "info" : "warm";
+  const toneFor = (type: "human" | "agent" | "system") =>
+    type === "agent" ? "engaged" : type === "human" ? "info" : "warm";
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Activity Log"
-        subtitle="Read-only trail of who did what — your team (Matt, Jordan, Alex) and your agents (Helios, Solara): sends, automations, stage changes, chats, and team changes."
+        subtitle={`Read-only trail for ${workspaceLabel}${rosterSummary ? ` across ${rosterSummary}` : ""}: calls, messages, automations, stage changes, chats, and team changes.`}
         action={
           <Link href="/settings" className="btn-secondary text-xs">
             Back to settings
@@ -48,7 +85,7 @@ export default async function AuditLogPage({
 
       <Card
         title="Recent activity"
-        subtitle="Latest 200 actions across people and agents. Filter by actor below."
+        subtitle="Latest 200 actions for this workspace. Filter by a current team member or enabled agent."
         action={<Tag tone="engaged">Admin only</Tag>}
       >
         <div className="space-y-4">
@@ -56,22 +93,24 @@ export default async function AuditLogPage({
             <Link
               href="/settings/audit-log"
               className={`rounded-md border px-2 py-1 text-[11px] font-bold ${
-                actor ? "border-bg-border text-fg-muted" : "border-accent text-accent bg-accent/10"
+                actorFilter
+                  ? "border-bg-border text-fg-muted"
+                  : "border-accent text-accent bg-accent/10"
               }`}
             >
               All
             </Link>
-            {KNOWN_ACTORS.map((name) => (
+            {actors.map((actor) => (
               <Link
-                key={name}
-                href={`/settings/audit-log?actor=${encodeURIComponent(name)}`}
+                key={actor.key}
+                href={`/settings/audit-log?actor=${encodeURIComponent(actor.key)}`}
                 className={`rounded-md border px-2 py-1 text-[11px] font-bold ${
-                  actor === name
+                  selectedActor?.key === actor.key
                     ? "border-accent text-accent bg-accent/10"
                     : "border-bg-border text-fg-muted"
                 }`}
               >
-                {name}
+                {actor.label}
               </Link>
             ))}
           </div>
@@ -85,9 +124,11 @@ export default async function AuditLogPage({
           {rows.length === 0 ? (
             <EmptyState
               message={
-                actor
-                  ? `No recorded activity for ${actor} yet.`
-                  : "No activity recorded yet."
+                selectedActor
+                  ? `No recorded activity for ${selectedActor.label} yet.`
+                  : actorFilter
+                    ? "That actor is not part of this workspace."
+                    : "No activity recorded yet."
               }
             />
           ) : (

@@ -62,6 +62,9 @@ const OUTCOMES: { key: CallOutcome; label: string; digit: string }[] = [
   { key: "not_interested", label: "Not interested", digit: "4" },
 ];
 
+// Mirrors the server contract without value-importing its server-only module.
+const MAX_CALL_NOTE_LENGTH = 4000;
+
 /** A keyboard hint rendered as a key cap, so the shortcut is discoverable
  *  without a help screen -- reps learn these in the first ten calls. */
 function Key({ children }: { children: React.ReactNode }) {
@@ -187,9 +190,14 @@ export function CallMode({
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<CallOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [lastLogged, setLastLogged] = useState<{ label: string; business: string } | null>(null);
+  const [lastLogged, setLastLogged] = useState<{
+    label: string;
+    business: string;
+    trackingWarning: boolean;
+  } | null>(null);
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const exitRef = useRef<HTMLButtonElement>(null);
+  const submissionRef = useRef<{ signature: string; requestId: string } | null>(null);
 
   // A NEW queue starts at the top. Without this, "load the next 50" leaves the
   // cursor at 50 -- past the end of the fresh array -- so the rep lands on the
@@ -201,6 +209,7 @@ export function CallMode({
     setI(0);
     setNote("");
     setError(null);
+    submissionRef.current = null;
   }, [queueKey]);
 
   // Nothing resolves to a lead until the leads on screen belong to this queue
@@ -215,40 +224,81 @@ export function CallMode({
   const next = useCallback(() => {
     setNote("");
     setError(null);
+    submissionRef.current = null;
     setI((n) => n + 1);
   }, []);
 
   const prev = useCallback(() => {
     setNote("");
     setError(null);
+    submissionRef.current = null;
     setI((n) => Math.max(0, n - 1));
   }, []);
 
   const log = useCallback(
     async (outcome: CallOutcome) => {
       if (!lead || pending) return;
+      const trimmedNote = note.trim();
+      if (outcome === "not_interested" && !trimmedNote) {
+        setError("Add the reason before logging Not interested.");
+        noteRef.current?.focus();
+        return;
+      }
+      if (trimmedNote.length > MAX_CALL_NOTE_LENGTH) {
+        setError(`Keep the call note to ${MAX_CALL_NOTE_LENGTH.toLocaleString()} characters or fewer.`);
+        noteRef.current?.focus();
+        return;
+      }
       setPending(outcome);
       setError(null);
       const business = lead.name;
       const label = OUTCOMES.find((o) => o.key === outcome)?.label || outcome;
+      const signature = JSON.stringify([lead.id, outcome, trimmedNote]);
+      const requestId =
+        submissionRef.current?.signature === signature
+          ? submissionRef.current.requestId
+          : crypto.randomUUID();
+      submissionRef.current = { signature, requestId };
       try {
         const r = await fetch(`/api/web-leads/${encodeURIComponent(lead.id)}/outcome`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ outcome, note: note.trim() || undefined }),
+          body: JSON.stringify({ outcome, note: trimmedNote || undefined, requestId }),
         });
+        const body = await r.json().catch(() => ({})) as {
+          error?: string;
+          trackingWarning?: string | null;
+          retrySafe?: boolean;
+          saved?: { outcomeSaved?: boolean; stageSaved?: boolean; leadContextSaved?: boolean; touchSaved?: boolean; trackingSaved?: boolean };
+        };
         if (!r.ok) {
           // Do NOT advance on a failed write. Advancing here would lose the
           // call silently: the rep saw the queue move, so they believe it was
           // recorded, and nothing was. Staying put with a visible error is the
           // only honest behaviour.
-          setError("Could not log that. The call was not recorded, try again.");
+          if (r.status < 500 || body.retrySafe === false) submissionRef.current = null;
+          setError(
+            body.error === "reason_required"
+              ? "Add the reason before logging Not interested."
+              : body.error === "note_too_long"
+                ? `Keep the call note to ${MAX_CALL_NOTE_LENGTH.toLocaleString()} characters or fewer.`
+                : body.error === "tracking_failed"
+                  ? "The call and Pipeline update are saved, but its timeline entry is not. Try again; this retry will repair it without duplicating the call."
+                  : body.error === "ownership_changed"
+                    ? "The call was saved, but this lead changed owners before every update finished. Refresh the queue."
+                  : body.saved?.outcomeSaved
+                  ? "The call was saved, but Pipeline is not fully updated. Try again; this retry will not duplicate it."
+                  : body.error === "request_id_conflict"
+                    ? "This retry no longer matches the saved call. Refresh before logging again."
+                    : "Could not confirm the call. Try again with the same details; it will not duplicate it.",
+          );
           return;
         }
-        setLastLogged({ label, business });
+        submissionRef.current = null;
+        setLastLogged({ label, business, trackingWarning: Boolean(body.trackingWarning) });
         next();
       } catch {
-        setError("Could not log that. The call was not recorded, try again.");
+        setError("Could not confirm whether the server finished. Try again with the same details; it will not duplicate the call.");
       } finally {
         setPending(null);
       }
@@ -339,9 +389,16 @@ export function CallMode({
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-semibold text-fg-muted">{queueLabel}</p>
             {lastLogged && (
-              <p className="mt-0.5 truncate text-[11px] text-fg-dim">
-                Logged <span className="text-fg-muted">{lastLogged.label}</span> for {lastLogged.business}
-              </p>
+              <>
+                <p className="mt-0.5 truncate text-[11px] text-fg-dim">
+                  Logged <span className="text-fg-muted">{lastLogged.label}</span> for {lastLogged.business}
+                </p>
+                {lastLogged.trackingWarning && (
+                  <p className="mt-0.5 truncate text-[11px] text-amber-300">
+                    Lead updated; its timeline entry was not recorded.
+                  </p>
+                )}
+              </>
             )}
           </div>
 
@@ -483,12 +540,13 @@ export function CallMode({
               ref={noteRef}
               value={note}
               onChange={(e) => setNote(e.target.value)}
+              maxLength={MAX_CALL_NOTE_LENGTH}
               rows={3}
-              placeholder="Note for this call (optional)"
+              placeholder="Call note (required for Not interested)"
               className="mt-3 w-full resize-y rounded-lg border border-bg-border bg-bg-deep px-3 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
             />
             <p className="mt-1.5 text-[11px] text-fg-dim">
-              <Key>N</Key> jumps here. Logging an outcome moves you to the next lead.
+              <Key>N</Key> jumps here. A reason is required for Not interested. Logging moves to the next lead.
             </p>
 
             {error && <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200">{error}</p>}

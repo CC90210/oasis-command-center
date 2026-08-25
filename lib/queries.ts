@@ -177,6 +177,7 @@ export async function getTenantBridgeStatus(tenantId: string | null): Promise<{
           .from("user_profiles")
           .select("display_name, full_name")
           .eq("auth_user_id", row.user_id)
+          .eq("tenant_id", tenantId)
           .maybeSingle();
         const pd = p.data as
           | { display_name?: string | null; full_name?: string | null }

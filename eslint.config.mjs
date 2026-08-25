@@ -33,6 +33,14 @@ const eslintConfig = [
     },
   },
   {
+    files: ["**/*.cjs"],
+    rules: {
+      // CommonJS preload hooks use require by definition; the TypeScript ESM
+      // rule is inapplicable to this file type.
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
     ignores: [
       "node_modules/**",
       ".next/**",

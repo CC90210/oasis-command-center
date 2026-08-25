@@ -38,7 +38,7 @@ const SORTS: { key: LeadSort; label: string }[] = [
 
 export function LeadsToolbar({
   filters, onChange, total, loading, queryDraft, onQueryDraft, onStartCalling, canStartCalling,
-  selectedCount, onClaim, claiming, claimLabel,
+  selectedCount, onClaim, claiming, claimLabel, canMutate,
 }: {
   filters: WebLeadFilters;
   onChange: (f: WebLeadFilters) => void;
@@ -55,6 +55,9 @@ export function LeadsToolbar({
   onClaim: () => void;
   claiming: boolean;
   claimLabel: string;
+  /** Server-resolved sales mutation capability. Read-only viewers keep every
+   *  targeting/read control but never receive claim or call affordances. */
+  canMutate: boolean;
 }) {
   // Every control resets to page 1: changing what you are looking at while
   // staying on page 8 of the previous result set shows a rep an arbitrary
@@ -152,7 +155,7 @@ export function LeadsToolbar({
               lead{total === 1 ? "" : "s"}
             </p>
           )}
-          {selectedCount > 0 && (
+          {canMutate && selectedCount > 0 && (
             <button
               type="button"
               onClick={onClaim}
@@ -163,14 +166,16 @@ export function LeadsToolbar({
               {claimLabel} {selectedCount}
             </button>
           )}
-          <button
-            type="button"
-            onClick={onStartCalling}
-            disabled={!canStartCalling}
-            className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-4 py-2 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.45)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-40"
-          >
-            <Phone className="h-4 w-4" />Start calling
-          </button>
+          {canMutate && (
+            <button
+              type="button"
+              onClick={onStartCalling}
+              disabled={!canStartCalling}
+              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-4 py-2 text-sm font-bold text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_8px_20px_-8px_rgba(59,130,246,0.45)] transition-[filter] hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-40"
+            >
+              <Phone className="h-4 w-4" />Start calling
+            </button>
+          )}
         </div>
       </div>
 

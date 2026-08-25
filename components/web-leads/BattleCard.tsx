@@ -449,9 +449,18 @@ function NotScored({ audit }: { audit: AuditResult }) {
  * Embedded only changes CHROME, never content: it drops the full-viewport
  * background (it sits inside a page that already has one) and the "Back to
  * leads" link (that page has its own "Back to pipeline", and sending a rep from
- * the pipeline to the leads pool is the wrong door).
+ * the pipeline to the leads pool is the wrong door). `canMutate` is orthogonal
+ * and stays required -- whether a viewer may WRITE is not a layout question.
  */
-export function BattleCard({ leadId, embedded = false }: { leadId: string; embedded?: boolean }) {
+export function BattleCard({
+  leadId,
+  canMutate,
+  embedded = false,
+}: {
+  leadId: string;
+  canMutate: boolean;
+  embedded?: boolean;
+}) {
   const [state, setState] = useState<Fetched>({ status: "loading" });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
@@ -505,7 +514,7 @@ export function BattleCard({ leadId, embedded = false }: { leadId: string; embed
 
   return (
     <div className={embedded ? "" : "min-h-screen bg-bg"}>
-      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} embedded={embedded} />
+      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
       <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
         {/* FIRST PANEL ON THE PAGE, ABOVE EVERY CHART, and deliberately not
             behind a disclosure. A rep confirms who they are calling before
@@ -546,7 +555,7 @@ export function BattleCard({ leadId, embedded = false }: { leadId: string; embed
               would be a second place for that rule to drift. It brings its own
               "Log this call" heading, so this panel deliberately does not add
               a second one above it. */}
-          <CallOutcomeLog leadId={leadId} />
+          <CallOutcomeLog leadId={leadId} canMutate={canMutate} />
         </Panel>
       </div>
     </div>
@@ -592,13 +601,14 @@ function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
  * one sentence that makes the score mean something.
  */
 function Hero({
-  lead, audit, competitors, drawn, reduced, embedded = false,
+  lead, audit, competitors, drawn, reduced, canMutate, embedded = false,
 }: {
   lead: WebLead;
   audit: AuditResult;
   competitors: CompetitorContext | null;
   drawn: boolean;
   reduced: boolean;
+  canMutate: boolean;
   embedded?: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
@@ -627,13 +637,15 @@ function Hero({
               {[lead.industry, fullAddress(lead)].filter(Boolean).join(" · ") || "No location on file"}
             </p>
             <div className="mt-5 flex flex-wrap gap-2.5">
-              {lead.phone ? (
+              {lead.phone && canMutate ? (
                 <a
                   href={`tel:${lead.phone}`}
                   className="inline-flex items-center gap-2.5 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 py-3 text-base font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter,transform] hover:brightness-110 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none"
                 >
                   <Phone className="h-4 w-4" />{lead.phone}
                 </a>
+              ) : lead.phone ? (
+                <p className="rounded-lg border border-bg-border px-5 py-3 text-base tabular-nums text-fg-muted">{lead.phone}</p>
               ) : (
                 <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">No phone number on file</p>
               )}

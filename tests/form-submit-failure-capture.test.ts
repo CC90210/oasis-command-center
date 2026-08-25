@@ -24,7 +24,13 @@ import { evaluate } from "../lib/health/checks-core";
       statement: { inline_base64: "x".repeat(1000), filename: "jan.pdf", mime_type: "application/pdf", size_bytes: 12345 },
       nested: [{ inline_base64: "y", filename: "feb.pdf" }],
     },
-  }) as Record<string, any>;
+  }) as {
+    payload: {
+      email: string;
+      statement: { stripped_file: boolean; filename: string; inline_base64?: string };
+      nested: Array<{ stripped_file: boolean }>;
+    };
+  };
   assert.equal(out.payload.email, "a.b@c.com", "answers survive");
   assert.equal(out.payload.statement.stripped_file, true, "file bytes do not");
   assert.equal(out.payload.statement.filename, "jan.pdf", "file identity survives");
@@ -56,21 +62,29 @@ import { evaluate } from "../lib/health/checks-core";
 }
 
 // ── forms.submit_failures_open: open rows keep the system red ──────────────
-function fakeDb(result: { error: unknown; count: number | null }) {
-  const chain: any = {
-    select: () => chain,
-    is: () => chain,
-    gte: () => chain,
-    lt: () => chain,
-    then: (res: (v: unknown) => unknown) => Promise.resolve(result).then(res),
-  };
-  return { from: () => chain } as any;
-}
-
 const check = FORM_CHECKS.find((c) => c.id === "forms.submit_failures_open");
 assert.ok(check, "the dead-letter check must exist");
 assert.equal(check!.severity, "critical");
 assert.equal(check!.rule.kind, "must_be_zero", "one blocked application is one too many");
+
+type ObserveDb = Parameters<(typeof check)["observe"]>[0];
+type FakeQuery = {
+  select: () => FakeQuery;
+  is: () => FakeQuery;
+  gte: () => FakeQuery;
+  lt: () => FakeQuery;
+  then: (resolve: (value: { error: unknown; count: number | null }) => unknown) => Promise<unknown>;
+};
+
+function fakeDb(result: { error: unknown; count: number | null }): ObserveDb {
+  const chain = {} as FakeQuery;
+  chain.select = () => chain;
+  chain.is = () => chain;
+  chain.gte = () => chain;
+  chain.lt = () => chain;
+  chain.then = (resolve) => Promise.resolve(result).then(resolve);
+  return { from: () => chain } as unknown as ObserveDb;
+}
 
 // tsx compiles tests as CJS, so the async observe assertions run in an IIFE
 // that fails the process loudly — a rejected promise must never read as green.

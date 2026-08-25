@@ -29,6 +29,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getEntityDefinition } from "@/lib/import/entities";
 import { importRowsForTenant } from "@/lib/import/service";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -100,6 +101,9 @@ export async function POST(
     dedupBy,
     defaultSource,
     dryRun,
+    // Decides whether website columns classify the lead onto the
+    // website-sales board, or are just detail on a funding application.
+    tenantSlug: await resolveOwnedSlug(profile.tenant_id),
   });
 
   if (!result.ok) {

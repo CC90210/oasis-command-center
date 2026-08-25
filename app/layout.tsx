@@ -20,6 +20,7 @@ import {
 } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 import { matchesPathPrefix } from "@/lib/path-prefix";
@@ -88,6 +89,7 @@ export default async function RootLayout({
 
   let profile = null;
   let primaryAgentLive = false;
+  let resolvedPrimaryAgent: string | null = null;
   let bridgeOnline = false;
   let tenantProfileSlug: string | null = null;
   let demoProfileSlug: string | null = null;
@@ -173,9 +175,10 @@ export default async function RootLayout({
     // tenant's heartbeat — cross-tenant signal leak. Fall back to the
     // manifest's primary slug (or first enabled) when the column is invalid.
     const manifestForAgent = await getTenantManifestForUser(tenantId);
-    const manifestEnabledForAgent = (manifestForAgent?.agents || [])
-      .filter((a) => a.enabled)
-      .map((a) => a.slug.toLowerCase());
+    const manifestEnabledForAgent = resolveEnabledAgentSlugs({
+      manifestAgents: manifestForAgent ? manifestForAgent.agents || [] : null,
+      legacyProfileAgents: profile?.agents_enabled,
+    });
     const requestedAgent = (profile?.primary_agent || "").toLowerCase();
     const manifestPrimary = manifestForAgent?.agents?.find(
       (a) => a.primary && a.enabled,
@@ -183,6 +186,7 @@ export default async function RootLayout({
     const agent = manifestEnabledForAgent.includes(requestedAgent)
       ? requestedAgent
       : (manifestPrimary || manifestEnabledForAgent[0] || requestedAgent || "bravo");
+    resolvedPrimaryAgent = agent;
 
     // Resolve the operator's tenant slug FIRST so the path-override gate
     // below can share the same access policy the /t/[slug] page uses
@@ -415,7 +419,7 @@ export default async function RootLayout({
                 // the operator is previewing a tenant they don't own.
                 (demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug))
                   ? (manifestPrimaryAgentSlug(manifest) ?? "bravo")
-                  : (profile?.primary_agent || manifestPrimaryAgentSlug(manifest) || "bravo")
+                  : (resolvedPrimaryAgent || manifestPrimaryAgentSlug(manifest) || "bravo")
               }
               primaryAgentLive={
                 // Suppress the live indicator in preview mode — it

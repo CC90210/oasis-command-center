@@ -24,6 +24,9 @@ import { canWriteCrm } from "@/lib/role-gates";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { findExistingLead } from "@/lib/forms/agent-routing";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
+import { isWebsiteSalesTenantSlug, OASIS_INTAKE_STAGE } from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -65,9 +68,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "business_name_required" }, { status: 400 });
   }
   const contactName = typeof body.contact_name === "string" ? body.contact_name.trim().slice(0, 200) : "";
-  const stage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : DEFAULT_STAGE;
-  if (!LEAD_PIPELINE_STAGES.some((s) => s.key === stage)) {
-    return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
+  // The default is SunBiz's own ("sent_application"), which is not a stage on
+  // the OASIS board — so the fallback has to follow the tenant too, or an
+  // OASIS quick-add with no explicit stage would fail its own validation.
+  const quickAddSlug = await resolveOwnedSlug(sess.tenantId);
+  const isWebsiteSalesWorkspace = isWebsiteSalesTenantSlug(quickAddSlug);
+  const defaultStage = isWebsiteSalesWorkspace ? OASIS_INTAKE_STAGE : DEFAULT_STAGE;
+  const stage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : defaultStage;
+  // The vocabulary this tenant speaks. An OASIS operator quick-adding a lead
+  // at a real OASIS stage was rejected as invalid_stage because only SunBiz
+  // keys were listed; accepting both everywhere would instead let a SunBiz
+  // caller create a lead in a stage its board cannot render.
+  const allowedStages = isWebsiteSalesWorkspace ? OASIS_LEAD_STAGES : LEAD_PIPELINE_STAGES;
+  if (!allowedStages.some((s) => s.key === stage)) {
+    return NextResponse.json(
+      { ok: false, error: "invalid_stage", message: `"${stage}" isn't a stage on this pipeline.` },
+      { status: 400 },
+    );
   }
 
   const email = normEmail(body.email);

@@ -90,6 +90,56 @@ export type Interval = { start: number; end: number };
 export type OpenState = "open" | "closed" | "unknown";
 
 // ---------------------------------------------------------------------------
+// Where the hours came from.
+// ---------------------------------------------------------------------------
+
+/**
+ * Provenance, shown to the rep rather than kept in a column nobody reads.
+ *
+ * Two collectors feed this. OpenStreetMap's `opening_hours` tag is a curated
+ * directory value. The website re-fetch reads the business's OWN page, and
+ * within that there is a real difference in confidence: a schema.org
+ * `openingHoursSpecification` is machine-readable and was written to be parsed,
+ * whereas a line lifted out of visible page text was written to be looked at by
+ * a human and might be a seasonal notice, a sister location, or a kitchen's
+ * hours rather than the shop's.
+ *
+ * A rep is about to say this out loud to a stranger. They get to know which
+ * kind of evidence they are holding, so `weak` is carried through to the screen
+ * instead of being flattened into one confident-looking line.
+ */
+export type HoursSourceKey = "osm" | "site-jsonld" | "site-microdata" | "site-text";
+
+export type HoursSource = {
+  key: HoursSourceKey;
+  /** Reads inside a sentence: "Hours from <label>." */
+  label: string;
+  /** True when the value came out of prose rather than structured markup. */
+  weak: boolean;
+};
+
+const HOURS_SOURCES: Record<HoursSourceKey, { label: string; weak: boolean }> = {
+  osm: { label: "the OpenStreetMap public directory", weak: false },
+  "site-jsonld": { label: "this business's own website, from its structured data", weak: false },
+  "site-microdata": { label: "this business's own website, from its structured data", weak: false },
+  "site-text": { label: "this business's own website, read off the page", weak: true },
+};
+
+/**
+ * Decode the stored source key, or null.
+ *
+ * Null for anything unrecognised rather than a guess: an unknown key means a
+ * collector we do not know the confidence of, and inventing a label for it is
+ * how a weak value ends up presented as a strong one.
+ */
+export function readHoursSource(value: unknown): HoursSource | null {
+  if (typeof value !== "string") return null;
+  const key = value.trim().toLowerCase();
+  const hit = HOURS_SOURCES[key as HoursSourceKey];
+  return hit ? { key: key as HoursSourceKey, label: hit.label, weak: hit.weak } : null;
+}
+
+// ---------------------------------------------------------------------------
 // Province -> IANA time zone.
 // ---------------------------------------------------------------------------
 
@@ -472,7 +522,12 @@ export function callWindowState(clock: LocalClock | null): CallWindow {
   return {
     allowed: false,
     window,
-    reason: `It is ${clock.label} where this business is. Calls are permitted ${window}.`,
+    // "Canadian telemarketing rules" and not a bare "calls are permitted".
+    // This sentence sits near a business's own hours, and the operator read an
+    // unattributed legal window as a claim about the PROSPECT: identical times
+    // on every card, in the place a rep looks for that shop's hours, reads as
+    // invented data. Naming whose rule it is makes it unmistakably about us.
+    reason: `It is ${clock.label} where this business is. Canadian telemarketing rules permit calls ${window}.`,
   };
 }
 
@@ -489,6 +544,8 @@ export type LeadHours = {
   clock: LocalClock | null;
   stored: StoredHours | null;
   raw: string | null;
+  /** Where the hours came from, or null when we hold none. */
+  source: HoursSource | null;
   state: OpenState;
   /** The single line a rep reads: "Open now", "Closed now", "Hours unknown". */
   headline: string;
@@ -505,6 +562,7 @@ export function leadHours(
     openingHours: unknown;
     openingHoursRaw: string | null;
     openingHoursCheckedAt?: string | null;
+    openingHoursSource?: unknown;
   },
   now: Date,
 ): LeadHours {
@@ -513,6 +571,11 @@ export function leadHours(
   const clock = localClock(tz, now);
   const stored = readStoredHours(input.openingHours);
   const raw = input.openingHoursRaw && input.openingHoursRaw.trim() ? input.openingHoursRaw.trim() : null;
+  // Provenance is only meaningful when we actually hold something. A source key
+  // sitting on a lead with no hours would render "Hours from their website"
+  // under a sentence saying we have no hours, which is the same class of
+  // confusing-but-confident output this whole change exists to remove.
+  const source = stored || raw ? readHoursSource(input.openingHoursSource) : null;
   const state = openState(stored, clock);
   const next = nextTransition(stored, clock);
 
@@ -545,8 +608,14 @@ export function leadHours(
       detail = `We hold opening hours for this business but could not read them reliably, so they are shown exactly as recorded. Confirm on the call.`;
     } else if (!tz) {
       detail = "No province on file, so we cannot work out the local time where this business is. Confirm the hours on the call.";
+    } else if (!input.openingHoursCheckedAt) {
+      // "Nobody has looked" and "we looked and found nothing" are different
+      // facts and a rep acts on them differently. Collapsing them into one
+      // sentence is how a gap in OUR collection gets read as a fact about the
+      // business.
+      detail = "Nobody has checked this business's hours yet. Ask when they open.";
     } else {
-      detail = "The directory has no opening hours for this business. Confirm on the call.";
+      detail = "We looked and found no published hours for this business. Ask when they open.";
     }
   }
 
@@ -556,6 +625,7 @@ export function leadHours(
     clock,
     stored,
     raw,
+    source,
     state,
     headline,
     detail,

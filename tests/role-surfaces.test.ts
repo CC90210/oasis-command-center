@@ -475,8 +475,8 @@ const pipelineCode = stripComments(pipelinePage);
  * were ever applied to the raw rows instead, it would become a way to look
  * sideways at a colleague's book. */
 assert.ok(
-  /workingRows = scopedRows\.filter/.test(pipelineCode) &&
-    /repScopedRows = repFilter\s*\?\s*workingRows\.filter/.test(pipelineCode),
+  /assigneeScope = resolveOasisPipelineAssigneeScope\(\{[\s\S]*?isAdmin: pipelineAdmin,[\s\S]*?userId: session\.ok \? session\.userId : null,[\s\S]*?repFilter,/.test(pipelineCode) &&
+    /listOasisPipelineWindow\(\{[\s\S]*?stageKeys: assigneeScope\.allowed \? stages\.map[\s\S]*?assignedTo: assigneeScope\.allowed \? assigneeScope\.assignedTo : undefined,/.test(pipelineCode),
   "THE SCOPING CHAIN. scopedRows is what filterWebsiteSalesRows already reduced to this " +
     "viewer; workingRows drops the researched pool from THAT; the rep chips filter THAT. " +
     "Every link must narrow the previous one — if any step reached back to namedRows or " +
@@ -490,7 +490,7 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /session\.ok && session\.isAdmin \? await buildMemberNameMap/.test(pipelineCode),
+  /session\.ok && pipelineAdmin \? await buildMemberNameMap/.test(pipelineCode),
   "the roster behind the chips is built for admins only: a rep does not need a list of " +
     "colleagues whose boards they cannot open",
 );
@@ -548,10 +548,25 @@ assert.equal(personaMayVisit("builder", "/automations"), false, "never the autom
 assert.equal(personaMayVisit("builder", "/operations"), false, "never the internal ops surface");
 assert.equal(personaMayVisit("builder", "/settings"), false);
 assert.equal(personaMayVisit("builder", "/founders/marketing"), true);
+assert.ok(
+  /viewerUserId=\{surface\.userId\}/.test(dispatcherCode),
+  "the Today dispatcher must pass the authenticated user id into the delivery queue",
+);
+assert.ok(
+  /resolveOasisDeliveryQueueScope\(teamRole, viewerUserId\)/.test(deliveryCode),
+  "DeliveryToday must resolve a builder-only ownership scope before it reads any stage",
+);
+assert.ok(
+  /where:\s*\{\s*stage,\s*assigned_to:\s*scope\.userId\s*\}/.test(deliveryCode) &&
+    /where:\s*\{\s*stage,\s*fulfillment_owner_id:\s*scope\.userId\s*\}/.test(deliveryCode),
+  "a builder queue must be narrowed in Turso by assigned_to OR fulfillment_owner_id; " +
+    "filtering a tenant-wide result in memory still leaks every client into the server payload",
+);
 
 /* The board must not render the raw prospect pool as pipeline work. */
 assert.ok(
-  /workingRows/.test(pipelineCode) && /researched/.test(pipelineCode),
+  /\.filter\(\(stage\) => stage\.key !== "researched"\)/.test(pipelineCode) &&
+    /stageKeys: assigneeScope\.allowed \? stages\.map/.test(pipelineCode),
   "the pipeline must exclude the researched stage — those are un-worked directory rows, " +
     "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",
 );

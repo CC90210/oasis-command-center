@@ -26,9 +26,12 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { declineLeadToApplication } from "@/lib/applications/decline-lead";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
+import { canViewLead } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
+import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { SUNBIZ_EMAIL_TEMPLATES, renderSunbizTemplate } from "@/lib/sunbiz-templates-library";
 import { runBlast, resolveLeadsAudience, renderTemplate, getDefaultSender } from "@/lib/integrations/constant-contact/blast";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
@@ -59,7 +62,7 @@ const INSERT_CHUNK = 50;
 
 const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 
-type Outcome = { updated: number; skipped: number; failed: number };
+type Outcome = { updated: number; skipped: number; failed: number; trackingFailed: number };
 
 export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
@@ -108,9 +111,24 @@ export async function POST(req: NextRequest) {
   }
 
   const db = getServiceSupabase();
-  const out: Outcome = { updated: 0, skipped: 0, failed: 0 };
+  const out: Outcome = { updated: 0, skipped: 0, failed: 0, trackingFailed: 0 };
 
   if (op === "assign") {
+    const bulkTenantSlug = await resolveOwnedSlug(tenantId);
+    if (!bulkTenantSlug) {
+      return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+    }
+    const isOasisBulkWorkspace = isWebsiteSalesTenantSlug(bulkTenantSlug);
+    if (isOasisBulkWorkspace && !sess.isAdmin) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_individual_sales_workflow",
+          message: "Transfer OASIS leads one at a time so ownership and attribution stay auditable.",
+        },
+        { status: 409 },
+      );
+    }
     // CRM-write authorization (2026-07-07, CC directive). Bulk-assign is core CRM
     // work for any non-read_only member on any tenant lead — matching single
     // /assign. Checked ONCE, before any record work, so read_only gets a clean 403
@@ -156,6 +174,7 @@ export async function POST(req: NextRequest) {
         out.skipped += 1;
         continue;
       }
+      const occurredAt = new Date().toISOString();
       const upd = await assignLifecycleOwner({
         tenantId,
         record: existing.data as {
@@ -164,36 +183,36 @@ export async function POST(req: NextRequest) {
           data: Record<string, unknown>;
         },
         assignedTo: nextAssignedTo,
+        occurredAt,
       });
       if (!upd.ok) {
         out.failed += 1;
         continue;
       }
       out.updated += 1;
-      try {
-        const note = nextAssignedTo
-          ? `Reassigned to ${nextAssignedTo} by ${sess.email || "an admin"} (bulk).`
-          : `Assignment cleared by ${sess.email || "an admin"} (bulk).`;
-        await db.from("lead_interactions").insert({
-          tenant_id: tenantId,
-          lead_id: id,
-          type: "lead_reassigned",
-          channel: "system",
-          direction: "outbound",
-          agent_source: "dashboard_bulk_assign",
-          subject: "Lead reassigned",
-          content: note,
-          content_preview: note,
-          metadata: {
-            assigned_to: nextAssignedTo,
-            assigned_by: sess.userId,
-            entity_type: (existing.data as { entity_type?: string }).entity_type,
-            bulk: true,
-          },
-        });
-      } catch {
-        /* best-effort audit */
-      }
+      const note = nextAssignedTo
+        ? `Reassigned to ${nextAssignedTo} by ${sess.email || "an admin"} (bulk).`
+        : `Assignment cleared by ${sess.email || "an admin"} (bulk).`;
+      const interaction = await db.from("lead_interactions").insert({
+        tenant_id: tenantId,
+        lead_id: id,
+        type: "lead_reassigned",
+        channel: "system",
+        direction: "internal",
+        agent_source: "dashboard_bulk_assign",
+        actor_user_id: sess.userId,
+        subject: "Lead reassigned",
+        content: note,
+        content_preview: note,
+        created_at: occurredAt,
+        metadata: {
+          assigned_to: nextAssignedTo,
+          assigned_by: sess.userId,
+          entity_type: (existing.data as { entity_type?: string }).entity_type,
+          bulk: true,
+        },
+      });
+      if (interaction.error) out.trackingFailed += 1;
     }
     return NextResponse.json({ ok: true, op, ...out });
   }
@@ -232,10 +251,19 @@ export async function POST(req: NextRequest) {
     // fact being delivered (Adon, 2026-08-20).
     //
     // The v2 agent_source keeps the legacy VPS send_gateway OFF these rows.
+    if (!sess.isAdmin && !canWriteCrm(sess.teamRole)) {
+      return NextResponse.json(
+        { ok: false, error: "forbidden_role", message: "Your role can't send bulk email." },
+        { status: 403 },
+      );
+    }
+
     const emailEntity = body.entity === "application" ? "application" : "lead";
-    const scoping = leadScopingEnabled();
     const viewer = { isAdmin: sess.isAdmin, userId: sess.userId };
-    const canAct = (data: Record<string, unknown>) => canViewLead(viewer, data, scoping, "isolate");
+    const canAct = (data: Record<string, unknown>) =>
+      canViewLead(viewer, data, true, "isolate") &&
+      (emailEntity === "lead" ||
+        (typeof data.lead_id === "string" && UUID_RE.test(data.lead_id)));
 
     // Batched fetch. A blast is thousands of rows; one round-trip per lead
     // would blow the request budget long before the queue was full.
@@ -295,15 +323,6 @@ export async function POST(req: NextRequest) {
     let templateId: string | null = null;
 
     if (isCustom) {
-      // Writing free-form merchant-facing copy is a CRM-write action. The
-      // template path is constrained to pre-approved copy; this one is not,
-      // so it carries the role gate the template path doesn't need.
-      if (!canWriteCrm(sess.teamRole)) {
-        return NextResponse.json(
-          { ok: false, error: "forbidden_role", message: "Read-only members can't send email." },
-          { status: 403 },
-        );
-      }
       const valid = validateCustomMessage(custom as { subject?: unknown; body?: unknown });
       if (!valid.ok) {
         return NextResponse.json(
@@ -380,6 +399,9 @@ export async function POST(req: NextRequest) {
     let blockedAfterMerge = 0;
 
     for (const r of cls.eligible) {
+      const recordData = byId.get(r.id)?.data || {};
+      const canonicalLeadId =
+        emailEntity === "lead" ? r.id : String(recordData.lead_id || "").trim();
       const { subject, body: rendered } = renderFor(r);
       // Merge values are MERCHANT-SUPPLIED data, so the copy that actually goes
       // out is not the copy the pre-render guard saw. A business name can
@@ -399,7 +421,10 @@ export async function POST(req: NextRequest) {
       }
       queueRows.push({
         tenant_id: tenantId,
-        lead_id: r.id,
+        // Applications point back to their originating lead. The interaction
+        // belongs on that lead's timeline so Turso's insert trigger can update
+        // the canonical Last Touch in the SAME transaction as this queue row.
+        lead_id: canonicalLeadId,
         type: "email_queued",
         channel: "email",
         direction: "outbound",
@@ -409,6 +434,7 @@ export async function POST(req: NextRequest) {
         content: rendered.slice(0, 32000),
         content_preview: rendered.slice(0, 1024),
         to_email: r.toEmail,
+        created_at: new Date().toISOString(),
         metadata: {
           requested_by_email: sess.email,
           acted_by_user_id: sess.userId,
@@ -417,6 +443,7 @@ export async function POST(req: NextRequest) {
           custom_message: isCustom,
           batch_id: batchId,
           entity_type: emailEntity,
+          source_record_id: r.id,
           bulk: true,
         },
       });
@@ -424,6 +451,10 @@ export async function POST(req: NextRequest) {
 
     let queued = 0;
     let insertFailed = 0;
+    // database/turso/156_atomic_lead_touch.turso.sql updates the lead from an
+    // AFTER INSERT trigger; migration 159 rejects a bulk row with no canonical lead.
+    // The trigger and queue insert share SQLite's transaction, so `queued`
+    // can never count a recipient whose Last Touch write did not commit.
     for (let i = 0; i < queueRows.length; i += INSERT_CHUNK) {
       const chunk = queueRows.slice(i, i + INSERT_CHUNK);
       try {
@@ -529,7 +560,24 @@ export async function POST(req: NextRequest) {
   // op === "stage"
   const entity = body.entity === "application" ? "application" : "lead";
   const stage = typeof body.stage === "string" ? body.stage.trim() : "";
-  const validStages = entity === "application" ? OPPORTUNITY_PIPELINE_STAGES : LEAD_PIPELINE_STAGES;
+  // The vocabulary this TENANT speaks — not the union of both. The OASIS
+  // board's BulkActionBar is populated from OASIS_LEAD_STAGES, so validating
+  // against SunBiz keys alone 400'd every "select rows → move to Assigned",
+  // the one lever that moves imported leads onto a rep's board. Accepting both
+  // everywhere would fix that by letting a SunBiz caller park a lead in an
+  // OASIS-only stage its board cannot render, so the tenant picks the list.
+  const bulkTenantSlug = await resolveOwnedSlug(tenantId);
+  if (!bulkTenantSlug) {
+    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+  }
+  const isOasisBulkWorkspace = isWebsiteSalesTenantSlug(bulkTenantSlug);
+  const isOasisBulkLead = entity === "lead" && isOasisBulkWorkspace;
+  const validStages =
+    entity === "application"
+      ? OPPORTUNITY_PIPELINE_STAGES
+      : isOasisBulkWorkspace
+        ? OASIS_LEAD_STAGES
+        : LEAD_PIPELINE_STAGES;
   if (!stage || !validStages.some((s) => s.key === stage)) {
     return NextResponse.json({ ok: false, error: "invalid_stage" }, { status: 400 });
   }
@@ -540,10 +588,20 @@ export async function POST(req: NextRequest) {
   // matching single /set-stage. Checked ONCE before the loop, so read_only gets a
   // clean 403. (Was a per-record canViewLead("isolate") gate, which let a read_only
   // OWNER still mutate stages and diverged from /set-stage's role model.)
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!sess.isAdmin && !canWriteCrm(sess.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't change stages." },
       { status: 403 },
+    );
+  }
+  // Bulk remains useful for intake (researched -> assigned), but every later
+  // OASIS edge requires per-lead facts: disposition, qualification, meeting
+  // context, quote terms, or payment attribution. Do not let a batch operation
+  // skip those closed-loop gates.
+  if (isOasisBulkLead && (!sess.isAdmin || stage !== "assigned")) {
+    return NextResponse.json(
+      { ok: false, error: "use_individual_sales_workflow" },
+      { status: 409 },
     );
   }
 
@@ -562,35 +620,52 @@ export async function POST(req: NextRequest) {
     const data = (existing.data as { data?: Record<string, unknown> }).data || {};
     // Authorization happened once before the loop (canWriteCrm); tenant scope is
     // enforced by the tenant_id-filtered fetch above.
+    const currentStage = typeof data[field] === "string" ? data[field] : null;
+    if (isOasisBulkLead && currentStage && currentStage !== "researched") {
+      out.skipped += 1;
+      continue;
+    }
     if (typeof data[field] === "string" && data[field] === stage) {
       out.skipped += 1; // already on this stage
       continue;
     }
+    const occurredAt = new Date().toISOString();
     try {
-      await updateRecord({ tenant_id: tenantId, entity, id, patch: { [field]: stage } });
+      await updateRecord({
+        tenant_id: tenantId,
+        entity,
+        id,
+        patch: { [field]: stage, last_contacted_at: occurredAt },
+      });
     } catch (err) {
       void (err instanceof RecordsError ? err.code : "unknown");
       out.failed += 1;
       continue;
     }
     out.updated += 1;
-    try {
-      const note = `Stage set to ${stage} (bulk)`;
-      await db.from("lead_interactions").insert({
-        tenant_id: tenantId,
-        lead_id: id,
-        type: "stage_changed",
-        channel: "system",
-        direction: "outbound",
-        agent_source: "dashboard_bulk_set_stage",
-        subject: "Stage changed",
-        content: note,
-        content_preview: note,
-        metadata: { to: stage, field, entity, changed_by: sess.userId, bulk: true },
-      });
-    } catch {
-      /* best-effort audit */
-    }
+    const note = `Stage changed ${typeof data[field] === "string" ? data[field] : "—"} → ${stage} (bulk)`;
+    const interaction = await db.from("lead_interactions").insert({
+      tenant_id: tenantId,
+      lead_id: id,
+      type: "stage_changed",
+      channel: "system",
+      direction: "internal",
+      agent_source: "dashboard_bulk_set_stage",
+      actor_user_id: sess.userId,
+      subject: "Stage changed",
+      content: note,
+      content_preview: note,
+      created_at: occurredAt,
+      metadata: {
+        from: typeof data[field] === "string" ? data[field] : null,
+        to: stage,
+        field,
+        entity,
+        changed_by: sess.userId,
+        bulk: true,
+      },
+    });
+    if (interaction.error) out.trackingFailed += 1;
   }
   return NextResponse.json({ ok: true, op, ...out });
 }

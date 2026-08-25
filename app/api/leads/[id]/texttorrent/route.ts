@@ -18,6 +18,8 @@ import { checkPhoneOptOut } from "@/lib/lead-interactions-queries";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolveTextTorrentSenderId } from "@/lib/integrations/texttorrent-sender";
 import { getTextTorrentCredentials, sendSms, TextTorrentError } from "@/lib/integrations/texttorrent";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,6 +36,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json(
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
+    );
   }
 
   let body: { to_number?: unknown; message?: unknown; account?: unknown };
@@ -96,41 +113,91 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const creds = await getTextTorrentCredentials(sess.tenantId, { service });
     const res = await sendSms(creds, { number: toNumber, message, sender_id: senderId });
 
-    const db = getServiceSupabase();
-    await db.from("lead_interactions").insert({
-      tenant_id: sess.tenantId,
-      lead_id: leadId,
-      type: "sms_sent",
-      channel: "sms_texttorrent",
-      direction: "outbound",
-      agent_source: "dashboard_drawer",
-      actor_user_id: sess.userId,
-      content: message,
-      content_preview: message.slice(0, 1024),
-      metadata: {
-        requested_by_email: sess.email,
-        acted_by_user_id: sess.userId,
-        to_number: toNumber,
-        from_number: senderId,
+    const trackingWarnings: string[] = [];
+    let db: ReturnType<typeof getServiceSupabase>;
+    try {
+      db = getServiceSupabase();
+    } catch (err) {
+      console.error("[leads.texttorrent] tracking database unavailable after send", err);
+      return NextResponse.json({
+        ok: true,
+        dry_run: false,
+        provider: "texttorrent",
         chat_id: res.data?.chat_id ?? null,
-        tt_message_id: res.data?.message_id ?? null,
-        tt_account: account,
-        status: "sent",
-      },
-    });
+        stage_bumped: null,
+        tracking_warning: "tracking_database_unavailable",
+      });
+    }
+    let touchAt = new Date().toISOString();
+    try {
+      const interaction = await db.from("lead_interactions").insert({
+        tenant_id: sess.tenantId,
+        lead_id: leadId,
+        type: "sms_sent",
+        channel: "sms_texttorrent",
+        direction: "outbound",
+        agent_source: "dashboard_drawer",
+        provider: "texttorrent",
+        provider_message_id: res.data?.message_id ?? null,
+        actor_user_id: sess.userId,
+        content: message,
+        content_preview: message.slice(0, 1024),
+        metadata: {
+          requested_by_email: sess.email,
+          acted_by_user_id: sess.userId,
+          to_number: toNumber,
+          from_number: senderId,
+          chat_id: res.data?.chat_id ?? null,
+          tt_message_id: res.data?.message_id ?? null,
+          tt_account: account,
+          status: "sent",
+        },
+      }).select("created_at").single();
+      if (interaction.error) {
+        trackingWarnings.push("interaction_log_failed");
+        console.error("[leads.texttorrent] interaction insert failed", interaction.error);
+      } else {
+        const storedAt = (interaction.data as { created_at?: string | null } | null)?.created_at;
+        if (typeof storedAt === "string" && Number.isFinite(Date.parse(storedAt))) {
+          touchAt = new Date(storedAt).toISOString();
+        }
+      }
+    } catch (err) {
+      trackingWarnings.push("interaction_log_failed");
+      console.error("[leads.texttorrent] interaction insert threw", err);
+    }
 
-    const stageEvent = await dispatchLeadStageEvent({
-      type: "outbound_email_queued", // reuse the outbound-touch stage motion
-      tenantId: sess.tenantId,
-      leadId,
-    });
+    try {
+      await persistCanonicalLeadTouch(db, {
+        tenantId: sess.tenantId,
+        leadId,
+        occurredAt: touchAt,
+      });
+    } catch (err) {
+      trackingWarnings.push("canonical_touch_failed");
+      console.error("[leads.texttorrent] canonical touch update failed", err);
+    }
+
+    let stageBumped: string | null = null;
+    try {
+      const stageEvent = await dispatchLeadStageEvent({
+        type: "outbound_email_queued", // reuse the outbound-touch stage motion
+        tenantId: sess.tenantId,
+        leadId,
+      });
+      stageBumped = stageEvent.fired ? stageEvent.to : null;
+    } catch (err) {
+      trackingWarnings.push("stage_dispatch_failed");
+      console.error("[leads.texttorrent] stage dispatch failed", err);
+    }
 
     return NextResponse.json({
       ok: true,
       dry_run: false,
       provider: "texttorrent",
       chat_id: res.data?.chat_id ?? null,
-      stage_bumped: stageEvent.fired ? stageEvent.to : null,
+      stage_bumped: stageBumped,
+      tracking_warning: trackingWarnings.length ? trackingWarnings.join(",") : null,
     });
   } catch (err) {
     if (err instanceof TextTorrentError) {

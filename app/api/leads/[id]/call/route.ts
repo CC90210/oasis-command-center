@@ -25,7 +25,8 @@ import { getUserIntegrationValue } from "@/lib/user-integration-store";
 import { getKixieCredentials, makeCall } from "@/lib/integrations/kixie";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
-import { isReadOnlyRole } from "@/lib/role-gates";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,22 +63,39 @@ export async function POST(
   // Resolve the acting user's tenant + email.
   const profile = await db
     .from("user_profiles")
-    .select("tenant_id,email,full_name,display_name,team_role")
+    .select("tenant_id,email,full_name,display_name,team_role,is_owner,admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
+  if (profile.error) {
+    console.error("[leads.call] profile lookup failed", profile.error);
+    return NextResponse.json({ ok: false, error: "profile_lookup_failed" }, { status: 503 });
+  }
   const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
   const fallbackEmail = (profile.data as { email?: string | null } | null)?.email || "";
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
   // Role gate (2026-06-18): placing an outbound call is a member+ capability —
-  // read_only members are denied, for parity with the SMS send path
-  // (/api/conversations/reply) and the bridge/exec-tool wall.
-  const teamRole = (profile.data as { team_role?: string | null } | null)?.team_role;
-  if (isReadOnlyRole(teamRole)) {
+  // Broad tenant visibility is insufficient: the strict helper below requires
+  // an admin or the assigned/collaborating OASIS sales operator.
+  const profileData = profile.data as {
+    team_role?: string | null;
+    is_owner?: boolean | null;
+    admin_access?: boolean | null;
+  } | null;
+  const access = await assertMayWorkLead({
+    teamRole: profileData?.team_role || "read_only",
+    userId: user.id,
+    tenantId,
+    leadId,
+    isOwner: profileData?.is_owner === true,
+    adminAccess: profileData?.admin_access === true,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
     return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't place calls." },
-      { status: 403 },
+      { ok: false, error: access.error, message: access.message },
+      { status: access.status },
     );
   }
 
@@ -89,6 +107,10 @@ export async function POST(
     .eq("id", leadId)
     .eq("tenant_id", tenantId)
     .maybeSingle();
+  if (leadRow.error) {
+    console.error("[leads.call] lead lookup failed", leadRow.error);
+    return NextResponse.json({ ok: false, error: "lead_lookup_failed" }, { status: 503 });
+  }
   if (!leadRow.data) {
     return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
   }
@@ -153,35 +175,44 @@ export async function POST(
     );
   }
 
-  // Dry-run gate (2026-06-02): the dashboard defaults to dry-run so the
-  // Call button can't place a live call the moment Kixie creds land. We
-  // still validate everything above (phone, agent email, creds) and log
-  // the attempt; we just skip the actual Kixie request.
+  // Dry-run validates phone, routing and credentials, then exits without a
+  // ledger row or canonical touch. Simulations must not inflate metrics.
   const dryRun = isDryRun("kixie");
-  if (!dryRun) {
-    try {
-      await makeCall(creds, {
-        target: targetPhone,
-        agentEmail,
-        displayName,
-        leadId, // echoed back via customField1 on webhook events
-      });
-    } catch (err) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "kixie_call_failed",
-          message: err instanceof Error ? err.message : "Kixie call request failed.",
-        },
-        { status: 502 },
-      );
-    }
+  if (dryRun) {
+    return NextResponse.json({
+      ok: true,
+      dry_run: true,
+      agent_email: agentEmail,
+      target_phone: targetPhone,
+      message: `Dry-run: would ring ${agentEmail} and bridge to ${targetPhone}. No call was placed.`,
+    });
   }
+  try {
+    await makeCall(creds, {
+      target: targetPhone,
+      agentEmail,
+      displayName,
+      leadId, // echoed back via customField1 on webhook events
+    });
+  } catch (err) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "kixie_call_failed",
+        message: err instanceof Error ? err.message : "Kixie call request failed.",
+      },
+      { status: 502 },
+    );
+  }
+
+  const occurredAt = new Date().toISOString();
 
   // Log the initiation immediately so the drawer timeline reflects the
   // pending call even before the startcall webhook arrives (~1-3s).
+  const trackingWarnings: string[] = [];
+  let touchAt = occurredAt;
   try {
-    await db.from("lead_interactions").insert({
+    const interaction = await db.from("lead_interactions").insert({
       tenant_id: tenantId,
       lead_id: leadId,
       type: "call_initiated",
@@ -190,28 +221,47 @@ export async function POST(
       agent_source: "dashboard_drawer",
       from_phone: null,
       to_phone: targetPhone,
-      content_preview: dryRun
-        ? `Dry-run call to ${targetPhone} (not placed)`
-        : `Call initiated by ${agentEmail}`,
+      content_preview: `Call initiated by ${agentEmail}`,
       actor_user_id: user.id,
       metadata: {
         kixie_agent_email: agentEmail,
         requested_by_email: fallbackEmail,
         display_name: displayName,
-        dry_run: dryRun,
+        dry_run: false,
       },
+    }).select("created_at").single();
+    if (interaction.error) {
+      trackingWarnings.push("interaction_log_failed");
+      console.error("[leads.call] initial lead_interactions insert failed", interaction.error);
+    } else {
+      const storedAt = (interaction.data as { created_at?: string | null } | null)?.created_at;
+      if (typeof storedAt === "string" && Number.isFinite(Date.parse(storedAt))) {
+        touchAt = new Date(storedAt).toISOString();
+      }
+    }
+  } catch (err) {
+    trackingWarnings.push("interaction_log_failed");
+    console.error("[leads.call] initial lead_interactions insert failed", err);
+  }
+
+  try {
+    await persistCanonicalLeadTouch(db, {
+      tenantId,
+      leadId,
+      occurredAt: touchAt,
+      isCall: true,
     });
   } catch (err) {
-    console.error("[leads.call] initial lead_interactions insert failed", err);
+    trackingWarnings.push("canonical_touch_failed");
+    console.error("[leads.call] canonical touch update failed", err);
   }
 
   return NextResponse.json({
     ok: true,
-    dry_run: dryRun,
+    dry_run: false,
     agent_email: agentEmail,
     target_phone: targetPhone,
-    message: dryRun
-      ? `Dry-run — would ring your line at ${agentEmail} then bridge to ${targetPhone}. No call placed (dashboard is in dry-run mode).`
-      : `Ringing your line at ${agentEmail} — pick up to bridge to the lead.`,
+    tracking_warning: trackingWarnings.length ? trackingWarnings.join(",") : null,
+    message: `Ringing your line at ${agentEmail} — pick up to bridge to the lead.`,
   });
 }

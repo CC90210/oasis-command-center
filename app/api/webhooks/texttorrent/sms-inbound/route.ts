@@ -37,6 +37,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,6 +68,13 @@ function verifyTextTorrentSignature(rawBody: string, headerSig: string | null): 
 
   const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
   return timingSafeStringEqual(headerSig.trim(), expected);
+}
+
+function inboundOccurredAt(value: unknown, fallback: string): string {
+  if (typeof value === "string" && Number.isFinite(Date.parse(value))) {
+    return new Date(value).toISOString();
+  }
+  return fallback;
 }
 
 /**
@@ -105,6 +113,7 @@ async function resolveTenantByInboundNumber(
       .select("tenant_id,encrypted_value")
       .eq("service", "texttorrent")
       .eq("field_key", "from_number");
+    if (tenantRows.error) throw new Error(`tenant_number_lookup_failed:${tenantRows.error.message}`);
     for (const row of (tenantRows.data || []) as { tenant_id: string; encrypted_value: string }[]) {
       try {
         if (decryptField(row.encrypted_value).replace(/^\+/, "") === normalized) {
@@ -121,6 +130,7 @@ async function resolveTenantByInboundNumber(
       .select("tenant_id,user_id,encrypted_value")
       .eq("service", "texttorrent")
       .eq("field_key", "texttorrent_from_number");
+    if (userRows.error) throw new Error(`rep_number_lookup_failed:${userRows.error.message}`);
     for (const row of (userRows.data || []) as { tenant_id: string; user_id: string; encrypted_value: string }[]) {
       try {
         if (decryptField(row.encrypted_value).replace(/^\+/, "") === normalized) {
@@ -170,11 +180,12 @@ async function findLeadByPhone(
       .eq("entity_type", "lead")
       .filter("data->>phone", "ilike", `%${last10}%`)
       .limit(1);
+    if (r.error) throw new Error(`lead_lookup_failed:${r.error.message}`);
     const rows = (r.data || []) as { id: string }[];
     return rows[0]?.id || null;
   } catch (err) {
     console.error("[webhooks.tt.sms-inbound] lead lookup failed", err);
-    return null;
+    throw err;
   }
 }
 
@@ -196,11 +207,14 @@ async function enqueueInboundWork(
   const account = ((accounts.data || []) as Array<{ id: string; from_number: string; voice_profile_id: string | null }>)
     .find((row) => row.from_number.replace(/\D/g, "").slice(-10) === normalized);
   if (!account) {
-    await db.from("agent_events").insert({
+    const eventWrite = await db.from("agent_events").insert({
       event_type: "TEXTTORRENT_UNMAPPED_DID", publisher_agent: "texttorrent",
       severity: "warn", correlation_id: tenantId,
       payload: { tenant_id: tenantId, destination_last4: normalized.slice(-4), provider_message_id: providerMessageId },
     });
+    if (eventWrite.error) {
+      console.error("[webhooks.tt.sms-inbound] unmapped DID event failed", eventWrite.error);
+    }
     return false;
   }
   let voiceProfile: Record<string, unknown> = {};
@@ -289,7 +303,12 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const leadId = await findLeadByPhone(db, tenantId, from);
+  let leadId: string | null;
+  try {
+    leadId = await findLeadByPhone(db, tenantId, from);
+  } catch {
+    return NextResponse.json({ ok: false, error: "lead_lookup_failed" }, { status: 503 });
+  }
   const providerMessageId = messageId || `tt-fp:${createHash("sha256")
     .update([to, from, String(payload.received_at || ""), messageText].join("\n"))
     .digest("hex")}`;
@@ -297,16 +316,49 @@ export async function POST(req: NextRequest) {
   // Canonical provider identity covers TT IDs and fallback hashes.
   const existing = await db
     .from("lead_interactions")
-    .select("id")
+    .select("id,created_at,lead_id")
     .eq("tenant_id", tenantId)
     .eq("provider", "texttorrent")
     .eq("provider_message_id", providerMessageId)
     .maybeSingle();
   if (existing.error) return NextResponse.json({ ok: false, error: "dedup_lookup_failed" }, { status: 503 });
   if ((existing.data as { id?: string } | null)?.id) {
+    const existingRow = existing.data as {
+      id: string;
+      created_at?: string | null;
+      lead_id?: string | null;
+    };
+    const linkedLeadId = existingRow.lead_id || leadId;
+    if (!existingRow.lead_id && leadId) {
+      const relink = await db
+        .from("lead_interactions")
+        .update({ lead_id: leadId })
+        .eq("tenant_id", tenantId)
+        .eq("id", existingRow.id);
+      if (relink.error) {
+        console.error("[webhooks.tt.sms-inbound] interaction relink failed", relink.error);
+        return NextResponse.json({ ok: false, error: "interaction_relink_failed" }, { status: 503 });
+      }
+    }
+    if (linkedLeadId) {
+      const fallback =
+        typeof existingRow.created_at === "string" && Number.isFinite(Date.parse(existingRow.created_at))
+          ? new Date(existingRow.created_at).toISOString()
+          : new Date().toISOString();
+      try {
+        await persistCanonicalLeadTouch(db, {
+          tenantId,
+          leadId: linkedLeadId,
+          occurredAt: inboundOccurredAt(payload.received_at, fallback),
+        });
+      } catch (err) {
+        console.error("[webhooks.tt.sms-inbound] canonical touch retry failed", err);
+        return NextResponse.json({ ok: false, error: "touch_persist_failed" }, { status: 503 });
+      }
+    }
     const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId,
-      (existing.data as { id: string }).id, typeof payload.chat_id === "string" ? payload.chat_id : null,
-      messageText, leadId, from);
+      existingRow.id, typeof payload.chat_id === "string" ? payload.chat_id : null,
+      messageText, linkedLeadId, from);
     if (!queued) return NextResponse.json({ ok: false, error: "enqueue_failed" }, { status: 503 });
     return NextResponse.json({ ok: true, deduped: true });
   }
@@ -338,10 +390,27 @@ export async function POST(req: NextRequest) {
       // debugging of per-agent number routing.
       routed_to_user_id: routedToUserId,
     },
-  }).select("id").single();
+  }).select("id,created_at").single();
   if (persisted.error || !persisted.data) {
     console.error("[webhooks.tt.sms-inbound] interaction insert failed", persisted.error);
     return NextResponse.json({ ok: false, error: "persist_failed" }, { status: 500 });
+  }
+  if (leadId) {
+    const storedAt = (persisted.data as { created_at?: string | null }).created_at;
+    const fallback =
+      typeof storedAt === "string" && Number.isFinite(Date.parse(storedAt))
+        ? new Date(storedAt).toISOString()
+        : new Date().toISOString();
+    try {
+      await persistCanonicalLeadTouch(db, {
+        tenantId,
+        leadId,
+        occurredAt: inboundOccurredAt(payload.received_at, fallback),
+      });
+    } catch (err) {
+      console.error("[webhooks.tt.sms-inbound] canonical touch update failed", err);
+      return NextResponse.json({ ok: false, error: "touch_persist_failed" }, { status: 503 });
+    }
   }
   const queued = await enqueueInboundWork(db, tenantId, to, providerMessageId, persisted.data.id,
     typeof payload.chat_id === "string" ? payload.chat_id : null, messageText, leadId, from);

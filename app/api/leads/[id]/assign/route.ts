@@ -14,9 +14,9 @@
  *   { assigned_to: string | null }   — auth_user_id of the assignee,
  *                                       or null to clear assignment.
  *
- * Authorization: any team member of the tenant. Soft-ownership means
- * any team member can re-assign. If/when CC asks for "only the current
- * assignee + admins can re-assign" semantics, that gate goes here.
+ * Authorization: shared CRM semantics on legacy tenants. On OASIS, admins may
+ * reassign anything; a sales rep may only transfer their own pre-handoff lead
+ * to another pre-handoff sales role. Founder/builder ownership is workflow-only.
  *
  * Response 200: { ok: true, assigned_to: string | null }
  * Response 4xx: { ok: false, error, message? }
@@ -28,12 +28,31 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
 import { assignLifecycleOwner } from "@/lib/lifecycle-assignment";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
+import {
+  OASIS_WEBSITE_SALES_PROGRAM,
+  isWebsiteSalesTenantSlug,
+} from "@/lib/leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Generic reassignment is only a pre-handoff convenience. Once a 15-minute
+// audit is booked, ownership belongs to the structured closer/payment/builder
+// workflow so attribution and fulfillment cannot be rewritten out of band.
+const OASIS_REP_ASSIGNABLE_STAGES = new Set([
+  "researched",
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+]);
+const OASIS_PRE_HANDOFF_ASSIGNEE_ROLES = new Set(["opener", "agent", "manager"]);
 
 export async function POST(
   req: NextRequest,
@@ -43,14 +62,9 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  // CRM-write authorization (2026-07-07, CC directive). Assigning / transferring a
-  // lead is core CRM work for ANY non-read_only team member, on ANY lead in the
-  // tenant — NOT owner-gated. Checked FIRST, before any record lookup, so a
-  // read_only caller gets an identical 403 whether or not the record exists (no
-  // enumeration oracle — Codex adversarial review 2026-07-07). Tenant isolation is
-  // still enforced by the tenant-scoped fetch below. (Was: owner-or-admin, which
-  // blocked a member from self-assigning or receiving a hand-off — the reported bug.)
-  if (!canWriteCrm(sess.teamRole)) {
+  // Shared CRM writers retain the SunBiz handoff model. OASIS sales titles are
+  // admitted only far enough to prove role + ownership + pre-handoff stage below.
+  if (!canWriteCrm(sess.teamRole) && !roleMayOperateOasisSalesLead(sess.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't reassign leads." },
       { status: 403 },
@@ -87,14 +101,14 @@ export async function POST(
   }
 
   const db = getServiceSupabase();
+  let nextAssigneeRole: string | null = null;
 
-  // Verify the candidate UUID is a member of THIS tenant. Prevents
-  // cross-tenant assignment by accident. We don't need to gate on what
-  // role the assignee has — any member is a valid assignee.
+  // Verify the candidate UUID is a member of THIS tenant. OASIS non-admin
+  // transfers also validate the assignee's sales role after loading the lead.
   if (nextAssignedTo) {
     const memberCheck = await db
       .from("user_profiles")
-      .select("auth_user_id")
+      .select("auth_user_id, team_role")
       .eq("tenant_id", tenantId)
       .eq("auth_user_id", nextAssignedTo)
       .maybeSingle();
@@ -108,6 +122,8 @@ export async function POST(
         { status: 400 },
       );
     }
+    nextAssigneeRole =
+      typeof memberCheck.data.team_role === "string" ? memberCheck.data.team_role : null;
   }
 
   // Existence + entity-type check — patch_tenant_record_data has tenant
@@ -124,16 +140,66 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
   }
 
-  // Owner-or-admin gate. Admins reassign anything; an agent may only reassign a
-  // lead they currently own. 404 (not 403) for a non-owner agent so the endpoint
-  // doesn't confirm a lead they can't see exists. Fail closed.
-  // Current owner — read for the board nudge below (the old owner's board also
-  // refreshes when a lead leaves it). Authorization already happened at the top.
+  // Current owner + stage are used for OASIS authorization and board nudges.
   const record = existing.data as {
     id: string;
     entity_type: "lead" | "application" | "funded_deal" | "renewal";
     data: Record<string, unknown>;
   };
+
+  const tenantSlug = await resolveOwnedSlug(tenantId);
+  if (!tenantSlug) {
+    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+  }
+  const isOasisSalesLead =
+    record.entity_type === "lead" &&
+    (record.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM ||
+      isWebsiteSalesTenantSlug(tenantSlug));
+  if (!isOasisSalesLead && !canWriteCrm(sess.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Your role can't reassign this record." },
+      { status: 403 },
+    );
+  }
+  if (isOasisSalesLead && !sess.isAdmin) {
+    const access = await assertMayWorkLead({
+      teamRole: sess.teamRole,
+      userId: sess.userId,
+      tenantId,
+      leadId: recordId,
+      isOwner: sess.isTrueAdmin,
+      adminAccess: sess.adminAccess,
+      accessMode: "owned_oasis_sales",
+    });
+    if (!access.ok) {
+      return NextResponse.json(
+        { ok: false, error: access.error, message: access.message },
+        { status: access.status },
+      );
+    }
+
+    const currentOwner =
+      typeof record.data.assigned_to === "string"
+        ? record.data.assigned_to.trim().toLowerCase()
+        : "";
+    const currentStage =
+      typeof record.data.stage === "string" ? record.data.stage.trim().toLowerCase() : "";
+    if (
+      currentOwner !== sess.userId.toLowerCase() ||
+      !OASIS_REP_ASSIGNABLE_STAGES.has(currentStage) ||
+      (nextAssignedTo !== null &&
+        !OASIS_PRE_HANDOFF_ASSIGNEE_ROLES.has((nextAssigneeRole || "").toLowerCase()))
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          message: "Use the guided lead handoff for founder, payment, and builder ownership.",
+        },
+        { status: 409 },
+      );
+    }
+  }
 
   // 2026-06-06 (Codex audit self-review extension) — atomic merge via
   // the patch_tenant_record_data RPC. The previous read-then-spread-then-
@@ -141,7 +207,13 @@ export async function POST(
   // tenant_records.data blob. Unassign sets the key to null (consumers
   // already treat null as "not assigned") rather than deleting the key,
   // which keeps this on the same RPC.
-  const update = await assignLifecycleOwner({ tenantId, record, assignedTo: nextAssignedTo });
+  const occurredAt = new Date().toISOString();
+  const update = await assignLifecycleOwner({
+    tenantId,
+    record,
+    assignedTo: nextAssignedTo,
+    occurredAt,
+  });
   if (!update.ok) {
     return NextResponse.json(
       { ok: false, error: "update_failed", message: update.error },
@@ -149,37 +221,45 @@ export async function POST(
     );
   }
 
-  // Audit trail — who reassigned this record to whom. Best-effort; a logging
-  // failure never fails the assignment. Only meaningful for lead/application
-  // (the assignee-scoped entities); funded_deal/renewal still log harmlessly.
-  try {
-    const note = nextAssignedTo
-      ? `Reassigned to ${nextAssignedTo} by ${sess.email || "an admin"}.`
-      : `Assignment cleared by ${sess.email || "an admin"}.`;
-    await db.from("lead_interactions").insert({
-      tenant_id: tenantId,
-      lead_id: recordId,
-      type: "lead_reassigned",
-      channel: "system",
-      direction: "outbound",
-      agent_source: "dashboard_assign",
-      subject: "Lead reassigned",
-      content: note,
-      content_preview: note,
-      metadata: {
-        assigned_to: nextAssignedTo,
-        assigned_by: sess.userId,
-        entity_type: existing.data.entity_type,
-        linked_record_ids: update.updatedIds.filter((id) => id !== recordId),
-      },
-    });
-  } catch {
-    /* best-effort audit */
-  }
-
   // Live nudge — the deal left the previous owner's board and joined the new
   // owner's. Refresh both (no-op for whichever is null).
   await nudgeBoards([...update.previousOwners, nextAssignedTo]);
 
-  return NextResponse.json({ ok: true, assigned_to: nextAssignedTo, updated_record_ids: update.updatedIds });
+  const note = nextAssignedTo
+    ? `Reassigned to ${nextAssignedTo} by ${sess.email || "an admin"}.`
+    : `Assignment cleared by ${sess.email || "an admin"}.`;
+  const interaction = await db.from("lead_interactions").insert({
+    tenant_id: tenantId,
+    lead_id: recordId,
+    type: "lead_reassigned",
+    channel: "system",
+    direction: "internal",
+    agent_source: "dashboard_assign",
+    actor_user_id: sess.userId,
+    subject: "Lead reassigned",
+    content: note,
+    content_preview: note,
+    created_at: occurredAt,
+    metadata: {
+      assigned_to: nextAssignedTo,
+      assigned_by: sess.userId,
+      entity_type: existing.data.entity_type,
+      linked_record_ids: update.updatedIds.filter((id) => id !== recordId),
+    },
+  });
+  if (interaction.error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "interaction_log_failed",
+        detail: interaction.error.message,
+        assignmentUpdated: true,
+        assigned_to: nextAssignedTo,
+        updated_record_ids: update.updatedIds,
+      },
+      { status: 500 },
+    );
+  }
+
+  return NextResponse.json({ ok: true, assigned_to: nextAssignedTo, updated_record_ids: update.updatedIds, touchAt: occurredAt });
 }

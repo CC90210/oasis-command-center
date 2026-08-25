@@ -15,10 +15,9 @@ import Link from "next/link";
 import { Card, PageHeader, Tag, EmptyState } from "@/components/Card";
 import { agentStates, getActiveProfile, recentDecisions, recentEvents } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { ALL_AGENT_KEYS, FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
-import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { FAMILY_AGENT_KEYS, getAgentInfo, resolveAgentKey } from "@/lib/agents";
+import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { buildRecordResolver, projectEvent } from "@/lib/event-projection";
@@ -65,25 +64,17 @@ export default async function OperationsPage({
   // contractor's screen. 404 before any read; see lib/role-surfaces.ts.
   await requireSystemSurface();
   const profile = await safe("operations.profile", getActiveProfile(), null);
-  const user = await getSessionUser().catch(() => null);
-  const isOperator = isOperatorEmail(user?.email || undefined);
   const db = getServiceSupabase();
   const sp = (await searchParams) || {};
   const showOlder = sp.showOlder === "1";
 
-  // Cross-tenant scoping for agent_state_snapshot + agent_events: resolve
-  // the tenant's enabled agents up front and pass to the helpers. Both
-  // tables predate the tenant_manifests system and have no tenant_id
-  // column today; the helpers proxy-filter by agent_name / publisher_agent
-  // to keep client tenants from seeing CC's OASIS heartbeats + activity.
-  // Operator (CC) bypasses via isOperator: true on the recentEvents call
-  // and explicit ALL_AGENT_KEYS fan-out on agentStates.
-  const manifestEnabledSlugs = await getTenantEnabledAgents(profile?.tenant_id ?? null);
-  const agentNamesForOps = isOperator
-    ? ALL_AGENT_KEYS
-    : (manifestEnabledSlugs.length > 0
-        ? manifestEnabledSlugs
-        : (profile?.agents_enabled || []).map(resolveAgentKey));
+  // This is a workspace surface, including for the OASIS operator. Resolve the
+  // current tenant's enabled roster with no empire-wide operator bypass; an
+  // operator debugging another workspace must first switch into that tenant.
+  const agentNamesForOps = await getTenantAwareEnabledAgents({
+    userTenantId: profile?.tenant_id ?? null,
+    profileAgentsEnabled: profile?.agents_enabled || [],
+  });
 
   // Health banner counts (4 tiles at the top). Phase 3 merge: the dedicated
   // /health page still exists for drill-down, but the operator gets a
@@ -132,7 +123,7 @@ export default async function OperationsPage({
         sinceDays: 0,
         tenantId: profile?.tenant_id || null,
         agentNames: agentNamesForOps,
-        isOperator,
+        isOperator: false,
       }),
       []
     ),
@@ -161,13 +152,14 @@ export default async function OperationsPage({
     safe(
       "operations.errors_24h",
       (async () => {
-        if (agentNamesForOps.length === 0 && !isOperator) return 0;
-        let q = db
+        if (!tenantId || agentNamesForOps.length === 0) return 0;
+        const q = db
           .from("agent_events")
           .select("id", { count: "exact", head: true })
           .in("severity", ["error"])
+          .eq("correlation_id", tenantId)
+          .in("publisher_agent", agentNamesForOps)
           .gte("published_at", now24Ago);
-        if (!isOperator) q = q.in("publisher_agent", agentNamesForOps);
         const r = await q;
         return r.count || 0;
       })(),
@@ -259,11 +251,7 @@ export default async function OperationsPage({
   // (2026-05-14): only show what's actually wired up; idle subscribed
   // agents are useful, hallucinated subscribed agents are noise.
   const familySet = new Set(FAMILY_AGENT_KEYS);
-  const enabledSource =
-    manifestEnabledSlugs.length > 0
-      ? manifestEnabledSlugs
-      : profile?.agents_enabled || [];
-  const enabled = enabledSource.filter((k) => familySet.has(resolveAgentKey(k)));
+  const enabled = agentNamesForOps.filter((key) => familySet.has(resolveAgentKey(key)));
   const now = Date.now();
 
   const totalHealthSignals = errorsCount + failedCronsCount + stuckThreadsCount + staleLeadsCount;
@@ -289,7 +277,7 @@ export default async function OperationsPage({
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         <HealthMiniTile label="Errors today" count={errorsCount} tone={errorsCount === 0 ? "engaged" : "warm"} href="/health" hint="Errors in the last 24h. Warnings are excluded — see the Activity Tape or /health for those." />
         <HealthMiniTile label="Failed automations" count={failedCronsCount} tone={failedCronsCount === 0 ? "engaged" : "warm"} href="/automations" hint="Scheduled jobs whose last run errored." />
-        <HealthMiniTile label="Quiet shop-outs" count={stuckThreadsCount} tone={stuckThreadsCount === 0 ? "engaged" : "accent"} href="/health" hint="Lender emails sent >7d ago with no reply yet." />
+        <HealthMiniTile label="Stalled outbound" count={stuckThreadsCount} tone={stuckThreadsCount === 0 ? "engaged" : "accent"} href="/health" hint="Outbound threads sent more than 7 days ago with no reply yet." />
         <HealthMiniTile label="Cold leads" count={staleLeadsCount} tone={staleLeadsCount === 0 ? "engaged" : "accent"} href="/pipeline" hint="Pipeline leads you haven't touched in 2+ weeks." />
       </div>
       {allClear && (

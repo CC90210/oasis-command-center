@@ -12,7 +12,6 @@ import assert from "node:assert/strict";
 import { readConsentArtifact, smsGate } from "../lib/sms/consent";
 
 const NOW = Date.parse("2026-08-06T12:00:00Z");
-const DAY = 86_400_000;
 
 const goodArtifact = {
   disclosure_text: "By checking this box you agree to receive text messages from SunBiz Funding about your funding application. Msg & data rates may apply. Reply STOP to opt out.",

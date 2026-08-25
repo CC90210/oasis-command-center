@@ -59,7 +59,7 @@ import { loadProviderAvailability } from "@/lib/routing/provider-availability";
 import { openReceipt } from "@/lib/sms/delivery-receipts";
 import { loadBrandsForLeads } from "@/lib/drips/brand-store";
 import { loadDealGate } from "@/lib/drips/deal-state-store";
-import { brandForStage, brandForSend } from "@/lib/drips/brand-routing";
+import { brandForSend } from "@/lib/drips/brand-routing";
 import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";

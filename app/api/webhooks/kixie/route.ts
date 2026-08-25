@@ -37,9 +37,9 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { isUniqueViolationError } from "@/lib/api-helpers";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import {
   findLeadByPhone,
   merchantNumberFor,
@@ -66,6 +66,7 @@ type KixieEvent = {
   hookevent?: string;        // SMS webhook uses this too
   callid?: string;
   messageid?: string;
+  message_id?: string;
   businessid?: string | number;
   // Call fields
   fromnumber?: string;
@@ -74,6 +75,9 @@ type KixieEvent = {
   calldate?: string;
   answerDate?: string;
   callEndDate?: string;
+  timestamp?: string;
+  created_at?: string;
+  messagedate?: string;
   duration?: number;
   calltype?: string;         // "outgoing" | "incoming"
   callstatus?: string;
@@ -174,6 +178,22 @@ function channelForEvent(eventname: string): CallChannel | null {
   }
 }
 
+function kixieOccurredAt(evt: KixieEvent, fallback: string): string {
+  for (const candidate of [
+    evt.callEndDate,
+    evt.answerDate,
+    evt.calldate,
+    evt.messagedate,
+    evt.timestamp,
+    evt.created_at,
+  ]) {
+    if (typeof candidate === "string" && Number.isFinite(Date.parse(candidate))) {
+      return new Date(candidate).toISOString();
+    }
+  }
+  return fallback;
+}
+
 /**
  * Map a Kixie event to a stable lead_interactions row. Uses kixie_call_id
  * as the idempotency anchor for call events (mig 093 has a UNIQUE index)
@@ -203,10 +223,12 @@ async function persistLeadInteraction(
   const isInbound = direction === "incoming" || direction === "inbound";
 
   if (isSms) {
-    // SMS rows are one per messageid. INSERT once; subsequent webhooks
-    // for the same messageid (delivery receipts etc.) UPDATE-merge.
-    const messageId = evt.messageid?.trim();
-    if (!messageId) return;
+    // SMS rows are one per provider/message id. Retried deliveries and later
+    // receipts merge through migration 112's composite unique index.
+    const messageId = (evt.messageid || evt.message_id || "").trim() ||
+      `kixie-fp:${createHash("sha256")
+        .update(`${tenantId}\n${leadId}\n${JSON.stringify(evt)}`)
+        .digest("hex")}`;
     const row = {
       tenant_id: tenantId,
       lead_id: leadId,
@@ -214,6 +236,8 @@ async function persistLeadInteraction(
       channel: "sms",
       direction: isInbound ? "inbound" : "outbound",
       agent_source: "kixie",
+      provider: "kixie",
+      provider_message_id: messageId,
       from_phone: evt.fromnumber || evt.from || null,
       to_phone: evt.tonumber || evt.to || evt.customernumber || null,
       content: evt.message || null,
@@ -226,16 +250,35 @@ async function persistLeadInteraction(
         raw_eventname: eventname,
       },
     };
-    // supabase-js does NOT throw on DB errors — check .error explicitly or the
-    // failure is invisible. 23505 (unique violation) means already-stored → ok.
-    const { error } = await db.from("lead_interactions").insert(row);
-    // !isUniqueViolationError, not `code !== "23505"`. On Turso a unique
-    // violation is code "TURSO_ADAPTER", so the "already-stored -> ok" case the
-    // comment describes never matched and a duplicate webhook delivery — the
-    // ordinary thing a webhook does — was logged as a failure.
-    if (error && !isUniqueViolationError(error)) {
+    // Supabase/PostgREST resolves write failures in .error instead of throwing.
+    const { error } = await db.from("lead_interactions").upsert(row, {
+      onConflict: "provider,provider_message_id",
+    });
+    if (error) {
       throw new Error(`sms insert failed: ${error.message}`);
     }
+    const stored = await db
+      .from("lead_interactions")
+      .select("created_at")
+      .eq("tenant_id", tenantId)
+      .eq("provider", "kixie")
+      .eq("provider_message_id", messageId)
+      .maybeSingle();
+    if (stored.error || !stored.data) {
+      throw new Error(`sms timestamp lookup failed: ${stored.error?.message || "row_not_found"}`);
+    }
+    const createdAt = (stored.data as { created_at?: string | null }).created_at;
+    const fallback =
+      typeof createdAt === "string" && Number.isFinite(Date.parse(createdAt))
+        ? new Date(createdAt).toISOString()
+        : new Date().toISOString();
+    // Shared helper patches last_contacted_at; calls additionally patch
+    // last_call_at. The stored timestamp makes provider retries stable.
+    await persistCanonicalLeadTouch(db, {
+      tenantId,
+      leadId,
+      occurredAt: kixieOccurredAt(evt, fallback),
+    });
     return;
   }
 
@@ -304,6 +347,26 @@ async function persistLeadInteraction(
   if (error) {
     throw new Error(`lead_interactions upsert failed: ${error.message}`);
   }
+  const stored = await db
+    .from("lead_interactions")
+    .select("created_at")
+    .eq("tenant_id", tenantId)
+    .eq("kixie_call_id", callId)
+    .maybeSingle();
+  if (stored.error || !stored.data) {
+    throw new Error(`call timestamp lookup failed: ${stored.error?.message || "row_not_found"}`);
+  }
+  const createdAt = (stored.data as { created_at?: string | null }).created_at;
+  const fallback =
+    typeof createdAt === "string" && Number.isFinite(Date.parse(createdAt))
+      ? new Date(createdAt).toISOString()
+      : new Date().toISOString();
+  await persistCanonicalLeadTouch(db, {
+    tenantId,
+    leadId,
+    occurredAt: kixieOccurredAt(evt, fallback),
+    isCall: true,
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -384,6 +447,10 @@ export async function POST(req: NextRequest) {
       if (matchedLead) evt.customField1 = matchedLead.id;
     } catch (err) {
       console.error("[webhooks.kixie] phone attribution failed", err);
+      return NextResponse.json(
+        { ok: false, error: "phone_attribution_failed" },
+        { status: 503 },
+      );
     }
   }
   let rep: ResolvedRep | null = null;
@@ -403,14 +470,14 @@ export async function POST(req: NextRequest) {
         ? "info"
         : "info";
   try {
-    await db.from("agent_events").insert({
+    const eventWrite = await db.from("agent_events").insert({
       event_type: eventType,
       publisher_agent: "kixie",
       severity,
       payload: {
         tenant_id: tenantId,
         call_id: evt.callid || null,
-        message_id: evt.messageid || null,
+        message_id: evt.messageid || evt.message_id || null,
         number: evt.number || evt.tonumber || evt.customernumber || null,
         agent_email: evt.email || null,
         duration_sec: evt.duration ?? null,
@@ -422,6 +489,9 @@ export async function POST(req: NextRequest) {
       },
       correlation_id: tenantId,
     });
+    if (eventWrite.error) {
+      console.error("[webhooks.kixie] agent_events insert failed", eventWrite.error);
+    }
   } catch (err) {
     console.error("[webhooks.kixie] agent_events insert failed", err);
   }
@@ -463,6 +533,7 @@ export async function POST(req: NextRequest) {
           fname: evt.fname,
           lname: evt.lname,
           email: evt.email,
+          occurredAt: kixieOccurredAt(evt, new Date().toISOString()),
         },
         leadId, leadData, rep, merchantPhone, isInbound, callId, cfg,
       });
@@ -481,6 +552,14 @@ export async function POST(req: NextRequest) {
       ok: false,
       detail: err instanceof Error ? err.message : "unknown",
     });
+  }
+
+  if (isInbound && automations.some((result) => !result.ok && result.retryable)) {
+    console.error("[webhooks.kixie] retryable inbound tracking failure", automations);
+    return NextResponse.json(
+      { ok: false, error: "inbound_tracking_failed", automations },
+      { status: 503 },
+    );
   }
 
   return NextResponse.json({

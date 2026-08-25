@@ -520,4 +520,93 @@ for (const view of [
   );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// THE BUSINESS'S HOURS AND THE LEGAL CALLING WINDOW NEVER SHARE A BOX.
+//
+// The defect this pins, in the operator's words: "I don't know what these
+// Calling Hours mean. They're completely hallucinating that you didn't take any
+// of their actual business work hours."
+//
+// He was looking at a heading a rep reads as "this shop's hours" under which
+// the only concrete times were 9:00 a.m. and 9:30 p.m. -- the CRTC window,
+// identical on all 31,034 leads, because none of them carried any hours at all.
+// A generic legal constant rendered in the slot reserved for facts about the
+// prospect IS fabricated data about the prospect, however careful the
+// surrounding sentence is.
+//
+// The fix is structural, so the guard is structural: the hours panel may not
+// reference the calling-window state at all, and the calling notice may not
+// borrow the hours vocabulary for its own label.
+//
+// PROVED TO FIRE (2026-08-25): putting `{h.call.reason}` back inside
+// BusinessHoursPanel failed the first assertion, and renaming the notice's
+// label to "Calling hours" failed the third. Both were reverted.
+// ═══════════════════════════════════════════════════════════════════════════
+{
+  const src = read("components/web-leads/OpeningHours.tsx");
+
+  // Comments are stripped before every assertion below. This guard is about
+  // what RENDERS, and on its first run it failed against CallingWindowNotice's
+  // own doc comment explaining the defect -- a prose mention of "9:30" is not a
+  // legal window printed on a rep's screen. (That miss is itself the proof the
+  // numeric assertion fires; see the PROVED note above.)
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+  const panel = strip(src.slice(
+    src.indexOf("export function BusinessHoursPanel"),
+    src.indexOf("export function CallingWindowNotice"),
+  ));
+  assert.ok(panel.length > 400, "BusinessHoursPanel and CallingWindowNotice must both exist, in that order");
+
+  assert.doesNotMatch(
+    panel,
+    /\bh\.call\b/,
+    "BusinessHoursPanel must not read the calling-window state -- the legal window renders as a separate sibling, never inside the business's own hours",
+  );
+  // The window's numbers, in any spelling. A future edit that inlines "9:00 am
+  // to 9:30 pm" as a literal would sail past the h.call check above.
+  assert.doesNotMatch(
+    panel,
+    /9:30|21 \* 60/,
+    "BusinessHoursPanel must not print the CRTC window's times, even as a literal",
+  );
+
+  const notice = strip(src.slice(src.indexOf("export function CallingWindowNotice")));
+  assert.doesNotMatch(
+    notice,
+    /<p className=\{LABEL\}>[^<]*(?:Business|Opening) hours/,
+    "the calling-window notice must not label itself with the business-hours vocabulary",
+  );
+  assert.match(
+    notice,
+    /if \(call\.allowed === true\) return null;/,
+    "the calling-window notice must render nothing while the rep is inside the window -- a caution shown on every card all day stops being read",
+  );
+
+  // And the two are actually mounted as siblings on the card, not nested.
+  const facts = read("components/web-leads/BusinessFacts.tsx");
+  assert.match(facts, /<BusinessHoursPanel[^>]*\/>\s*<CallingWindowNotice[^>]*\/>/,
+    "BusinessFacts must render the two as sibling rows");
+}
+
+// UNKNOWN HOURS ARE A SENTENCE, AND THE TWO KINDS OF UNKNOWN STAY APART.
+// "Nobody has looked" and "we looked and found nothing" are different facts and
+// a rep acts on them differently. Collapsing them is how a gap in OUR
+// collection gets read as a fact about the business.
+{
+  const hours = read("lib/web-leads/hours.ts");
+  assert.match(hours, /Nobody has checked this business's hours yet/);
+  assert.match(hours, /We looked and found no published hours/);
+  // No default, anywhere on the unknown path.
+  assert.doesNotMatch(
+    hours,
+    /state = "open"|headline = "Open now";\s*\n\s*\}\s*else \{/,
+    "the unknown state must never fall through to open",
+  );
+  // Provenance must survive to the screen, and a weak source must say so.
+  assert.match(hours, /"site-text": \{ label: [^}]*weak: true/);
+  const ui = read("components/web-leads/OpeningHours.tsx");
+  assert.match(ui, /h\.source/, "the card must show where the hours came from");
+}
+
 console.log("web-leads-guards ok");

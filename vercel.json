@@ -38,6 +38,10 @@
       "schedule": "17 * * * *"
     },
     {
+      "path": "/api/cron/reconcile-website-sales-payments",
+      "schedule": "17 * * * *"
+    },
+    {
       "path": "/api/cron/dispatch-scheduled-calls",
       "schedule": "*/5 * * * *"
     },

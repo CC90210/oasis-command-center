@@ -78,12 +78,58 @@ export type ListRecordsInput = {
   offset?: number;
   /** Equality filters on top-level data keys. Values are coerced to strings. */
   where?: Record<string, string | number | boolean | null>;
+  /** Top-level data keys where both a missing/null value and "" mean empty. */
+  whereEmpty?: readonly string[];
+  /**
+   * Case-insensitive contains search across selected top-level data keys.
+   * Applied in PostgREST before ordering/range so pagination searches the
+   * complete entity set instead of whichever rows happened to be fetched.
+   */
+  search?: { fields: readonly string[]; query: string };
 };
 
 export type ListRecordsResult = {
   rows: TenantRecord[];
   total: number;
 };
+
+const DATA_FIELD_RE = /^[a-z][a-z0-9_]{0,62}$/;
+const MAX_RECORD_SEARCH_CHARS = 160;
+
+/**
+ * Build a PostgREST `.or()` clause for JSONB top-level ILIKE filters.
+ *
+ * `.or()` is a tiny grammar, not a parameterized SQL surface: commas and
+ * parentheses in a raw value can become grammar delimiters. Turn those (plus
+ * SQL wildcard characters) into a contains wildcard before interpolation.
+ * This keeps searches such as `Acme, Inc. (Montreal)` useful while preventing
+ * user text from changing the filter structure. The database adapter converts
+ * PostgREST's `*` alias to SQL `%` in Turso mode; Supabase supports the same
+ * alias.
+ */
+export function buildRecordSearchOr(fields: readonly string[], rawQuery: string): string | null {
+  const validFields = [...new Set(fields)].filter((field) => {
+    if (!DATA_FIELD_RE.test(field)) {
+      throw new RecordsError("validation", `invalid search field "${field}"`);
+    }
+    return true;
+  });
+  if (validFields.length === 0) {
+    throw new RecordsError("validation", "search requires at least one field");
+  }
+
+  const bounded = rawQuery.normalize("NFKC").trim().slice(0, MAX_RECORD_SEARCH_CHARS);
+  if (!bounded) return null;
+  const token = bounded
+    // Grammar delimiters, quotes/slashes, whitespace, and caller-supplied SQL
+    // wildcards all become one intentional contains wildcard.
+    .replace(/[(),"'\\\s%*_]+/g, "*")
+    .replace(/\*+/g, "*")
+    .replace(/^\*|\*$/g, "");
+  if (!token) return null;
+  const pattern = `*${token}*`;
+  return validFields.map((field) => `data->>${field}.ilike.${pattern}`).join(",");
+}
 
 export async function listRecords(input: ListRecordsInput): Promise<ListRecordsResult> {
   assertEntity(input.entity);
@@ -108,6 +154,20 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
         q = q.eq(`data->>${k}`, String(v));
       }
     }
+  }
+
+  if (input.whereEmpty) {
+    for (const field of [...new Set(input.whereEmpty)]) {
+      if (!DATA_FIELD_RE.test(field)) {
+        throw new RecordsError("validation", `invalid empty filter field "${field}"`);
+      }
+      q = q.or(`data->>${field}.is.null,data->>${field}.eq.""`);
+    }
+  }
+
+  if (input.search) {
+    const searchOr = buildRecordSearchOr(input.search.fields, input.search.query);
+    if (searchOr) q = q.or(searchOr);
   }
 
   // Transferred leads normally graduate to Applications. Live Subs are the
@@ -503,6 +563,11 @@ export type UpdateRecordInput = {
    * ready to catch RecordsError("conflict") and re-read.
    */
   ifMatch?: { field: string; value: string | null };
+  /** Multiple JSON-field preconditions on the same atomic UPDATE. Use when a
+   *  workflow decision depends on more than one fact (for example lifecycle
+   *  stage AND current owner). Kept separate from `ifMatch` so existing call
+   *  sites and their single-condition contract remain unchanged. */
+  ifMatchAll?: readonly { field: string; value: string | null }[];
 };
 
 export async function updateRecord(input: UpdateRecordInput): Promise<TenantRecord> {
@@ -566,9 +631,21 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
     // optimistic concurrency rather than a single-field check wearing its
     // name. Unguarded callers are untouched — they keep last-write-wins, which
     // is what every existing call site already assumes.
+  }
+  if (input.ifMatchAll) {
+    for (const condition of input.ifMatchAll) {
+      writeQ = condition.value === null
+        ? writeQ.is(`data->>${condition.field}`, null)
+        : writeQ.eq(`data->>${condition.field}`, condition.value);
+    }
+  }
+  const guarded = Boolean(input.ifMatch || input.ifMatchAll?.length);
+  if (guarded) {
+    // The JSON conditions protect the workflow facts the caller read;
+    // updated_at protects every other field in the replaced data document.
     writeQ = writeQ.eq("updated_at", existing.updated_at);
   }
-  const result = input.ifMatch
+  const result = guarded
     ? await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").maybeSingle()
     : await writeQ.select("id, tenant_id, entity_type, data, created_at, updated_at").single();
   if (result.error) throw new RecordsError("db", result.error.message);
@@ -578,7 +655,10 @@ export async function updateRecord(input: UpdateRecordInput): Promise<TenantReco
   if (!result.data) {
     throw new RecordsError(
       "conflict",
-      `precondition failed: ${input.ifMatch?.field} is no longer ${String(input.ifMatch?.value)}`,
+      `precondition failed: ${[
+        ...(input.ifMatch ? [input.ifMatch] : []),
+        ...(input.ifMatchAll || []),
+      ].map((condition) => `${condition.field} is no longer ${String(condition.value)}`).join(", ")}`,
     );
   }
   let row = result.data as TenantRecord;

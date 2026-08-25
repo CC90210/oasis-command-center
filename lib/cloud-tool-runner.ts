@@ -50,8 +50,6 @@ import {
 } from "./lead-scope";
 import { runAction } from "./agent-actions";
 import { CLOUD_TOOLS } from "./cloud-tools";
-import { dispatchOasisOnlyEvent } from "./lead-stage-dispatcher";
-import type { OasisLeadStageEvent } from "./oasis-lead-stage-engine";
 import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
@@ -338,37 +336,6 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         id: { type: "string", description: "Record UUID." },
       },
       required: ["entity", "id"],
-    },
-  },
-  {
-    name: "advance_lead_stage",
-    description:
-      "Move a lead through its lifecycle by firing a stage-engine event. " +
-      "Use this (NOT update_record with a stage patch) when the operator " +
-      "says things like 'mark Bennett as lost', 'I got off the phone with " +
-      "Windsor — they signed the contract', or 'kickoff is done, start the " +
-      "build'. The engine validates the transition, emits the proper " +
-      "timeline event, and invalidates the dashboard cache so the kanban " +
-      "refreshes immediately. " +
-      "Event types (OASIS, 14-stage lifecycle): manual_outreach_started " +
-      "(-> attempting_contact), discovery_call_scheduled (-> " +
-      "founder_meeting_booked), lead_qualified (-> qualified), " +
-      "proposal_sent (-> proposal_sent), proposal_viewed (-> proposal_sent, " +
-      "lag-repair), contract_signed (-> won), onboarding_complete (-> " +
-      "in_build), lead_replied_negative (-> lost), contract_ended (-> lost, " +
-      "only from launched; reason code marks it as churn), manual_archive " +
-      "(-> lost, operator cleanup from any non-lost stage). " +
-      "Find the lead's UUID first via search_records or list_records.",
-    input_schema: {
-      type: "object",
-      properties: {
-        lead_id: { type: "string", description: "Lead UUID." },
-        event_type: {
-          type: "string",
-          description: "One of: manual_outreach_started, discovery_call_scheduled, lead_qualified, proposal_sent, proposal_viewed, contract_signed, onboarding_complete, lead_replied_negative, contract_ended, manual_archive.",
-        },
-      },
-      required: ["lead_id", "event_type"],
     },
   },
   {
@@ -903,6 +870,8 @@ async function dispatch(
       const r = await runAction({ type: name, payload: input }, {
         tenantId: ctx.tenantId,
         authUserId: ctx.authUserId,
+        userId: ctx.userId,
+        isAdmin: ctx.isAdmin,
       });
       if (!r.ok) throw new Error(r.error);
       return { ok: true, summary: r.summary };
@@ -924,8 +893,6 @@ async function dispatch(
       return await toolListLeadDocuments(input, ctx);
     case "import_leads_from_attachment":
       return await toolImportLeadsFromAttachment(input, ctx);
-    case "advance_lead_stage":
-      return await toolAdvanceLeadStage(input, ctx);
     case "kixie_call":
       return await toolKixieCall(input, ctx);
     case "kixie_send_sms":
@@ -947,84 +914,6 @@ async function dispatch(
     default:
       throw new Error(`unknown_tool:${name}`);
   }
-}
-
-/**
- * NL-CRM bridge: operator says "Bennett's contract ended" -> Bravo
- * calls this with {lead_id, event_type: "contract_ended"} -> engine
- * moves the lead's stage, emits BRAVO_LEAD_AUTO_BUMPED, revalidates
- * the dashboard cache.
- *
- * This is preferred over update_record({stage: "..."}) because it
- * runs through the engine: archived-lead bypass kicks in, from-set
- * gates protect against accidental backflow on regular leads, and
- * the timeline gets a row with the canonical reason code (not just
- * a generic field-changed entry).
- *
- * The tool is OASIS-tenant aware via dispatchOasisOnlyEvent — on
- * SunBiz / other tenants it returns no_rule, which is the correct
- * shape (those tenants use a different lifecycle and have their
- * own dispatcher entry points).
- */
-async function toolAdvanceLeadStage(
-  input: unknown,
-  ctx: { tenantId: string },
-): Promise<unknown> {
-  const args = (input || {}) as { lead_id?: string; event_type?: string };
-  const leadId = String(args.lead_id || "").trim();
-  const eventType = String(args.event_type || "").trim();
-  if (!leadId) throw new Error("missing_lead_id");
-  if (!eventType) throw new Error("missing_event_type");
-
-  // Whitelist matches the API route's OASIS_OPERATOR_TRIGGERABLE so
-  // the agent can't synthesize a transition the operator UI couldn't
-  // also fire. Keeps webhook-only events (outbound_email_sent, etc.)
-  // off the table.
-  const ALLOWED: ReadonlySet<OasisLeadStageEvent["type"]> = new Set([
-    "discovery_call_scheduled",
-    "lead_qualified",
-    "proposal_sent",
-    "proposal_viewed",
-    "contract_signed",
-    "onboarding_complete",
-    "lead_replied_negative",
-    "contract_ended",
-    "manual_outreach_started",
-    "manual_archive",
-  ]);
-  if (!ALLOWED.has(eventType as OasisLeadStageEvent["type"])) {
-    throw new Error(`event_type_not_allowed:${eventType}`);
-  }
-
-  // Dispatcher owns cache invalidation now (lib/lead-stage-dispatcher
-  // → invalidateLeadStagePaths) so both the UI button path and this
-  // chat-driven path get the same kanban refresh without duplicating
-  // the revalidatePath calls in two places.
-  const result = await dispatchOasisOnlyEvent({
-    type: eventType as OasisLeadStageEvent["type"],
-    tenantId: ctx.tenantId,
-    leadId,
-  });
-
-  return {
-    fired: result.fired,
-    ...(result.fired
-      ? {
-          from: result.from,
-          to: result.to,
-          reason: result.reasonCode,
-          summary: `Lead moved from ${result.from} -> ${result.to} (${result.reasonCode}).`,
-        }
-      : {
-          reason: result.reason,
-          summary:
-            result.reason === "stage_blocked"
-              ? "No-op: that transition isn't allowed from the lead's current stage."
-              : result.reason === "not_found"
-                ? "No-op: lead not found (already deleted or wrong tenant)."
-                : "No-op: stage engine declined the event.",
-        }),
-  };
 }
 
 // ----------------------------------------------------------------------------
@@ -1365,7 +1254,9 @@ async function toolListRecords(input: Record<string, unknown>, ctx: ToolContext)
   // non-admin operator only sees their own + collaborated rows (admins see all).
   // The arbitrary `where` is dropped for scoped entities (security > filter).
   // (2026-06-22 audit.)
-  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const scoped =
+    SCOPED_ENTITIES.has(entity.toLowerCase()) &&
+    (!ctx.isAdmin || leadScopingEnabled());
   const result = scoped
     ? await listByAssignedScope({
         tenant_id: ctx.tenantId,
@@ -1400,7 +1291,12 @@ async function toolGetRecord(input: Record<string, unknown>, ctx: ToolContext) {
   // book exactly as before (filtered-view mode opens the human UI, not the agent).
   if (
     SCOPED_ENTITIES.has(entity.toLowerCase()) &&
-    !recordMatchesViewer(row.data, { isAdmin: ctx.isAdmin, userId: ctx.userId }, leadScopingEnabled(), "isolate")
+    !recordMatchesViewer(
+      row.data,
+      { isAdmin: ctx.isAdmin, userId: ctx.userId },
+      !ctx.isAdmin || leadScopingEnabled(),
+      "isolate",
+    )
   ) {
     throw new Error("record_not_found");
   }
@@ -1413,6 +1309,22 @@ async function toolListLeadDocuments(
 ) {
   const leadId = String(input.lead_id || "").trim();
   if (!leadId) throw new Error("lead_id_required");
+  const lead = await dataGet({
+    tenant_id: ctx.tenantId,
+    entity: "lead",
+    id: leadId,
+  }).catch(() => null);
+  if (
+    !lead ||
+    !recordMatchesViewer(
+      lead.data,
+      { isAdmin: ctx.isAdmin, userId: ctx.userId },
+      !ctx.isAdmin || leadScopingEnabled(),
+      "isolate",
+    )
+  ) {
+    throw new Error("record_not_found");
+  }
   const docTypeFilter =
     typeof input.doc_type === "string" && input.doc_type.trim()
       ? input.doc_type.trim().toLowerCase()
@@ -1522,7 +1434,9 @@ async function toolSearchRecords(input: Record<string, unknown>, ctx: ToolContex
   // is fixed; if the operator has more, they should narrow via filter.
   // Per-agent scope for SCOPED_ENTITIES so search can't reach another rep's
   // leads/applications/funded-deals. (2026-06-22 audit.)
-  const scoped = SCOPED_ENTITIES.has(entity.toLowerCase()) && leadScopingEnabled();
+  const scoped =
+    SCOPED_ENTITIES.has(entity.toLowerCase()) &&
+    (!ctx.isAdmin || leadScopingEnabled());
   const result = scoped
     ? await listByAssignedScope({
         tenant_id: ctx.tenantId,

@@ -207,6 +207,7 @@ export const SUN_NAV: NavItem[] = [
 export const WEBDEV_NAV: NavItem[] = [
   ...CC_NAV,
   { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
+  { group: "Leads", href: "/commissions", label: "Commissions", icon: "DollarSign" },
   // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
   // filtered to this engine's leads -- a VIEW over the fourteen-stage
   // lifecycle CC already runs, never a second one (2026-08-21, Build D).

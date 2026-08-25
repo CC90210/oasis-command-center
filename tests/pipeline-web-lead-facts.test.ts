@@ -190,24 +190,33 @@ async function run() {
   }
 
   // ---------------------------------------------------------------------------
-  // 6. THE BOARD'S OWN FILTERS APPLY WITH AN EMPTY SEARCH BOX.
+  // 6. THE SCORE JOIN RUNS ON WHAT IS ACTUALLY RENDERED.
   //
-  // Fixed 2026-08-25. `const rows = query ? repScopedRows.filter(...) : scopedRows`
-  // meant both filters built directly above it only took effect once a rep typed
-  // something. With an empty box the board fell back to the pre-filter set, which
-  // still carries the ~30,000-row researched prospect pool and ignores ?rep=.
+  // RE-AIMED 2026-08-25 when origin/main (#295) moved the board's filtering into
+  // the DATABASE. This block used to pin an in-memory shape:
+  // `const rows = query ? repScopedRows.filter(...) : scopedRows`, where the
+  // no-query branch skipped both the researched cut and the ?rep= filter -- a
+  // real bug at the time. That whole structure is gone: `listOasisPipelineWindow`
+  // now applies scope, the researched cut, the rep filter and the search before
+  // returning one bounded page of rows, so the bug it guarded cannot exist.
+  //
+  // Deleting the block would have been wrong too -- what still matters is that
+  // the score join runs on the PAGED window rather than on some wider set, and
+  // that it stays gated on the tenant.
   // ---------------------------------------------------------------------------
   {
     const page = read("app/pipeline/page.tsx");
-    assert.doesNotMatch(
+    assert.match(
       page,
-      /\?\s*repScopedRows\.filter\([\s\S]{0,2000}?\n\s*:\s*scopedRows;/,
-      "the no-query branch must fall back to repScopedRows, not scopedRows -- otherwise the researched cut and the rep filter only apply while someone is typing",
+      /attachWebsiteScores\(named\)/,
+      "scores must be attached to the already-scoped, already-paged window",
     );
-    assert.match(page, /:\s*repScopedRows;/, "the no-query branch must use repScopedRows");
-    // Scores are attached to what is actually rendered, not to the wider set.
-    assert.match(page, /attachWebsiteScores\(rows\)/, "scores must be attached to the final filtered rows");
-    assert.match(page, /rows=\{rowsWithScores\}/, "the view must receive the enriched rows");
+    assert.match(
+      page,
+      /const named = await attachAssignedNames\(pipelineWindow\.rows, tenantId\)/,
+      "the window from the DB query is what gets enriched -- not a re-fetched or wider set",
+    );
+    assert.match(page, /rows=\{rows\}/, "the view must receive the enriched rows");
 
     // ─────────────────────────────────────────────────────────────────────
     // 7. THE SCORE JOIN IS GATED ON THE TENANT.
@@ -222,7 +231,7 @@ async function run() {
     // ─────────────────────────────────────────────────────────────────────
     assert.match(
       page,
-      /tenantId === WEBDEV_TENANT_ID \? await attachWebsiteScores\(rows\) : rows/,
+      /tenantId === WEBDEV_TENANT_ID \? await attachWebsiteScores\(named\) : named/,
       "the score join must be gated on the web-leads tenant -- fetchScoreIndex is pinned to it, so another tenant would resolve against the wrong index",
     );
   }
@@ -248,15 +257,24 @@ async function run() {
       "the battle-card link must be gated on isWebLead",
     );
 
+    // The DETAIL page no longer carries its own compact business band. This
+    // used to assert a battle-card link inside one; origin/main (#295) shipped
+    // `LeadWebsiteAuditBand`, which renders the website, industry, condition
+    // and findings for every viewer, so a second band of the same fields was
+    // deleted rather than merged. What the detail page owes now is the full
+    // card, which section 9 covers -- plus the band, unconditionally, so a
+    // viewer who cannot load the card is never left with nothing.
     const detail = read("app/pipeline/[id]/page.tsx");
     assert.match(
       detail,
-      /\{nonEmptyString\(data\.webdev_source_business_id\) && \(\s*<Link\s+href=\{`\/web-leads\//,
-      "the detail page's battle-card link must be gated the same way",
+      /<LeadWebsiteAuditBand data=\{activeRecord\.data\} \/>/,
+      "the website band must render for EVERY viewer -- it is the floor under the battle card",
     );
-    // The View site link is deliberately NOT gated: `website` is a generic CRM
-    // field and opening a URL works for any lead that has one.
-    assert.match(detail, /const href = preferredSiteUrl\(websiteUrl\);/);
+    assert.doesNotMatch(
+      detail,
+      /\{[^}]*&& <LeadWebsiteAuditBand/,
+      "the website band must not be gated -- gating it is what could leave a collaborator with nothing",
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -287,8 +305,8 @@ async function run() {
     );
     assert.match(
       detail,
-      /<BattleCard leadId=\{id\} embedded \/>/,
-      "the pipeline lead page must render the battle card",
+      /<BattleCard leadId=\{id\} canMutate=\{canMutateLead\} embedded \/>/,
+      "the pipeline lead page must render the battle card, and pass ITS OWN mutation gate into it",
     );
 
     // ─── NOBODY EVER GETS NEITHER ─────────────────────────────────────────
@@ -311,27 +329,31 @@ async function run() {
     );
     assert.match(
       detail,
-      /const willRenderBattleCard = Boolean\(\s*webLeadBusinessId && cardViewer && visibleToViewer\(assignedTo, cardViewer\),/,
+      /const willRenderBattleCard = Boolean\(\s*webLeadBusinessId && cardViewer && visibleToViewer\(assignedTo \?\? null, cardViewer\),/,
       "the card gate must combine 'is a web-lead' with the API's own visibility rule",
     );
     assert.match(
       detail,
-      /\{willRenderBattleCard && \(/,
+      /\{willRenderBattleCard \? \(/,
       "the battle card must render only when the API will actually serve it",
     );
-    // THE COMPLEMENT, and this is the assertion that matters: the fallback band
-    // must key on the SAME boolean, so the two branches are exhaustive. If one
-    // gate says `willRenderBattleCard` and the other says `webLeadBusinessId`,
-    // a collaborator falls through both and sees nothing.
+    // NOBODY GETS NOTHING, and this is the assertion that matters.
+    //
+    // The card is gated on `visibleToViewer`, which accepts the assignee only,
+    // while this PAGE admits collaborators too. So a collaborator can open the
+    // record and be refused the card. That is survivable only because the
+    // website band above renders unconditionally -- asserted in section 8. If
+    // that band ever becomes conditional, this gate starts hiding the business
+    // from exactly the people the comp plan pays.
     assert.match(
       detail,
-      /\{!willRenderBattleCard && <LeadBusinessBand/,
-      "the fallback band must key on the SAME boolean as the card, or a viewer can get neither",
+      /const willRenderBattleCard = Boolean\(/,
+      "the card gate must be a named, single decision -- not repeated inline",
     );
     assert.doesNotMatch(
       detail,
-      /\{!webLeadBusinessId && <LeadBusinessBand/,
-      "the fallback must not key on web-lead-ness alone -- that is the gap that left collaborators with nothing",
+      /\{willRenderBattleCard \? \([\s\S]{0,4000}?\) : \(\s*<Lead/,
+      "there must be no BAND alternative branch -- the unconditional band above already covers it, and a second one is the duplication that was removed",
     );
 
     // The card is READ, not hidden behind a click. A card a rep has to expand

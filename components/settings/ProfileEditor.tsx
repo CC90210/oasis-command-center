@@ -3,15 +3,13 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { UserProfile } from "@/lib/supabase";
-import { FAMILY_AGENT_KEYS, AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
+import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
 
 /**
  * `tenantAgents` — slugs of agents the tenant manifest enables. When
- * provided, the agent palette renders THIS list; otherwise we fall
- * back to the empire-wide FAMILY_AGENT_KEYS (Bravo / Atlas / Maven /
- * Aura / Hermes / Lumen). Fixes the cross-tenant bleed where a SunBiz
- * operator opened OASIS Settings and saw their SunBiz agents mixed
- * into the OASIS family list.
+ * provided, the primary-agent picker renders THIS list. Workspace agent
+ * membership is managed once in the tenant manifest, not independently on
+ * every user's profile.
  */
 export function ProfileEditor({
   profile,
@@ -35,38 +33,16 @@ export function ProfileEditor({
   const [mrrCurrent, setMrrCurrent] = useState(String(profile.mrr_current_usd));
   const [mrrDate, setMrrDate] = useState(profile.mrr_target_date || "");
   const [manifesto, setManifesto] = useState(profile.manifesto || "");
-  const [primaryAgent, setPrimaryAgent] = useState(resolveAgentKey(profile.primary_agent));
-  const [enabled, setEnabled] = useState<Set<string>>(
-    new Set((profile.agents_enabled || []).map(resolveAgentKey)),
-  );
-  // Tenant-aware palette. SunBiz operators see Solara + Helios; OASIS
-  // operators see the family agents. The currently-checked agents in
-  // profile.agents_enabled and the primary_agent are ALWAYS kept in
-  // the list so an operator can see + un-check a stale value (e.g.
-  // a SunBiz agent that's still on an OASIS profile from prior
-  // testing). Otherwise it'd render as a permanent invisible flag.
-  const tenantBase =
-    tenantAgents && tenantAgents.length > 0
-      ? tenantAgents.map(resolveAgentKey)
-      : FAMILY_AGENT_KEYS;
+  const tenantBase = (tenantAgents || []).map(resolveAgentKey);
   const availableAgentKeys = Array.from(
-    new Set(
-      [
-        ...tenantBase,
-        ...(profile.agents_enabled || []).map(resolveAgentKey),
-        resolveAgentKey(profile.primary_agent),
-      ].filter((key): key is string => typeof key === "string" && key.length > 0),
-    ),
+    new Set(tenantBase.filter((key): key is string => typeof key === "string" && key.length > 0)),
   );
-
-  function toggleAgent(key: string) {
-    setEnabled((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
+  const requestedPrimary = resolveAgentKey(profile.primary_agent);
+  const [primaryAgent, setPrimaryAgent] = useState(
+    availableAgentKeys.includes(requestedPrimary)
+      ? requestedPrimary
+      : availableAgentKeys[0] || "",
+  );
 
   async function onSave() {
     setBusy(true);
@@ -85,8 +61,7 @@ export function ProfileEditor({
           mrr_current_usd: Number(mrrCurrent) || 0,
           mrr_target_date: mrrDate || null,
           manifesto: manifesto || null,
-          primary_agent: primaryAgent,
-          agents_enabled: Array.from(enabled),
+          ...(primaryAgent ? { primary_agent: primaryAgent } : {}),
         }),
       });
       const body = await r.json();
@@ -128,11 +103,21 @@ export function ProfileEditor({
           <input className="input" value={brand} onChange={(e) => setBrand(e.target.value)} />
         </Field>
         <Field label="Primary agent">
-          <select className="select" value={primaryAgent} onChange={(e) => setPrimaryAgent(e.target.value)}>
-            {availableAgentKeys.map((k) => (
+          <select
+            className="select"
+            value={primaryAgent}
+            onChange={(e) => setPrimaryAgent(e.target.value)}
+            disabled={availableAgentKeys.length === 0}
+          >
+            {availableAgentKeys.length === 0 ? (
+              <option value="">No workspace agents enabled</option>
+            ) : availableAgentKeys.map((k) => (
               <option key={k} value={k}>{AGENT_REGISTRY[k]?.label || k}</option>
             ))}
           </select>
+          <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">
+            This list comes from Workspace agents below. Enable or remove an agent there once for the whole team.
+          </p>
         </Field>
         <Field label="MRR target (USD)">
           <input className="input" type="number" value={mrrTarget} onChange={(e) => setMrrTarget(e.target.value)} />
@@ -158,43 +143,6 @@ export function ProfileEditor({
         />
       </Field>
 
-      <div>
-        <div className="label mb-2">Agents enabled</div>
-        <ul className="grid sm:grid-cols-2 gap-2">
-          {availableAgentKeys.map((key) => {
-            const a = AGENT_REGISTRY[key];
-            const on = enabled.has(key);
-            return (
-              <li key={key}>
-                <button
-                  type="button"
-                  onClick={() => toggleAgent(key)}
-                  className={`w-full text-left p-3 rounded-md border flex items-center gap-3 transition-all ${
-                    on
-                      ? "bg-accent-soft border-accent text-fg"
-                      : "bg-bg-elev border-bg-border text-fg-muted hover:border-bg-hover"
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${
-                      on ? "bg-accent border-accent text-bg" : "border-fg-faint"
-                    }`}
-                  >
-                    {on && <CheckIcon />}
-                  </div>
-                  <div>
-                    <div className={`font-bold uppercase tracking-wider text-xs ${on ? "text-accent" : ""}`}>
-                      {a?.label || key}
-                    </div>
-                    <div className="text-xs">{a?.role || "Custom agent"}</div>
-                  </div>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-
       <div className="flex items-center gap-3 pt-2">
         <button onClick={onSave} disabled={busy} className="btn-primary">
           {busy ? "Saving…" : "Save profile"}
@@ -212,13 +160,5 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="label">{label}</div>
       {children}
     </div>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-      <path d="M2.5 6.5L5 9L9.5 3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }

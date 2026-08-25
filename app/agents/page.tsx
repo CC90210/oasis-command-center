@@ -4,6 +4,7 @@ import { timeAgo } from "@/lib/fmt";
 import { agentStates, getActiveProfile, integrationsHealth, aiServicesWithKey, getTenantBridgeOwner, getBridgeOnline } from "@/lib/queries";
 import { FAMILY_AGENT_KEYS, getAgentInfo } from "@/lib/agents";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentStats } from "@/lib/agent-stats";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
@@ -54,9 +55,10 @@ export default async function AgentsPage() {
   // agentStates() by the tenant's enabled agents. agent_state_snapshot
   // has no tenant_id column yet — see queries.ts:agentStates() docstring.
   const manifestForAgents = await getTenantManifestForUser(profile?.tenant_id ?? null);
-  const manifestEnabledSlugs = (manifestForAgents?.agents || [])
-    .filter((a) => a.enabled)
-    .map((a) => a.slug.toLowerCase());
+  const manifestEnabledSlugs = resolveEnabledAgentSlugs({
+    manifestAgents: manifestForAgents ? manifestForAgents.agents || [] : null,
+    legacyProfileAgents: profile?.agents_enabled,
+  });
 
   const [states, integrations, stats, noBridge, aiServices, tenantBridgeOwner, serverBridgeOnline] = await Promise.all([
     agentStates(manifestEnabledSlugs),

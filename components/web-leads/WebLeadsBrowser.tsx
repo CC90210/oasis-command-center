@@ -87,7 +87,7 @@ function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v:
   );
 }
 
-export function WebLeadsBrowser() {
+export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
   const router = useRouter();
   const sp = useSearchParams();
   const filters = useMemo(() => parseFilters(new URLSearchParams(sp.toString())), [sp]);
@@ -290,6 +290,7 @@ export function WebLeadsBrowser() {
    * that reports success is worse than an error".
    */
   const runClaim = useCallback(async () => {
+    if (!canMutate) return;
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     setClaiming(true);
@@ -316,12 +317,14 @@ export function WebLeadsBrowser() {
         const lost = (body.lostRace || []).length;
         const capped = (body.refused || []).filter((x: { reason: string }) => x.reason === "at_capacity").length;
         const gone = (body.refused || []).length - capped;
+        const trackingFailed = (body.trackingFailed || []).length;
         setClaimNote(
           [
             `Claimed ${got}.`,
             lost ? `${lost} were taken by someone else just now.` : "",
             gone ? `${gone} were already held.` : "",
             capped ? `${capped} would put you over your ${body.cap} lead limit.` : "",
+            trackingFailed ? `${trackingFailed} claims saved, but their activity tracking needs an admin check.` : "",
             `You now hold ${body.held} of ${body.cap}.`,
           ].filter(Boolean).join(" "),
         );
@@ -331,11 +334,11 @@ export function WebLeadsBrowser() {
       // my book) at once, rather than lingering until the next navigation.
       setRefreshKey((n) => n + 1);
     } catch {
-      setClaimNote("Could not reach the server. Nothing was changed.");
+      setClaimNote("Could not confirm whether the server finished. Refresh before trying again so you do not act on stale ownership.");
     } finally {
       setClaiming(false);
     }
-  }, [selected, mine]);
+  }, [canMutate, selected, mine]);
 
   /**
    * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
@@ -357,6 +360,7 @@ export function WebLeadsBrowser() {
    * would drain the pool for everyone else in a single click.
    */
   const startCalling = useCallback(async () => {
+    if (!canMutate) return;
     if (mine) { setCalling(true); return; }
     const ids = leads.map((l) => l.id);
     if (ids.length === 0) return;
@@ -374,6 +378,7 @@ export function WebLeadsBrowser() {
         return;
       }
       const got: string[] = body.claimed || [];
+      const trackingFailed = (body.trackingFailed || []).length;
       if (got.length === 0) {
         // Never open an empty queue and let the rep discover it. Say why.
         setClaimNote(
@@ -382,18 +387,19 @@ export function WebLeadsBrowser() {
         return;
       }
       setClaimNote(
-        `Claimed ${got.length} of ${ids.length}. You now hold ${body.held} of ${body.cap}. They are yours until you release them.`,
+        `Claimed ${got.length} of ${ids.length}. You now hold ${body.held} of ${body.cap}. They are yours until you release them.` +
+          (trackingFailed ? ` ${trackingFailed} activity records need an admin check.` : ""),
       );
       // Land in My leads: the queue a rep works is their own book, and the
       // claimed leads have by definition just left the pool this view shows.
       push({ ...filters, view: "mine", page: 1 });
       setCalling(true);
     } catch {
-      setClaimNote("Could not reach the server. Nothing was claimed.");
+      setClaimNote("Could not confirm whether the claims finished. Refresh before calling so you only work leads shown in your book.");
     } finally {
       setClaiming(false);
     }
-  }, [mine, leads, push, filters]);
+  }, [canMutate, mine, leads, push, filters]);
 
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {
@@ -434,6 +440,7 @@ export function WebLeadsBrowser() {
           onClaim={runClaim}
           claiming={claiming}
           claimLabel={mine ? "Release" : "Claim"}
+          canMutate={canMutate}
         />
 
         {claimNote && (
@@ -450,6 +457,7 @@ export function WebLeadsBrowser() {
           emptyHint={mine ? "Nothing in your book yet. Go to Leads, tick the ones you want and claim them." : emptyHint}
           selected={selected} onToggle={toggle} onToggleAll={toggleAll}
           showStage={mine}
+          canSelect={canMutate}
         />
       </div>
     </div>
@@ -475,7 +483,7 @@ export function WebLeadsBrowser() {
         </div>
       )}
 
-      {calling && (
+      {calling && canMutate && (
         <CallMode
           leads={leads}
           // Page AND filter identity: a rep who changes a filter in another tab
@@ -497,7 +505,7 @@ export function WebLeadsBrowser() {
         />
       )}
 
-      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} />}
+      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} canMutate={canMutate && mine} />}
     </div>
   );
 }

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -51,6 +52,10 @@ export async function POST(req: NextRequest) {
         .eq("from_phone", to)
         .maybeSingle()
     : { data: null };
+  if ("error" in account && account.error) {
+    console.error("[webhooks.twilio.sms-inbound] account lookup failed", account.error);
+    return new NextResponse("Account lookup failed", { status: 503 });
+  }
   const tenantId =
     (account.data as { tenant_id?: string } | null)?.tenant_id ||
     process.env.TWILIO_TENANT_ID ||
@@ -87,7 +92,12 @@ export async function POST(req: NextRequest) {
         .filter("data->>phone", "ilike", `%${phoneLast10}%`)
         .limit(1)
     : { data: [] };
+  if ("error" in lead && lead.error) {
+    console.error("[webhooks.twilio.sms-inbound] lead lookup failed", lead.error);
+    return new NextResponse("Lead lookup failed", { status: 503 });
+  }
   const leadId = ((lead.data || []) as Array<{ id: string }>)[0]?.id || null;
+  const providerMessageId = messageSid || `twilio-fp:${createHash("sha256").update(rawBody).digest("hex")}`;
   const interaction = await db.from("lead_interactions").upsert({
     tenant_id: tenantId,
     lead_id: leadId,
@@ -96,7 +106,7 @@ export async function POST(req: NextRequest) {
     direction: "inbound",
     agent_source: "twilio",
     provider: "twilio",
-    provider_message_id: messageSid || null,
+    provider_message_id: providerMessageId,
     from_phone: from,
     to_phone: to,
     content: body,
@@ -110,11 +120,37 @@ export async function POST(req: NextRequest) {
     },
   }, {
     onConflict: "provider,provider_message_id",
-    ignoreDuplicates: true,
   });
   if (interaction.error) {
     console.error("[webhooks.twilio.sms-inbound] persistence failed", interaction.error.message);
     return new NextResponse("Persistence failed", { status: 500 });
+  }
+  const stored = await db
+    .from("lead_interactions")
+    .select("id,created_at")
+    .eq("tenant_id", tenantId)
+    .eq("provider", "twilio")
+    .eq("provider_message_id", providerMessageId)
+    .maybeSingle();
+  if (stored.error || !stored.data) {
+    console.error("[webhooks.twilio.sms-inbound] persisted row lookup failed", stored.error);
+    return new NextResponse("Persistence verification failed", { status: 500 });
+  }
+  if (leadId) {
+    const createdAt = (stored.data as { created_at?: string | null }).created_at;
+    const providerAt = params.get("DateCreated");
+    const occurredAt =
+      providerAt && Number.isFinite(Date.parse(providerAt))
+        ? new Date(providerAt).toISOString()
+        : typeof createdAt === "string" && Number.isFinite(Date.parse(createdAt))
+          ? new Date(createdAt).toISOString()
+          : new Date().toISOString();
+    try {
+      await persistCanonicalLeadTouch(db, { tenantId, leadId, occurredAt });
+    } catch (err) {
+      console.error("[webhooks.twilio.sms-inbound] canonical touch failed", err);
+      return new NextResponse("Touch persistence failed", { status: 500 });
+    }
   }
   await nudgeConversations(tenantId);
 

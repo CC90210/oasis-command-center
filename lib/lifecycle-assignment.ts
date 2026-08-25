@@ -10,6 +10,7 @@ export async function assignLifecycleOwner(input: {
   tenantId: string;
   record: RecordRow;
   assignedTo: string | null;
+  occurredAt?: string;
 }): Promise<{ ok: true; updatedIds: string[]; previousOwners: Array<string | null> } | { ok: false; error: string }> {
   const db = getServiceSupabase();
   const rows = new Map<string, RecordRow>([[input.record.id, input.record]]);
@@ -48,7 +49,10 @@ export async function assignLifecycleOwner(input: {
     const update = await db.rpc("patch_tenant_record_data", {
       p_id: row.id,
       p_tenant_id: input.tenantId,
-      p_patch: { assigned_to: input.assignedTo },
+      p_patch: {
+        assigned_to: input.assignedTo,
+        ...(input.occurredAt ? { last_contacted_at: input.occurredAt } : {}),
+      },
     });
     if (update.error) return { ok: false, error: update.error.message };
     updatedIds.push(row.id);
