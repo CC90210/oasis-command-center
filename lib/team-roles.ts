@@ -236,6 +236,35 @@ export function mayQuoteAndClose(role: unknown): boolean {
 }
 
 /**
+ * Roles eligible to HOST a booked 15-minute audit call.
+ *
+ * Widened 2026-08-25 (operator plan): the old inline allowlist was
+ * `is_owner || owner|admin|closer`, so newly added reps and the selling
+ * builder never appeared in the "Founder or closer hosting" dropdown and the
+ * API refused them server-side. Hosting is RUNNING the booked call — it is
+ * not a quote/close grant (that stays DEAL_CLOSING_ROLES) and not a
+ * commission change (attribution still freezes on booking).
+ *
+ * `agent` is grandfathered for the same reason it sits in DEAL_CLOSING_ROLES,
+ * and `marketing` is included per the operator's explicit instruction even
+ * though no live marketing row exists yet — hosting ≠ revenue ownership.
+ */
+export const AUDIT_HOST_ROLES: ReadonlySet<string> = new Set([
+  "owner",
+  "admin",
+  "manager",
+  "closer",
+  "agent",     // legacy full-stack rep, kept working on purpose
+  "builder",   // CC 2026-08-25: the selling builder hosts his own audits
+  "marketing",
+]);
+
+/** True when this role may host a booked audit call. Fails closed. */
+export function mayHostAuditCall(role: unknown): boolean {
+  return typeof role === "string" && AUDIT_HOST_ROLES.has(role.trim().toLowerCase());
+}
+
+/**
  * Every role the invite UI can offer ANYWHERE. This is the "is it a role at
  * all" set — it deliberately does NOT answer "may it be used here", which is
  * tenant-dependent and lives in lib/role-surfaces.ts.

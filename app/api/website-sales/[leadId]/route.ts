@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { mayQuoteAndClose } from "@/lib/team-roles";
+import { mayHostAuditCall, mayQuoteAndClose } from "@/lib/team-roles";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -50,14 +50,6 @@ import {
 } from "@/lib/website-sales-founder-meeting";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const STRUCTURED_STAGE_TARGETS = new Set([
-  "qualified",
-  "founder_meeting_booked",
-  "demo_completed",
-  "proposal_sent",
-  "won",
-  "onboarding",
-]);
 
 function isPositiveCentAmount(value: number): boolean {
   return (
@@ -404,7 +396,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     }
     if (
       !auditHost.data ||
-      (!auditHost.data.is_owner && !["owner","admin","closer"].includes(String(auditHost.data.team_role)))
+      (!auditHost.data.is_owner && !mayHostAuditCall(auditHost.data.team_role))
     ) return NextResponse.json({ok:false,error:"audit_host_not_authorized"},{status:400});
     const auditHostEmail = typeof auditHost.data.email === "string" ? auditHost.data.email.trim() : "";
     if (!auditHostEmail || !auditHostEmail.includes("@")) {
@@ -667,11 +659,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     }
     patch = { stage:nextStage };
   } else if (body.action === "set_stage") {
+    // Direct admin stage control (2026-08-25 operator plan): a true admin may
+    // move a lead to ANY valid stage from the header dropdown, including the
+    // structured targets. Downstream guards (stored_proposal_incomplete,
+    // verified_meeting_required, builder_handoff_not_ready) still fail loudly
+    // when a server-generated artifact is missing, so out-of-order moves can
+    // never corrupt the payment or meeting ledgers — they just surface a
+    // readable error instead of being silently blocked here.
     if (!WEBSITE_SALES_STAGES.includes(body.stage as never)) return NextResponse.json({ok:false,error:"invalid_stage"},{status:400});
     if (!session.isAdmin) return NextResponse.json({ok:false,error:"rep_stage_forbidden"},{status:403});
-    if (!transitionNote) return NextResponse.json({ok:false,error:"transition_note_required"},{status:400});
     if (currentStage === body.stage) return NextResponse.json({ok:true,noop:true,data:current});
-    if (STRUCTURED_STAGE_TARGETS.has(String(body.stage))) return NextResponse.json({ok:false,error:"use_structured_lifecycle_action"},{status:409});
     patch = { stage:body.stage };
   } else if (body.action === "proposal") {
     if (!session.isTrueAdmin && !repMayRunDeal) return NextResponse.json({ok:false,error:"founder_only"},{status:403});

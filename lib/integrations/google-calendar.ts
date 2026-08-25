@@ -83,6 +83,60 @@ export type FounderMeetingCalendarRequest = {
   durationMinutes?: number;
 };
 
+/**
+ * Workspace (system) Calendar credentials, read from the environment.
+ *
+ * Added 2026-08-25 (operator plan): hosts who never completed the personal
+ * work-OAuth handshake were hard-blocked with "This host needs to reconnect
+ * Google Calendar" even though OASIS owns a workspace calendar that can host
+ * every audit. When these variables are present, a host without a usable
+ * personal connection books on the WORKSPACE identity instead:
+ *
+ *   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   (same OAuth client as personal mode)
+ *   GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN      long-lived refresh token for the
+ *                                             OASIS workspace account, granted
+ *                                             https://www.googleapis.com/auth/calendar.events
+ *   GOOGLE_SYSTEM_CALENDAR_ADDRESS            the workspace organizer address
+ *                                             (used for receipts/identity)
+ *   GOOGLE_CALENDAR_ID                        target calendar, default "primary"
+ *
+ * The workspace account becomes the event ORGANIZER; the human host is added
+ * as an attendee so their calendar still shows the booking, and the client
+ * invite/Meet flow is unchanged. Access-token refreshes in this mode are
+ * deliberately NOT persisted into any user's integration store.
+ */
+export type SystemCalendarConfig = {
+  refreshToken: string;
+  organizerEmail: string;
+  calendarId: string;
+};
+
+export function systemCalendarConfig(): SystemCalendarConfig | null {
+  const clientId = process.env.GOOGLE_CLIENT_ID || "";
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+  const refreshToken = (
+    process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN ||
+    process.env.GOOGLE_SYSTEM_REFRESH_TOKEN ||
+    ""
+  ).trim();
+  if (!clientId || !clientSecret || !refreshToken) return null;
+  return {
+    refreshToken,
+    organizerEmail: (process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS || "").trim().toLowerCase(),
+    calendarId: (process.env.GOOGLE_CALENDAR_ID || "").trim() || PRIMARY_CALENDAR_ID,
+  };
+}
+
+/** True when bookings can fall back to the workspace calendar identity. */
+export function isSystemCalendarConfigured(): boolean {
+  return systemCalendarConfig() !== null;
+}
+
+/** The workspace organizer address, when configured; null otherwise. */
+export function systemOrganizerEmail(): string | null {
+  return systemCalendarConfig()?.organizerEmail || null;
+}
+
 export type GoogleCalendarReceipt = {
   calendarId: string;
   eventId: string;
@@ -133,7 +187,8 @@ export type CancelGoogleFounderMeetingInput = {
 
 export type FounderMeetingCalendarReceipt = {
   provider: "google_calendar";
-  calendarId: "primary";
+  /** "primary" for personal-host bookings, or the configured workspace calendar id. */
+  calendarId: string;
   eventId: string;
   htmlUrl: string;
   meetUrl: string;
@@ -405,6 +460,8 @@ async function refreshAccessToken(args: {
   organizerUserId: string;
   refreshToken: string;
   dependencies: GoogleCalendarDependencies;
+  /** False in workspace-fallback mode: never write system tokens into a user's bundle. */
+  persist?: boolean;
 }): Promise<string> {
   const { dependencies } = args;
   if (!dependencies.oauthClientId || !dependencies.oauthClientSecret) {
@@ -458,6 +515,9 @@ async function refreshAccessToken(args: {
   const expiresAt = new Date(
     dependencies.now() + (payload.expires_in || 3600) * 1000,
   ).toISOString();
+  if (args.persist === false) {
+    return payload.access_token;
+  }
   const persisted = await Promise.allSettled([
     dependencies.setValue(
       args.tenantId,
@@ -514,6 +574,8 @@ type ExpectedFounderMeetingEvent = {
   startAt: string;
   endAt: string;
   clientEmail: string;
+  /** Set in workspace-fallback mode: the human host is invited as an attendee. */
+  hostAttendeeEmail?: string;
   summary: string;
   description: string;
 };
@@ -545,9 +607,14 @@ function assertFounderMeetingEventIdentity(
   const attendeeEmails = (event.attendees || [])
     .map((attendee) => attendee.email?.trim().toLowerCase())
     .filter((email): email is string => Boolean(email));
+  const allowedAttendees = new Set(
+    [expected.clientEmail, expected.hostAttendeeEmail]
+      .filter((email): email is string => Boolean(email))
+      .map((email) => email.trim().toLowerCase()),
+  );
   if (
-    attendeeEmails.length !== 1 ||
-    attendeeEmails[0] !== expected.clientEmail.trim().toLowerCase()
+    attendeeEmails.length !== allowedAttendees.size ||
+    !attendeeEmails.every((email) => allowedAttendees.has(email))
   ) {
     fail("client_attendee");
   }
@@ -585,6 +652,9 @@ async function openAuthorizedCalendarSession(args: {
   dependencies: GoogleCalendarDependencies;
   bundle: Record<string, string>;
   authorizedFetch: AuthorizedCalendarFetch;
+  /** True when the session runs on the workspace identity instead of the host's personal OAuth. */
+  systemFallback: boolean;
+  calendarId: string;
 }> {
   const dependencies = resolveDependencies(args.dependencyOverrides || {});
   const bundle = await dependencies.getBundle(
@@ -592,21 +662,42 @@ async function openAuthorizedCalendarSession(args: {
     args.organizerUserId,
     WORK_OAUTH_SERVICE,
   );
-  if (!bundle.refresh_token) {
-    throw new GoogleCalendarIntegrationError(
-      "google_calendar_not_connected",
-      "the organizer has not connected the work Google account",
-    );
+
+  // Workspace fallback (2026-08-25): a host without a usable personal work
+  // connection no longer blocks the booking when workspace credentials are
+  // configured. The strict per-host errors below are preserved verbatim when
+  // no fallback exists, so fail-closed behaviour is unchanged otherwise.
+  let systemFallback = false;
+  let calendarId = PRIMARY_CALENDAR_ID;
+  let sessionBundle = bundle;
+  if (!bundle.refresh_token || !hasRequiredScope(bundle.scope)) {
+    const system = systemCalendarConfig();
+    if (system) {
+      systemFallback = true;
+      calendarId = system.calendarId;
+      sessionBundle = {
+        ...bundle,
+        refresh_token: system.refreshToken,
+        scope: CALENDAR_EVENTS_SCOPE,
+        ...(system.organizerEmail ? { gmail_address: system.organizerEmail } : {}),
+      };
+    } else if (!bundle.refresh_token) {
+      throw new GoogleCalendarIntegrationError(
+        "google_calendar_not_connected",
+        "the organizer has not connected the work Google account",
+      );
+    } else {
+      throw new GoogleCalendarIntegrationError(
+        "calendar_scope_required",
+        `the work Google connection must grant ${CALENDAR_EVENTS_SCOPE}`,
+      );
+    }
   }
-  if (!hasRequiredScope(bundle.scope)) {
-    throw new GoogleCalendarIntegrationError(
-      "calendar_scope_required",
-      `the work Google connection must grant ${CALENDAR_EVENTS_SCOPE}`,
-    );
-  }
+
   const expectedOrganizerEmail = String(args.expectedOrganizerEmail || "").trim().toLowerCase();
-  const connectedOrganizerEmail = String(bundle.gmail_address || "").trim().toLowerCase();
+  const connectedOrganizerEmail = String(sessionBundle.gmail_address || "").trim().toLowerCase();
   if (
+    !systemFallback &&
     expectedOrganizerEmail &&
     (!connectedOrganizerEmail || connectedOrganizerEmail !== expectedOrganizerEmail)
   ) {
@@ -616,14 +707,15 @@ async function openAuthorizedCalendarSession(args: {
     );
   }
 
-  let accessToken = bundle.access_token || "";
-  const expiresAt = bundle.expires_at ? Date.parse(bundle.expires_at) : 0;
+  let accessToken = sessionBundle.access_token || "";
+  const expiresAt = sessionBundle.expires_at ? Date.parse(sessionBundle.expires_at) : 0;
   const refresh = async () => {
     accessToken = await refreshAccessToken({
       tenantId: args.tenantId,
       organizerUserId: args.organizerUserId,
-      refreshToken: bundle.refresh_token,
+      refreshToken: sessionBundle.refresh_token,
       dependencies,
+      persist: !systemFallback,
     });
   };
   if (
@@ -674,7 +766,7 @@ async function openAuthorizedCalendarSession(args: {
     }
   };
 
-  return { dependencies, bundle, authorizedFetch };
+  return { dependencies, bundle: sessionBundle, authorizedFetch, systemFallback, calendarId };
 }
 
 function validatedEventId(eventId: string): string {
@@ -700,12 +792,13 @@ export async function createFounderMeetingCalendarEvent(
   dependencyOverrides: Partial<GoogleCalendarDependencies> = {},
 ): Promise<FounderMeetingCalendarReceipt> {
   const normalized = validateRequest(args);
-  const { dependencies, bundle, authorizedFetch } = await openAuthorizedCalendarSession({
-    tenantId: args.tenantId,
-    organizerUserId: args.organizerUserId,
-    expectedOrganizerEmail: args.expectedOrganizerEmail,
-    dependencyOverrides,
-  });
+  const { dependencies, bundle, authorizedFetch, systemFallback, calendarId: sessionCalendarId } =
+    await openAuthorizedCalendarSession({
+      tenantId: args.tenantId,
+      organizerUserId: args.organizerUserId,
+      expectedOrganizerEmail: args.expectedOrganizerEmail,
+      dependencyOverrides,
+    });
 
   const eventId = founderMeetingEventId(
     args.tenantId,
@@ -713,7 +806,7 @@ export async function createFounderMeetingCalendarEvent(
     args.bookingRequestId,
   );
   const eventUrl = `${CALENDAR_API}/calendars/${encodeURIComponent(
-    PRIMARY_CALENDAR_ID,
+    sessionCalendarId,
   )}/events/${eventId}`;
   const getEvent = async (
     code: "calendar_reconcile_failed" | "calendar_read_failed",
@@ -733,19 +826,30 @@ export async function createFounderMeetingCalendarEvent(
   };
 
   const insertUrl = new URL(
-    `${CALENDAR_API}/calendars/${encodeURIComponent(PRIMARY_CALENDAR_ID)}/events`,
+    `${CALENDAR_API}/calendars/${encodeURIComponent(sessionCalendarId)}/events`,
   );
   insertUrl.searchParams.set("conferenceDataVersion", "1");
   insertUrl.searchParams.set("sendUpdates", "all");
 
-  const attendee = args.clientName?.trim()
+  const clientAttendee = args.clientName?.trim()
     ? { email: normalized.clientEmail, displayName: args.clientName.trim() }
     : { email: normalized.clientEmail };
+  // Workspace fallback: the workspace account is the organizer, so the human
+  // host is invited explicitly — otherwise the booking would never reach the
+  // person expected to run the call.
+  const hostAttendeeEmail =
+    systemFallback && args.expectedOrganizerEmail?.trim()
+      ? args.expectedOrganizerEmail.trim().toLowerCase()
+      : undefined;
+  const attendees = hostAttendeeEmail
+    ? [{ email: hostAttendeeEmail }, clientAttendee]
+    : [clientAttendee];
   const expectedEvent: ExpectedFounderMeetingEvent = {
     eventId,
     startAt: normalized.startAt,
     endAt: normalized.endAt,
     clientEmail: normalized.clientEmail,
+    ...(hostAttendeeEmail ? { hostAttendeeEmail } : {}),
     summary: eventTitle(args.businessName),
     description: publicEventDescription(args.clientAgenda, normalized.website),
   };
@@ -755,7 +859,7 @@ export async function createFounderMeetingCalendarEvent(
     description: expectedEvent.description,
     start: { dateTime: normalized.startAt, timeZone: normalized.timeZone },
     end: { dateTime: normalized.endAt, timeZone: normalized.timeZone },
-    attendees: [attendee],
+    attendees,
     guestsCanInviteOthers: false,
     guestsCanModify: false,
     conferenceData: {
@@ -836,7 +940,7 @@ export async function createFounderMeetingCalendarEvent(
 
   return {
     provider: "google_calendar",
-    calendarId: PRIMARY_CALENDAR_ID,
+    calendarId: sessionCalendarId,
     eventId,
     htmlUrl: event.htmlLink || "",
     meetUrl,
@@ -941,27 +1045,36 @@ export async function updateGoogleFounderMeeting(
     website: input.website,
     clientAgenda: input.clientAgenda,
   });
-  const { dependencies, bundle, authorizedFetch } = await openAuthorizedCalendarSession({
-    tenantId: input.tenantId,
-    organizerUserId: input.hostUserId,
-    expectedOrganizerEmail: input.expectedOrganizerEmail,
-    dependencyOverrides,
-  });
+  const { dependencies, bundle, authorizedFetch, systemFallback, calendarId: sessionCalendarId } =
+    await openAuthorizedCalendarSession({
+      tenantId: input.tenantId,
+      organizerUserId: input.hostUserId,
+      expectedOrganizerEmail: input.expectedOrganizerEmail,
+      dependencyOverrides,
+    });
 
   const eventUrl = `${CALENDAR_API}/calendars/${encodeURIComponent(
-    PRIMARY_CALENDAR_ID,
+    sessionCalendarId,
   )}/events/${eventId}`;
   const patchUrl = new URL(eventUrl);
   patchUrl.searchParams.set("conferenceDataVersion", "1");
   patchUrl.searchParams.set("sendUpdates", "all");
-  const attendee = input.clientName?.trim()
+  const clientAttendee = input.clientName?.trim()
     ? { email: normalized.clientEmail, displayName: input.clientName.trim() }
     : { email: normalized.clientEmail };
+  const hostAttendeeEmail =
+    systemFallback && input.expectedOrganizerEmail?.trim()
+      ? input.expectedOrganizerEmail.trim().toLowerCase()
+      : undefined;
+  const attendees = hostAttendeeEmail
+    ? [{ email: hostAttendeeEmail }, clientAttendee]
+    : [clientAttendee];
   const expectedEvent: ExpectedFounderMeetingEvent = {
     eventId,
     startAt: normalized.startAt,
     endAt: normalized.endAt,
     clientEmail: normalized.clientEmail,
+    ...(hostAttendeeEmail ? { hostAttendeeEmail } : {}),
     summary: eventTitle(input.company),
     description: publicEventDescription(input.clientAgenda, normalized.website),
   };
@@ -975,7 +1088,7 @@ export async function updateGoogleFounderMeeting(
         description: expectedEvent.description,
         start: { dateTime: normalized.startAt, timeZone: normalized.timeZone },
         end: { dateTime: normalized.endAt, timeZone: normalized.timeZone },
-        attendees: [attendee],
+        attendees,
         guestsCanInviteOthers: false,
         guestsCanModify: false,
       }),
@@ -1046,7 +1159,7 @@ export async function updateGoogleFounderMeeting(
     );
   }
   return {
-    calendarId: PRIMARY_CALENDAR_ID,
+    calendarId: sessionCalendarId,
     eventId,
     htmlLink,
     meetLink,
@@ -1074,14 +1187,14 @@ export async function cancelGoogleFounderMeeting(
     );
   }
   const eventId = validatedEventId(input.eventId);
-  const { authorizedFetch } = await openAuthorizedCalendarSession({
+  const { authorizedFetch, calendarId: sessionCalendarId } = await openAuthorizedCalendarSession({
     tenantId: input.tenantId,
     organizerUserId: input.hostUserId,
     expectedOrganizerEmail: input.expectedOrganizerEmail,
     dependencyOverrides,
   });
   const deleteUrl = new URL(
-    `${CALENDAR_API}/calendars/${encodeURIComponent(PRIMARY_CALENDAR_ID)}/events/${eventId}`,
+    `${CALENDAR_API}/calendars/${encodeURIComponent(sessionCalendarId)}/events/${eventId}`,
   );
   deleteUrl.searchParams.set("sendUpdates", "all");
   const response = await authorizedFetch(

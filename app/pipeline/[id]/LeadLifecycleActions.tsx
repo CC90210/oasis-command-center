@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, CheckCircle2, Clock3 } from "lucide-react";
+import { ArrowRight, Check, CheckCircle2, Clock3 } from "lucide-react";
 import {
   LeadBuildBriefForm,
   type BuildBriefDraft,
 } from "@/components/leads/LeadBuildBriefForm";
 import { OASIS_LEAD_STAGES, findOasisStage } from "@/lib/oasis-stage-meta";
+import { mayHostAuditCall } from "@/lib/team-roles";
 import {
   AUTOMATION_ADD_ONS,
   WEBSITE_PACKAGES,
@@ -259,13 +260,6 @@ const DIRECT_ADVANCE_LABELS: Record<string, string> = {
   in_build: "Send to client review",
   client_review: "Mark launched",
 };
-const STRUCTURED_STAGE_TARGETS = new Set([
-  "qualified",
-  "founder_meeting_booked",
-  "proposal_sent",
-  "won",
-  "onboarding",
-]);
 
 export function LeadLifecycleActions({
   leadId,
@@ -338,7 +332,6 @@ export function LeadLifecycleActions({
   const [builderUserId, setBuilderUserId] = useState(initialOffer?.builderUserId || "");
   const [paymentProvider, setPaymentProvider] = useState<"stripe" | "manual">("stripe");
   const [manualPaymentConfirmed, setManualPaymentConfirmed] = useState(false);
-  const [correctionStage, setCorrectionStage] = useState(currentStage);
 
   useEffect(() => {
     fetch("/api/team/members")
@@ -346,7 +339,7 @@ export function LeadLifecycleActions({
       .then((body) => {
         const members = (body?.members || []) as Founder[];
         const next = members.filter(
-          (member: Founder) => member.is_owner || ["admin", "closer"].includes(member.team_role),
+          (member: Founder) => member.is_owner || mayHostAuditCall(member.team_role),
         );
         setFounders(next);
         const delivery = members.filter((member) => member.team_role === "builder");
@@ -358,8 +351,6 @@ export function LeadLifecycleActions({
       })
       .catch(() => setFounders([]));
   }, [initialOffer?.builderUserId]);
-
-  useEffect(() => setCorrectionStage(currentStage), [currentStage]);
 
   const currentMeta = findOasisStage("lead", currentStage);
   const nextStage = nextOasisLifecycleStage(currentStage);
@@ -596,6 +587,30 @@ export function LeadLifecycleActions({
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm font-semibold">
               <StagePill label={currentMeta?.label || titleCase(currentStage)} color={currentMeta?.bg} />
+              {canManage ? (
+                <select
+                  aria-label="Move lead to stage"
+                  title="Move this lead to any OASIS lifecycle stage"
+                  value={currentStage}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const stage = event.target.value;
+                    if (!stage || stage === currentStage) return;
+                    const meta = findOasisStage("lead", stage);
+                    void patch(
+                      { action: "set_stage", stage },
+                      `Stage moved to ${meta?.label || titleCase(stage)}.`,
+                    );
+                  }}
+                  className="rounded-lg border border-bg-border bg-bg-deep px-2.5 py-1.5 text-xs font-semibold text-fg outline-none transition hover:border-accent/50 focus:border-accent/70 focus:ring-1 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {OASIS_LEAD_STAGES.map((stage) => (
+                    <option key={stage.key} value={stage.key}>
+                      {stage.label}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               {nextMeta && (
                 <>
                   <ArrowRight className="h-4 w-4 text-fg-dim" aria-hidden />
@@ -755,17 +770,13 @@ export function LeadLifecycleActions({
                 "Timing confirmed",
                 "Open to $2,000+",
               ].map((label, index) => (
-                <label
+                <QualificationGateCard
                   key={label}
-                  className="flex items-center gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2 text-xs text-fg-muted"
-                >
-                  <input
-                    type="checkbox"
-                    checked={checks[index]}
-                    onChange={(event) => setQualificationCheck(index, event.target.checked)}
-                  />
-                  {label}
-                </label>
+                  label={label}
+                  checked={checks[index]}
+                  disabled={disabled}
+                  onChange={(checked) => setQualificationCheck(index, checked)}
+                />
               ))}
             </div>
             <button
@@ -837,17 +848,13 @@ export function LeadLifecycleActions({
                       "Timing confirmed",
                       "Open to $2,000+",
                     ].map((label, index) => (
-                      <label
+                      <QualificationGateCard
                         key={`handoff-${label}`}
-                        className="flex items-center gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2 text-xs text-fg-muted"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checks[index]}
-                          onChange={(event) => setQualificationCheck(index, event.target.checked)}
-                        />
-                        {label}
-                      </label>
+                        label={label}
+                        checked={checks[index]}
+                        disabled={disabled}
+                        onChange={(checked) => setQualificationCheck(index, checked)}
+                      />
                     ))}
                   </div>
                 )}
@@ -1037,50 +1044,42 @@ export function LeadLifecycleActions({
             </div>
 
             <div className="grid gap-2 md:grid-cols-3">
-              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={contactConfirmed}
-                  onChange={(event) => setContactConfirmed(event.target.checked)}
-                  className="mt-1"
-                />
-                I confirmed the client&apos;s contact details and email.
-              </label>
-              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={clientAgreedToTime}
-                  onChange={(event) => setClientAgreedToTime(event.target.checked)}
-                  className="mt-1"
-                />
-                The client agreed to this date and time.
-              </label>
-              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={handoffComplete}
-                  disabled={!transitionNote.trim()}
-                  onChange={(event) => setHandoffComplete(event.target.checked)}
-                  className="mt-1"
-                />
-                The internal founder handoff note is complete.
-              </label>
+              <ConfirmationCheckCard
+                checked={contactConfirmed}
+                onChange={setContactConfirmed}
+                label={
+                  <>
+                    I confirmed the client&apos;s contact details and email.
+                  </>
+                }
+              />
+              <ConfirmationCheckCard
+                checked={clientAgreedToTime}
+                onChange={setClientAgreedToTime}
+                label={<>The client agreed to this date and time.</>}
+              />
+              <ConfirmationCheckCard
+                checked={handoffComplete}
+                disabled={!transitionNote.trim()}
+                onChange={setHandoffComplete}
+                label={<>The internal founder handoff note is complete.</>}
+              />
             </div>
 
             {bookingContact.phone.trim() ? (
-              <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 px-3 py-2.5 text-xs leading-5 text-fg-muted">
-                <input
-                  type="checkbox"
-                  checked={smsConsent}
-                  onChange={(event) => {
-                    setSmsConsent(event.target.checked);
-                    renewFounderBookingRequest();
-                  }}
-                  className="mt-1"
-                />
-                Client consented to SMS meeting reminders at {bookingContact.phone.trim()} (optional; used only
-                when SMS delivery is enabled).
-              </label>
+              <ConfirmationCheckCard
+                checked={smsConsent}
+                onChange={(checked) => {
+                  setSmsConsent(checked);
+                  renewFounderBookingRequest();
+                }}
+                label={
+                  <>
+                    Client consented to SMS meeting reminders at {bookingContact.phone.trim()} (optional;
+                    used only when SMS delivery is enabled).
+                  </>
+                }
+              />
             ) : null}
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-bg-border/70 pt-4">
@@ -1399,50 +1398,9 @@ export function LeadLifecycleActions({
         {(currentStage === "lost" || currentStage === "launched") && (
           <div className="rounded-xl border border-bg-border bg-bg-elev/30 p-4 text-sm text-fg-muted">
             {currentStage === "lost"
-              ? "This lead is closed as lost. An admin can correct the stage below with a required reason."
+              ? "This lead is closed as lost. An admin can reopen it from the stage dropdown above."
               : "Lifecycle complete. The client has launched."}
           </div>
-        )}
-
-        {canManage && (
-          <details className="rounded-xl border border-bg-border bg-bg-elev/20 p-4">
-            <summary className="cursor-pointer text-xs font-semibold text-fg-muted">
-              Admin stage correction
-            </summary>
-            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-              <select
-                value={correctionStage}
-                onChange={(event) => setCorrectionStage(event.target.value)}
-                className={INPUT}
-              >
-                {OASIS_LEAD_STAGES.filter(
-                  (stage) => stage.key === currentStage || !STRUCTURED_STAGE_TARGETS.has(stage.key),
-                ).map((stage) => (
-                  <option key={stage.key} value={stage.key}>
-                    {stage.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                disabled={
-                  disabled || correctionStage === currentStage || transitionNote.trim().length === 0
-                }
-                onClick={() =>
-                  patch(
-                    { action: "set_stage", stage: correctionStage },
-                    `Stage corrected to ${findOasisStage("lead", correctionStage)?.label || titleCase(correctionStage)}.`,
-                  )
-                }
-                className="btn-secondary shrink-0 !px-4 !py-2 text-xs"
-              >
-                Apply correction
-              </button>
-            </div>
-            <div className="mt-2 text-[10px] text-fg-dim">
-              A correction requires the outcome and handoff note above. Use the guided action whenever possible.
-            </div>
-          </details>
         )}
 
         {message && (
@@ -1646,6 +1604,85 @@ function StagePill({ label, color }: { label: string; color?: string }) {
   );
 }
 
+function CheckSquare({ checked }: { checked: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition ${
+        checked
+          ? "border-emerald-400/80 bg-emerald-400/90 text-bg-deep"
+          : "border-bg-border bg-bg-deep text-transparent"
+      }`}
+    >
+      <Check className="h-3 w-3" strokeWidth={3} />
+    </span>
+  );
+}
+
+/** A qualification gate rendered as a compact toggle card with an emerald active state. */
+function QualificationGateCard({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${
+        checked
+          ? "border-emerald-500/50 bg-emerald-500/10 text-fg"
+          : "border-bg-border bg-bg-elev/30 text-fg-muted hover:border-accent/40 hover:text-fg"
+      }`}
+    >
+      <CheckSquare checked={checked} />
+      {label}
+    </button>
+  );
+}
+
+/** A booking confirmation item as a toggle card; keeps the exact confirmation wording. */
+function ConfirmationCheckCard({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  label: ReactNode;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left text-xs leading-5 transition disabled:cursor-not-allowed disabled:opacity-60 ${
+        checked
+          ? "border-emerald-500/50 bg-emerald-500/10 text-fg"
+          : "border-bg-border bg-bg-elev/30 text-fg-muted hover:border-accent/40 hover:text-fg"
+      }`}
+    >
+      <span className="mt-0.5">
+        <CheckSquare checked={checked} />
+      </span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
 function instructionFor(stage: string, admin: boolean): string {
   const rep: Record<string, string> = {
     assigned: "Review the website context, start outreach, and record the first outcome.",
@@ -1702,6 +1739,8 @@ function readableError(code: string): string {
     meeting_activation_failed: "The meeting exists, but its reminder queue needs to be reactivated. Retry the same booking.",
     transition_note_required: "Explain the reason before applying an admin stage correction.",
     use_structured_lifecycle_action: "Use the structured action for this phase.",
+    rep_stage_forbidden: "Only an admin can move a lead directly between stages.",
+    invalid_stage: "That stage is not part of the OASIS pipeline.",
     founder_only: "A founder or authorized closer must complete this action.",
     founder_or_closer_only: "The assigned closer or a founder must complete the audit.",
     founder_meeting_required: "Book the 15-minute audit before capturing the build brief.",
@@ -1756,8 +1795,14 @@ function BookingContactField({
 }) {
   return (
     <label className={`text-xs text-fg-muted ${className}`}>
-      {label}
-      {required ? <span className="ml-1 text-amber-200">Required</span> : null}
+      <span className="flex items-baseline gap-1">
+        {label}
+        {required ? (
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-300/90">
+            Required
+          </span>
+        ) : null}
+      </span>
       <input
         type={type}
         value={value}

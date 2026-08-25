@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
 import { getUserIntegrationBundle } from "@/lib/user-integration-store";
+import { isSystemCalendarConfigured } from "@/lib/integrations/google-calendar";
 import {
   canManageTeam,
   isTrueAdminRole,
@@ -68,6 +69,13 @@ export async function GET() {
   if (!ctx) return bad(401, "unauthorized");
   const members = await getTenantMembers(ctx.tenantId);
   const canManage = canManageTeam(ctx.teamRole, ctx.adminAccess);
+  // Workspace fallback (2026-08-25): when the OASIS workspace Calendar
+  // credentials are configured, a host WITHOUT a personal work connection can
+  // still be booked — the event is organized by the workspace account and the
+  // host is invited as an attendee. Reporting every host as calendar-ready
+  // here is what removes the false "needs to reconnect Google Calendar" card
+  // from the audit handoff; per-host detail fields are preserved underneath.
+  const workspaceFallbackReady = isSystemCalendarConfigured();
   const membersWithCalendar = await Promise.all(
     members.map(async (member) => ({
       member,
@@ -80,6 +88,7 @@ export async function GET() {
     self_role: ctx.teamRole,
     self_is_owner: ctx.isOwner,
     can_manage: canManage,
+    system_calendar_fallback: workspaceFallbackReady,
     members: membersWithCalendar.map(({ member: m, readiness }) => ({
       id: m.id,
       // auth_user_id is required by the lead-drawer "Assign to" dropdown
@@ -96,8 +105,9 @@ export async function GET() {
       team_role: m.team_role,
       is_owner: m.is_owner,
       joined_at: m.joined_at,
-      calendar_connected: readiness.calendar_connected,
-      calendar_reconnect_required: readiness.calendar_reconnect_required,
+      calendar_connected: readiness.calendar_connected || workspaceFallbackReady,
+      calendar_reconnect_required:
+        readiness.calendar_reconnect_required && !workspaceFallbackReady,
       calendar_identity_mismatch: readiness.calendar_identity_mismatch,
       connected_google_address: readiness.connected_google_address,
     })),

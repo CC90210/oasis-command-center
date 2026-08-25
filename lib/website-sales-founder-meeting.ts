@@ -14,6 +14,7 @@ import {
 import {
   cancelGoogleFounderMeeting,
   createGoogleFounderMeeting,
+  systemOrganizerEmail,
   updateGoogleFounderMeeting,
   type GoogleCalendarReceipt,
 } from "@/lib/integrations/google-calendar";
@@ -166,9 +167,15 @@ function asReceipt(row: AppointmentRow): GoogleCalendarReceipt | null {
 }
 
 function assertOrganizer(receipt: GoogleCalendarReceipt, expectedOrganizerEmail: string): void {
-  if (receipt.organizerEmail.trim().toLowerCase() !== expectedOrganizerEmail) {
-    throw new Error("calendar_organizer_mismatch");
-  }
+  const organizer = receipt.organizerEmail.trim().toLowerCase();
+  if (organizer === expectedOrganizerEmail) return;
+  // Workspace fallback (2026-08-25): when the booking ran on the workspace
+  // identity because the host has no personal work connection, Google reports
+  // the workspace address as organizer. That is the sanctioned shape, not a
+  // mismatch — reject only an unexpected third identity.
+  const systemAddress = systemOrganizerEmail();
+  if (systemAddress && organizer === systemAddress) return;
+  throw new Error("calendar_organizer_mismatch");
 }
 
 function assertConfirmations(value: unknown): asserts value is FounderMeetingConfirmations {
