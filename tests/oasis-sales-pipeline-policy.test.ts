@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import {
   AGENT_PIPELINE_STAGE_KEYS,
   BUILDER_DELIVERY_STAGE_KEYS,
+  BUILDER_VISIBLE_STAGE_KEYS,
   CLOSER_PIPELINE_STAGE_KEYS,
   OASIS_WEBSITE_SALES_PROGRAM,
   OPENER_PIPELINE_STAGE_KEYS,
   canOpenOasisSalesRecord,
+  canMutateOasisSalesRecord,
   filterWebsiteSalesRows,
   mayOperateOasisDeliveryStage,
   resolveOasisDeliveryQueueScope,
@@ -42,10 +44,13 @@ assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["onboarding", "in_build", "client
 assert.deepEqual(stagesForOasisRole("agent").map((s) => s.key), AGENT_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("opener").map((s) => s.key), OPENER_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("closer").map((s) => s.key), CLOSER_PIPELINE_STAGE_KEYS);
+// CC, 2026-08-25: the builder/marketing hire sells too, so his board is the
+// nine sales stages his claimed deals travel UNION the four delivery stages
+// his build work sits in. Neither half may be dropped by a later edit.
 assert.deepEqual(
-  stagesForOasisRole("builder").map((s) => s.key),
-  ["onboarding", "in_build", "client_review", "launched"],
-  "builders get an assigned delivery queue, not an empty sales board",
+  new Set(stagesForOasisRole("builder").map((s) => s.key)),
+  new Set([...AGENT_PIPELINE_STAGE_KEYS, ...BUILDER_VISIBLE_STAGE_KEYS]),
+  "a builder's pipeline carries BOTH jobs: his sales book and his delivery queue",
 );
 assert.equal(stagesForOasisRole("admin").length, 14);
 assert.equal(stagesForOasisRole("member").length, 14);
@@ -214,6 +219,46 @@ assert.deepEqual(
 );
 assert.equal(mayOperateOasisDeliveryStage("builder", "onboarding"), true);
 assert.equal(mayOperateOasisDeliveryStage("builder", "launched"), false);
+
+/* ─── CC, 2026-08-25: the builder sells too. The full loop, pinned. ─────────
+ * He claims from the pool (assigned_to = him), the lead rides his board at
+ * every sales stage through won, his delivery rows stay visible beside it,
+ * and he may mutate exactly what is his. The negatives matter as much as the
+ * positives: another rep's deal at ANY stage must never appear on his board
+ * or open for him — the widening was ownership-scoped, never tenant-wide. */
+const builderClaim = {
+  id: "claimed",
+  data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "builder-1", stage: "assigned" },
+};
+const builderWon = {
+  id: "won-by-builder",
+  data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "builder-1", stage: "won" },
+};
+const otherRepsDeal = {
+  id: "other-reps-deal",
+  data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-2", stage: "proposal_sent" },
+};
+assert.deepEqual(
+  filterWebsiteSalesRows([builderClaim, builderWon, otherRepsDeal, assignedBuild, fulfillmentOwnedBuild], {
+    role: "builder",
+    userId: "builder-1",
+  }).map((row) => row.id),
+  ["claimed", "won-by-builder", "build-1", "build-3"],
+  "the selling builder's board: claimed + closed deals AND his delivery work — never a colleague's book",
+);
+for (const row of [builderClaim, builderWon]) {
+  assert.equal(canMutateOasisSalesRecord(row, { role: "builder", userId: "builder-1" }), true);
+}
+assert.equal(
+  canMutateOasisSalesRecord(otherRepsDeal, { role: "builder", userId: "builder-1" }),
+  false,
+  "sales capability did not turn into tenant-wide write authority",
+);
+assert.equal(
+  canOpenOasisSalesRecord(builderClaim, { role: "builder", userId: "builder-1" }),
+  true,
+  "a claimed lead opens for the builder who claimed it — ownership, not board shape",
+);
 assert.equal(
   canOpenOasisSalesRecord(handedOff, { role: "opener", userId: "opener-1" }),
   true,

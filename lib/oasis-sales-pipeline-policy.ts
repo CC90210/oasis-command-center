@@ -45,14 +45,21 @@ const AGENT_STAGE_SET = new Set<string>(AGENT_PIPELINE_STAGE_KEYS);
 const OPENER_STAGE_SET = new Set<string>(OPENER_PIPELINE_STAGE_KEYS);
 const CLOSER_STAGE_SET = new Set<string>(CLOSER_PIPELINE_STAGE_KEYS);
 const BUILDER_DELIVERY_STAGE_SET = new Set<string>(BUILDER_DELIVERY_STAGE_KEYS);
-const BUILDER_VISIBLE_STAGE_SET = new Set<string>(BUILDER_VISIBLE_STAGE_KEYS);
+// CC, 2026-08-25: the builder/marketing hire sells too, so his board carries
+// BOTH jobs — the nine sales stages his claimed deals travel, plus the four
+// delivery stages his build work sits in. Union, not replacement: dropping the
+// delivery stages here would empty the pipeline half of his Today.
+const BUILDER_SALES_AND_DELIVERY_STAGE_SET = new Set<string>([
+  ...AGENT_PIPELINE_STAGE_KEYS,
+  ...BUILDER_VISIBLE_STAGE_KEYS,
+]);
 const EMPTY_STAGE_SET = new Set<string>();
 
 function stageSetForOasisRole(role: string): ReadonlySet<string> {
   const normalized = role.trim().toLowerCase();
   if (normalized === "opener") return OPENER_STAGE_SET;
   if (normalized === "closer") return CLOSER_STAGE_SET;
-  if (normalized === "builder") return BUILDER_VISIBLE_STAGE_SET;
+  if (normalized === "builder") return BUILDER_SALES_AND_DELIVERY_STAGE_SET;
   if (normalized === "agent" || normalized === "manager") return AGENT_STAGE_SET;
   return EMPTY_STAGE_SET;
 }
@@ -72,12 +79,11 @@ function stageSetForOasisRole(role: string): ReadonlySet<string> {
  *                    showing them too little. They see their own until the
  *                    team-scope read lands with the manager pages.
  *
- *   builder          not a sales role at all. They are scoped to their own rows
- *                    here, and because its role maps to no sales stages,
- *                    stages, a builder's board is EMPTY today — their work sits
- *                    at onboarding / in_build / client_review / launched. Empty
- *                    is not a leak, but it is not their tool either; the
- *                    delivery board is what fixes it.
+ *   builder          was delivery-only; CC, 2026-08-25 widened him to his OWN
+ *                    book at the full sales stage set (plus his delivery
+ *                    stages) because the builder/marketing hire now sells as
+ *                    well. Tenant-wide visibility stays false — the widening
+ *                    is ownership-scoped rows only.
  *
  * Do not "fix" a role into this list to make a screen populate. Widening here
  * widens `filterWebsiteSalesRows` to every program row in the tenant.
@@ -124,11 +130,17 @@ export function resolveOasisDeliveryQueueScope(
  * legitimately edit their own records. The OASIS pipeline is a sales surface:
  * an attached delivery, marketing, default-member, or read-only account may
  * review a deal, but it must not send, pause nurture, add notes, or edit facts.
+ *
+ * `builder` joined on 2026-08-25 (CC): the builder/marketing hire sells, and
+ * the per-lead tools — notes, AI score, lifecycle actions on HIS claimed
+ * leads — are that job now. Ownership is still proven by every caller; this
+ * set only answers "does this role do sales work at all".
  */
 export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "manager",
   "closer",
   "opener",
+  "builder",
   "agent",
 ]);
 

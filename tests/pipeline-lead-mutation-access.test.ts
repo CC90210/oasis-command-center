@@ -43,7 +43,12 @@ for (const role of ["agent", "opener", "closer", "manager"]) {
 }
 
 assert.equal(roleMayOperateOasisSalesLead(" OpEnEr "), true, "role matching is normalized");
-for (const role of ["read_only", "member", "marketing", "builder", "loan_officer", "processor", "unknown", ""]) {
+// UPDATED 2026-08-25 (CC): `builder` joined the sales operators — the
+// builder/marketing hire works his own claimed leads now. His assignment
+// semantics are the same assigned_to/collaborators pair as every other sales
+// operator, asserted explicitly below rather than folded into the loop above
+// so this file keeps naming the seat that changed.
+for (const role of ["read_only", "member", "marketing", "loan_officer", "processor", "unknown", ""]) {
   assert.equal(roleMayOperateOasisSalesLead(role), false, `${role || "empty"} is not an OASIS sales operator`);
   assert.equal(
     canMutateOasisSalesRecord(assigned, { role, userId: REP }),
@@ -51,6 +56,18 @@ for (const role of ["read_only", "member", "marketing", "builder", "loan_officer
     `${role || "empty"} cannot turn assignment into write authority`,
   );
 }
+for (const row of [assigned, collaborated]) {
+  assert.equal(
+    canMutateOasisSalesRecord(row, { role: "builder", userId: REP }),
+    true,
+    "CC 2026-08-25: the selling builder mutates leads assigned to or shared with him",
+  );
+}
+assert.equal(
+  canMutateOasisSalesRecord(unrelated, { role: "builder", userId: REP }),
+  false,
+  "builder sales capability is ownership-scoped, never tenant-wide",
+);
 
 assert.equal(
   canOpenOasisSalesRecord(assigned, { role: "read_only", userId: REP }),
