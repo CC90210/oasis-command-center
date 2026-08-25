@@ -1,10 +1,12 @@
 const FUNDING_TENANT_SLUGS = new Set(["sun", "submissions"]);
 
-function normalizedHttpsOrigin(value: string | undefined): string | null {
+function normalizedPublicOrigin(value: string | undefined): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.username || url.password) return null;
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) return null;
+    if (url.username || url.password) return null;
     if (url.pathname !== "/" || url.search || url.hash) return null;
     return url.origin;
   } catch {
@@ -25,16 +27,15 @@ export function publicFormOrigin(input: {
 }): string {
   const tenantSlug = input.tenantSlug.trim().toLowerCase();
   if (FUNDING_TENANT_SLUGS.has(tenantSlug)) {
-    const fundingOrigin = normalizedHttpsOrigin(process.env.SUNBIZ_PUBLIC_FORM_ORIGIN);
+    const fundingOrigin = normalizedPublicOrigin(process.env.SUNBIZ_PUBLIC_FORM_ORIGIN);
     if (fundingOrigin) return fundingOrigin;
   }
 
   return (
-    normalizedHttpsOrigin(input.requestOrigin) ||
-    normalizedHttpsOrigin(process.env.PUBLIC_APP_URL) ||
-    normalizedHttpsOrigin(process.env.OASIS_PUBLIC_ORIGIN) ||
-    normalizedHttpsOrigin(process.env.NEXT_PUBLIC_SITE_URL) ||
+    normalizedPublicOrigin(input.requestOrigin) ||
+    normalizedPublicOrigin(process.env.OASIS_PUBLIC_ORIGIN) ||
+    normalizedPublicOrigin(process.env.NEXT_PUBLIC_SITE_URL) ||
+    normalizedPublicOrigin(process.env.PUBLIC_APP_URL) ||
     "https://oasisai.work"
   );
 }
-
