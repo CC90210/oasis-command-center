@@ -192,17 +192,34 @@ assert.equal(
 );
 assert.equal(
   canOpenOasisSalesRecord(collaboratorOnlyBuild, { role: "builder", userId: "builder-1" }),
-  false,
-  "a sales collaborator flag must not leak another builder's delivery client",
+  true,
+  "a builder named as collaborator can OPEN the row he may MUTATE — since 2026-08-25 he is a sales operator, and read must never sit below write",
 );
 assert.deepEqual(
   filterWebsiteSalesRows(
     [assignedBuild, anotherBuildersBuild, fulfillmentOwnedBuild, collaboratorOnlyBuild],
     { role: "builder", userId: "builder-1" },
   ).map((row) => row.id),
-  ["build-1", "build-3"],
-  "the builder pipeline lists only delivery work assigned directly or through fulfillment ownership",
+  ["build-1", "build-3", "build-4"],
+  "the board shows delivery allocations AND collaborator rows — the same rows the record read admits",
 );
+// READ ⊇ WRITE, pinned as a property across every fixture: anything a builder
+// may mutate through assertMayWorkLead must also open on /pipeline/[id].
+for (const [label, row] of [
+  ["assigned build", assignedBuild],
+  ["fulfillment-owned build", fulfillmentOwnedBuild],
+  ["collaborator-only build", collaboratorOnlyBuild],
+] as const) {
+  if (
+    canMutateOasisSalesRecord(row, { role: "builder", userId: "builder-1" })
+  ) {
+    assert.equal(
+      canOpenOasisSalesRecord(row, { role: "builder", userId: "builder-1" }),
+      true,
+      `${label}: mutability without readability is the inversion that rendered 'Lead not found' under an editable row`,
+    );
+  }
+}
 assert.deepEqual(resolveOasisDeliveryQueueScope("builder", " BUILDER-1 "), {
   mode: "owned",
   userId: "builder-1",

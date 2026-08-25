@@ -143,8 +143,10 @@ assert(
 assert(
   workflowRoute.includes("mayWorkWebsiteSalesLifecycle") &&
     workflowRoute.includes("forbidden_sales_role") &&
-    detail.includes('["agent", "closer", "builder"]'),
-  "only authorized sales roles can mutate lifecycle state, and assigned closers/builders receive deal controls (builder joined the closing seats 2026-08-25)",
+    workflowRoute.includes("builderOnOwnSalesLead") &&
+    workflowRoute.includes("!builderOnOwnSalesLead && (!builderMayRunDelivery || !builderOwnsDelivery)") &&
+    detail.includes("mayQuoteAndClose(session.teamRole)"),
+  "only authorized sales roles can mutate lifecycle state; a builder on his OWN sales lead takes the rep path instead of the delivery lane, and the page's deal controls read the one DEAL_CLOSING_ROLES list",
 );
 assert(
   workflowRoute.includes("p_opener_user_id") &&
