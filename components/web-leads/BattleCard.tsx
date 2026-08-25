@@ -72,6 +72,7 @@ import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
+import { AutomationPanel } from "./AutomationPanel";
 
 type Payload = {
   lead: WebLead;
@@ -848,6 +849,15 @@ function ScoredBody({
 
       {/* ── The objections that arrive whatever the site looks like ──────── */}
       <ObjectionPanel />
+
+      {/* ── What else we can build, per industry ─────────────────────── */}
+      {/* BELOW the objections ON PURPOSE, and pinned there by
+          tests/web-leads-automations.test.ts. This is the save for the call
+          where the website itself is not landing, not a second pitch to open
+          with -- the upsell ladder puts the first automation sale at month
+          three. A layout tidy-up that floats it up the page would quietly
+          change what this whole surface argues for. */}
+      <AutomationPanel industry={lead.industry} audit={audit} />
 
       {/* ── §3.2 radar + §3.3 points on the table ───────────────────────── */}
       <div className="grid gap-5 lg:grid-cols-2">

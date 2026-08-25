@@ -216,6 +216,11 @@ const TESTS = [
   // Task 2 (2026-08-21 build-a-lead-detail plan): rep-facing remedy copy ported
   // from JARVIS's services/leadgen/lib/remedies.js.
   "tests/web-leads-remedies.test.ts",
+  // 2026-08-25: the per-industry automations a rep offers when the website
+  // itself is not landing. Pins the seventeen-industry taxonomy against
+  // JARVIS, keeps unverified capabilities off the screen, and holds the
+  // copy to the rep card's rules -- no technology named, no price quoted.
+  "tests/web-leads-automations.test.ts",
   // Task 3 hotfix (2026-08-21): proves the Turso adapter's object-vs-string
   // profile decoding is handled -- see coerceProfile() in lib/web-leads/audit.ts.
   "tests/web-leads-audit.test.ts",

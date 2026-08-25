@@ -365,6 +365,15 @@ for (const view of [
   // (2026-08-24): the assertion failed as intended, and the classes were
   // reverted.
   "components/web-leads/OpeningHours.tsx",
+  // Added 2026-08-25 with the per-industry automations panel. It renders a
+  // "they do not have this" marker off the audit, which is the single most
+  // tempting thing on this feature to tint: the marker is derived from a
+  // measurement, so colouring it feels like reporting rather than judging.
+  // It is not. The marker is carried by a word and a hollow ring instead.
+  // Proved to fire against this file by planting `text-red-400 bg-green-500`
+  // on the marker once (2026-08-25): the assertion failed as intended, and
+  // the classes were reverted.
+  "components/web-leads/AutomationPanel.tsx",
 ]) {
   const src = read(view);
 
