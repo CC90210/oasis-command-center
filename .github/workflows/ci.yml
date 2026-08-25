@@ -112,6 +112,24 @@ jobs:
           # through. It needs --conditions=react-server because the renderer
           # imports server-only.
           npm run test:watermark
+      - name: Web-leads automations render check
+        # ADDED 2026-08-25 with the per-industry automations panel. Every
+        # other test around this feature reads SOURCE -- the table is right,
+        # the component is imported, the panel is placed. None of them
+        # RENDERS it, so a crash in the map or an empty group would leave a
+        # rep staring at a blank panel mid-call with the whole suite green.
+        # This server-renders the real component and asserts what reaches the
+        # HTML, including that the absence marker appears exactly as often as
+        # the audit justifies and never on a lead we never measured.
+        #
+        # Its own tsconfig, and its own step, because the root config sets
+        # "jsx": "preserve" for Next and tsx falls back to the classic runtime
+        # under that -- which fails inside every component in this repo, none
+        # of which imports React. See tsconfig.render-check.json. It also must
+        # NOT inherit the react-server condition the suite above needs.
+        env:
+          TSX_TSCONFIG_PATH: tsconfig.render-check.json
+        run: npm run test:web-leads-render
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.

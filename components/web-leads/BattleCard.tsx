@@ -72,6 +72,7 @@ import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
+import { AutomationPanel } from "./AutomationPanel";
 
 type Payload = {
   lead: WebLead;
@@ -505,6 +506,23 @@ export function BattleCard({ leadId, canMutate }: { leadId: string; canMutate: b
             reduced={reduced}
           />
         )}
+
+        {/* ── What else we can build, per industry ─────────────────────── */}
+        {/* OUTSIDE the scored/not-scored branch ON PURPOSE. It first shipped
+            inside ScoredBody, which meant the three non-scored states -- the
+            leads with no website found, the ones our crawler was blocked
+            from, the ones not yet scored -- got no automations panel at all.
+            Those are the leads where 'maybe the website is not the thing you
+            want' is the MOST likely thing a rep needs, and the selector and
+            its tests already handled all three states correctly; only the
+            render site did not. (Codex review, 2026-08-25.)
+
+            It renders after the entire website case either way, so it is
+            still below the objections for a scored lead: the save at the end
+            of the argument, not a second pitch to open with. Pinned by
+            tests/web-leads-automations.test.ts. On a non-scored lead nothing
+            is marked 'not on their site', because nothing was measured. */}
+        <AutomationPanel industry={lead.industry} audit={audit} />
         <Panel>
           {/* Reused wholesale rather than restyled: one component owns the four
               outcomes, and logging an outcome IS the transfer to the pipeline

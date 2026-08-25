@@ -1,0 +1,20 @@
+{
+  // Used ONLY by scripts/render-automation-panel-check.tsx, which server-renders
+  // a component under tsx instead of under Next.
+  //
+  // The root tsconfig sets "jsx": "preserve" because Next does the JSX transform
+  // itself. tsx does not, and falls back to the CLASSIC runtime, which emits
+  // React.createElement and needs React in every component's scope -- which no
+  // component in this repo imports, correctly, because Next has used the
+  // automatic runtime for years. Running the check against the root config
+  // therefore fails inside the component with "React is not defined", which
+  // says nothing at all about the component.
+  //
+  // This narrows the difference to exactly that one setting so the check
+  // exercises the real file with the same module resolution and the same path
+  // aliases the app uses.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  }
+}
