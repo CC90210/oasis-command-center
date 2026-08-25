@@ -75,3 +75,17 @@ export function lastTouchIsoFlat(row: {
     null
   );
 }
+
+/**
+ * Keep canonical touch fields monotonic when a provider retries or delivers
+ * webhook events out of order. Invalid legacy values never outrank a valid
+ * provider timestamp.
+ */
+export function latestTouchIso(existing: string | null | undefined, candidate: string): string {
+  const candidateMs = Date.parse(candidate);
+  if (!Number.isFinite(candidateMs)) {
+    throw new Error("invalid_touch_timestamp");
+  }
+  const existingMs = typeof existing === "string" ? Date.parse(existing) : Number.NaN;
+  return Number.isFinite(existingMs) && existingMs > candidateMs ? existing! : candidate;
+}

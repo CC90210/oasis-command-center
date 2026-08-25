@@ -64,8 +64,8 @@ assert.match(
 );
 assert.match(
   bulkRoute,
-  /canViewLead\(viewer, data, scoping, "isolate"\)/,
-  "the per-record owner-or-admin gate must survive the batching rewrite",
+  /canViewLead\(viewer, data, true, "isolate"\)/,
+  "the per-record owner-or-admin gate must be enforced even when the rollout visibility flag is off",
 );
 
 // ---- drain (lib/bulk-email/dispatch.ts) -------------------------------------

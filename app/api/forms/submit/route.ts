@@ -33,7 +33,10 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
-import { stampSalesProgram } from "@/lib/leads/canonical-lead-fields";
+import {
+  OASIS_INBOUND_WARM_MOTION,
+  stampSalesProgram,
+} from "@/lib/leads/canonical-lead-fields";
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
@@ -1567,12 +1570,13 @@ async function initAnonymousLead(input: {
     // original agent or reset pipeline progress. Adopt a rep only if the
     // existing lead was never assigned.
     const merged: Record<string, unknown> = { ...existing.data, ...contactFields };
-    // A returning prospect who supplies their website on this submission earns
-    // the same classification a new one would. Without this the funnel's own
-    // repeat leads stayed off the website-sales board — stampSalesProgram is a
-    // no-op when the lead already carries a program, so an established
-    // classification is never overwritten.
+    // Preserve the website-sales product classification for downstream intake,
+    // while sales_motion keeps this warm form response out of the cold claimed-
+    // lead Pipeline. stampSalesProgram never overwrites an established program.
     if (!funding) Object.assign(merged, stampSalesProgram(merged));
+    if (!funding && !existing.data.sales_motion) {
+      merged.sales_motion = OASIS_INBOUND_WARM_MOTION;
+    }
     if (existing.data.stage) merged.stage = existing.data.stage;
     if (existing.data.assigned_to) {
       merged.assigned_to = existing.data.assigned_to;
@@ -1623,11 +1627,11 @@ async function initAnonymousLead(input: {
       created_from_form_id: form.id,
       created_from_ip_hash: input.ip ? hashIp(input.ip) : null,
       ...contactFields,
-      // An inbound lead that handed us its website is a website-sales lead;
-      // the board filters on this stamp, so without it the funnel's own leads
-      // never appear on the pipeline they were captured for. SunBiz's funding
-      // funnel is a different program and is left alone.
+      // The product is website sales, but the motion is warm inbound. Forms and
+      // the cold claimed-lead Pipeline deliberately remain separate operating
+      // queues. SunBiz's funding funnel is a different program and is untouched.
       ...(funding ? {} : stampSalesProgram(contactFields)),
+      ...(funding ? {} : { sales_motion: OASIS_INBOUND_WARM_MOTION }),
     };
     if (repAssign) {
       leadData.assigned_to = repAssign.auth_user_id;

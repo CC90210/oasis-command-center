@@ -31,9 +31,15 @@ import {
 import { resolveAssignedScope, leadScopingEnabled, SCOPED_ENTITIES, isAdminProfile } from "@/lib/lead-scope";
 import {
   ownsOasisSalesRecord,
+  rejectedOasisGenericPatchKeys,
   rejectedRepPatchKeys,
+  roleMayOperateOasisSalesLead,
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  OASIS_WEBSITE_SALES_PROGRAM,
+  isWebsiteSalesTenantSlug,
+} from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 
 export const runtime = "nodejs";
@@ -199,6 +205,33 @@ export async function POST(
   if (!body.data || typeof body.data !== "object") {
     return NextResponse.json({ ok: false, error: "data_required" }, { status: 400 });
   }
+  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
+  if (isOasisSalesLead) {
+    const requestedStage = body.data.stage;
+    if (requestedStage !== "researched") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          message: "Create new OASIS leads in Researched, then move them through the guided lifecycle.",
+        },
+        { status: 409 },
+      );
+    }
+    const protectedKeys = rejectedOasisGenericPatchKeys(body.data).filter(
+      (key) => key !== "stage" && key !== "sales_program",
+    );
+    if (
+      protectedKeys.length > 0 ||
+      (body.data.sales_program !== undefined &&
+        body.data.sales_program !== OASIS_WEBSITE_SALES_PROGRAM)
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "protected_lifecycle_fields", fields: protectedKeys },
+        { status: 409 },
+      );
+    }
+  }
 
   try {
     const row = await createRecord({
@@ -235,6 +268,22 @@ export async function PATCH(
     return NextResponse.json({ ok: false, error: "patch_required" }, { status: 400 });
   }
 
+  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
+  if (isOasisSalesLead) {
+    const protectedKeys = rejectedOasisGenericPatchKeys(body.patch);
+    if (protectedKeys.length > 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "use_website_sales_workflow",
+          message: `Use the guided lifecycle action for ${protectedKeys.join(", ")}.`,
+          fields: protectedKeys,
+        },
+        { status: 409 },
+      );
+    }
+  }
+
   // A rep may correct the facts of a lead they own; only an admin may reshape
   // the pipeline around it. Before 2026-08-24 this was a flat admin gate, so a
   // closer could open the edit form, type into it, and get a 403 on save.
@@ -248,7 +297,10 @@ export async function PATCH(
     // Ownership AND a role floor. Ownership alone would let a `read_only`
     // account write to any deal it is merely attached to, which is the one
     // thing that role name promises it cannot do.
-    if (!roleMaySelfEditLead(r.team_role)) {
+    const roleMayEdit = isOasisSalesLead
+      ? roleMayOperateOasisSalesLead(r.team_role)
+      : roleMaySelfEditLead(r.team_role);
+    if (!roleMayEdit) {
       return NextResponse.json(
         { ok: false, error: "forbidden", message: "Your role can't edit lead fields." },
         { status: 403 },

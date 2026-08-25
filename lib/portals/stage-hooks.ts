@@ -30,7 +30,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { cancelStaleDripRunsForLead } from "@/lib/drips/stage-cancel";
 import { BOARD_EXIT_FIELD } from "@/lib/leads/board-visibility";
-import { runQualifiedBookingHandoff } from "@/lib/website-sales-booking";
 import type { PortalId } from "./registry";
 
 type Db = SupabaseClient;
@@ -159,29 +158,13 @@ const sunbizDripCancel: StageTransitionHook = {
 };
 
 /**
- * OASIS website sales: when a lead is qualified on the oasis-webdev pipeline,
- * email it the founder booking link and ping the founders on Telegram.
- * All gating (transition-into-qualified, program+tenant, idempotency stamp,
- * env live-switch, suppression) lives in lib/website-sales-booking.ts; the
- * handler never throws — same fail-soft contract as the drip cancel above.
+ * The former OASIS qualified-stage booking email is intentionally not wired.
+ * Cold-sales openers now agree on an exact 15-minute audit time and save the
+ * closer handoff before opening a pre-filled Google Calendar event. Sending a
+ * generic self-book link here would create a second, conflicting schedule.
  */
-const oasisQualifiedBooking: StageTransitionHook = {
-  portal: "oasis",
-  name: "qualified-booking-link",
-  async handle(ctx) {
-    await runQualifiedBookingHandoff({
-      db: ctx.db,
-      tenantId: ctx.tenantId,
-      entity: ctx.entity,
-      recordId: ctx.recordId,
-      data: ctx.data,
-      transitions: ctx.transitions,
-    });
-  },
-};
-
 /** Every portal reaction to a stage transition. Static on purpose — see header. */
-const HOOKS: StageTransitionHook[] = [sunbizDripCancel, oasisQualifiedBooking];
+const HOOKS: StageTransitionHook[] = [sunbizDripCancel];
 
 /**
  * Run every portal's stage-transition reaction.

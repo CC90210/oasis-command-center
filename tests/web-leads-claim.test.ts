@@ -226,9 +226,13 @@ assert.equal(
   const patch = claimPatch("rep-b", "2026-08-23T12:00:00Z");
   assert.equal(patch.assigned_to, "rep-b");
   assert.equal(patch.claimed_at, "2026-08-23T12:00:00Z");
+  assert.equal(patch.stage_entered_at, "2026-08-23T12:00:00Z");
+  assert.equal(patch.last_contacted_at, "2026-08-23T12:00:00Z", "claiming into Assigned counts as a lifecycle touch");
   assert.equal(patch.last_call_at, null, "the previous owner's call stamp must be cleared");
   assert.equal(patch.lost_at, null, "the previous owner's lost stamp must be cleared");
   assert.equal(patch.stage, "assigned", "a claimed lead enters the pipeline at 'assigned'");
+  assert.equal(patch.sales_program, "website_sales_v1", "a claimed prospect is visible to the website-sales pipeline query");
+  assert.equal(patch.sales_motion, "cold_outbound", "a claim enters only the cold outbound sales engine");
 
   // Prove the round trip: apply the patch and the lead is held by the new rep,
   // not instantly stale and not still lost.
@@ -290,12 +294,12 @@ assert.equal(
 
   assert.match(
     outcome,
-    /last_call_at:\s*nowIso/,
+    /await persistCanonicalLeadTouch\(db,\s*\{[\s\S]*?leadId,[\s\S]*?occurredAt:\s*calledAt,[\s\S]*?isCall:\s*true/,
     "logging any outcome must stamp last_call_at, or every claim expires on day 7 no matter how hard the rep worked it",
   );
   assert.match(
     outcome,
-    /if \(target === "lost"\) patch\.lost_at = nowIso;/,
+    /if \(target === "lost"\)\s*\{\s*stagePatch\.lost_at = calledAt;/,
     "the transition into lost must stamp lost_at, or the 90-day recycle can never fire and lost leads are locked forever",
   );
 
@@ -308,18 +312,12 @@ assert.equal(
 
   // "no answer" must stamp too. A rep who dials four times and reaches nobody
   // is working that lead; taking it off them on day 7 punishes the persistence
-  // this funnel depends on. The patch is built before the `target` check, so it
-  // applies to every outcome including the one that does not move the stage.
-  const patchLine = outcome.indexOf("const patch: Record<string, unknown> = { last_call_at: nowIso };");
-  const targetLine = outcome.indexOf("const target = nextStage(stage, outcome);");
-  assert.ok(
-    patchLine > 0 && targetLine > 0 && patchLine > targetLine,
-    "last_call_at must be stamped unconditionally, not only when the stage advances",
-  );
+  // this funnel depends on. The canonical touch write sits outside the stage
+  // transition branch, so it applies to every outcome including no-answer.
   assert.doesNotMatch(
     outcome,
-    /if \(target\) \{\s*await updateRecord/,
-    "the tenant_records write must no longer be gated on a stage change -- a no-answer call still has to record that the lead was worked",
+    /if \([^)]*target[^)]*\)\s*\{[\s\S]{0,300}?persistCanonicalLeadTouch/,
+    "the canonical touch write must not be gated on a stage change -- a no-answer call still has to record that the lead was worked",
   );
 }
 
@@ -344,6 +342,16 @@ assert.equal(
     ops,
     /\.eq\("data->>assigned_to", prevOwner\)/,
     "a recycled lead must be swapped on the owner we OBSERVED -- it still carries its previous owner, so a bare IS NULL would refuse exactly the leads the recycling rules just released",
+  );
+  assert.match(
+    ops,
+    /data:\s*\{\s*\.\.\.raw,\s*\.\.\.claimPatch\(userId, nowIso\)\s*\}/,
+    "claiming must merge lifecycle ownership onto the complete lead record so website, contacts, location and enrichment context survive intact",
+  );
+  assert.match(
+    ops,
+    /\.eq\("updated_at", source\?\.updated_at \|\| ""\)/,
+    "claiming must pin the full-record row version so a concurrent website/contact edit cannot be replaced by the older claim snapshot",
   );
   // The adapter-only spelling that 500s against real supabase-js (see
   // lib/web-leads/scores.ts) must not appear here either.
@@ -414,6 +422,11 @@ assert.equal(
     /\.eq\("data->>assigned_to", prevOwner as string\)/,
     "releasing must compare the observed owner, or it can erase another rep's claim",
   );
+  assert.match(
+    releaseFn![0],
+    /\.eq\("updated_at", r\.updated_at\)/,
+    "releasing must also pin the row version so it cannot erase a concurrent contact/context edit while the owner stays the same",
+  );
 
   // The per-lead swap says nothing about a rep's own total. Two overlapping
   // requests from one rep both read the same held count and both grant the
@@ -454,8 +467,9 @@ assert.equal(
     /onStartCalling=\{startCalling\}/,
     "Start calling must go through the claiming path, not straight into Call Mode",
   );
-  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[mine, leads, push, filters\]\);/);
+  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[canMutate, mine, leads, push, filters\]\);/);
   assert.ok(fn, "startCalling must be findable");
+  assert.match(fn![0], /if \(!canMutate\) return;/, "a read-only viewer must not enter the claiming/call path");
   assert.match(
     fn![0],
     /if \(mine\) \{ setCalling\(true\); return; \}/,
@@ -475,6 +489,28 @@ assert.equal(
   const claimIdx = fn![0].indexOf("/api/web-leads/claim");
   const openIdx = fn![0].lastIndexOf("setCalling(true)");
   assert.ok(openIdx > claimIdx, "Call Mode must open only after the claim returns");
+}
+
+// ---------------------------------------------------------------------------
+// 14. Claim/release/call are sales mutations, not tenant-wide conveniences.
+//     The API uses the same centralized role floor as the lifecycle route,
+//     while the browser removes the controls (including selection checkboxes)
+//     for a read-only/non-sales viewer. Read access remains unchanged.
+// ---------------------------------------------------------------------------
+
+{
+  const route = fs.readFileSync(path.join(process.cwd(), "app/api/web-leads/claim/route.ts"), "utf8");
+  const browser = fs.readFileSync(path.join(process.cwd(), "components/web-leads/WebLeadsBrowser.tsx"), "utf8");
+  const toolbar = fs.readFileSync(path.join(process.cwd(), "components/web-leads/LeadsToolbar.tsx"), "utf8");
+  const table = fs.readFileSync(path.join(process.cwd(), "components/web-leads/LeadsTable.tsx"), "utf8");
+  const page = fs.readFileSync(path.join(process.cwd(), "app/web-leads/page.tsx"), "utf8");
+
+  assert.match(route, /mayWorkWebsiteSalesLifecycle\(/, "claim and release must use the centralized sales-role allowlist");
+  assert.match(route, /status:\s*403/, "claim and release must reject a read-only/non-sales caller");
+  assert.match(page, /canMutate/, "the server page must resolve mutation capability from the authenticated role");
+  assert.match(browser, /canMutate/, "the browser must receive and enforce mutation capability");
+  assert.match(toolbar, /canMutate/, "claim and Start calling controls must be hidden for read-only viewers");
+  assert.match(table, /canSelect/, "claim-selection checkboxes must be hidden for read-only viewers");
 }
 
 console.log("web-leads-claim ok");

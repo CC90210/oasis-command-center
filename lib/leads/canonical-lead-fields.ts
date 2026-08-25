@@ -24,6 +24,8 @@ import { OASIS_WEBSITE_SALES_PROGRAM } from "@/lib/oasis-sales-pipeline-policy";
 // been the same mistake in miniature — two spellings of the marker the board
 // filters on, free to drift apart.
 export { OASIS_WEBSITE_SALES_PROGRAM };
+export const OASIS_COLD_OUTBOUND_MOTION = "cold_outbound";
+export const OASIS_INBOUND_WARM_MOTION = "inbound_warm";
 
 /**
  * The research fields that make a lead a website-sales lead. Presence of ANY

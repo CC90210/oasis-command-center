@@ -6,11 +6,11 @@
  * "what is our MRR". So this page carries the four post-sale stages —
  * onboarding, in_build, client_review, launched — and nothing about money.
  *
- * SCOPED BY QUERY, LIKE THE REP PAGE. Four `where: { stage }` reads, one per
- * delivery stage. The prospecting pipeline is never fetched, so "no prospecting
- * pipeline for fulfilment" is a property of the request rather than a rule
- * someone has to remember when adding the next card. Company financials are not
- * imported here at all.
+ * SCOPED BY QUERY, LIKE THE REP PAGE. Internal viewers read one tenant-stage
+ * window per delivery stage. Builders read two narrower windows (assigned_to
+ * OR fulfillment_owner_id), so another builder's clients never enter their RSC
+ * payload. The prospecting pipeline is never fetched, and company financials
+ * are not imported here at all.
  *
  * Client names ARE shown. That is deliberate and it is the difference between
  * this persona and the sales one: a builder cannot build a website for a
@@ -25,6 +25,10 @@ import Link from "next/link";
 import { Card, EmptyState, PageHeader, Stat, Tag } from "@/components/Card";
 import { LiveClock } from "@/components/LiveClock";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
+import {
+  resolveOasisDeliveryQueueScope,
+  type OasisDeliveryQueueScope,
+} from "@/lib/oasis-sales-pipeline-policy";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
@@ -62,19 +66,67 @@ function who(row: TenantRecord): string {
  * the prospecting stages are never in the result set to begin with.
  */
 type StageRead =
-  | { ok: true; stage: DeliveryStageKey; rows: TenantRecord[] }
+  | { ok: true; stage: DeliveryStageKey; rows: TenantRecord[]; total: number }
   | { ok: false; stage: DeliveryStageKey };
 
-async function loadStage(tenantId: string, stage: DeliveryStageKey): Promise<StageRead> {
+async function loadStage(
+  tenantId: string,
+  stage: DeliveryStageKey,
+  scope: OasisDeliveryQueueScope,
+): Promise<StageRead> {
+  if (scope.mode === "none") return { ok: true, stage, rows: [], total: 0 };
   try {
-    const result = await listRecords({
-      tenant_id: tenantId,
-      entity: "lead",
-      where: { stage },
-      sort: "-updated_at",
-      limit: 200,
-    });
-    return { ok: true, stage, rows: result.rows };
+    if (scope.mode === "all") {
+      const result = await listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage },
+        sort: "-updated_at",
+        limit: 200,
+      });
+      return { ok: true, stage, rows: result.rows, total: result.total };
+    }
+
+    // Two narrow reads implement assigned_to OR fulfillment_owner_id without
+    // loading the tenant-wide stage. The third count-only read measures the
+    // overlap so the tile stays exact when both fields name the same builder.
+    const [assigned, fulfilled, overlap] = await Promise.all([
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage, assigned_to: scope.userId },
+        sort: "-updated_at",
+        limit: 200,
+      }),
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: { stage, fulfillment_owner_id: scope.userId },
+        sort: "-updated_at",
+        limit: 200,
+      }),
+      listRecords({
+        tenant_id: tenantId,
+        entity: "lead",
+        where: {
+          stage,
+          assigned_to: scope.userId,
+          fulfillment_owner_id: scope.userId,
+        },
+        limit: 1,
+      }),
+    ]);
+    const unique = new Map<string, TenantRecord>();
+    for (const row of [...assigned.rows, ...fulfilled.rows]) unique.set(row.id, row);
+    const rows = [...unique.values()].sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+    return {
+      ok: true,
+      stage,
+      rows,
+      total: assigned.total + fulfilled.total - overlap.total,
+    };
   } catch (err) {
     console.error(`[delivery-today.${stage}]`, err);
     return { ok: false, stage };
@@ -86,10 +138,12 @@ export async function DeliveryToday({
   viewerName,
   readOnly,
   teamRole,
+  viewerUserId,
 }: {
   tenantId: string;
   viewerName: string;
   readOnly: boolean;
+  viewerUserId: string | null;
   /**
    * Shown in the footer line, and it earns its place.
    *
@@ -102,7 +156,8 @@ export async function DeliveryToday({
    */
   teamRole: string;
 }) {
-  const reads = await Promise.all(DELIVERY_STAGE_KEYS.map((s) => loadStage(tenantId, s)));
+  const scope = resolveOasisDeliveryQueueScope(teamRole, viewerUserId);
+  const reads = await Promise.all(DELIVERY_STAGE_KEYS.map((s) => loadStage(tenantId, s, scope)));
   const byStage = new Map<DeliveryStageKey, StageRead>(reads.map((r) => [r.stage, r]));
 
   const countOf = (stage: DeliveryStageKey): number | "—" => {
@@ -110,7 +165,7 @@ export async function DeliveryToday({
     // Em dash, never 0, on a failed read: "there is no work in build" and
     // "I could not find out" are different facts and only one of them means
     // the builder can go home.
-    return r && r.ok ? r.rows.length : "—";
+    return r && r.ok ? r.total : "—";
   };
 
   const active = reads
@@ -146,7 +201,10 @@ export async function DeliveryToday({
   dueToday.sort((a, b) => a.at - b.at);
 
   const anyReadFailed = reads.some((r) => !r.ok);
-  const totalActive = active.length;
+  const totalActive = reads
+    .filter((r): r is Extract<StageRead, { ok: true }> => r.ok)
+    .filter((r) => r.stage !== "launched")
+    .reduce((sum, r) => sum + r.total, 0);
 
   return (
     <div className="space-y-6 animate-fade-in">

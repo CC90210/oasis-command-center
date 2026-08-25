@@ -38,7 +38,10 @@ export async function GET() {
       // expose to every tenant member — it's the same UUID that surfaces
       // in chat session headers and other already-public identifiers.
       auth_user_id: m.auth_user_id,
-      email: canManage ? m.email : null,
+      // Tenant teammates need the selected audit host's address so the
+      // prefilled Google Calendar event actually invites that founder/closer.
+      // This never crosses the tenant boundary and contains no provider secret.
+      email: m.email,
       full_name: m.full_name,
       display_name: m.display_name,
       team_role: m.team_role,

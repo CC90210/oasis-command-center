@@ -48,6 +48,7 @@ import {
   type CliRuntime,
 } from "@/lib/cli-runtime";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
+import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
 import {
   deriveDropdownState,
@@ -267,14 +268,6 @@ const CLI_RUNTIME_LABELS: Record<CliRuntime, string> = {
 // (SSR / API routes) we still trust the build-time env, which works there
 // because Vercel decrypts env vars for server runtime even when build-time
 // inlining for NEXT_PUBLIC_* misses.
-function isProxyModeRuntime(): boolean {
-  if (typeof window !== "undefined") {
-    const h = window.location.hostname;
-    return h !== "localhost" && h !== "127.0.0.1";
-  }
-  return BRIDGE_CHAT_BASE !== "http://127.0.0.1:9100";
-}
-
 // computeEffectiveBridgeOnline lives in lib/bridge-effective-online.ts so it
 // can be unit-tested and reused by other components (Sidebar, BridgeCliPanel)
 // without dragging in this client component. See that file for the full

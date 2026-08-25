@@ -71,9 +71,12 @@ export async function requestPasswordReset(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
         });
-        // Deliberately uniform: this endpoint always 200s so it cannot be used
-        // to discover which addresses have accounts.
-        return r.ok ? { ok: true } : { ok: false, error: "could not send reset email" };
+        const j = await r.json().catch(() => ({}));
+        // Unauthenticated requests remain uniform. The route returns a specific
+        // non-200 error only when a signed-in user requests their own reset.
+        return r.ok
+            ? { ok: true }
+            : { ok: false, error: j?.error || "could not send reset email" };
     }
     const { error } = await getBrowserSupabase().auth.resetPasswordForEmail(
         email, { redirectTo });

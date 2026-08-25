@@ -15,11 +15,28 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { canWriteCrm } from "@/lib/role-gates";
-import { ownsOasisSalesRecord, roleMaySelfEditLead } from "@/lib/oasis-sales-pipeline-policy";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import {
+  canMutateOasisSalesRecord,
+  ownsOasisSalesRecord,
+  roleMayOperateOasisSalesLead,
+  roleMaySelfEditLead,
+} from "@/lib/oasis-sales-pipeline-policy";
 
 export type PerLeadAccess =
   | { ok: true }
   | { ok: false; status: number; error: string; message: string };
+
+export type PerLeadAccessMode = "crm" | "owned_oasis_sales";
+
+/** Shared lead routes keep legacy CRM permissions outside OASIS. */
+export function resolvePerLeadAccessPolicy(
+  accessMode: PerLeadAccessMode,
+  tenantSlug: string | null,
+): PerLeadAccessMode {
+  if (accessMode === "crm") return "crm";
+  return tenantSlug && !isWebsiteSalesTenantSlug(tenantSlug) ? "crm" : "owned_oasis_sales";
+}
 
 export async function assertMayWorkLead(args: {
   teamRole: string;
@@ -28,14 +45,52 @@ export async function assertMayWorkLead(args: {
   leadId: string;
   isOwner?: boolean;
   adminAccess?: boolean;
+  /**
+   * `crm` preserves the shared legacy CRM rule. `owned_oasis_sales` is the
+   * lead-file boundary: admins, or assigned/collaborating OASIS sales roles.
+   */
+  accessMode?: PerLeadAccessMode;
 }): Promise<PerLeadAccess> {
-  if (canWriteCrm(args.teamRole)) return { ok: true };
+  const accessMode = args.accessMode ?? "crm";
+  const normalizedRole = args.teamRole.trim().toLowerCase();
+  const admin =
+    args.isOwner ||
+    args.adminAccess ||
+    normalizedRole === "owner" ||
+    normalizedRole === "admin";
+  if (admin) return { ok: true };
+  if (accessMode === "crm" && canWriteCrm(args.teamRole)) return { ok: true };
+
+  const db = getServiceSupabase();
+  let effectiveMode = accessMode;
+  if (accessMode === "owned_oasis_sales") {
+    const tenantResult = await db
+      .from("tenants")
+      .select("slug")
+      .eq("id", args.tenantId)
+      .maybeSingle();
+    if (tenantResult.error) {
+      return {
+        ok: false,
+        status: 503,
+        error: "tenant_lookup_failed",
+        message: "Lead access could not be verified.",
+      };
+    }
+    const tenantSlug = (tenantResult.data as { slug?: string | null } | null)?.slug ?? null;
+    effectiveMode = resolvePerLeadAccessPolicy(accessMode, tenantSlug);
+    if (effectiveMode === "crm" && canWriteCrm(args.teamRole)) return { ok: true };
+  }
 
   // Not a blanket CRM writer — but this may still be their own lead, provided
   // the role is one that does sales work at all. Without this floor a
   // `read_only` account named on a deal could run write-back AI tools, which
   // is a capability it had before this branch existed.
-  if (!roleMaySelfEditLead(args.teamRole)) {
+  const roleAllowed =
+    effectiveMode === "owned_oasis_sales"
+      ? roleMayOperateOasisSalesLead(args.teamRole)
+      : roleMaySelfEditLead(args.teamRole);
+  if (!roleAllowed) {
     return {
       ok: false,
       status: 403,
@@ -43,7 +98,6 @@ export async function assertMayWorkLead(args: {
       message: "Your role can't run this.",
     };
   }
-  const db = getServiceSupabase();
   const res = await db
     .from("tenant_records")
     .select("id, data")
@@ -63,7 +117,15 @@ export async function assertMayWorkLead(args: {
   // yes for the wide `member` role (the team_role column default), which is
   // the right answer for "may they look at it" and the wrong one for "may
   // they write to it".
-  const mine = ownsOasisSalesRecord(row, args.userId);
+  const mine =
+    effectiveMode === "owned_oasis_sales"
+      ? canMutateOasisSalesRecord(row, {
+          role: args.teamRole,
+          userId: args.userId,
+          isOwner: args.isOwner,
+          adminAccess: args.adminAccess,
+        })
+      : ownsOasisSalesRecord(row, args.userId);
 
   return mine
     ? { ok: true }

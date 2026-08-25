@@ -48,7 +48,8 @@ async function main() {
     const id = existing.get(seed.name);
     const result = id ? await db.from("cc_email_templates").update(payload).eq("id", id).eq("tenant_id", tenantId) : await db.from("cc_email_templates").insert(payload);
     if (result.error) throw result.error;
-    id ? updated++ : inserted++;
+    if (id) updated += 1;
+    else inserted += 1;
   }
   console.log(JSON.stringify({ ok: true, templates: seeds.length, inserted, updated }));
 }

@@ -24,9 +24,9 @@ import { isOperatorEmail } from "@/lib/operator-credentials";
 import { operatorNameOverride } from "@/lib/operator-name";
 import { resolveAgentKey } from "@/lib/agents";
 import {
-  getTenantAwareEnabledAgents,
   getTenantManifestForUser,
 } from "@/lib/manifest/tenant-scope";
+import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import type { IntegrationHealth } from "@/lib/supabase";
 
 export type ChatShellProps = {
@@ -89,19 +89,23 @@ export async function resolveChatShellProps(args: {
 
   // Manifest-first precedence; falls through to profile.agents_enabled, else
   // empty (never silently "bravo" — that was the cross-tenant leak we sealed).
-  const enabledRaw = await getTenantAwareEnabledAgents({
-    userTenantId: tenantId,
-    profileAgentsEnabled: profile?.agents_enabled ?? null,
+  const enabledRaw = resolveEnabledAgentSlugs({
+    manifestAgents: manifest ? manifest.agents || [] : null,
+    legacyProfileAgents: profile?.agents_enabled ?? null,
   });
   const enabled = enabledRaw.map(resolveAgentKey);
+  if (enabled.length === 0) return null;
   const manifestPrimary = manifest?.agents?.find((a) => a.primary && a.enabled)?.slug;
   // Family default keyed off the authoritative tenants.slug column:
   //   SunBiz (slug 'submissions') → 'solara'; OASIS / unknown → 'bravo'.
   const tenantFamily = (tenant?.slug || "").toLowerCase();
   const familyDefault = tenantFamily === "submissions" ? "solara" : "bravo";
-  const primary = resolveAgentKey(
-    manifestPrimary || profile?.primary_agent || enabled[0] || familyDefault,
-  );
+  const requestedPrimary = resolveAgentKey(manifestPrimary || profile?.primary_agent || "");
+  // A stale per-user primary must never re-enable an agent the tenant manifest
+  // disabled. Prefer it only when it belongs to the canonical roster.
+  const primary = enabled.includes(requestedPrimary)
+    ? requestedPrimary
+    : enabled[0] || familyDefault;
   const agentKeys = Array.from(new Set([primary, ...enabled])).filter(Boolean);
 
   // Hardwired per-account override (lib/operator-name.ts) wins over the

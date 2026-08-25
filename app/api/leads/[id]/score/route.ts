@@ -48,6 +48,7 @@ export async function POST(
     leadId,
     isOwner: sess.isTrueAdmin,
     adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
   });
   if (!access.ok) {
     return NextResponse.json(

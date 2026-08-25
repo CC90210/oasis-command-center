@@ -31,6 +31,7 @@ import { getTenant } from "@/lib/queries";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { getManifest } from "./loader";
 import { getManifestRow, getManifestSlugForTenant } from "./persistence";
+import { resolveEnabledAgentSlugs } from "./agent-roster";
 
 /**
  * Resolve the tenant_id that should scope tenant_records reads/writes
@@ -131,9 +132,7 @@ export async function getTenantEnabledAgents(
 ): Promise<string[]> {
   const manifest = await getTenantManifestForUser(userTenantId);
   if (!manifest) return [];
-  return (manifest.agents || [])
-    .filter((a) => a.enabled)
-    .map((a) => a.slug.toLowerCase());
+  return resolveEnabledAgentSlugs({ manifestAgents: manifest.agents || [] });
 }
 
 /**
@@ -151,9 +150,9 @@ export async function getTenantEnabledAgents(
  *
  * Order of precedence:
  *   1. tenant_manifests.manifest.agents.filter(enabled) — the canonical
- *      "what this tenant has" list.
- *   2. user_profiles.agents_enabled — legacy per-user override (kept for
- *      back-compat with tenants that haven't fully migrated to manifest).
+ *      "what this tenant has" list, including an intentionally empty list.
+ *   2. user_profiles.agents_enabled — legacy per-user fallback only when no
+ *      manifest resolves (kept for tenants that haven't migrated yet).
  *   3. empty array — caller decides what empty means.
  *
  * Operator-bypass: when isOperator is true the caller can do its own
@@ -165,12 +164,11 @@ export async function getTenantAwareEnabledAgents(args: {
   userTenantId: string | null;
   profileAgentsEnabled?: string[] | null;
 }): Promise<string[]> {
-  const manifestSlugs = await getTenantEnabledAgents(args.userTenantId);
-  if (manifestSlugs.length > 0) return manifestSlugs;
-  const profileSlugs = (args.profileAgentsEnabled || [])
-    .filter(Boolean)
-    .map((s) => s.toLowerCase());
-  return profileSlugs;
+  const manifest = await getTenantManifestForUser(args.userTenantId);
+  return resolveEnabledAgentSlugs({
+    manifestAgents: manifest ? manifest.agents || [] : null,
+    legacyProfileAgents: args.profileAgentsEnabled,
+  });
 }
 
 

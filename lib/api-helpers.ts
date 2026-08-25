@@ -282,13 +282,22 @@ export function isUniqueViolationError(
  * is set only for an error that is NOT a duplicate, and the caller decides
  * whether that is fatal.
  */
+type InsertFailure = { message?: string; code?: string };
+type InsertResponse = { data: unknown[] | null; error: InsertFailure | null };
+type InsertTable = {
+  insert: (value: unknown) => {
+    select: (columns: string) => PromiseLike<InsertResponse>;
+  };
+};
+
 export async function insertChunkSalvagingDuplicates<T>(
-  db: { from: (t: string) => any },
+  db: { from: (table: string) => unknown },
   table: string,
   chunk: T[],
   select = "id",
 ): Promise<{ inserted: number; duplicates: number; failure: { message?: string } | null }> {
-  const bulk = await db.from(table).insert(chunk).select(select);
+  const target = () => db.from(table) as InsertTable;
+  const bulk = await target().insert(chunk).select(select);
   if (!bulk.error) {
     return { inserted: bulk.data?.length ?? 0, duplicates: 0, failure: null };
   }
@@ -300,7 +309,7 @@ export async function insertChunkSalvagingDuplicates<T>(
   let inserted = 0;
   let duplicates = 0;
   for (const row of chunk) {
-    const one = await db.from(table).insert(row).select(select);
+    const one = await target().insert(row).select(select);
     if (!one.error) inserted += one.data?.length ?? 0;
     else if (isUniqueViolationError(one.error)) duplicates += 1;
     else return { inserted, duplicates, failure: one.error };

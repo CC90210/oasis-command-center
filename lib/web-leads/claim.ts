@@ -48,6 +48,11 @@
 
 /** Everything the ownership rules read. A subset of the lead's stored `data`,
  *  named so the rules can be tested without a database or a WebLead. */
+import {
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+} from "@/lib/leads/canonical-lead-fields";
+
 export type ClaimFacts = {
   /** Auth user id of the owning rep, or null when nobody holds it. */
   assignedTo: string | null;
@@ -214,9 +219,13 @@ export function claimPatch(userId: string, nowIso: string): Record<string, unkno
   return {
     assigned_to: userId,
     claimed_at: nowIso,
+    sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+    sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+    last_contacted_at: nowIso,
     last_call_at: null,
     lost_at: null,
     stage: "assigned",
+    stage_entered_at: nowIso,
   };
 }
 

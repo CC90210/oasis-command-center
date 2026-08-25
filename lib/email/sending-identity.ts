@@ -18,9 +18,6 @@
 import { resolveTrackingBase, trackingHost } from "./tracking-base";
 import { ALL_BRAND_KEYS, getBrand, resolveBrandKey, type BrandKey } from "./brands";
 
-/** What the sender was before any of this was configurable. Kept as the default
- *  so an unset environment is byte-identical to the pre-2026-07-29 behaviour. */
-const LEGACY_FROM = "submissions@sunbizfunding.com";
 const LEGACY_PLATFORM = "https://oasisai.work";
 
 function env(name: string): string | undefined {

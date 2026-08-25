@@ -17,7 +17,6 @@
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { findExistingLead } from "@/lib/forms/agent-routing";
 
 /** Candidate storage formats for a NANP number: 10-digit, 1+10, +1+10. */
 export function phoneCandidates(raw: string | null | undefined): string[] {
@@ -39,9 +38,24 @@ export async function findLeadByPhone(
   tenantId: string,
   rawPhone: string,
 ): Promise<{ id: string; data: Record<string, unknown> } | null> {
+  const db = getServiceSupabase();
   for (const candidate of phoneCandidates(rawPhone)) {
-    const hit = await findExistingLead(tenantId, { phone: candidate });
-    if (hit) return hit;
+    const result = await db
+      .from("tenant_records")
+      .select("id,data,created_at")
+      .eq("tenant_id", tenantId)
+      .eq("entity_type", "lead")
+      .filter("data->>phone", "eq", candidate)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (result.error) {
+      throw new Error(`kixie_phone_attribution_failed:${result.error.message}`);
+    }
+    if (result.data) {
+      const row = result.data as { id: string; data?: Record<string, unknown> | null };
+      return { id: row.id, data: row.data || {} };
+    }
   }
   return null;
 }

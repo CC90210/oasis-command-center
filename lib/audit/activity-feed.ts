@@ -1,39 +1,31 @@
 /**
- * activity-feed.ts — actor-filtered activity timeline for the SunBiz audit page.
+ * Tenant-scoped activity timeline.
  *
- * CC's ask (2026-06-18): the audit log should show what each of the 5 actors —
- * the people Matt / Jordan / Alex and the AI agents Helios / Solara — actually
- * did: team changes, sends (email/SMS/call), AI automations + stage changes,
- * and chats. v1 SURFACES signals we already capture (no new instrumentation) by
- * unioning four tables and normalizing to one row shape, resolvable + filterable
- * by actor. Gaps (precise AI attribution on some daemon sends, chat→tool→record
- * tracing) are deferred to a later "deeper instrumentation" pass.
- *
- * Sources (all tenant-scoped, each best-effort — a failing source is skipped,
- * never breaks the feed):
- *   - tenant_audit_log    team / invite / agent-config changes (human)
- *   - lead_interactions   email / SMS / call (human operator OR AI automation)
- *   - agent_events        AI stage-changes, automation/cron runs (agent)
- *   - chat_sessions       chats (human ↔ agent)
- *
- * WRITE SIDE (added 2026-07-23, B2): logTenantAudit() below is the write
- * counterpart to the tenant_audit_log read above. Best-effort, same
- * convention as lib/esign/db.ts::logEvent() — a failed audit write is
- * reported to the caller but must never block the primary action it's
- * logging (e.g. an e-sign envelope completing).
+ * Human actors come from this tenant's user_profiles rows and agent actors
+ * come from this tenant's enabled manifest agents. There is deliberately no
+ * platform-wide fallback roster: missing attribution renders as System instead
+ * of leaking another workspace's people or personas.
  */
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, type MemberRow } from "@/lib/team";
+import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
+import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
+import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 
-export type ActorName = "Matt" | "Jordan" | "Alex" | "Helios" | "Solara";
-export const KNOWN_ACTORS: ActorName[] = ["Matt", "Jordan", "Alex", "Helios", "Solara"];
+export type ActivityActor = {
+  /** Stable filter key. Display labels can be renamed or duplicated. */
+  key: string;
+  label: string;
+  type: "human" | "agent" | "system";
+};
 
 export type ActivityRow = {
   id: string;
   time: string;
-  actor: string; // an ActorName, or "System" when unattributable
+  actorKey: string;
+  actor: string;
   actorType: "human" | "agent" | "system";
   action: string;
   target: string;
@@ -41,118 +33,165 @@ export type ActivityRow = {
   source: string;
 };
 
+const SYSTEM_ACTOR: ActivityActor = { key: "system", label: "System", type: "system" };
+
+export function memberActivityLabel(
+  member: Pick<MemberRow, "display_name" | "full_name" | "email">,
+): string {
+  return (member.display_name || member.full_name || member.email || "Team member").trim();
+}
+
+/** Build authoritative identity maps from this tenant's actual members. */
+export function buildHumanActorMaps(
+  members: Array<
+    Pick<MemberRow, "id" | "auth_user_id" | "email" | "full_name" | "display_name">
+  >,
+): {
+  actors: ActivityActor[];
+  byEmail: Map<string, ActivityActor>;
+  byId: Map<string, ActivityActor>;
+} {
+  const actors: ActivityActor[] = [];
+  const byEmail = new Map<string, ActivityActor>();
+  const byId = new Map<string, ActivityActor>();
+  for (const member of members) {
+    const actor: ActivityActor = {
+      key: `human:${member.id}`,
+      label: memberActivityLabel(member),
+      type: "human",
+    };
+    actors.push(actor);
+    if (member.email) byEmail.set(member.email.trim().toLowerCase(), actor);
+    if (member.auth_user_id) byId.set(member.auth_user_id, actor);
+  }
+  return { actors, byEmail, byId };
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Map an automated source string (lead_interactions.agent_source or
- * agent_events.publisher_agent / cron name) to the owning AI agent, per the
- * Settings role split: Helios = sales / outreach / SMS / closing; Solara =
- * operational / backend / workflows / data. Returns null when it's not an
- * AI-attributable source (operator-initiated or system).
+ * Resolve an automated source only against this tenant's enabled agents.
+ * Direct slug/name matches work for every tenant. Legacy funding aliases are
+ * considered only if that specific agent is enabled for this workspace.
  */
-export function resolveAgent(source: string | null | undefined): ActorName | null {
-  const s = (source || "").trim().toLowerCase();
-  if (!s) return null;
-  if (s === "helios" || s === "solara") return s === "helios" ? "Helios" : "Solara";
-  // Helios — sales / outbound / SMS follow-ups / the inquiry handoff.
-  if (
-    s.includes("cold_outreach") ||
-    s.includes("sequence") ||
-    s.includes("drip") ||
-    s.includes("form_intake") ||
-    s.includes("texttorrent")
-  ) {
-    return "Helios";
+export function resolveActivityAgent(
+  source: string | null | undefined,
+  agents: ActivityActor[],
+): ActivityActor | null {
+  const normalized = (source || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  for (const agent of agents) {
+    const slug = agent.key.replace(/^agent:/, "").toLowerCase();
+    const label = agent.label.toLowerCase();
+    const slugBoundary = new RegExp(`(^|[^a-z0-9])${escapeRegex(slug)}([^a-z0-9]|$)`);
+    if (normalized === slug || normalized === label || slugBoundary.test(normalized)) {
+      return agent;
+    }
   }
-  // Solara — operational / backend / data / underwriting.
+
+  const bySlug = new Map(
+    agents.map((agent) => [agent.key.replace(/^agent:/, "").toLowerCase(), agent]),
+  );
   if (
-    s.includes("follow_up") ||
-    s.includes("daily_plan") ||
-    s.includes("underwriting") ||
-    s.includes("classifier") ||
-    s.includes("renewal") ||
-    s.includes("shop_out_sender")
+    normalized.includes("cold_outreach") ||
+    normalized.includes("sequence") ||
+    normalized.includes("drip") ||
+    normalized.includes("form_intake") ||
+    normalized.includes("texttorrent")
   ) {
-    return "Solara";
+    return bySlug.get("helios") || null;
   }
-  // Operator-initiated (manual_cc, dashboard_drawer, dashboard_conversations,
-  // shop_out_send_batch) and system publishers (bravo, manifest-data, dashboard)
-  // are NOT AI-attributable — caller resolves the human actor instead.
+  if (
+    normalized.includes("follow_up") ||
+    normalized.includes("daily_plan") ||
+    normalized.includes("underwriting") ||
+    normalized.includes("classifier") ||
+    normalized.includes("renewal") ||
+    normalized.includes("shop_out_sender")
+  ) {
+    return bySlug.get("solara") || null;
+  }
   return null;
 }
 
-const KNOWN_HUMANS = ["Matt", "Jordan", "Alex"] as const;
-
-/** Canonicalize a member's stored name to one of the known actor labels so the
- *  actor chips match even when the profile name is "Jordan Colleson" rather
- *  than "Jordan". (Codex audit 2026-06-18: exact-name filter could miss.) */
-function canonHuman(name: string): string {
-  const first = name.trim().split(/\s+/)[0]?.toLowerCase() || "";
-  return KNOWN_HUMANS.find((k) => k.toLowerCase() === first) || name;
+/** True when a source explicitly names a registered agent outside the roster. */
+export function sourceNamesDisabledAgent(
+  source: string | null | undefined,
+  enabledAgents: ActivityActor[],
+): boolean {
+  const normalized = (source || "").trim().toLowerCase();
+  if (!normalized) return false;
+  const enabled = new Set(
+    enabledAgents.map((agent) => resolveAgentKey(agent.key.replace(/^agent:/, "")).toLowerCase()),
+  );
+  return Object.keys(AGENT_REGISTRY).some((key) => {
+    const resolved = resolveAgentKey(key).toLowerCase();
+    const boundary = new RegExp(`(^|[^a-z0-9])${escapeRegex(key.toLowerCase())}([^a-z0-9]|$)`);
+    return boundary.test(normalized) && !enabled.has(resolved);
+  });
 }
 
-/** Build email→name and authUserId→name maps for the tenant's real members,
- *  canonicalized to the known actor labels. Reused for human attribution. */
-function buildHumanMaps(
-  members: Array<{ auth_user_id: string | null; email: string; full_name: string; display_name: string | null }>,
-): { byEmail: Map<string, string>; byId: Map<string, string> } {
-  const byEmail = new Map<string, string>();
-  const byId = new Map<string, string>();
-  for (const m of members) {
-    const raw = (m.display_name || m.full_name || m.email || "").trim();
-    if (!raw) continue;
-    const name = canonHuman(raw);
-    if (m.email) byEmail.set(m.email.trim().toLowerCase(), name);
-    if (m.auth_user_id) byId.set(m.auth_user_id, name);
-  }
-  return { byEmail, byId };
+function dedupeActors(actors: ActivityActor[]): ActivityActor[] {
+  const seen = new Set<string>();
+  return actors.filter((actor) => {
+    if (seen.has(actor.key)) return false;
+    seen.add(actor.key);
+    return true;
+  });
 }
 
-// Keys whose VALUES must never be rendered into the admin activity feed: signed
-// form-link tokens (grant access to a merchant's application), and KYC / banking
-// fields. (Codex audit 2026-06-18 [medium]: raw payload preview leaked these.)
-const SENSITIVE_KEY = /(url|token|signature|ssn|dob|birth|tax_id|ein|account_number|routing|secret|password)/i;
+async function loadTenantAgents(tenantId: string): Promise<ActivityActor[]> {
+  const manifest = await getTenantManifestForUser(tenantId).catch(() => null);
+  const bindings = manifest?.agents || [];
+  const enabledSlugs = resolveEnabledAgentSlugs({
+    manifestAgents: manifest ? bindings : null,
+  });
+  return enabledSlugs.map((slug) => {
+    const binding = bindings.find(
+      (agent) => resolveAgentKey(agent.slug.toLowerCase()) === slug,
+    );
+    return {
+      key: `agent:${slug}`,
+      label: binding?.display_name || binding?.slug || slug,
+      type: "agent" as const,
+    };
+  });
+}
 
-/** VALUE-side scrub: redact sensitive content regardless of its key — a signed
- *  form-link URL (grants access to a merchant's application), an SSN, or a long
- *  account/EIN/routing digit-run can ride under a benign key like `message` or
- *  `value`. (Codex audit 2026-06-18 [high]: key-only masking leaked these.) */
-function scrubValue(s: string): string {
-  return s
+// Keys whose values must never render in the activity feed.
+const SENSITIVE_KEY =
+  /(url|token|signature|ssn|dob|birth|tax_id|ein|account_number|routing|secret|password)/i;
+
+function scrubValue(value: string): string {
+  return value
     .replace(/https?:\/\/[^\s"'<>]+/gi, "[link]")
-    .replace(/\b\d{3}-?\d{2}-?\d{4}\b/g, "[redacted]") // SSN-shaped
-    .replace(/\b\d{9,}\b/g, "[redacted]"); // EIN / account / routing / long ids
+    .replace(/\b\d{3}-?\d{2}-?\d{4}\b/g, "[redacted]")
+    .replace(/\b\d{9,}\b/g, "[redacted]");
 }
 
-/** Redacting preview for the admin feed: shallow-renders an object with
- *  sensitive KEYS masked, nested objects collapsed (so agent_events.payload.data
- *  — the full post-update record — can't dump), and every scalar VALUE scrubbed
- *  for sensitive content. Defense-in-depth: the serialized output is scrubbed
- *  once more as a catch-all. */
 function safeDetail(value: unknown, max = 160): string {
   if (value == null) return "";
   if (typeof value === "string") return scrubValue(value).slice(0, max);
   if (typeof value !== "object") return String(value).slice(0, max);
   const safe: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (SENSITIVE_KEY.test(k)) safe[k] = "[redacted]";
-    else if (v !== null && typeof v === "object") safe[k] = "{…}";
-    else if (typeof v === "string") safe[k] = scrubValue(v);
-    else safe[k] = v;
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY.test(key)) safe[key] = "[redacted]";
+    else if (item !== null && typeof item === "object") safe[key] = "{…}";
+    else if (typeof item === "string") safe[key] = scrubValue(item);
+    else safe[key] = item;
   }
   try {
-    const scrubbed = scrubValue(JSON.stringify(safe));
-    return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
+    const serialized = scrubValue(JSON.stringify(safe));
+    return serialized.length > max ? `${serialized.slice(0, max)}…` : serialized;
   } catch {
     return "";
   }
 }
 
-/**
- * Write one row to tenant_audit_log. Only the columns already consumed by
- * getActivityFeed() (above) and components/settings/OperationsTrackerPanel.tsx
- * are written — id/created_at are DB-defaulted. Best-effort: a failed write
- * is returned as { ok: false } for the caller to log, never thrown, so a
- * blip in the audit table can't fail the action being audited.
- */
+/** Best-effort audit write; a logging failure never blocks the primary action. */
 export async function logTenantAudit(input: {
   tenantId: string;
   actorEmail?: string | null;
@@ -164,7 +203,7 @@ export async function logTenantAudit(input: {
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const db = getServiceSupabase();
-    const ins = await db.from("tenant_audit_log").insert({
+    const result = await db.from("tenant_audit_log").insert({
       tenant_id: input.tenantId,
       actor_email: input.actorEmail ?? null,
       actor_user_id: input.actorUserId ?? null,
@@ -173,215 +212,226 @@ export async function logTenantAudit(input: {
       target_id: input.targetId ?? null,
       after: input.after ?? {},
     });
-    if (ins.error) return { ok: false, error: ins.error.message };
+    if (result.error) return { ok: false, error: result.error.message };
     return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "insert_failed" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "insert_failed" };
   }
 }
 
-/**
- * Aggregate the activity feed for a tenant. Optional `actor` filters to one of
- * the five known actors. Each source is queried independently and best-effort.
- */
+export type ActivityFeedOptions = {
+  actor?: string | null;
+  limit?: number;
+  /** Test/consumer injection: production callers omit these. */
+  db?: ReturnType<typeof getServiceSupabase>;
+  members?: MemberRow[];
+  agents?: ActivityActor[];
+};
+
+/** Aggregate the activity feed. Every source is independently tenant-scoped. */
 export async function getActivityFeed(
   tenantId: string,
-  opts: { actor?: string | null; limit?: number } = {},
-): Promise<{ rows: ActivityRow[]; errors: string[] }> {
+  opts: ActivityFeedOptions = {},
+): Promise<{ rows: ActivityRow[]; actors: ActivityActor[]; errors: string[] }> {
   const limit = opts.limit ?? 200;
   const perSource = 150;
-  const db = getServiceSupabase();
+  const db = opts.db ?? getServiceSupabase();
   const errors: string[] = [];
-
-  const members = await getTenantMembers(tenantId).catch(() => []);
-  const { byEmail, byId } = buildHumanMaps(members);
-  // auth_user_id is the authoritative, server-stamped identity; resolve it
-  // FIRST and only fall back to a metadata-supplied email (which can be stale /
-  // operator-typed). (Codex audit 2026-06-18 [medium].)
-  const human = (email?: string | null, userId?: string | null): string | null =>
-    (userId && byId.get(userId)) || (email && byEmail.get(email.trim().toLowerCase())) || null;
-
+  const members = opts.members ?? (await getTenantMembers(tenantId).catch(() => []));
+  const humanMaps = buildHumanActorMaps(members);
+  const agentActors = dedupeActors(opts.agents ?? (await loadTenantAgents(tenantId)));
+  const human = (email?: string | null, userId?: string | null): ActivityActor | null =>
+    (userId && humanMaps.byId.get(userId)) ||
+    (email && humanMaps.byEmail.get(email.trim().toLowerCase())) ||
+    null;
   const out: ActivityRow[] = [];
 
-  // 1. tenant_audit_log — team / invite / agent-config (human actors).
+  const push = (row: Omit<ActivityRow, "actorKey" | "actor" | "actorType">, actor: ActivityActor) => {
+    out.push({
+      ...row,
+      actorKey: actor.key,
+      actor: actor.label,
+      actorType: actor.type,
+    });
+  };
+
   try {
-    const r = await db
+    const result = await db
       .from("tenant_audit_log")
       .select("id, actor_email, actor_user_id, action_type, target_table, target_id, after, created_at")
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
-    // Supabase query errors don't throw — surface them via the per-source catch
-    // below (each pushes a labelled entry to `errors`) instead of silently
-    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
-    if (r.error) throw new Error(r.error.message);
-    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
-      const actor = human(row.actor_email as string, row.actor_user_id as string);
-      out.push({
-        id: `audit:${row.id}`,
-        time: String(row.created_at || ""),
-        actor: actor || String(row.actor_email || "System"),
-        actorType: actor ? "human" : "system",
-        action: String(row.action_type || "change"),
-        target: String(row.target_table || ""),
-        detail: safeDetail(row.after),
-        source: "team/settings",
-      });
+    if (result.error) throw new Error(result.error.message);
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const actor = human(row.actor_email as string, row.actor_user_id as string) || SYSTEM_ACTOR;
+      push(
+        {
+          id: `audit:${row.id}`,
+          time: String(row.created_at || ""),
+          action: String(row.action_type || "change"),
+          target: String(row.target_table || ""),
+          detail: safeDetail(row.after),
+          source: "team/settings",
+        },
+        actor,
+      );
     }
-  } catch (e) {
-    errors.push(`audit_log: ${e instanceof Error ? e.message : "failed"}`);
+  } catch (error) {
+    errors.push(`audit_log: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  // 2. lead_interactions — sends. Human when an operator queued it; otherwise
-  //    attribute to the AI agent that owns the automated source.
   try {
-    const r = await db
+    const result = await db
       .from("lead_interactions")
       .select("id, type, channel, direction, agent_source, actor_user_id, metadata, to_email, created_at")
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
-    // Supabase query errors don't throw — surface them via the per-source catch
-    // below (each pushes a labelled entry to `errors`) instead of silently
-    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
-    if (r.error) throw new Error(r.error.message);
-    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
-      const md = (row.metadata && typeof row.metadata === "object" ? row.metadata : {}) as Record<string, unknown>;
-      const reqEmail = typeof md.requested_by_email === "string" ? md.requested_by_email : null;
-      const h = human(reqEmail, row.actor_user_id as string);
-      // Inbound is the MERCHANT replying — never an internal agent's action.
-      // Only attribute an AI agent to outbound/system automated rows. (Codex
-      // audit 2026-06-18 [medium]: inbound texttorrent was credited to Helios.)
-      const agent = h || row.direction === "inbound" ? null : resolveAgent(row.agent_source as string);
-      const actor = h || agent || "System";
-      out.push({
-        id: `li:${row.id}`,
-        time: String(row.created_at || ""),
+    if (result.error) throw new Error(result.error.message);
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const metadata = (
+        row.metadata && typeof row.metadata === "object" ? row.metadata : {}
+      ) as Record<string, unknown>;
+      const requestedBy =
+        typeof metadata.requested_by_email === "string" ? metadata.requested_by_email : null;
+      const humanActor = human(requestedBy, row.actor_user_id as string);
+      // A stale/mis-stamped interaction that explicitly names another
+      // workspace's agent is not downgraded to "System" because its target and
+      // payload can still expose that workspace's sales activity. Drop it.
+      if (!humanActor && sourceNamesDisabledAgent(row.agent_source as string, agentActors)) {
+        continue;
+      }
+      const agentActor =
+        !humanActor && row.direction !== "inbound"
+          ? resolveActivityAgent(row.agent_source as string, agentActors)
+          : null;
+      const actor = humanActor || agentActor || SYSTEM_ACTOR;
+      push(
+        {
+          id: `li:${row.id}`,
+          time: String(row.created_at || ""),
+          action: String(row.type || `${row.channel || "message"} ${row.direction || ""}`).trim(),
+          target: row.to_email ? `→ ${row.to_email}` : String(row.channel || ""),
+          detail:
+            humanActor || agentActor
+              ? safeDetail(String(row.agent_source || ""))
+              : "Automated or unattributed action",
+          source: "comms",
+        },
         actor,
-        actorType: h ? "human" : agent ? "agent" : "system",
-        action: String(row.type || `${row.channel || "message"} ${row.direction || ""}`).trim(),
-        target: row.to_email ? `→ ${row.to_email}` : String(row.channel || ""),
-        detail: String(row.agent_source || ""),
-        source: "comms",
-      });
+      );
     }
-  } catch (e) {
-    errors.push(`lead_interactions: ${e instanceof Error ? e.message : "failed"}`);
+  } catch (error) {
+    errors.push(`lead_interactions: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  // 3. agent_events — AI stage-changes + automation/cron runs. Scope is the
-  //    correlation_id (this table has no tenant_id column).
   try {
-    const r = await db
+    const result = await db
       .from("agent_events")
       .select("id, event_type, publisher_agent, payload, created_at, published_at")
       .eq("correlation_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
-    // Supabase query errors don't throw — surface them via the per-source catch
-    // below (each pushes a labelled entry to `errors`) instead of silently
-    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
-    if (r.error) throw new Error(r.error.message);
-    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
-      const agent = resolveAgent(row.publisher_agent as string);
-      // Only surface AI-attributable events here; operator/system events come
-      // through the audit + comms sources already.
+    if (result.error) throw new Error(result.error.message);
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const agent = resolveActivityAgent(row.publisher_agent as string, agentActors);
       if (!agent) continue;
-      const payload = (row.payload && typeof row.payload === "object" ? row.payload : {}) as Record<string, unknown>;
-      // Defensive tenant boundary: agent_events has no tenant_id column (scoped
-      // by correlation_id, a generic text field with no DB constraint). If a
-      // payload carries an explicit tenant_id that disagrees, drop it so a
-      // mis-stamped producer can't leak another tenant's event into this admin
-      // feed. (Codex audit 2026-06-18 [medium].)
+      const payload = (
+        row.payload && typeof row.payload === "object" ? row.payload : {}
+      ) as Record<string, unknown>;
       if (typeof payload.tenant_id === "string" && payload.tenant_id !== tenantId) continue;
       const target = payload.entity
         ? `${payload.entity}${payload.record_id ? ` ${String(payload.record_id).slice(0, 8)}` : ""}`
         : "";
-      out.push({
-        id: `ev:${row.id}`,
-        time: String(row.created_at || row.published_at || ""),
-        actor: agent,
-        actorType: "agent",
-        action: String(row.event_type || "event"),
-        target,
-        detail: safeDetail(payload),
-        source: "automation",
-      });
+      push(
+        {
+          id: `ev:${row.id}`,
+          time: String(row.created_at || row.published_at || ""),
+          action: String(row.event_type || "event"),
+          target,
+          detail: safeDetail(payload),
+          source: "automation",
+        },
+        agent,
+      );
     }
-  } catch (e) {
-    errors.push(`agent_events: ${e instanceof Error ? e.message : "failed"}`);
+  } catch (error) {
+    errors.push(`agent_events: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  // 4. chat_sessions — chats (human ↔ agent).
   try {
-    const r = await db
+    const result = await db
       .from("chat_sessions")
       .select("id, agent_key, user_id, created_at")
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false })
       .limit(perSource);
-    // Supabase query errors don't throw — surface them via the per-source catch
-    // below (each pushes a labelled entry to `errors`) instead of silently
-    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
-    if (r.error) throw new Error(r.error.message);
-    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
-      const h = human(null, row.user_id as string);
-      const agentKey = resolveAgent(row.agent_key as string);
-      out.push({
-        id: `chat:${row.id}`,
-        time: String(row.created_at || ""),
-        actor: h || agentKey || "System",
-        actorType: h ? "human" : agentKey ? "agent" : "system",
-        action: "chat session",
-        target: agentKey ? `with ${agentKey}` : String(row.agent_key || ""),
-        detail: "",
-        source: "chat",
-      });
+    if (result.error) throw new Error(result.error.message);
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const humanActor = human(null, row.user_id as string);
+      const agentActor = resolveActivityAgent(row.agent_key as string, agentActors);
+      // A chat with an agent outside this tenant's roster is not this tenant's
+      // activity surface, even if a stale row was accidentally stamped here.
+      if (!agentActor) continue;
+      push(
+        {
+          id: `chat:${row.id}`,
+          time: String(row.created_at || ""),
+          action: "chat session",
+          target: `with ${agentActor.label}`,
+          detail: "",
+          source: "chat",
+        },
+        humanActor || agentActor,
+      );
     }
-  } catch (e) {
-    errors.push(`chat_sessions: ${e instanceof Error ? e.message : "failed"}`);
+  } catch (error) {
+    errors.push(`chat_sessions: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  // 5. tenant_cron_jobs — agent automation runs, attributed by agent_key
-  //    (helios / solara). The table keeps only the LATEST run per job (not full
-  //    history), so this surfaces the most recent run of each scheduled job —
-  //    the clearest "Solara ran the daily plan" / "Helios ran cold outreach"
-  //    signal, which agent_events doesn't currently attribute to a named agent.
   try {
-    const r = await db
+    const result = await db
       .from("tenant_cron_jobs")
       .select("id, name, agent_key, schedule, last_run_at, last_run_status, run_count")
       .eq("tenant_id", tenantId)
       .not("last_run_at", "is", null)
       .order("last_run_at", { ascending: false })
       .limit(perSource);
-    // Supabase query errors don't throw — surface them via the per-source catch
-    // below (each pushes a labelled entry to `errors`) instead of silently
-    // rendering the source empty. (Codex audit 2026-06-18 [medium].)
-    if (r.error) throw new Error(r.error.message);
-    for (const row of (r.data || []) as Array<Record<string, unknown>>) {
-      const agent = resolveAgent(row.agent_key as string);
+    if (result.error) throw new Error(result.error.message);
+    for (const row of (result.data || []) as Array<Record<string, unknown>>) {
+      const agent = resolveActivityAgent(row.agent_key as string, agentActors);
       if (!agent) continue;
-      out.push({
-        id: `cron:${row.id}`,
-        time: String(row.last_run_at || ""),
-        actor: agent,
-        actorType: "agent",
-        action: `ran "${row.name}"`,
-        target: String(row.schedule || ""),
-        detail: `${row.last_run_status || ""}${row.run_count ? ` · ${row.run_count} runs` : ""}`.trim(),
-        source: "automation",
-      });
+      push(
+        {
+          id: `cron:${row.id}`,
+          time: String(row.last_run_at || ""),
+          action: `ran "${row.name}"`,
+          target: String(row.schedule || ""),
+          detail: `${row.last_run_status || ""}${row.run_count ? ` · ${row.run_count} runs` : ""}`.trim(),
+          source: "automation",
+        },
+        agent,
+      );
     }
-  } catch (e) {
-    errors.push(`cron_jobs: ${e instanceof Error ? e.message : "failed"}`);
+  } catch (error) {
+    errors.push(`cron_jobs: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  // Merge, newest first, optional actor filter, cap.
+  const actors = dedupeActors([
+    ...humanMaps.actors,
+    ...agentActors,
+    ...(out.some((row) => row.actorKey === SYSTEM_ACTOR.key) ? [SYSTEM_ACTOR] : []),
+  ]);
   let rows = out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
-  const wantActor = (opts.actor || "").trim();
-  if (wantActor && (KNOWN_ACTORS as string[]).includes(wantActor)) {
-    rows = rows.filter((row) => row.actor === wantActor);
+  const requestedActor = (opts.actor || "").trim();
+  if (requestedActor) {
+    const match = actors.find(
+      (candidate) =>
+        candidate.key === requestedActor ||
+        candidate.label.toLowerCase() === requestedActor.toLowerCase(),
+    );
+    rows = match ? rows.filter((row) => row.actorKey === match.key) : [];
   }
-  return { rows: rows.slice(0, limit), errors };
+  return { rows: rows.slice(0, limit), actors, errors };
 }

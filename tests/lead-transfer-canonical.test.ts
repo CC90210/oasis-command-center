@@ -164,6 +164,7 @@ assert.deepEqual(rejectedRepPatchKeys({ phone: "1", stage: "won", assigned_to: "
 assert.deepEqual(rejectedRepPatchKeys({ some_future_field: 1 }), ["some_future_field"]);
 assert.equal(REP_EDITABLE_LEAD_FIELDS.has("stage"), false);
 assert.equal(REP_EDITABLE_LEAD_FIELDS.has("website"), true);
+assert.equal(REP_EDITABLE_LEAD_FIELDS.has("next_action_at"), true, "reps may schedule the next touch on their own lead");
 
 /* ─── ownership is the WRITE question, visibility is not ──────────────────────
  *

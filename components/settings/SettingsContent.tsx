@@ -55,6 +55,7 @@ import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest } from "@/lib/manifest/loader";
+import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
@@ -109,15 +110,14 @@ export async function SettingsContent({
     ? await safe("settings.manifest", getManifest(manifestSlug), null)
     : null;
 
-  const manifestAgentKeys = (manifest?.agents || [])
-    .filter((a) => a.enabled !== false)
-    .map((a) => a.slug.toLowerCase());
-  const effectiveAgentKeys =
-    profile?.agents_enabled && profile.agents_enabled.length > 0
-      ? profile.agents_enabled
-      : manifestAgentKeys.length > 0
-        ? manifestAgentKeys
-        : chatAgentKeys();
+  const manifestAgentKeys = resolveEnabledAgentSlugs({
+    manifestAgents: manifest ? manifest.agents || [] : null,
+    legacyProfileAgents: profile?.agents_enabled,
+  });
+  // Fail closed when neither the manifest nor the legacy profile supplies a
+  // roster. Falling back to every chat persona here leaked OASIS agents into
+  // tenants whose manifest lookup failed.
+  const effectiveAgentKeys = manifestAgentKeys;
   const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
   const enabledChatAgentKeys = chatAgentKeys().filter((k) => enabledAgents.includes(k));
   const isOperator = isOperatorEmail(user?.email || undefined);
@@ -182,7 +182,11 @@ export async function SettingsContent({
             }
           >
             <SafeBoundary label="Profile editor">
-              <ProfileEditor profile={profile} tenantAgents={manifestAgentKeys} />
+              <ProfileEditor
+                key={manifestAgentKeys.join(":")}
+                profile={profile}
+                tenantAgents={manifestAgentKeys}
+              />
             </SafeBoundary>
           </SettingsSection>
 
@@ -298,7 +302,7 @@ export async function SettingsContent({
               </SafeBoundary>
               <p className="text-[11px] text-fg-dim leading-relaxed mt-3">
                 Invitees land on /invite/&lt;token&gt;, sign up, and join this tenant automatically.
-                Solara recognizes them by name and respects their role.
+                Enabled workspace agents recognize them by name and respect their role.
               </p>
             </SettingsSection>
           )}
@@ -324,6 +328,7 @@ export async function SettingsContent({
 
           {canManageTenant && (
             <SettingsSection
+              id="devices"
               title="Devices (advanced)"
               subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account below is enough for chat without ever pairing a machine."
               action={
@@ -361,7 +366,7 @@ export async function SettingsContent({
 
           {isOperator && (
             <SafeBoundary label="Local CLI providers">
-              <LocalCliProvidersCard />
+              <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} />
             </SafeBoundary>
           )}
 
@@ -465,7 +470,10 @@ export async function SettingsContent({
               very bottom — daemons, sequences, employee activity in
               one place. Mutations live on the surfaces it tracks. */}
           <SafeBoundary label="operations-tracker">
-            <OperationsTrackerPanel tenantId={profile?.tenant_id ?? null} />
+            <OperationsTrackerPanel
+              tenantId={profile?.tenant_id ?? null}
+              tenantName={tenant?.name ?? null}
+            />
           </SafeBoundary>
         </>
       )}
