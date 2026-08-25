@@ -304,7 +304,14 @@ for (const [file, needle] of [
   ["components/web-leads/useAudit.ts", /parked: "Their domain has lapsed and is listed for sale/],
   ["components/web-leads/BattleCard.tsx", /audit\.state === "parked"/],
   ["components/web-leads/WebsiteComparison.tsx", /audit\.state === "parked"/],
-  ["components/web-leads/LeadsTable.tsx", /lead\.scoreState === "parked"/],
+  // Re-aimed 2026-08-25, NOT relaxed. The results list grew a second layout
+  // (cards below `xl`, table above), and its score renderer moved into
+  // LeadCells.tsx so both layouts share one -- which is what keeps the phone
+  // from saying something the desktop does not. This assertion follows the
+  // renderer to where it actually lives; pointing it at LeadsTable.tsx now
+  // would fail, and deleting it would leave the parked sentence unguarded on
+  // every list surface at once.
+  ["components/web-leads/LeadCells.tsx", /lead\.scoreState === "parked"/],
   ["components/manifest/LeadPipelineView.tsx", /m\.webScoreState === "parked"/],
 ] as const) {
   assert.match(read(file), needle, `${file} must render the parked state explicitly`);

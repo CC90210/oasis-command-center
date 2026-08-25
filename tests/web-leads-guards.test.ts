@@ -365,6 +365,18 @@ for (const view of [
   // (2026-08-24): the assertion failed as intended, and the classes were
   // reverted.
   "components/web-leads/OpeningHours.tsx",
+  // Added 2026-08-25 with the mobile card layout. These two are the reason the
+  // extraction happened at all: WebsiteCell -- the ONE renderer that decides
+  // whether a lead shows a number or an honest sentence -- lived inside
+  // LeadsTable.tsx, which can never join this list because it carries the
+  // repo's red "Could not load leads" banner. So the single most tempting
+  // place in the feature to tint a low score had no guard on it, and it now
+  // feeds BOTH the desktop table and every card a rep sees on a phone. Both
+  // were proved to fire (2026-08-25): `text-red-400` planted on the score span
+  // in LeadCells.tsx and `bg-green-500` on LeadCards' label constant each
+  // failed the assertion as intended, and both were reverted.
+  "components/web-leads/LeadCells.tsx",
+  "components/web-leads/LeadCards.tsx",
   // Added 2026-08-25 when the website block reached the CRM board. This page
   // renders the same website_condition / audit_findings sentences the battle
   // card does, on the screen a rep actually works from, so the same rule

@@ -636,16 +636,23 @@ function Hero({
             <p className="mt-2 text-sm text-fg-muted">
               {[lead.industry, fullAddress(lead)].filter(Boolean).join(" · ") || "No location on file"}
             </p>
-            <div className="mt-5 flex flex-wrap gap-2.5">
+            {/* Full width and 56px tall below `sm`, one line of pills above it.
+                A rep reading this page on a phone is usually reading it BECAUSE
+                they are about to dial, and `tel:` is the one control on this
+                whole surface that does something better on a phone than on a
+                desktop. `whitespace-nowrap` on the number for the same reason
+                the table has it: a browser will break after a hyphen, and
+                `+1-416-` / `259-` / `9326` is not a number a rep can read out. */}
+            <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:flex-wrap">
               {lead.phone && canMutate ? (
                 <a
                   href={`tel:${lead.phone}`}
-                  className="inline-flex items-center gap-2.5 rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 py-3 text-base font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter,transform] hover:brightness-110 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none"
+                  className="inline-flex min-h-14 w-full items-center justify-center gap-2.5 whitespace-nowrap rounded-lg bg-gradient-to-br from-accent to-accent-muted px-5 text-lg font-bold tabular-nums text-white shadow-[0_0_0_1px_rgba(59,130,246,0.18),0_10px_28px_-10px_rgba(59,130,246,0.5)] transition-[filter,transform] hover:brightness-110 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:min-h-0 sm:w-auto sm:py-3 sm:text-base"
                 >
-                  <Phone className="h-4 w-4" />{lead.phone}
+                  <Phone className="h-5 w-5 shrink-0" />{lead.phone}
                 </a>
               ) : lead.phone ? (
-                <p className="rounded-lg border border-bg-border px-5 py-3 text-base tabular-nums text-fg-muted">{lead.phone}</p>
+                <p className="rounded-lg border border-bg-border px-5 py-3 text-center text-base tabular-nums text-fg-muted sm:text-left">{lead.phone}</p>
               ) : (
                 <p className="rounded-lg border border-bg-border px-5 py-3 text-sm text-fg-dim">No phone number on file</p>
               )}
@@ -660,7 +667,7 @@ function Hero({
                   href={websiteHref}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 py-3 text-sm font-semibold text-fg transition-[color,border-color,transform] hover:border-accent/40 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none"
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-4 text-sm font-semibold text-fg transition-[color,border-color,transform] hover:border-accent/40 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 motion-reduce:transition-none sm:py-3"
                 >
                   {/* Same words as the drawer's button and as the operator's
                       own request. Two surfaces that send a rep to the same
@@ -898,7 +905,17 @@ function ScoredBody({
       <div className="grid gap-5 lg:grid-cols-2">
         <Panel>
           <SectionTitle>What kind of bad is it</SectionTitle>
-          <div className="mt-3 flex justify-center">
+          {/* THE RADAR IS HIDDEN BELOW `sm`, AND NOTHING REPLACES IT, because
+              nothing has to. A seven-axis radar with wrapped labels is drawn
+              in a 420x340 viewBox; scaled into 326px of card it is a shape a
+              rep cannot read a single value off, and a chart that cannot be
+              read is worse than no chart -- it looks like information.
+              The seven dimension bars below already carry every number the
+              radar encodes, labelled, in one column, and they were always
+              there. So the phone gets the bars and the desktop gets both.
+              (The radar's own `aria-label` names all seven scores, so a screen
+              reader was never getting the picture either way.) */}
+          <div className="mt-3 hidden justify-center sm:flex">
             <Radar
               dimensions={audit.dimensions}
               leader={competitors?.headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null}
@@ -907,7 +924,7 @@ function ScoredBody({
               reduced={reduced}
             />
           </div>
-          <div className="mt-4 space-y-2.5 border-t border-bg-border pt-4">
+          <div className="mt-4 space-y-2.5 sm:border-t sm:border-bg-border sm:pt-4">
             {audit.dimensions.map((d) => (
               <div key={d.key}>
                 <div className="flex items-center justify-between text-xs text-fg-muted">
