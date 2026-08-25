@@ -572,8 +572,24 @@ export function CallMode({
               bottom of the phone, and it stays there while the talking points
               scroll behind it. `pb-[env(safe-area-inset-bottom)]` keeps the
               disposition row clear of the iOS home indicator, which otherwise
-              sits on top of the bottom 34px of a full-height overlay. */}
-          <aside className="shrink-0 border-t border-bg-border bg-bg-panel/50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 lg:w-80 lg:overflow-y-auto lg:border-l lg:border-t-0 lg:px-6 lg:py-9 lg:pb-9">
+              sits on top of the bottom 34px of a full-height overlay.
+
+              🚨 `max-h-[65vh] overflow-y-auto` IS NOT DECORATION. (Codex review,
+              2026-08-25, P2, then MEASURED.) Pinning this panel trades a scroll
+              for reach, and the trade goes bad the moment the panel is taller
+              than the screen: only <main> scrolls, the page behind is
+              scroll-locked by the overlay, so a `shrink-0` aside that overruns
+              pushes its own lower half past the bottom edge with nothing able
+              to bring it back. Measured on iPhone landscape (844x390) with the
+              "Add the reason before logging Not interested" banner up: the
+              panel wanted 348px of a 390px viewport and Back/Skip sat at
+              top 419 -- 29px below the screen, unreachable. Capping it means it
+              scrolls INSIDE itself instead, and because the dispositions are at
+              the top of the panel they stay visible while the note, the error
+              and Back/Skip become reachable. The cap does nothing on a normal
+              portrait phone (65vh of 844 is 548px against a 348px panel); it
+              only ever engages when the alternative was losing a control. */}
+          <aside className="max-h-[65vh] shrink-0 overflow-y-auto overscroll-contain border-t border-bg-border bg-bg-panel/50 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 lg:max-h-none lg:w-80 lg:border-l lg:border-t-0 lg:px-6 lg:py-9 lg:pb-9">
             <p className="hidden text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted lg:block">Log this call</p>
             {/* A 2x2 GRID BELOW `lg`, not a stack. Four full-width rows would
                 push the note box off a 390x844 screen; a grid keeps all four

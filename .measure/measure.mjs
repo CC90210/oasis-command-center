@@ -318,8 +318,59 @@ async function main() {
     await ctx.close();
   }
 
+  /**
+   * SHORT VIEWPORTS, WITH THE ERROR BANNER UP. (Codex review, 2026-08-25, P2.)
+   *
+   * Pinning the log panel to the bottom trades a scroll for reach, and the
+   * trade goes bad when the panel is taller than the screen: only <main>
+   * scrolls, so a `shrink-0` aside that overruns simply pushes its own lower
+   * half past the bottom edge, and the page behind it is scroll-locked by the
+   * overlay. iPhone landscape is 844x390 -- the 2x2 grid, the note, the hint,
+   * an error and Back/Skip do not fit in 390px of height.
+   *
+   * The error is raised the way a rep raises it: press "Not interested" with an
+   * empty note. Reachability is then tested by ACTUALLY SCROLLING each control
+   * into view and re-reading its box -- a control inside a scrollable ancestor
+   * is reachable, one that has been pushed off a non-scrolling flex container
+   * is not, and only moving it can tell the two apart.
+   */
+  const shortCall = [];
+  if (process.env.HARNESS_ENTRY !== "entry-baseline.tsx") {
+    for (const [w, h, name] of [[844, 390, "iPhone landscape"], [375, 667, "iPhone SE"], [390, 844, "iPhone 14"]]) {
+      const ctx = await browser.newContext({ viewport: { width: w, height: h }, isMobile: true, hasTouch: true });
+      const page = await ctx.newPage();
+      await page.goto(url("call"));
+      await page.waitForSelector("[role='dialog'][aria-label='Call mode']", { timeout: 15000 });
+      await page.evaluate(() => {
+        const b = [...document.querySelectorAll("aside button")]
+          .find((x) => (x.querySelector("span")?.textContent || "").trim() === "Not interested");
+        b?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await page.waitForTimeout(200);
+      const probe = await page.evaluate(() => {
+        const aside = document.querySelector("[role='dialog'][aria-label='Call mode'] aside");
+        if (!aside) return null;
+        const errorShown = /required/i.test(aside.textContent || "");
+        const controls = [...aside.querySelectorAll("button, textarea")];
+        const unreachable = [];
+        for (const el of controls) {
+          el.scrollIntoView({ block: "nearest" });
+          const r = el.getBoundingClientRect();
+          if (r.bottom > window.innerHeight + 1 || r.top < -1) {
+            const label = (el.querySelector("span")?.textContent || el.getAttribute("placeholder") || el.textContent || "").trim().slice(0, 30);
+            unreachable.push({ label, top: Math.round(r.top), bottom: Math.round(r.bottom) });
+          }
+        }
+        return { errorShown, controls: controls.length, unreachable, asideH: Math.round(aside.getBoundingClientRect().height) };
+      });
+      shortCall.push({ name, w, h, ...probe });
+      await page.screenshot({ path: path.join(here, "shots", `${label}-shortcall-${w}x${h}.png`) });
+      await ctx.close();
+    }
+  }
+
   await browser.close();
-  fs.writeFileSync(path.join(here, `results-${label}.json`), JSON.stringify({ results, resize }, null, 2));
+  fs.writeFileSync(path.join(here, `results-${label}.json`), JSON.stringify({ results, resize, shortCall }, null, 2));
 
   let failures = 0;
   for (const r of results) {
@@ -407,6 +458,19 @@ async function main() {
     if (resize.sheetPresent) { failures++; console.log("      FAIL the sheet survived the breakpoint it is supposed to hand over at"); }
     if (resize.bodyOverflow === "hidden") { failures++; console.log("      FAIL the page is still scroll-locked and no visible control can release it"); }
     if (!resize.railPresent) { failures++; console.log("      FAIL the rail did not take over, so the filters are now unreachable"); }
+  }
+
+  for (const s of shortCall) {
+    console.log(`\n=== Call Mode on a short screen: ${s.name} ${s.w}x${s.h}, error banner up ===`);
+    console.log(`  log panel          ${s.asideH}px of ${s.h}px viewport, ${s.controls} controls, error ${s.errorShown ? "shown" : "NOT SHOWN"}`);
+    if (!s.errorShown) { failures++; console.log("      FAIL the error banner never rendered, so this measured the easy case"); }
+    if (s.unreachable.length) {
+      failures++;
+      console.log(`      FAIL ${s.unreachable.length} control(s) cannot be scrolled into view:`);
+      for (const u of s.unreachable) console.log(`         "${u.label}" top ${u.top} bottom ${u.bottom}`);
+    } else {
+      console.log("  reachability       every control scrolls into view");
+    }
   }
 
   console.log(`\n${failures === 0 ? "PASS" : `FAIL -- ${failures} failing assertions`}`);
