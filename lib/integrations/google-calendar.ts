@@ -40,7 +40,12 @@ export type GoogleCalendarErrorCode =
   | "calendar_cancel_failed"
   | "calendar_reconcile_failed"
   | "calendar_read_failed"
-  | "google_meet_link_missing";
+  | "google_meet_link_missing"
+  // The host's token AND the shared workspace token both rejected. Distinct
+  // from token_refresh_failed on purpose: that one means "this host must
+  // reconnect", this one means "nobody can book until an administrator mints a
+  // new workspace token with Calendar scope". Different people, different fix.
+  | "workspace_calendar_token_invalid";
 
 export class GoogleCalendarIntegrationError extends Error {
   readonly code: GoogleCalendarErrorCode;
@@ -832,13 +837,37 @@ async function openAuthorizedCalendarSession(args: {
         scope: CALENDAR_EVENTS_SCOPE,
         ...(system.organizerEmail ? { gmail_address: system.organizerEmail } : {}),
       };
-      accessToken = await refreshAccessToken({
-        tenantId: args.tenantId,
-        organizerUserId: args.organizerUserId,
-        refreshToken: system.refreshToken,
-        dependencies,
-        persist: false,
-      });
+      /**
+       * IF THE SHARED CALENDAR IS ALSO DEAD, SAY SO DISTINCTLY.
+       *
+       * Both failures used to surface as the same `token_refresh_failed`, so
+       * "this host must reconnect" and "NOBODY can book, the shared workspace
+       * token is dead too" were indistinguishable on screen. That ambiguity cost
+       * hours on 2026-08-26: the message told an operator to reconnect a host,
+       * which would not have helped, because the fallback behind it had already
+       * failed for a completely different reason and nothing said so.
+       *
+       * A distinct code makes the difference visible in one glance, and the two
+       * remedies are genuinely different: one is a host clicking reconnect, the
+       * other is an administrator minting a new workspace token with Calendar
+       * scope. Telling someone to do the first when they need the second is
+       * worse than telling them nothing.
+       */
+      try {
+        accessToken = await refreshAccessToken({
+          tenantId: args.tenantId,
+          organizerUserId: args.organizerUserId,
+          refreshToken: system.refreshToken,
+          dependencies,
+          persist: false,
+        });
+      } catch (fallbackError) {
+        throw new GoogleCalendarIntegrationError(
+          "workspace_calendar_token_invalid",
+          "the host's Google sign-in was rejected AND the shared workspace calendar token was rejected too",
+          { cause: fallbackError },
+        );
+      }
     }
   };
   if (
