@@ -1828,6 +1828,9 @@ function readableError(code: string): string {
     // A rep cannot act on a code. Each message below names the human step,
     // because every one of these is a "somebody must go and do a thing"
     // condition, not something retrying will clear.
+    workspace_calendar_token_invalid:
+      "Bookings are down for everyone, not just this host: the shared OASIS workspace calendar credential has expired. " +
+      "An administrator must reconnect it with Calendar access. Reconnecting this host will NOT fix it. Nothing was booked and no invite went out.",
     token_refresh_failed:
       "Google rejected the host's saved sign-in, usually because access was revoked or the password changed. " +
       "They need to reconnect Google once in Settings. Nothing was booked and no invite went out.",
