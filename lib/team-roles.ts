@@ -172,6 +172,9 @@ export const TENANT_WIDE_ROLES: ReadonlySet<string> = new Set([
   "admin",
   "manager",
   "marketing",
+  "closer",
+  "opener",
+  "builder",
   "read_only",
   "member",        // legacy, and the column DEFAULT — 45 live rows
   "loan_officer",  // SunBiz's own portal roles; a different product

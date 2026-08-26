@@ -141,7 +141,9 @@ export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "closer",
   "opener",
   "builder",
+  "marketing",
   "agent",
+  "member",
 ]);
 
 /** Fails closed on null, unknown, or non-sales roles. */

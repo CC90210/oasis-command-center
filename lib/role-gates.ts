@@ -103,6 +103,11 @@ export function isReadOnlyRole(teamRole: string | null | undefined): boolean {
 export const CRM_WRITE_ROLES: ReadonlySet<string> = new Set([
   "owner",
   "admin",
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "marketing",
   "member",
   "agent",
   "loan_officer",
