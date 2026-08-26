@@ -485,8 +485,16 @@ assert.equal(
   // clear" while each query still had unseen rows behind it.
   assert.match(
     cron,
-    /truncated:\s*\n\s*merged\.length > rows\.length \|\|\s*\n\s*\(queued\.data \|\| \[\]\)\.length >= SCAN_LIMIT \|\|\s*\n\s*\(legacyPending\.data \|\| \[\]\)\.length >= SCAN_LIMIT/,
-    "truncation must consider BOTH the merged slice and each query hitting its own limit",
+    /truncated:\s*\n\s*merged\.length > rows\.length \|\|\s*\n\s*\(queued\.data \|\| \[\]\)\.length > SCAN_LIMIT \|\|\s*\n\s*\(legacyPending\.data \|\| \[\]\)\.length > SCAN_LIMIT/,
+    "truncation must consider the merged slice AND each query exceeding its own limit, with a strict > so a full page alone is not a false alarm",
+  );
+  // The extra row is what PROVES there is more behind the page. Without it,
+  // `>= SCAN_LIMIT` cries backlog on every run that found exactly a full page
+  // and nothing more, and a signal that is always on is one nobody reads.
+  assert.match(
+    cron,
+    /\.limit\(SCAN_LIMIT \+ 1\)/,
+    "each query must fetch one extra row, so truncation is proven rather than assumed from a full page",
   );
 }
 

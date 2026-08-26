@@ -123,14 +123,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       .eq("entity_type", "lead")
       .eq(`data->>${FOLLOW_UP_FIELDS.workerQueue}`, WORKER_QUEUE_ON)
       .order("updated_at", { ascending: true })
-      .limit(SCAN_LIMIT),
+      .limit(SCAN_LIMIT + 1),
     db
       .from("tenant_records")
       .select("id, tenant_id, updated_at, data")
       .eq("entity_type", "lead")
       .eq(`data->>${FOLLOW_UP_FIELDS.state}`, "pending")
       .order("updated_at", { ascending: true })
-      .limit(SCAN_LIMIT),
+      .limit(SCAN_LIMIT + 1),
   ]);
 
   const scanError = queued.error || legacyPending.error;
@@ -352,15 +352,17 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     ok: true,
     ...counts,
     maxSyncAttempts: MAX_SYNC_ATTEMPTS,
-    // Truncation is this run's ONLY backlog signal, so it must never
-    // under-report. The merged slice alone is not enough: if both queries hit
-    // their limit and returned the SAME rows, the union is not sliced and this
-    // would read "all clear" while each query still had unseen rows behind it.
-    // Either condition means there is more out there. (Codex round 5.)
+    // Truncation is this run's ONLY backlog signal, so it must be exact in both
+    // directions. Each query asks for SCAN_LIMIT + 1 and the extra row is what
+    // PROVES there is more behind it -- `>= SCAN_LIMIT` would cry backlog on
+    // every run that found exactly a full page and nothing more, and a signal
+    // that is always on is one nobody reads. The merged check is still needed
+    // because two capped-but-overlapping result sets can leave the union
+    // unsliced while each query still had rows behind it. (Codex rounds 5-6.)
     truncated:
       merged.length > rows.length ||
-      (queued.data || []).length >= SCAN_LIMIT ||
-      (legacyPending.data || []).length >= SCAN_LIMIT,
+      (queued.data || []).length > SCAN_LIMIT ||
+      (legacyPending.data || []).length > SCAN_LIMIT,
     ms: Date.now() - startedAt,
   };
   // One structured line per run: this is the only place the queue backlog is
