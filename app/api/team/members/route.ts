@@ -45,7 +45,45 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
  * already pass the token/scope/identity checks. It buys the difference between
  * a banner that is true and a banner that is decorative.
  */
+/**
+ * Verdict cache, 60 seconds, keyed on the token itself.
+ *
+ * CREDITED TO CC's REVIEW (2026-08-26), which caught a real flaw in the first
+ * version of this: it called Google once per connected host on EVERY request.
+ * A team of ten reps loading the handoff form is ten token calls, and this
+ * endpoint is hit on every page that needs the member list. That is a rate-limit
+ * incident waiting to happen, and Google's response to being hammered is to
+ * start failing the very calls this check depends on.
+ *
+ * Keyed on the token string, not on a user id, so reconnecting with a NEW token
+ * is a new key and is verified immediately rather than waiting out the TTL. The
+ * stale window therefore only ever applies to a token that has not changed --
+ * which is the case where the previous answer is still the best one available.
+ *
+ * 60s is the deliberate trade: a token revoked at Google is believed for at most
+ * a minute, and a rep who books inside that window gets the workspace fallback
+ * (google-calendar.ts, PR #324) rather than a failure -- so the worst case is a
+ * booking organised by the shared address instead of the host, not a lost
+ * booking. Without that fallback this TTL would be far riskier.
+ */
+const TOKEN_VERDICT_TTL_MS = 60_000;
+const tokenVerdicts = new Map<string, { ok: boolean; expires: number }>();
+
 async function tokenUsable(refreshToken: string): Promise<boolean> {
+  const now = Date.now();
+  const cached = tokenVerdicts.get(refreshToken);
+  if (cached && cached.expires > now) return cached.ok;
+  const verdict = await probeToken(refreshToken);
+  tokenVerdicts.set(refreshToken, { ok: verdict, expires: now + TOKEN_VERDICT_TTL_MS });
+  // Bound the map so a long-lived instance cycling through many tokens cannot
+  // grow it without limit. Cheap because entries are tiny and short-lived.
+  if (tokenVerdicts.size > 500) {
+    for (const [k, v] of tokenVerdicts) if (v.expires <= now) tokenVerdicts.delete(k);
+  }
+  return verdict;
+}
+
+async function probeToken(refreshToken: string): Promise<boolean> {
   const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
   // No OAuth config is a deployment problem, not a host problem. Nothing can
