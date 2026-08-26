@@ -141,6 +141,20 @@ export function LeadsToolbar({
           </button>
         )}
 
+        <button
+          type="button"
+          onClick={() => set({ industries: filters.industries.includes("CC Leads") ? filters.industries.filter((i) => i !== "CC Leads") : ["CC Leads"] })}
+          aria-pressed={filters.industries.includes("CC Leads")}
+          title="Toggle CC Leads (trade & contractor businesses)"
+          className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold transition-all xl:min-h-0 xl:py-1.5 ${
+            filters.industries.includes("CC Leads")
+              ? "border-accent bg-accent text-bg-deep shadow-md shadow-accent/20"
+              : "border-accent/60 bg-accent/10 text-accent hover:border-accent hover:bg-accent/20"
+          }`}
+        >
+          🔥 CC Leads
+        </button>
+
         <div className="hidden h-6 w-px bg-bg-border sm:block" aria-hidden />
 
         <div role="group" aria-label="Website score" className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
