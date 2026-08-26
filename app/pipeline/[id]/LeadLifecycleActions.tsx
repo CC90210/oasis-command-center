@@ -948,10 +948,25 @@ export function LeadLifecycleActions({
                 </label>
                 {typeof selectedFounderCalendarReady === "boolean" ? (
                   <div
+                    /*
+                     * THREE STATES NEED THREE COLOURS. This was a two-way
+                     * emerald/amber pick, so the workspace-calendar case -- which
+                     * is a WORKING, EXPECTED, BOOKABLE state -- rendered in the
+                     * same amber as "this is broken". The operator read the
+                     * screen exactly as it was painted and reported the calendar
+                     * as non-functional when it was about to book correctly.
+                     *
+                     * Amber is now reserved for the one state that genuinely
+                     * blocks a booking. The shared-calendar path gets a neutral
+                     * informational blue: it is how this tenant books by default,
+                     * not a fault to be fixed.
+                     */
                     className={`mt-2 rounded-md border px-2.5 py-2 text-[11px] ${
                       selectedFounderCalendarReady
                         ? "border-emerald-400/25 bg-emerald-400/5 text-emerald-200"
-                        : "border-amber-400/30 bg-amber-400/5 text-amber-200"
+                        : founderCanBook
+                          ? "border-sky-400/25 bg-sky-400/5 text-sky-200"
+                          : "border-amber-400/30 bg-amber-400/5 text-amber-200"
                     }`}
                   >
                     {/* Three DIFFERENT states, because they carry three
@@ -965,7 +980,16 @@ export function LeadLifecycleActions({
                     {selectedFounderCalendarReady
                       ? "Google Calendar is ready for this host."
                       : systemCalendarFallback
-                        ? "This host has not connected Google. The invite will be sent from the shared OASIS workspace calendar, so the shared account appears as the organiser."
+                        ? // LEADS WITH THE OUTCOME, NOT THE DEFICIENCY. The old
+                          // wording opened "This host has not connected Google",
+                          // which describes a missing thing rather than the
+                          // working thing, and reads as an error even though the
+                          // booking is about to succeed. Booking from the OASIS
+                          // calendar is the DEFAULT operating mode for this
+                          // tenant; the organiser identity is still stated,
+                          // because a rep should never be surprised by whose name
+                          // the client sees on the invite.
+                          "Ready to book from the OASIS AI calendar. The client gets the Calendar invite and Meet link, and the OASIS AI account appears as the organiser."
                         : selectedFounder?.calendar_identity_mismatch
                           ? `This host connected ${selectedFounder.connected_google_address || "a different Google account"}. They must reconnect with ${selectedFounder.email || "their OASIS work email"} before client invitations can be sent.`
                           : "This host needs to reconnect Google Calendar before a booking can be created."}
