@@ -151,11 +151,34 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
       hasToken && scopes.has(CALENDAR_EVENTS_SCOPE) && identityMatches
         ? await tokenUsable(String(bundle.refresh_token))
         : false;
+    // ═══ THESE TWO FLAGS WERE ALWAYS FALSE ═════════════════════════════════
+    //
+    // They read `workspaceConnected && !calendarConnected` and
+    // `workspaceConnected && ... && !identityMatches`. When `calendarConnected`
+    // was collapsed to equal `workspaceConnected` (PR #322), the first became
+    // `X && !X` -- a contradiction, false for every host forever. The second was
+    // already unreachable: `workspaceConnected` REQUIRES `identityMatches`, so
+    // `workspaceConnected && !identityMatches` can never hold.
+    //
+    // The cost was not cosmetic. A host whose token Google had revoked reported
+    // `calendar_reconnect_required: false`, so the UI never showed the one
+    // instruction that would have fixed it -- reconnect Google once -- and a rep
+    // was left with a disabled button and no route forward. A flag that is
+    // structurally incapable of being true is worse than an absent flag: it
+    // reads as a definite "no problem here". (Caught by CC's agent, 2026-08-26.)
+    //
+    // Each is now derived from the INPUTS rather than from the conclusion, so no
+    // flag can depend on the thing it is meant to explain.
     const calendarConnected = workspaceConnected;
+    const identityMismatch = hasToken && Boolean(connectedAddress && expectedAddress) && !identityMatches;
+    // A token that exists but does not work, for any reason OTHER than the host
+    // having connected the wrong account -- that case gets its own, more
+    // specific message and must not be flattened into a generic "reconnect".
+    const reconnectRequired = hasToken && !calendarConnected && !identityMismatch;
     return {
       calendar_connected: calendarConnected,
-      calendar_reconnect_required: workspaceConnected && !calendarConnected,
-      calendar_identity_mismatch: workspaceConnected && Boolean(connectedAddress && expectedAddress) && !identityMatches,
+      calendar_reconnect_required: reconnectRequired,
+      calendar_identity_mismatch: identityMismatch,
       connected_google_address: connectedAddress || null,
     };
   } catch (err) {
