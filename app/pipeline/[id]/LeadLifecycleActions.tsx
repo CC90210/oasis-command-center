@@ -333,10 +333,18 @@ export function LeadLifecycleActions({
   const [paymentProvider, setPaymentProvider] = useState<"stripe" | "manual">("stripe");
   const [manualPaymentConfirmed, setManualPaymentConfirmed] = useState(false);
 
+  // Whether a shared OASIS workspace calendar can carry a booking for a host
+  // who has not connected their own Google account. A DIFFERENT fact from
+  // `calendar_connected`, which is about this host specifically -- the two used
+  // to be OR'd together server-side, which made every host look ready whenever
+  // this global was configured. See app/api/team/members/route.ts.
+  const [systemCalendarFallback, setSystemCalendarFallback] = useState(false);
+
   useEffect(() => {
     fetch("/api/team/members")
       .then((response) => (response.ok ? response.json() : null))
       .then((body) => {
+        setSystemCalendarFallback(body?.system_calendar_fallback === true);
         const members = (body?.members || []) as Founder[];
         const next = members.filter(
           (member: Founder) => member.is_owner || mayHostAuditCall(member.team_role),
@@ -915,11 +923,21 @@ export function LeadLifecycleActions({
                         : "border-amber-400/30 bg-amber-400/5 text-amber-200"
                     }`}
                   >
+                    {/* Three DIFFERENT states, because they carry three
+                        different promises and used to be one boolean:
+                        the host's own verified connection; nobody's connection
+                        but a shared workspace calendar that can still carry the
+                        booking (organised by the shared account, not the host);
+                        and genuinely not bookable. The middle case used to
+                        render as "ready for this host", which was not true of
+                        the host at all. */}
                     {selectedFounderCalendarReady
                       ? "Google Calendar is ready for this host."
-                      : selectedFounder?.calendar_identity_mismatch
-                        ? `This host connected ${selectedFounder.connected_google_address || "a different Google account"}. They must reconnect with ${selectedFounder.email || "their OASIS work email"} before client invitations can be sent.`
-                        : "This host needs to reconnect Google Calendar before a booking can be created."}
+                      : systemCalendarFallback
+                        ? "This host has not connected Google. The invite will be sent from the shared OASIS workspace calendar, so the shared account appears as the organiser."
+                        : selectedFounder?.calendar_identity_mismatch
+                          ? `This host connected ${selectedFounder.connected_google_address || "a different Google account"}. They must reconnect with ${selectedFounder.email || "their OASIS work email"} before client invitations can be sent.`
+                          : "This host needs to reconnect Google Calendar before a booking can be created."}
                   </div>
                 ) : null}
               </div>
@@ -1746,6 +1764,26 @@ function readableError(code: string): string {
     sms_consent_requires_phone: "Add a valid client phone number before recording SMS consent.",
     google_calendar_not_connected: "The selected host must connect their work Google account in Settings.",
     calendar_scope_required: "The selected host must reconnect Google once to approve Calendar access.",
+    // ADDED 2026-08-26. These five are declared in GoogleCalendarErrorCode
+    // (lib/integrations/google-calendar.ts) and every one of them was missing
+    // here, so the RAW CODE reached the rep's screen. The operator reported it
+    // as "it says invalid token or something" -- that was `token_refresh_failed`
+    // falling straight through this map onto a sales rep mid-handoff.
+    //
+    // A rep cannot act on a code. Each message below names the human step,
+    // because every one of these is a "somebody must go and do a thing"
+    // condition, not something retrying will clear.
+    token_refresh_failed:
+      "Google rejected the host's saved sign-in, usually because access was revoked or the password changed. " +
+      "They need to reconnect Google once in Settings. Nothing was booked and no invite went out.",
+    google_oauth_config_missing:
+      "This deployment is missing its Google OAuth configuration, so no host can book. Nothing was booked. Tell an administrator.",
+    calendar_reconcile_failed:
+      "Google accepted the booking but we could not read it back to confirm it. Do not rebook yet: check the host's calendar first, then retry.",
+    calendar_read_failed:
+      "Google Calendar could not be read just now. Nothing was changed. Retry in a moment.",
+    invalid_request:
+      "Google rejected the booking details. Check the meeting time, the client email, and the host, then retry.",
     calendar_organizer_mismatch: "The selected host connected a different Google account. Reconnect with their OASIS work email before booking.",
     google_meet_link_missing: "Google created the event but has not returned its Meet link yet. Retry this booking; it will reconcile the same event.",
     calendar_create_failed: "Google Calendar could not verify this booking. Nothing moved; retry after checking the host connection.",
