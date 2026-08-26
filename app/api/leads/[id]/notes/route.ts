@@ -35,6 +35,8 @@ import { removeReminderEvent } from "@/lib/integrations/calendar-reminder";
 import {
   syncFollowUpReminder,
   describeFollowUpSync,
+  planReminderOwnership,
+  nextAttemptAt,
   FOLLOW_UP_FIELDS,
   type FollowUpSyncState,
 } from "@/lib/leads/follow-up";
@@ -220,6 +222,7 @@ export async function POST(
   // we have on any reminder already on this operator's calendar, and the
   // business name and phone are what make the reminder readable at a glance.
   let leadData: Record<string, unknown> = {};
+  let leadReadFailed = false;
   if (followUpSupplied) {
     try {
       const record = await getRecord({
@@ -229,8 +232,16 @@ export async function POST(
       });
       leadData = (record?.data || {}) as Record<string, unknown>;
     } catch {
-      // Not fatal. A missing read costs us the existing event id, which the
-      // sync below handles by creating a fresh event; it never costs the note.
+      // NOT SAFE TO PROCEED, and an earlier version of this comment said it was.
+      //
+      // Without this read we do not know whether the lead already has a live
+      // reminder. Pushing anyway would create a SECOND event and store only the
+      // new id, leaving the first one live on the operator's calendar with
+      // nothing able to address it again -- the exact orphan this module
+      // guards against everywhere else. The note and the follow-up still land;
+      // only the mirror waits for the cron, which re-reads the lead and gets
+      // the real id. (Codex review, 2026-08-26.)
+      leadReadFailed = true;
       leadData = {};
     }
   }
@@ -259,11 +270,76 @@ export async function POST(
     return NextResponse.json({ ok: true, note: ins.data, touchAt: occurredAt });
   }
 
+  // The lead was unreadable, so hand the mirror to the cron rather than push
+  // blind. `follow_up_at` is already saved above; only the phone copy waits.
+  if (leadReadFailed) {
+    const pendingPatch = {
+      [FOLLOW_UP_FIELDS.state]: "pending",
+      [FOLLOW_UP_FIELDS.reason]: "lead_unreadable",
+      [FOLLOW_UP_FIELDS.detail]: "could not read the lead to find an existing reminder",
+      [FOLLOW_UP_FIELDS.attempts]: 1,
+      [FOLLOW_UP_FIELDS.nextAttemptAt]: nextAttemptAt(0, Date.now()),
+      [FOLLOW_UP_FIELDS.operatorUserId]: sess.userId,
+      [FOLLOW_UP_FIELDS.timeZone]: timeZone,
+      [FOLLOW_UP_FIELDS.note]: note,
+    };
+    try {
+      await updateRecord({
+        tenant_id: sess.tenantId,
+        entity: "lead",
+        id: target.queryLeadId,
+        patch: pendingPatch,
+      });
+    } catch {
+      // Nothing was created on any calendar, so there is nothing to strand.
+    }
+    return NextResponse.json({
+      ok: true,
+      note: ins.data,
+      touchAt: occurredAt,
+      followUpAt,
+      calendar: { state: "pending", message: describeFollowUpSync("pending") },
+    });
+  }
+
   // STEP 3 — THE MIRROR. Never throws, never undoes steps 1 or 2.
-  const existingEventId =
+  let existingEventId =
     typeof leadData[FOLLOW_UP_FIELDS.eventId] === "string"
       ? (leadData[FOLLOW_UP_FIELDS.eventId] as string)
       : null;
+
+  // HANDOVER. The stored event may belong to a DIFFERENT operator: leads get
+  // reassigned, and an admin may schedule on someone else's lead. Patching
+  // that id through this session's calendar would 404, silently create a
+  // second event here, and overwrite the id -- leaving the previous rep a
+  // reminder nothing can clear. Delete it as its owner first.
+  const storedOperator =
+    typeof leadData[FOLLOW_UP_FIELDS.operatorUserId] === "string"
+      ? (leadData[FOLLOW_UP_FIELDS.operatorUserId] as string)
+      : null;
+  let strandedEventId: string | null = null;
+  let strandedOperator: string | null = null;
+  const ownership = planReminderOwnership({
+    existingEventId,
+    storedOperatorUserId: storedOperator,
+    currentOperatorUserId: sess.userId,
+  });
+  if (ownership.removeAs) {
+    const handover = await removeReminderEvent(
+      sess.tenantId,
+      ownership.removeAs,
+      existingEventId as string,
+    );
+    if (!handover.ok) {
+      // Record it as a tracked cleanup rather than pretending it is gone. The
+      // current operator still gets their reminder below: leaving THIS rep
+      // without one, to tidy a colleague's calendar, is the worse trade.
+      strandedEventId = existingEventId;
+      strandedOperator = ownership.removeAs;
+    }
+  }
+  existingEventId = ownership.pushWithEventId;
+
   const outcome = await syncFollowUpReminder({
     lead: {
       leadId: target.queryLeadId,
@@ -299,12 +375,31 @@ export async function POST(
   // we just made returns us to "no reminder", which is recoverable.
   let syncState: FollowUpSyncState = outcome.state;
   let syncMessage = outcome.message;
+
+  // A stranded event keeps the record in `pending` even when this operator's
+  // own push succeeded, so the cron still comes back to clear it. Without this
+  // a successful push would write "synced" over the only trace of the leak.
+  const patch: Record<string, unknown> = { ...outcome.patch };
+  if (strandedEventId) {
+    patch[FOLLOW_UP_FIELDS.strandedEventId] = strandedEventId;
+    patch[FOLLOW_UP_FIELDS.strandedOperatorUserId] = strandedOperator;
+    if (outcome.state === "synced") {
+      patch[FOLLOW_UP_FIELDS.state] = "pending";
+      patch[FOLLOW_UP_FIELDS.reason] = "stranded_handover";
+      patch[FOLLOW_UP_FIELDS.attempts] = 1;
+      patch[FOLLOW_UP_FIELDS.nextAttemptAt] = nextAttemptAt(0, Date.now());
+      syncState = "pending";
+    }
+    syncMessage =
+      "Follow-up saved and on your calendar. A reminder on the previous rep's calendar could not be removed yet, and we will keep trying.";
+  }
+
   try {
     await updateRecord({
       tenant_id: sess.tenantId,
       entity: "lead",
       id: target.queryLeadId,
-      patch: outcome.patch,
+      patch,
     });
   } catch {
     const orphanId = outcome.patch[FOLLOW_UP_FIELDS.eventId];

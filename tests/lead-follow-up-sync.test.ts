@@ -9,11 +9,13 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   syncFollowUpReminder,
   isDueForRetry,
   nextAttemptAt,
   describeFollowUpSync,
+  planReminderOwnership,
   FOLLOW_UP_FIELDS,
   MAX_SYNC_ATTEMPTS,
   RETRY_BACKOFF_MINUTES,
@@ -254,6 +256,89 @@ for (const reason of ["not_connected", "scope_required", "auth_failed", "retry_e
     line,
     /saved/i,
     "every failure line must lead with the fact the follow-up was kept, or a rep will re-enter it",
+  );
+}
+
+/* ------------------------------------------------- handover of ownership */
+
+{
+  // Nothing stored yet: create fresh, nothing to hand over.
+  const plan = planReminderOwnership({
+    existingEventId: null,
+    storedOperatorUserId: null,
+    currentOperatorUserId: "user-1",
+  });
+  assert.deepEqual(plan, { removeAs: null, pushWithEventId: null });
+}
+
+{
+  // Same operator: move their own event, do not create a second one.
+  const plan = planReminderOwnership({
+    existingEventId: "evt_1",
+    storedOperatorUserId: "user-1",
+    currentOperatorUserId: "user-1",
+  });
+  assert.deepEqual(plan, { removeAs: null, pushWithEventId: "evt_1" });
+}
+
+{
+  // THE ONE THAT MATTERS. The lead changed hands, or an admin is scheduling on
+  // someone else's lead. Google addresses events per-calendar, so patching this
+  // id through the NEW operator would 404, create a second event, and overwrite
+  // the id -- stranding a live reminder on the old rep's phone with nothing
+  // able to clear it. Delete it as its owner, then create fresh.
+  const plan = planReminderOwnership({
+    existingEventId: "evt_1",
+    storedOperatorUserId: "user-1",
+    currentOperatorUserId: "user-2",
+  });
+  assert.equal(
+    plan.removeAs,
+    "user-1",
+    "the old event must be deleted as the operator who owns it, not the one clicking",
+  );
+  assert.equal(
+    plan.pushWithEventId,
+    null,
+    "the new operator must get a FRESH event: the old id is not addressable on their calendar",
+  );
+}
+
+/* ------------------------------------------------------- route wiring
+ *
+ * These two ARE source assertions, and only because the behaviour lives inside
+ * a route handler and a cron whose collaborators (session, tenant records, the
+ * bridge) cannot be injected today. The ledger's rule is followed as written:
+ * behaviour where a pure function exists (everything above), source matching
+ * kept only for module-private wiring. Each one names what breaks if it goes.
+ */
+
+{
+  const route = readFileSync("app/api/leads/[id]/notes/route.ts", "utf8");
+  assert.match(
+    route,
+    /leadReadFailed = true/,
+    "a failed lead read must be recorded, not swallowed: pushing without knowing the existing event id creates a second reminder and strands the first",
+  );
+  assert.match(
+    route,
+    /if \(leadReadFailed\)[\s\S]{0,900}?state: "pending"/,
+    "an unreadable lead must hand the mirror to the cron, which re-reads and finds the real event id",
+  );
+  const mirrorAt = route.indexOf("const outcome = await syncFollowUpReminder");
+  const guardAt = route.indexOf("if (leadReadFailed)");
+  assert.ok(
+    guardAt > 0 && guardAt < mirrorAt,
+    "the read-failure guard must come BEFORE the calendar push, or it guards nothing",
+  );
+}
+
+{
+  const cron = readFileSync("app/api/cron/reconcile-calendar-reminders/route.ts", "utf8");
+  assert.match(
+    cron,
+    /\.order\("updated_at", \{ ascending: true \}\)/,
+    "an unordered LIMIT can return the same page every run, starving pending reminders past it for days during an outage",
   );
 }
 

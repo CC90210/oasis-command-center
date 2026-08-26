@@ -74,6 +74,19 @@ export const FOLLOW_UP_FIELDS = {
    * wrong operator would land on a stranger's phone.
    */
   operatorUserId: "follow_up_operator_user_id",
+  /**
+   * An event on a PREVIOUS operator's calendar that we failed to delete.
+   *
+   * A lead can change hands, and an admin can schedule on someone else's lead.
+   * When that happens the stored event lives on the old operator's calendar and
+   * cannot be addressed through the new one: patching it there returns 404, and
+   * an earlier version of this code then created a second event and overwrote
+   * the id, leaving the old rep with a reminder nothing could ever clear. If
+   * the handover delete fails we park the pair here instead, so the cleanup is
+   * a tracked work item rather than a leak. (Codex review, 2026-08-26.)
+   */
+  strandedEventId: "follow_up_stranded_event_id",
+  strandedOperatorUserId: "follow_up_stranded_operator_user_id",
   state: "follow_up_sync_state",
   reason: "follow_up_sync_reason",
   detail: "follow_up_sync_detail",
@@ -348,6 +361,40 @@ export function describeFollowUpSync(
     default:
       return "Follow-up saved, but it did not reach your Google Calendar. Check Settings.";
   }
+}
+
+/**
+ * Who owns the event we are about to touch, and what to do about it.
+ *
+ * A lead can change hands, and an admin can schedule on someone else's lead.
+ * The stored event then lives on the PREVIOUS operator's calendar, and Google
+ * addresses events per-calendar: patching that id through the new operator's
+ * session returns 404, which the write path would recover from by creating a
+ * second event and storing its id — leaving the old rep a reminder that
+ * nothing can ever clear. For a lead that has since gone do-not-call, that is
+ * a prospect being called again by someone who never saw the note.
+ *
+ * Pure, so the rule is testable without a calendar. (Codex review, 2026-08-26.)
+ */
+export function planReminderOwnership(input: {
+  existingEventId: string | null;
+  storedOperatorUserId: string | null;
+  currentOperatorUserId: string;
+}): {
+  /** Delete the old event as THIS user first, or null when no handover is needed. */
+  removeAs: string | null;
+  /** The id to hand the push. Null forces a fresh event on the new calendar. */
+  pushWithEventId: string | null;
+} {
+  const { existingEventId, storedOperatorUserId, currentOperatorUserId } = input;
+  const handover =
+    Boolean(existingEventId) &&
+    Boolean(storedOperatorUserId) &&
+    storedOperatorUserId !== currentOperatorUserId;
+  if (!handover) {
+    return { removeAs: null, pushWithEventId: existingEventId };
+  }
+  return { removeAs: storedOperatorUserId, pushWithEventId: null };
 }
 
 /** True when the retry worker should pick this record up now. */

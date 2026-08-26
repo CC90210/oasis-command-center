@@ -29,6 +29,7 @@ import { removeReminderEvent } from "@/lib/integrations/calendar-reminder";
 import {
   syncFollowUpReminder,
   isDueForRetry,
+  nextAttemptAt,
   FOLLOW_UP_FIELDS,
 } from "@/lib/leads/follow-up";
 
@@ -69,11 +70,22 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // silently mistranslates returns a plausible empty set rather than an error.
   // The pending set is small, so scanning it and comparing here is both safe
   // and cheap. See isDueForRetry.
+  //
+  // ORDERED BY `updated_at` ASCENDING, AND THAT IS NOT COSMETIC. An unordered
+  // LIMIT can hand back the same first 200 rows every run, so during an outage
+  // that produces more than 200 pending leads the rows past the page are never
+  // examined until the earlier ones sync or exhaust -- which, on a ladder that
+  // ends at twelve hours, could delay a callback by days. Every retry writes
+  // the record, so oldest-touched-first rotates the whole backlog through the
+  // page. `updated_at` is a real column, not a field inside the JSON document,
+  // so ordering on it does not depend on bridge support for JSON operators.
+  // (Codex review, 2026-08-26.)
   const scan = await db
     .from("tenant_records")
     .select("id, tenant_id, data")
     .eq("entity_type", "lead")
     .eq(`data->>${FOLLOW_UP_FIELDS.state}`, "pending")
+    .order("updated_at", { ascending: true })
     .limit(SCAN_LIMIT);
 
   if (scan.error) {
@@ -96,6 +108,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     blocked: 0,
     unattributed: 0,
     persistFailed: 0,
+    strandedCleared: 0,
+    strandedRemaining: 0,
   };
   const exhaustedByTenant = new Map<string, number>();
 
@@ -127,6 +141,19 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
+    // A reminder left on a PREVIOUS operator's calendar by a lead handover.
+    // Cleared as its owner, before anything else, because it is the only piece
+    // of state here that no operator can see or fix from a screen.
+    const strandedId = asString(data[FOLLOW_UP_FIELDS.strandedEventId]);
+    const strandedOperator = asString(data[FOLLOW_UP_FIELDS.strandedOperatorUserId]);
+    let strandedCleared = true;
+    if (strandedId && strandedOperator) {
+      const removed = await removeReminderEvent(row.tenant_id, strandedOperator, strandedId);
+      strandedCleared = removed.ok;
+      if (removed.ok) counts.strandedCleared += 1;
+      else counts.strandedRemaining += 1;
+    }
+
     const existingEventId = asString(data[FOLLOW_UP_FIELDS.eventId]);
     const attemptsRaw = Number(data[FOLLOW_UP_FIELDS.attempts]);
     const attempts = Number.isFinite(attemptsRaw) && attemptsRaw > 0 ? attemptsRaw : 0;
@@ -154,11 +181,26 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       attempts,
     });
 
-    if (outcome.state === "synced") counts.synced += 1;
-    else if (outcome.state === "pending") counts.stillPending += 1;
-    else if (outcome.state === "blocked") {
+    const patch: Record<string, unknown> = { ...outcome.patch };
+    if (strandedCleared) {
+      patch[FOLLOW_UP_FIELDS.strandedEventId] = null;
+      patch[FOLLOW_UP_FIELDS.strandedOperatorUserId] = null;
+    } else if (patch[FOLLOW_UP_FIELDS.state] === "synced") {
+      // This operator's own reminder is fine, but the old one is still live.
+      // Staying pending is what guarantees another pass; writing "synced" here
+      // would erase the only record that a stranded event exists.
+      patch[FOLLOW_UP_FIELDS.state] = "pending";
+      patch[FOLLOW_UP_FIELDS.reason] = "stranded_handover";
+      patch[FOLLOW_UP_FIELDS.attempts] = attempts + 1;
+      patch[FOLLOW_UP_FIELDS.nextAttemptAt] = nextAttemptAt(attempts, Date.now());
+    }
+
+    const finalState = patch[FOLLOW_UP_FIELDS.state];
+    if (finalState === "synced") counts.synced += 1;
+    else if (finalState === "pending") counts.stillPending += 1;
+    else if (finalState === "blocked") {
       counts.blocked += 1;
-      if (outcome.patch[FOLLOW_UP_FIELDS.reason] === "retry_exhausted") {
+      if (patch[FOLLOW_UP_FIELDS.reason] === "retry_exhausted") {
         counts.exhausted += 1;
         exhaustedByTenant.set(row.tenant_id, (exhaustedByTenant.get(row.tenant_id) || 0) + 1);
       }
@@ -169,14 +211,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         tenant_id: row.tenant_id,
         entity: "lead",
         id: row.id,
-        patch: outcome.patch,
+        patch,
       });
     } catch {
       // Same hazard as the write path: an event Google created that we could
       // not record is unaddressable forever. Roll it back to "no reminder",
       // which the next tick can recreate cleanly.
       counts.persistFailed += 1;
-      const newId = outcome.patch[FOLLOW_UP_FIELDS.eventId];
+      const newId = patch[FOLLOW_UP_FIELDS.eventId];
       if (typeof newId === "string" && newId && newId !== existingEventId) {
         await removeReminderEvent(row.tenant_id, operatorUserId, newId);
       }
