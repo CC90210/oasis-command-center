@@ -1664,14 +1664,38 @@ async function initAnonymousLead(input: {
     }
     return "";
   };
-  const name = trimmed("contact_name", "name", "full_name");
+  /**
+   * THE FULL APPLICATION SPEAKS A DIFFERENT VOCABULARY (2026-08-26).
+   *
+   * The reads above are described as "deliberately generous", and for the
+   * intake forms they are. They were not generous enough for the form that
+   * matters most: SunBiz's `full-application` asks for the company under
+   * `business_legal_name`, the person under `owner_full_name`, and the number
+   * under `owner_cell` — none of which appear in the lists below, so a merchant
+   * who applies on that form produced a lead with NO name, NO contact and NO
+   * phone.
+   *
+   * On the board that lead renders as `Untitled 65061d` (LeadPipelineView falls
+   * back to the record id), and a rep cannot identify or call it. Measured on
+   * production: 13 such leads, EVERY ONE of them from this one form, several at
+   * `signed_application` — completed, signed applications from real businesses,
+   * sitting on the board anonymously. The names were never lost; they are on the
+   * application record and in form_submissions the whole time. Only the lead,
+   * the thing a rep actually looks at, never received them.
+   *
+   * Aliases are appended, never reordered: the intake vocabulary still wins
+   * where both are present, so nothing about the existing forms changes.
+   */
+  const name = trimmed("contact_name", "name", "full_name", "owner_full_name", "owner_name");
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
-  const business = trimmed("business_name", "company");
+  const business = trimmed("business_name", "company", "business_legal_name", "legal_business_name", "dba");
   if (business) contactFields[funding ? "business_name" : "company"] = business;
-  const emailRaw = pick("email");
+  const emailRaw = pick("email") ?? pick("owner_email") ?? pick("contact_email");
   const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
   if (email) contactFields.email = email;
-  const phone = pick("phone");
+  // `owner_cell` is the full application's phone field. Without it the lead
+  // carries no number at all and the rep cannot call a signed applicant.
+  const phone = pick("phone") ?? pick("owner_cell") ?? pick("cell_phone");
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
