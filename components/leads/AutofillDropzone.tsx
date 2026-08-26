@@ -81,7 +81,7 @@ export function AutofillDropzone({
   }
 
   async function pollJob(jobId: string): Promise<
-    | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null }
+    | { status: "applied"; appliedKeys: number; signaturePreview: string | null; applicationId: string | null; jobLeadId: string | null; matchedExisting: boolean }
     | { status: "failed"; error: string | null }
     | { status: "timeout" }
   > {
@@ -104,6 +104,7 @@ export function AutofillDropzone({
           signaturePreview: typeof j.signature_preview === "string" ? j.signature_preview : null,
           applicationId: typeof j.application_id === "string" ? j.application_id : null,
           jobLeadId: typeof j.lead_id === "string" ? j.lead_id : null,
+          matchedExisting: j.matched_existing === true,
         };
       }
       if (status === "failed") {
@@ -154,7 +155,14 @@ export function AutofillDropzone({
         return;
       }
       // applied
-      setMsg(`Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`);
+      // Say when the document joined a merchant we already had. Without this the
+      // rep drops a file, no new card appears, and the only way to find out why
+      // is to go looking — which is how people conclude a feature is broken.
+      setMsg(
+        res.matchedExisting
+          ? `Matched an existing merchant. Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} on their file instead of creating a duplicate.`
+          : `Filled ${res.appliedKeys} field${res.appliedKeys === 1 ? "" : "s"} from the application.`,
+      );
       const resolvedLeadId = leadId || res.jobLeadId || "";
       const newRedirect = mode === "new" && res.applicationId && tenantSlug ? res.applicationId : null;
       setPendingRedirect(newRedirect);
