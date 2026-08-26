@@ -21,8 +21,16 @@ for (const field of ["name", "company", "email", "phone", "website"]) {
 assert.match(source, /timezone:\s*FOUNDER_TIMEZONE/);
 assert.match(source, /qualification:\s*\{/);
 assert.match(source, /confirmations:\s*\{/);
-for (const confirmation of ["contactConfirmed", "clientAgreedToTime", "handoffComplete"]) {
-  assert.match(source, new RegExp(`confirmations:[\\s\\S]*?${confirmation}`));
+for (const [key, value] of [
+  ["contactConfirmed", "effectiveContactConfirmed"],
+  ["clientAgreedToTime", "effectiveClientAgreedToTime"],
+  ["handoffComplete", "effectiveHandoffComplete"],
+] as const) {
+  assert.match(
+    source,
+    new RegExp(`confirmations:\\s*\\{[\\s\\S]*?${key}:\\s*${value}\\b`),
+    `booking payload must send the effective ${key} (${value}) — raw checkbox state breaks the implicit-confirm unlock`,
+  );
 }
 assert.match(source, /smsConsent:\s*Boolean\(/);
 assert.match(source, /requestId:\s*founderBookingRequestId/);

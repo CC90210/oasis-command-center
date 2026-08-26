@@ -535,10 +535,14 @@ export function LeadLifecycleActions({
           timingConfirmed: founderQualification.timingConfirmed,
           minimumInvestmentConfirmed: founderQualification.minimumInvestmentConfirmed,
         },
+        // Send the effective values the readiness gate evaluated: when a rep
+        // relies on implicit confirmation (valid email, future time, written
+        // handoff note), raw checkbox state would still be false and the
+        // server's strict true-check would reject an otherwise valid booking.
         confirmations: {
-          contactConfirmed,
-          clientAgreedToTime,
-          handoffComplete,
+          contactConfirmed: effectiveContactConfirmed,
+          clientAgreedToTime: effectiveClientAgreedToTime,
+          handoffComplete: effectiveHandoffComplete,
         },
         smsConsent: Boolean(bookingContact.phone.trim() && smsConsent),
       },
