@@ -76,7 +76,13 @@ export const ALL_MARKETING_PATHS: readonly string[] = [
 export const SITE_ORIGIN = "https://oasisai.work";
 
 /** CC's booking link — the one CTA that leaves the site. */
-export const BOOKING_URL = "https://calendar.app.google/tpfvJYBGircnGu8G8";
+export const BOOKING_URL = (
+  process.env.NEXT_PUBLIC_BOOKING_URL ||
+  process.env.NEXT_PUBLIC_FOUNDER_BOOKING_URL ||
+  process.env.OASIS_FOUNDER_BOOKING_URL ||
+  process.env.BOOKING_LINK ||
+  "https://calendar.app.google/tpfvJYBGircnGu8G8"
+).trim();
 
 /**
  * The address a prospect should actually write to.

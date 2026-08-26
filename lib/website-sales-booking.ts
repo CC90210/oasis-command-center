@@ -114,7 +114,13 @@ export function isWebsiteSalesLead(data: Record<string, unknown>): boolean {
 }
 
 export function bookingUrl(): string {
-  const fromEnv = (process.env.OASIS_FOUNDER_BOOKING_URL || "").trim();
+  const fromEnv = (
+    process.env.NEXT_PUBLIC_BOOKING_URL ||
+    process.env.NEXT_PUBLIC_FOUNDER_BOOKING_URL ||
+    process.env.OASIS_FOUNDER_BOOKING_URL ||
+    process.env.BOOKING_LINK ||
+    ""
+  ).trim();
   return fromEnv || DEFAULT_BOOKING_URL;
 }
 
