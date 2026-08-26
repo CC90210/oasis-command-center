@@ -156,4 +156,75 @@ assert.deepEqual(
   "no identity at all means no match input — the caller creates a fresh lead",
 );
 
+// ── fail closed on the reads (Codex review, 2026-08-26) ─────────────────────
+//
+// The gap-fill guard is only as good as the record it compares against. The
+// first version swallowed a read failure and continued with an empty current
+// record — which inverts the guard completely: with nothing to compare, EVERY
+// extracted value is a "gap", so a transient database blip produces exactly the
+// blind overwrite the branch exists to prevent, silently, on a live deal.
+
+/** Mirrors both guarded reads: on an auto-matched target a failed read stops. */
+function decideOnRead(autoMatched: boolean, record: { data?: unknown } | null): "proceed" | "abort" {
+  if (autoMatched && !record?.data) return "abort";
+  return "proceed";
+}
+
+// THE GUARD FIRING.
+assert.equal(
+  decideOnRead(true, null),
+  "abort",
+  "an unreadable record on an auto-matched target must abort, never fall through to a blind write",
+);
+assert.equal(
+  decideOnRead(true, {}),
+  "abort",
+  "a record that came back without data is not an empty record — it is an unknown one",
+);
+
+// Proving the guard cannot be satisfied by the very emptiness it must reject:
+// an empty `data` object is a legitimately blank record and IS safe to fill.
+assert.equal(
+  decideOnRead(true, { data: {} }),
+  "proceed",
+  "a genuinely blank record is readable and gap-filling it is the whole point",
+);
+
+// Operator-chosen autofill keeps its long-standing tolerance: they picked the
+// target, so a read failure degrades rather than blocks. Changing that would be
+// a behaviour change to a path this work never touched.
+assert.equal(
+  decideOnRead(false, null),
+  "proceed",
+  "operator-chosen autofill is unchanged by this work",
+);
+
+// ── the operator is told the truth about what was written ───────────────────
+//
+// appliedKeys is rendered verbatim ("Filled N fields"). On the gap-fill branch
+// the patch may contain a subset of the extracted keys, or none at all.
+
+function reportedKeys(autoMatchedExisting: boolean, extracted: string[], gaps: string[]): string[] {
+  return autoMatchedExisting ? gaps : extracted;
+}
+
+const extractedKeys = Object.keys(modelExtracted);
+const gapKeys = Object.keys(filled);
+
+assert.deepEqual(
+  reportedKeys(true, extractedKeys, gapKeys),
+  gapKeys,
+  "a matched apply reports the fields actually written, not everything extracted",
+);
+assert.equal(
+  reportedKeys(true, extractedKeys, []).length,
+  0,
+  'when existing values blocked every write the operator must be told 0, not "Filled 4 fields"',
+);
+assert.deepEqual(
+  reportedKeys(false, extractedKeys, []),
+  extractedKeys,
+  "the authoritative paths still report every extracted key",
+);
+
 console.log("appdrop-dedupe: all guards fire ✓");

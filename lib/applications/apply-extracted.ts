@@ -134,6 +134,16 @@ export async function applyExtractedApplication(input: {
     } else {
       // Existing lead — backfill identity gaps only (never clobber operator data).
       const lead = await getRecord({ tenant_id: input.tenantId, entity: "lead", id: leadId }).catch(() => null);
+      // Same fail-closed rule as the application read below, for the same
+      // reason, applied to the path this change introduced: an unread lead
+      // yields an empty `ld`, every identity key then looks like a gap, and the
+      // merchant's email and phone get overwritten from a document that may not
+      // even carry them. On an operator-chosen autofill they picked the target
+      // and the legacy tolerance stands; on a lead the MATCHER picked, nobody
+      // did, so a failed read must stop rather than guess.
+      if (autoMatchedLead && !lead?.data) {
+        return { ok: false, error: "matched_lead_read_failed" };
+      }
       const ld = (lead?.data || {}) as Record<string, unknown>;
       const patch: Record<string, unknown> = {};
       for (const k of LEAD_IDENTITY_KEYS) {
@@ -151,6 +161,10 @@ export async function applyExtractedApplication(input: {
     const appRes = await createApplicationFromLead({ tenantId: input.tenantId, leadId });
     if (!appRes.ok) return { ok: false, error: appRes.error };
     const applicationId = appRes.applicationId;
+
+    // What we actually wrote. Equals every extracted key on the authoritative
+    // paths; narrowed to the filled gaps on an auto-matched existing record.
+    let writtenKeys: string[] = Object.keys(fields);
 
     let patch: Record<string, unknown> = {
       ...fields,
@@ -182,12 +196,35 @@ export async function applyExtractedApplication(input: {
      * empty, so gap-filling writes everything anyway and nothing is lost.
      */
     if (autoMatchedLead && !appRes.created) {
-      const existingApp = await getRecord({
-        tenant_id: input.tenantId,
-        entity: "application",
-        id: applicationId,
-      }).catch(() => null);
-      const cur = (existingApp?.data || {}) as Record<string, unknown>;
+      /**
+       * FAIL CLOSED on the read (Codex review, 2026-08-26).
+       *
+       * The first version swallowed a read failure with `.catch(() => null)`
+       * and carried on with an empty `cur`. That inverts the entire guard: with
+       * nothing to compare against, EVERY extracted value looks like a gap, so
+       * a transient database blip would produce exactly the blind overwrite of
+       * the rep's verified revenue and contact details this branch exists to
+       * prevent — and silently, on a deal someone is working.
+       *
+       * We cannot protect values we could not read. The job is left to retry.
+       */
+      let existingApp: Awaited<ReturnType<typeof getRecord>> | null = null;
+      try {
+        existingApp = await getRecord({
+          tenant_id: input.tenantId,
+          entity: "application",
+          id: applicationId,
+        });
+      } catch (e) {
+        return {
+          ok: false,
+          error: `matched_application_read_failed: ${e instanceof Error ? e.message : "unknown"}`,
+        };
+      }
+      if (!existingApp?.data) {
+        return { ok: false, error: "matched_application_read_failed: empty_record" };
+      }
+      const cur = existingApp.data as Record<string, unknown>;
       const gaps: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(fields)) {
         const have = cur[k];
@@ -199,6 +236,12 @@ export async function applyExtractedApplication(input: {
         autofilled_at: new Date().toISOString(),
         autofill_source: "dropped_document_matched",
       };
+      // Report what was actually WRITTEN, not what was extracted (Codex P2).
+      // On this branch gap-filling may skip most keys — or all of them — and
+      // the dropzone renders this count verbatim. Claiming "Filled 22 fields"
+      // when existing values blocked every one of them is the message telling
+      // the operator a lie about their own data.
+      writtenKeys = Object.keys(gaps);
     }
 
     await updateRecord({
@@ -237,7 +280,7 @@ export async function applyExtractedApplication(input: {
       leadId,
       applicationId,
       createdLead,
-      appliedKeys: Object.keys(fields),
+      appliedKeys: writtenKeys,
       matchedExisting: autoMatchedLead,
     };
   } catch (err) {
