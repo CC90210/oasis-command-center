@@ -36,7 +36,9 @@ import {
   syncFollowUpReminder,
   describeFollowUpSync,
   planReminderOwnership,
+  workerQueueFlag,
   nextAttemptAt,
+  WORKER_QUEUE_ON,
   FOLLOW_UP_FIELDS,
   type FollowUpSyncState,
 } from "@/lib/leads/follow-up";
@@ -248,6 +250,25 @@ export async function POST(
 
   // STEP 2 — THE SOURCE-OF-TRUTH WRITE. `follow_up_at` lands on the lead here,
   // before Google is contacted at all. Everything after this point is a mirror.
+  //
+  // When the read above failed, the pending fields ride along IN THIS SAME
+  // WRITE. They used to be a second updateRecord whose failure was swallowed,
+  // which left the lead holding a new `follow_up_at` and no pending state --
+  // so the cron never saw it and the promised reminder was never created. One
+  // write cannot half-apply. (Codex review round 2, 2026-08-26.)
+  const unreadablePending = leadReadFailed
+    ? {
+        [FOLLOW_UP_FIELDS.state]: "pending",
+        [FOLLOW_UP_FIELDS.reason]: "lead_unreadable",
+        [FOLLOW_UP_FIELDS.detail]: "could not read the lead to find an existing reminder",
+        [FOLLOW_UP_FIELDS.attempts]: 1,
+        [FOLLOW_UP_FIELDS.nextAttemptAt]: nextAttemptAt(0, Date.now()),
+        [FOLLOW_UP_FIELDS.operatorUserId]: sess.userId,
+        [FOLLOW_UP_FIELDS.timeZone]: timeZone,
+        [FOLLOW_UP_FIELDS.note]: note,
+        [FOLLOW_UP_FIELDS.workerQueue]: WORKER_QUEUE_ON,
+      }
+    : {};
   try {
     await updateRecord({
       tenant_id: sess.tenantId,
@@ -256,6 +277,7 @@ export async function POST(
       patch: {
         last_contacted_at: occurredAt,
         ...(followUpSupplied ? { [FOLLOW_UP_FIELDS.at]: followUpAt } : {}),
+        ...unreadablePending,
       },
     });
   } catch (error) {
@@ -273,26 +295,8 @@ export async function POST(
   // The lead was unreadable, so hand the mirror to the cron rather than push
   // blind. `follow_up_at` is already saved above; only the phone copy waits.
   if (leadReadFailed) {
-    const pendingPatch = {
-      [FOLLOW_UP_FIELDS.state]: "pending",
-      [FOLLOW_UP_FIELDS.reason]: "lead_unreadable",
-      [FOLLOW_UP_FIELDS.detail]: "could not read the lead to find an existing reminder",
-      [FOLLOW_UP_FIELDS.attempts]: 1,
-      [FOLLOW_UP_FIELDS.nextAttemptAt]: nextAttemptAt(0, Date.now()),
-      [FOLLOW_UP_FIELDS.operatorUserId]: sess.userId,
-      [FOLLOW_UP_FIELDS.timeZone]: timeZone,
-      [FOLLOW_UP_FIELDS.note]: note,
-    };
-    try {
-      await updateRecord({
-        tenant_id: sess.tenantId,
-        entity: "lead",
-        id: target.queryLeadId,
-        patch: pendingPatch,
-      });
-    } catch {
-      // Nothing was created on any calendar, so there is nothing to strand.
-    }
+    // The pending state was already persisted with the source-of-truth write
+    // above, so there is nothing further to save and nothing to strand.
     return NextResponse.json({
       ok: true,
       note: ins.data,
@@ -381,18 +385,25 @@ export async function POST(
   // a successful push would write "synced" over the only trace of the leak.
   const patch: Record<string, unknown> = { ...outcome.patch };
   if (strandedEventId) {
+    // The cleanup rides its OWN clock and its OWN queue flag, so it survives
+    // whatever this operator's sync did. Round 1 only forced a retry when the
+    // outcome was "synced", which meant clearing a reassigned lead's follow-up
+    // (outcome "off"), or handing it to someone with no Google connection
+    // (outcome "blocked"), left the previous rep's reminder live forever with
+    // no worker eligible to touch it. (Codex review round 2, 2026-08-26.)
     patch[FOLLOW_UP_FIELDS.strandedEventId] = strandedEventId;
     patch[FOLLOW_UP_FIELDS.strandedOperatorUserId] = strandedOperator;
-    if (outcome.state === "synced") {
-      patch[FOLLOW_UP_FIELDS.state] = "pending";
-      patch[FOLLOW_UP_FIELDS.reason] = "stranded_handover";
-      patch[FOLLOW_UP_FIELDS.attempts] = 1;
-      patch[FOLLOW_UP_FIELDS.nextAttemptAt] = nextAttemptAt(0, Date.now());
-      syncState = "pending";
-    }
+    patch[FOLLOW_UP_FIELDS.strandedAttempts] = 1;
+    patch[FOLLOW_UP_FIELDS.strandedNextAttemptAt] = nextAttemptAt(0, Date.now());
+    patch[FOLLOW_UP_FIELDS.strandedReason] = null;
     syncMessage =
-      "Follow-up saved and on your calendar. A reminder on the previous rep's calendar could not be removed yet, and we will keep trying.";
+      "Follow-up saved. A reminder on the previous rep's calendar could not be removed yet, and we will keep trying.";
   }
+  // Recomputed from BOTH jobs so neither can hide the other.
+  patch[FOLLOW_UP_FIELDS.workerQueue] = workerQueueFlag({
+    syncState: patch[FOLLOW_UP_FIELDS.state] as string,
+    strandedEventId,
+  });
 
   try {
     await updateRecord({

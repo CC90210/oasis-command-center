@@ -87,6 +87,30 @@ export const FOLLOW_UP_FIELDS = {
    */
   strandedEventId: "follow_up_stranded_event_id",
   strandedOperatorUserId: "follow_up_stranded_operator_user_id",
+  /**
+   * The stranded cleanup gets its OWN retry clock, deliberately.
+   *
+   * Round 1 of this design hung it off the sync state, which meant a handover
+   * whose cleanup failed was only retried when the NEW operator's own push also
+   * happened to be pending. Clear the follow-up, or hand the lead to someone
+   * with no Google connection, and the record went terminal with a live
+   * reminder still on the previous rep's phone and no worker eligible to touch
+   * it again. Two independent jobs need two independent clocks.
+   * (Codex review round 2, 2026-08-26.)
+   */
+  strandedAttempts: "follow_up_stranded_attempts",
+  strandedNextAttemptAt: "follow_up_stranded_next_attempt_at",
+  strandedReason: "follow_up_stranded_reason",
+  /**
+   * The single key the reconcile cron scans on.
+   *
+   * "1" whenever ANY work is outstanding: a pending sync, a stranded cleanup,
+   * or both. One plain equality filter finds every record with work to do,
+   * which matters because a filter the Turso bridge mistranslates returns a
+   * plausible empty set rather than an error -- and "is not null" on a field
+   * inside the JSON document is exactly the shape that would risk it.
+   */
+  workerQueue: "follow_up_worker_queue",
   state: "follow_up_sync_state",
   reason: "follow_up_sync_reason",
   detail: "follow_up_sync_detail",
@@ -203,6 +227,7 @@ function clearedPatch(): FollowUpSyncPatch {
     [FOLLOW_UP_FIELDS.nextAttemptAt]: null,
     [FOLLOW_UP_FIELDS.summary]: null,
     [FOLLOW_UP_FIELDS.note]: null,
+    [FOLLOW_UP_FIELDS.workerQueue]: null,
   };
 }
 
@@ -259,6 +284,7 @@ export async function syncFollowUpReminder(input: {
         [FOLLOW_UP_FIELDS.nextAttemptAt]: next,
         [FOLLOW_UP_FIELDS.summary]: null,
         [FOLLOW_UP_FIELDS.note]: null,
+        [FOLLOW_UP_FIELDS.workerQueue]: state === "pending" ? WORKER_QUEUE_ON : null,
       },
       state,
       message: describeFollowUpSync(state, removed.reason),
@@ -300,6 +326,7 @@ export async function syncFollowUpReminder(input: {
         [FOLLOW_UP_FIELDS.timeZone]: lead.timeZone || null,
         [FOLLOW_UP_FIELDS.summary]: summary,
         [FOLLOW_UP_FIELDS.note]: input.note,
+        [FOLLOW_UP_FIELDS.workerQueue]: null,
       },
       state: "synced",
       message: null,
@@ -329,6 +356,7 @@ export async function syncFollowUpReminder(input: {
       // than whatever the lead looks like hours later.
       [FOLLOW_UP_FIELDS.summary]: summary,
       [FOLLOW_UP_FIELDS.note]: input.note,
+      [FOLLOW_UP_FIELDS.workerQueue]: state === "pending" ? WORKER_QUEUE_ON : null,
     },
     state,
     message: describeFollowUpSync(state, result.reason),
@@ -395,6 +423,37 @@ export function planReminderOwnership(input: {
     return { removeAs: null, pushWithEventId: existingEventId };
   }
   return { removeAs: storedOperatorUserId, pushWithEventId: null };
+}
+
+/** Value of the scan key when a record has outstanding work. */
+export const WORKER_QUEUE_ON = "1";
+
+/**
+ * Should the reconcile cron be able to find this record at all?
+ *
+ * Computed from BOTH jobs, so neither can hide the other. Round 1 let a
+ * successful sync write "synced" over a record that still owed a stranded
+ * cleanup, which removed the only trace that the cleanup was owed.
+ */
+export function workerQueueFlag(input: {
+  syncState: FollowUpSyncState | string | null | undefined;
+  strandedEventId: string | null;
+}): string | null {
+  if (input.syncState === "pending") return WORKER_QUEUE_ON;
+  if (input.strandedEventId) return WORKER_QUEUE_ON;
+  return null;
+}
+
+/** True when the stranded-event cleanup is due for another attempt. */
+export function isStrandedDue(data: Record<string, unknown>, nowMs: number): boolean {
+  if (!data[FOLLOW_UP_FIELDS.strandedEventId]) return false;
+  if (!data[FOLLOW_UP_FIELDS.strandedOperatorUserId]) return false;
+  const next = data[FOLLOW_UP_FIELDS.strandedNextAttemptAt];
+  // Never attempted yet: due immediately. A missing clock must not mean
+  // "never run", which is how the exhausted case silently disappeared.
+  if (typeof next !== "string") return true;
+  const at = Date.parse(next);
+  return Number.isFinite(at) && at <= nowMs;
 }
 
 /** True when the retry worker should pick this record up now. */

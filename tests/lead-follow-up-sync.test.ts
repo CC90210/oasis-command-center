@@ -16,6 +16,9 @@ import {
   nextAttemptAt,
   describeFollowUpSync,
   planReminderOwnership,
+  workerQueueFlag,
+  isStrandedDue,
+  WORKER_QUEUE_ON,
   FOLLOW_UP_FIELDS,
   MAX_SYNC_ATTEMPTS,
   RETRY_BACKOFF_MINUTES,
@@ -304,6 +307,91 @@ for (const reason of ["not_connected", "scope_required", "auth_failed", "retry_e
   );
 }
 
+/* ----------------------------- the worker queue: two jobs, one scan key
+ *
+ * The cron finds work by ONE equality filter. If either job can clear the flag
+ * while the other still owes something, that work becomes unreachable: the
+ * record is never scanned again, nothing retries, and nothing alerts.
+ */
+
+assert.equal(
+  workerQueueFlag({ syncState: "pending", strandedEventId: null }),
+  WORKER_QUEUE_ON,
+  "a pending sync must stay findable",
+);
+assert.equal(
+  workerQueueFlag({ syncState: "synced", strandedEventId: null }),
+  null,
+  "nothing outstanding means nothing to scan",
+);
+assert.equal(
+  workerQueueFlag({ syncState: "off", strandedEventId: null }),
+  null,
+);
+
+for (const terminal of ["synced", "off", "blocked"] as const) {
+  assert.equal(
+    workerQueueFlag({ syncState: terminal, strandedEventId: "evt_old" }),
+    WORKER_QUEUE_ON,
+    `a stranded event must keep the record findable even when the sync is "${terminal}" -- ` +
+      "clearing a reassigned lead's follow-up, or handing it to a rep with no Google connection, " +
+      "must not leave the previous rep's phone ringing with no worker able to touch it",
+  );
+}
+
+/* ------------------------------- stranded cleanup runs on its own clock */
+
+assert.equal(
+  isStrandedDue({}, NOW),
+  false,
+  "nothing stranded, nothing to do",
+);
+assert.equal(
+  isStrandedDue(
+    { [FOLLOW_UP_FIELDS.strandedEventId]: "evt_old" },
+    NOW,
+  ),
+  false,
+  "an id with no owner cannot be deleted from anyone's calendar",
+);
+assert.equal(
+  isStrandedDue(
+    {
+      [FOLLOW_UP_FIELDS.strandedEventId]: "evt_old",
+      [FOLLOW_UP_FIELDS.strandedOperatorUserId]: "user-1",
+    },
+    NOW,
+  ),
+  true,
+  "never attempted yet must mean due NOW: a missing clock read as 'never run' is how the exhausted case vanished",
+);
+assert.equal(
+  isStrandedDue(
+    {
+      [FOLLOW_UP_FIELDS.strandedEventId]: "evt_old",
+      [FOLLOW_UP_FIELDS.strandedOperatorUserId]: "user-1",
+      [FOLLOW_UP_FIELDS.strandedNextAttemptAt]: new Date(NOW + 60_000).toISOString(),
+    },
+    NOW,
+  ),
+  false,
+  "backoff must be respected for the cleanup too",
+);
+assert.equal(
+  isStrandedDue(
+    {
+      [FOLLOW_UP_FIELDS.strandedEventId]: "evt_old",
+      [FOLLOW_UP_FIELDS.strandedOperatorUserId]: "user-1",
+      [FOLLOW_UP_FIELDS.strandedNextAttemptAt]: new Date(NOW - 1).toISOString(),
+      // A stranded cleanup is due on its OWN clock regardless of the sync state.
+      [FOLLOW_UP_FIELDS.state]: "synced",
+    },
+    NOW,
+  ),
+  true,
+  "the cleanup must not wait on the sync job being pending: they are independent",
+);
+
 /* ------------------------------------------------------- route wiring
  *
  * These two ARE source assertions, and only because the behaviour lives inside
@@ -322,7 +410,7 @@ for (const reason of ["not_connected", "scope_required", "auth_failed", "retry_e
   );
   assert.match(
     route,
-    /if \(leadReadFailed\)[\s\S]{0,900}?state: "pending"/,
+    /const unreadablePending = leadReadFailed[\s\S]{0,700}?"pending"/,
     "an unreadable lead must hand the mirror to the cron, which re-reads and finds the real event id",
   );
   const mirrorAt = route.indexOf("const outcome = await syncFollowUpReminder");
@@ -330,6 +418,16 @@ for (const reason of ["not_connected", "scope_required", "auth_failed", "retry_e
   assert.ok(
     guardAt > 0 && guardAt < mirrorAt,
     "the read-failure guard must come BEFORE the calendar push, or it guards nothing",
+  );
+
+  // The pending state must ride the SOURCE-OF-TRUTH write, not a second one.
+  // As two writes, a failure of the second left the lead holding follow_up_at
+  // with no pending state, so the cron never saw it and the reminder was never
+  // created. One write cannot half-apply.
+  const sotAt = route.indexOf("...unreadablePending,");
+  assert.ok(
+    sotAt > 0 && sotAt < mirrorAt,
+    "the pending fields must be part of the same updateRecord that stores follow_up_at",
   );
 }
 

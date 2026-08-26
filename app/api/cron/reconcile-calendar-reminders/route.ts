@@ -10,14 +10,26 @@
  * failure was invisible: a lead with a reminder and a lead whose reminder never
  * landed look identical on every screen.
  *
- * This run is the thing that closes that gap. It never invents work: it only
- * touches leads the write path explicitly marked `follow_up_sync_state:
- * "pending"`, which happens only for transport-shaped failures.
+ * TWO INDEPENDENT JOBS, TWO INDEPENDENT CLOCKS.
  *
- * WHAT IT DELIBERATELY DOES NOT RETRY. `"blocked"` records need a person to
- * act (connect Google, re-grant the scope, replace a revoked token). Retrying
- * those on a timer would burn quota forever, never fix the cause, and page
- * about it every cycle. They are surfaced to the operator instead, on the lead.
+ *   1. RETRY  — push a follow-up that has not reached the operator's calendar.
+ *   2. CLEANUP — delete a reminder left on a PREVIOUS operator's calendar when
+ *                a lead changed hands and the handover delete failed.
+ *
+ * They are deliberately not coupled. An earlier version hung the cleanup off
+ * the sync state, so a stranded reminder was only ever retried when the new
+ * operator's own push also happened to be pending. Clearing a reassigned
+ * lead's follow-up, or handing it to someone with no Google connection, left
+ * the old rep's phone ringing for a call nobody was going to make, with no
+ * worker eligible to touch the record again.
+ *
+ * Both jobs raise the same flag, `follow_up_worker_queue`, which is the single
+ * key this scan filters on. One plain equality finds every record with work.
+ *
+ * WHAT IT DELIBERATELY DOES NOT RETRY. `"blocked"` syncs need a person to act
+ * (connect Google, re-grant the scope, replace a revoked token). Retrying those
+ * on a timer would burn quota forever, never fix the cause, and page about it
+ * every cycle. They are surfaced to the operator instead, on the lead.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -29,7 +41,11 @@ import { removeReminderEvent } from "@/lib/integrations/calendar-reminder";
 import {
   syncFollowUpReminder,
   isDueForRetry,
+  isStrandedDue,
   nextAttemptAt,
+  workerQueueFlag,
+  MAX_SYNC_ATTEMPTS,
+  WORKER_QUEUE_ON,
   FOLLOW_UP_FIELDS,
 } from "@/lib/leads/follow-up";
 
@@ -38,10 +54,11 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
 /**
- * Ceiling on records examined per run. The pending set is small by nature (it
- * only grows during a Google outage), but a cap keeps one bad window from
- * running the function to its timeout. Anything left waits for the next tick,
- * and `truncated` in the response says so rather than reading as "all clear".
+ * Ceiling on records examined per run. The queue is small by nature (it only
+ * grows during a Google outage or a failed handover), but a cap keeps one bad
+ * window from running the function to its timeout. Anything left waits for the
+ * next tick, and `truncated` in the response says so rather than reading as
+ * "all clear".
  */
 const SCAN_LIMIT = 200;
 
@@ -55,6 +72,11 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value ? value : null;
 }
 
+function asCount(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
   if (denied) return denied;
@@ -62,29 +84,27 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
   const db = getServiceSupabase();
 
-  // Filter on the state only, then decide due-ness in JS.
+  // Filter on the queue flag only, then decide due-ness in JS.
   //
   // A range comparison against a value INSIDE the JSON document
   // (`next_attempt_at <= now`) would depend on the Turso PostgREST bridge
   // supporting operators it is not proven to support, and a filter the bridge
   // silently mistranslates returns a plausible empty set rather than an error.
-  // The pending set is small, so scanning it and comparing here is both safe
-  // and cheap. See isDueForRetry.
+  // The queue is small, so scanning it and comparing here is safe and cheap.
   //
   // ORDERED BY `updated_at` ASCENDING, AND THAT IS NOT COSMETIC. An unordered
   // LIMIT can hand back the same first 200 rows every run, so during an outage
-  // that produces more than 200 pending leads the rows past the page are never
-  // examined until the earlier ones sync or exhaust -- which, on a ladder that
-  // ends at twelve hours, could delay a callback by days. Every retry writes
-  // the record, so oldest-touched-first rotates the whole backlog through the
-  // page. `updated_at` is a real column, not a field inside the JSON document,
-  // so ordering on it does not depend on bridge support for JSON operators.
-  // (Codex review, 2026-08-26.)
+  // that produces more than 200 queued leads the rows past the page are never
+  // examined until the earlier ones finish -- which, on a ladder that ends at
+  // twelve hours, could delay a callback by days. Every attempt writes the
+  // record, so oldest-touched-first rotates the whole backlog through the page.
+  // `updated_at` is a real column, not a field inside the JSON document, so
+  // ordering on it does not depend on bridge support for JSON operators.
   const scan = await db
     .from("tenant_records")
     .select("id, tenant_id, data")
     .eq("entity_type", "lead")
-    .eq(`data->>${FOLLOW_UP_FIELDS.state}`, "pending")
+    .eq(`data->>${FOLLOW_UP_FIELDS.workerQueue}`, WORKER_QUEUE_ON)
     .order("updated_at", { ascending: true })
     .limit(SCAN_LIMIT);
 
@@ -101,7 +121,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const rows = (scan.data || []) as LeadRow[];
   const counts = {
     scanned: rows.length,
-    due: 0,
+    touched: 0,
     synced: 0,
     stillPending: 0,
     exhausted: 0,
@@ -109,102 +129,125 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     unattributed: 0,
     persistFailed: 0,
     strandedCleared: 0,
-    strandedRemaining: 0,
+    strandedRetrying: 0,
+    strandedAbandoned: 0,
   };
-  const exhaustedByTenant = new Map<string, number>();
+  const alertsByTenant = new Map<string, { exhausted: number; stranded: number }>();
+  const bumpAlert = (tenantId: string, key: "exhausted" | "stranded") => {
+    const row = alertsByTenant.get(tenantId) || { exhausted: 0, stranded: 0 };
+    row[key] += 1;
+    alertsByTenant.set(tenantId, row);
+  };
 
   for (const row of rows) {
     const data = (row.data || {}) as Record<string, unknown>;
-    if (!isDueForRetry(data, Date.now())) continue;
-    counts.due += 1;
+    const now = Date.now();
+    const strandedDue = isStrandedDue(data, now);
+    const syncDue = isDueForRetry(data, now);
+    if (!strandedDue && !syncDue) continue;
+    counts.touched += 1;
 
-    const operatorUserId = asString(data[FOLLOW_UP_FIELDS.operatorUserId]);
-    if (!operatorUserId) {
-      // Nothing to retry against. Park it rather than guessing an owner: a
-      // reminder pushed to the wrong operator lands on a stranger's phone.
-      counts.unattributed += 1;
-      try {
-        await updateRecord({
-          tenant_id: row.tenant_id,
-          entity: "lead",
-          id: row.id,
-          patch: {
-            [FOLLOW_UP_FIELDS.state]: "blocked",
-            [FOLLOW_UP_FIELDS.reason]: "unattributed",
-            [FOLLOW_UP_FIELDS.detail]: "no operator recorded for this reminder",
-            [FOLLOW_UP_FIELDS.nextAttemptAt]: null,
+    const patch: Record<string, unknown> = {};
+
+    // ---- JOB 2: the stranded cleanup, on its own clock ---------------------
+    let strandedEventId = asString(data[FOLLOW_UP_FIELDS.strandedEventId]);
+    if (strandedDue) {
+      const strandedOperator = asString(data[FOLLOW_UP_FIELDS.strandedOperatorUserId]);
+      const strandedAttempts = asCount(data[FOLLOW_UP_FIELDS.strandedAttempts]);
+      const removed = await removeReminderEvent(
+        row.tenant_id,
+        strandedOperator as string,
+        strandedEventId as string,
+      );
+      if (removed.ok) {
+        counts.strandedCleared += 1;
+        strandedEventId = null;
+        patch[FOLLOW_UP_FIELDS.strandedEventId] = null;
+        patch[FOLLOW_UP_FIELDS.strandedOperatorUserId] = null;
+        patch[FOLLOW_UP_FIELDS.strandedAttempts] = 0;
+        patch[FOLLOW_UP_FIELDS.strandedNextAttemptAt] = null;
+        patch[FOLLOW_UP_FIELDS.strandedReason] = null;
+      } else {
+        const next = nextAttemptAt(strandedAttempts, now);
+        patch[FOLLOW_UP_FIELDS.strandedAttempts] = strandedAttempts + 1;
+        patch[FOLLOW_UP_FIELDS.strandedNextAttemptAt] = next;
+        if (next) {
+          counts.strandedRetrying += 1;
+          patch[FOLLOW_UP_FIELDS.strandedReason] = removed.reason;
+        } else {
+          // OUT OF RETRIES, AND THIS ONE MUST NOT GO QUIET.
+          //
+          // A live reminder we cannot delete is on a real person's phone. An
+          // earlier version left the record `pending` with a null next-attempt,
+          // which `isDueForRetry` then rejected forever: no retries, no alert,
+          // no trace. It ends as an explicit terminal state that pages.
+          counts.strandedAbandoned += 1;
+          patch[FOLLOW_UP_FIELDS.strandedReason] = "retry_exhausted";
+          bumpAlert(row.tenant_id, "stranded");
+        }
+      }
+    }
+
+    // ---- JOB 1: the sync retry --------------------------------------------
+    if (syncDue) {
+      const operatorUserId = asString(data[FOLLOW_UP_FIELDS.operatorUserId]);
+      if (!operatorUserId) {
+        // Nothing to retry against. Park it rather than guessing an owner: a
+        // reminder pushed to the wrong operator lands on a stranger's phone.
+        counts.unattributed += 1;
+        patch[FOLLOW_UP_FIELDS.state] = "blocked";
+        patch[FOLLOW_UP_FIELDS.reason] = "unattributed";
+        patch[FOLLOW_UP_FIELDS.detail] = "no operator recorded for this reminder";
+        patch[FOLLOW_UP_FIELDS.nextAttemptAt] = null;
+      } else {
+        const existingEventId = asString(data[FOLLOW_UP_FIELDS.eventId]);
+        const attempts = asCount(data[FOLLOW_UP_FIELDS.attempts]);
+        const outcome = await syncFollowUpReminder({
+          lead: {
+            leadId: row.id,
+            tenantId: row.tenant_id,
+            operatorUserId,
+            // Retry the reminder AS SCHEDULED, from the snapshot taken when the
+            // operator saved it. Rebuilding it from the lead as it looks now
+            // would quietly push a different reminder than they were promised.
+            businessName:
+              asString(data[FOLLOW_UP_FIELDS.summary])?.replace(/^Call\s+/, "") ||
+              asString(data.company) ||
+              asString(data.name) ||
+              "lead",
+            phone: asString(data.phone),
+            leadUrl: `${req.nextUrl.origin}/pipeline/${row.id}`,
+            timeZone: asString(data[FOLLOW_UP_FIELDS.timeZone]),
           },
+          followUpAt: asString(data[FOLLOW_UP_FIELDS.at]),
+          note: asString(data[FOLLOW_UP_FIELDS.note]),
+          existingEventId,
+          attempts,
         });
-      } catch {
-        counts.persistFailed += 1;
+        Object.assign(patch, outcome.patch);
+
+        if (outcome.state === "synced") counts.synced += 1;
+        else if (outcome.state === "pending") counts.stillPending += 1;
+        else if (outcome.state === "blocked") {
+          counts.blocked += 1;
+          if (outcome.patch[FOLLOW_UP_FIELDS.reason] === "retry_exhausted") {
+            counts.exhausted += 1;
+            bumpAlert(row.tenant_id, "exhausted");
+          }
+        }
       }
-      continue;
     }
 
-    // A reminder left on a PREVIOUS operator's calendar by a lead handover.
-    // Cleared as its owner, before anything else, because it is the only piece
-    // of state here that no operator can see or fix from a screen.
-    const strandedId = asString(data[FOLLOW_UP_FIELDS.strandedEventId]);
-    const strandedOperator = asString(data[FOLLOW_UP_FIELDS.strandedOperatorUserId]);
-    let strandedCleared = true;
-    if (strandedId && strandedOperator) {
-      const removed = await removeReminderEvent(row.tenant_id, strandedOperator, strandedId);
-      strandedCleared = removed.ok;
-      if (removed.ok) counts.strandedCleared += 1;
-      else counts.strandedRemaining += 1;
-    }
-
-    const existingEventId = asString(data[FOLLOW_UP_FIELDS.eventId]);
-    const attemptsRaw = Number(data[FOLLOW_UP_FIELDS.attempts]);
-    const attempts = Number.isFinite(attemptsRaw) && attemptsRaw > 0 ? attemptsRaw : 0;
-
-    const outcome = await syncFollowUpReminder({
-      lead: {
-        leadId: row.id,
-        tenantId: row.tenant_id,
-        operatorUserId,
-        // Retry the reminder AS SCHEDULED, from the snapshot taken when the
-        // operator saved it. Rebuilding it from the lead as it looks now would
-        // quietly push a different reminder than the one they were promised.
-        businessName:
-          asString(data[FOLLOW_UP_FIELDS.summary])?.replace(/^Call\s+/, "") ||
-          asString(data.company) ||
-          asString(data.name) ||
-          "lead",
-        phone: asString(data.phone),
-        leadUrl: `${req.nextUrl.origin}/pipeline/${row.id}`,
-        timeZone: asString(data[FOLLOW_UP_FIELDS.timeZone]),
-      },
-      followUpAt: asString(data[FOLLOW_UP_FIELDS.at]),
-      note: asString(data[FOLLOW_UP_FIELDS.note]),
-      existingEventId,
-      attempts,
+    // The flag is recomputed from BOTH jobs, so neither can clear it while the
+    // other still owes work. A stranded event that has exhausted its retries
+    // drops out of the queue on purpose: no worker can help it now, and the
+    // alert above is what carries it to a person.
+    const strandedStillQueued =
+      Boolean(strandedEventId) && patch[FOLLOW_UP_FIELDS.strandedReason] !== "retry_exhausted";
+    patch[FOLLOW_UP_FIELDS.workerQueue] = workerQueueFlag({
+      syncState: (patch[FOLLOW_UP_FIELDS.state] ?? data[FOLLOW_UP_FIELDS.state]) as string,
+      strandedEventId: strandedStillQueued ? strandedEventId : null,
     });
-
-    const patch: Record<string, unknown> = { ...outcome.patch };
-    if (strandedCleared) {
-      patch[FOLLOW_UP_FIELDS.strandedEventId] = null;
-      patch[FOLLOW_UP_FIELDS.strandedOperatorUserId] = null;
-    } else if (patch[FOLLOW_UP_FIELDS.state] === "synced") {
-      // This operator's own reminder is fine, but the old one is still live.
-      // Staying pending is what guarantees another pass; writing "synced" here
-      // would erase the only record that a stranded event exists.
-      patch[FOLLOW_UP_FIELDS.state] = "pending";
-      patch[FOLLOW_UP_FIELDS.reason] = "stranded_handover";
-      patch[FOLLOW_UP_FIELDS.attempts] = attempts + 1;
-      patch[FOLLOW_UP_FIELDS.nextAttemptAt] = nextAttemptAt(attempts, Date.now());
-    }
-
-    const finalState = patch[FOLLOW_UP_FIELDS.state];
-    if (finalState === "synced") counts.synced += 1;
-    else if (finalState === "pending") counts.stillPending += 1;
-    else if (finalState === "blocked") {
-      counts.blocked += 1;
-      if (patch[FOLLOW_UP_FIELDS.reason] === "retry_exhausted") {
-        counts.exhausted += 1;
-        exhaustedByTenant.set(row.tenant_id, (exhaustedByTenant.get(row.tenant_id) || 0) + 1);
-      }
-    }
 
     try {
       await updateRecord({
@@ -219,29 +262,43 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // which the next tick can recreate cleanly.
       counts.persistFailed += 1;
       const newId = patch[FOLLOW_UP_FIELDS.eventId];
-      if (typeof newId === "string" && newId && newId !== existingEventId) {
+      const priorId = asString(data[FOLLOW_UP_FIELDS.eventId]);
+      const operatorUserId = asString(data[FOLLOW_UP_FIELDS.operatorUserId]);
+      if (typeof newId === "string" && newId && newId !== priorId && operatorUserId) {
         await removeReminderEvent(row.tenant_id, operatorUserId, newId);
       }
     }
   }
 
-  // Page only on the terminal condition: a reminder that has run out of retries
-  // is a promise to a prospect that no phone will ever surface. Transient
-  // pending records are the system working, and alerting on them every tick is
+  // Page only on terminal conditions. A reminder that has run out of retries is
+  // a promise no phone will surface; a stranded event that cannot be deleted is
+  // a live alert on someone's phone for a lead they no longer own. Transient
+  // pending records are the system working, and alerting on those every tick is
   // how a useful signal becomes noise nobody reads.
-  for (const [tenantId, count] of exhaustedByTenant) {
+  for (const [tenantId, tally] of alertsByTenant) {
+    const parts: string[] = [];
+    if (tally.exhausted) {
+      parts.push(
+        `${tally.exhausted} follow-up reminder${tally.exhausted === 1 ? "" : "s"} gave up reaching Google Calendar. ` +
+          "The follow-up is still on the lead, so nothing was lost, but it will not appear on the rep's phone.",
+      );
+    }
+    if (tally.stranded) {
+      parts.push(
+        `${tally.stranded} reminder${tally.stranded === 1 ? "" : "s"} could not be removed from a previous rep's calendar ` +
+          "after repeated attempts, and may still alert them for a lead they no longer own. Remove by hand.",
+      );
+    }
     try {
       await writeAgentAlert({
         tenantId,
         alertType: "calendar_reminder_unrecoverable",
         severity: "warn",
-        title: `${count} follow-up reminder${count === 1 ? "" : "s"} gave up reaching Google Calendar`,
-        body:
-          "The follow-up is still on the lead in the pipeline, so nothing was lost, " +
-          "but it will not appear on the rep's phone. Check the Google connection in Settings.",
+        title: `Calendar reminders need a human (${tally.exhausted + tally.stranded})`,
+        body: parts.join(" "),
         lane: "operator",
         subjectType: "lead",
-        payload: { count, source: "reconcile-calendar-reminders" },
+        payload: { ...tally, source: "reconcile-calendar-reminders" },
       });
     } catch {
       // An alert that cannot be delivered must not abort the drain.
@@ -251,10 +308,11 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const body = {
     ok: true,
     ...counts,
+    maxSyncAttempts: MAX_SYNC_ATTEMPTS,
     truncated: rows.length >= SCAN_LIMIT,
     ms: Date.now() - startedAt,
   };
-  // One structured line per run: this is the only place the pending backlog is
+  // One structured line per run: this is the only place the queue backlog is
   // observable without opening the database.
   console.log("[reconcile-calendar-reminders]", JSON.stringify(body));
   return NextResponse.json(body);
