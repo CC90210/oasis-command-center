@@ -763,14 +763,74 @@ async function openAuthorizedCalendarSession(args: {
 
   let accessToken = sessionBundle.access_token || "";
   const expiresAt = sessionBundle.expires_at ? Date.parse(sessionBundle.expires_at) : 0;
+  /**
+   * Refresh, and FALL BACK IF THE HOST'S TOKEN HAS BEEN REVOKED.
+   *
+   * ═══ THE GAP THIS CLOSES (live, 2026-08-26) ══════════════════════════════
+   *
+   * The workspace fallback above triggers on a token that is MISSING or
+   * WRONG-SCOPED. It does not trigger on a token that is PRESENT and DEAD --
+   * and revocation is the common case, not the rare one: a host changes their
+   * Google password, or removes the app at myaccount.google.com/permissions,
+   * and the stored refresh_token stays in the column looking perfectly healthy.
+   *
+   * So a host whose access had been withdrawn skipped the fallback entirely,
+   * went straight to refreshAccessToken with a dead token, and the booking died
+   * with `token_refresh_failed` -- WHILE A FULLY CONFIGURED WORKSPACE CALENDAR
+   * SAT UNUSED. The operator reported it as "it says invalid token"; nothing
+   * could book, and the credentials to book were already in production.
+   *
+   * Google reports revocation the same way it reports every other bad grant, so
+   * the only way to learn it is to try. This tries, and on failure retries once
+   * through the workspace identity when one is configured.
+   *
+   * WHAT IS DELIBERATELY PRESERVED:
+   *
+   *  - No fallback configured  -> the original error propagates unchanged.
+   *    Fail-closed behaviour is not traded away for convenience.
+   *  - Already on the fallback -> no retry. Retrying the system token with the
+   *    system token is a loop that would turn one clear failure into two.
+   *  - `persist` stays false on the fallback path, so a system token is never
+   *    written into a user's bundle -- that would silently convert a temporary
+   *    cover into the host's permanent stored identity.
+   *
+   * WHAT THE REP SEES CHANGES, AND THAT MATTERS: the invite now goes out
+   * organised by the shared OASIS workspace address rather than by the host.
+   * That is a real difference and the handoff banner says so before they book.
+   * It is the right trade for a client-facing founder audit -- and it is NOT
+   * extended to private rep reminders, which refuse this fallback on purpose
+   * because it would publish a rep's own call notes to the whole workspace.
+   */
   const refresh = async () => {
-    accessToken = await refreshAccessToken({
-      tenantId: args.tenantId,
-      organizerUserId: args.organizerUserId,
-      refreshToken: sessionBundle.refresh_token,
-      dependencies,
-      persist: !systemFallback,
-    });
+    try {
+      accessToken = await refreshAccessToken({
+        tenantId: args.tenantId,
+        organizerUserId: args.organizerUserId,
+        refreshToken: sessionBundle.refresh_token,
+        dependencies,
+        persist: !systemFallback,
+      });
+    } catch (error) {
+      const revoked =
+        error instanceof GoogleCalendarIntegrationError && error.code === "token_refresh_failed";
+      const system = revoked && !systemFallback ? systemCalendarConfig() : null;
+      if (!system) throw error;
+      systemFallback = true;
+      calendarId = system.calendarId;
+      sessionBundle = {
+        ...sessionBundle,
+        refresh_token: system.refreshToken,
+        scope: CALENDAR_EVENTS_SCOPE,
+        ...(system.organizerEmail ? { gmail_address: system.organizerEmail } : {}),
+      };
+      accessToken = await refreshAccessToken({
+        tenantId: args.tenantId,
+        organizerUserId: args.organizerUserId,
+        refreshToken: system.refreshToken,
+        dependencies,
+        persist: false,
+      });
+    }
   };
   if (
     !accessToken ||
