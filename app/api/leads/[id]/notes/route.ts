@@ -11,7 +11,18 @@
  * Auth: session-cookie → tenant via resolveSessionContext.
  *
  *   GET   — list the lead's notes, newest first, 100 max.
- *   POST  — body { note: string } — insert one note.
+ *   POST  — body { note: string, followUpAt?: string | null } — insert one note,
+ *           and optionally schedule (or clear) a follow-up on the operator's
+ *           own Google Calendar.
+ *
+ * ON `followUpAt`, THE TRI-STATE MATTERS:
+ *   absent  — leave any existing follow-up exactly as it is. A plain note must
+ *             never silently cancel a callback the operator already promised.
+ *   null    — clear the follow-up and delete the reminder.
+ *   string  — schedule at that instant.
+ *
+ * The calendar is a MIRROR of `follow_up_at` on the lead, never the record of
+ * it. See lib/leads/follow-up.ts for the ordering rule and the retry design.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -19,7 +30,14 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLeadTarget } from "@/lib/lead-access";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
-import { updateRecord, RecordsError } from "@/lib/manifest/data";
+import { getRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
+import { removeReminderEvent } from "@/lib/integrations/calendar-reminder";
+import {
+  syncFollowUpReminder,
+  describeFollowUpSync,
+  FOLLOW_UP_FIELDS,
+  type FollowUpSyncState,
+} from "@/lib/leads/follow-up";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -107,9 +125,14 @@ export async function POST(
       { status: access.status },
     );
   }
-  let body: { note?: unknown };
+  let body: { note?: unknown; followUpAt?: unknown; reminderMinutes?: unknown; timeZone?: unknown };
   try {
-    body = (await req.json()) as { note?: unknown };
+    body = (await req.json()) as {
+      note?: unknown;
+      followUpAt?: unknown;
+      reminderMinutes?: unknown;
+      timeZone?: unknown;
+    };
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
@@ -118,6 +141,47 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "note_required" }, { status: 400 });
   }
   const note = raw.slice(0, MAX_NOTE_LENGTH);
+
+  // Tri-state: undefined leaves the existing follow-up alone, null clears it,
+  // a string schedules it. `"followUpAt" in body` is the only way to tell
+  // "not supplied" from "explicitly cleared" once JSON has been parsed.
+  const followUpSupplied = Object.prototype.hasOwnProperty.call(body, "followUpAt");
+  let followUpAt: string | null = null;
+  if (followUpSupplied && body.followUpAt !== null) {
+    if (typeof body.followUpAt !== "string") {
+      return NextResponse.json({ ok: false, error: "invalid_follow_up_at" }, { status: 400 });
+    }
+    const parsed = Date.parse(body.followUpAt);
+    if (!Number.isFinite(parsed)) {
+      return NextResponse.json({ ok: false, error: "invalid_follow_up_at" }, { status: 400 });
+    }
+    // A reminder in the past fires immediately or never, depending on the
+    // client. Either way it is not what the operator meant, so refuse it here
+    // rather than writing a promise nothing will keep.
+    if (parsed <= Date.now()) {
+      return NextResponse.json({ ok: false, error: "follow_up_must_be_future" }, { status: 400 });
+    }
+    followUpAt = new Date(parsed).toISOString();
+  }
+  // The operator's IANA zone, so the event reads correctly on their phone.
+  // Charset-allowlisted rather than trusted: this string is stored on the lead
+  // and sent to Google, and "Area/Location" is the entire legal shape.
+  let timeZone: string | null = null;
+  if (typeof body.timeZone === "string" && body.timeZone) {
+    if (!/^[A-Za-z][A-Za-z0-9+_-]*(?:\/[A-Za-z0-9+_-]+){0,2}$/.test(body.timeZone)) {
+      return NextResponse.json({ ok: false, error: "invalid_time_zone" }, { status: 400 });
+    }
+    timeZone = body.timeZone;
+  }
+
+  let reminderMinutes: number | undefined;
+  if (body.reminderMinutes !== undefined) {
+    const value = Number(body.reminderMinutes);
+    if (!Number.isFinite(value) || value < 0 || value > 40_320) {
+      return NextResponse.json({ ok: false, error: "invalid_reminder_minutes" }, { status: 400 });
+    }
+    reminderMinutes = value;
+  }
 
   const occurredAt = new Date().toISOString();
   const db = getServiceSupabase();
@@ -152,12 +216,36 @@ export async function POST(
   if (ins.error) {
     return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
   }
+  // Read the lead BEFORE patching it: the stored event id is the only handle
+  // we have on any reminder already on this operator's calendar, and the
+  // business name and phone are what make the reminder readable at a glance.
+  let leadData: Record<string, unknown> = {};
+  if (followUpSupplied) {
+    try {
+      const record = await getRecord({
+        tenant_id: sess.tenantId,
+        entity: "lead",
+        id: target.queryLeadId,
+      });
+      leadData = (record?.data || {}) as Record<string, unknown>;
+    } catch {
+      // Not fatal. A missing read costs us the existing event id, which the
+      // sync below handles by creating a fresh event; it never costs the note.
+      leadData = {};
+    }
+  }
+
+  // STEP 2 — THE SOURCE-OF-TRUTH WRITE. `follow_up_at` lands on the lead here,
+  // before Google is contacted at all. Everything after this point is a mirror.
   try {
     await updateRecord({
       tenant_id: sess.tenantId,
       entity: "lead",
       id: target.queryLeadId,
-      patch: { last_contacted_at: occurredAt },
+      patch: {
+        last_contacted_at: occurredAt,
+        ...(followUpSupplied ? { [FOLLOW_UP_FIELDS.at]: followUpAt } : {}),
+      },
     });
   } catch (error) {
     const code = error instanceof RecordsError ? error.code : "unknown";
@@ -166,5 +254,77 @@ export async function POST(
       { status: 500 },
     );
   }
-  return NextResponse.json({ ok: true, note: ins.data, touchAt: occurredAt });
+
+  if (!followUpSupplied) {
+    return NextResponse.json({ ok: true, note: ins.data, touchAt: occurredAt });
+  }
+
+  // STEP 3 — THE MIRROR. Never throws, never undoes steps 1 or 2.
+  const existingEventId =
+    typeof leadData[FOLLOW_UP_FIELDS.eventId] === "string"
+      ? (leadData[FOLLOW_UP_FIELDS.eventId] as string)
+      : null;
+  const outcome = await syncFollowUpReminder({
+    lead: {
+      leadId: target.queryLeadId,
+      tenantId: sess.tenantId,
+      operatorUserId: sess.userId,
+      businessName:
+        (typeof leadData.company === "string" && leadData.company) ||
+        (typeof leadData.name === "string" && leadData.name) ||
+        "lead",
+      phone: typeof leadData.phone === "string" ? leadData.phone : null,
+      leadUrl: `${req.nextUrl.origin}/pipeline/${target.queryLeadId}`,
+      timeZone:
+        timeZone ||
+        (typeof leadData[FOLLOW_UP_FIELDS.timeZone] === "string"
+          ? (leadData[FOLLOW_UP_FIELDS.timeZone] as string)
+          : null),
+    },
+    followUpAt,
+    note,
+    existingEventId,
+    // A fresh operator action restarts the retry ladder: this is new intent,
+    // not a continuation of an old failing attempt.
+    attempts: 0,
+    reminderMinutes,
+  });
+
+  // STEP 4 — PERSIST THE OUTCOME, AND ROLL BACK IF WE CANNOT.
+  //
+  // The event id only exists here, in memory. If this write fails after Google
+  // created an event, nothing will ever be able to address that event again:
+  // a later "clear this reminder" would target a null id, succeed vacuously,
+  // and leave a live alert on the operator's phone forever. Deleting the event
+  // we just made returns us to "no reminder", which is recoverable.
+  let syncState: FollowUpSyncState = outcome.state;
+  let syncMessage = outcome.message;
+  try {
+    await updateRecord({
+      tenant_id: sess.tenantId,
+      entity: "lead",
+      id: target.queryLeadId,
+      patch: outcome.patch,
+    });
+  } catch {
+    const orphanId = outcome.patch[FOLLOW_UP_FIELDS.eventId];
+    if (typeof orphanId === "string" && orphanId && orphanId !== existingEventId) {
+      const rolledBack = await removeReminderEvent(sess.tenantId, sess.userId, orphanId);
+      syncState = "blocked";
+      syncMessage = rolledBack.ok
+        ? "Follow-up saved. The phone reminder could not be recorded, so it was removed. Save again to retry."
+        : "Follow-up saved, but a reminder may be live on your calendar that we can no longer manage. Remove it by hand.";
+    } else {
+      syncState = "blocked";
+      syncMessage = describeFollowUpSync("blocked", null);
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    note: ins.data,
+    touchAt: occurredAt,
+    followUpAt,
+    calendar: { state: syncState, message: syncMessage },
+  });
 }

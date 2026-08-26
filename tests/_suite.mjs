@@ -28,6 +28,8 @@ const TESTS = [
   "tests/lead-transfer-canonical.test.ts",
   "tests/pipeline-turnkey-lifecycle.test.ts",
   "tests/founder-booking-ui.test.ts",
+  "tests/calendar-reminder.test.ts",
+  "tests/lead-follow-up-sync.test.ts",
   "tests/founder-meeting-calendar.test.ts",
   "tests/founder-meeting-closed-loop.test.ts",
   "tests/founder-meeting-service.test.ts",

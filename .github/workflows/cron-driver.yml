@@ -40,7 +40,7 @@ on:
   schedule:
     - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls, dispatch-bulk-email
     - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll, scan-lender-replies
-    - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
+    - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, reconcile-calendar-reminders, health-check
     - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
     - cron: "0 * * * *"      # collect-outreach-intel
     - cron: "15 * * * *"     # collect-cc-metrics
@@ -130,6 +130,7 @@ jobs:
               ROUTES="/api/cron/enroll-drips
                       /api/cron/enroll-accelerated
                       /api/cron/reconcile-sms
+                      /api/cron/reconcile-calendar-reminders
                       /api/cron/health-check" ;;
             "*/30 * * * *")
               # Inbound scanning. Without these an approval sits unread, which

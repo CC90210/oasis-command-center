@@ -116,6 +116,10 @@
     {
       "path": "/api/cron/dispatch-bulk-email",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-calendar-reminders",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

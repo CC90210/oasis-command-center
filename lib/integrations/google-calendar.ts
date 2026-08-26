@@ -17,7 +17,7 @@ import {
 } from "@/lib/user-integration-store";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
+export const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 const WORK_OAUTH_SERVICE = "gmail_oauth";
 const PRIMARY_CALENDAR_ID = "primary";
 const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
@@ -637,13 +637,13 @@ function publicEventDescription(clientAgenda?: string, website?: string): string
   return sections.join("\n\n");
 }
 
-type AuthorizedCalendarFetch = (
+export type AuthorizedCalendarFetch = (
   url: string,
   init: RequestInit,
   networkErrorCode: GoogleCalendarErrorCode,
 ) => Promise<Response>;
 
-async function openAuthorizedCalendarSession(args: {
+export async function openAuthorizedCalendarSession(args: {
   tenantId: string;
   organizerUserId: string;
   expectedOrganizerEmail?: string;
