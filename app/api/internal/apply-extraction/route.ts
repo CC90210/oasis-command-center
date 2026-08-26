@@ -211,6 +211,7 @@ export async function POST(req: NextRequest) {
         application_id: applied.applicationId,
         lead_id: applied.leadId,
         created_lead: applied.createdLead,
+        matched_existing: applied.matchedExisting,
         signature_preview: signaturePreview,
         signature_box: signatureBox,
         used_fallback: usedFallback,

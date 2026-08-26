@@ -17,6 +17,7 @@
 import "server-only";
 import { createRecord, updateRecord, getRecord } from "@/lib/manifest/data";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
+import { findExistingLead } from "@/lib/forms/agent-routing";
 import { extractAppFields } from "@/lib/forms/application-upsert";
 import { uploadLeadDocument } from "@/lib/lead-documents";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
@@ -39,7 +40,18 @@ const LEAD_IDENTITY_KEYS = [
 ] as const;
 
 export type ApplyExtractedResult =
-  | { ok: true; leadId: string; applicationId: string; createdLead: boolean; appliedKeys: string[] }
+  | {
+      ok: true;
+      leadId: string;
+      applicationId: string;
+      createdLead: boolean;
+      appliedKeys: string[];
+      /** True when the drop was routed into a merchant we ALREADY had rather
+       *  than creating a new lead. Surfaced to the operator, because "your
+       *  document went onto an existing file" is a different outcome from "a
+       *  new deal was created" and they must not have to discover it. */
+      matchedExisting: boolean;
+    }
   | { ok: false; error: string };
 
 export async function applyExtractedApplication(input: {
@@ -60,6 +72,38 @@ export async function applyExtractedApplication(input: {
     // 2) Ensure a lead.
     let leadId = input.leadId || null;
     let createdLead = false;
+
+    /**
+     * Is this a merchant we already have? (2026-08-26)
+     *
+     * The new-deal path used to create a lead unconditionally, and a rep drops
+     * an application for a merchant who is ALREADY in the CRM most of the time
+     * — that is where the paperwork comes from. Measured live: four recovered
+     * applications produced four second copies of merchants who already existed
+     * at `signed_application` WITH contact details, sitting beside the
+     * originals on the same board. The duplicate is also the worse record,
+     * because a completed application form often carries no contact fields
+     * (the merchant gave those on form 1), so the copy arrives with no email
+     * and no phone.
+     *
+     * Same matcher the public form uses — email, then phone, then exact
+     * business name — so the two intake paths cannot disagree about what
+     * counts as a returning merchant. A miss just creates a fresh lead, which
+     * is the old behaviour; it never guesses.
+     */
+    let autoMatchedLead = false;
+    if (!leadId) {
+      const match = await findExistingLead(input.tenantId, {
+        email: typeof fields.email === "string" ? fields.email : null,
+        phone: typeof fields.phone === "string" ? fields.phone : null,
+        business: typeof fields.business_name === "string" ? fields.business_name : null,
+      }).catch(() => null);
+      if (match?.id) {
+        leadId = match.id;
+        autoMatchedLead = true;
+      }
+    }
+
     if (!leadId) {
       const leadData: Record<string, unknown> = { source: "dropped_application" };
       for (const k of LEAD_IDENTITY_KEYS) {
@@ -90,6 +134,16 @@ export async function applyExtractedApplication(input: {
     } else {
       // Existing lead — backfill identity gaps only (never clobber operator data).
       const lead = await getRecord({ tenant_id: input.tenantId, entity: "lead", id: leadId }).catch(() => null);
+      // Same fail-closed rule as the application read below, for the same
+      // reason, applied to the path this change introduced: an unread lead
+      // yields an empty `ld`, every identity key then looks like a gap, and the
+      // merchant's email and phone get overwritten from a document that may not
+      // even carry them. On an operator-chosen autofill they picked the target
+      // and the legacy tolerance stands; on a lead the MATCHER picked, nobody
+      // did, so a failed read must stop rather than guess.
+      if (autoMatchedLead && !lead?.data) {
+        return { ok: false, error: "matched_lead_read_failed" };
+      }
       const ld = (lead?.data || {}) as Record<string, unknown>;
       const patch: Record<string, unknown> = {};
       for (const k of LEAD_IDENTITY_KEYS) {
@@ -107,17 +161,94 @@ export async function applyExtractedApplication(input: {
     const appRes = await createApplicationFromLead({ tenantId: input.tenantId, leadId });
     if (!appRes.ok) return { ok: false, error: appRes.error };
     const applicationId = appRes.applicationId;
+
+    // What we actually wrote. Equals every extracted key on the authoritative
+    // paths; narrowed to the filled gaps on an auto-matched existing record.
+    let writtenKeys: string[] = Object.keys(fields);
+
+    let patch: Record<string, unknown> = {
+      ...fields,
+      lead_id: leadId,
+      status: "application_in",
+      autofilled_at: new Date().toISOString(),
+      autofill_source: "dropped_document",
+    };
+
+    /**
+     * A lead WE matched, onto an application that already existed, is the one
+     * case where this write must not be authoritative.
+     *
+     * Everywhere else the operator chose the target: they opened a lead and
+     * pressed autofill, or the lead was created from this very document a
+     * moment ago. Here nobody chose — the matcher did — and the application on
+     * the other side may be a deal a rep has been working for days.
+     *
+     * Two ways a blind `{...fields}` would damage that:
+     *   - `status: "application_in"` drags a `shopping` or `offer_received`
+     *     deal backwards on the Applications board. Measured against the real
+     *     records: one of the four matched merchants was already at `shopping`.
+     *   - a model reading of `monthly_revenue` overwrites the number a rep
+     *     typed off the bank statements. Both readings are plausible; the
+     *     human's is the one that was checked.
+     *
+     * So on that path we fill GAPS only and never touch status. A reused
+     * application keeps every value it already had; a freshly created one is
+     * empty, so gap-filling writes everything anyway and nothing is lost.
+     */
+    if (autoMatchedLead && !appRes.created) {
+      /**
+       * FAIL CLOSED on the read (Codex review, 2026-08-26).
+       *
+       * The first version swallowed a read failure with `.catch(() => null)`
+       * and carried on with an empty `cur`. That inverts the entire guard: with
+       * nothing to compare against, EVERY extracted value looks like a gap, so
+       * a transient database blip would produce exactly the blind overwrite of
+       * the rep's verified revenue and contact details this branch exists to
+       * prevent — and silently, on a deal someone is working.
+       *
+       * We cannot protect values we could not read. The job is left to retry.
+       */
+      let existingApp: Awaited<ReturnType<typeof getRecord>> | null = null;
+      try {
+        existingApp = await getRecord({
+          tenant_id: input.tenantId,
+          entity: "application",
+          id: applicationId,
+        });
+      } catch (e) {
+        return {
+          ok: false,
+          error: `matched_application_read_failed: ${e instanceof Error ? e.message : "unknown"}`,
+        };
+      }
+      if (!existingApp?.data) {
+        return { ok: false, error: "matched_application_read_failed: empty_record" };
+      }
+      const cur = existingApp.data as Record<string, unknown>;
+      const gaps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(fields)) {
+        const have = cur[k];
+        if (have === undefined || have === null || have === "") gaps[k] = v;
+      }
+      patch = {
+        ...gaps,
+        lead_id: leadId,
+        autofilled_at: new Date().toISOString(),
+        autofill_source: "dropped_document_matched",
+      };
+      // Report what was actually WRITTEN, not what was extracted (Codex P2).
+      // On this branch gap-filling may skip most keys — or all of them — and
+      // the dropzone renders this count verbatim. Claiming "Filled 22 fields"
+      // when existing values blocked every one of them is the message telling
+      // the operator a lie about their own data.
+      writtenKeys = Object.keys(gaps);
+    }
+
     await updateRecord({
       tenant_id: input.tenantId,
       entity: "application",
       id: applicationId,
-      patch: {
-        ...fields,
-        lead_id: leadId,
-        status: "application_in",
-        autofilled_at: new Date().toISOString(),
-        autofill_source: "dropped_document",
-      },
+      patch,
     });
 
     // 4) Keep the original dropped file as the `application` document (it's the
@@ -144,7 +275,14 @@ export async function applyExtractedApplication(input: {
       replace: true,
     }).catch(() => {});
 
-    return { ok: true, leadId, applicationId, createdLead, appliedKeys: Object.keys(fields) };
+    return {
+      ok: true,
+      leadId,
+      applicationId,
+      createdLead,
+      appliedKeys: writtenKeys,
+      matchedExisting: autoMatchedLead,
+    };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "apply_failed" };
   }
