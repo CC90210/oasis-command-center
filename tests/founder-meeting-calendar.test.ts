@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   cancelGoogleFounderMeeting,
   createGoogleFounderMeeting,
+  GoogleCalendarIntegrationError,
   founderMeetingConferenceRequestId,
   founderMeetingEventId,
   operatorCalendarStatus,
@@ -720,4 +721,132 @@ async function main() {
 main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
+});
+
+/**
+ * Restore an env var to exactly what it was, including ABSENT.
+ *
+ * `process.env.FOO = undefined` stores the STRING "undefined", which is truthy
+ * and which systemCalendarConfig() would happily accept as a refresh token. A
+ * cleanup written that way does not restore the environment, it poisons it for
+ * every test that runs afterwards -- which is precisely what happened here: the
+ * next test's expected rejection stopped happening because a "configured"
+ * workspace calendar had appeared out of a failed teardown.
+ */
+function restoreEnv(key: string, previous: string | undefined): void {
+  if (previous === undefined) delete process.env[key];
+  else process.env[key] = previous;
+}
+
+async function revokedTokenFallbackChecks() {
+// ---------------------------------------------------------------------------
+// A REVOKED HOST TOKEN MUST FALL BACK TO THE WORKSPACE CALENDAR, NOT FAIL.
+//
+// Added 2026-08-26, from a live outage. The workspace fallback triggered on a
+// token that was MISSING or WRONG-SCOPED, but not on one that was PRESENT AND
+// DEAD -- and revocation is the common case: a host changes their Google
+// password or removes the app at myaccount.google.com/permissions, and the
+// stored refresh_token stays in the column looking perfectly healthy.
+//
+// So the booking skipped the fallback, went to refreshAccessToken with a dead
+// token, and died with `token_refresh_failed` WHILE A FULLY CONFIGURED
+// WORKSPACE CALENDAR SAT UNUSED. The credentials to book were already in
+// production the whole time.
+{
+  const prevToken = process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN;
+  const prevAddress = process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS;
+  const prevClientId = process.env.GOOGLE_CLIENT_ID;
+  const prevSecret = process.env.GOOGLE_CLIENT_SECRET;
+  process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "system-refresh-token";
+  process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "meetings@oasisai.work";
+  process.env.GOOGLE_CLIENT_ID = "google-client-id";
+  process.env.GOOGLE_CLIENT_SECRET = "google-client-secret";
+
+  const tokenBodies: string[] = [];
+  let created: Record<string, unknown> | null = null;
+
+  const fetchImpl: GoogleCalendarDependencies["fetchImpl"] = async (url, init) => {
+    const href = String(url);
+    if (href.includes("oauth2.googleapis.com/token")) {
+      const body = String((init as RequestInit)?.body || "");
+      tokenBodies.push(body);
+      // The HOST's token is the revoked one. The SYSTEM token still works.
+      if (body.includes("refresh_token=refresh-token")) {
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ access_token: "system-access-token", expires_in: 3600 }), { status: 200 });
+    }
+    if (href.includes("/events")) {
+      created = { url: href };
+      return new Response(JSON.stringify(eventResponse(deterministicEventId())), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    // The stored access token must be STALE, or nothing ever calls refresh and
+    // the revoked refresh_token is never exercised -- which is exactly the shape
+    // of a test that passes while proving nothing.
+    const staleBundle = { ...freshBundle(), access_token: "", expires_at: "2026-08-25T13:00:00.000Z" };
+    const receipt = await createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(fetchImpl, { getBundle: async () => staleBundle }),
+    );
+    // 1. IT BOOKED. Before the fix this threw token_refresh_failed.
+    assert.ok(receipt, "a revoked host token must not stop the booking when a workspace calendar is configured");
+    // 2. IT TRIED THE HOST FIRST, then the system token. Order matters: the host
+    //    should organise their own meeting whenever they still can.
+    assert.ok(tokenBodies.length >= 2, `expected a host attempt then a system attempt, saw ${tokenBodies.length}`);
+    assert.ok(tokenBodies[0].includes("refresh_token=refresh-token"), "the host's own token must be tried first");
+    assert.ok(
+      tokenBodies.some((b) => b.includes("refresh_token=system-refresh-token")),
+      "the workspace token must be used after the host's is rejected",
+    );
+    assert.ok(created, "an event must actually have been created");
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", prevToken);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_ADDRESS", prevAddress);
+    restoreEnv("GOOGLE_CLIENT_ID", prevClientId);
+    restoreEnv("GOOGLE_CLIENT_SECRET", prevSecret);
+  }
+}
+{
+  // AND WITH NO FALLBACK CONFIGURED, THE ORIGINAL ERROR STILL PROPAGATES.
+  // Fail-closed behaviour is not traded away for convenience: if there is no
+  // workspace calendar to cover, a revoked token is still a hard failure the
+  // host must fix.
+  const prevToken = process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN;
+  const prevAlt = process.env.GOOGLE_SYSTEM_REFRESH_TOKEN;
+  delete process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN;
+  delete process.env.GOOGLE_SYSTEM_REFRESH_TOKEN;
+
+  const fetchImpl: GoogleCalendarDependencies["fetchImpl"] = async (url) =>
+    String(url).includes("oauth2.googleapis.com/token")
+      ? new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
+      : new Response("{}", { status: 200 });
+
+  try {
+    let code = "";
+    try {
+      const staleBundle = { ...freshBundle(), access_token: "", expires_at: "2026-08-25T13:00:00.000Z" };
+      await createGoogleFounderMeeting(
+        requestArgs(),
+        baseDependencies(fetchImpl, { getBundle: async () => staleBundle }),
+      );
+    } catch (error) {
+      code = error instanceof GoogleCalendarIntegrationError ? error.code : "unexpected";
+    }
+    assert.equal(code, "token_refresh_failed", "with no workspace fallback, a revoked token must still fail closed");
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", prevToken);
+    restoreEnv("GOOGLE_SYSTEM_REFRESH_TOKEN", prevAlt);
+  }
+}
+
+console.log("founder-meeting-calendar revoked-token fallback ok");
+}
+
+revokedTokenFallbackChecks().catch((error) => {
+  console.error(error);
+  process.exit(1);
 });
