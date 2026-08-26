@@ -118,7 +118,17 @@ function list(sp: URLSearchParams, key: string): string[] {
   return raw
     .split(",")
     .map((v) => {
-      try { return decodeURIComponent(v).trim(); } catch { return v.trim(); }
+      let s = v.trim();
+      try {
+        while (s.includes("%")) {
+          const decoded = decodeURIComponent(s);
+          if (decoded === s) break;
+          s = decoded;
+        }
+        return s.trim();
+      } catch {
+        return s.trim();
+      }
     })
     .filter((v) => v.length > 0);
 }
