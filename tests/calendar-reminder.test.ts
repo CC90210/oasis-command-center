@@ -18,6 +18,7 @@ import {
   removeReminderEvent,
   isRetryableFailure,
   type ReminderSession,
+  type ReminderFailure,
 } from "@/lib/integrations/calendar-reminder";
 
 type Call = { url: string; init: RequestInit };
@@ -163,6 +164,48 @@ const INPUT = {
     !result.ok && result.reason,
     "not_connected",
     "an off-domain operator must be told to connect their own account, not silently written elsewhere",
+  );
+}
+
+{
+  // A TIMEOUT IS NOT A DISCONNECTED ACCOUNT. If a transient mint failure
+  // flattened into not_connected, the worker would mark it BLOCKED and never
+  // retry, so a momentary Google wobble would permanently cost a delegated
+  // rep's reminder.
+  const result = await writeReminderEvent("t1", "u-rep", null, INPUT, {
+    openSession: async () => null,
+    resolveOperatorEmail: async () => "rep@oasisai.work",
+    mintDelegatedToken: async () => ({
+      ok: false as const,
+      reason: "retryable" as const,
+      detail: "google_503",
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(
+    !result.ok && result.reason,
+    "retryable",
+    "a transient token-endpoint failure must stay queued, not be reported as a disconnected account",
+  );
+  assert.equal(isRetryableFailure("retryable"), true);
+}
+
+{
+  // ...but a rejected grant IS a human's job, and must not spin on a timer.
+  const result = await writeReminderEvent("t1", "u-rep", null, INPUT, {
+    openSession: async () => null,
+    resolveOperatorEmail: async () => "rep@oasisai.work",
+    mintDelegatedToken: async () => ({
+      ok: false as const,
+      reason: "delegation_rejected" as const,
+      detail: "unauthorized_client",
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(
+    isRetryableFailure((result as { reason: ReminderFailure }).reason),
+    false,
+    "a missing admin grant needs a person; retrying it on a timer never once helps",
   );
 }
 

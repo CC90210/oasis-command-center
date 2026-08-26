@@ -134,7 +134,23 @@ async function openDelegatedSession(
 
   const mint = deps?.mintDelegatedToken || mintDelegatedAccessToken;
   let minted = await mint(email);
-  if (!minted.ok) return null;
+  if (!minted.ok) {
+    // A TIMEOUT IS NOT A DISCONNECTED ACCOUNT, AND FLATTENING THE TWO COSTS
+    // THE REMINDER.
+    //
+    // Returning null for every mint failure sends all of them to
+    // `not_connected`, which the follow-up worker classifies as BLOCKED and
+    // never retries. For a rep whose calendar comes from delegation, a 429 or a
+    // 5xx at Google's token endpoint would then permanently kill that
+    // reminder -- the exact blocked-vs-failed inversion this module is careful
+    // about everywhere else. Transport failures must stay retryable so the
+    // cron picks them up; only the ones a person has to fix fall through to a
+    // refusal. (Codex review, 2026-08-26.)
+    if (minted.reason === "retryable") {
+      throw new GoogleCalendarIntegrationError("calendar_read_failed", minted.detail);
+    }
+    return null;
+  }
   let accessToken = minted.accessToken;
 
   const fetchImpl = deps?.fetchImpl || fetch;
@@ -161,7 +177,15 @@ async function openDelegatedSession(
     // revoked grant needing a human.
     clearDelegatedTokenCache();
     minted = await mint(email);
-    if (!minted.ok) return response;
+    if (!minted.ok) {
+      // Same distinction on the refresh path. Handing back the 401 would have
+      // it read as a revoked grant needing a human, when Google's token
+      // endpoint was merely unreachable for a moment.
+      if (minted.reason === "retryable") {
+        throw new GoogleCalendarIntegrationError(code(networkErrorCode), minted.detail);
+      }
+      return response;
+    }
     accessToken = minted.accessToken;
     try {
       return await perform();
