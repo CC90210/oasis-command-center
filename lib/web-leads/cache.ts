@@ -63,8 +63,64 @@ const store = new Map<string, Entry<unknown>>();
  * writes. One shared TTL would either re-transfer ~31,000 rows every ten
  * seconds to answer a question whose answer changes daily, or leave a released
  * lead on screen for five minutes.
+ *
+ * ═══ LEADS: 10s -> 90s, 2026-08-26 ══════════════════════════════════════════
+ *
+ * THE OPERATOR COMPLAINT THIS FIXES (Adon): "when you click it for the first
+ * time it takes over 10 seconds", and "when we change the preference in terms
+ * of province or industry ... it takes a significant amount of time".
+ *
+ * The second half was this constant. Measured against live production
+ * 2026-08-26, the projected lead read is 2,703 ms for 31,086 rows / 15.27 MB.
+ * At a 10-second TTL, a rep who spends more than ten seconds reading the screen
+ * before touching a filter pays that 2,703 ms AGAIN -- and reading the screen is
+ * the entire job. So the common case was a cache that had already expired by the
+ * time it was next needed. It was doing the work of a cache without the benefit
+ * of one.
+ *
+ * WHY 90 SECONDS IS SAFE, and it is the SAME argument the module header makes:
+ * claiming is a compare-and-swap (claim-ops.ts). A stale pool cannot produce a
+ * duplicate call. It can only produce a claim that FAILS, and failing tells the
+ * rep the truth -- "taken by someone else just now". The ceiling on staleness is
+ * therefore one wasted CLICK, never a wasted phone call, at 10 seconds or at 90.
+ *
+ * WHY NOT LONGER: the release case is the one a human actually watches. A rep
+ * who releases a lead and does not see it return to the pool concludes the
+ * button is broken. Writes invalidate in-process immediately (invalidate()
+ * below), so the rep who acted sees their own change AT ONCE on that instance;
+ * 90s bounds only what a DIFFERENT serverless instance can still be showing.
+ * That is a bound on someone else's screen, not on the actor's.
+ *
+ * THIS DOES NOT FIX THE COLD FIRST CLICK. A cold serverless instance has an
+ * empty map and pays every read regardless of TTL. That is a separate problem
+ * with a separate fix (server-side filtering and paging), and raising this
+ * number must not be mistaken for having solved it.
+ *
+ * ═══ PARKED: its own TTL, 2026-08-26 ════════════════════════════════════════
+ *
+ * The parked-domain read is the most expensive query on this page PER ROW
+ * RETURNED by an enormous margin. Measured live 2026-08-26:
+ *
+ *   parked net (business_id, signals)   2,125 ms   57 rows   0.07 MB
+ *
+ * Two seconds to move seventy kilobytes. The cost is not transfer, it is the
+ * SCAN: sixteen `LIKE '%...%'` patterns over the `signals` blob of all 23,222
+ * audit rows. A leading-wildcard LIKE cannot use an index, so this is a full
+ * table scan by construction and no index will fix it.
+ *
+ * It was folded into loadScoreIndex(), so it was re-paid on every SCORES
+ * rebuild -- every five minutes, per instance -- to recompute an answer that
+ * changes only when the audit worker writes a new row. Given its own longer TTL
+ * it is paid roughly once per half hour instead, taking ~2.1s off five of every
+ * six score-index rebuilds.
+ *
+ * THE DURABLE FIX IS A STORED COLUMN, NOT A LONGER TTL. `is_parked` computed
+ * once at audit-write time and indexed turns this into a point lookup and
+ * removes the scan from a cold start too, which no TTL can do. That needs a
+ * migration plus a JARVIS audit-worker change and is deliberately NOT bundled
+ * here.
  */
-export const TTL = { LEADS: 10_000, SCORES: 300_000, CORPUS: 300_000 } as const;
+export const TTL = { LEADS: 90_000, SCORES: 300_000, CORPUS: 300_000, PARKED: 1_800_000 } as const;
 
 /**
  * Run `load` and memoise it for `ttlMs`, keyed by `key`.
