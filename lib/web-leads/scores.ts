@@ -116,6 +116,51 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
   return memo("web-leads:scores", TTL.SCORES, loadScoreIndex);
 }
 
+/**
+ * The parked-domain candidate net, on its OWN cache entry.
+ *
+ * WHY IT IS SPLIT OUT (measured live, 2026-08-26): this read takes 2,125 ms to
+ * return 57 rows / 0.07 MB. It is the slowest query on the Leads page per row
+ * returned, by a wide margin, and the cost is the SCAN not the transfer --
+ * sixteen leading-wildcard LIKE patterns over the `signals` blob of all 23,222
+ * audit rows. A leading-wildcard LIKE cannot use an index, so this is a full
+ * scan by construction.
+ *
+ * Folded into loadScoreIndex() it was re-paid on every SCORES rebuild (five
+ * minutes, per instance) to recompute something that only changes when the
+ * audit worker writes. On its own TTL it is paid about once per half hour.
+ *
+ * STILL FAILS LOUD, AND STILL PROVES COMPLETENESS. Both were already true here
+ * and neither may be traded for speed: a parked read that quietly returned
+ * short leaves the for-sale pages it missed sitting in `scored` at 82, back at
+ * the top of every peer group, being offered to a prospect as their best
+ * competitor -- and nothing on screen would look wrong. Throwing inside the memo
+ * means the failure is not cached, so the next request retries rather than
+ * inheriting a bad index for half an hour.
+ *
+ * `signals` comes back too, because the SQL filter is a NET, not a verdict:
+ * `signals.like.*dan.com*` also matches `chezjordan.com`, and LIKE cannot
+ * express "on a hostname label boundary". confirmParked() re-checks each
+ * candidate properly. ~57 rows, so the extra column costs nothing; getting this
+ * wrong strips a real business of its score.
+ */
+async function loadParkedCandidates(): Promise<{ business_id: string; signals: unknown }[]> {
+  return memo("web-leads:parked", TTL.PARKED, async () => {
+    const db = getServiceSupabase();
+    const res = await db
+      .from("leadgen_site_audits")
+      .select("business_id,signals", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .or(parkedSignalsOrFilter())
+      .limit(LEAD_READ_CAP);
+    if (res.error) throw new Error(`parked_index_read_failed: ${res.error.message}`);
+    const rows = (res.data || []) as unknown as { business_id: string; signals: unknown }[];
+    assertCompleteRead("parked_index", rows, res.count);
+    return rows;
+  });
+}
+
 async function loadScoreIndex(): Promise<ScoreIndex> {
   const db = getServiceSupabase();
 
@@ -156,34 +201,18 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .limit(LEAD_READ_CAP),
-    // PARKED DOMAINS. Matched in the DATABASE against the stored `finalUrl`
-    // inside `signals`, and only business_id comes back -- 54 rows today.
-    // Selecting `signals` for all 23,200 audits to filter in JS would move tens
-    // of megabytes through a memoised index to answer a question about ~0.2% of
-    // it. The filter string is generated from PARKING_HOSTS so the list and the
-    // query cannot drift apart.
-    db
-      .from("leadgen_site_audits")
-      // `signals` comes back too, because the SQL filter is a NET, not a
-      // verdict: `signals.like.*dan.com*` also matches `chezjordan.com`, and
-      // LIKE cannot express "on a hostname label boundary". confirmParked()
-      // re-checks each candidate properly. ~54 rows, so the extra column costs
-      // nothing; getting this wrong strips a real business of its score.
-      .select("business_id,signals", { count: "exact" })
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("audit_version", MODEL_VERSION)
-      .or(parkedSignalsOrFilter())
-      .limit(LEAD_READ_CAP),
+    // PARKED DOMAINS. Memoised SEPARATELY and for far longer than the rest of
+    // this index -- see loadParkedCandidates() and TTL.PARKED in ./cache.
+    loadParkedCandidates(),
   ]);
 
   if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
   if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
   if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
-  // Fails LOUD like its siblings. A parked-domain read that quietly returned
-  // nothing would put every for-sale page straight back into the peer groups at
-  // score 82, which is the exact defect this read exists to stop -- and it would
-  // look completely normal on screen.
-  if (parkedRes.error) throw new Error(`parked_index_read_failed: ${parkedRes.error.message}`);
+  // The parked read's own error check and completeness proof moved INTO
+  // loadParkedCandidates() when it got its own cache entry, so that a failure
+  // is never memoised -- see its doc comment. Both guarantees still hold; they
+  // are just enforced one level down now.
 
   const allRows = (allAudits.data || []) as { business_id: string; fetched_at: string }[];
   const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
@@ -198,12 +227,11 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
   assertCompleteRead("audit_index", allRows, allAudits.count);
   assertCompleteRead("audit_index_scored", scoredRows, scoredAudits.count);
   assertCompleteRead("unreachable_index", unreachableRows, unreachable.count);
-  // Proved complete for the same reason as its siblings, and the consequence of
-  // skipping it is the sharpest of the four: a truncated parked read leaves the
-  // parking pages it missed sitting in `scored` at 82, back at the top of every
-  // peer group, being offered to prospects as their best competitor. Nothing on
-  // screen would look wrong.
-  assertCompleteRead("parked_index", (parkedRes.data || []) as unknown[], parkedRes.count);
+  // parked_index is proved complete inside loadParkedCandidates(), for the same
+  // reason as its siblings and with the sharpest consequence of the four: a
+  // truncated parked read leaves the parking pages it missed sitting in `scored`
+  // at 82, back at the top of every peer group, offered to prospects as their
+  // best competitor, with nothing on screen looking wrong.
 
   /**
    * NEWEST ROW FIRST, THEN ASK WHETHER IT IS SCORED -- NOT THE OTHER WAY ROUND.
@@ -229,7 +257,7 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
   }
 
   // The precise decision, not the query's coarse guess -- see confirmParked().
-  const parkedCandidates = (parkedRes.data || []) as { business_id: string; signals: unknown }[];
+  const parkedCandidates = parkedRes;
   const parked = confirmParked(parkedCandidates);
 
   const scored = new Map<string, number>();
