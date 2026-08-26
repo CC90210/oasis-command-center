@@ -216,7 +216,12 @@ function FilterTree({
                     checked={filters.industries.includes(i.name)}
                     onChange={() => set({ industries: toggle(filters.industries, i.name) })}
                   />
-                  <span className="truncate">{i.name}</span>
+                  <span className={`truncate ${i.name === "CC Leads" ? "font-semibold text-accent" : ""}`}>{i.name}</span>
+                  {i.name === "CC Leads" && (
+                    <span className="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-accent">
+                      HOT
+                    </span>
+                  )}
                 </span>
                 <span className="shrink-0 tabular-nums text-xs text-fg-dim">{i.count.toLocaleString()}</span>
               </label>
