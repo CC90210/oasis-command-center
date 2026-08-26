@@ -99,3 +99,33 @@ assert(
 );
 
 console.log("google-workspace-calendar-readiness: all assertions passed");
+
+// ---------------------------------------------------------------------------
+// EVERY DECLARED CALENDAR ERROR CODE MUST HAVE A HUMAN MESSAGE.
+//
+// Added 2026-08-26. Five of the twelve codes in GoogleCalendarErrorCode had no
+// entry in LeadLifecycleActions' readableError map, so the RAW CODE reached the
+// rep's screen mid-handoff. The operator reported it as "it says invalid token
+// or something" -- that was `token_refresh_failed` falling through the map onto
+// a sales rep who had just filled in a whole booking form.
+//
+// This is a source check because that is where the gap lives: the union and the
+// map are in different files and nothing made them agree.
+{
+  const calSrc = readFileSync(`${process.cwd()}/lib/integrations/google-calendar.ts`, "utf8");
+  const uiSrc = readFileSync(`${process.cwd()}/app/pipeline/[id]/LeadLifecycleActions.tsx`, "utf8");
+
+  const union = calSrc.match(/export type GoogleCalendarErrorCode =([\s\S]*?);/);
+  assert.ok(union, "could not find the GoogleCalendarErrorCode union -- this check must not silently pass");
+  const codes = [...union![1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  assert.ok(codes.length >= 10, `expected the full error union, parsed only ${codes.length} codes`);
+
+  const missing = codes.filter((c) => !new RegExp(`(^|\\s)${c}:`, "m").test(uiSrc));
+  assert.deepEqual(
+    missing,
+    [],
+    `these calendar error codes have no human-readable message and would reach a sales rep as a raw code: ${missing.join(", ")}`,
+  );
+}
+
+console.log("google-workspace-calendar-readiness error-map coverage ok");

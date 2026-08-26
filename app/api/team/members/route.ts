@@ -23,6 +23,55 @@ const ROLE_VALUES: TeamRole[] = [
 ];
 
 const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+
+/**
+ * Can this refresh token actually be spent? Asks Google, because there is no
+ * local signal for revocation.
+ *
+ * FAILS CLOSED, WITH ONE DELIBERATE EXCEPTION. A definitive rejection from
+ * Google (HTTP 4xx -- `invalid_grant` for a revoked or withdrawn token) means
+ * NOT connected, and the banner must say so. But a TRANSPORT failure, or a 5xx
+ * from Google, means we do not know: reporting "reconnect Google" to a host
+ * whose connection is fine, because Google had a bad minute, sends a rep off to
+ * re-authorise something that was never broken. Unknown therefore preserves the
+ * previous belief (the cheap checks already passed) rather than inventing a
+ * verdict in either direction.
+ *
+ * The distinction matters because the two errors have opposite remedies: one
+ * needs a human at a consent screen, the other needs nobody to do anything.
+ *
+ * Cost: one token call per connected host per request, and only for hosts who
+ * already pass the token/scope/identity checks. It buys the difference between
+ * a banner that is true and a banner that is decorative.
+ */
+async function tokenUsable(refreshToken: string): Promise<boolean> {
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+  // No OAuth config is a deployment problem, not a host problem. Nothing can
+  // book in that state, so claiming a host is ready would be the bigger lie.
+  if (!clientId || !clientSecret) return false;
+  try {
+    const res = await fetch(GOOGLE_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }).toString(),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.ok) return true;
+    // 4xx is Google's definitive "this token is dead". 5xx is Google's problem.
+    if (res.status >= 400 && res.status < 500) return false;
+    return true;
+  } catch {
+    // Timeout or network error: unknown, not dead. See the doc comment.
+    return true;
+  }
+}
 
 async function calendarReadiness(tenantId: string, userId: string | null, profileEmail: string | null) {
   if (!userId) {
@@ -35,12 +84,36 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
   }
   try {
     const bundle = await getUserIntegrationBundle(tenantId, userId, "gmail_oauth");
-    const workspaceConnected = Boolean(bundle.refresh_token);
+    // ═══ PRESENCE IS NOT VALIDITY ═══════════════════════════════════════════
+    //
+    // This read `Boolean(bundle.refresh_token)` and called it connected. That is
+    // a check that a STRING EXISTS. A refresh token that Google has REVOKED is
+    // still a perfectly good-looking string sitting in that column, and Google
+    // only tells you otherwise when you try to spend it -- which happens inside
+    // the booking call, long after this banner has gone green.
+    //
+    // That produced the exact sequence the operator hit on 2026-08-26: the
+    // handoff form said "Google Calendar is ready for this host", the rep filled
+    // in the whole form, ticked three confirmations, clicked Book, and got a raw
+    // `token_refresh_failed` on screen with no idea what to do. The readiness
+    // check and the booking were asking different questions.
+    //
+    // `tokenUsable()` asks the SAME question the booking asks: it spends the
+    // refresh token against Google's token endpoint. Revocation has no local
+    // signal at all -- checking an `expires_at` column would not have caught
+    // this, because the token had not expired, it had been withdrawn.
+    const hasToken = Boolean(bundle.refresh_token);
     const scopes = new Set((bundle.scope || "").split(/\s+/u).filter(Boolean));
     const connectedAddress = String(bundle.gmail_address || "").trim().toLowerCase();
     const expectedAddress = String(profileEmail || "").trim().toLowerCase();
     const identityMatches = Boolean(connectedAddress && expectedAddress && connectedAddress === expectedAddress);
-    const calendarConnected = workspaceConnected && scopes.has(CALENDAR_EVENTS_SCOPE) && identityMatches;
+    // Only spend a network call when the cheap checks already pass -- a host
+    // with no token or the wrong scope is not connected regardless of Google.
+    const workspaceConnected =
+      hasToken && scopes.has(CALENDAR_EVENTS_SCOPE) && identityMatches
+        ? await tokenUsable(String(bundle.refresh_token))
+        : false;
+    const calendarConnected = workspaceConnected;
     return {
       calendar_connected: calendarConnected,
       calendar_reconnect_required: workspaceConnected && !calendarConnected,
@@ -105,9 +178,32 @@ export async function GET() {
       team_role: m.team_role,
       is_owner: m.is_owner,
       joined_at: m.joined_at,
-      calendar_connected: readiness.calendar_connected || workspaceFallbackReady,
-      calendar_reconnect_required:
-        readiness.calendar_reconnect_required && !workspaceFallbackReady,
+      // ═══ THIS HOST'S OWN CONNECTION, AND NOTHING ELSE ═══════════════════
+      //
+      // This used to be `readiness.calendar_connected || workspaceFallbackReady`.
+      // `workspaceFallbackReady` is isSystemCalendarConfigured() -- a GLOBAL
+      // ENVIRONMENT CHECK with nothing to do with the selected host. So whenever
+      // the system calendar was configured, EVERY host in the dropdown reported
+      // connected, including hosts who had never linked a Google account, and the
+      // UI rendered "Google Calendar is ready for this host" over the top of it.
+      // The sentence made a claim about a specific person that the value behind
+      // it did not support.
+      //
+      // The fallback is still available and still returned -- as
+      // `system_calendar_fallback` at the top level, which is a DIFFERENT fact
+      // and deserves a different sentence. Booking through the shared workspace
+      // identity is not the same promise as booking as the host: the event is
+      // organised by the shared account, which is fine for a client-facing
+      // founder audit and deliberately REFUSED for private rep reminders (see
+      // the rep-calendar path, which will not fall back because it would publish
+      // a rep's own call notes to the whole workspace). Collapsing the two facts
+      // into one boolean is what made that distinction invisible here.
+      calendar_connected: readiness.calendar_connected,
+      // Reconnect is now about the HOST, so the fallback no longer suppresses
+      // it. A host whose token Google has revoked needs to reconnect whether or
+      // not a shared calendar could cover for them -- suppressing the prompt is
+      // how a dead connection stays dead for weeks.
+      calendar_reconnect_required: readiness.calendar_reconnect_required,
       calendar_identity_mismatch: readiness.calendar_identity_mismatch,
       connected_google_address: readiness.connected_google_address,
     })),
