@@ -399,10 +399,21 @@ export async function POST(
     syncMessage =
       "Follow-up saved. A reminder on the previous rep's calendar could not be removed yet, and we will keep trying.";
   }
-  // Recomputed from BOTH jobs so neither can hide the other.
+  // Recomputed from BOTH jobs so neither can hide the other -- and the stranded
+  // side has to include a cleanup this lead was ALREADY carrying, not just one
+  // this request created. `strandedEventId` above is only ever set by a
+  // handover that failed on THIS save, so using it alone meant the next
+  // ordinary note save on the same lead computed the flag as null and dropped
+  // an older, still-live stranded reminder out of the worker's reach for good.
+  // Only the cron clears those fields, once it has actually deleted the event.
+  // (Codex review round 3, 2026-08-26.)
+  const priorStrandedEventId =
+    typeof leadData[FOLLOW_UP_FIELDS.strandedEventId] === "string"
+      ? (leadData[FOLLOW_UP_FIELDS.strandedEventId] as string)
+      : null;
   patch[FOLLOW_UP_FIELDS.workerQueue] = workerQueueFlag({
     syncState: patch[FOLLOW_UP_FIELDS.state] as string,
-    strandedEventId,
+    strandedEventId: strandedEventId || priorStrandedEventId,
   });
 
   try {

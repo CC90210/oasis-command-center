@@ -23,8 +23,10 @@
  * the old rep's phone ringing for a call nobody was going to make, with no
  * worker eligible to touch the record again.
  *
- * Both jobs raise the same flag, `follow_up_worker_queue`, which is the single
- * key this scan filters on. One plain equality finds every record with work.
+ * Both jobs raise the same flag, `follow_up_worker_queue`, which is the key
+ * this scan filters on. A second compatibility scan on the legacy
+ * `follow_up_sync_state = "pending"` runs alongside it so records written
+ * before that flag existed are not silently excluded forever.
  *
  * WHAT IT DELIBERATELY DOES NOT RETRY. `"blocked"` syncs need a person to act
  * (connect Google, re-grant the scope, replace a revoked token). Retrying those
@@ -84,7 +86,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
   const db = getServiceSupabase();
 
-  // Filter on the queue flag only, then decide due-ness in JS.
+  // Filter on the flags only, then decide due-ness in JS.
   //
   // A range comparison against a value INSIDE the JSON document
   // (`next_attempt_at <= now`) would depend on the Turso PostgREST bridge
@@ -100,25 +102,55 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   // record, so oldest-touched-first rotates the whole backlog through the page.
   // `updated_at` is a real column, not a field inside the JSON document, so
   // ordering on it does not depend on bridge support for JSON operators.
-  const scan = await db
-    .from("tenant_records")
-    .select("id, tenant_id, data")
-    .eq("entity_type", "lead")
-    .eq(`data->>${FOLLOW_UP_FIELDS.workerQueue}`, WORKER_QUEUE_ON)
-    .order("updated_at", { ascending: true })
-    .limit(SCAN_LIMIT);
+  //
+  // TWO SCANS, AND THE SECOND IS A COMPATIBILITY SCAN.
+  //
+  // `follow_up_worker_queue` is new. Any record written by an earlier revision
+  // of this feature carries `follow_up_sync_state = "pending"` and NO queue
+  // field, so a filter on the new key alone would exclude that entire backlog
+  // permanently -- silently, since an excluded row looks exactly like a row
+  // with no work. The second scan keeps those visible; every record this
+  // worker or the write path touches gets the flag, so the legacy set only
+  // drains. Both filters are plain equalities, which is deliberate: an
+  // "is not null" against a field inside the JSON document is the shape the
+  // Turso bridge could mistranslate into a plausible empty set.
+  // (Codex review round 3, 2026-08-26.)
+  const [queued, legacyPending] = await Promise.all([
+    db
+      .from("tenant_records")
+      .select("id, tenant_id, data")
+      .eq("entity_type", "lead")
+      .eq(`data->>${FOLLOW_UP_FIELDS.workerQueue}`, WORKER_QUEUE_ON)
+      .order("updated_at", { ascending: true })
+      .limit(SCAN_LIMIT),
+    db
+      .from("tenant_records")
+      .select("id, tenant_id, data")
+      .eq("entity_type", "lead")
+      .eq(`data->>${FOLLOW_UP_FIELDS.state}`, "pending")
+      .order("updated_at", { ascending: true })
+      .limit(SCAN_LIMIT),
+  ]);
 
-  if (scan.error) {
+  const scanError = queued.error || legacyPending.error;
+  if (scanError) {
     // Fail loudly. A reconciler that reports success when it could not read its
     // own work queue is worse than one that is down, because it silences the
     // very alarm that would reveal the backlog.
     return NextResponse.json(
-      { ok: false, error: "scan_failed", detail: scan.error.message },
+      { ok: false, error: "scan_failed", detail: scanError.message },
       { status: 500 },
     );
   }
 
-  const rows = (scan.data || []) as LeadRow[];
+  const byId = new Map<string, LeadRow>();
+  for (const row of [
+    ...((queued.data || []) as LeadRow[]),
+    ...((legacyPending.data || []) as LeadRow[]),
+  ]) {
+    if (!byId.has(row.id)) byId.set(row.id, row);
+  }
+  const rows = [...byId.values()];
   const counts = {
     scanned: rows.length,
     touched: 0,
@@ -309,7 +341,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     ok: true,
     ...counts,
     maxSyncAttempts: MAX_SYNC_ATTEMPTS,
-    truncated: rows.length >= SCAN_LIMIT,
+    truncated:
+      (queued.data || []).length >= SCAN_LIMIT ||
+      (legacyPending.data || []).length >= SCAN_LIMIT,
     ms: Date.now() - startedAt,
   };
   // One structured line per run: this is the only place the queue backlog is

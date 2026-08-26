@@ -438,6 +438,27 @@ assert.equal(
     /\.order\("updated_at", \{ ascending: true \}\)/,
     "an unordered LIMIT can return the same page every run, starving pending reminders past it for days during an outage",
   );
+  // The queue flag is newer than the feature. A record written before it
+  // existed carries only the legacy pending state, and a filter on the new key
+  // alone would exclude that whole backlog permanently and silently -- an
+  // excluded row is indistinguishable from a row with no work.
+  assert.match(
+    cron,
+    new RegExp(`data->>\\$\\{FOLLOW_UP_FIELDS\\.state\\}\`, "pending"`),
+    "the compatibility scan on the legacy pending state must survive, or pre-existing retries are stranded",
+  );
+}
+
+{
+  const route = readFileSync("app/api/leads/[id]/notes/route.ts", "utf8");
+  // A stranded cleanup this lead was ALREADY carrying must keep the record on
+  // the worker queue when an ordinary later save recomputes the flag. Using
+  // only this request's handover result drops the older one out of reach.
+  assert.match(
+    route,
+    /strandedEventId: strandedEventId \|\| priorStrandedEventId/,
+    "the queue flag must consider a stranded cleanup already on the lead, not just one created by this save",
+  );
 }
 
 console.log("lead-follow-up-sync.test.ts passed");
