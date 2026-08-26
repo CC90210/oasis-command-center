@@ -88,4 +88,44 @@ for (const notAnImage of ["/icons", "/iconography", "/opengraph-image/secret", "
   assert.equal(isPublic(notAnImage), false, `${notAnImage} must not be treated as a metadata image`);
 }
 
+// The machine-to-machine /api/internal surface. None of these callers can hold
+// a session cookie: each is a VPS daemon that authenticates with an HMAC over
+// the raw body INSIDE its route. Left off the allowlist, middleware answers 401
+// before the signature check ever runs, and the failure looks like a broken
+// integration rather than a routing rule.
+//
+// This has now happened twice. apply-extraction was fixed once, and on
+// 2026-08-26 extraction-doc-url shipped in #321 with the same omission — a
+// Codex review caught it, otherwise the outage it was written to repair would
+// have survived its own fix. Pinning all three so the next one is a red test
+// rather than a second silent outage.
+for (const internal of [
+  "/api/internal/apply-extraction",
+  "/api/internal/live-subs/promote",
+  "/api/internal/extraction-doc-url",
+]) {
+  assert.equal(
+    isPublic(internal),
+    true,
+    `${internal} is HMAC-gated inside its route and MUST bypass session middleware, or the daemon 401s before signing is checked`,
+  );
+}
+
+// ...and nothing else under /api/internal is public. The prefix must not be a
+// wildcard: a future internal route stays session-gated until someone
+// deliberately adds it above with a reason.
+for (const notPublic of [
+  "/api/internal",
+  "/api/internal/anything-else",
+  "/api/internal/apply-extraction-secrets",
+  "/api/internal/extraction-doc-url-admin",
+  "/api/internal/live-subs",
+]) {
+  assert.equal(
+    isPublic(notPublic),
+    false,
+    `${notPublic} must stay session-gated — /api/internal is not a blanket public prefix`,
+  );
+}
+
 console.log("middleware-prefix ok");
