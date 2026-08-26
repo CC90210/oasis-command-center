@@ -622,3 +622,58 @@ for (const view of [
 }
 
 console.log("web-leads-guards ok");
+
+// ---------------------------------------------------------------------------
+// EVERY tenant_records READ IN THIS FEATURE MUST PIN THE TENANT.
+//
+// Added 2026-08-26. `tenant_records` is SHARED. Measured live that day it holds
+// leads for three tenants in one table:
+//
+//   ef8d389e-...  oasis-ai-cc      31,086 leads   <- this feature
+//   aa04fa1f-...  SunBiz            1,375 leads   <- a DIFFERENT portal, worked
+//                                                    on by a different agent
+//   42423fde-...  Oasis Web Studio    293 leads
+//
+// libSQL has no row-level security. The tenant predicate in the query IS the
+// authorization boundary -- there is no second line of defence behind it. A
+// single read that forgets `.eq("tenant_id", ...)` serves SunBiz's book to an
+// Oasis rep, and it does so silently: the page renders, the rows look like
+// leads, and nothing anywhere reports an error.
+//
+// The route-level checks above prove the CALLER is resolved. This proves the
+// QUERY is scoped, which is a different failure and the one that leaks data.
+//
+// Deliberately a source check rather than a runtime one: the danger is a read
+// added later, by someone (or something) that never runs this feature's tests
+// against a multi-tenant fixture. A grep over the source catches it at the only
+// moment it is cheap to catch.
+{
+  const dir = path.join(process.cwd(), "lib/web-leads");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".ts"));
+  assert.ok(files.length > 10, "sanity: the web-leads lib directory should not be near-empty");
+
+  let audited = 0;
+  for (const f of files) {
+    const src = read(path.join("lib/web-leads", f));
+    // Each `.from("tenant_records")` opens a query chain that ends at a
+    // terminator. Take the text up to the next `;` and require a tenant pin
+    // inside it -- that is the whole builder chain for that read.
+    const parts = src.split('from("tenant_records")');
+    for (let i = 1; i < parts.length; i++) {
+      const chain = parts[i].slice(0, parts[i].indexOf(";") === -1 ? 400 : parts[i].indexOf(";"));
+      audited++;
+      assert.match(
+        chain,
+        /\.eq\(\s*["']tenant_id["']/,
+        `lib/web-leads/${f}: a tenant_records query is not pinned to a tenant. ` +
+          `tenant_records is shared with SunBiz (aa04fa1f-...); an unpinned read serves their leads to an Oasis rep with no error.`,
+      );
+    }
+  }
+  // Prove the sweep actually looked at something. A regex that silently matched
+  // nothing would pass this block while checking zero queries -- the exact
+  // "redundancy hides failure" shape this codebase guards against elsewhere.
+  assert.ok(audited >= 12, `expected to audit at least 12 tenant_records reads, saw ${audited}`);
+}
+
+console.log("web-leads-guards tenant-pin sweep ok");
