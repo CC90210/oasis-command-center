@@ -35,6 +35,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID } from "./data";
+// The one definition of program membership, shared with claim.ts and with
+// filterWebsiteSalesRows -- so the two doors into ownership cannot disagree
+// about what makes a lead visible on /pipeline. See withAssignedTo below.
+import { OASIS_WEBSITE_SALES_PROGRAM } from "@/lib/oasis-sales-pipeline-policy";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -86,14 +90,65 @@ export type AssignResult =
 
 type LeadRow = { id: string; data: Record<string, unknown> };
 
-/** Merge `assigned_to` into a lead's existing data without touching any
- *  other field — most importantly never `stage`, which belongs to CC's
- *  website-sales pipeline, not this route. Pure and unit-testable. */
+/**
+ * Merge `assigned_to` into a lead's existing data, plus the two stamps that
+ * decide whether the lead is VISIBLE to the rep it was just given to.
+ *
+ * ═══ THE BUG THIS FIXES (live, found 2026-08-26) ════════════════════════════
+ *
+ * This used to be `{ ...data, assigned_to: assignedTo }` and nothing else, on
+ * the principle that a territory assignment must not disturb the lead. That is
+ * right for `stage`, which belongs to CC's website-sales lifecycle. It was
+ * WRONG for `sales_program`, and the difference matters because
+ * `filterWebsiteSalesRows` drops every row not stamped `website_sales_v1`.
+ *
+ * So a lead assigned through a TERRITORY was owned by a rep in Web Leads and
+ * INVISIBLE on /pipeline. Not an error, not an empty state a rep could reason
+ * about -- simply absent. Two live leads were in exactly that state when this
+ * was found (Lakeside Montessori School and Silverthorne, both assigned to the
+ * same rep on 2026-08-24/25), and the operator reported it as "an issue with
+ * the actual data being transferred to the pipeline".
+ *
+ * The CLAIM path (claim.ts claimPatch) has always stamped `sales_program`. Only
+ * the territory-assign path did not, so the two doors into ownership disagreed
+ * about what ownership means.
+ *
+ * ═══ WHAT IS AND IS NOT STAMPED ═════════════════════════════════════════════
+ *
+ * `sales_program` — ALWAYS. It is program MEMBERSHIP, not lifecycle state:
+ * idempotent, and without it the lead cannot appear on the pipeline at all.
+ *
+ * `stage` — ONLY WHEN ABSENT. Re-assigning a lead already at `qualified` or
+ * `attempting_contact` must never rewind it to `assigned`; that would destroy a
+ * rep's recorded progress and, because `lost` drives the 90-day recycle in
+ * claim.ts, could recycle a lead that was deliberately closed. The original
+ * comment's instinct about `stage` was correct and is preserved here.
+ *
+ * `stage_entered_at` — filled only alongside a stage we just introduced, so the
+ * SLA clock starts when ownership started rather than at some later read.
+ *
+ * Pure and unit-testable; proven by tests/web-leads-territory-assign.test.ts.
+ */
 export function withAssignedTo(
   data: Record<string, unknown>,
   assignedTo: string,
+  nowIso: string = new Date().toISOString(),
 ): Record<string, unknown> {
-  return { ...data, assigned_to: assignedTo };
+  const hasStage = typeof data.stage === "string" && data.stage.trim() !== "";
+  return {
+    ...data,
+    assigned_to: assignedTo,
+    sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+    ...(hasStage
+      ? {}
+      : {
+          stage: "assigned",
+          stage_entered_at:
+            typeof data.stage_entered_at === "string" && data.stage_entered_at.trim()
+              ? data.stage_entered_at
+              : nowIso,
+        }),
+  };
 }
 
 export async function assignTerritory(

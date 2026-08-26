@@ -278,10 +278,20 @@ async function main() {
   // ---- Pure helpers ---------------------------------------------------------
   assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.deepEqual(chunk([], 5), []);
+  // UPDATED 2026-08-26: this previously asserted that withAssignedTo adds
+  // `assigned_to` and NOTHING else, which is exactly the bug it encoded -- a
+  // territory-assigned lead was never stamped into the website-sales program, so
+  // filterWebsiteSalesRows dropped it and the rep who had just been given the
+  // lead could not see it on /pipeline. `sales_program` is now always stamped.
+  //
+  // `stage: "researched"` is still expected to survive verbatim, and that is the
+  // other half of the contract: an existing stage is never rewound. See the
+  // dedicated cases at the end of this file.
   assert.deepEqual(withAssignedTo({ business_name: "X", stage: "researched" }, AGENT), {
     business_name: "X",
     stage: "researched",
     assigned_to: AGENT,
+    sales_program: "website_sales_v1",
   });
   assert.equal(isUuid(TERRITORY), true);
   assert.equal(isUuid("nope"), false);
@@ -294,3 +304,54 @@ void main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+
+// ---------------------------------------------------------------------------
+// A TERRITORY ASSIGNMENT MUST MAKE THE LEAD VISIBLE TO THE REP IT WAS GIVEN TO.
+// Added 2026-08-26 after a live report: "an issue with the actual data being
+// transferred to the pipeline".
+//
+// withAssignedTo() used to return `{ ...data, assigned_to }` and nothing else.
+// filterWebsiteSalesRows drops every row not stamped `website_sales_v1`, so a
+// lead assigned through a TERRITORY was owned in Web Leads and simply ABSENT
+// from /pipeline -- no error, no empty state, nothing to reason about. Two live
+// leads were in that state when this was found (Lakeside Montessori School and
+// Silverthorne, same rep, 2026-08-24/25). The CLAIM path always stamped it; only
+// this door did not, so the two doors disagreed about what ownership means.
+{
+  // 1. THE FIX FIRES: a fresh, unstamped lead becomes pipeline-eligible.
+  const out = withAssignedTo({ business_name: "Silverthorne" }, "rep-1", "2026-08-26T00:00:00.000Z");
+  assert.equal(out.assigned_to, "rep-1");
+  assert.equal(out.sales_program, "website_sales_v1", "without this the lead never reaches /pipeline");
+  assert.equal(out.stage, "assigned");
+  assert.equal(out.stage_entered_at, "2026-08-26T00:00:00.000Z");
+}
+{
+  // 2. AND IT MUST NOT REWIND WORK IN FLIGHT. Re-assigning a lead already at
+  //    `qualified` may never reset it to `assigned`: that destroys the rep's
+  //    recorded progress, and because `lost` drives the 90-day recycle in
+  //    claim.ts, rewinding stage can recycle a deliberately closed lead.
+  const out = withAssignedTo(
+    { business_name: "X", stage: "qualified", stage_entered_at: "2026-08-01T00:00:00.000Z" },
+    "rep-2",
+    "2026-08-26T00:00:00.000Z",
+  );
+  assert.equal(out.stage, "qualified", "an in-flight stage must survive re-assignment");
+  assert.equal(out.stage_entered_at, "2026-08-01T00:00:00.000Z", "and keep its original clock");
+  assert.equal(out.sales_program, "website_sales_v1", "membership is still stamped, idempotently");
+}
+{
+  // 3. A blank-string stage counts as absent, not as a stage. A whitespace value
+  //    would otherwise be preserved as "in flight" and keep the lead invisible.
+  const out = withAssignedTo({ stage: "   " }, "rep-3", "2026-08-26T00:00:00.000Z");
+  assert.equal(out.stage, "assigned");
+}
+{
+  // 4. Every other field is still carried through untouched -- the original
+  //    reason this function was written as a merge.
+  const out = withAssignedTo({ business_name: "Y", phone: "555", dnc: true }, "rep-4", "2026-08-26T00:00:00.000Z");
+  assert.equal(out.business_name, "Y");
+  assert.equal(out.phone, "555");
+  assert.equal(out.dnc, true);
+}
+
+console.log("web-leads-territory-assign pipeline-visibility ok");
