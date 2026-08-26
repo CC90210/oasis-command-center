@@ -24,6 +24,31 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Turn the daemon's internal failure token into something a rep can act on.
+ *
+ * For three weeks the only thing anyone saw when an application drop broke was
+ * the literal string "Couldn't read it (download_failed)." — a rep cannot tell
+ * from that whether to re-drop, wait, or give up, so Ezra reasonably concluded
+ * the feature was dead and went back to JotForm. The two cases need opposite
+ * actions: a `blocked:` prefix means the reader is misconfigured and re-dropping
+ * will fail identically every time, while anything else is worth one retry.
+ *
+ * The raw code is still shown in parentheses because support needs it, but it
+ * is no longer the whole message.
+ */
+function explainFailure(error: string | null): string {
+  if (!error) return "Couldn't read this application. Try dropping it again, or enter the deal manually.";
+  if (error.startsWith("blocked:")) {
+    return (
+      "The application reader is offline, so this file can't be read automatically right now. " +
+      "Nothing was saved, so enter the deal manually. The team has been alerted. " +
+      `(${error})`
+    );
+  }
+  return `Couldn't read this application. Try dropping it again, or enter the deal manually. (${error})`;
+}
+
 export function AutofillDropzone({
   mode,
   leadId,
@@ -121,7 +146,7 @@ export function AutofillDropzone({
     try {
       const res = await pollJob(jobId);
       if (res.status === "failed") {
-        setErr(res.error ? `Couldn't read it (${res.error}). Re-drop or fill manually.` : "Couldn't read the application. Re-drop or fill manually.");
+        setErr(explainFailure(res.error));
         return;
       }
       if (res.status === "timeout") {
