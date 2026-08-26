@@ -115,8 +115,17 @@ export type SystemCalendarConfig = {
 };
 
 export function systemCalendarConfig(): SystemCalendarConfig | null {
-  const clientId = process.env.GOOGLE_CLIENT_ID || "";
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+  // BOTH NAME PAIRS, because the codebase already reads both and a mismatch is
+  // silent: systemCalendarConfig() checked only GOOGLE_CLIENT_ID/SECRET while
+  // the readiness probe in app/api/team/members reads GOOGLE_OAUTH_CLIENT_ID
+  // first. A deployment that set only the OAUTH_-prefixed pair would have a
+  // working readiness check and a workspace fallback that silently reported
+  // "not configured" -- so every host with a dead token would be unbookable
+  // while the credentials to book them sat in the environment under the other
+  // name. Production today sets the unprefixed pair, so this is not currently
+  // firing; it is closed so it cannot start. (Raised by CC's agent, 2026-08-26.)
+  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
+  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || "";
   const refreshToken = (
     process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN ||
     process.env.GOOGLE_SYSTEM_REFRESH_TOKEN ||

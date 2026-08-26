@@ -376,8 +376,34 @@ export function LeadLifecycleActions({
   );
   const schedulingAlsoQualifies = currentStage !== "qualified";
   const selectedFounder = founders.find((founder) => founder.auth_user_id === founderUserId) || null;
-  const selectedFounderCalendarReady =
+  /**
+   * TWO DIFFERENT QUESTIONS, AND CONFLATING THEM BROKE BOOKING TWICE IN A DAY.
+   *
+   *   ...Connected — is THIS HOST's own Google connection alive? Drives the
+   *                  BANNER, which must stay honest about the host.
+   *   ...CanBook   — can a booking be created AT ALL? Drives the BUTTON, and is
+   *                  true when the host is connected OR the shared OASIS
+   *                  workspace calendar is configured to carry it.
+   *
+   * HISTORY, because both mistakes were the same mistake in opposite directions.
+   * Originally one boolean OR'd the workspace fallback into the host's status,
+   * so every host showed "ready for this host" even with nothing connected --
+   * the banner lied. PR #322 removed the fallback from that boolean, which made
+   * the banner truthful and SILENTLY DISABLED THE BUTTON: a host with no
+   * personal connection now read `false`, and the gate below refuses on `false`.
+   * So the UI told the rep the shared calendar would carry the booking while the
+   * button sat greyed out. (Caught by CC's agent, 2026-08-26.)
+   *
+   * The backend has been able to do this the whole time -- openAuthorizedCalendarSession
+   * falls back to the workspace identity, including for a REVOKED host token
+   * since #324. The gate was simply asking the wrong question.
+   */
+  const selectedFounderCalendarConnected =
     selectedFounder?.calendar_ready ?? selectedFounder?.calendar_connected ?? null;
+  const selectedFounderCalendarReady = selectedFounderCalendarConnected;
+  const founderCanBook =
+    selectedFounderCalendarConnected === true ||
+    (selectedFounderCalendarConnected !== null && systemCalendarFallback);
   const founderMeetingAt = founderMeetingIso(meetingDate, meetingTime);
   const nextActionAt = founderMeetingIso(nextActionDate, nextActionTime);
   const founderMeetingLabel = founderMeetingPreview(founderMeetingAt);
@@ -404,7 +430,11 @@ export function LeadLifecycleActions({
     effectiveContactConfirmed &&
     effectiveClientAgreedToTime &&
     effectiveHandoffComplete &&
-    selectedFounderCalendarReady !== false;
+    // THE BUTTON ASKS "can a booking be created", not "is this host connected".
+    // See the founderCanBook comment above: the shared workspace calendar can
+    // carry it, and refusing here left the rep staring at a disabled button
+    // under a banner that said the shared calendar would handle it.
+    founderCanBook !== false;
   const bookingBlockedReason = (() => {
     if (!founderUserId) return "Select a founder or closer as host";
     if (!founderMeetingAt) return "Select meeting date and time";
@@ -413,7 +443,8 @@ export function LeadLifecycleActions({
     if (!transitionNote.trim()) return "Add internal founder handoff note";
     if (!founderContactValid) return "Enter a valid client email";
     if (!Object.values(founderQualification).every(Boolean)) return "Complete qualification gates above";
-    if (selectedFounderCalendarReady === false) return "Selected host Google Calendar is not ready";
+    if (founderCanBook === false)
+      return "Selected host must reconnect Google, and no shared workspace calendar is configured";
     return null;
   })();
   const postFounderRep =
