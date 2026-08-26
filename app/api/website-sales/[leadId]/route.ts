@@ -81,6 +81,35 @@ function lifecycleInteractionType(action: string): string {
   return "stage_changed";
 }
 
+/**
+ * Resolve the opener rep's invite copy. The opener is CC'd on the audit
+ * invite when they are not the host/closer; a missing or malformed profile
+ * degrades to no copy instead of blocking a verified booking.
+ */
+async function resolveOpenerAttendee(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  openerUserId: unknown,
+  excludeEmail: unknown,
+): Promise<{ email: string; displayName?: string } | null> {
+  const userId = typeof openerUserId === "string" && UUID.test(openerUserId.trim())
+    ? openerUserId.trim().toLowerCase()
+    : "";
+  if (!userId) return null;
+  const profile = await db
+    .from("user_profiles")
+    .select("email,full_name")
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", userId)
+    .maybeSingle();
+  if (profile.error || !profile.data) return null;
+  const email = typeof profile.data.email === "string" ? profile.data.email.trim().toLowerCase() : "";
+  const excluded = typeof excludeEmail === "string" ? excludeEmail.trim().toLowerCase() : "";
+  if (!email.includes("@") || email === excluded) return null;
+  const fullName = typeof profile.data.full_name === "string" ? profile.data.full_name.trim() : "";
+  return fullName ? { email, displayName: fullName } : { email };
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ leadId: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok:false,error:"unauthorized" },{status:401});
@@ -405,6 +434,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const contact = body.contact && typeof body.contact === "object" && !Array.isArray(body.contact)
       ? body.contact as Record<string,unknown>
       : {};
+    // Resolve the opener BEFORE the provider call so their invite copy rides
+    // on the original Calendar event (and every reschedule of it).
+    const existingRep = resolveWebsiteSalesHandoffRep(
+      current.attributed_rep_user_id,
+      current.assigned_to,
+      session.userId,
+    );
+    const openerAttendee = await resolveOpenerAttendee(db, session.tenantId, existingRep, auditHostEmail);
     try {
       verifiedMeeting = await createVerifiedFounderMeeting({
         tenantId:session.tenantId,
@@ -418,6 +455,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         handoffNote:transitionNote,
         smsConsent:body.smsConsent === true,
         expectedOrganizerEmail:auditHostEmail,
+        openerAttendee,
         confirmations:{
           contactConfirmed:true,
           clientAgreedToTime:true,
@@ -434,11 +472,6 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           : 503;
       return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
     }
-    const existingRep = resolveWebsiteSalesHandoffRep(
-      current.attributed_rep_user_id,
-      current.assigned_to,
-      session.userId,
-    );
     const collaborators = [
       existingRep,
       ...normalizeCollaborators(current).filter((userId) => userId !== founderUserId),
@@ -589,12 +622,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           return NextResponse.json({ok:false,error:"verified_meeting_required"},{status:409});
         }
         try {
+          const openerAttendee = await resolveOpenerAttendee(
+            db,
+            session.tenantId,
+            // Post-booking assigned_to is the closer; attributed_rep stays the
+            // opener. excludeEmail drops the copy when they are the same person.
+            current.attributed_rep_user_id ?? current.assigned_to,
+            current.audit_host_email,
+          );
           verifiedMeeting = await rescheduleVerifiedFounderMeeting({
             tenantId:session.tenantId,
             leadId,
             appointmentId,
             requestId,
             meetingAt:nextActionAt,
+            openerAttendee,
           });
         } catch (error) {
           const detail = error instanceof Error ? error.message : "calendar_update_failed";

@@ -80,6 +80,19 @@ export type FounderMeetingConfirmations = {
   handoffComplete: true;
 };
 
+/** Auxiliary invite copy for the opener rep; a malformed value is dropped, never fatal. */
+export type OpenerAttendee = { email: string; displayName?: string };
+
+function normalizedOpenerAttendee(value: OpenerAttendee | null | undefined): {
+  openerEmail?: string;
+  openerDisplayName?: string;
+} {
+  const email = typeof value?.email === "string" ? value.email.trim().toLowerCase() : "";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) return {};
+  const displayName = typeof value?.displayName === "string" ? value.displayName.trim() : "";
+  return displayName ? { openerEmail: email, openerDisplayName: displayName } : { openerEmail: email };
+}
+
 export type VerifiedFounderMeeting = {
   appointmentId: string;
   requestId: string;
@@ -542,6 +555,7 @@ export async function createVerifiedFounderMeeting(input: {
   smsConsent: boolean;
   expectedOrganizerEmail: string;
   confirmations: FounderMeetingConfirmations;
+  openerAttendee?: OpenerAttendee | null;
 }, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
   const deps = dependencies(dependencyOverrides);
   const db = deps.db;
@@ -665,6 +679,7 @@ export async function createVerifiedFounderMeeting(input: {
         durationMinutes: FOUNDER_MEETING_DURATION_MINUTES,
         clientEmail: contact.email,
         clientName: contact.name || undefined,
+        ...normalizedOpenerAttendee(input.openerAttendee),
         company: contact.company || undefined,
         website: contact.website || undefined,
         clientAgenda,
@@ -887,6 +902,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   appointmentId: string;
   requestId: string;
   meetingAt: string;
+  openerAttendee?: OpenerAttendee | null;
 }, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
   const deps = dependencies(dependencyOverrides);
   const db = deps.db;
@@ -960,6 +976,7 @@ export async function rescheduleVerifiedFounderMeeting(input: {
       durationMinutes: FOUNDER_MEETING_DURATION_MINUTES,
       clientEmail: contact.email,
       clientName: contact.name || undefined,
+      ...normalizedOpenerAttendee(input.openerAttendee),
       company: contact.company || undefined,
       website: contact.website || undefined,
       clientAgenda,

@@ -164,7 +164,10 @@ async function testCreatesFifteenMinuteMeetInviteWithoutInternalNotes() {
   assert.match(payload.id, /^[0-9a-v]{5,1024}$/, "Google custom event IDs must use base32hex characters");
   assert.equal(payload.id, deterministicEventId());
   assert.equal(payload.summary, "OASIS 15-minute website audit — Lakeside Montessori School");
-  assert.deepEqual(payload.attendees, [{ email: "owner@example.com", displayName: "Morgan Owner" }]);
+  assert.deepEqual(payload.attendees, [
+    { email: "owner@example.com", displayName: "Morgan Owner" },
+    { email: "conaugh@oasisai.work" },
+  ]);
   assert.equal(payload.start.dateTime, START_AT);
   assert.equal(payload.start.timeZone, "America/Toronto");
   assert.equal(Date.parse(payload.end.dateTime) - Date.parse(payload.start.dateTime), 15 * 60 * 1000);
@@ -190,6 +193,45 @@ async function testCreatesFifteenMinuteMeetInviteWithoutInternalNotes() {
     iCalUID: `${payload.id}@google.com`,
     organizerEmail: "founder@oasisai.work",
   });
+}
+
+async function testCopiesOpenerAndCentralInboxAndToleratesOrganizerEcho() {
+  const calls: FetchCall[] = [];
+  const args = {
+    ...requestArgs(),
+    openerEmail: " Opener@OasisAI.Work ",
+    openerDisplayName: "Opener Rep",
+  };
+
+  await createGoogleFounderMeeting(
+    args,
+    baseDependencies(async (input, init) => {
+      calls.push({ url: String(input), init });
+      const payload = JSON.parse(String(init?.body)) as { id: string };
+      // Google echoes the organizing account among attendees on reads.
+      return jsonResponse({
+        ...eventResponse(payload.id),
+        attendees: [
+          { email: "founder@oasisai.work", responseStatus: "accepted", organizer: true },
+          { email: "owner@example.com", responseStatus: "needsAction" },
+          { email: "opener@oasisai.work", responseStatus: "needsAction" },
+          { email: "conaugh@oasisai.work", responseStatus: "needsAction" },
+        ],
+      });
+    }),
+  );
+
+  assert.equal(calls.length, 1);
+  const payload = JSON.parse(String(calls[0].init?.body)) as {
+    attendees: Array<{ email: string; displayName?: string }>;
+  };
+  // Host (personal mode → organizer, no copy) is skipped; opener precedes the
+  // client; the central inbox closes the list; nothing is duplicated.
+  assert.deepEqual(payload.attendees, [
+    { email: "opener@oasisai.work", displayName: "Opener Rep" },
+    { email: "owner@example.com", displayName: "Morgan Owner" },
+    { email: "conaugh@oasisai.work" },
+  ]);
 }
 
 async function testRejectsBundleWithoutCalendarScope() {
@@ -479,7 +521,10 @@ async function testReschedulesExistingMeetAndSendsUpdatedInvite() {
     conferenceData?: unknown;
   };
   assert.equal(payload.summary, "OASIS 15-minute website audit — Lakeside Montessori School");
-  assert.deepEqual(payload.attendees, [{ email: "new-owner@example.com", displayName: "Morgan Owner" }]);
+  assert.deepEqual(payload.attendees, [
+    { email: "new-owner@example.com", displayName: "Morgan Owner" },
+    { email: "conaugh@oasisai.work" },
+  ]);
   assert.equal(payload.start.dateTime, input.meetingAt);
   assert.equal(payload.start.timeZone, input.timezone);
   assert.equal(Date.parse(payload.end.dateTime) - Date.parse(payload.start.dateTime), 15 * 60 * 1000);
@@ -653,6 +698,7 @@ async function main() {
     deterministicEventId("22222222-2222-4222-8222-222222222222"),
   );
   await testCreatesFifteenMinuteMeetInviteWithoutInternalNotes();
+  await testCopiesOpenerAndCentralInboxAndToleratesOrganizerEcho();
   await testRejectsBundleWithoutCalendarScope();
   await testRejectsWrongGoogleIdentityBeforeProviderCall();
   await testRefreshesExpiredAccessTokenAndPersistsIt();

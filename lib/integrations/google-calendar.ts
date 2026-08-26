@@ -77,6 +77,9 @@ export type FounderMeetingCalendarRequest = {
   timeZone: string;
   clientEmail: string;
   clientName?: string;
+  /** Opener rep copied on the invite when they are not the host/closer. */
+  openerEmail?: string;
+  openerDisplayName?: string;
   businessName?: string;
   website?: string;
   clientAgenda?: string;
@@ -137,6 +140,17 @@ export function systemOrganizerEmail(): string | null {
   return systemCalendarConfig()?.organizerEmail || null;
 }
 
+/**
+ * Central inbox copied on every founder-audit invite so ops sees each booking
+ * without relying on a rep forwarding it. Defaults to the operator address;
+ * override with GOOGLE_FOUNDER_MEETING_CC_EMAIL.
+ */
+export function centralMeetingCcEmail(): string {
+  return (process.env.GOOGLE_FOUNDER_MEETING_CC_EMAIL || "conaugh@oasisai.work")
+    .trim()
+    .toLowerCase();
+}
+
 export type GoogleCalendarReceipt = {
   calendarId: string;
   eventId: string;
@@ -156,6 +170,9 @@ export type CreateGoogleFounderMeetingInput = {
   durationMinutes: number;
   clientEmail: string;
   clientName?: string;
+  /** Opener rep copied on the invite when they are not the host/closer. */
+  openerEmail?: string;
+  openerDisplayName?: string;
   company?: string;
   website?: string;
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
@@ -172,6 +189,9 @@ export type UpdateGoogleFounderMeetingInput = {
   durationMinutes: number;
   clientEmail: string;
   clientName?: string;
+  /** Opener rep copied on the invite when they are not the host/closer. */
+  openerEmail?: string;
+  openerDisplayName?: string;
   company?: string;
   website?: string;
   /** Client-visible agenda only. Internal qualification/handoff notes are forbidden. */
@@ -574,8 +594,13 @@ type ExpectedFounderMeetingEvent = {
   startAt: string;
   endAt: string;
   clientEmail: string;
-  /** Set in workspace-fallback mode: the human host is invited as an attendee. */
-  hostAttendeeEmail?: string;
+  /**
+   * Exact lowercase invitee set sent with the request. Google may additionally
+   * echo the organizing account among attendees on reads, so the organizer is
+   * tolerated separately — any other address fails closed.
+   */
+  attendeeEmails: string[];
+  organizerEmail?: string;
   summary: string;
   description: string;
 };
@@ -607,14 +632,12 @@ function assertFounderMeetingEventIdentity(
   const attendeeEmails = (event.attendees || [])
     .map((attendee) => attendee.email?.trim().toLowerCase())
     .filter((email): email is string => Boolean(email));
-  const allowedAttendees = new Set(
-    [expected.clientEmail, expected.hostAttendeeEmail]
-      .filter((email): email is string => Boolean(email))
-      .map((email) => email.trim().toLowerCase()),
-  );
+  const allowedAttendees = new Set(expected.attendeeEmails);
+  if (expected.organizerEmail) allowedAttendees.add(expected.organizerEmail.trim().toLowerCase());
   if (
-    attendeeEmails.length !== allowedAttendees.size ||
-    !attendeeEmails.every((email) => allowedAttendees.has(email))
+    !attendeeEmails.length ||
+    !attendeeEmails.every((email) => allowedAttendees.has(email)) ||
+    !attendeeEmails.includes(expected.clientEmail.trim().toLowerCase())
   ) {
     fail("client_attendee");
   }
@@ -635,6 +658,37 @@ function publicEventDescription(clientAgenda?: string, website?: string): string
   if (agenda) sections.push(`Agenda:\n${agenda}`);
   if (website) sections.push(`Website: ${website}`);
   return sections.join("\n\n");
+}
+
+type FounderMeetingInvitee = { email: string; displayName?: string };
+
+/**
+ * Deduplicated invite list for a founder-audit event: host (workspace-fallback
+ * only — otherwise the host IS the organizer), opener rep, client, and the
+ * central ops inbox. First occurrence wins, so an opener who is also the host,
+ * or the CC address that matches any invitee/organizer, is never doubled.
+ */
+function founderMeetingInviteList(args: {
+  clientEmail: string;
+  clientName?: string;
+  hostAttendeeEmail?: string;
+  openerEmail?: string;
+  openerDisplayName?: string;
+}): FounderMeetingInvitee[] {
+  const seen = new Set<string>();
+  const attendees: FounderMeetingInvitee[] = [];
+  const add = (rawEmail: string | undefined, displayName?: string) => {
+    const email = rawEmail?.trim().toLowerCase();
+    if (!email || !email.includes("@") || seen.has(email)) return;
+    seen.add(email);
+    const name = displayName?.trim();
+    attendees.push(name ? { email, displayName: name } : { email });
+  };
+  add(args.hostAttendeeEmail);
+  add(args.openerEmail, args.openerDisplayName);
+  add(args.clientEmail, args.clientName);
+  add(centralMeetingCcEmail());
+  return attendees;
 }
 
 type AuthorizedCalendarFetch = (
@@ -831,9 +885,6 @@ export async function createFounderMeetingCalendarEvent(
   insertUrl.searchParams.set("conferenceDataVersion", "1");
   insertUrl.searchParams.set("sendUpdates", "all");
 
-  const clientAttendee = args.clientName?.trim()
-    ? { email: normalized.clientEmail, displayName: args.clientName.trim() }
-    : { email: normalized.clientEmail };
   // Workspace fallback: the workspace account is the organizer, so the human
   // host is invited explicitly — otherwise the booking would never reach the
   // person expected to run the call.
@@ -841,15 +892,20 @@ export async function createFounderMeetingCalendarEvent(
     systemFallback && args.expectedOrganizerEmail?.trim()
       ? args.expectedOrganizerEmail.trim().toLowerCase()
       : undefined;
-  const attendees = hostAttendeeEmail
-    ? [{ email: hostAttendeeEmail }, clientAttendee]
-    : [clientAttendee];
+  const attendees = founderMeetingInviteList({
+    clientEmail: normalized.clientEmail,
+    clientName: args.clientName,
+    hostAttendeeEmail,
+    openerEmail: args.openerEmail,
+    openerDisplayName: args.openerDisplayName,
+  });
   const expectedEvent: ExpectedFounderMeetingEvent = {
     eventId,
     startAt: normalized.startAt,
     endAt: normalized.endAt,
     clientEmail: normalized.clientEmail,
-    ...(hostAttendeeEmail ? { hostAttendeeEmail } : {}),
+    attendeeEmails: attendees.map((attendee) => attendee.email),
+    organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(args.businessName),
     description: publicEventDescription(args.clientAgenda, normalized.website),
   };
@@ -983,6 +1039,8 @@ export async function createGoogleFounderMeeting(
       durationMinutes: input.durationMinutes,
       clientEmail: input.clientEmail,
       clientName: input.clientName,
+      openerEmail: input.openerEmail,
+      openerDisplayName: input.openerDisplayName,
       businessName: input.company,
       website: input.website,
       clientAgenda: input.clientAgenda,
@@ -1041,6 +1099,8 @@ export async function updateGoogleFounderMeeting(
     durationMinutes: input.durationMinutes,
     clientEmail: input.clientEmail,
     clientName: input.clientName,
+    openerEmail: input.openerEmail,
+    openerDisplayName: input.openerDisplayName,
     businessName: input.company,
     website: input.website,
     clientAgenda: input.clientAgenda,
@@ -1059,22 +1119,24 @@ export async function updateGoogleFounderMeeting(
   const patchUrl = new URL(eventUrl);
   patchUrl.searchParams.set("conferenceDataVersion", "1");
   patchUrl.searchParams.set("sendUpdates", "all");
-  const clientAttendee = input.clientName?.trim()
-    ? { email: normalized.clientEmail, displayName: input.clientName.trim() }
-    : { email: normalized.clientEmail };
   const hostAttendeeEmail =
     systemFallback && input.expectedOrganizerEmail?.trim()
       ? input.expectedOrganizerEmail.trim().toLowerCase()
       : undefined;
-  const attendees = hostAttendeeEmail
-    ? [{ email: hostAttendeeEmail }, clientAttendee]
-    : [clientAttendee];
+  const attendees = founderMeetingInviteList({
+    clientEmail: normalized.clientEmail,
+    clientName: input.clientName,
+    hostAttendeeEmail,
+    openerEmail: input.openerEmail,
+    openerDisplayName: input.openerDisplayName,
+  });
   const expectedEvent: ExpectedFounderMeetingEvent = {
     eventId,
     startAt: normalized.startAt,
     endAt: normalized.endAt,
     clientEmail: normalized.clientEmail,
-    ...(hostAttendeeEmail ? { hostAttendeeEmail } : {}),
+    attendeeEmails: attendees.map((attendee) => attendee.email),
+    organizerEmail: bundle.gmail_address || undefined,
     summary: eventTitle(input.company),
     description: publicEventDescription(input.clientAgenda, normalized.website),
   };
