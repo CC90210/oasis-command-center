@@ -459,6 +459,26 @@ assert.equal(
     /strandedEventId: strandedEventId \|\| priorStrandedEventId/,
     "the queue flag must consider a stranded cleanup already on the lead, not just one created by this save",
   );
+  // ...but NOT one that already gave up. Its next-attempt is null, which reads
+  // as "due now", so requeueing it would fire a Google call and a terminal
+  // alert on every later save of this lead.
+  assert.match(
+    route,
+    /leadData\[FOLLOW_UP_FIELDS\.strandedReason\] !== "retry_exhausted"/,
+    "an exhausted cleanup has already paged a human and must not be revived by an ordinary save",
+  );
+}
+
+{
+  const cron = readFileSync("app/api/cron/reconcile-calendar-reminders/route.ts", "utf8");
+  // Two queries each capped at SCAN_LIMIT can return disjoint sets, so the cap
+  // has to be re-applied to the union or the loop does double the intended
+  // serial Google calls and can run the function past its time limit.
+  assert.match(
+    cron,
+    /merged\.slice\(0, SCAN_LIMIT\)/,
+    "the scan ceiling must apply to the MERGED set, not to each query separately",
+  );
 }
 
 console.log("lead-follow-up-sync.test.ts passed");

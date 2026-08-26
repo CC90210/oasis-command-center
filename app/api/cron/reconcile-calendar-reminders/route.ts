@@ -67,6 +67,7 @@ const SCAN_LIMIT = 200;
 type LeadRow = {
   id: string;
   tenant_id: string;
+  updated_at: string | null;
   data: Record<string, unknown> | null;
 };
 
@@ -118,14 +119,14 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const [queued, legacyPending] = await Promise.all([
     db
       .from("tenant_records")
-      .select("id, tenant_id, data")
+      .select("id, tenant_id, updated_at, data")
       .eq("entity_type", "lead")
       .eq(`data->>${FOLLOW_UP_FIELDS.workerQueue}`, WORKER_QUEUE_ON)
       .order("updated_at", { ascending: true })
       .limit(SCAN_LIMIT),
     db
       .from("tenant_records")
-      .select("id, tenant_id, data")
+      .select("id, tenant_id, updated_at, data")
       .eq("entity_type", "lead")
       .eq(`data->>${FOLLOW_UP_FIELDS.state}`, "pending")
       .order("updated_at", { ascending: true })
@@ -143,6 +144,13 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // MERGE, RE-SORT, THEN CAP. Two queries each capped at SCAN_LIMIT can return
+  // disjoint sets, so the union is up to 2x the ceiling -- and the loop below
+  // makes serial Google calls, so double the intended work is how this function
+  // reaches its 120s limit and dies without persisting the later results. The
+  // cap has to be applied to the COMBINED set, oldest-touched first, so the cap
+  // still means what it says and rotation still reaches every row.
+  // (Codex review round 4, 2026-08-26.)
   const byId = new Map<string, LeadRow>();
   for (const row of [
     ...((queued.data || []) as LeadRow[]),
@@ -150,7 +158,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   ]) {
     if (!byId.has(row.id)) byId.set(row.id, row);
   }
-  const rows = [...byId.values()];
+  const merged = [...byId.values()].sort((a, b) =>
+    String(a.updated_at || "").localeCompare(String(b.updated_at || "")),
+  );
+  const rows = merged.slice(0, SCAN_LIMIT);
   const counts = {
     scanned: rows.length,
     touched: 0,
@@ -341,9 +352,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     ok: true,
     ...counts,
     maxSyncAttempts: MAX_SYNC_ATTEMPTS,
-    truncated:
-      (queued.data || []).length >= SCAN_LIMIT ||
-      (legacyPending.data || []).length >= SCAN_LIMIT,
+    truncated: merged.length > rows.length,
     ms: Date.now() - startedAt,
   };
   // One structured line per run: this is the only place the queue backlog is

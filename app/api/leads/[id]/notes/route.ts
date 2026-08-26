@@ -407,8 +407,17 @@ export async function POST(
   // an older, still-live stranded reminder out of the worker's reach for good.
   // Only the cron clears those fields, once it has actually deleted the event.
   // (Codex review round 3, 2026-08-26.)
+  //
+  // An EXHAUSTED cleanup is deliberately excluded. It has already run out of
+  // retries and already paged a person, and its next-attempt time is null,
+  // which `isStrandedDue` reads as "due now". Requeueing it would fire another
+  // Google call and another terminal alert on every subsequent save of this
+  // lead -- the alert-storm shape, where a condition that needs one human
+  // action instead pages on a loop. It stays on the record for that human to
+  // find; it does not go back in the queue. (Codex review round 4, 2026-08-26.)
   const priorStrandedEventId =
-    typeof leadData[FOLLOW_UP_FIELDS.strandedEventId] === "string"
+    typeof leadData[FOLLOW_UP_FIELDS.strandedEventId] === "string" &&
+    leadData[FOLLOW_UP_FIELDS.strandedReason] !== "retry_exhausted"
       ? (leadData[FOLLOW_UP_FIELDS.strandedEventId] as string)
       : null;
   patch[FOLLOW_UP_FIELDS.workerQueue] = workerQueueFlag({
