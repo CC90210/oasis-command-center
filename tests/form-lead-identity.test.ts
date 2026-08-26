@@ -120,4 +120,79 @@ assert.equal(
   "with the alias mapped, the same lead renders with the merchant's own name",
 );
 
+// ── a blank canonical field must not mask a real alias (Codex P2) ───────────
+//
+// The first version used `??`, which treats an EMPTY string as present. A
+// payload carrying `phone: ""` alongside a real `owner_cell` selected the blank
+// and the lead still had no number — the exact bug being fixed, reintroduced by
+// the fix.
+const firstNonBlank = (p: Record<string, unknown>, ...keys: string[]) => {
+  for (const k of keys) {
+    const v = p[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+};
+
+assert.equal(
+  firstNonBlank({ phone: "", owner_cell: "5555550100" }, "phone", "owner_cell", "cell_phone"),
+  "5555550100",
+  "an empty canonical phone must fall through to owner_cell, not win",
+);
+assert.equal(
+  firstNonBlank({ email: "   ", owner_email: "real@example.com" }, "email", "owner_email"),
+  "real@example.com",
+  "a whitespace-only canonical email must fall through to the alias",
+);
+
+// ── identity must reach the lead on LATER steps too (Codex P1) ──────────────
+//
+// The step-0 extractor only runs when an anonymous submission INITIALISES the
+// lead. SunBiz's full application collects the owner, their cell and their
+// email on step 2 — a tokenised submission that takes a different branch — so
+// the alias fix alone left contact_name / email / phone unset. This mirrors
+// mapBoardIdentityFields, which closes that path.
+function mapBoardIdentity(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const name = firstNonBlank(payload, "contact_name", "full_name", "owner_full_name", "owner_name");
+  if (name) out.contact_name = name;
+  const email = firstNonBlank(payload, "email", "owner_email", "contact_email");
+  if (email) out.email = email.toLowerCase();
+  const phone = firstNonBlank(payload, "phone", "owner_cell", "cell_phone");
+  if (phone) out.phone = phone;
+  return out;
+}
+
+assert.deepEqual(
+  mapBoardIdentity(fullApplicationStep2),
+  { contact_name: "A Real Owner", email: "owner@example.com", phone: "5555550100" },
+  "step 2 of the full application must yield the three board-visible identity fields",
+);
+assert.deepEqual(
+  mapBoardIdentity({ owner_ssn: "999-99-9999", owner_dob: "1980-01-01" }),
+  {},
+  "a step with no identity fields writes nothing — never a blank overwrite",
+);
+
+// ...and it is GAP-FILL only. owner_* overwrite freely (they are this form's own
+// answers), but a rep may have corrected contact_name/email/phone by hand and a
+// later step must not silently replace that.
+function identityGaps(cur: Record<string, unknown>, incoming: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(incoming)) {
+    const have = cur[k];
+    if (have === undefined || have === null || have === "") out[k] = v;
+  }
+  return out;
+}
+
+assert.deepEqual(
+  identityGaps(
+    { email: "rep-corrected@example.com", phone: "" },
+    { contact_name: "A Real Owner", email: "owner@example.com", phone: "5555550100" },
+  ),
+  { contact_name: "A Real Owner", phone: "5555550100" },
+  "an email a human already set survives; the blank phone and missing name are filled",
+);
+
 console.log("form-lead-identity: all guards fire ✓");

@@ -1132,7 +1132,18 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // last-4 lands on the lead; the full value stays on form_submissions.payload.
   try {
     const ownerFields = mapOwnerFields(payload);
-    if (Object.keys(ownerFields).length > 0) {
+    /**
+     * Board identity is GAP-FILL ONLY, unlike the owner_* keys above.
+     *
+     * owner_* are this form's own answers and overwrite freely. contact_name,
+     * email and phone are different: a rep may have corrected them by hand, or
+     * an earlier form may have captured a better address, and a later step of
+     * one application must not quietly replace that. Filling only what is
+     * missing turns a blank card into a callable one without ever overwriting
+     * something a human chose.
+     */
+    const boardIdentity = mapBoardIdentityFields(payload);
+    if (Object.keys(ownerFields).length > 0 || Object.keys(boardIdentity).length > 0) {
       const cur = await db
         .from("tenant_records")
         .select("data")
@@ -1141,9 +1152,14 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         .maybeSingle();
       const curData =
         (cur.data as { data?: Record<string, unknown> } | null)?.data || {};
+      const identityGaps: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(boardIdentity)) {
+        const have = curData[k];
+        if (have === undefined || have === null || have === "") identityGaps[k] = v;
+      }
       await db
         .from("tenant_records")
-        .update({ data: { ...curData, ...ownerFields } })
+        .update({ data: { ...curData, ...ownerFields, ...identityGaps } })
         .eq("id", link.lead_id)
         .eq("tenant_id", form.tenant_id);
     }
@@ -1690,12 +1706,17 @@ async function initAnonymousLead(input: {
   if (name) contactFields[funding ? "contact_name" : "name"] = name;
   const business = trimmed("business_name", "company", "business_legal_name", "legal_business_name", "dba");
   if (business) contactFields[funding ? "business_name" : "company"] = business;
-  const emailRaw = pick("email") ?? pick("owner_email") ?? pick("contact_email");
-  const email = emailRaw ? emailRaw.trim().toLowerCase() : undefined;
+  // `trimmed`, not `??`. Nullish coalescing treats an EMPTY canonical field as a
+  // present value, so a payload carrying `phone: ""` alongside a real
+  // `owner_cell` would select the blank and the lead would still have no number.
+  // trimmed() skips blanks and keeps looking, which is the behaviour the name
+  // and business lookups above have always had (Codex review 2026-08-26).
+  const emailRaw = trimmed("email", "owner_email", "contact_email");
+  const email = emailRaw ? emailRaw.toLowerCase() : undefined;
   if (email) contactFields.email = email;
   // `owner_cell` is the full application's phone field. Without it the lead
   // carries no number at all and the rep cannot call a signed applicant.
-  const phone = pick("phone") ?? pick("owner_cell") ?? pick("cell_phone");
+  const phone = trimmed("phone", "owner_cell", "cell_phone");
   if (phone) contactFields.phone = phone;
   const monthlyRev = pick("monthly_revenue");
   if (monthlyRev) contactFields.monthly_revenue = monthlyRev;
@@ -1888,5 +1909,41 @@ function mapOwnerFields(payload: Record<string, unknown>): Record<string, unknow
     out.ownership_pct = pct;
   const addr = s("owner_home_address");
   if (addr) out.owner_address_line1 = addr;
+  return out;
+}
+
+/**
+ * The BOARD-VISIBLE identity, from a later application step.
+ *
+ * mapOwnerFields above feeds the drawer's Owner tab (owner_name, owner_dob, …).
+ * It deliberately does not touch the three fields the Leads board and every
+ * outreach surface actually read: contact_name, email, phone.
+ *
+ * That split is why the alias fix alone was not enough (Codex review
+ * 2026-08-26). The identity extraction at the top of this file runs ONLY when
+ * an anonymous step-0 submission initialises the lead, and the SunBiz full
+ * application asks for the owner, their cell and their email on step 2 — a
+ * tokenised submission that takes the branch above instead. So the merchant
+ * types their email and phone, the lead never receives either, and the rep is
+ * left with a card they cannot call.
+ *
+ * Read generously, exactly like the step-0 extractor, so the two paths agree
+ * about what a name, an email and a phone are called.
+ */
+function mapBoardIdentityFields(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const first = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = payload[k];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+    return "";
+  };
+  const name = first("contact_name", "full_name", "owner_full_name", "owner_name");
+  if (name) out.contact_name = name;
+  const email = first("email", "owner_email", "contact_email");
+  if (email) out.email = email.toLowerCase();
+  const phone = first("phone", "owner_cell", "cell_phone");
+  if (phone) out.phone = phone;
   return out;
 }
