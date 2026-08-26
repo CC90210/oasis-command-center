@@ -175,8 +175,53 @@ export type LeadScope = "pool" | "mine";
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
 
+/**
+ * Audit sources that mean THE SITE WAS NEVER SUCCESSFULLY OBSERVED.
+ *
+ * A row carrying one of these is telling us its own fetch failed. Anything the
+ * writer stored alongside it -- a website_condition, an audit_findings line --
+ * therefore describes OUR failure, not the prospect's website, and must not
+ * reach a rep as a finding about them.
+ *
+ * WHY THIS EXISTS (live data incident, 2026-08-26). CC's `seed_cc_leads_turso`
+ * run wrote 52 leads. 46 carried `audit_source: "fallback"` AND
+ * `website_condition: "unreachable"` AND a pitch instructing the rep to open
+ * with "when I tried to look at your website it wouldn't even load properly for
+ * me". All 46 URLs were refetched on 2026-08-26; every one returned HTTP
+ * 200/202. The verdict was not merely unverified, it was FALSE -- and on 23 of
+ * the rows the business name was the placeholder "Trade Business", so the line
+ * rendered as "when I tried to look at 's website". Nothing had been sent and
+ * nobody was assigned, so no prospect ever heard it, and the rows were repaired
+ * in place. This is the guard that stops the next seed run reintroducing it.
+ *
+ * WHY A NAMED FAILURE SET RATHER THAN AN ALLOWLIST OF TRUSTED SOURCES: measured
+ * against the live tenant on 2026-08-26, 31,034 of 31,086 leads carry no
+ * `audit_source` at all, and 31,021 of those carry a real website_condition --
+ * the OpenStreetMap pipeline predates the field entirely. An allowlist would
+ * blank a correct, load-bearing sentence on 31,021 leads in order to suppress
+ * 46. An ABSENT field means "this pipeline had no audit concept"; that is not
+ * the same claim as "an audit ran and failed", and only the second one lies.
+ *
+ * Proven by tests/web-leads-data.test.ts, which asserts the guard fires on the
+ * exact payload that shipped, and that it does NOT fire on the 6 genuinely
+ * audited leads from the same run nor on the 31,021 OSM rows.
+ */
+const NON_OBSERVING_AUDIT_SOURCES = new Set(["fallback", "none", "error", "skipped", "timeout", "blocked"]);
+
+/**
+ * True when the record itself says the observation never happened. Compared
+ * lower-cased and trimmed: a seeder writing "Fallback" or " fallback " is making
+ * exactly the same claim, and a guard that a whitespace difference walks past is
+ * not a guard.
+ */
+export function auditDidNotObserve(auditSource: unknown): boolean {
+  const s = str(auditSource);
+  return s !== null && NON_OBSERVING_AUDIT_SOURCES.has(s.toLowerCase());
+}
+
 export function toWebLead(row: { id: string; data: Record<string, unknown> }): WebLead {
   const d = row.data || {};
+  const unaudited = auditDidNotObserve(d.audit_source);
   return {
     id: row.id,
     name: str(d.business_name) || str(d.name) || "Unnamed business",
@@ -192,8 +237,12 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     // reading a fabricated finding aloud on a live call is the worst outcome this
     // system can produce, so these two fields must never be shortened, re-worded,
     // normalised, or defaulted to a confident-sounding verdict.
-    websiteCondition: str(d.website_condition) || "Not checked",
-    auditFindings: str(d.audit_findings) || "Not audited yet - confirm on the call",
+    // A record that declares its own observation failed may not also carry a
+    // finding derived from that observation -- see auditDidNotObserve above.
+    // Falling through to the same defaults an un-audited lead gets is the whole
+    // point: "Not checked" is true, and "unreachable" was not.
+    websiteCondition: (unaudited ? null : str(d.website_condition)) || "Not checked",
+    auditFindings: (unaudited ? null : str(d.audit_findings)) || "Not audited yet - confirm on the call",
     territoryId: str(d.webdev_territory_id),
     territoryName: str(d.webdev_territory),
     osmCategory: str(d.webdev_osm_category),
