@@ -46,4 +46,48 @@ export const FORM_CHECKS: DripCheck[] = [
       `Each row in form_submit_failures holds the merchant's answers — contact them, then set recovered_at. ` +
       `This exact silence cost nine days of dotted-email applications.`,
   },
+  {
+    /**
+     * A rep dropped an application PDF into the pipeline and the reader could
+     * not process it.
+     *
+     * Born from the same class of silence as the check above (2026-08-26): the
+     * 2026-08-09 Turso/R2 cutover moved object storage, the VPS extraction
+     * daemon never got the credentials or the code to read it back, and EVERY
+     * drop failed from that day on. The only signal in existence was a red
+     * "Couldn't read it (download_failed)" on the rep's own screen. The rep
+     * stopped using the feature and went back to JotForm; we found out three
+     * weeks later from a WhatsApp screenshot.
+     *
+     * `document_extraction_jobs` is where that outage was fully recorded the
+     * entire time — nothing was ever asked to look. This is that ask. It would
+     * have fired at 18:12 on 2026-08-25, the first failed drop.
+     */
+    id: "forms.extraction_jobs_failed",
+    severity: "critical",
+    rule: { kind: "must_be_zero" },
+    // Tenant-scoped: unlike the estate-wide dead-letter table above, an
+    // extraction job carries the real tenant_id it was queued under, so this
+    // grades the tenant the runner is actually checking.
+    observe: async (db, tenantId, endMs) => {
+      try {
+        const r = await db
+          .from("document_extraction_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .eq("status", "failed")
+          .gte("created_at", iso(endMs - OPEN_WINDOW_MS))
+          .lt("created_at", iso(endMs));
+        if (r.error) return null;
+        return r.count ?? 0;
+      } catch {
+        return null;
+      }
+    },
+    describe: (r) =>
+      `${r.observed} dropped application(s) in the last 48h that the reader could not process. ` +
+      `The rep saw a red error and had to fill the deal in by hand. ` +
+      `Read the \`error\` column of document_extraction_jobs: a \`blocked:\` prefix means the ` +
+      `daemon is misconfigured and a human must fix it — retrying will never clear it.`,
+  },
 ];

@@ -21,8 +21,9 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { verifyInternalHmac } from "@/lib/internal-hmac";
+import { pathBelongsToTenant } from "@/lib/storage-helpers";
 import { applyExtractedApplication } from "@/lib/applications/apply-extracted";
 import { cropSignatureFromDocument, toPngDataUri } from "@/lib/forms/signature-crop";
 import { LEAD_DOC_BUCKET } from "@/lib/lead-documents";
@@ -33,17 +34,6 @@ export const maxDuration = 60;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BODY_BYTES = 512_000; // fields JSON is small; generous ceiling
-
-function verifyHmac(rawBody: string, header: string | null): boolean {
-  const secret = (process.env.OASIS_OUTBOUND_HMAC_SECRET || "").trim();
-  if (!secret || !header) return false;
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-  const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(header.trim(), "utf8");
-  // timingSafeEqual throws on length mismatch — guard so a wrong-length sig is a
-  // clean false, not a 500.
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 
 type Job = {
   id: string;
@@ -64,7 +54,7 @@ export async function POST(req: NextRequest) {
   if (raw.length > MAX_BODY_BYTES) {
     return NextResponse.json({ ok: false, error: "payload_too_large" }, { status: 413 });
   }
-  if (!verifyHmac(raw, req.headers.get("x-oasis-signature"))) {
+  if (!verifyInternalHmac(raw, req.headers.get("x-oasis-signature"))) {
     return NextResponse.json({ ok: false, error: "bad_signature" }, { status: 401 });
   }
 
@@ -127,6 +117,20 @@ export async function POST(req: NextRequest) {
 
   // Download the doc once — needed to FILE it for the new-deal path (the lead
   // doesn't exist until apply) and/or to CROP the signature.
+  //
+  // The path is re-checked against the job's own tenant for the same reason the
+  // sibling extraction-doc-url route does it: this reads an object key straight
+  // out of a database row, and a row is not a promise. Nothing exploits this
+  // today — the queue routes write `<tenant_id>/...` themselves — but a future
+  // bug or bad migration that put a foreign path in the row would otherwise get
+  // another tenant's merchant document filed onto this tenant's lead.
+  if (!pathBelongsToTenant(job.tenant_id, job.storage_path)) {
+    await db
+      .from("document_extraction_jobs")
+      .update({ status: "failed", error: "blocked:path_outside_tenant", updated_at: new Date().toISOString() })
+      .eq("id", jobId);
+    return NextResponse.json({ ok: false, error: "path_outside_tenant" }, { status: 409 });
+  }
   let docBytes: Buffer | null = null;
   const dl = await db.storage.from(LEAD_DOC_BUCKET).download(job.storage_path);
   if (!dl.error && dl.data) docBytes = Buffer.from(await dl.data.arrayBuffer());
