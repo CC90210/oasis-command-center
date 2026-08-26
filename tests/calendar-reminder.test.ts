@@ -111,6 +111,75 @@ const INPUT = {
   assert.equal(result.ok, true, "a personal connection must still be allowed to write");
 }
 
+/* ------------------------------- domain-wide delegation: nobody clicks anything */
+
+{
+  // A rep who never connected anything. Delegation acts AS them, so the event
+  // lands on THEIR primary calendar and reaches THEIR phone -- which is what
+  // makes this the right answer where the shared workspace calendar was wrong.
+  const calls: Call[] = [];
+  const result = await writeReminderEvent("t1", "u-rep", null, INPUT, {
+    openSession: async () => null, // no personal grant
+    resolveOperatorEmail: async () => "rep@oasisai.work",
+    mintDelegatedToken: async () => ({
+      ok: true as const,
+      accessToken: "tok_delegated",
+      expiresAtMs: Date.now() + 3_600_000,
+    }),
+    fetchImpl: (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return json({ id: "evt_dwd", htmlLink: null });
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(result.ok, true, "a rep with no personal grant must still get a reminder");
+  assert.equal(result.ok && result.eventId, "evt_dwd");
+  assert.match(
+    calls[0].url,
+    /calendars\/primary\/events/,
+    "impersonated, 'primary' IS the rep's own calendar; anything else is somebody else's",
+  );
+  assert.equal(
+    (calls[0].init.headers as Record<string, string>).authorization,
+    "Bearer tok_delegated",
+  );
+  const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>;
+  assert.ok(!("attendees" in body), "the privacy guarantee must hold on the delegated path too");
+  assert.equal(body.visibility, "private");
+}
+
+{
+  // Delegation not available for this person: refuse, do not borrow a calendar.
+  const result = await writeReminderEvent("t1", "u-rep", null, INPUT, {
+    openSession: async () => null,
+    resolveOperatorEmail: async () => "contractor@gmail.com",
+    mintDelegatedToken: async () => ({
+      ok: false as const,
+      reason: "not_delegatable" as const,
+      detail: "off-domain",
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(
+    !result.ok && result.reason,
+    "not_connected",
+    "an off-domain operator must be told to connect their own account, not silently written elsewhere",
+  );
+}
+
+{
+  // We could not work out who this operator is. Guessing would put one rep's
+  // leads on another rep's phone, so it refuses.
+  const result = await writeReminderEvent("t1", "u-rep", null, INPUT, {
+    openSession: async () => null,
+    resolveOperatorEmail: async () => null,
+    mintDelegatedToken: async () => {
+      throw new Error("must not be called without a resolved address");
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(!result.ok && result.reason, "not_connected");
+}
+
 /* ------------------------------------------------------- the id lifecycle */
 
 {

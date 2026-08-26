@@ -77,9 +77,20 @@ for (const [surface, source] of [
   );
 }
 
+// Re-aimed at the INTENT rather than the exact phrasing (2026-08-26).
+//
+// This previously pinned the literal string "Google Workspace (Gmail + Calendar)".
+// The point of the guard is discoverability: a rep must be able to see that this
+// one connection covers Calendar as well as Gmail, so they neither miss it nor
+// go hunting for a separate calendar setting. Pinning the exact words made the
+// test go red when the title was reworded to lead with Calendar (a change that
+// improves the very property this asserts), while a reword that dropped Calendar
+// entirely and kept the old string would have stayed green. Assert both
+// capabilities are named; leave the wording free.
+const workCardTitle = panel.match(/<span className="font-semibold text-sm text-fg">([^<]+)<\/span>/u)?.[1] || "";
 assert(
-  panel.includes("Google Workspace (Gmail + Calendar)"),
-  "Settings must name the work connection by both capabilities",
+  /calendar/i.test(workCardTitle) && /gmail/i.test(workCardTitle),
+  `Settings must name the work connection by both capabilities (found: "${workCardTitle}")`,
 );
 assert(
   panel.includes("Reconnect once"),

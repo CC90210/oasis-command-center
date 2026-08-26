@@ -420,7 +420,7 @@ export function PersonalIntegrationsPanel({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-fg">Google Workspace (Gmail + Calendar)</span>
+                  <span className="font-semibold text-sm text-fg">Google Calendar &amp; Gmail</span>
                   {calendarConnected ? (
                     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                       <Check className="w-3 h-3" />
@@ -445,9 +445,26 @@ export function PersonalIntegrationsPanel({
                     : calendarIdentityMismatch
                       ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this profile must send client invitations as ${gmailStatus?.expected_work_email || "its OASIS work email"}. Reconnect with the matching work account.`
                     : calendarReconnectRequired
-                      ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Founder hosts reconnect once to enable Calendar invites and Google Meet.`
-                      : "Connect your work Google account for Gmail sends, read-only deal-email monitoring, and founder-owned Calendar invites with Google Meet."}
+                      ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Reconnect once and your follow-ups start reaching your phone.`
+                      : "Connect your work Google account and the follow-ups you schedule on a lead show up on your own phone. It also covers Gmail sends and read-only deal-email monitoring from your address."}
                 </div>
+                {/*
+                  THE APP-PASSWORD CORRECTION, PLACED WHERE THE MISTAKE HAPPENS.
+
+                  Reps are used to app passwords for mail, and the instinct is to
+                  go generate one and look for a box to paste it into. There is no
+                  such box and there cannot be: an app password authorises IMAP and
+                  SMTP only, and the Google Calendar API accepts OAuth bearer
+                  tokens and nothing else. Saying so here costs one line and saves
+                  a rep the round trip of generating a credential that could never
+                  have worked.
+                */}
+                {!calendarConnected && (
+                  <div className="text-[11px] text-fg-dim mt-2 leading-relaxed">
+                    This is a Google sign-in, not a password. An app password only works for
+                    email and cannot connect a calendar, so there is nothing to paste here.
+                  </div>
+                )}
               </div>
               <div className="shrink-0 flex flex-col gap-1.5">
                 {calendarReconnectRequired ? (

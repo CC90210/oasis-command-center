@@ -39,12 +39,23 @@
  */
 
 import "server-only";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   CALENDAR_API,
   openAuthorizedCalendarSession,
   GoogleCalendarIntegrationError,
   type AuthorizedCalendarFetch,
+  type GoogleCalendarErrorCode,
 } from "./google-calendar";
+import {
+  isDwdConfigured,
+  mintDelegatedAccessToken,
+  clearDelegatedTokenCache,
+  type DwdTokenResult,
+} from "./google-dwd";
+
+/** Impersonated, "primary" is the rep's OWN calendar. That is the whole point. */
+const PRIMARY_CALENDAR_ID = "primary";
 
 /**
  * The slice of an authorized session this module needs.
@@ -63,18 +74,164 @@ export type ReminderSession = {
 };
 
 export type ReminderDeps = {
-  openSession?: (tenantId: string, userId: string) => Promise<ReminderSession>;
+  /** Returns null to mean "this operator has no usable personal grant". */
+  openSession?: (tenantId: string, userId: string) => Promise<ReminderSession | null>;
+  /** Test seam: resolve the operator's work address for delegation. */
+  resolveOperatorEmail?: (tenantId: string, userId: string) => Promise<string | null>;
+  /** Test seam: mint a delegated access token for that address. */
+  mintDelegatedToken?: (email: string) => Promise<DwdTokenResult>;
+  /** Test seam: the fetch the delegated session uses. */
+  fetchImpl?: typeof fetch;
 };
+
+/**
+ * Resolve the address a delegated token should act as.
+ *
+ * `user_profiles.auth_user_id` is the same id the session and the integration
+ * store key on, and `.email` is the work address the Workspace knows. If we
+ * cannot find it, delegation is skipped rather than guessed at: minting a
+ * token for the wrong person would put one rep's leads on another rep's phone.
+ */
+async function resolveOperatorEmail(tenantId: string, userId: string): Promise<string | null> {
+  try {
+    const db = getServiceSupabase();
+    const row = await db
+      .from("user_profiles")
+      .select("email")
+      .eq("tenant_id", tenantId)
+      .eq("auth_user_id", userId)
+      .maybeSingle();
+    if (row.error) return null;
+    const email = (row.data as { email?: string | null } | null)?.email;
+    return typeof email === "string" && email.trim() ? email.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A session that acts as the operator via domain-wide delegation.
+ *
+ * Returns null when delegation is not configured, the address is not on an
+ * authorised domain, or the mint failed — every one of which means "fall back
+ * to refusing", never "use somebody else's calendar".
+ *
+ * `calendarId` is "primary" and that is the point: while impersonating, primary
+ * IS this rep's own calendar, so the reminder reaches their own phone. This is
+ * the difference between delegation (correct) and the shared workspace
+ * calendar this module refuses above (wrong for a private reminder).
+ */
+async function openDelegatedSession(
+  tenantId: string,
+  userId: string,
+  deps?: ReminderDeps,
+): Promise<ReminderSession | null> {
+  if (!deps?.mintDelegatedToken && !isDwdConfigured()) return null;
+
+  const resolve = deps?.resolveOperatorEmail || resolveOperatorEmail;
+  const email = await resolve(tenantId, userId);
+  if (!email) return null;
+
+  const mint = deps?.mintDelegatedToken || mintDelegatedAccessToken;
+  let minted = await mint(email);
+  if (!minted.ok) return null;
+  let accessToken = minted.accessToken;
+
+  const fetchImpl = deps?.fetchImpl || fetch;
+  const authorizedFetch: AuthorizedCalendarFetch = async (url, init, networkErrorCode) => {
+    const perform = () =>
+      fetchImpl(url, {
+        ...init,
+        headers: { ...(init.headers || {}), authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(
+          init.method === "POST" || init.method === "PATCH" ? 20_000 : 15_000,
+        ),
+      });
+    let response: Response;
+    try {
+      response = await perform();
+    } catch (cause) {
+      throw new GoogleCalendarIntegrationError(code(networkErrorCode), "delegated request failed", {
+        cause,
+      });
+    }
+    if (response.status !== 401) return response;
+    // The cached token went stale. Re-mint once, exactly like the personal
+    // path does, rather than surfacing a 401 the caller would read as a
+    // revoked grant needing a human.
+    clearDelegatedTokenCache();
+    minted = await mint(email);
+    if (!minted.ok) return response;
+    accessToken = minted.accessToken;
+    try {
+      return await perform();
+    } catch (cause) {
+      throw new GoogleCalendarIntegrationError(
+        code(networkErrorCode),
+        "delegated retry failed after re-minting",
+        { cause },
+      );
+    }
+  };
+
+  return { authorizedFetch, calendarId: PRIMARY_CALENDAR_ID, systemFallback: false };
+}
+
+/** Identity helper so the network-error code passes through unchanged. */
+function code(value: GoogleCalendarErrorCode): GoogleCalendarErrorCode {
+  return value;
+}
 
 async function openSession(
   tenantId: string,
   userId: string,
   deps?: ReminderDeps,
 ): Promise<ReminderSession> {
-  const session: ReminderSession = deps?.openSession
-    ? await deps.openSession(tenantId, userId)
-    : await openAuthorizedCalendarSession({ tenantId, organizerUserId: userId });
+  if (deps?.openSession) {
+    const injected = await deps.openSession(tenantId, userId);
+    // A null injected session means "no personal grant", which must fall
+    // through to delegation exactly like the real path does -- otherwise the
+    // test seam would exercise a flow production never takes.
+    if (injected) return assertNotSharedCalendar(injected);
+    const delegatedOnly = await openDelegatedSession(tenantId, userId, deps);
+    if (delegatedOnly) return delegatedOnly;
+    throw new GoogleCalendarIntegrationError(
+      "google_calendar_not_connected",
+      "no personal Google connection and no domain-wide delegation for this operator",
+    );
+  }
 
+  // 1. THE REP'S OWN GRANT WINS. If they clicked Connect, that consent is the
+  //    most direct answer and needs no admin configuration at all.
+  let personalError: unknown = null;
+  try {
+    const s = await openAuthorizedCalendarSession({ tenantId, organizerUserId: userId });
+    if (!s.systemFallback) {
+      return { authorizedFetch: s.authorizedFetch, calendarId: s.calendarId, systemFallback: false };
+    }
+    // systemFallback means there was no usable personal grant. Fall through to
+    // delegation rather than writing to the shared calendar.
+  } catch (error) {
+    personalError = error;
+  }
+
+  // 2. DOMAIN-WIDE DELEGATION. Acts AS this rep, so the reminder still lands on
+  //    their own calendar and their own phone, with nothing for them to click.
+  const delegated = await openDelegatedSession(tenantId, userId, deps);
+  if (delegated) return delegated;
+
+  // 3. Neither route is available. Preserve the personal path's own diagnosis
+  //    when it had one, so "scope required" does not get flattened into
+  //    "not connected" and send a rep to the wrong fix.
+  if (personalError) throw personalError;
+  throw new GoogleCalendarIntegrationError(
+    "google_calendar_not_connected",
+    "no personal Google connection and no domain-wide delegation for this operator",
+  );
+}
+
+/** REFUSE THE WORKSPACE FALLBACK. */
+function assertNotSharedCalendar(session: ReminderSession): ReminderSession {
   // REFUSE THE WORKSPACE FALLBACK. THIS IS NOT AN OPTIMISATION, IT IS A LEAK.
   //
   // `openAuthorizedCalendarSession` falls back to the shared OASIS workspace
