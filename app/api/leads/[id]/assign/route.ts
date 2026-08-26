@@ -52,7 +52,17 @@ const OASIS_REP_ASSIGNABLE_STAGES = new Set([
   "connected",
   "qualified",
 ]);
-const OASIS_PRE_HANDOFF_ASSIGNEE_ROLES = new Set(["opener", "agent", "manager"]);
+const OASIS_PRE_HANDOFF_ASSIGNEE_ROLES = new Set([
+  "opener",
+  "closer",
+  "builder",
+  "marketing",
+  "agent",
+  "manager",
+  "admin",
+  "owner",
+  "member",
+]);
 
 export async function POST(
   req: NextRequest,
@@ -184,9 +194,14 @@ export async function POST(
         : "";
     const currentStage =
       typeof record.data.stage === "string" ? record.data.stage.trim().toLowerCase() : "";
+    const isAllowedTransfer =
+      !currentOwner ||
+      currentOwner === sess.userId.toLowerCase() ||
+      sess.isAdmin ||
+      sess.teamRole === "manager" ||
+      sess.teamRole === "owner";
     if (
-      currentOwner !== sess.userId.toLowerCase() ||
-      !OASIS_REP_ASSIGNABLE_STAGES.has(currentStage) ||
+      !isAllowedTransfer ||
       (nextAssignedTo !== null &&
         !OASIS_PRE_HANDOFF_ASSIGNEE_ROLES.has((nextAssigneeRole || "").toLowerCase()))
     ) {
