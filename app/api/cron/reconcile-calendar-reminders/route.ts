@@ -352,7 +352,15 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     ok: true,
     ...counts,
     maxSyncAttempts: MAX_SYNC_ATTEMPTS,
-    truncated: merged.length > rows.length,
+    // Truncation is this run's ONLY backlog signal, so it must never
+    // under-report. The merged slice alone is not enough: if both queries hit
+    // their limit and returned the SAME rows, the union is not sliced and this
+    // would read "all clear" while each query still had unseen rows behind it.
+    // Either condition means there is more out there. (Codex round 5.)
+    truncated:
+      merged.length > rows.length ||
+      (queued.data || []).length >= SCAN_LIMIT ||
+      (legacyPending.data || []).length >= SCAN_LIMIT,
     ms: Date.now() - startedAt,
   };
   // One structured line per run: this is the only place the queue backlog is

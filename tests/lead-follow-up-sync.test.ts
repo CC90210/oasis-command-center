@@ -479,6 +479,15 @@ assert.equal(
     /merged\.slice\(0, SCAN_LIMIT\)/,
     "the scan ceiling must apply to the MERGED set, not to each query separately",
   );
+  // Truncation is the only backlog signal this run emits, so it must never
+  // under-report. If both queries hit their limit and returned the SAME rows,
+  // the union is not sliced -- and a merged-only check would call that "all
+  // clear" while each query still had unseen rows behind it.
+  assert.match(
+    cron,
+    /truncated:\s*\n\s*merged\.length > rows\.length \|\|\s*\n\s*\(queued\.data \|\| \[\]\)\.length >= SCAN_LIMIT \|\|\s*\n\s*\(legacyPending\.data \|\| \[\]\)\.length >= SCAN_LIMIT/,
+    "truncation must consider BOTH the merged slice and each query hitting its own limit",
+  );
 }
 
 console.log("lead-follow-up-sync.test.ts passed");
