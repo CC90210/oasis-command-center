@@ -1,12 +1,27 @@
 /**
- * verify-workspace-calendar-live — book a real founder meeting through the REAL
- * production code path, against the REAL Google Calendar API, using the SAME
+ * verify-workspace-calendar-live — book a real founder audit through the
+ * calendar adapter, against the REAL Google Calendar API, using the same
  * workspace credentials that are set in Vercel production.
  *
- * This is the gate the booking chain never had. Every previous check either
- * inspected the shape of a credential (which is what "presence is not validity"
- * kept getting wrong) or stubbed Google out. This spends the credential the way
- * a rep clicking "Book meeting & send invite" spends it, and then cleans up.
+ * ═══ WHAT THIS PROVES, AND WHAT IT DOES NOT ════════════════════════════════
+ *
+ * PROVES: the workspace credential is spendable, with the client it is paired
+ * with; the adapter creates an event, provisions a Meet link, attaches the
+ * attendee list, and cancels cleanly. Every previous check either inspected the
+ * SHAPE of a credential -- which is what "presence is not validity" kept
+ * getting wrong -- or stubbed Google out entirely. This spends it.
+ *
+ * DOES NOT PROVE that a rep can book. It calls createGoogleFounderMeeting
+ * directly and stubs getBundle/setValue, so it never touches the HTTP route
+ * (POST /api/website-sales/[leadId]), session auth, tenant scoping, the
+ * createVerifiedFounderMeeting saga, or any database write. A green run here
+ * with a broken route is entirely possible.
+ *
+ * That distinction is the whole reason this file exists, so do not quietly
+ * widen the claim: a check that asserts more than it verifies is the exact
+ * defect that put a green "Ready to book" banner over a dead credential twice
+ * (#322, #331). For the rep journey, drive the UI or read a real booking's
+ * calendar receipt off tenant_records.
  *
  * It forces the WORKSPACE FALLBACK specifically: getBundle returns an empty
  * bundle, so the host has no personal connection and the shared OASIS calendar
