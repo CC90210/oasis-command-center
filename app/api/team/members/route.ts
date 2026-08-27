@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
 import { getUserIntegrationBundle } from "@/lib/user-integration-store";
-import { isSystemCalendarConfigured } from "@/lib/integrations/google-calendar";
+import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import {
   canManageTeam,
   isTrueAdminRole,
@@ -69,12 +69,19 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const TOKEN_VERDICT_TTL_MS = 60_000;
 const tokenVerdicts = new Map<string, { ok: boolean; expires: number }>();
 
-async function tokenUsable(refreshToken: string): Promise<boolean> {
+async function tokenUsable(
+  refreshToken: string,
+  clientId?: string,
+  clientSecret?: string,
+): Promise<boolean> {
   const now = Date.now();
-  const cached = tokenVerdicts.get(refreshToken);
+  // Keyed on client too: the same token string presented by a different OAuth
+  // client is a genuinely different question, and Google answers it differently.
+  const key = `${clientId || ""}:${refreshToken}`;
+  const cached = tokenVerdicts.get(key);
   if (cached && cached.expires > now) return cached.ok;
-  const verdict = await probeToken(refreshToken);
-  tokenVerdicts.set(refreshToken, { ok: verdict, expires: now + TOKEN_VERDICT_TTL_MS });
+  const verdict = await probeToken(refreshToken, clientId, clientSecret);
+  tokenVerdicts.set(key, { ok: verdict, expires: now + TOKEN_VERDICT_TTL_MS });
   // Bound the map so a long-lived instance cycling through many tokens cannot
   // grow it without limit. Cheap because entries are tiny and short-lived.
   if (tokenVerdicts.size > 500) {
@@ -83,9 +90,17 @@ async function tokenUsable(refreshToken: string): Promise<boolean> {
   return verdict;
 }
 
-async function probeToken(refreshToken: string): Promise<boolean> {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+async function probeToken(
+  refreshToken: string,
+  overrideClientId?: string,
+  overrideClientSecret?: string,
+): Promise<boolean> {
+  const clientId =
+    overrideClientId || process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret =
+    overrideClientSecret ||
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET ||
+    process.env.GOOGLE_CLIENT_SECRET;
   // No OAuth config is a deployment problem, not a host problem. Nothing can
   // book in that state, so claiming a host is ready would be the bigger lie.
   if (!clientId || !clientSecret) return false;
@@ -209,7 +224,27 @@ export async function GET() {
   // host is invited as an attendee. Reporting every host as calendar-ready
   // here is what removes the false "needs to reconnect Google Calendar" card
   // from the audit handoff; per-host detail fields are preserved underneath.
-  const workspaceFallbackReady = isSystemCalendarConfigured();
+  // ═══ PRESENCE IS NOT VALIDITY -- FOR THE SHARED CREDENTIAL TOO ══════════
+  //
+  // This was isSystemCalendarConfigured(): "the three env vars are non-empty".
+  // That is the SAME check that was ripped out of the per-host path in #322 for
+  // lying, and it lied here in exactly the same way, one level up and far more
+  // expensively: a revoked or client-mismatched workspace token is still three
+  // perfectly non-empty strings, so the handoff banner read "Ready to book from
+  // the OASIS AI calendar" while NOTHING could book for ANYONE. Every host also
+  // looked coverable by a fallback that was already dead.
+  //
+  // Now it spends the token the way the booking spends it. Same 60s cache and
+  // same fail-soft-on-network-error rules as the per-host probe, and it is one
+  // extra Google call per request at most, deduped across all hosts.
+  const systemCalendar = systemCalendarConfig();
+  const workspaceFallbackReady = systemCalendar
+    ? await tokenUsable(
+        systemCalendar.refreshToken,
+        systemCalendar.clientId,
+        systemCalendar.clientSecret,
+      )
+    : false;
   const membersWithCalendar = await Promise.all(
     members.map(async (member) => ({
       member,
