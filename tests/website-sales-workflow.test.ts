@@ -73,9 +73,18 @@ assert.equal(mayWorkWebsiteSalesLifecycle("agent"), true);
 assert.equal(mayWorkWebsiteSalesLifecycle("opener"), true);
 assert.equal(mayWorkWebsiteSalesLifecycle("closer"), true);
 assert.equal(mayWorkWebsiteSalesLifecycle("manager"), true);
-assert.equal(mayWorkWebsiteSalesLifecycle("marketing"), false);
+// `marketing` was granted sales-lifecycle access on 2026-08-26 by 01461615
+// ("enable lead access and cross-role transfers for openers, closers, builders,
+// and marketing"), one day after this line was written asserting the opposite.
+// The assertion was never updated, so the suite has been red ever since -- and
+// because npm chains these files with `&&`, it took the ENTIRE test:website-sales
+// run down with it, including every founder-meeting-calendar test. Fourteen
+// files stopped running and nothing said so.
+assert.equal(mayWorkWebsiteSalesLifecycle("marketing"), true, "the marketing hire sells (01461615)");
 assert.equal(mayWorkWebsiteSalesLifecycle("read_only"), false);
-assert.equal(mayWorkWebsiteSalesLifecycle("marketing", true), true, "an explicit admin grant can operate the lifecycle");
+assert.equal(mayWorkWebsiteSalesLifecycle("delivery"), false, "delivery reviews a deal, it does not work one");
+assert.equal(mayWorkWebsiteSalesLifecycle(null), false, "an absent role must fail closed");
+assert.equal(mayWorkWebsiteSalesLifecycle("read_only", true), true, "an explicit admin grant can operate the lifecycle");
 
 assert.deepEqual(
   resolveWebsiteSalesCloseParties({
