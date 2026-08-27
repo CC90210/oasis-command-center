@@ -6,6 +6,7 @@ import {
   founderMeetingConferenceRequestId,
   founderMeetingEventId,
   operatorCalendarStatus,
+  hasRequiredScope,
   updateGoogleFounderMeeting,
   type GoogleCalendarDependencies,
 } from "../lib/integrations/google-calendar";
@@ -853,6 +854,7 @@ console.log("founder-meeting-calendar revoked-token fallback ok");
 revokedTokenFallbackChecks()
   .then(systemCalendarUsesItsOwnClientChecks)
   .then(broaderCalendarScopeChecks)
+  .then(scopePredicateChecks)
   .catch((error) => {
     console.error(error);
     process.exit(1);
@@ -1036,4 +1038,47 @@ async function broaderCalendarScopeChecks() {
   assert.equal(calls.length, 1, "no extra token round-trip should be needed");
 
   console.log("founder-meeting-calendar broader-scope acceptance ok");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE SCOPE PREDICATE IS SHARED, SO EVERY SURFACE AGREES.
+//
+// hasRequiredScope is exported and used by the booking, the handoff readiness
+// banner, the OAuth callback's grant check and the personal-integrations
+// status page. Before that, each had its own literal `calendar.events` string
+// test, and the callback's version REFUSED a rep whose Google granted the
+// broader auth/calendar -- bouncing them to Settings with
+// `calendar_events_scope_not_granted` and no way to succeed, because
+// re-consenting grants the same broader scope again.
+//
+// This pins the contract itself, since four call sites now depend on it.
+function scopePredicateChecks() {
+  const CAL = "https://www.googleapis.com/auth/calendar";
+  const EVENTS = "https://www.googleapis.com/auth/calendar.events";
+
+  assert.equal(hasRequiredScope(EVENTS), true, "the exact scope we request must pass");
+  assert.equal(hasRequiredScope(CAL), true, "the parent scope contains it and must pass");
+  assert.equal(
+    hasRequiredScope(`openid email ${CAL} https://www.googleapis.com/auth/gmail.send`),
+    true,
+    "the parent must be found among a real granted scope string",
+  );
+  assert.equal(hasRequiredScope(`openid email ${EVENTS}`), true);
+
+  // Fails closed on everything that is genuinely insufficient.
+  assert.equal(hasRequiredScope(undefined), false, "absent scope must fail closed");
+  assert.equal(hasRequiredScope(""), false, "empty scope must fail closed");
+  assert.equal(hasRequiredScope("openid email"), false, "no calendar scope at all");
+  assert.equal(
+    hasRequiredScope("https://www.googleapis.com/auth/calendar.readonly"),
+    false,
+    "readonly cannot create events -- it is NOT a substitute",
+  );
+  assert.equal(
+    hasRequiredScope("https://www.googleapis.com/auth/calendar.settings.readonly"),
+    false,
+    "a scope that merely starts with the parent string must not pass",
+  );
+
+  console.log("founder-meeting-calendar shared scope predicate ok");
 }

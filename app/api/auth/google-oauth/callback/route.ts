@@ -28,13 +28,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { setUserIntegrationBundle } from "@/lib/user-integration-store";
+import { hasRequiredScope } from "@/lib/integrations/google-calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 const SETTINGS_RETURN_PATH = "/settings#integrations";
 // Must mirror start/route.ts. work → send+monitor; personal → monitor only.
 const MAILBOX_SERVICE: Record<string, string> = {
@@ -162,7 +162,8 @@ export async function GET(req: NextRequest) {
   // Verify the granted scope covers what this mailbox needs. Google can grant
   // a subset in edge cases. Work needs send + readonly + Calendar events;
   // personal needs readonly only.
-  const grantedScopes = new Set((tokenResp.scope || "").split(/\s+/u).filter(Boolean));
+  const grantedScopeValue = tokenResp.scope || "";
+  const grantedScopes = new Set(grantedScopeValue.split(/\s+/u).filter(Boolean));
   const needWorkScopes = service === "gmail_oauth";
   if (needWorkScopes && !grantedScopes.has(GMAIL_SEND_SCOPE)) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_send_scope_not_granted" });
@@ -170,7 +171,20 @@ export async function GET(req: NextRequest) {
   if (!grantedScopes.has(GMAIL_READONLY_SCOPE)) {
     return settingsRedirect(req, { gmail_oauth: "error", reason: "gmail_readonly_scope_not_granted" });
   }
-  if (needWorkScopes && !grantedScopes.has(CALENDAR_EVENTS_SCOPE)) {
+  // A BROADER GRANT IS NOT A FAILED GRANT.
+  //
+  // This asked `grantedScopes.has(CALENDAR_EVENTS_SCOPE)` -- the literal narrow
+  // string. Google returns the parent `auth/calendar` when the account has
+  // already granted it to this client, and the parent CONTAINS calendar.events.
+  // So a rep whose Google was more privileged than we asked for was bounced
+  // back to Settings with `calendar_events_scope_not_granted` and no way to
+  // succeed: re-consenting grants the same broader scope again.
+  //
+  // hasRequiredScope is the predicate the BOOKING uses. Sharing it is the point
+  // -- a connection this route accepts must be one the booking can spend, and
+  // three separate copies of that question is what put a green banner over a
+  // dead credential twice (#322, #331).
+  if (needWorkScopes && !hasRequiredScope(grantedScopeValue)) {
     return settingsRedirect(req, {
       gmail_oauth: "error",
       reason: "calendar_events_scope_not_granted",

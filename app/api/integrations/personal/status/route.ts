@@ -15,15 +15,10 @@ import {
   getUserIntegrationBundle,
   listUserIntegrationStatus,
 } from "@/lib/user-integration-store";
+import { hasRequiredScope } from "@/lib/integrations/google-calendar";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-
-function grantedScopes(scope: string | undefined): Set<string> {
-  return new Set((scope || "").split(/\s+/u).filter(Boolean));
-}
 
 export async function GET() {
   const user = await getSessionUser();
@@ -68,7 +63,10 @@ export async function GET() {
         const workspaceConnected = Boolean(bundle.refresh_token);
         const calendarConnected =
           workspaceConnected &&
-          grantedScopes(bundle.scope).has(CALENDAR_EVENTS_SCOPE) &&
+          // Same predicate the booking uses: the broader auth/calendar scope
+          // contains calendar.events, and reporting a more-privileged
+          // connection as not-connected is the #331 defect on another surface.
+          hasRequiredScope(bundle.scope) &&
           Boolean(expectedWorkEmail) &&
           String(bundle.gmail_address || "").trim().toLowerCase() === expectedWorkEmail;
         const calendarIdentityMismatch =
