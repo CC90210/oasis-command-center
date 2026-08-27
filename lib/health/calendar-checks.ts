@@ -15,27 +15,35 @@
  * a confident yes over a dead credential, which is exactly what the handoff
  * banner did for two days (#322, then again at the workspace level in #331).
  *
- * So this check spends it. That is the only question whose answer is worth
- * anything, and it is the same question the booking asks.
- *
- * DELIBERATELY FAILS SOFT ON "UNKNOWN". A 4xx from Google is definitive: the
- * credential is dead and nobody can book. A 5xx or a transport failure means we
- * do not know, and paging Adon because Google had a bad minute trains people to
- * ignore the channel. Unknown scores 0 here, matching the per-host probe in
- * app/api/team/members. Not knowing is not the same as broken, and it is also
- * not the same as healthy — but between a false page every time Google wobbles
- * and a real page delayed by 15 minutes, the second is the better trade for a
- * credential that fails permanently, not intermittently.
+ * So this check spends it, through the same probe the readiness banner uses.
+ * That shared probe is deliberate: the incident this exists to prevent was two
+ * surfaces asking Google different questions and getting different answers.
  */
 
 import "server-only";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
+import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
 import type { DripCheck } from "./drip-checks";
 
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-
-/** Distinguishes the two failures, which have OPPOSITE remedies. */
-let lastFailureMode: "unconfigured" | "rejected" | null = null;
+/**
+ * Observed values double as the failure MODE, so `describe` can stay a pure
+ * function of its CheckResult.
+ *
+ * The first version of this cached the mode in a module-level variable that
+ * `observe` wrote and `describe` read. Two things were wrong with that. It is
+ * not the pattern the other checks use — DEPLOY_CHECKS re-derives everything in
+ * `describe` and holds no state — and `runCheck` awaits between observe and
+ * describe, so a second invocation landing in the same warm process could
+ * rewrite the mode under the first one and print the wrong remedy. A monitor
+ * that names the wrong fix under load is worse than one that says less.
+ *
+ * Any non-zero fails `must_be_zero`, so both modes alert, and the distinction
+ * now also persists into health_check_runs.observed — the history can answer
+ * "was it ever misconfigured, or only ever rejected?"
+ */
+const OK = 0;
+const UNCONFIGURED = 1;
+const REJECTED = 2;
 
 export const CALENDAR_CHECKS: DripCheck[] = [
   {
@@ -45,53 +53,35 @@ export const CALENDAR_CHECKS: DripCheck[] = [
     observe: async () => {
       // Only production is doctrine-bound to hold a working workspace
       // credential. Previews and local dev legitimately run without one, and
-      // grading them would be a standing false alarm that gets the whole
-      // channel muted -- the same reasoning as deploy.prod_serves_main.
-      if (process.env.VERCEL_ENV !== "production") return 0;
+      // grading those would be a standing false alarm that gets the whole
+      // channel muted — the same reasoning as deploy.prod_serves_main.
+      if (process.env.VERCEL_ENV !== "production") return OK;
 
       const config = systemCalendarConfig();
-      if (!config) {
-        // Not a degraded state: with no workspace credential, EVERY host whose
-        // personal Google is missing, wrong-scoped or revoked is unbookable,
-        // and the fallback that exists to cover them cannot run at all.
-        lastFailureMode = "unconfigured";
-        return 1;
-      }
+      // Not a degraded state: with no workspace credential, EVERY host whose
+      // personal Google is missing, wrong-scoped or revoked is unbookable, and
+      // the fallback that exists to cover them cannot run at all.
+      if (!config) return UNCONFIGURED;
 
-      try {
-        const res = await fetch(GOOGLE_TOKEN_URL, {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            refresh_token: config.refreshToken,
-            client_id: config.clientId,
-            client_secret: config.clientSecret,
-          }).toString(),
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (res.ok) {
-          lastFailureMode = null;
-          return 0;
-        }
-        if (res.status >= 400 && res.status < 500) {
-          lastFailureMode = "rejected";
-          return 1;
-        }
-        // 5xx is Google's problem, not ours. See the doc comment.
-        lastFailureMode = null;
-        return 0;
-      } catch {
-        // Timeout or transport failure: unknown, not dead.
-        lastFailureMode = null;
-        return 0;
-      }
+      const verdict = await probeRefreshToken({
+        refreshToken: config.refreshToken,
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+      });
+      // POLICY ON THE THIRD ANSWER, stated where it applies: `unknown` scores
+      // healthy. Paging an operator every time Google has a bad minute is how a
+      // channel gets muted, and a muted monitor is worse than none. This
+      // credential fails permanently, not intermittently, so a real outage is
+      // delayed by one 15-minute tick at worst — a far better trade than a
+      // recurring false alarm. The readiness banner takes `unknown` differently
+      // and says so at its own call site; that divergence is intentional.
+      return verdict === "dead" ? REJECTED : OK;
     },
     describe: (r) => {
-      if (r.observed === 0) {
+      if (r.observed === OK) {
         return "the shared OASIS calendar credential is live — founder audits can be booked.";
       }
-      if (lastFailureMode === "unconfigured") {
+      if (r.observed === UNCONFIGURED) {
         return (
           "THE SHARED OASIS CALENDAR IS NOT CONFIGURED — GOOGLE_SYSTEM_CALENDAR_CLIENT_ID, " +
           "_CLIENT_SECRET and _REFRESH_TOKEN must all be set in Vercel production. " +
