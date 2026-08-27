@@ -14,6 +14,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { evaluate, type CheckResult, type CheckRule } from "./checks-core";
+import type { TelegramLane } from "@/lib/notify/telegram";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -21,6 +22,17 @@ export type DripCheck = {
   id: string;
   severity: "critical" | "high" | "medium";
   rule: CheckRule;
+  /**
+   * Who gets paged. Omitted means `sunbiz-ops`, which is where every check in
+   * this file belongs and where all of them went before this field existed.
+   *
+   * It exists because the runner hardcoded that lane, and the estate stopped
+   * being only SunBiz: an OASIS check added in #334 would have announced an
+   * OASIS booking outage into the SunBiz ops channel — the client's lane, for a
+   * product they do not operate. Wrong-audience alerts are ignored alerts, and
+   * an ignored alert is the same as no alert.
+   */
+  lane?: TelegramLane;
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
