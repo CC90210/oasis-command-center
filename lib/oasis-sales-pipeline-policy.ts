@@ -128,13 +128,21 @@ export function resolveOasisDeliveryQueueScope(
  * This is intentionally narrower than SELF_EDIT_LEAD_ROLES below. That older
  * allowlist serves shared CRM surfaces where loan officers/processors/builders
  * legitimately edit their own records. The OASIS pipeline is a sales surface:
- * an attached delivery, marketing, default-member, or read-only account may
- * review a deal, but it must not send, pause nurture, add notes, or edit facts.
+ * an attached delivery or read-only account may review a deal, but it must not
+ * send, pause nurture, add notes, or edit facts.
  *
  * `builder` joined on 2026-08-25 (CC): the builder/marketing hire sells, and
  * the per-lead tools — notes, AI score, lifecycle actions on HIS claimed
  * leads — are that job now. Ownership is still proven by every caller; this
  * set only answers "does this role do sales work at all".
+ *
+ * `marketing` joined on 2026-08-26 (CC, 01461615 "enable lead access and
+ * cross-role transfers for openers, closers, builders, and marketing") for the
+ * same reason. The paragraph above used to list `marketing` among the roles
+ * that may only REVIEW, which flatly contradicted the set two lines below it
+ * from the day the role was added — so the prose said one thing, the code did
+ * another, and a reader had no way to know which was current. Corrected here
+ * rather than left as an open question about who may work a deal.
  */
 export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "manager",
