@@ -53,7 +53,8 @@ async function run() {
     // ─── 1. A live credential is healthy ────────────────────────────────────
     configure();
     let sentBody = "";
-    stubFetch(() => new Response(JSON.stringify({ access_token: "a" }), { status: 200 }));
+    // Bespoke stub here rather than stubFetch(): this case also captures the
+    // request body, to prove the WORKSPACE client is the one presented.
     globalThis.fetch = (async (_u: unknown, init: RequestInit) => {
       sentBody = String(init?.body || "");
       return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
