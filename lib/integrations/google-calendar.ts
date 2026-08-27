@@ -115,22 +115,56 @@ export type FounderMeetingCalendarRequest = {
  */
 export type SystemCalendarConfig = {
   refreshToken: string;
+  /** OAuth client that MINTED refreshToken. A refresh grant is only valid with its own client. */
+  clientId: string;
+  clientSecret: string;
   organizerEmail: string;
   calendarId: string;
 };
 
 export function systemCalendarConfig(): SystemCalendarConfig | null {
-  // BOTH NAME PAIRS, because the codebase already reads both and a mismatch is
-  // silent: systemCalendarConfig() checked only GOOGLE_CLIENT_ID/SECRET while
-  // the readiness probe in app/api/team/members reads GOOGLE_OAUTH_CLIENT_ID
-  // first. A deployment that set only the OAUTH_-prefixed pair would have a
-  // working readiness check and a workspace fallback that silently reported
-  // "not configured" -- so every host with a dead token would be unbookable
-  // while the credentials to book them sat in the environment under the other
-  // name. Production today sets the unprefixed pair, so this is not currently
-  // firing; it is closed so it cannot start. (Raised by CC's agent, 2026-08-26.)
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || "";
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || "";
+  // ═══ THE WORKSPACE CALENDAR IS ITS OWN IDENTITY ═════════════════════════
+  //
+  // A Google refresh token can ONLY be exchanged by the OAuth client that
+  // minted it. Until now this function returned no client at all and the
+  // workspace token was refreshed with `dependencies.oauthClientId` -- the
+  // REP-FACING client from GOOGLE_CLIENT_ID. That silently imposed a
+  // requirement nobody wrote down: the shared workspace token had to be
+  // minted by the same client the "Connect Google" button uses, or every
+  // fallback booking died with `token_refresh_failed` from inside a code
+  // path whose whole job was to be the thing that still works.
+  //
+  // It also made the two credentials un-rotatable independently, which is
+  // backwards: the rep-facing client is a WEB client (it needs an https
+  // redirect URI for the consent bounce), while the workspace calendar is a
+  // service identity that never sees a browser and is perfectly happy as an
+  // installed/desktop client. Forcing one client to be both is why standing
+  // this up appeared to require a new Google Cloud project.
+  //
+  // GOOGLE_SYSTEM_CALENDAR_CLIENT_ID/SECRET let the workspace credential
+  // carry its own client. Unset, behaviour is byte-identical to before.
+  // (CC's agent, 2026-08-27.)
+  //
+  // BOTH NAME PAIRS below, because the codebase already reads both and a
+  // mismatch is silent: systemCalendarConfig() checked only
+  // GOOGLE_CLIENT_ID/SECRET while the readiness probe in app/api/team/members
+  // reads GOOGLE_OAUTH_CLIENT_ID first. A deployment that set only the
+  // OAUTH_-prefixed pair would have a working readiness check and a workspace
+  // fallback that silently reported "not configured" -- so every host with a
+  // dead token would be unbookable while the credentials to book them sat in
+  // the environment under the other name. Production today sets the
+  // unprefixed pair, so this is not currently firing; it is closed so it
+  // cannot start. (Raised by CC's agent, 2026-08-26.)
+  const clientId =
+    process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID ||
+    process.env.GOOGLE_OAUTH_CLIENT_ID ||
+    process.env.GOOGLE_CLIENT_ID ||
+    "";
+  const clientSecret =
+    process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET ||
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET ||
+    process.env.GOOGLE_CLIENT_SECRET ||
+    "";
   const refreshToken = (
     process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN ||
     process.env.GOOGLE_SYSTEM_REFRESH_TOKEN ||
@@ -139,6 +173,8 @@ export function systemCalendarConfig(): SystemCalendarConfig | null {
   if (!clientId || !clientSecret || !refreshToken) return null;
   return {
     refreshToken,
+    clientId,
+    clientSecret,
     organizerEmail: (process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS || "").trim().toLowerCase(),
     calendarId: (process.env.GOOGLE_CALENDAR_ID || "").trim() || PRIMARY_CALENDAR_ID,
   };
@@ -494,11 +530,22 @@ async function refreshAccessToken(args: {
   organizerUserId: string;
   refreshToken: string;
   dependencies: GoogleCalendarDependencies;
+  /**
+   * OAuth client to spend `refreshToken` with. Omitted for a host's personal
+   * token (the rep-facing client minted it). Supplied on the workspace-calendar
+   * path, whose token may come from an entirely different client -- see
+   * systemCalendarConfig(). Google rejects a refresh grant presented by any
+   * client other than the one that issued it, so this is not a preference.
+   */
+  clientId?: string;
+  clientSecret?: string;
   /** False in workspace-fallback mode: never write system tokens into a user's bundle. */
   persist?: boolean;
 }): Promise<string> {
   const { dependencies } = args;
-  if (!dependencies.oauthClientId || !dependencies.oauthClientSecret) {
+  const clientId = args.clientId || dependencies.oauthClientId;
+  const clientSecret = args.clientSecret || dependencies.oauthClientSecret;
+  if (!clientId || !clientSecret) {
     throw new GoogleCalendarIntegrationError(
       "google_oauth_config_missing",
       "Google OAuth client credentials are not configured",
@@ -513,8 +560,8 @@ async function refreshAccessToken(args: {
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: args.refreshToken,
-        client_id: dependencies.oauthClientId,
-        client_secret: dependencies.oauthClientSecret,
+        client_id: clientId,
+        client_secret: clientSecret,
       }).toString(),
       signal: AbortSignal.timeout(15_000),
     });
@@ -738,11 +785,18 @@ async function openAuthorizedCalendarSession(args: {
   let systemFallback = false;
   let calendarId = PRIMARY_CALENDAR_ID;
   let sessionBundle = bundle;
+  // Undefined while the session is on the host's own token: refreshAccessToken
+  // then falls through to the rep-facing client that minted it. Set only when
+  // the workspace identity takes over, so its token is spent with ITS client.
+  let sessionClientId: string | undefined;
+  let sessionClientSecret: string | undefined;
   if (!bundle.refresh_token || !hasRequiredScope(bundle.scope)) {
     const system = systemCalendarConfig();
     if (system) {
       systemFallback = true;
       calendarId = system.calendarId;
+      sessionClientId = system.clientId;
+      sessionClientSecret = system.clientSecret;
       sessionBundle = {
         ...bundle,
         refresh_token: system.refreshToken,
@@ -822,6 +876,8 @@ async function openAuthorizedCalendarSession(args: {
         organizerUserId: args.organizerUserId,
         refreshToken: sessionBundle.refresh_token,
         dependencies,
+        clientId: sessionClientId,
+        clientSecret: sessionClientSecret,
         persist: !systemFallback,
       });
     } catch (error) {
@@ -831,6 +887,8 @@ async function openAuthorizedCalendarSession(args: {
       if (!system) throw error;
       systemFallback = true;
       calendarId = system.calendarId;
+      sessionClientId = system.clientId;
+      sessionClientSecret = system.clientSecret;
       sessionBundle = {
         ...sessionBundle,
         refresh_token: system.refreshToken,
@@ -859,6 +917,8 @@ async function openAuthorizedCalendarSession(args: {
           organizerUserId: args.organizerUserId,
           refreshToken: system.refreshToken,
           dependencies,
+          clientId: system.clientId,
+          clientSecret: system.clientSecret,
           persist: false,
         });
       } catch (fallbackError) {

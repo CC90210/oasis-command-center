@@ -846,7 +846,154 @@ async function revokedTokenFallbackChecks() {
 console.log("founder-meeting-calendar revoked-token fallback ok");
 }
 
-revokedTokenFallbackChecks().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+// Chained, NOT fired in parallel: both this and the system-client checks below
+// mutate the same GOOGLE_* process.env keys, and concurrent suites clobbering
+// each other's env is a race that reports as a bogus assertion failure in
+// whichever one loses. Sequence them and each sees the environment it set up.
+revokedTokenFallbackChecks()
+  .then(systemCalendarUsesItsOwnClientChecks)
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE WORKSPACE CALENDAR IS SPENT WITH ITS OWN OAUTH CLIENT.
+//
+// Added 2026-08-27. A Google refresh grant is only valid when presented by the
+// client that MINTED it. The workspace credential was being refreshed with
+// `dependencies.oauthClientId` -- the rep-facing GOOGLE_CLIENT_ID -- so the
+// shared calendar could only ever work if its credential happened to be minted
+// by the same client as the "Connect Google" button. Nothing said so, and when
+// it was not true every fallback booking died with `token_refresh_failed` from
+// inside the code path whose entire job is to be the thing that still works.
+//
+// That coupling is also why standing this up looked like it needed a brand new
+// Google Cloud project: the rep-facing client must be a WEB client (https
+// redirect for the consent bounce), while the workspace calendar is a headless
+// service identity. One client cannot be the best form of both.
+async function systemCalendarUsesItsOwnClientChecks() {
+{
+  const saved = {
+    sysRefresh: process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN,
+    address: process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS,
+    repId: process.env.GOOGLE_CLIENT_ID,
+    repSecret: process.env.GOOGLE_CLIENT_SECRET,
+    sysId: process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID,
+    sysSecret: process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET,
+  };
+  process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "system-refresh-value";
+  process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "meetings@oasisai.work";
+  process.env.GOOGLE_CLIENT_ID = "rep-facing-web-client";
+  process.env.GOOGLE_CLIENT_SECRET = "rep-facing-web-secret";
+  process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID = "workspace-desktop-client";
+  process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET = "workspace-desktop-secret";
+
+  const grantBodies: string[] = [];
+  const fetchImpl: GoogleCalendarDependencies["fetchImpl"] = async (url, init) => {
+    const href = String(url);
+    if (href.includes("oauth2.googleapis.com/token")) {
+      const body = String((init as RequestInit)?.body || "");
+      grantBodies.push(body);
+      // Google's real behaviour: a grant presented by the wrong client is
+      // rejected, however valid the credential itself is. Modelling that is the
+      // whole point -- a stub that accepts any client proves nothing here.
+      if (body.includes("refresh_token=system-refresh-value")) {
+        return body.includes("client_id=workspace-desktop-client")
+          ? new Response(JSON.stringify({ access_token: "system-access-value", expires_in: 3600 }), { status: 200 })
+          : new Response(JSON.stringify({ error: "invalid_client" }), { status: 401 });
+      }
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }
+    if (href.includes("/events")) {
+      return new Response(JSON.stringify(eventResponse(deterministicEventId())), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    const staleBundle = { ...freshBundle(), access_token: "", expires_at: "2026-08-25T13:00:00.000Z" };
+    const receipt = await createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(fetchImpl, { getBundle: async () => staleBundle }),
+    );
+    assert.ok(receipt, "the workspace calendar must book using its own OAuth client");
+
+    const systemAttempt = grantBodies.find((b) => b.includes("refresh_token=system-refresh-value"));
+    assert.ok(systemAttempt, "the workspace credential must have been attempted");
+    assert.ok(
+      systemAttempt.includes("client_id=workspace-desktop-client"),
+      "the workspace credential must be presented with GOOGLE_SYSTEM_CALENDAR_CLIENT_ID, not the rep-facing client",
+    );
+    assert.ok(
+      !systemAttempt.includes("client_id=rep-facing-web-client"),
+      "the rep-facing client must not be used to spend the workspace credential",
+    );
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", saved.sysRefresh);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_ADDRESS", saved.address);
+    restoreEnv("GOOGLE_CLIENT_ID", saved.repId);
+    restoreEnv("GOOGLE_CLIENT_SECRET", saved.repSecret);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_CLIENT_ID", saved.sysId);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET", saved.sysSecret);
+  }
+}
+{
+  // AND WITH NO DEDICATED CLIENT SET, THE OLD BEHAVIOUR IS UNCHANGED.
+  // The override is additive: an existing deployment whose workspace credential
+  // was minted by the rep-facing client keeps working untouched.
+  const saved = {
+    sysRefresh: process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN,
+    repId: process.env.GOOGLE_CLIENT_ID,
+    repSecret: process.env.GOOGLE_CLIENT_SECRET,
+    sysId: process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID,
+    sysSecret: process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET,
+  };
+  process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "system-refresh-value";
+  process.env.GOOGLE_CLIENT_ID = "rep-facing-web-client";
+  process.env.GOOGLE_CLIENT_SECRET = "rep-facing-web-secret";
+  delete process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID;
+  delete process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET;
+
+  const grantBodies: string[] = [];
+  const fetchImpl: GoogleCalendarDependencies["fetchImpl"] = async (url, init) => {
+    const href = String(url);
+    if (href.includes("oauth2.googleapis.com/token")) {
+      const body = String((init as RequestInit)?.body || "");
+      grantBodies.push(body);
+      if (body.includes("refresh_token=system-refresh-value")) {
+        return new Response(JSON.stringify({ access_token: "system-access-value", expires_in: 3600 }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    }
+    if (href.includes("/events")) {
+      return new Response(JSON.stringify(eventResponse(deterministicEventId())), { status: 200 });
+    }
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    const staleBundle = { ...freshBundle(), access_token: "", expires_at: "2026-08-25T13:00:00.000Z" };
+    await createGoogleFounderMeeting(
+      requestArgs(),
+      baseDependencies(fetchImpl, { getBundle: async () => staleBundle }),
+    );
+    const systemAttempt = grantBodies.find((b) => b.includes("refresh_token=system-refresh-value"));
+    assert.ok(systemAttempt, "the workspace credential must have been attempted");
+    assert.ok(
+      systemAttempt.includes("client_id=rep-facing-web-client"),
+      "with no dedicated client configured, the workspace credential still uses GOOGLE_CLIENT_ID",
+    );
+  } finally {
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN", saved.sysRefresh);
+    restoreEnv("GOOGLE_CLIENT_ID", saved.repId);
+    restoreEnv("GOOGLE_CLIENT_SECRET", saved.repSecret);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_CLIENT_ID", saved.sysId);
+    restoreEnv("GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET", saved.sysSecret);
+  }
+}
+
+console.log("founder-meeting-calendar system-client isolation ok");
+}
+
+// Invoked by the chain above, not here -- see the note on that call site.
