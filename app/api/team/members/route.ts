@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
 import { getUserIntegrationBundle } from "@/lib/user-integration-store";
-import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
+import { systemCalendarConfig, hasRequiredScope } from "@/lib/integrations/google-calendar";
+import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
 import {
   canManageTeam,
   isTrueAdminRole,
@@ -22,8 +23,6 @@ const ROLE_VALUES: TeamRole[] = [
   "agent",
 ];
 
-const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 /**
  * Can this refresh token actually be spent? Asks Google, because there is no
@@ -104,26 +103,18 @@ async function probeToken(
   // No OAuth config is a deployment problem, not a host problem. Nothing can
   // book in that state, so claiming a host is ready would be the bigger lie.
   if (!clientId || !clientSecret) return false;
-  try {
-    const res = await fetch(GOOGLE_TOKEN_URL, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }).toString(),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (res.ok) return true;
-    // 4xx is Google's definitive "this token is dead". 5xx is Google's problem.
-    if (res.status >= 400 && res.status < 500) return false;
-    return true;
-  } catch {
-    // Timeout or network error: unknown, not dead. See the doc comment.
-    return true;
-  }
+
+  // The request and the status-code reasoning live in ONE place
+  // (lib/integrations/google-token-probe). What stays here is this surface's
+  // POLICY on the third answer:
+  //
+  // `unknown` PRESERVES THE PREVIOUS BELIEF. The cheap checks above already
+  // passed, so the last thing we actually knew was "connected". Downgrading a
+  // host to "reconnect Google" because Google had a bad minute sends a rep off
+  // to re-authorise an account that was never broken -- and the two errors have
+  // opposite remedies, so guessing is worse than deferring.
+  const verdict = await probeRefreshToken({ refreshToken, clientId, clientSecret });
+  return verdict !== "dead";
 }
 
 async function calendarReadiness(tenantId: string, userId: string | null, profileEmail: string | null) {
@@ -156,14 +147,13 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
     // signal at all -- checking an `expires_at` column would not have caught
     // this, because the token had not expired, it had been withdrawn.
     const hasToken = Boolean(bundle.refresh_token);
-    const scopes = new Set((bundle.scope || "").split(/\s+/u).filter(Boolean));
     const connectedAddress = String(bundle.gmail_address || "").trim().toLowerCase();
     const expectedAddress = String(profileEmail || "").trim().toLowerCase();
     const identityMatches = Boolean(connectedAddress && expectedAddress && connectedAddress === expectedAddress);
     // Only spend a network call when the cheap checks already pass -- a host
     // with no token or the wrong scope is not connected regardless of Google.
     const workspaceConnected =
-      hasToken && scopes.has(CALENDAR_EVENTS_SCOPE) && identityMatches
+      hasToken && hasRequiredScope(bundle.scope) && identityMatches
         ? await tokenUsable(String(bundle.refresh_token))
         : false;
     // ═══ THESE TWO FLAGS WERE ALWAYS FALSE ═════════════════════════════════

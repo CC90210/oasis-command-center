@@ -524,7 +524,7 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
  * now includes the workspace identity, and "we happen not to hit it today" is
  * the reason it would have stayed wrong until it cost another afternoon.
  */
-function hasRequiredScope(scopeValue: string | undefined): boolean {
+export function hasRequiredScope(scopeValue: string | undefined): boolean {
   const granted = new Set((scopeValue || "").split(/\s+/u).filter(Boolean));
   return granted.has(CALENDAR_EVENTS_SCOPE) || granted.has(CALENDAR_FULL_SCOPE);
 }

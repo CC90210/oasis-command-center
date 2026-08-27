@@ -69,8 +69,8 @@ async function run() {
     // ─── 2. A revoked credential is a critical failure ──────────────────────
     configure();
     stubFetch(() => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
-    assert.equal(await observe(), 1, "a 4xx from Google is definitive: nobody can book");
-    const revoked = check.describe({ id: check.id, verdict: "failing", observed: 1, baseline: 0, reason: "" });
+    assert.equal(await observe(), 2, "a 4xx from Google is definitive: nobody can book (2 = rejected)");
+    const revoked = check.describe({ id: check.id, verdict: "failing", observed: 2, baseline: 0, reason: "" });
     assert.match(revoked, /reconnect will NOT fix this/i, "must not send someone to reconnect a host");
     assert.match(revoked, /SAME OAuth client/i, "must name the client-mismatch trap that caused the outage");
 
@@ -80,7 +80,7 @@ async function run() {
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
     stubFetch(() => new Response("{}", { status: 200 }));
-    assert.equal(await observe(), 1, "no workspace credential at all means no fallback exists");
+    assert.equal(await observe(), 1, "no workspace credential at all means no fallback exists (1 = unconfigured)");
     const unconfigured = check.describe({ id: check.id, verdict: "failing", observed: 1, baseline: 0, reason: "" });
     assert.match(unconfigured, /NOT CONFIGURED/i, "the two failures must read differently");
 
@@ -116,3 +116,31 @@ run().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+/**
+ * DESCRIBE IS A PURE FUNCTION OF ITS RESULT.
+ *
+ * The first version cached the failure mode in a module-level variable that
+ * observe() wrote and describe() read. runCheck awaits between the two, so a
+ * second invocation in the same warm process could rewrite the mode under the
+ * first and print the wrong remedy — and the two remedies here are opposite
+ * (set env vars vs mint a new credential). Calling describe() with each mode,
+ * in an order that does not match any observe() that ran, pins that out.
+ */
+{
+  const c = CALENDAR_CHECKS[0];
+  const say = (observed: number) =>
+    c.describe({ id: c.id, verdict: observed === 0 ? "ok" : "failing", observed, baseline: 0, reason: "" });
+
+  // Deliberately out of order, with no observe() in between.
+  assert.match(say(2), /REJECTED BY GOOGLE/i, "2 must always read as rejected");
+  assert.match(say(1), /NOT CONFIGURED/i, "1 must always read as unconfigured");
+  assert.match(say(2), /REJECTED BY GOOGLE/i, "and again, after describing a different mode");
+  assert.match(say(0), /is live/i, "0 must always read as healthy");
+  assert.ok(
+    !say(1).includes("REJECTED BY GOOGLE") && !say(2).includes("NOT CONFIGURED"),
+    "the two remedies must never bleed into each other",
+  );
+
+  console.log("calendar-health-check: describe is stateless ok");
+}
