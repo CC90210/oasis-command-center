@@ -852,6 +852,7 @@ console.log("founder-meeting-calendar revoked-token fallback ok");
 // whichever one loses. Sequence them and each sees the environment it set up.
 revokedTokenFallbackChecks()
   .then(systemCalendarUsesItsOwnClientChecks)
+  .then(broaderCalendarScopeChecks)
   .catch((error) => {
     console.error(error);
     process.exit(1);
@@ -997,3 +998,42 @@ console.log("founder-meeting-calendar system-client isolation ok");
 }
 
 // Invoked by the chain above, not here -- see the note on that call site.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A BROADER SCOPE SATISFIES A NARROWER ONE.
+//
+// Added 2026-08-27. hasRequiredScope matched the literal `calendar.events`
+// string and nothing else, so a host granted the FULL `auth/calendar` scope --
+// which strictly contains calendar.events and can do strictly more -- was
+// treated as insufficiently privileged and pushed onto the workspace fallback
+// (or refused outright when none was configured).
+async function broaderCalendarScopeChecks() {
+  const calls: FetchCall[] = [];
+  const bundle = {
+    ...freshBundle(),
+    // The exact shape the OASIS workspace account holds.
+    scope: "openid email https://www.googleapis.com/auth/calendar",
+  };
+  const receipt = await createGoogleFounderMeeting(
+    requestArgs(),
+    baseDependencies(async (input, init) => {
+      const url = String(input);
+      calls.push({ url, init });
+      const payload = JSON.parse(String(init?.body)) as { id: string };
+      return jsonResponse(eventResponse(payload.id));
+    }, { getBundle: async () => bundle }),
+  );
+
+  assert.ok(receipt, "the full calendar scope must be accepted");
+  // The decisive assertion: it booked as the HOST, not via the workspace
+  // fallback. Falling back would also produce a receipt, so asserting only
+  // "it booked" would pass on the broken behaviour too.
+  assert.equal(
+    receipt.organizerEmail,
+    "founder@oasisai.work",
+    "a host holding the parent scope must organise their OWN meeting, not be demoted to the shared calendar",
+  );
+  assert.equal(calls.length, 1, "no extra token round-trip should be needed");
+
+  console.log("founder-meeting-calendar broader-scope acceptance ok");
+}

@@ -27,6 +27,8 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 const PUBLIC_EVENT_DESCRIPTION = "A 15-minute website audit with OASIS AI Solutions.";
 
 export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+/** The parent scope. Strictly contains CALENDAR_EVENTS_SCOPE — see hasRequiredScope. */
+export const CALENDAR_FULL_SCOPE = "https://www.googleapis.com/auth/calendar";
 
 export type GoogleCalendarErrorCode =
   | "invalid_request"
@@ -100,12 +102,24 @@ export type FounderMeetingCalendarRequest = {
  * every audit. When these variables are present, a host without a usable
  * personal connection books on the WORKSPACE identity instead:
  *
- *   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET   (same OAuth client as personal mode)
+ *   GOOGLE_SYSTEM_CALENDAR_CLIENT_ID /         the OAuth client that MINTED the
+ *   GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET      refresh token below. Falls back to
+ *                                             GOOGLE_CLIENT_ID/SECRET when unset.
+ *                                             These used to be the SAME client as
+ *                                             personal mode, which was not a
+ *                                             choice but an unwritten constraint
+ *                                             — see systemCalendarConfig().
  *   GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN      long-lived refresh token for the
  *                                             OASIS workspace account, granted
- *                                             https://www.googleapis.com/auth/calendar.events
- *   GOOGLE_SYSTEM_CALENDAR_ADDRESS            the workspace organizer address
- *                                             (used for receipts/identity)
+ *                                             calendar.events or the broader
+ *                                             auth/calendar that contains it
+ *   GOOGLE_SYSTEM_CALENDAR_ADDRESS            the workspace organizer address.
+ *                                             MUST be the account that owns the
+ *                                             refresh token: it doubles as the
+ *                                             allowed organizer-echo attendee,
+ *                                             so an aspirational alias fails the
+ *                                             booking's identity assertion AFTER
+ *                                             the event already exists.
  *   GOOGLE_CALENDAR_ID                        target calendar, default "primary"
  *
  * The workspace account becomes the event ORGANIZER; the human host is added
@@ -495,10 +509,24 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
   };
 }
 
+/**
+ * A BROADER SCOPE SATISFIES A NARROWER ONE.
+ *
+ * This matched the literal `calendar.events` string and nothing else, so a
+ * connection granted the FULL `auth/calendar` scope -- which strictly contains
+ * `calendar.events` and can do everything it can plus more -- was rejected as
+ * insufficiently privileged. Google itself treats the parent as sufficient; the
+ * workspace credential that unblocked booking on 2026-08-27 holds exactly this
+ * shape and would have been refused here on its way in.
+ *
+ * Not reachable from the in-app connect flow, which requests the exact narrow
+ * string -- but it is reachable by any credential minted anywhere else, which
+ * now includes the workspace identity, and "we happen not to hit it today" is
+ * the reason it would have stayed wrong until it cost another afternoon.
+ */
 function hasRequiredScope(scopeValue: string | undefined): boolean {
-  return new Set((scopeValue || "").split(/\s+/u).filter(Boolean)).has(
-    CALENDAR_EVENTS_SCOPE,
-  );
+  const granted = new Set((scopeValue || "").split(/\s+/u).filter(Boolean));
+  return granted.has(CALENDAR_EVENTS_SCOPE) || granted.has(CALENDAR_FULL_SCOPE);
 }
 
 async function responseText(response: Response): Promise<string> {

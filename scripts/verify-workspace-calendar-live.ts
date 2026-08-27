@@ -31,7 +31,22 @@ import {
 const OPERATOR = (process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS || "conaugh@oasisai.work").toLowerCase();
 const TENANT = "verify-tenant";
 const HOST = "verify-host";
-const REQUEST_ID = `workspace-calendar-verify-${process.env.VERIFY_RUN_ID || "manual"}`;
+/**
+ * UNIQUE PER RUN, DELIBERATELY.
+ *
+ * The event id is derived deterministically from this, and Google KEEPS a
+ * cancelled event at its id. So a fixed value works exactly once: the second
+ * run's insert 409s, the adapter reconciles by reading the existing event,
+ * finds it `cancelled`, and fails `event_not_active` -- a green gate that turns
+ * permanently red the moment you use it twice, reporting a fault in the
+ * booking chain when the only thing wrong is the gate's own bookkeeping.
+ *
+ * VERIFY_RUN_ID pins it when a run needs to be reproducible; otherwise every
+ * invocation gets its own slot and this stays runnable on demand, forever.
+ */
+const REQUEST_ID = `workspace-calendar-verify-${
+  process.env.VERIFY_RUN_ID || new Date().toISOString().replace(/[^0-9]/gu, "")
+}`;
 
 function fail(message: string): never {
   console.error(`\nFAIL: ${message}`);
