@@ -17,7 +17,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram } from "@/lib/notify/telegram";
+import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck } from "./drip-checks";
@@ -42,6 +42,24 @@ export function allChecks() {
 
 
 type Db = ReturnType<typeof getServiceSupabase>;
+
+/**
+ * Where a check's alerts go.
+ *
+ * `sunbiz-ops` is the default because every check that existed when this runner
+ * was written was a SunBiz drip check, and the lane was hardcoded to match. The
+ * estate outgrew that: the OASIS workspace-calendar check added in #334 would
+ * have announced an OASIS booking outage into the CLIENT's ops channel, for a
+ * product they do not operate. An alert in the wrong room is an alert nobody
+ * acts on, which is indistinguishable from no alert at all -- the exact failure
+ * mode this whole subsystem was built after.
+ *
+ * Defaulting rather than requiring the field keeps every existing check on the
+ * lane it already used, so this is additive: nothing reroutes by accident.
+ */
+function laneFor(check: { lane?: TelegramLane }): TelegramLane {
+  return check.lane ?? "sunbiz-ops";
+}
 
 const SEV_ICON: Record<string, string> = {
   failing: "🔴",
@@ -124,7 +142,7 @@ export async function runHealthChecks(
         recovered.push(result.id);
         await sendTelegram(
           `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
-          { lane: "sunbiz-ops" },
+          { lane: laneFor(check) },
         ).catch(() => undefined);
         await db.from("health_alert_state").upsert({
           alert_key: key, tenant_id: tenantId, last_signature: null,
@@ -147,7 +165,7 @@ export async function runHealthChecks(
       `${SEV_ICON[result.verdict]} <b>${esc(result.verdict.toUpperCase())}</b> — ${esc(result.id)}\n` +
       `${esc(check.describe(result))}\n` +
       `<i>next check in 15 min · re-alerts in ${decision.windowH}h if still bad</i>`;
-    const sent = await sendTelegram(body, { lane: "sunbiz-ops" }).catch(() => ({ ok: false }));
+    const sent = await sendTelegram(body, { lane: laneFor(check) }).catch(() => ({ ok: false }));
 
     // Record the alert attempt regardless of delivery. If Telegram is down we
     // must not spin re-sending every 15 minutes; the delivery self-test is the

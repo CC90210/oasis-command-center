@@ -49,6 +49,11 @@ export const CALENDAR_CHECKS: DripCheck[] = [
   {
     id: "calendar.workspace_credential_usable",
     severity: "critical",
+    // OASIS's booking chain, so CC's lane -- not the SunBiz ops channel every
+    // other check in this runner uses. Adon operates SunBiz; nobody there can
+    // action a dead OASIS workspace credential, and an alert in the wrong room
+    // is one nobody acts on.
+    lane: "operator",
     rule: { kind: "must_be_zero" },
     observe: async () => {
       // Only production is doctrine-bound to hold a working workspace

@@ -144,3 +144,21 @@ run().catch((error) => {
 
   console.log("calendar-health-check: describe is stateless ok");
 }
+
+/**
+ * THE ALERT MUST REACH THE PEOPLE WHO CAN ACT ON IT.
+ *
+ * Every check in this runner predates OASIS and defaults to the SunBiz ops
+ * lane, which is Adon's channel for a product he operates. A dead OASIS
+ * workspace credential is not actionable there — nobody in that room can mint
+ * one — and an alert in the wrong room is one nobody acts on, which is
+ * indistinguishable from no alert at all.
+ */
+{
+  const c = CALENDAR_CHECKS[0];
+  assert.equal(
+    c.lane,
+    "operator",
+    "an OASIS booking outage must page CC's lane, not the SunBiz ops channel",
+  );
+}
