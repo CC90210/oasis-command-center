@@ -719,11 +719,6 @@ async function main() {
   console.log("founder-meeting-calendar: OK");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-
 /**
  * Restore an env var to exactly what it was, including ABSENT.
  *
@@ -847,11 +842,25 @@ async function revokedTokenFallbackChecks() {
 console.log("founder-meeting-calendar revoked-token fallback ok");
 }
 
-// Chained, NOT fired in parallel: both this and the system-client checks below
-// mutate the same GOOGLE_* process.env keys, and concurrent suites clobbering
-// each other's env is a race that reports as a bogus assertion failure in
-// whichever one loses. Sequence them and each sees the environment it set up.
-revokedTokenFallbackChecks()
+// Chained, NOT fired in parallel: these suites mutate the same GOOGLE_* keys on
+// process.env, and concurrent suites clobbering each other's env is a race that
+// reports as a bogus assertion failure in whichever one loses. Sequence them and
+// each sees the environment it set up.
+//
+// main() IS PART OF THE CHAIN, and that is the whole point of this edit
+// (2026-08-29). It used to be launched on its own above with a floating
+// `main().catch(...)`, so it was still running when this chain started setting
+// GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN — the exact clobbering the paragraph
+// above forbids, committed by the file that wrote it. main()'s scope and
+// identity tests assert that a booking with no calendar scope FAILS BEFORE
+// touching Google; with a workspace calendar suddenly configured mid-flight it
+// falls back to that instead and reaches the fetch stub, so the expected
+// rejection never arrives. Whether it lost the race was pure timing: green on
+// Windows, red on the CI runner, where it took main down at
+// testRejectsBundleWithoutCalendarScope and stopped the remaining 174 files in
+// the suite from running at all.
+main()
+  .then(revokedTokenFallbackChecks)
   .then(systemCalendarUsesItsOwnClientChecks)
   .then(broaderCalendarScopeChecks)
   .then(scopePredicateChecks)
