@@ -133,6 +133,18 @@ const nextConfig = {
   // so without an explicit include the prompts don't ship and the AI scoring
   // routes 500 on cold start with "ENOENT".
   outputFileTracingIncludes: {
+    // 2026-08-29 (Cloudflare migration): the OpenNext bundle step needs the
+    // COMPLETE @libsql/client family in the traced tree — the default trace
+    // copies it partially ("lib-esm/web.js not found") and hrana's ws shim
+    // not at all. Harmless on Vercel (full node_modules exists there).
+    "/**/*": [
+      "./node_modules/@libsql/client/**/*",
+      "./node_modules/@libsql/core/**/*",
+      "./node_modules/@libsql/hrana-client/**/*",
+      "./node_modules/@libsql/isomorphic-ws/**/*",
+      "./node_modules/@libsql/isomorphic-fetch/**/*",
+      "./node_modules/js-base64/**/*",
+    ],
     "/api/leads/*/score": ["./lib/prompts/**/*"],
     "/api/leads/*/next-action": ["./lib/prompts/**/*"],
     // Added 2026-06-07 after Playwright UI sweep caught the new

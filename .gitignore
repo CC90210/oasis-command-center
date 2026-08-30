@@ -30,3 +30,7 @@ Thumbs.db
 .vercel
 .env*.local
 .env.preview
+
+# Cloudflare/OpenNext build output
+.open-next/
+.wrangler/
