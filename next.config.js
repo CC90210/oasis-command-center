@@ -133,6 +133,24 @@ const nextConfig = {
   // so without an explicit include the prompts don't ship and the AI scoring
   // routes 500 on cold start with "ENOENT".
   outputFileTracingIncludes: {
+    // 2026-08-29 (Cloudflare migration): the OpenNext bundle step needs the
+    // COMPLETE @libsql/client family in the traced tree — the default trace
+    // copies it partially ("lib-esm/web.js not found") and hrana's ws shim
+    // not at all. Gated on CF_MIGRATION_BUILD (set by wrangler_tool.py builds
+    // only): a global include participates in VERCEL function packaging too
+    // and would bloat every function there (codex audit 2026-08-30).
+    ...(process.env.CF_MIGRATION_BUILD === "1"
+      ? {
+          "/**/*": [
+            "./node_modules/@libsql/client/**/*",
+            "./node_modules/@libsql/core/**/*",
+            "./node_modules/@libsql/hrana-client/**/*",
+            "./node_modules/@libsql/isomorphic-ws/**/*",
+            "./node_modules/@libsql/isomorphic-fetch/**/*",
+            "./node_modules/js-base64/**/*",
+          ],
+        }
+      : {}),
     "/api/leads/*/score": ["./lib/prompts/**/*"],
     "/api/leads/*/next-action": ["./lib/prompts/**/*"],
     // Added 2026-06-07 after Playwright UI sweep caught the new
@@ -181,6 +199,8 @@ const nextConfig = {
         // the includes are cheap insurance if branding is ever re-added there.
         "/api/leads/*/documents",
         "/api/forms/submit",
+        // 2026-08-30: signature-crop consumer (extract-signature flow).
+        "/api/internal/apply-extraction",
       ].map((route) => [
         route,
         [
@@ -191,6 +211,22 @@ const nextConfig = {
           // The watermark tiles this logo + registers LiberationSans-Bold (above)
           // so canvas text renders on Vercel (no system fonts there).
           "./public/brand/sunbiz-logo.png",
+          // 2026-08-30 (codex audit): lib/forms/native-raster.ts now loads the
+          // native raster stack via a bundler-opaque dynamic import, which
+          // hides the dependency edge from output tracing too — without these
+          // the packaged Vercel functions would lack the packages entirely and
+          // watermark/signature-crop would silently regress to ok:false.
+          // Excluded from CF builds (unreachable there; @napi-rs store entries
+          // also EPERM on the Windows OpenNext copy step).
+          ...(process.env.CF_MIGRATION_BUILD === "1"
+            ? []
+            : [
+                "./node_modules/@napi-rs/**",
+                "./node_modules/sharp/**",
+                "./node_modules/@img/**",
+                "./node_modules/pdfjs-dist/legacy/**",
+                "./node_modules/pdfjs-dist/package.json",
+              ]),
         ],
       ]),
     ),
