@@ -20,6 +20,20 @@
 # these as "at least every N minutes". That is the same guarantee Vercel gave,
 # and considerably better than the zero we have now.
 
+# ── CUTOVER PAIRING (2026-08-30, Cloudflare migration) ────────────────────────
+# THIS FILE IS THE ACTIVE FIRER for the 28 cron routes (verified: scheduled runs
+# succeeding as of 2026-08-30 02:35Z). vercel.json's `crons` block is INERT —
+# Vercel's scheduler died 2026-08-06, which is why this file exists.
+#
+# The replacement is the `oasis-cc-cron` Cloudflare Worker (workers/oasis-cc-cron),
+# currently deployed in DRY mode. These two MUST flip together, in one PR:
+#     enable  : set the Worker secret CRON_FORWARD=true   (on|true|1|yes)
+#     disable : delete the `schedule:` triggers below     (KEEP workflow_dispatch
+#               and this whole file — it is the rollback path; Vercel is not)
+# Enabling the Worker without disabling these schedules = every job fires TWICE.
+# Full choreography + rollback: Business-Empire-Agent
+# brain/WAVE3_OASIS_CC_RUNBOOK.md (Phase C).
+# ──────────────────────────────────────────────────────────────────────────────
 name: cron-driver
 
 # One workflow schedule per DISTINCT cron expression in vercel.json, and the

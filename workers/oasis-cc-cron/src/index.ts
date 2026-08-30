@@ -58,9 +58,16 @@ interface ExecutionContext {
 
 interface Env {
   APP_ORIGIN?: string;        // default https://oasisai.work
-  CRON_FORWARD?: string;      // secret; anything but "on" => dry tick
+  CRON_FORWARD?: string;      // "on"|"true"|"1"|"yes" => forward; anything else => dry
   CRON_SECRET?: string;       // bearer, shared with the app
   CRON_ATTEST_SECRET?: string; // second leg replacing x-vercel-cron
+}
+
+/** Accept any conventional truthy spelling. Still FAIL-CLOSED (unset/typo =>
+ *  dry), but a cutover set to "true" must not silently no-op — the operator
+ *  would see a quiet worker and no forwards and have nothing to debug. */
+function forwardingEnabled(env: Env): boolean {
+  return ["on", "true", "1", "yes"].includes((env.CRON_FORWARD ?? "").trim().toLowerCase());
 }
 
 interface ForwardResult {
@@ -117,7 +124,7 @@ export default {
     const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, at)).map((e) => e.path);
     return Response.json({
       at: at.toISOString(),
-      forwarding: env.CRON_FORWARD === "on",
+      forwarding: forwardingEnabled(env),
       due,
     });
   },
@@ -125,7 +132,7 @@ export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const at = new Date(controller.scheduledTime);
     const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, at));
-    const forwarding = env.CRON_FORWARD === "on";
+    const forwarding = forwardingEnabled(env);
     if (!forwarding) {
       // Dry mode logs EVERY tick (due or not): the Phase A gate compares the
       // full due-minute stream against Vercel's cron log, and an all-quiet
