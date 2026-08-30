@@ -337,9 +337,15 @@ for (const junk of ["", "not json", "{broken", null, undefined, 42, {}, { finalU
   // into the peer groups at 82 and look completely normal on screen -- the
   // exact defect this whole file exists to prevent, reintroduced by a swallowed
   // error rather than by a wrong list.
+  // Matches the RESULT BINDING by shape, not by name. e1d4063b (#318) moved
+  // this read into its own memo, renaming `parkedRes` to `res`, and the
+  // assertion below kept naming the old variable — so it failed on a pure
+  // rename while the fail-loud behaviour it guards was still there. Anchoring
+  // on `parked_index_read_failed` keeps the guard exact: deleting the throw, or
+  // degrading it to `return []`, still fails here.
   assert.match(
     scores,
-    /if \(parkedRes\.error\) throw new Error\(`parked_index_read_failed/,
+    /if \(\w+\.error\) throw new Error\(`parked_index_read_failed/,
     "the parked read must throw on error, never degrade to an empty set",
   );
   // And it must PROVE it read everything. Truncation here is the same failure
