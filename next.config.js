@@ -199,6 +199,8 @@ const nextConfig = {
         // the includes are cheap insurance if branding is ever re-added there.
         "/api/leads/*/documents",
         "/api/forms/submit",
+        // 2026-08-30: signature-crop consumer (extract-signature flow).
+        "/api/internal/apply-extraction",
       ].map((route) => [
         route,
         [
@@ -209,6 +211,22 @@ const nextConfig = {
           // The watermark tiles this logo + registers LiberationSans-Bold (above)
           // so canvas text renders on Vercel (no system fonts there).
           "./public/brand/sunbiz-logo.png",
+          // 2026-08-30 (codex audit): lib/forms/native-raster.ts now loads the
+          // native raster stack via a bundler-opaque dynamic import, which
+          // hides the dependency edge from output tracing too — without these
+          // the packaged Vercel functions would lack the packages entirely and
+          // watermark/signature-crop would silently regress to ok:false.
+          // Excluded from CF builds (unreachable there; @napi-rs store entries
+          // also EPERM on the Windows OpenNext copy step).
+          ...(process.env.CF_MIGRATION_BUILD === "1"
+            ? []
+            : [
+                "./node_modules/@napi-rs/**",
+                "./node_modules/sharp/**",
+                "./node_modules/@img/**",
+                "./node_modules/pdfjs-dist/legacy/**",
+                "./node_modules/pdfjs-dist/package.json",
+              ]),
         ],
       ]),
     ),

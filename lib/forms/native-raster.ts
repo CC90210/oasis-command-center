@@ -38,7 +38,9 @@ export type NativeRaster =
     }
   | { available: false; reason: string };
 
-let cached: NativeRaster | null = null;
+// Cache SUCCESS only (codex audit 2026-08-30): a transient load failure must
+// not poison the warm instance — the next request retries the import.
+let cached: Extract<NativeRaster, { available: true }> | null = null;
 
 export async function loadNativeRaster(): Promise<NativeRaster> {
   if (cached) return cached;
@@ -46,13 +48,13 @@ export async function loadNativeRaster(): Promise<NativeRaster> {
     const canvasMod = (await loadModule("@napi-rs/canvas")) as typeof import("@napi-rs/canvas");
     const sharpNs = (await loadModule("sharp")) as { default: typeof import("sharp").default };
     cached = { available: true, canvasMod, sharp: sharpNs.default ?? (sharpNs as never) };
+    return cached;
   } catch (e) {
-    cached = {
+    return {
       available: false,
       reason: "native_raster_unavailable:" + (e instanceof Error ? e.message.slice(0, 120) : "import_failed"),
     };
   }
-  return cached;
 }
 
 /** pdfjs' legacy build renders through the native canvas stack, so it lives
