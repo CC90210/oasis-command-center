@@ -56,7 +56,7 @@ interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
 }
 
-interface Env {
+export interface Env {
   APP_ORIGIN?: string;        // default https://oasisai.work
   CRON_FORWARD?: string;      // "on"|"true"|"1"|"yes" => forward; anything else => dry
   CRON_SECRET?: string;       // bearer, shared with the app
@@ -66,7 +66,7 @@ interface Env {
 /** Accept any conventional truthy spelling. Still FAIL-CLOSED (unset/typo =>
  *  dry), but a cutover set to "true" must not silently no-op — the operator
  *  would see a quiet worker and no forwards and have nothing to debug. */
-function forwardingEnabled(env: Env): boolean {
+export function forwardingEnabled(env: Env): boolean {
   return ["on", "true", "1", "yes"].includes((env.CRON_FORWARD ?? "").trim().toLowerCase());
 }
 

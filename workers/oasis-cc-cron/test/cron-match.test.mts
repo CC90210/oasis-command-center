@@ -1,7 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cronMatches } from "../src/cron-match";
-import { CRON_TABLE } from "../src/index";
+import { CRON_TABLE, forwardingEnabled } from "../src/index";
+
+// The kill switch decides whether 28 production routes get called. It must be
+// permissive about SPELLING (an operator writing "true" must not silently get a
+// dry worker) and strict about everything else (unset/typo => dry).
+test("CRON_FORWARD accepts conventional truthy spellings", () => {
+  for (const v of ["on", "true", "1", "yes", "ON", "True", " on ", "YES"]) {
+    assert.equal(forwardingEnabled({ CRON_FORWARD: v }), true, `should forward: ${JSON.stringify(v)}`);
+  }
+});
+
+test("CRON_FORWARD is fail-closed for anything else", () => {
+  for (const v of [undefined, "", "off", "false", "0", "no", "onn", "enabled", "y"]) {
+    assert.equal(forwardingEnabled({ CRON_FORWARD: v }), false, `should stay dry: ${JSON.stringify(v)}`);
+  }
+});
 
 const at = (iso: string) => new Date(iso);
 
