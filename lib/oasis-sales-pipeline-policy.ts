@@ -143,6 +143,21 @@ export function resolveOasisDeliveryQueueScope(
  * from the day the role was added — so the prose said one thing, the code did
  * another, and a reader had no way to know which was current. Corrected here
  * rather than left as an open question about who may work a deal.
+ *
+ * `member` was REMOVED on 2026-08-30. It entered this set in 01461615
+ * alongside `marketing`, but that commit authorises "openers, closers,
+ * builders, and marketing" — `member` is not in its subject, not in the
+ * paragraphs above, and has no stated rationale anywhere. It is also the
+ * team_role COLUMN DEFAULT, which the comment on ownsOasisSalesRecord below
+ * warns about in these words: "gating an edit on it would have let any
+ * default-role account edit every lead in the tenant". Ownership still gates
+ * the row, so the reachable effect was narrower than that — but it made
+ * ASSIGNMENT confer write authority on the default seat, which is exactly what
+ * tests/pipeline-lead-mutation-access.test.ts asserts must never happen. That
+ * test has been failing since 01461615 and was invisible because the suite is
+ * fail-fast and died earlier. Restored to the documented intent; if `member`
+ * is genuinely meant to sell, re-add it WITH a rationale here and update that
+ * test deliberately rather than by accident.
  */
 export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "manager",
@@ -151,7 +166,6 @@ export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "builder",
   "marketing",
   "agent",
-  "member",
 ]);
 
 /** Fails closed on null, unknown, or non-sales roles. */

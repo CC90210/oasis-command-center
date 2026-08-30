@@ -48,7 +48,13 @@ assert.equal(roleMayOperateOasisSalesLead(" OpEnEr "), true, "role matching is n
 // semantics are the same assigned_to/collaborators pair as every other sales
 // operator, asserted explicitly below rather than folded into the loop above
 // so this file keeps naming the seat that changed.
-for (const role of ["read_only", "member", "marketing", "loan_officer", "processor", "unknown", ""]) {
+// `marketing` left this list on 2026-08-30: it joined the operator set
+// deliberately in 01461615 ("enable lead access ... for openers, closers,
+// builders, and marketing") with a rationale recorded in the policy file, so
+// the stale side here was the test. `member` stays — it is the team_role
+// column default, was never named by that commit, and must not gain write
+// authority by being assigned a lead.
+for (const role of ["read_only", "member", "loan_officer", "processor", "unknown", ""]) {
   assert.equal(roleMayOperateOasisSalesLead(role), false, `${role || "empty"} is not an OASIS sales operator`);
   assert.equal(
     canMutateOasisSalesRecord(assigned, { role, userId: REP }),
