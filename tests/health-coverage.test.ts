@@ -11,8 +11,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { cronPathsFrom, cronCheckId, computeCoverage } from "../lib/health/coverage";
 
-// ── Discovery reads the REAL vercel.json, not a hardcoded list ──────────────
-const vercel = JSON.parse(readFileSync("vercel.json", "utf8"));
+// ── Discovery reads the REAL registry, not a hardcoded list ─────────────────
+// (config/cron-registry.json since PR #347: same shape as vercel.json's old
+// crons block, minus the zombie Vercel registrations. See the note in
+// tests/cron-driver-coverage.test.ts for why it is not derived from the driver.)
+const vercel = JSON.parse(readFileSync("config/cron-registry.json", "utf8"));
 const paths = cronPathsFrom(vercel);
 
 assert.ok(paths.length >= 15, `expected the real cron list, got ${paths.length}`);
