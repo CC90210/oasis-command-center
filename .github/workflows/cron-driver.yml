@@ -98,7 +98,13 @@ jobs:
     steps:
       - name: Drive the due cron routes
         env:
-          BASE: https://agent-dashboard-cc90210.vercel.app
+          # 2026-08-31: repointed from the Vercel deployment to the apex, which
+          # now serves the oasis-command-center Cloudflare Worker. This is the
+          # second half of the CRON_SECRET rotation: the GitHub secret was
+          # updated to the Worker's value, at which point every route 401'd
+          # against Vercel (which still holds the old value). Verified 200 via
+          # the Cloudflare edge with the rotated bearer before this change.
+          BASE: https://oasisai.work
           SECRET: ${{ secrets.OASIS_CRON_SECRET }}
         run: |
           set -uo pipefail
