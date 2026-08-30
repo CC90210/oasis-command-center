@@ -719,10 +719,9 @@ async function main() {
   console.log("founder-meeting-calendar: OK");
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+// main() is NOT launched here — it is the head of the chain at the bottom of
+// this file. See the comment there: it mutates the same GOOGLE_* env keys as
+// the suites below, so racing them is what turned CI red from 2026-08-27.
 
 /**
  * Restore an env var to exactly what it was, including ABSENT.
@@ -851,7 +850,17 @@ console.log("founder-meeting-calendar revoked-token fallback ok");
 // mutate the same GOOGLE_* process.env keys, and concurrent suites clobbering
 // each other's env is a race that reports as a bogus assertion failure in
 // whichever one loses. Sequence them and each sees the environment it set up.
-revokedTokenFallbackChecks()
+//
+// 2026-08-30: main() now heads this chain. It used to be fired un-awaited at
+// the top of the file — i.e. exactly the race this comment warns about, just
+// with main() as the participant nobody serialized. Its
+// testRejectsBundleWithoutCalendarScope would intermittently observe the
+// workspace-calendar env set by revokedTokenFallbackChecks, take the fallback
+// branch in google-calendar.ts instead of throwing calendar_scope_required,
+// and fail with calendar_create_failed. It won that race locally by ~1.7ms and
+// lost it on CI's Node 20, which is why main has been red since 2026-08-27.
+main()
+  .then(revokedTokenFallbackChecks)
   .then(systemCalendarUsesItsOwnClientChecks)
   .then(broaderCalendarScopeChecks)
   .then(scopePredicateChecks)

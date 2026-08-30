@@ -8,12 +8,12 @@ import {
 import type { verifyStripeWebsitePayment } from "../lib/website-sales-payment";
 
 const routeSource = readFileSync("app/api/cron/reconcile-website-sales-payments/route.ts", "utf8");
-const vercel = readFileSync("vercel.json", "utf8");
+const cronRegistry = readFileSync("config/cron-registry.json", "utf8");
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 assert.match(routeSource, /checkCronAuth\(req\)/, "the unattended reconciler must require shared cron auth");
 assert.match(routeSource, /getTursoClient\(\)/, "website-sale reconciliation must use Turso directly");
 assert.doesNotMatch(routeSource, /Supabase|Postgres/i, "the reconciliation route must not introduce a second data plane");
-assert.ok(vercel.includes("/api/cron/reconcile-website-sales-payments"), "Vercel must schedule the reconciler");
+assert.ok(cronRegistry.includes("/api/cron/reconcile-website-sales-payments"), "the cron registry must schedule the reconciler");
 assert.ok(driver.includes("/api/cron/reconcile-website-sales-payments"), "the fallback cron driver must run it too");
 
 async function main() {

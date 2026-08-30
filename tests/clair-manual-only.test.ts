@@ -132,12 +132,27 @@ for (const f of scheduled) {
   );
 }
 
-// ---- 6. No Vercel cron is pointed at the CLEAR route.
-const vercelJson = read(join(ROOT, "vercel.json"));
+// ---- 6. No scheduled job is pointed at the CLEAR route.
+//
+// Checks BOTH files deliberately. This is a NEGATIVE assertion, so it passes
+// vacuously against a file that no longer contains any schedules: when the
+// registry moved out of vercel.json (2026-08-30) this guard would have kept
+// reporting green while guarding nothing. vercel.json is still checked so a
+// re-added crons block aimed at CLEAR is caught too.
+const cronRegistry = read(join(ROOT, "config/cron-registry.json"));
 assert.ok(
-  !/clair/i.test(vercelJson),
-  "vercel.json must not schedule anything against the CLEAR route — a cron has no operator identity",
+  /"crons"/.test(cronRegistry),
+  "config/cron-registry.json must actually contain the schedule list — otherwise the CLEAR check below guards nothing",
 );
+for (const [name, text] of [
+  ["config/cron-registry.json", cronRegistry],
+  ["vercel.json", read(join(ROOT, "vercel.json"))],
+] as const) {
+  assert.ok(
+    !/clair/i.test(text),
+    `${name} must not schedule anything against the CLEAR route — a cron has no operator identity`,
+  );
+}
 
 // ---- 7. The transport itself refuses an unattributed CLEAR pull.
 // This is the layer that does not depend on how anyone spelled anything: it
