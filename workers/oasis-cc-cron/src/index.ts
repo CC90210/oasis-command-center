@@ -63,7 +63,14 @@ interface Env {
   CRON_ATTEST_SECRET?: string; // second leg replacing x-vercel-cron
 }
 
-async function forward(env: Env, origin: string, path: string): Promise<{ path: string; status: number | string }> {
+interface ForwardResult {
+  path: string;
+  status: number | string;
+  ok: boolean;
+  attempts: number;
+}
+
+async function callOnce(env: Env, origin: string, path: string): Promise<{ status: number | string; ok: boolean; retryable: boolean }> {
   try {
     const res = await fetch(origin + path, {
       method: "GET",
@@ -74,10 +81,25 @@ async function forward(env: Env, origin: string, path: string): Promise<{ path: 
       },
       signal: AbortSignal.timeout(120_000),
     });
-    return { path, status: res.status };
+    // Non-2xx is a FAILED tick, never a success (codex audit 2026-08-30).
+    // 5xx may be transient -> retryable; 4xx is a contract bug -> not.
+    return { status: res.status, ok: res.ok, retryable: res.status >= 500 };
   } catch (err) {
-    return { path, status: `error: ${String(err).slice(0, 120)}` };
+    return { status: `error: ${String(err).slice(0, 120)}`, ok: false, retryable: true };
   }
+}
+
+async function forward(env: Env, origin: string, path: string): Promise<ForwardResult> {
+  const first = await callOnce(env, origin, path);
+  if (first.ok || !first.retryable) {
+    return { path, status: first.status, ok: first.ok, attempts: 1 };
+  }
+  // One bounded retry with jitter for transient failures. Safe for every
+  // route: the cutover gate (runbook Phase B) requires all 28 routes to be
+  // double-fire-safe via CAS claims or the tick-lease before CRON_FORWARD=on.
+  await new Promise((r) => setTimeout(r, 15_000 + Math.floor(Math.random() * 15_000)));
+  const second = await callOnce(env, origin, path);
+  return { path, status: second.status, ok: second.ok, attempts: 2 };
 }
 
 export default {
@@ -115,7 +137,14 @@ export default {
     const origin = env.APP_ORIGIN || "https://oasisai.work";
     ctx.waitUntil(
       Promise.all(due.map((e) => forward(env, origin, e.path))).then((results) => {
-        console.log(JSON.stringify({ tick: at.toISOString(), mode: "forward", results }));
+        const failed = results.filter((r) => !r.ok);
+        console.log(JSON.stringify({ tick: at.toISOString(), mode: "forward", ok: results.length - failed.length, failed: failed.length, results }));
+        if (failed.length) {
+          // Error-level so Workers observability alerting can page on it.
+          // Phase B wires this into the Telegram ops lane (needs the
+          // OASIS_TELEGRAM secrets from CC's fill list).
+          console.error(JSON.stringify({ cron_failures: failed, tick: at.toISOString() }));
+        }
       }),
     );
   },

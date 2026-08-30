@@ -12,6 +12,14 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
+/** Constant-time string compare — auth material must not leak via timing. */
+function timingSafeEq(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 export function checkCronAuth(req: NextRequest): NextResponse | null {
   const expected = process.env.CRON_SECRET;
   if (!expected) {
@@ -23,16 +31,27 @@ export function checkCronAuth(req: NextRequest): NextResponse | null {
     );
   }
   const auth = req.headers.get("authorization") || "";
-  if (auth !== `Bearer ${expected}`) {
+  if (!timingSafeEq(auth, `Bearer ${expected}`)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  // Allow a local-dev escape hatch — but only when explicitly opted in.
-  // Without this, you'd have to fake the Vercel header on every test curl.
+  // Second leg — one of:
+  //  - x-vercel-cron: 1  (platform-injected, unforgeable from outside Vercel;
+  //    kept until Vercel retirement)
+  //  - x-oasis-cron-attest matching CRON_ATTEST_SECRET (the oasis-cc-cron
+  //    companion Worker's leg — two independent secrets replace the
+  //    secret+platform pair on Cloudflare; see workers/oasis-cc-cron and
+  //    Business-Empire-Agent brain/WAVE3_OASIS_CC_RUNBOOK.md). The attest path
+  //    activates only when the env secret exists, so nothing changes on
+  //    deployments that haven't minted it.
+  //  - CRON_ALLOW_LOCAL=1 local-dev escape hatch (unchanged).
   const allowLocal = process.env.CRON_ALLOW_LOCAL === "1";
   const vercelCron = req.headers.get("x-vercel-cron") === "1";
-  if (!vercelCron && !allowLocal) {
+  const attestExpected = process.env.CRON_ATTEST_SECRET;
+  const attestGiven = req.headers.get("x-oasis-cron-attest") || "";
+  const attestOk = Boolean(attestExpected) && timingSafeEq(attestGiven, attestExpected as string);
+  if (!vercelCron && !attestOk && !allowLocal) {
     return NextResponse.json(
-      { error: "unauthorized", detail: "missing_vercel_cron_header" },
+      { error: "unauthorized", detail: "missing_cron_platform_proof" },
       { status: 401 }
     );
   }
