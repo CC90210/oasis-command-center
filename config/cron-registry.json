@@ -1,0 +1,117 @@
+{
+  "$comment": "Canonical cron INTENT registry. Nothing registers this with any scheduler - it exists so coverage tests can compare intent against whichever driver is live (cron-driver.yml today, oasis-cc-cron after the Wave 3 cutover) without vercel.json carrying registrations that Vercel could silently resurrect. Same shape as vercel.json's old crons block so computeCoverage consumes it unchanged.",
+  "crons": [
+    {
+      "path": "/api/cron/materialize-plans",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/collect-outreach-intel?write=1",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/collect-cc-metrics?write=1",
+      "schedule": "15 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-scheduled-sends",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-founder-meeting-reminders",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/enroll-drips",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/scan-lender-replies?write=1",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-drips",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-drip-telemetry",
+      "schedule": "17 * * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-website-sales-payments",
+      "schedule": "17 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-scheduled-calls",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-tt-inbox",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-tt-inbox?account=followup",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/operator-email-agent?write=1",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/scan-bounces?write=1",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/scan-bounces?write=1&brand=bluerise",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/scan-funmate-replies?write=1",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/sweep-stale-sent-app",
+      "schedule": "0 13 * * *"
+    },
+    {
+      "path": "/api/cron/kixie-compliance-scan",
+      "schedule": "10 13 * * *"
+    },
+    {
+      "path": "/api/cron/kixie-compliance-scan?mode=weekly",
+      "schedule": "40 13 * * 1"
+    },
+    {
+      "path": "/api/cron/enroll-accelerated",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/tps-enroll?write=1",
+      "schedule": "*/10 * * * *"
+    },
+    {
+      "path": "/api/cron/tps-backlog-watch",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/renewal-thresholds",
+      "schedule": "15 13 * * *"
+    },
+    {
+      "path": "/api/cron/health-check",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/sync-sms-numbers",
+      "schedule": "0 6,18 * * *"
+    },
+    {
+      "path": "/api/cron/reconcile-sms",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/dispatch-bulk-email",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

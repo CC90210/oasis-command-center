@@ -288,15 +288,15 @@ assert.equal(
 {
   const read = (p: string) => readFileSync(p, "utf8");
   assert.ok(
-    read("vercel.json").includes("/api/cron/scan-lender-replies"),
-    "the scanner must be registered in vercel.json",
+    read("config/cron-registry.json").includes("/api/cron/scan-lender-replies"),
+    "the scanner must be registered in config/cron-registry.json",
   );
   const driver = read(".github/workflows/cron-driver.yml");
   assert.ok(driver.includes("/api/cron/scan-lender-replies"), "and driven by the workflow");
   // BOTH registrations need write=1, not just the driver's. Dry-run is the
   // default, so a scheduled call without it reads the whole inbox, classifies
   // every reply, and stores none of it.
-  for (const [name, text] of [["driver", driver], ["vercel.json", read("vercel.json")]] as const) {
+  for (const [name, text] of [["driver", driver], ["cron-registry", read("config/cron-registry.json")]] as const) {
     assert.ok(
       /scan-lender-replies\?write=1/.test(text),
       `${name} must drive the scanner with write=1, or it reads and stores nothing`,

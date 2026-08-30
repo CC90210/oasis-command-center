@@ -23,7 +23,11 @@ const read = (path: string) => readFileSync(join(root, path), "utf8");
 const dispatch = read("lib/bulk-email/dispatch.ts");
 const bulkRoute = read("app/api/leads/bulk/route.ts");
 const cronRoute = read("app/api/cron/dispatch-bulk-email/route.ts");
-const vercel = read("vercel.json");
+// Schedule-of-record moved out of vercel.json 2026-08-30 (Vercel's scheduler
+// died 2026-08-06; the array there was read as if it were live).
+const cronRegistry = JSON.parse(read("config/cron-registry.json")) as {
+  crons?: Array<{ path: string; schedule: string }>;
+};
 
 // ---- queue writer (app/api/leads/bulk) --------------------------------------
 
@@ -165,10 +169,15 @@ assert.match(
   /checkCronAuth\(req\)[\s\S]*?runDispatchBulkEmail\(\)/,
   "the drain endpoint must sit behind the shared cron auth gate",
 );
-assert.match(
-  vercel,
-  /"path": "\/api\/cron\/dispatch-bulk-email",\s*"schedule": "\*\/5 \* \* \* \*"/,
-  "the drain must be scheduled in vercel.json — without the cron entry nothing ever sends",
+// Parsed, not regex-matched against raw text: the old pattern depended on key
+// order, the literal `",` separator and 2-space layout, none of which anything
+// enforces (no prettier/editorconfig in this repo). A reformat would have
+// silently un-asserted this.
+assert.ok(
+  (cronRegistry.crons ?? []).some(
+    (c) => c.path === "/api/cron/dispatch-bulk-email" && c.schedule === "*/5 * * * *",
+  ),
+  "the drain must be scheduled in config/cron-registry.json — without the cron entry nothing ever sends",
 );
 
 console.log("bulk-email dispatch tests passed");

@@ -231,7 +231,7 @@ export async function runHealthChecks(
  * What exists but is not checked.
  *
  * The 2026-08-06 incident was caused by a hand-maintained watch list, not by a
- * missing check. So the gap itself is monitored: crons come from vercel.json,
+ * missing check. So the gap itself is monitored: crons come from config/cron-registry.json,
  * brands from the registry, and anything without a corresponding check is
  * reported. Low severity and weekly, because it is a backlog rather than an
  * outage — but never silent, because silence is how the list fell behind.
@@ -250,7 +250,7 @@ export async function reportCoverageGap(
       `⚪ <b>MONITORING GAP</b> — ${cov.uncovered.length} surface(s) have no health check\n` +
         shown.map((u) => `· ${esc(u)}`).join("\n") +
         (cov.uncovered.length > shown.length ? `\n…and ${cov.uncovered.length - shown.length} more` : "") +
-        `\n<i>${cov.crons.length} cron routes discovered from vercel.json</i>`,
+        `\n<i>${cov.crons.length} cron routes discovered from config/cron-registry.json</i>`,
       { lane: "sunbiz-ops" },
     ).catch(() => undefined);
   }

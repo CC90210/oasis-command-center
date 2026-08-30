@@ -24,7 +24,7 @@ const workflow = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8")
 const meetingService = readFileSync("lib/website-sales-founder-meeting.ts", "utf8");
 const cron = readFileSync("app/api/cron/dispatch-founder-meeting-reminders/route.ts", "utf8");
 const gmailSender = readFileSync("lib/integrations/gmail-oauth-send.ts", "utf8");
-const vercel = readFileSync("vercel.json", "utf8");
+const cronRegistry = readFileSync("config/cron-registry.json", "utf8");
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 
 const contact = normalizeFounderMeetingContact({
@@ -315,7 +315,7 @@ assert(
   cron.includes('sent.reason === "delivery_unknown"'),
   "ambiguous Gmail transport failures are terminal instead of risking a duplicate retry",
 );
-assert(vercel.includes("dispatch-founder-meeting-reminders"), "Vercel registers the meeting worker");
+assert(cronRegistry.includes("dispatch-founder-meeting-reminders"), "the cron registry registers the meeting worker");
 assert(driver.includes("dispatch-founder-meeting-reminders"), "the live GitHub cron driver runs the worker");
 
 await db.close();

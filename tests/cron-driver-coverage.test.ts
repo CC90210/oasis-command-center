@@ -23,13 +23,36 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const vercelJson = JSON.parse(readFileSync("vercel.json", "utf8")) as {
+// 2026-08-30 (PR #347): the crons moved OUT of vercel.json into an inert
+// registry. Vercel's scheduler died silently on 08-06 while reporting the
+// registrations enabled; leaving them in vercel.json meant every deploy
+// re-armed a zombie that would double-fire the moment Vercel fixed itself.
+// The registry carries the same intent with nothing to resurrect.
+//
+// Deliberately NOT derived from cron-driver.yml: this test exists to compare
+// two INDEPENDENT lists (intent vs driver). Deriving intent from the driver
+// would make the comparison a tautology - everything the driver drives is
+// driven - which is the exact presence-not-contribution blindness that let
+// eighteen crons die invisibly the first time.
+const vercelJson = JSON.parse(readFileSync("config/cron-registry.json", "utf8")) as {
   crons?: Array<{ path: string; schedule: string }>;
 };
 const driver = readFileSync(".github/workflows/cron-driver.yml", "utf8");
 
 const crons = vercelJson.crons ?? [];
-assert.ok(crons.length > 0, "vercel.json must register at least one cron");
+assert.ok(crons.length > 0, "the cron registry must carry at least one cron");
+
+// ── 0. The disarm itself is pinned: vercel.json must stay cron-free ─────────
+//
+// The registrations were removed because Vercel re-registers whatever this
+// file carries on every deploy, and its scheduler already failed silently
+// once in each direction. If a crons block ever reappears here, that is the
+// zombie coming back - fail naming it, before a deploy re-arms it.
+const liveVercel = JSON.parse(readFileSync("vercel.json", "utf8")) as { crons?: unknown[] };
+assert.ok(
+  !liveVercel.crons || liveVercel.crons.length === 0,
+  "vercel.json must not register crons: Vercel's scheduler is retired here. Add routes to config/cron-registry.json + the driver instead.",
+);
 
 /** "/api/cron/scan-bounces?write=1" -> "/api/cron/scan-bounces" */
 const basePathOf = (p: string) => p.split("?")[0];
