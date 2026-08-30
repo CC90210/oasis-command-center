@@ -375,7 +375,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
       "Most crons in the default repo are CC-specific. Audit, recommend which to enable / disable for this client.",
     tags: ["onboarding", "crons"],
     prompt:
-      "Audit every cron in vercel.json and .agents/workflows/ for this client. For each, tell me: does it apply to their business model? Should we enable, disable, or change frequency? Don't disable anything yet — just give me the recommendation list.",
+      "Audit every cron in config/cron-registry.json and .agents/workflows/ for this client. For each, tell me: does it apply to their business model? Should we enable, disable, or change frequency? Don't disable anything yet — just give me the recommendation list.",
   },
   {
     id: "client-mcp-setup",
@@ -438,7 +438,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
       "Most clients don't need every cron firing. Audit, recommend a leaner schedule based on their volume.",
     tags: ["crons", "ops"],
     prompt:
-      "This client's cron schedule is probably over-tuned for someone running CC's volume. Audit every cron in vercel.json + .agents/workflows/ and recommend a leaner schedule based on their actual lead volume + team size. Be specific about which to disable, which to drop in frequency, which to keep.",
+      "This client's cron schedule is probably over-tuned for someone running CC's volume. Audit every cron in config/cron-registry.json + .agents/workflows/ and recommend a leaner schedule based on their actual lead volume + team size. Be specific about which to disable, which to drop in frequency, which to keep.",
   },
   {
     id: "client-revenue-baseline",
@@ -531,7 +531,14 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     foundational: true,
     tags: ["override", "cron"],
     prompt:
-      "[OVERRIDE]\nContext: pause autonomous agent activity for the next 24h.\n\nDisable every cron in vercel.json by setting it to a date in the past. List what you disabled, the original schedule, and write a re-enable script I can run when I'm back. Do NOT touch any data — just the cron triggers.",
+      // The firer is .github/workflows/cron-driver.yml, NOT vercel.json —
+      // Vercel's scheduler died 2026-08-06 and the schedule list moved to
+      // config/cron-registry.json on 2026-08-30. This prompt used to say
+      // "disable every cron in vercel.json", which after the move edits a file
+      // with no crons in it: the operator would report the fleet paused while
+      // all 28 jobs kept firing. An emergency control that lies is worse than
+      // none.
+      "[OVERRIDE]\nContext: pause autonomous agent activity for the next 24h.\n\nComment out the `schedule:` triggers in .github/workflows/cron-driver.yml (the ACTIVE firer — vercel.json no longer schedules anything), and confirm the oasis-cc-cron Cloudflare Worker is not armed (its CRON_FORWARD secret must be unset/off). List what you disabled, the original schedules from config/cron-registry.json, and write a re-enable script I can run when I'm back. Do NOT touch any data — just the triggers.",
   },
   {
     id: "override-voice-shift",
