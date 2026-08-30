@@ -10,7 +10,7 @@
 #
 # REQUIRED REPO SECRETS (CC adds these in Settings → Secrets → Actions):
 #   CLOUDFLARE_API_TOKEN   — Workers Scripts:Edit on the deploying account
-#   CLOUDFLARE_ACCOUNT_ID  — d5e302344d575cf5f2a07c17bcf51367
+#   CLOUDFLARE_ACCOUNT_ID  — e371c0f2dfde76e329b351a54bc738fe
 #   -- build-time values inlined by the bundler:
 #   NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_BLUERISE
 #   NEXT_PUBLIC_OPTINVAULT_DISCLOSURE_SUNBIZ
