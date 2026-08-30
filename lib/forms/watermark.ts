@@ -28,6 +28,8 @@
 
 import "server-only";
 
+import { loadNativeRaster, loadPdfjs } from "./native-raster";
+
 // ── SunBiz brand (mirrors the `sunbiz` block in CEO-Agent/scripts/email_template.py)
 const NAVY = "#001F54";
 const GOLD = "#D4A843";
@@ -445,7 +447,9 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
   // outputFileTracingIncludes).
   const path = await import("node:path");
   const { pathToFileURL } = await import("node:url");
-  const canvasMod = await import("@napi-rs/canvas");
+  const native = await loadNativeRaster();
+  if (!native.available) return { ok: false, error: native.reason };
+  const canvasMod = native.canvasMod;
   const { PDFDocument } = await import("pdf-lib");
 
   // pdfjs renders through DOM APIs Node lacks (DOMMatrix/Path2D/ImageData);
@@ -473,7 +477,8 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
   if (!g.DOMMatrix) return { ok: false, error: "dommatrix_unavailable" };
 
   // Import pdfjs AFTER the globals are set (see above).
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const pdfjs = await loadPdfjs();
+  if (!pdfjs) return { ok: false, error: "native_raster_unavailable:pdfjs" };
 
   // wasmUrl points pdfjs at its bundled image-decoder dir. The raw .wasm doesn't
   // instantiate in this Node runtime, but pdfjs then loads the pure-JS fallback
@@ -572,8 +577,10 @@ async function watermarkImage(
   mimeType: string,
   prov: WatermarkProvenance,
 ): Promise<WatermarkResult> {
-  const sharp = (await import("sharp")).default;
-  const canvasMod = await import("@napi-rs/canvas");
+  const native = await loadNativeRaster();
+  if (!native.available) return { ok: false, error: native.reason };
+  const sharp = native.sharp;
+  const canvasMod = native.canvasMod;
   const cm = (canvasMod as { default?: Record<string, unknown> }).default ?? {};
   const ns = canvasMod as unknown as Record<string, unknown>;
   const createCanvas = (ns.createCanvas ?? cm.createCanvas) as typeof import("@napi-rs/canvas").createCanvas;
