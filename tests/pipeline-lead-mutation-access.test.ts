@@ -48,7 +48,7 @@ assert.equal(roleMayOperateOasisSalesLead(" OpEnEr "), true, "role matching is n
 // semantics are the same assigned_to/collaborators pair as every other sales
 // operator, asserted explicitly below rather than folded into the loop above
 // so this file keeps naming the seat that changed.
-for (const role of ["read_only", "member", "marketing", "loan_officer", "processor", "unknown", ""]) {
+for (const role of ["read_only", "member", "loan_officer", "processor", "unknown", ""]) {
   assert.equal(roleMayOperateOasisSalesLead(role), false, `${role || "empty"} is not an OASIS sales operator`);
   assert.equal(
     canMutateOasisSalesRecord(assigned, { role, userId: REP }),
@@ -56,18 +56,29 @@ for (const role of ["read_only", "member", "marketing", "loan_officer", "process
     `${role || "empty"} cannot turn assignment into write authority`,
   );
 }
-for (const row of [assigned, collaborated]) {
+// MOVED OUT OF THE DENY LOOP 2026-08-29: `marketing` was granted on 2026-08-26
+// by 01461615, the day after this line was written asserting the opposite, and
+// 72bf0e12 already aligned the sibling assertion in
+// tests/website-sales-workflow.test.ts and the doc comment on
+// OASIS_SALES_LEAD_OPERATOR_ROLES with that grant — this file was the last
+// place still saying otherwise. It is asserted here beside `builder` rather
+// than folded into the loop at the top so both seats that were widened by name
+// keep saying so, and so the widening stays visibly OWNERSHIP-scoped: the
+// unrelated-lead case below is the half that must never move.
+for (const role of ["builder", "marketing"]) {
+  for (const row of [assigned, collaborated]) {
+    assert.equal(
+      canMutateOasisSalesRecord(row, { role, userId: REP }),
+      true,
+      `${role} mutates leads assigned to or shared with him (CC 2026-08-25 / 01461615)`,
+    );
+  }
   assert.equal(
-    canMutateOasisSalesRecord(row, { role: "builder", userId: REP }),
-    true,
-    "CC 2026-08-25: the selling builder mutates leads assigned to or shared with him",
+    canMutateOasisSalesRecord(unrelated, { role, userId: REP }),
+    false,
+    `${role} sales capability is ownership-scoped, never tenant-wide`,
   );
 }
-assert.equal(
-  canMutateOasisSalesRecord(unrelated, { role: "builder", userId: REP }),
-  false,
-  "builder sales capability is ownership-scoped, never tenant-wide",
-);
 
 assert.equal(
   canOpenOasisSalesRecord(assigned, { role: "read_only", userId: REP }),

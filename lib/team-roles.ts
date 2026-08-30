@@ -166,15 +166,22 @@ export function isSelfScopedRole(role: unknown): boolean {
  * member(45), owner(4), admin(3), manager(1) and builder(1) — every one of them
  * a known value, so this flips the answer for ZERO current users. It is a guard
  * against the NEXT role someone adds, not a change to anyone's access today.
+ *
+ * `closer`, `opener` and `builder` were added here on 2026-08-26 by 01461615
+ * ("enable lead access and cross-role transfers...") and are removed again. All
+ * three are members of SELF_SCOPED_ROLES above, so listing them here put them in
+ * BOTH sets — the overlap tests/agent-api-scope.test.ts forbids, because it makes
+ * the answer depend on which door a request happens to knock on. Concretely it
+ * reopened the leak #285 closed: `mustSeeOwnRecordsOnly` is the predicate at every
+ * door onto tenant_records, so an opener stopped being confined and could read the
+ * whole ~31K web-sales book. Working your OWN book — what 01461615 set out to
+ * enable — runs through the per-lead ownership predicates, never a seat here.
  */
 export const TENANT_WIDE_ROLES: ReadonlySet<string> = new Set([
   "owner",
   "admin",
   "manager",
   "marketing",
-  "closer",
-  "opener",
-  "builder",
   "read_only",
   "member",        // legacy, and the column DEFAULT — 45 live rows
   "loan_officer",  // SunBiz's own portal roles; a different product

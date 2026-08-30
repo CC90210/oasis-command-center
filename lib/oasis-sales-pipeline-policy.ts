@@ -143,6 +143,15 @@ export function resolveOasisDeliveryQueueScope(
  * from the day the role was added — so the prose said one thing, the code did
  * another, and a reader had no way to know which was current. Corrected here
  * rather than left as an open question about who may work a deal.
+ *
+ * `member` was added by that same commit and is removed again. It is the only
+ * role 01461615 granted that its own message never names, and it is not a job:
+ * it is the team_role COLUMN DEFAULT (45 live rows), the value an account
+ * carries when nobody chose one. Listing it here collapsed the distinction the
+ * paragraph above exists to state — this set answers "does this role do sales
+ * work at all", and for an unset seat the answer is no. `member` keeps
+ * everything it had before: SELF_EDIT_LEAD_ROLES on the shared CRM surfaces,
+ * CRM_WRITE_ROLES, and whole-board visibility via isOasisPipelineAdmin.
  */
 export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "manager",
@@ -151,7 +160,6 @@ export const OASIS_SALES_LEAD_OPERATOR_ROLES = new Set<string>([
   "builder",
   "marketing",
   "agent",
-  "member",
 ]);
 
 /** Fails closed on null, unknown, or non-sales roles. */
