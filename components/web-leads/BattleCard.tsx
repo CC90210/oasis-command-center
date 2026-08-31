@@ -1301,7 +1301,12 @@ function DimensionShape({
           className="relative"
           style={{
             transform: reduced ? "none" : `rotateX(${(8 + tilt.x).toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
-            transition: "transform 180ms ease-out",
+            // Conditional like every other transition in this file: `reduced`
+            // starts false and corrects on mount, so an unconditional 180ms
+            // here animated the base pitch flat for exactly the users who
+            // asked for no motion. With it conditional, the correction is a
+            // one-frame snap. (Codex review, 2026-08-31.)
+            transition: reduced ? "none" : "transform 180ms ease-out",
             transformStyle: "preserve-3d",
           }}
           onPointerMove={
