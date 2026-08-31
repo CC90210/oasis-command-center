@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createClient } from "@libsql/client";
+import {
+  buildFounderMeetingMessages,
+  clampSmsBody,
+  FOUNDER_REMINDER_TIERS,
+  founderMeetingDedupeKey,
+  plannedReminderTiers,
+  reminderKindFor,
+  reminderTierStillValid,
+  SMS_STOP_FOOTER,
+  withSmsFooter,
+} from "../lib/website-sales-meeting";
+import { countSegments } from "../lib/sms-segments";
 
 const migration167 = readFileSync(
   "database/turso/167_founder_meeting_closed_loop.turso.sql",
@@ -10,6 +22,84 @@ const migration169 = readFileSync(
   "database/turso/169_founder_meeting_reminder_tiers.turso.sql",
   "utf8",
 );
+const dispatcherSource = readFileSync(
+  "app/api/cron/dispatch-founder-meeting-reminders/route.ts",
+  "utf8",
+);
+
+assert.match(dispatcherSource, /row\.reminder_minutes_before\s*!=\s*null/);
+assert.match(dispatcherSource, /reminderTierStillValid\(/);
+assert.doesNotMatch(
+  dispatcherSource,
+  /row\.kind\s*===\s*["']ten_minute["']/,
+  "delivery must branch on the numeric tier, never the legacy reporting kind",
+);
+
+assert.deepEqual(FOUNDER_REMINDER_TIERS, [60, 30, 10]);
+assert.equal(reminderKindFor(60), "reminder_60");
+assert.equal(reminderKindFor(30), "reminder_30");
+assert.equal(reminderKindFor(10), "ten_minute");
+assert.throws(() => reminderKindFor(15 as never), /unsupported_reminder_tier/);
+
+assert.deepEqual(
+  plannedReminderTiers({
+    meetingAt: "2026-09-01T15:15:00.000Z",
+    nowIso: "2026-09-01T14:00:00.000Z",
+  }),
+  [60, 30, 10],
+  "a 75-minute lead time plans all three tiers",
+);
+assert.deepEqual(
+  plannedReminderTiers({
+    meetingAt: "2026-09-01T14:20:00.000Z",
+    nowIso: "2026-09-01T14:00:00.000Z",
+  }),
+  [10],
+  "a 20-minute lead time never invents T-60/T-30 reminders",
+);
+assert(reminderTierStillValid(60, 30));
+assert(!reminderTierStillValid(60, 29));
+assert(reminderTierStillValid(30, 10));
+assert(!reminderTierStillValid(30, 9));
+assert(reminderTierStillValid(10, 1));
+assert(!reminderTierStillValid(10, 0));
+assert.equal(
+  founderMeetingDedupeKey("appointment-1", 2, "ten_minute", "sms"),
+  "appointment-1:2:ten_minute:sms",
+  "the live T-10 dedupe-key format is stable",
+);
+
+const tierMessages = buildFounderMeetingMessages({
+  company: "North Star Dental",
+  contactName: "Taylor",
+  meetingAt: "2026-09-01T15:15:00.000Z",
+  timezone: "America/Toronto",
+  meetLink: "https://meet.google.com/abc-defg-hij",
+  clientAgenda: "Review the current site and booking workflow.",
+  reminderMinutesBefore: 60,
+});
+assert.match(tierMessages.reminder.subject, /1 hour/i);
+assert.doesNotMatch(tierMessages.reminder.subject, /60 minutes/i);
+assert.match(tierMessages.reminder.sms, /^OASIS AI:/);
+assert.match(tierMessages.reminder.sms, /meet\.google\.com\/abc-defg-hij/);
+
+const firstSms = withSmsFooter(tierMessages.reminder.sms, { firstInConversation: true });
+assert.match(firstSms, /^OASIS AI:/);
+assert(firstSms.endsWith(SMS_STOP_FOOTER));
+assert.equal(firstSms.split(SMS_STOP_FOOTER).length - 1, 1, "STOP footer is not duplicated");
+assert.doesNotMatch(
+  withSmsFooter(tierMessages.reminder.sms, { firstInConversation: false }),
+  /Reply STOP/i,
+);
+
+const clamped = clampSmsBody(
+  `${tierMessages.reminder.sms}\nAgenda: ${"a detailed discovery item ".repeat(30)}\n${SMS_STOP_FOOTER}`,
+  2,
+);
+assert(countSegments(clamped) <= 2, "outbound reminder stays within two SMS segments");
+assert.match(clamped, /meet\.google\.com\/abc-defg-hij/);
+assert(clamped.endsWith(SMS_STOP_FOOTER), "segment clamping never drops the STOP footer");
+assert.doesNotMatch(clamped, /detailed discovery item/, "agenda is dropped before protected content");
 
 async function main() {
 const db = createClient({ url: ":memory:" });

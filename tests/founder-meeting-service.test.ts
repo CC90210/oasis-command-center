@@ -3,6 +3,7 @@ import { createClient, type Client } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
 import {
   activateVerifiedFounderMeeting,
+  backfillFounderMeetingNotifications,
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
@@ -61,10 +62,11 @@ type CalendarCalls = {
 
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
-  const migration = await import("node:fs").then(({ readFileSync }) =>
+  const [migration167, migration169] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
-  );
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration}`);
+    readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
+  ]);
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}`);
   const db = createTursoPostgrest(raw);
   const calls: CalendarCalls = { created: 0, updated: [], cancelled: [] };
   const deps = {
@@ -194,6 +196,21 @@ async function testCreateAuditAndFullIdempotency() {
   assert.equal(row.pending_operation, "book");
   assert.equal(row.workflow_status, "pending_transition");
 
+  const notificationRows = await raw.execute({
+    sql: `SELECT channel, kind, reminder_minutes_before
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ?
+          ORDER BY reminder_minutes_before DESC, channel`,
+    args: [meeting.appointmentId],
+  });
+  assert.equal(notificationRows.rows.length, 8, "confirmation plus three email/SMS reminder tiers are planned");
+  const reminders = notificationRows.rows.filter((notification) => notification.reminder_minutes_before !== null);
+  assert.equal(reminders.length, 6);
+  assert.deepEqual(
+    [...new Set(reminders.map((notification) => Number(notification.reminder_minutes_before)))].sort((a, b) => b - a),
+    [60, 30, 10],
+  );
+
   await createVerifiedFounderMeeting(bookingInput(), deps);
   assert.equal(calls.created, 1, "a byte-equivalent retry reuses the verified receipt");
   for (const [field, value] of [
@@ -209,6 +226,40 @@ async function testCreateAuditAndFullIdempotency() {
     createVerifiedFounderMeeting({ ...bookingInput(), smsConsent: false }, deps),
     /booking_request_mismatch/,
   );
+  await raw.close();
+}
+
+async function testBackfillHydratesLatePhoneAndRepairsTiers() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, { id: "meeting-backfill", workflowStatus: "active" });
+  await raw.execute({
+    sql: `UPDATE call_appointments
+          SET client_phone_snapshot = NULL, sms_consent = 1
+          WHERE tenant_id = ? AND id = ?`,
+    args: [TENANT, "meeting-backfill"],
+  });
+  await setLead(raw, { phone: "+14165550101" });
+
+  const result = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 25,
+  }, deps);
+  assert.equal(result.considered, 1);
+  assert.equal(result.repaired, 1);
+  assert.equal(result.failed, 0);
+
+  const repaired = await appointment(raw, "meeting-backfill");
+  assert.equal(repaired.client_phone_snapshot, "+14165550101", "late phone data is copied into the immutable send snapshot");
+  const reminders = await raw.execute({
+    sql: `SELECT channel, reminder_minutes_before
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill"],
+  });
+  assert.equal(reminders.rows.length, 6);
+  assert.equal(reminders.rows.filter((row) => row.channel === "sms").length, 3);
   await raw.close();
 }
 
@@ -586,6 +637,7 @@ async function testFinalCompensationConflictLeavesRemindersRecoverable() {
 
 async function main() {
   await testCreateAuditAndFullIdempotency();
+  await testBackfillHydratesLatePhoneAndRepairsTiers();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();
   await testExclusiveReservationAndNoShowRebook();

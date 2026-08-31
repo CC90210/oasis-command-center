@@ -138,6 +138,9 @@ assert.match(messages.reminder.subject, /7 minutes/i);
 assert.doesNotMatch(messages.reminder.subject, /10 minutes/i);
 assert.match(messages.reminder.body, /meet\.google\.com\/abc-defg-hij/);
 assert.doesNotMatch(messages.reminder.body, /internal|handoff/i);
+assert.match(messages.confirmationSms, /^OASIS AI:/);
+assert.match(messages.reminder.sms, /^OASIS AI:/);
+assert.match(messages.reminder.sms, /meet\.google\.com\/abc-defg-hij/);
 assert.equal(
   minutesUntilMeeting(meetingAt, "2026-09-01T19:53:15.000Z"),
   7,
