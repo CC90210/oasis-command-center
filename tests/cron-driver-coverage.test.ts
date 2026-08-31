@@ -129,6 +129,16 @@ assert.ok(
   !/^\s*schedule:\s*$/m.test(workflowTriggers),
   "cron-driver.yml must not retain schedule triggers after the Cloudflare Worker is live",
 );
+assert.match(
+  driver,
+  /ATTEST:\s*\$\{\{\s*secrets\.OASIS_CRON_ATTEST_SECRET\s*\}\}/,
+  "the manual rollback driver must load the independent cron attestation secret",
+);
+assert.match(
+  driver,
+  /-H "x-oasis-cron-attest: \$\{ATTEST\}"/,
+  "the manual rollback driver must send both cron auth proofs",
+);
 
 // Keep the full historical mapping in the manual fallback so a rollback does
 // not require reconstructing route/cadence pairings under pressure.
