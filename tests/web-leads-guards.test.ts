@@ -341,6 +341,15 @@ for (const view of [
   // against this file by planting `text-red-400` on the composite score once
   // (2026-08-24): the assertion failed as intended, and the class was reverted.
   "components/web-leads/BattleCard.tsx",
+  // Added 2026-08-31 with the collapsible-sections redesign. Pure chrome -- a
+  // disclosure shell that renders no audit data -- which is exactly why it is
+  // listed rather than trusted: a section header is the single most tempting
+  // place to "helpfully" tint a closed section that contains bad news, and a
+  // tinted header is a verdict rendered before the rep has even opened the
+  // drawer. Proved to fire against this file by planting `text-red-400` on the
+  // teaser span once (2026-08-31): the assertion failed as intended, and the
+  // class was reverted.
+  "components/web-leads/BattleSection.tsx",
   // Added 2026-08-24 with the objection panel. It renders no audit data at all,
   // which is exactly why it earns the ban rather than an exemption: a surface
   // that is "obviously safe" today is the one a future editor tints to make a

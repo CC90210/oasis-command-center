@@ -25,9 +25,13 @@
  * Rackham's 35,000-call study found top performers did not answer objections
  * better than average reps, they received about a third as many, because their
  * sequencing never gave the objection a reason to form. So the prevention line
- * is the one a rep should read between calls, and it is rendered quieter but
- * always visible rather than behind a disclosure -- a `<details>` here is a
- * click nobody makes with a stranger waiting.
+ * is the one a rep should read BETWEEN calls -- which is also why this panel
+ * survives being a closed-by-default section on the battle card (Adon,
+ * 2026-08-31): the eight cards are identical on every lead, a rep who has read
+ * them once carries them, and the section teaser names what is behind the one
+ * click for the rep who has not. WITHIN a card nothing changes: the prevention
+ * line stays quieter but always visible next to its objection, never behind a
+ * second disclosure of its own.
  *
  * ═══ THE RULES THIS FILE DOES NOT GET TO BREAK ══════════════════════════════
  *
@@ -40,16 +44,18 @@
  * 3. The spoken line is visually dominant. `meaning` and `prevent` are coaching
  *    notes and are never said aloud, so they must not be able to be mistaken
  *    for the script at a glance mid-sentence.
+ *
+ * `bare` renders the same content without the outer shell and heading, for the
+ * battle card, where BattleSection provides both and the heading doubles as
+ * the collapse control. CHROME ONLY: the copy inside is byte-identical either
+ * way, so the two renderings can never disagree.
  */
 
 import { OBJECTIONS } from "@/lib/web-leads/angles";
 
-export function ObjectionPanel() {
-  return (
-    <section className="rounded-xl border border-bg-border bg-bg-panel p-5 lg:p-6">
-      <h2 className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">
-        The brush-offs, and what to do with them
-      </h2>
+export function ObjectionPanel({ bare = false }: { bare?: boolean }) {
+  const body = (
+    <>
       <p className="mt-1 max-w-4xl text-xs leading-relaxed text-fg-dim">
         These arrive on every call whatever the site looks like. The quoted line is what you say. The note underneath
         it is what to have done earlier so it never comes up, which is where the difference between reps actually
@@ -70,6 +76,17 @@ export function ObjectionPanel() {
           </li>
         ))}
       </ul>
+    </>
+  );
+
+  if (bare) return body;
+
+  return (
+    <section className="rounded-xl border border-bg-border bg-bg-panel p-5 lg:p-6">
+      <h2 className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">
+        The brush-offs, and what to do with them
+      </h2>
+      {body}
     </section>
   );
 }
