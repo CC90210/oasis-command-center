@@ -24,6 +24,7 @@ import {
   shouldHonorTwilioOptOut,
   TWILIO_SYNC_DB_OPERATION_BUDGET,
   twilioCarrierKeyword,
+  twilioCarrierReplyForDelivery,
   twilioMessageResponse,
   verifyTwilioSignature,
 } from "@/lib/sms/twilio-inbound";
@@ -204,7 +205,7 @@ async function runPendingCarrierAction(
   tenantId: string,
   job: InboundJob,
   budget: SyncOperationBudget,
-): Promise<void> {
+): Promise<"stop" | "start" | null> {
   const action = pendingTwilioCarrierAction(job);
   if (action === "stop") {
     budget.consume();
@@ -236,6 +237,7 @@ async function runPendingCarrierAction(
     });
     await markCarrierAction(db, tenantId, job.id, "release_suppression", budget);
   }
+  return action;
 }
 
 export async function POST(req: NextRequest) {
@@ -316,12 +318,14 @@ export async function POST(req: NextRequest) {
     completed_at: keyword === "help" ? receivedAt : null,
   });
   let job: InboundJob;
+  let deliveryWasDuplicate = false;
   if (insertedJob.error) {
     try {
       if (!isUniqueViolationError(insertedJob.error)) {
         console.error("[webhooks.twilio.sms-inbound] job enqueue failed", insertedJob.error.message);
         return new NextResponse("Queue failed", { status: 500 });
       }
+      deliveryWasDuplicate = true;
       job = await loadExistingJob(db, tenantId, providerMessageId, budget);
       assertSameDelivery(job, { from, to, body });
     } catch (error) {
@@ -360,8 +364,9 @@ export async function POST(req: NextRequest) {
     return new NextResponse("Persistence failed", { status: 500 });
   }
 
+  let resumedAction: "stop" | "start" | null;
   try {
-    await runPendingCarrierAction(db, tenantId, job, budget);
+    resumedAction = await runPendingCarrierAction(db, tenantId, job, budget);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "deterministic_sms_action_failed";
     console.error("[webhooks.twilio.sms-inbound] deterministic action failed", detail);
@@ -375,8 +380,12 @@ export async function POST(req: NextRequest) {
   if (elapsedMs >= 2_000) {
     console.warn("[webhooks.twilio.sms-inbound] latency budget exceeded", { elapsed_ms: elapsedMs });
   }
-  if (job.intent === "opt_out") return xmlResponse(STOP_CONFIRMATION);
-  if (job.proposed_action === "reply_help") return xmlResponse(HELP_RESPONSE);
-  if (job.proposed_action === "release_suppression") return xmlResponse(START_CONFIRMATION);
+  const carrierReply = twilioCarrierReplyForDelivery(job, {
+    duplicate: deliveryWasDuplicate,
+    resumedAction,
+  });
+  if (carrierReply === "stop") return xmlResponse(STOP_CONFIRMATION);
+  if (carrierReply === "help") return xmlResponse(HELP_RESPONSE);
+  if (carrierReply === "start") return xmlResponse(START_CONFIRMATION);
   return xmlResponse();
 }

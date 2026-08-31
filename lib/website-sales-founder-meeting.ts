@@ -318,6 +318,11 @@ async function cancelOutstandingNotifications(
   if (result.error) throw new Error(`meeting_notification_cancel_failed:${result.error.message}`);
 }
 
+type NotificationContextRequirements = {
+  requireActive?: boolean;
+  expectedSmsConsent?: boolean;
+};
+
 async function ensureNotificationRows(
   db: Db,
   meeting: VerifiedFounderMeeting,
@@ -326,6 +331,7 @@ async function ensureNotificationRows(
   hostUserId: string,
   agenda: string,
   nowMs: number,
+  requirements: NotificationContextRequirements = {},
 ): Promise<number> {
   const now = new Date(nowMs).toISOString();
   const tiers = plannedReminderTiers({ meetingAt: meeting.meetingAt, nowIso: now });
@@ -408,18 +414,38 @@ async function ensureNotificationRows(
 
   // This context read used to filter only by appointment id. Service-role reads
   // bypass RLS, so the tenant predicate is mandatory even for a UUID lookup.
-  const contextResult = await db
+  let contextQuery = db
     .from("call_appointments")
-    .select("tenant_id,lead_id,sms_consent")
+    .select("tenant_id,lead_id,status,workflow_status,calendar_status,pending_request_id,revision,sms_consent,client_phone_snapshot")
     .eq("tenant_id", tenantId)
     .eq("id", meeting.appointmentId)
     .eq("lead_id", leadId)
-    .maybeSingle();
+    .eq("revision", meeting.revision);
+  contextQuery = meeting.contact.phone
+    ? contextQuery.eq("client_phone_snapshot", meeting.contact.phone)
+    : contextQuery.is("client_phone_snapshot", null);
+  if (requirements.requireActive) {
+    contextQuery = contextQuery
+      .eq("status", "scheduled")
+      .eq("workflow_status", "active")
+      .eq("calendar_status", "verified")
+      .is("pending_request_id", null);
+  }
+  if (requirements.expectedSmsConsent !== undefined) {
+    contextQuery = contextQuery.eq("sms_consent", requirements.expectedSmsConsent ? 1 : 0);
+  }
+  const contextResult = await contextQuery.maybeSingle();
   if (contextResult.error || !contextResult.data) throw new Error("meeting_notification_context_failed");
   const context = contextResult.data as {
     tenant_id: string;
     lead_id: string;
+    status: string;
+    workflow_status: string;
+    calendar_status: string;
+    pending_request_id: string | null;
+    revision: number;
     sms_consent: number | boolean;
+    client_phone_snapshot: string | null;
   };
   const existingResult = await db
     .from("website_sales_meeting_notifications")
@@ -476,6 +502,22 @@ function meetingFromAppointment(
     receipt,
     revision: Number(appointment.revision || 1),
   };
+}
+
+function expectedNotificationDedupeKeys(appointment: AppointmentRow, nowIso: string): string[] {
+  const revision = Number(appointment.revision || 1);
+  const tiers = plannedReminderTiers({ meetingAt: appointment.scheduled_for, nowIso });
+  const keys = [founderMeetingDedupeKey(appointment.id, revision, "confirmation", "email")];
+  for (const tier of tiers) {
+    keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "email"));
+  }
+  if (appointment.sms_consent && appointment.client_phone_snapshot) {
+    keys.push(founderMeetingDedupeKey(appointment.id, revision, "confirmation", "sms"));
+    for (const tier of tiers) {
+      keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "sms"));
+    }
+  }
+  return keys;
 }
 
 function recordData(value: unknown): Record<string, unknown> {
@@ -596,8 +638,31 @@ async function backfillTenantFounderMeetingNotifications(
     }
     const page = (candidates.data || []) as AppointmentRow[];
     if (page.length === 0) break;
+    const existingResult = await deps.db.from("website_sales_meeting_notifications")
+      .select("appointment_id,dedupe_key")
+      .eq("tenant_id", tenantId)
+      .in("appointment_id", page.map((candidate) => candidate.id));
+    if (existingResult.error) {
+      result.failed += 1;
+      result.errors.push("meeting_notification_backfill_lookup_failed");
+      break;
+    }
+    const existingByAppointment = new Map<string, Set<string>>();
+    for (const row of (existingResult.data || []) as Array<{ appointment_id?: unknown; dedupe_key?: unknown }>) {
+      if (typeof row.appointment_id !== "string" || typeof row.dedupe_key !== "string") continue;
+      const keys = existingByAppointment.get(row.appointment_id) || new Set<string>();
+      keys.add(row.dedupe_key);
+      existingByAppointment.set(row.appointment_id, keys);
+    }
     for (const candidate of page) {
       result.considered += 1;
+      const existingKeys = existingByAppointment.get(candidate.id) || new Set<string>();
+      const expectedKeys = expectedNotificationDedupeKeys(candidate, nowIso);
+      const needsPhoneHydration = Boolean(candidate.sms_consent && !candidate.client_phone_snapshot);
+      if (!needsPhoneHydration && expectedKeys.every((key) => existingKeys.has(key))) {
+        if (result.considered >= MAX_BACKFILL_SCAN) break;
+        continue;
+      }
       try {
         const appointment = await hydrateBackfillPhone(deps.db, candidate, nowIso);
         if (!appointment.assigned_to) throw new Error("meeting_host_missing");
@@ -613,6 +678,10 @@ async function backfillTenantFounderMeetingNotifications(
           appointment.assigned_to,
           appointment.client_agenda || "Review your current website and next steps.",
           nowMs,
+          {
+            requireActive: true,
+            expectedSmsConsent: Boolean(appointment.sms_consent),
+          },
         );
         if (inserted > 0) result.repaired += 1;
       } catch (error) {
@@ -692,33 +761,31 @@ export async function grantFounderMeetingSmsConsent(input: {
     throw new Error("verified_meeting_required");
   }
 
-  if (!appointment.sms_consent || !appointment.client_phone_snapshot) {
-    let updateQuery = deps.db.from("call_appointments")
-      .update({
-        client_phone_snapshot: consentedPhone,
-        sms_consent: 1,
-        sms_consent_at: appointment.sms_consent_at || new Date(capturedAtMs).toISOString(),
-        updated_at: new Date(deps.now()).toISOString(),
-      })
-      .eq("tenant_id", input.tenantId)
-      .eq("lead_id", input.leadId)
-      .eq("id", input.appointmentId)
-      .eq("revision", Number(appointment.revision))
-      .eq("status", "scheduled")
-      .eq("workflow_status", "active")
-      .eq("calendar_status", "verified")
-      .is("pending_request_id", null);
-    updateQuery = appointment.client_phone_snapshot
-      ? updateQuery.eq("client_phone_snapshot", consentedPhone)
-      : updateQuery.is("client_phone_snapshot", null);
-    const updated = await updateQuery
-      .select("*")
-      .maybeSingle();
-    if (updated.error || !updated.data) {
-      throw new Error(`meeting_sms_consent_update_failed:${updated.error?.message || "row_changed"}`);
-    }
-    appointment = updated.data as AppointmentRow;
+  let updateQuery = deps.db.from("call_appointments")
+    .update({
+      client_phone_snapshot: consentedPhone,
+      sms_consent: 1,
+      sms_consent_at: appointment.sms_consent_at || new Date(capturedAtMs).toISOString(),
+      updated_at: new Date(deps.now()).toISOString(),
+    })
+    .eq("tenant_id", input.tenantId)
+    .eq("lead_id", input.leadId)
+    .eq("id", input.appointmentId)
+    .eq("revision", Number(appointment.revision))
+    .eq("status", "scheduled")
+    .eq("workflow_status", "active")
+    .eq("calendar_status", "verified")
+    .is("pending_request_id", null);
+  updateQuery = appointment.client_phone_snapshot
+    ? updateQuery.eq("client_phone_snapshot", consentedPhone)
+    : updateQuery.is("client_phone_snapshot", null);
+  const updated = await updateQuery
+    .select("*")
+    .maybeSingle();
+  if (updated.error || !updated.data) {
+    throw new Error(`meeting_sms_consent_update_failed:${updated.error?.message || "row_changed"}`);
   }
+  appointment = updated.data as AppointmentRow;
 
   if (!appointment.assigned_to) throw new Error("meeting_host_missing");
   const meeting = meetingFromAppointment(
@@ -733,6 +800,7 @@ export async function grantFounderMeetingSmsConsent(input: {
     appointment.assigned_to,
     appointment.client_agenda || "Review your current website and next steps.",
     deps.now(),
+    { requireActive: true, expectedSmsConsent: true },
   );
   return meeting;
 }

@@ -8,6 +8,7 @@ import {
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
   founderMeetingBackfillChunkStart,
+  grantFounderMeetingSmsConsent,
   prepareVerifiedFounderMeetingCancellation,
   reconcileFounderMeetingSagas,
   rescheduleVerifiedFounderMeeting,
@@ -60,6 +61,57 @@ type CalendarCalls = {
   updated: string[];
   cancelled: string[];
 };
+
+type InstrumentationHooks = {
+  onSelect?: (table: string, columns: string) => void;
+  onUpdate?: (table: string) => void;
+  beforeMaybeSingle?: (table: string, columns: string | null) => Promise<unknown> | null;
+};
+
+function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
+  const target = db as {
+    from(table: string): {
+      select(columns?: string, options?: unknown): unknown;
+      update(values: Record<string, unknown>, options?: unknown): unknown;
+      maybeSingle(): PromiseLike<unknown>;
+    };
+  };
+  return new Proxy(target, {
+    get(object, property, receiver) {
+      if (property !== "from") {
+        const value = Reflect.get(object, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(object) : value;
+      }
+      return (table: string) => {
+        const builder = object.from(table);
+        let selectedColumns: string | null = null;
+        const originalSelect = builder.select.bind(builder);
+        builder.select = (columns = "*", options?: unknown) => {
+          selectedColumns = columns;
+          hooks.onSelect?.(table, columns);
+          return originalSelect(columns, options);
+        };
+        const originalUpdate = builder.update.bind(builder);
+        builder.update = (values: Record<string, unknown>, options?: unknown) => {
+          hooks.onUpdate?.(table);
+          return originalUpdate(values, options);
+        };
+        const originalMaybeSingle = builder.maybeSingle.bind(builder);
+        builder.maybeSingle = () => {
+          const query = originalMaybeSingle();
+          const before = hooks.beforeMaybeSingle?.(table, selectedColumns) ?? null;
+          if (!before) return query;
+          return {
+            then(onFulfilled, onRejected) {
+              return Promise.resolve(before).then(() => query).then(onFulfilled, onRejected);
+            },
+          };
+        };
+        return builder;
+      };
+    },
+  });
+}
 
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
@@ -306,6 +358,98 @@ async function testBackfillLimitScansPastAlreadyCompleteAppointments() {
     args: ["meeting-backfill-missing-second"],
   });
   assert.equal(Number(repairedLater.rows[0].count), 6, "the later missing appointment is not starved by the limit");
+  await raw.close();
+}
+
+async function testBackfillBatchSkipsCompleteAppointments() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-batch-complete-a",
+    scheduledFor: "2026-09-01T15:30:00.000Z",
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-batch-complete-b",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    limit: 2,
+  }, deps);
+
+  let notificationReads = 0;
+  let perAppointmentContextReads = 0;
+  const instrumentedDb = instrumentDb(deps.db, {
+    onSelect(table, columns) {
+      if (table === "website_sales_meeting_notifications") notificationReads += 1;
+      if (table === "call_appointments" && columns.includes("sms_consent")) {
+        perAppointmentContextReads += 1;
+      }
+    },
+  });
+  const result = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    limit: 1,
+  }, { ...deps, db: instrumentedDb as never });
+  assert.equal(result.repaired, 0);
+  assert.equal(result.considered, 2);
+  assert.equal(notificationReads, 1, "one page-level outbox read replaces per-appointment dedupe reads");
+  assert.equal(perAppointmentContextReads, 0, "complete appointments never enter ensureNotificationRows");
+  await raw.close();
+}
+
+async function testIdempotentConsentReplayCannotRecreateRowsDuringTransition() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-consent-race",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  let guardedAppointmentUpdates = 0;
+  let transitionInjected = false;
+  const instrumentedDb = instrumentDb(deps.db, {
+    onUpdate(table) {
+      if (table === "call_appointments") guardedAppointmentUpdates += 1;
+    },
+    beforeMaybeSingle(table, columns) {
+      if (
+        transitionInjected ||
+        table !== "call_appointments" ||
+        !columns?.includes("sms_consent") ||
+        columns === "*"
+      ) return null;
+      transitionInjected = true;
+      return raw.execute({
+        sql: `UPDATE call_appointments
+              SET workflow_status = 'pending_transition',
+                  pending_request_id = 'consent-race',
+                  pending_operation = 'cancel',
+                  pending_started_at = ?
+              WHERE tenant_id = ? AND id = ?`,
+        args: ["2026-09-01T14:01:00.000Z", TENANT, "meeting-consent-race"],
+      });
+    },
+  });
+
+  await assert.rejects(
+    grantFounderMeetingSmsConsent({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: "meeting-consent-race",
+      consentedPhone: "+14165550101",
+      capturedAt: new Date("2026-09-01T14:00:30.000Z"),
+    }, { ...deps, db: instrumentedDb as never }),
+    /meeting_notification_context_failed/,
+  );
+  assert.equal(guardedAppointmentUpdates, 1, "an already-consented replay still performs the guarded revision CAS");
+  const notifications = await raw.execute({
+    sql: "SELECT count(*) AS count FROM website_sales_meeting_notifications WHERE appointment_id = ?",
+    args: ["meeting-consent-race"],
+  });
+  assert.equal(Number(notifications.rows[0].count), 0, "the pending transition prevents reminder recreation");
   await raw.close();
 }
 
@@ -699,6 +843,8 @@ async function main() {
   await testCreateAuditAndFullIdempotency();
   await testBackfillHydratesLatePhoneAndRepairsTiers();
   await testBackfillLimitScansPastAlreadyCompleteAppointments();
+  await testIdempotentConsentReplayCannotRecreateRowsDuringTransition();
+  await testBackfillBatchSkipsCompleteAppointments();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();
   await testExclusiveReservationAndNoShowRebook();

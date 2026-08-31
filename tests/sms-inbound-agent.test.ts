@@ -19,6 +19,7 @@ import {
   resolveTwilioInboundTenant,
   shouldHonorTwilioOptOut,
   TWILIO_SYNC_DB_OPERATION_BUDGET,
+  twilioCarrierReplyForDelivery,
   twilioMessageResponse,
   verifyTwilioSignature,
 } from "../lib/sms/twilio-inbound";
@@ -61,6 +62,14 @@ assert(
 );
 assert(shouldHonorTwilioOptOut("Cancel my meeting and STOP"), "an explicit STOP still wins the scheduling carve-out");
 assert(shouldHonorTwilioOptOut("Cancel my appointment and don't text me"));
+for (const revocation of [
+  "Cancel my appointment and remove me please",
+  "Please cancel my meeting and cancel all texts",
+  "Cancel my appointment and STOP ALL",
+  "cancel my meeting and stop texting me",
+]) {
+  assert(shouldHonorTwilioOptOut(revocation), `global revocation must win meeting language: ${revocation}`);
+}
 assert.equal(
   pendingTwilioCarrierAction({ intent: "opt_out", proposed_action: "cancel_meeting", executed_action: null }),
   "stop",
@@ -77,6 +86,56 @@ assert.equal(
   }),
   null,
   "a completed carrier action is not repeated on a normal retry",
+);
+const completedStop = {
+  intent: "opt_out",
+  proposed_action: "cancel_meeting",
+  executed_action: "suppress_and_cancel_sms",
+};
+assert.equal(
+  twilioCarrierReplyForDelivery(completedStop, { duplicate: true, resumedAction: null }),
+  null,
+  "a completed STOP retry is acknowledged with empty TwiML",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "question", proposed_action: "reply_help", executed_action: "reply_help" },
+    { duplicate: true, resumedAction: null },
+  ),
+  null,
+  "a completed HELP retry is acknowledged with empty TwiML",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "unknown", proposed_action: "release_suppression", executed_action: "release_suppression" },
+    { duplicate: true, resumedAction: null },
+  ),
+  null,
+  "a completed START retry is acknowledged with empty TwiML",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "question", proposed_action: "reply_help", executed_action: "reply_help" },
+    { duplicate: false, resumedAction: null },
+  ),
+  "help",
+  "the first HELP delivery still receives its inline reply",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "opt_out", proposed_action: "cancel_meeting", executed_action: null },
+    { duplicate: true, resumedAction: "stop" },
+  ),
+  "stop",
+  "an incomplete STOP retry resumes and receives the confirmation",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "unknown", proposed_action: "release_suppression", executed_action: null },
+    { duplicate: true, resumedAction: "start" },
+  ),
+  "start",
+  "an incomplete START retry resumes and receives the confirmation",
 );
 
 const failingDb = {
@@ -162,6 +221,10 @@ assert(!webhookSource.includes("queueInfer"));
 assert(!webhookSource.includes("sendSmsDirectTwilio"));
 assert.match(webhookSource, /loadExistingJob/);
 assert.match(webhookSource, /pendingTwilioCarrierAction/);
+assert.match(webhookSource, /deliveryWasDuplicate/);
+assert.match(webhookSource, /twilioCarrierReplyForDelivery/);
+assert.match(webhookSource, /const carrierReply = twilioCarrierReplyForDelivery/);
+assert.doesNotMatch(webhookSource, /if \(job\.intent === "opt_out"\) return xmlResponse/);
 assert.match(webhookSource, /TWILIO_SYNC_DB_OPERATION_BUDGET/);
 assert.match(webhookSource, /new SyncOperationBudget/);
 assert.doesNotMatch(

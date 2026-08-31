@@ -28,6 +28,20 @@ export function pendingTwilioCarrierAction(
   return null;
 }
 
+export function twilioCarrierReplyForDelivery(
+  job: TwilioCarrierJobState,
+  delivery: {
+    duplicate: boolean;
+    resumedAction: "stop" | "start" | null;
+  },
+): "stop" | "start" | "help" | null {
+  if (delivery.duplicate && delivery.resumedAction === null) return null;
+  if (job.intent === "opt_out" && job.proposed_action === "cancel_meeting") return "stop";
+  if (job.proposed_action === "release_suppression") return "start";
+  if (job.proposed_action === "reply_help") return "help";
+  return null;
+}
+
 function timingSafeStringEqual(provided: string, expected: string): boolean {
   const providedBuffer = Buffer.from(provided);
   const expectedBuffer = Buffer.from(expected);
@@ -147,17 +161,28 @@ export function twilioCarrierKeyword(body: string): "help" | "start" | null {
 }
 
 export function shouldHonorTwilioOptOut(body: string): boolean {
+  const cleaned = body.trim().toLowerCase()
+    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const exactGlobalCommand =
+    /^(?:please\s+)?(?:stop\s*all|stop|unsubscribe|unsub|opt\s*-?\s*out|revoke|quit|end)(?:\s+please)?$/i.test(cleaned);
+  const unmistakableGlobalRevocation =
+    exactGlobalCommand ||
+    /\b(?:take me off|remove me|leave me alone|lose my number|never contact me)\b/i.test(body) ||
+    /\b(?:do\s*not|don't|never)\s+(?:text|message|contact|call)\s+me\b/i.test(body) ||
+    /\bstop\s+(?:all\s+)?(?:texts?|texting|messages?|messaging|contacting)\b/i.test(body) ||
+    /\bcancel\s+all\s+(?:texts?|messages?|messaging|contact)\b/i.test(body) ||
+    /\bno more (?:texts?|messages?|contact)\b/i.test(body) ||
+    /\b(?:and|also)\s+(?:stop\s*all|stop|unsubscribe|unsub|opt\s*-?\s*out|revoke|quit|end)\s*[.!?]*$/i.test(body);
+  if (unmistakableGlobalRevocation) return true;
+
   const meetingOnlyCancellation =
     /\b(?:cancel|reschedule|move)\b[\s\S]{0,40}\b(?:meeting|appointment|audit|call)\b/i.test(body) ||
     /\b(?:meeting|appointment|audit|call)\b[\s\S]{0,40}\b(?:cancel|reschedule|move)\b/i.test(body);
-  const unmistakableGlobalRevocation =
-    /\b(?:do\s*not|don't|never|stop)\s+(?:text|message|contact|call)/i.test(body) ||
-    /\b(?:take|remove)\s+me\s+(?:off|from)\b/i.test(body) ||
-    /\b(?:unsubscribe|unsub|opt\s*-?\s*out|revoke|quit|end|lose my number|leave me alone)\b/i.test(body) ||
-    /\bno more (?:texts|messages|contact)\b/i.test(body) ||
-    /(?:^|\band\s+|[,.;!]\s*)stop[.!?]*$/i.test(body.trim());
-  if (unmistakableGlobalRevocation) return true;
-  if (meetingOnlyCancellation) return false;
+  const schedulingFollowUp =
+    /\b(?:text|message)\s+me\b[\s\S]{0,40}\b(?:alternatives?|new\s+times?|other\s+times?|available\s+times?|slots?|options?)\b/i.test(body);
+  if (meetingOnlyCancellation && schedulingFollowUp) return false;
   const verdict = classifyOptOut(body);
   if (!verdict.optOut) return false;
   if (verdict.confidence === "likely") return true;
@@ -165,10 +190,6 @@ export function shouldHonorTwilioOptOut(body: string): boolean {
     /\b(stop|cancel|unsubscribe|remove)\b/i.test(body) &&
     /\b(text|texts|texting|message|messages|messaging|list|contact)\b/i.test(body)
   ) return true;
-  const cleaned = body.trim().toLowerCase()
-    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
   const command = "(?:stopall|stop all|stop|unsubscribe|unsub|optout|opt out|opt-out|revoke|cancel|quit|end)";
   return new RegExp(`^(?:please\\s+)?${command}(?:\\s+please)?$`, "i").test(cleaned);
 }
