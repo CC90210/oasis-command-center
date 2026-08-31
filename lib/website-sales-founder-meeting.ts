@@ -321,6 +321,7 @@ async function cancelOutstandingNotifications(
 type NotificationContextRequirements = {
   requireActive?: boolean;
   expectedSmsConsent?: boolean;
+  notificationLeaseToken?: string;
 };
 
 async function ensureNotificationRows(
@@ -433,6 +434,9 @@ async function ensureNotificationRows(
   }
   if (requirements.expectedSmsConsent !== undefined) {
     contextQuery = contextQuery.eq("sms_consent", requirements.expectedSmsConsent ? 1 : 0);
+  }
+  if (requirements.notificationLeaseToken) {
+    contextQuery = contextQuery.eq("notification_lease_token", requirements.notificationLeaseToken);
   }
   const contextResult = await contextQuery.maybeSingle();
   if (contextResult.error || !contextResult.data) throw new Error("meeting_notification_context_failed");
@@ -742,8 +746,9 @@ export async function grantFounderMeetingSmsConsent(input: {
   capturedAt?: Date;
 }, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
   const deps = dependencies(dependencyOverrides);
-  const capturedAtMs = input.capturedAt?.getTime() ?? deps.now();
-  if (!Number.isFinite(capturedAtMs) || capturedAtMs > deps.now() + 86_400_000) {
+  const operationNowMs = deps.now();
+  const capturedAtMs = input.capturedAt?.getTime() ?? operationNowMs;
+  if (!Number.isFinite(capturedAtMs) || capturedAtMs > operationNowMs + 86_400_000) {
     throw new Error("invalid_sms_consent_timestamp");
   }
   let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
@@ -760,13 +765,20 @@ export async function grantFounderMeetingSmsConsent(input: {
   ) {
     throw new Error("verified_meeting_required");
   }
+  if (notificationLeaseIsFresh(appointment, operationNowMs)) {
+    throw new Error("meeting_notification_in_progress");
+  }
 
+  const notificationLeaseToken = randomUUID();
+  const notificationLeaseExpiresAt = new Date(operationNowMs + OPERATION_LEASE_MS).toISOString();
   let updateQuery = deps.db.from("call_appointments")
     .update({
       client_phone_snapshot: consentedPhone,
       sms_consent: 1,
       sms_consent_at: appointment.sms_consent_at || new Date(capturedAtMs).toISOString(),
-      updated_at: new Date(deps.now()).toISOString(),
+      notification_lease_token: notificationLeaseToken,
+      notification_lease_expires_at: notificationLeaseExpiresAt,
+      updated_at: new Date(operationNowMs).toISOString(),
     })
     .eq("tenant_id", input.tenantId)
     .eq("lead_id", input.leadId)
@@ -779,6 +791,16 @@ export async function grantFounderMeetingSmsConsent(input: {
   updateQuery = appointment.client_phone_snapshot
     ? updateQuery.eq("client_phone_snapshot", consentedPhone)
     : updateQuery.is("client_phone_snapshot", null);
+  updateQuery = nullableMatch(
+    updateQuery,
+    "notification_lease_token",
+    appointment.notification_lease_token,
+  );
+  updateQuery = nullableMatch(
+    updateQuery,
+    "notification_lease_expires_at",
+    appointment.notification_lease_expires_at,
+  );
   const updated = await updateQuery
     .select("*")
     .maybeSingle();
@@ -787,22 +809,46 @@ export async function grantFounderMeetingSmsConsent(input: {
   }
   appointment = updated.data as AppointmentRow;
 
-  if (!appointment.assigned_to) throw new Error("meeting_host_missing");
-  const meeting = meetingFromAppointment(
-    appointment,
-    appointment.booking_request_id || `consent:${appointment.id}:r${appointment.revision}`,
-  );
-  await ensureNotificationRows(
-    deps.db,
-    meeting,
-    input.tenantId,
-    input.leadId,
-    appointment.assigned_to,
-    appointment.client_agenda || "Review your current website and next steps.",
-    deps.now(),
-    { requireActive: true, expectedSmsConsent: true },
-  );
-  return meeting;
+  try {
+    if (!appointment.assigned_to) throw new Error("meeting_host_missing");
+    const meeting = meetingFromAppointment(
+      appointment,
+      appointment.booking_request_id || `consent:${appointment.id}:r${appointment.revision}`,
+    );
+    await ensureNotificationRows(
+      deps.db,
+      meeting,
+      input.tenantId,
+      input.leadId,
+      appointment.assigned_to,
+      appointment.client_agenda || "Review your current website and next steps.",
+      deps.now(),
+      {
+        requireActive: true,
+        expectedSmsConsent: true,
+        notificationLeaseToken,
+      },
+    );
+    return meeting;
+  } finally {
+    const released = await deps.db.from("call_appointments")
+      .update({
+        notification_lease_token: null,
+        notification_lease_expires_at: null,
+        updated_at: new Date(deps.now()).toISOString(),
+      })
+      .eq("tenant_id", input.tenantId)
+      .eq("lead_id", input.leadId)
+      .eq("id", input.appointmentId)
+      .eq("revision", Number(appointment.revision))
+      .eq("notification_lease_token", notificationLeaseToken)
+      .eq("notification_lease_expires_at", notificationLeaseExpiresAt)
+      .select("id")
+      .maybeSingle();
+    if (released.error || !released.data) {
+      throw new Error(`meeting_notification_lease_release_failed:${released.error?.message || "row_changed"}`);
+    }
+  }
 }
 
 type NullableFilterQuery<T> = {

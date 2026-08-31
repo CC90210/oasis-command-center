@@ -66,6 +66,7 @@ type InstrumentationHooks = {
   onSelect?: (table: string, columns: string) => void;
   onUpdate?: (table: string) => void;
   beforeMaybeSingle?: (table: string, columns: string | null) => Promise<unknown> | null;
+  beforeExecute?: (table: string, columns: string | null) => Promise<unknown> | null;
 };
 
 function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
@@ -74,6 +75,10 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
       select(columns?: string, options?: unknown): unknown;
       update(values: Record<string, unknown>, options?: unknown): unknown;
       maybeSingle(): PromiseLike<unknown>;
+      then(
+        onFulfilled?: ((value: unknown) => unknown) | null,
+        onRejected?: ((reason: unknown) => unknown) | null,
+      ): Promise<unknown>;
     };
   };
   return new Proxy(target, {
@@ -106,6 +111,12 @@ function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
               return Promise.resolve(before).then(() => query).then(onFulfilled, onRejected);
             },
           };
+        };
+        const originalThen = builder.then.bind(builder);
+        builder.then = (onFulfilled, onRejected) => {
+          const before = hooks.beforeExecute?.(table, selectedColumns) ?? null;
+          if (!before) return originalThen(onFulfilled, onRejected);
+          return Promise.resolve(before).then(() => originalThen(onFulfilled, onRejected));
         };
         return builder;
       };
@@ -444,12 +455,69 @@ async function testIdempotentConsentReplayCannotRecreateRowsDuringTransition() {
     }, { ...deps, db: instrumentedDb as never }),
     /meeting_notification_context_failed/,
   );
-  assert.equal(guardedAppointmentUpdates, 1, "an already-consented replay still performs the guarded revision CAS");
+  assert.equal(guardedAppointmentUpdates, 2, "an already-consented replay acquires and releases the guarded lease");
   const notifications = await raw.execute({
     sql: "SELECT count(*) AS count FROM website_sales_meeting_notifications WHERE appointment_id = ?",
     args: ["meeting-consent-race"],
   });
   assert.equal(Number(notifications.rows[0].count), 0, "the pending transition prevents reminder recreation");
+  const failedAppointment = await appointment(raw, "meeting-consent-race");
+  assert.equal(failedAppointment.notification_lease_token, null, "a failed consent replay releases its notification lease");
+  assert.equal(failedAppointment.notification_lease_expires_at, null);
+  await raw.close();
+}
+
+async function testConsentLeaseSerializesCancellationAfterContextRead() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-consent-lease",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  let cancellationAttempted = false;
+  let cancellationError = "";
+  const instrumentedDb = instrumentDb(deps.db, {
+    beforeExecute(table, columns) {
+      if (
+        cancellationAttempted ||
+        table !== "website_sales_meeting_notifications" ||
+        columns !== "dedupe_key"
+      ) return null;
+      cancellationAttempted = true;
+      return prepareVerifiedFounderMeetingCancellation({
+        tenantId: TENANT,
+        leadId: LEAD,
+        appointmentId: "meeting-consent-lease",
+        requestId: "cancel-during-consent",
+      }, deps).then(
+        () => undefined,
+        (error: unknown) => {
+          cancellationError = error instanceof Error ? error.message : String(error);
+        },
+      );
+    },
+  });
+
+  await grantFounderMeetingSmsConsent({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "meeting-consent-lease",
+    consentedPhone: "+14165550101",
+    capturedAt: new Date("2026-09-01T14:00:30.000Z"),
+  }, { ...deps, db: instrumentedDb as never });
+  assert(cancellationAttempted, "the cancellation was interleaved after context validation");
+  assert.match(cancellationError, /meeting_notification_in_progress/);
+
+  const succeeded = await appointment(raw, "meeting-consent-lease");
+  assert.equal(succeeded.workflow_status, "active");
+  assert.equal(succeeded.pending_request_id, null, "cancellation never acquired the transition reservation");
+  assert.equal(succeeded.notification_lease_token, null, "successful consent releases its notification lease");
+  assert.equal(succeeded.notification_lease_expires_at, null);
+  const notifications = await raw.execute({
+    sql: "SELECT count(*) AS count FROM website_sales_meeting_notifications WHERE appointment_id = ?",
+    args: ["meeting-consent-lease"],
+  });
+  assert(Number(notifications.rows[0].count) > 0);
   await raw.close();
 }
 
@@ -844,6 +912,7 @@ async function main() {
   await testBackfillHydratesLatePhoneAndRepairsTiers();
   await testBackfillLimitScansPastAlreadyCompleteAppointments();
   await testIdempotentConsentReplayCannotRecreateRowsDuringTransition();
+  await testConsentLeaseSerializesCancellationAfterContextRead();
   await testBackfillBatchSkipsCompleteAppointments();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();

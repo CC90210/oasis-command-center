@@ -17,6 +17,7 @@ import {
 } from "@/lib/sms/auto-responses";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
+import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import {
   normalizedTwilioPhone,
   pendingTwilioCarrierAction,
@@ -186,11 +187,11 @@ async function markCarrierAction(
   db: Db,
   tenantId: string,
   jobId: string,
-  action: "suppress_and_cancel_sms" | "release_suppression",
+  action: "suppress_and_cancel_sms" | "release_suppression" | "reply_help",
   budget: SyncOperationBudget,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const patch = action === "release_suppression"
+  const patch = action !== "suppress_and_cancel_sms"
     ? { status: "done", executed_action: action, completed_at: now, last_error: null }
     : { executed_action: action, last_error: null };
   budget.consume();
@@ -200,34 +201,41 @@ async function markCarrierAction(
   if (updated.error) throw new Error(`sms_job_complete_failed:${updated.error.message}`);
 }
 
+async function runStopComplianceEffects(
+  db: Db,
+  tenantId: string,
+  job: InboundJob,
+  budget: SyncOperationBudget,
+): Promise<void> {
+  budget.consume();
+  await suppressPhoneNumber(db, {
+    tenantId,
+    phone: job.from_phone,
+    reason: "OPT_OUT",
+    source: "twilio_webhook",
+  });
+  budget.consume();
+  const cancelled = await db.from("website_sales_meeting_notifications").update({
+    status: "cancelled",
+    claimed_at: null,
+    last_error: "recipient_opted_out",
+    updated_at: job.received_at,
+  }).eq("tenant_id", tenantId)
+    .eq("channel", "sms")
+    .eq("recipient", job.from_phone)
+    .in("status", ["pending", "sending"]);
+  if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
+}
+
 async function runPendingCarrierAction(
   db: Db,
   tenantId: string,
   job: InboundJob,
   budget: SyncOperationBudget,
-): Promise<"stop" | "start" | null> {
+): Promise<"start" | "help" | null> {
   const action = pendingTwilioCarrierAction(job);
-  if (action === "stop") {
-    budget.consume();
-    await suppressPhoneNumber(db, {
-      tenantId,
-      phone: job.from_phone,
-      reason: "OPT_OUT",
-      source: "twilio_webhook",
-    });
-    budget.consume();
-    const cancelled = await db.from("website_sales_meeting_notifications").update({
-      status: "cancelled",
-      claimed_at: null,
-      last_error: "recipient_opted_out",
-      updated_at: job.received_at,
-    }).eq("tenant_id", tenantId)
-      .eq("channel", "sms")
-      .eq("recipient", job.from_phone)
-      .in("status", ["pending", "sending"]);
-    if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
-    await markCarrierAction(db, tenantId, job.id, "suppress_and_cancel_sms", budget);
-  } else if (action === "start") {
+  if (action === "stop") throw new Error("stop_requires_compliance_first_ordering");
+  if (action === "start") {
     budget.consume(2);
     await releasePhoneSuppression(db, {
       tenantId,
@@ -236,6 +244,8 @@ async function runPendingCarrierAction(
       leadId: job.lead_id,
     });
     await markCarrierAction(db, tenantId, job.id, "release_suppression", budget);
+  } else if (action === "help") {
+    await markCarrierAction(db, tenantId, job.id, "reply_help", budget);
   }
   return action;
 }
@@ -307,15 +317,15 @@ export async function POST(req: NextRequest) {
     lead_id: leadId,
     appointment_id: null,
     interaction_id: interactionId,
-    status: keyword === "help" ? "done" : "pending",
+    status: "pending",
     intent,
     intent_confidence: keyword ? "high" : null,
     intent_source: keyword ? "rules" : "none",
     proposed_action: proposedAction,
-    executed_action: keyword === "help" ? "reply_help" : null,
+    executed_action: null,
     attempts: 0,
     received_at: receivedAt,
-    completed_at: keyword === "help" ? receivedAt : null,
+    completed_at: null,
   });
   let job: InboundJob;
   let deliveryWasDuplicate = false;
@@ -342,7 +352,7 @@ export async function POST(req: NextRequest) {
       interaction_id: interactionId,
       intent,
       proposed_action: proposedAction,
-      executed_action: keyword === "help" ? "reply_help" : null,
+      executed_action: null,
       received_at: receivedAt,
     };
   }
@@ -364,9 +374,36 @@ export async function POST(req: NextRequest) {
     return new NextResponse("Persistence failed", { status: 500 });
   }
 
-  let resumedAction: "stop" | "start" | null;
+  let resumedAction = pendingTwilioCarrierAction(job);
+  if (resumedAction === "stop") {
+    try {
+      await runStopComplianceEffects(db, tenantId, job, budget);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "deterministic_sms_action_failed";
+      console.error("[webhooks.twilio.sms-inbound] STOP compliance action failed", detail);
+      budget.consume();
+      await db.from("sms_agent_jobs").update({ last_error: detail.slice(0, 500) })
+        .eq("tenant_id", tenantId).eq("id", job.id);
+      return new NextResponse("Action failed", { status: 503 });
+    }
+  }
+
+  if (job.lead_id) {
+    try {
+      budget.consume();
+      await persistCanonicalLeadTouch(db, { tenantId, leadId: job.lead_id, occurredAt: job.received_at });
+    } catch (error) {
+      console.error("[webhooks.twilio.sms-inbound] canonical touch failed", error);
+      return new NextResponse("Touch persistence failed", { status: 500 });
+    }
+  }
+
   try {
-    resumedAction = await runPendingCarrierAction(db, tenantId, job, budget);
+    if (resumedAction === "stop") {
+      await markCarrierAction(db, tenantId, job.id, "suppress_and_cancel_sms", budget);
+    } else {
+      resumedAction = await runPendingCarrierAction(db, tenantId, job, budget);
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : "deterministic_sms_action_failed";
     console.error("[webhooks.twilio.sms-inbound] deterministic action failed", detail);

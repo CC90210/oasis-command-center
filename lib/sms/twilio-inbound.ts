@@ -5,7 +5,7 @@ import { classifyOptOut } from "@/lib/sms-opt-out";
 type Db = ReturnType<typeof getServiceSupabase>;
 type TenantResolution = { tenantId: string; ownerUserId: string | null };
 const MAX_TWILIO_CREDENTIAL_CANDIDATES = 25;
-export const TWILIO_SYNC_DB_OPERATION_BUDGET = 13;
+export const TWILIO_SYNC_DB_OPERATION_BUDGET = 14;
 
 export type TwilioCarrierJobState = {
   intent?: string | null;
@@ -15,7 +15,7 @@ export type TwilioCarrierJobState = {
 
 export function pendingTwilioCarrierAction(
   job: TwilioCarrierJobState,
-): "stop" | "start" | null {
+): "stop" | "start" | "help" | null {
   if (
     job.intent === "opt_out" &&
     job.proposed_action === "cancel_meeting" &&
@@ -25,6 +25,10 @@ export function pendingTwilioCarrierAction(
     job.proposed_action === "release_suppression" &&
     job.executed_action !== "release_suppression"
   ) return "start";
+  if (
+    job.proposed_action === "reply_help" &&
+    job.executed_action !== "reply_help"
+  ) return "help";
   return null;
 }
 
@@ -32,7 +36,7 @@ export function twilioCarrierReplyForDelivery(
   job: TwilioCarrierJobState,
   delivery: {
     duplicate: boolean;
-    resumedAction: "stop" | "start" | null;
+    resumedAction: "stop" | "start" | "help" | null;
   },
 ): "stop" | "start" | "help" | null {
   if (delivery.duplicate && delivery.resumedAction === null) return null;

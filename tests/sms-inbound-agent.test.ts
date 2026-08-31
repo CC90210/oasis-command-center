@@ -40,7 +40,7 @@ const base = [...params.entries()]
 const signature = createHmac("sha1", "auth-token").update(base, "utf8").digest("base64");
 assert(verifyTwilioSignature(url, params, signature, "auth-token"));
 assert(!verifyTwilioSignature(url, params, "wrong", "auth-token"));
-assert.equal(TWILIO_SYNC_DB_OPERATION_BUDGET, 13, "the synchronous webhook path has a fixed DB-operation ceiling");
+assert.equal(TWILIO_SYNC_DB_OPERATION_BUDGET, 14, "the synchronous webhook path has a fixed DB-operation ceiling");
 
 const decodedStop = twilioMessageResponse(STOP_CONFIRMATION)
   .replace(/^<Response><Message>/, "")
@@ -77,6 +77,11 @@ assert.equal(
 assert.equal(
   pendingTwilioCarrierAction({ intent: "unknown", proposed_action: "release_suppression", executed_action: null }),
   "start",
+);
+assert.equal(
+  pendingTwilioCarrierAction({ intent: "question", proposed_action: "reply_help", executed_action: null }),
+  "help",
+  "HELP stays resumable until the interaction and canonical touch are durable",
 );
 assert.equal(
   pendingTwilioCarrierAction({
@@ -136,6 +141,14 @@ assert.equal(
   ),
   "start",
   "an incomplete START retry resumes and receives the confirmation",
+);
+assert.equal(
+  twilioCarrierReplyForDelivery(
+    { intent: "question", proposed_action: "reply_help", executed_action: null },
+    { duplicate: true, resumedAction: "help" },
+  ),
+  "help",
+  "an incomplete HELP retry resumes and receives the reply",
 );
 
 const failingDb = {
@@ -212,6 +225,7 @@ await raw.close();
 const optOutSource = readFileSync("lib/sms-opt-out.ts", "utf8");
 assert(!optOutSource.includes("child_process"));
 const webhookSource = readFileSync("app/api/webhooks/twilio/sms-inbound/route.ts", "utf8");
+const webhookPostSource = webhookSource.slice(webhookSource.indexOf("export async function POST"));
 assert.match(webhookSource, /sms_agent_jobs/);
 assert.match(webhookSource, /provider_message_id/);
 assert.match(webhookSource, /cancel_meeting/);
@@ -225,6 +239,20 @@ assert.match(webhookSource, /deliveryWasDuplicate/);
 assert.match(webhookSource, /twilioCarrierReplyForDelivery/);
 assert.match(webhookSource, /const carrierReply = twilioCarrierReplyForDelivery/);
 assert.doesNotMatch(webhookSource, /if \(job\.intent === "opt_out"\) return xmlResponse/);
+assert.match(webhookSource, /await persistCanonicalLeadTouch\(db, \{ tenantId, leadId: job\.lead_id, occurredAt: job\.received_at \}\)/);
+assert.match(webhookSource, /runStopComplianceEffects/);
+assert(
+  webhookPostSource.indexOf("await runStopComplianceEffects") <
+    webhookPostSource.indexOf("await persistCanonicalLeadTouch"),
+  "STOP suppression and outbox cancellation must precede canonical touch",
+);
+assert(
+  webhookPostSource.indexOf("await persistCanonicalLeadTouch") <
+    webhookPostSource.indexOf('await markCarrierAction(db, tenantId, job.id, "suppress_and_cancel_sms"'),
+  "STOP remains incomplete until canonical touch succeeds",
+);
+assert.doesNotMatch(webhookSource, /status: keyword === "help" \? "done" : "pending"/);
+assert.doesNotMatch(webhookSource, /executed_action: keyword === "help" \? "reply_help" : null/);
 assert.match(webhookSource, /TWILIO_SYNC_DB_OPERATION_BUDGET/);
 assert.match(webhookSource, /new SyncOperationBudget/);
 assert.doesNotMatch(
@@ -233,7 +261,6 @@ assert.doesNotMatch(
   "a duplicate delivery must reload and resume an incomplete carrier action",
 );
 for (const noncriticalCall of [
-  "persistCanonicalLeadTouch",
   "writeAgentAlert",
   "nudgeConversations",
 ]) {
