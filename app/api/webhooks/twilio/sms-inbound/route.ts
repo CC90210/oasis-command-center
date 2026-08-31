@@ -257,7 +257,13 @@ export async function POST(req: NextRequest) {
   const params = new URLSearchParams(rawBody);
   const to = params.get("To") || "";
   const db = getServiceSupabase();
-  const resolved = await resolveTwilioInboundTenant(db, to, process.env, () => budget.consume());
+  const resolved = await resolveTwilioInboundTenant(
+    db,
+    to,
+    process.env,
+    () => budget.consume(),
+    params.get("MessagingServiceSid") || "",
+  );
   if (!resolved) {
     console.error("[webhooks.twilio.sms-inbound] unmapped destination", {
       to_last4: normalizedTwilioPhone(to).slice(-4),

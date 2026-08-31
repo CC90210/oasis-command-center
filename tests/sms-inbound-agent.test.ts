@@ -156,6 +156,7 @@ const failingDb = {
     return {
       select() { return this; },
       eq() { return this; },
+      in() { return this; },
       order() { return this; },
       limit() { return this; },
       maybeSingle: async () => ({
@@ -178,6 +179,46 @@ const matchedFallback = await resolveTwilioInboundTenant(failingDb as never, "+1
   TWILIO_FROM_NUMBER: "+18005550199",
 });
 assert.deepEqual(matchedFallback, { tenantId: "tenant-fallback", ownerUserId: null });
+
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "sms-inbound-agent-test-key-material";
+const { encryptField } = await import("../lib/field-encryption");
+const messagingServiceCredentialDb = {
+  from(table: string) {
+    return {
+      select() { return this; },
+      eq() { return this; },
+      in() { return this; },
+      order() { return this; },
+      limit() { return this; },
+      maybeSingle: async () => ({ data: null, error: null }),
+      then(resolve: (value: unknown) => unknown) {
+        const result = table === "tenant_integration_credentials"
+          ? {
+              data: [{
+                tenant_id: "tenant-messaging-service",
+                field_key: "messaging_service_sid",
+                encrypted_value: encryptField("MG11111111111111111111111111111111"),
+              }],
+              error: null,
+            }
+          : { data: null, error: null };
+        return Promise.resolve(result).then(resolve);
+      },
+    };
+  },
+};
+const messagingServiceTenant = await resolveTwilioInboundTenant(
+  messagingServiceCredentialDb as never,
+  "+18005550199",
+  {},
+  undefined,
+  "MG11111111111111111111111111111111",
+);
+assert.deepEqual(
+  messagingServiceTenant,
+  { tenantId: "tenant-messaging-service", ownerUserId: null },
+  "a Messaging Service-only tenant must still receive compliance-critical inbound replies",
+);
 
 const raw = createClient({ url: ":memory:" });
 await raw.executeMultiple(`
@@ -241,6 +282,7 @@ assert.match(webhookSource, /const carrierReply = twilioCarrierReplyForDelivery/
 assert.doesNotMatch(webhookSource, /if \(job\.intent === "opt_out"\) return xmlResponse/);
 assert.match(webhookSource, /await persistCanonicalLeadTouch\(db, \{ tenantId, leadId: job\.lead_id, occurredAt: job\.received_at \}\)/);
 assert.match(webhookSource, /runStopComplianceEffects/);
+assert.match(webhookSource, /params\.get\("MessagingServiceSid"\)/);
 assert(
   webhookPostSource.indexOf("await runStopComplianceEffects") <
     webhookPostSource.indexOf("await persistCanonicalLeadTouch"),
@@ -275,9 +317,12 @@ assert(
 );
 const resolverSource = readFileSync("lib/sms/twilio-inbound.ts", "utf8");
 assert.match(resolverSource, /MAX_TWILIO_CREDENTIAL_CANDIDATES/);
+assert.match(resolverSource, /const credentialFields = targetMessagingService/);
+assert.match(resolverSource, /\.in\("field_key", credentialFields\)/);
 assert.match(resolverSource, /\.order\("tenant_id"/);
-assert.match(resolverSource, /\.limit\(MAX_TWILIO_CREDENTIAL_CANDIDATES \+ 1\)/);
+assert.match(resolverSource, /\.limit\(MAX_TWILIO_CREDENTIAL_CANDIDATES \* credentialFields\.length \+ 1\)/);
 assert.match(resolverSource, /TWILIO_FROM_NUMBER/);
+assert.match(resolverSource, /TWILIO_MESSAGING_SERVICE_SID/);
 
 console.log("sms-inbound-agent: OK");
 }

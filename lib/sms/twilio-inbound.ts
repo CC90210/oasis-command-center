@@ -83,6 +83,7 @@ export async function resolveTwilioInboundTenant(
   toNumber: string,
   env: Record<string, string | undefined> = process.env,
   onDbOperation?: () => void,
+  messagingServiceSid = "",
 ): Promise<TenantResolution | null> {
   if (toNumber) {
     onDbOperation?.();
@@ -107,16 +108,32 @@ export async function resolveTwilioInboundTenant(
     }
 
     onDbOperation?.();
+    const target = normalizedTwilioPhone(toNumber);
+    const targetMessagingService = messagingServiceSid.trim().toUpperCase();
+    const credentialFields = targetMessagingService
+      ? ["from_number", "messaging_service_sid"]
+      : ["from_number"];
     const credentials = await db.from("tenant_integration_credentials")
-      .select("tenant_id,encrypted_value")
+      .select("tenant_id,field_key,encrypted_value")
       .eq("service", "twilio")
-      .eq("field_key", "from_number")
+      .in("field_key", credentialFields)
+      .order("field_key", { ascending: true })
       .order("tenant_id", { ascending: true })
-      .limit(MAX_TWILIO_CREDENTIAL_CANDIDATES + 1);
+      .limit(MAX_TWILIO_CREDENTIAL_CANDIDATES * credentialFields.length + 1);
     if (!credentials.error) {
-      const target = normalizedTwilioPhone(toNumber);
-      const rows = (credentials.data || []) as Array<{ tenant_id: string; encrypted_value: string }>;
-      if (rows.length > MAX_TWILIO_CREDENTIAL_CANDIDATES) {
+      const rows = (credentials.data || []) as Array<{
+        tenant_id: string;
+        field_key: "from_number" | "messaging_service_sid";
+        encrypted_value: string;
+      }>;
+      const fromNumberCandidates = rows.filter((row) => row.field_key === "from_number").length;
+      const messagingServiceCandidates = rows.filter(
+        (row) => row.field_key === "messaging_service_sid",
+      ).length;
+      if (
+        fromNumberCandidates > MAX_TWILIO_CREDENTIAL_CANDIDATES ||
+        messagingServiceCandidates > MAX_TWILIO_CREDENTIAL_CANDIDATES
+      ) {
         console.warn("[webhooks.twilio.sms-inbound] credential fallback capped; channel account mapping required");
         return null;
       }
@@ -125,7 +142,16 @@ export async function resolveTwilioInboundTenant(
         const matchedTenants = new Set<string>();
         for (const row of rows) {
           try {
-            if (normalizedTwilioPhone(decryptField(row.encrypted_value)) === target) {
+            const decrypted = decryptField(row.encrypted_value);
+            const matchesFromNumber =
+              row.field_key === "from_number" &&
+              Boolean(target) &&
+              normalizedTwilioPhone(decrypted) === target;
+            const matchesMessagingService =
+              row.field_key === "messaging_service_sid" &&
+              Boolean(targetMessagingService) &&
+              decrypted.trim().toUpperCase() === targetMessagingService;
+            if (matchesFromNumber || matchesMessagingService) {
               matchedTenants.add(row.tenant_id);
             }
           } catch {
@@ -151,8 +177,13 @@ export async function resolveTwilioInboundTenant(
 
   const fallback = (env.TWILIO_TENANT_ID || "").trim();
   const fallbackNumber = normalizedTwilioPhone(env.TWILIO_FROM_NUMBER || "");
+  const fallbackMessagingService = (env.TWILIO_MESSAGING_SERVICE_SID || "").trim().toUpperCase();
   const target = normalizedTwilioPhone(toNumber);
-  return fallback && target && fallbackNumber === target
+  const targetMessagingService = messagingServiceSid.trim().toUpperCase();
+  const fallbackMatches =
+    (Boolean(target) && fallbackNumber === target) ||
+    (Boolean(targetMessagingService) && fallbackMessagingService === targetMessagingService);
+  return fallback && fallbackMatches
     ? { tenantId: fallback, ownerUserId: null }
     : null;
 }
