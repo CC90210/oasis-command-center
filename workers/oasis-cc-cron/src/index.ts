@@ -13,8 +13,8 @@
 
 import { cronMatches } from "./cron-match";
 
-// Verbatim from vercel.json (2026-08-29). Do not "dedupe" or reformat —
-// diffability against vercel.json is the review mechanism.
+// Verbatim from config/cron-registry.json. Do not "dedupe" or reformat — the
+// coverage test compares this live table with the inert registry exactly.
 export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
   { path: "/api/cron/collect-outreach-intel?write=1", schedule: "0 * * * *" },
