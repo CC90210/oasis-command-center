@@ -44,10 +44,16 @@ import {
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
+  grantFounderMeetingSmsConsent,
   prepareVerifiedFounderMeetingCancellation,
   rescheduleVerifiedFounderMeeting,
   type VerifiedFounderMeeting,
 } from "@/lib/website-sales-founder-meeting";
+import { readConsentArtifact } from "@/lib/sms/consent";
+import {
+  SMS_CONSENT_DISCLOSURE,
+  SMS_CONSENT_DISCLOSURE_VERSION,
+} from "@/lib/sms/auto-responses";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -78,7 +84,31 @@ function lifecycleInteractionType(action: string): string {
   if (action === "create_payment_link") return "payment_link_created";
   if (action === "deal_outcome") return "deal_outcome";
   if (action === "record_payment") return "deal_closed";
+  if (action === "founder_meeting_sms_consent") return "sms_consent_captured";
   return "stage_changed";
+}
+
+function verifiedFounderSmsConsentArtifact(value: unknown, nowMs: number): Record<string, unknown> {
+  const verdict = readConsentArtifact(value, nowMs);
+  if (!verdict.ok) throw new Error("invalid_sms_consent_artifact");
+  const artifact = verdict.artifact;
+  if (
+    artifact.disclosureText !== SMS_CONSENT_DISCLOSURE ||
+    artifact.disclosureVersion !== SMS_CONSENT_DISCLOSURE_VERSION ||
+    artifact.sellerNamed !== "OASIS AI Solutions" ||
+    artifact.method !== "verbal" ||
+    !artifact.sourceUrl
+  ) {
+    throw new Error("invalid_sms_consent_artifact");
+  }
+  return {
+    disclosure_text: artifact.disclosureText,
+    disclosure_version: artifact.disclosureVersion,
+    seller_named: artifact.sellerNamed,
+    captured_at: artifact.capturedAtIso,
+    method: artifact.method,
+    source_url: artifact.sourceUrl,
+  };
 }
 
 /**
@@ -181,7 +211,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (builderMayRunDelivery && !builderOnOwnSalesLead && body.action !== "advance") {
     return NextResponse.json({ok:false,error:"builder_delivery_action_only"},{status:403});
   }
-  const trackedAction = ["advance","disposition","qualify","book_founder","complete_audit","set_stage","proposal","create_payment_link","deal_outcome","record_payment"].includes(body.action);
+  const trackedAction = ["advance","disposition","qualify","book_founder","founder_meeting_sms_consent","complete_audit","set_stage","proposal","create_payment_link","deal_outcome","record_payment"].includes(body.action);
   const requestId = typeof body.requestId === "string" && UUID.test(body.requestId) ? body.requestId : null;
   if (trackedAction && !requestId) return NextResponse.json({ok:false,error:"request_id_required"},{status:400});
   if (requestId) {
@@ -351,6 +381,29 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           }
         }
       }
+      if (body.action === "founder_meeting_sms_consent") {
+        const appointmentId = typeof current.calendar_appointment_id === "string"
+          ? current.calendar_appointment_id.trim()
+          : "";
+        if (!UUID.test(appointmentId)) {
+          return NextResponse.json({ok:false,error:"verified_meeting_required"},{status:409});
+        }
+        let artifact: Record<string, unknown>;
+        try {
+          artifact = verifiedFounderSmsConsentArtifact(body.smsConsentArtifact, Date.now());
+          await grantFounderMeetingSmsConsent({
+            tenantId:session.tenantId,
+            leadId,
+            appointmentId,
+            capturedAt:new Date(String(artifact.captured_at)),
+          });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : "meeting_sms_consent_update_failed";
+          const code = detail.split(":", 1)[0];
+          return NextResponse.json({ok:false,error:code,detail,stageUpdated:true},{status:code === "invalid_sms_consent_artifact" ? 400 : 503});
+        }
+        return NextResponse.json({ok:true,idempotent:true});
+      }
       const checkout = body.action === "create_payment_link" ? storedCheckout(current) : null;
       return NextResponse.json({
         ok:true,
@@ -375,9 +428,33 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   }
   let patch: Record<string,unknown> = {};
   let verifiedMeeting: VerifiedFounderMeeting | null = null;
+  let smsConsentAfterTransition: { appointmentId: string; capturedAt: Date } | null = null;
   let cancellationAfterTransition: { appointmentId: string; requestId: string } | null = null;
   let cancellationDisposition: "cancelled" | "preserved" | "pending" | null = null;
-  if (body.action === "disposition") {
+  if (body.action === "founder_meeting_sms_consent") {
+    const appointmentId = typeof current.calendar_appointment_id === "string"
+      ? current.calendar_appointment_id.trim()
+      : "";
+    if (!UUID.test(appointmentId)) {
+      return NextResponse.json({ok:false,error:"verified_meeting_required"},{status:409});
+    }
+    let artifact: Record<string, unknown>;
+    try {
+      artifact = verifiedFounderSmsConsentArtifact(body.smsConsentArtifact, Date.now());
+    } catch (error) {
+      const code = error instanceof Error ? error.message : "invalid_sms_consent_artifact";
+      return NextResponse.json({ok:false,error:code},{status:400});
+    }
+    patch = {
+      stage: currentStage,
+      founder_meeting_sms_consent: true,
+      founder_meeting_sms_consent_artifact: artifact,
+    };
+    smsConsentAfterTransition = {
+      appointmentId,
+      capturedAt: new Date(String(artifact.captured_at)),
+    };
+  } else if (body.action === "disposition") {
     const disposition = String(body.disposition || "");
     const allowed = ["attempted", "voicemail", "connected", "lost"];
     if (!allowed.includes(disposition)) return NextResponse.json({ok:false,error:"invalid_disposition"},{status:400});
@@ -434,6 +511,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const contact = body.contact && typeof body.contact === "object" && !Array.isArray(body.contact)
       ? body.contact as Record<string,unknown>
       : {};
+    let smsConsentArtifact: Record<string, unknown> | null = null;
+    if (body.smsConsent === true) {
+      try {
+        smsConsentArtifact = verifiedFounderSmsConsentArtifact(body.smsConsentArtifact, Date.now());
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "invalid_sms_consent_artifact";
+        return NextResponse.json({ok:false,error:code},{status:400});
+      }
+    }
     // Resolve the opener BEFORE the provider call so their invite copy rides
     // on the original Calendar event (and every reschedule of it).
     const existingRep = resolveWebsiteSalesHandoffRep(
@@ -465,7 +551,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     } catch (error) {
       const detail = error instanceof Error ? error.message : "calendar_create_failed";
       const code = detail.split(":",1)[0];
-      const status = ["client_email_required","invalid_client_phone","invalid_client_website","client_agenda_required","handoff_note_required","sms_consent_requires_phone","meeting_must_be_in_future","booking_request_mismatch"].includes(code)
+      const status = ["client_email_required","client_phone_required","invalid_client_phone","invalid_client_website","client_agenda_required","handoff_note_required","sms_consent_requires_phone","meeting_must_be_in_future","booking_request_mismatch"].includes(code)
         ? 400
         : ["google_calendar_not_connected","calendar_scope_required","calendar_organizer_mismatch"].includes(code)
           ? 409
@@ -514,6 +600,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       phone:verifiedMeeting.contact.phone,
       website:verifiedMeeting.contact.website,
       founder_meeting_sms_consent:body.smsConsent === true,
+      founder_meeting_sms_consent_artifact:smsConsentArtifact,
       founder_contact_confirmed_at:occurredAt,
       founder_time_confirmed_at:occurredAt,
       founder_handoff_confirmed_at:occurredAt,
@@ -1364,6 +1451,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         ok:false,
         error:"meeting_activation_failed",
         detail:error instanceof Error ? error.message : "meeting_activation_failed",
+        correlationId:requestId,
+        stageUpdated:true,
+      },{status:503});
+    }
+  }
+  if (smsConsentAfterTransition) {
+    try {
+      await grantFounderMeetingSmsConsent({
+        tenantId:session.tenantId,
+        leadId,
+        appointmentId:smsConsentAfterTransition.appointmentId,
+        capturedAt:smsConsentAfterTransition.capturedAt,
+      });
+    } catch (error) {
+      return NextResponse.json({
+        ok:false,
+        error:"meeting_sms_consent_update_failed",
+        detail:error instanceof Error ? error.message : "meeting_sms_consent_update_failed",
         correlationId:requestId,
         stageUpdated:true,
       },{status:503});

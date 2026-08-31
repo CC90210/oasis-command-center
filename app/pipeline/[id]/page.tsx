@@ -217,6 +217,7 @@ export default async function PipelineLeadDetailPage({
           canManage={canManage}
           canRunDeal={canRunDeal}
           canRunDelivery={canRunDelivery}
+          initialFounderMeetingSmsConsent={activeRecord.data.founder_meeting_sms_consent === true}
           initialOffer={{
             packageId: nonEmptyString(activeRecord.data.recommended_tier),
             setupAmount: numberValue(activeRecord.data.quoted_setup_amount),

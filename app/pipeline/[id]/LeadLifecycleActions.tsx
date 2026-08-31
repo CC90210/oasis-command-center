@@ -18,6 +18,10 @@ import {
   mayUseDirectAdvance,
   nextOasisLifecycleStage,
 } from "@/lib/website-sales-workflow";
+import {
+  SMS_CONSENT_DISCLOSURE,
+  SMS_CONSENT_DISCLOSURE_VERSION,
+} from "@/lib/sms/auto-responses";
 
 type Founder = {
   auth_user_id: string | null;
@@ -64,6 +68,7 @@ type Props = {
   canManage: boolean;
   canRunDeal: boolean;
   canRunDelivery: boolean;
+  initialFounderMeetingSmsConsent?: boolean;
   initialOffer?: InitialOffer;
   initialBuildBrief?: Partial<BuildBriefDraft> | null;
 };
@@ -93,6 +98,17 @@ const FOUNDER_TIME_OPTIONS = Array.from({ length: 96 }, (_, index) => {
   return { value, label: `${labelHours}:${String(minutes).padStart(2, "0")} ${suffix}` };
 });
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function founderSmsConsentArtifact() {
+  return {
+    disclosure_text: SMS_CONSENT_DISCLOSURE,
+    disclosure_version: SMS_CONSENT_DISCLOSURE_VERSION,
+    seller_named: "OASIS AI Solutions",
+    captured_at: new Date().toISOString(),
+    method: "verbal",
+    source_url: window.location.href,
+  };
+}
 
 function defaultDepositAmount(setupAmount: number): number {
   return Math.ceil(Math.max(0, setupAmount) * 100 / 2) / 100;
@@ -272,6 +288,7 @@ export function LeadLifecycleActions({
   canManage,
   canRunDeal,
   canRunDelivery,
+  initialFounderMeetingSmsConsent = false,
   initialOffer,
   initialBuildBrief,
 }: Props) {
@@ -305,6 +322,9 @@ export function LeadLifecycleActions({
   const [clientAgreedToTime, setClientAgreedToTime] = useState(false);
   const [handoffComplete, setHandoffComplete] = useState(false);
   const [smsConsent, setSmsConsent] = useState(false);
+  const [founderMeetingSmsConsent, setFounderMeetingSmsConsent] = useState(
+    initialFounderMeetingSmsConsent,
+  );
   const initialPackageId =
     initialOffer?.packageId && initialOffer.packageId in WEBSITE_PACKAGES
       ? (initialOffer.packageId as WebsitePackageId)
@@ -412,6 +432,8 @@ export function LeadLifecycleActions({
   const founderContactValid =
     Boolean(bookingContact.name.trim() || bookingContact.company.trim()) &&
     EMAIL_PATTERN.test(bookingContact.email.trim());
+  const founderPhoneDigits = bookingContact.phone.replace(/\D/g, "");
+  const founderPhoneValid = founderPhoneDigits.length >= 10 && founderPhoneDigits.length <= 15;
   const founderQualification = {
     authorityConfirmed: currentStage === "qualified" ? true : checks[0],
     websiteProblemConfirmed: currentStage === "qualified" ? true : checks[1],
@@ -426,6 +448,7 @@ export function LeadLifecycleActions({
     Boolean(founderUserId && founderMeetingAt && promisedDemo.trim() && transitionNote.trim()) &&
     founderMeetingIsFuture &&
     founderContactValid &&
+    founderPhoneValid &&
     Object.values(founderQualification).every(Boolean) &&
     effectiveContactConfirmed &&
     effectiveClientAgreedToTime &&
@@ -442,6 +465,7 @@ export function LeadLifecycleActions({
     if (!promisedDemo.trim()) return "Enter client-facing meeting agenda";
     if (!transitionNote.trim()) return "Add internal founder handoff note";
     if (!founderContactValid) return "Enter a valid client email";
+    if (!founderPhoneValid) return "Enter a valid client phone number";
     if (!Object.values(founderQualification).every(Boolean)) return "Complete qualification gates above";
     if (founderCanBook === false)
       return "Selected host must reconnect Google, and no shared workspace calendar is configured";
@@ -584,13 +608,26 @@ export function LeadLifecycleActions({
           handoffComplete: effectiveHandoffComplete,
         },
         smsConsent: Boolean(bookingContact.phone.trim() && smsConsent),
+        smsConsentArtifact: smsConsent ? founderSmsConsentArtifact() : null,
       },
       schedulingAlsoQualifies
         ? "Meeting booked, Google invite sent, and qualification handed to the founder."
         : "Meeting booked and the verified Google invite was sent to the client.",
     );
     if (!result) return;
+    if (smsConsent) setFounderMeetingSmsConsent(true);
     setFounderBookingRequestId(crypto.randomUUID());
+  }
+
+  async function captureFounderMeetingSmsConsent() {
+    const result = await patch(
+      {
+        action: "founder_meeting_sms_consent",
+        smsConsentArtifact: founderSmsConsentArtifact(),
+      },
+      "SMS meeting-reminder consent recorded and eligible reminder tiers repaired.",
+    );
+    if (result) setFounderMeetingSmsConsent(true);
   }
 
   async function createPaymentLink() {
@@ -1092,6 +1129,7 @@ export function LeadLifecycleActions({
                   label="Phone"
                   value={bookingContact.phone}
                   type="tel"
+                  required
                   onChange={(value) => updateBookingContact("phone", value)}
                 />
                 <BookingContactField
@@ -1166,10 +1204,9 @@ export function LeadLifecycleActions({
                   renewFounderBookingRequest();
                 }}
                 label={
-                  <>
-                    Client consented to SMS meeting reminders at {bookingContact.phone.trim()} (optional;
-                    used only when SMS delivery is enabled).
-                  </>
+                  <span>
+                    Client verbally agreed to this optional disclosure at {bookingContact.phone.trim()}: {SMS_CONSENT_DISCLOSURE}
+                  </span>
                 }
               />
             ) : null}
@@ -1194,6 +1231,25 @@ export function LeadLifecycleActions({
             </div>
           </fieldset>
         )}
+
+        {currentStage === "founder_meeting_booked" && leadPhone && !founderMeetingSmsConsent ? (
+          <div className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/20 p-4">
+            <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
+              Optional SMS reminder consent
+            </div>
+            <p className="text-xs leading-5 text-fg-muted">
+              Read this disclosure verbatim to the client before recording consent: {SMS_CONSENT_DISCLOSURE}
+            </p>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => void captureFounderMeetingSmsConsent()}
+              className="btn-secondary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
+            >
+              Record verbal SMS consent for {leadPhone}
+            </button>
+          </div>
+        ) : null}
 
         {canRunDeal && currentStage === "founder_meeting_booked" && (
           <LeadBuildBriefForm

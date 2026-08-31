@@ -608,6 +608,69 @@ export async function backfillFounderMeetingNotifications(input: {
   return aggregate;
 }
 
+export async function grantFounderMeetingSmsConsent(input: {
+  tenantId: string;
+  leadId: string;
+  appointmentId: string;
+  capturedAt?: Date;
+}, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
+  const deps = dependencies(dependencyOverrides);
+  const capturedAtMs = input.capturedAt?.getTime() ?? deps.now();
+  if (!Number.isFinite(capturedAtMs) || capturedAtMs > deps.now() + 86_400_000) {
+    throw new Error("invalid_sms_consent_timestamp");
+  }
+  let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
+  appointment = await hydrateBackfillPhone(deps.db, appointment, new Date(deps.now()).toISOString());
+  if (!appointment.client_phone_snapshot) throw new Error("client_phone_required");
+  if (
+    appointment.status !== "scheduled" ||
+    appointment.workflow_status !== "active" ||
+    appointment.calendar_status !== "verified" ||
+    appointment.pending_request_id
+  ) {
+    throw new Error("verified_meeting_required");
+  }
+
+  if (!appointment.sms_consent) {
+    const updated = await deps.db.from("call_appointments")
+      .update({
+        sms_consent: 1,
+        sms_consent_at: new Date(capturedAtMs).toISOString(),
+        updated_at: new Date(deps.now()).toISOString(),
+      })
+      .eq("tenant_id", input.tenantId)
+      .eq("lead_id", input.leadId)
+      .eq("id", input.appointmentId)
+      .eq("revision", Number(appointment.revision))
+      .eq("status", "scheduled")
+      .eq("workflow_status", "active")
+      .eq("calendar_status", "verified")
+      .is("pending_request_id", null)
+      .select("*")
+      .maybeSingle();
+    if (updated.error || !updated.data) {
+      throw new Error(`meeting_sms_consent_update_failed:${updated.error?.message || "row_changed"}`);
+    }
+    appointment = updated.data as AppointmentRow;
+  }
+
+  if (!appointment.assigned_to) throw new Error("meeting_host_missing");
+  const meeting = meetingFromAppointment(
+    appointment,
+    appointment.booking_request_id || `consent:${appointment.id}:r${appointment.revision}`,
+  );
+  await ensureNotificationRows(
+    deps.db,
+    meeting,
+    input.tenantId,
+    input.leadId,
+    appointment.assigned_to,
+    appointment.client_agenda || "Review your current website and next steps.",
+    deps.now(),
+  );
+  return meeting;
+}
+
 type NullableFilterQuery<T> = {
   is(column: string, value: null): T;
   eq(column: string, value: string): T;
@@ -792,6 +855,7 @@ export async function createVerifiedFounderMeeting(input: {
       leaseToken = takeover.leaseToken;
     }
   } else {
+    if (!contact.phone) throw new Error("client_phone_required");
     const appointmentId = randomUUID();
     leaseToken = randomUUID();
     const inserted = await db.from("call_appointments").insert({
