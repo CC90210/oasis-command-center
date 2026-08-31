@@ -1,4 +1,4 @@
-# Drives the Vercel cron routes from GitHub Actions.
+# Manual rollback driver for the Cloudflare cron routes.
 #
 # WHY THIS EXISTS. Vercel's own scheduler stopped executing for this project on
 # 2026-08-06. Everything that could explain it was checked and ruled out: the
@@ -9,36 +9,29 @@
 # billing block. The engine itself is fine — driven by hand it claimed and
 # processed 12 rows in 3 seconds.
 #
-# So the fault is the scheduler alone, and this replaces it. CRON_ALLOW_LOCAL=1
-# is set on production, which lets an external caller holding the bearer through
-# the same auth the platform uses.
+# So the fault was the scheduler alone, and this replaced it until the
+# oasis-cc-cron Worker passed its live cutover gate on 2026-08-31.
 #
 # The cost of the outage: the dispatcher had not claimed a row in four days and
 # 230 steps sat overdue while everything reported healthy.
 #
-# CAVEAT: GitHub's scheduler is best-effort and can lag under load, so treat
-# these as "at least every N minutes". That is the same guarantee Vercel gave,
-# and considerably better than the zero we have now.
+# Keep workflow_dispatch as the manual rollback path. Do not restore scheduled
+# triggers while the Worker is forwarding or every due job fires twice.
 
 # ── CUTOVER PAIRING (2026-08-30, Cloudflare migration) ────────────────────────
-# THIS FILE IS THE ACTIVE FIRER for the 28 cron routes (verified: scheduled runs
-# succeeding as of 2026-08-30 02:35Z). vercel.json's `crons` block is INERT —
-# Vercel's scheduler died 2026-08-06, which is why this file exists.
+# THIS FILE IS MANUAL-ONLY. vercel.json's `crons` block is INERT and the
+# oasis-cc-cron Worker is the active firer for the registered routes.
 #
-# The replacement is the `oasis-cc-cron` Cloudflare Worker (workers/oasis-cc-cron),
-# currently deployed in DRY mode. These two MUST flip together, in one PR:
-#     enable  : set the Worker secret CRON_FORWARD=true   (on|true|1|yes)
-#     disable : delete the `schedule:` triggers below     (KEEP workflow_dispatch
-#               and this whole file — it is the rollback path; Vercel is not)
-# Enabling the Worker without disabling these schedules = every job fires TWICE.
+# The replacement is the `oasis-cc-cron` Cloudflare Worker
+# (workers/oasis-cc-cron), live with CRON_FORWARD=on. Re-arming schedules here
+# without first turning CRON_FORWARD off makes every job fire twice.
 # Full choreography + rollback: Business-Empire-Agent
 # brain/WAVE3_OASIS_CC_RUNBOOK.md (Phase C).
 # ──────────────────────────────────────────────────────────────────────────────
 name: cron-driver
 
-# One workflow schedule per DISTINCT cron expression in vercel.json, and the
-# routes are selected by which schedule fired (github.event.schedule) rather
-# than by reading the wall clock.
+# The historical schedule-to-route map remains below for rollback review. A
+# manual dispatch drives only the fast paths plus health-check.
 #
 # The wall-clock version of this was wrong. GitHub's scheduler is best-effort
 # and routinely starts a run late; a 13:00 tick that lands at 13:06 failed a
@@ -47,25 +40,9 @@ name: cron-driver
 # class of quiet nothing this whole file exists to fix. (Codex review,
 # 2026-08-11.)
 #
-# Keyed on the schedule, lateness is harmless: whenever the run lands, it knows
-# which tick it is. tests/cron-driver-coverage.test.ts asserts every expression
-# in vercel.json appears here, so the two lists cannot drift.
+# tests/cron-driver-coverage.test.ts pins the Worker table to the inert registry
+# and asserts this workflow stays manual-only.
 on:
-  schedule:
-    - cron: "*/5 * * * *"    # dispatch-drips, dispatch-scheduled-sends, dispatch-scheduled-calls, dispatch-bulk-email
-    - cron: "*/10 * * * *"   # operator-email-agent, tps-enroll, scan-lender-replies
-    - cron: "*/15 * * * *"   # enroll-drips, enroll-accelerated, reconcile-sms, health-check
-    - cron: "*/30 * * * *"   # scan-bounces, scan-funmate-replies, sync-tt-inbox
-    - cron: "0 * * * *"      # collect-outreach-intel
-    - cron: "15 * * * *"     # collect-cc-metrics
-    - cron: "17 * * * *"     # reconcile-drip-telemetry
-    - cron: "0 */6 * * *"    # tps-backlog-watch
-    - cron: "0 3 * * *"      # materialize-plans
-    - cron: "0 6,18 * * *"   # sync-sms-numbers
-    - cron: "0 13 * * *"     # sweep-stale-sent-app
-    - cron: "10 13 * * *"    # kixie-compliance-scan
-    - cron: "15 13 * * *"    # renewal-thresholds
-    - cron: "40 13 * * 1"    # kixie-compliance-scan?mode=weekly
   workflow_dispatch:
 
 concurrency:
@@ -98,13 +75,10 @@ jobs:
     steps:
       - name: Drive the due cron routes
         env:
-          # 2026-08-31: repointed from the Vercel deployment to the apex, which
-          # now serves the oasis-command-center Cloudflare Worker. This is the
-          # second half of the CRON_SECRET rotation: the GitHub secret was
-          # updated to the Worker's value, at which point every route 401'd
-          # against Vercel (which still holds the old value). Verified 200 via
-          # the Cloudflare edge with the rotated bearer before this change.
-          BASE: https://oasisai.work
+          # The apex still serves Vercel during the migration and holds an old
+          # sensitive CRON_SECRET. The Cloudflare app carries the same bearer
+          # as this rollback workflow; use its direct URL until DNS cutover.
+          BASE: https://oasis-command-center.oasisaisolutions.workers.dev
           SECRET: ${{ secrets.OASIS_CRON_SECRET }}
         run: |
           set -uo pipefail

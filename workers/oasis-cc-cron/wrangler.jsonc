@@ -3,9 +3,11 @@
   "name": "oasis-cc-cron",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["global_fetch_strictly_public"],
   "triggers": {
     // One minute-tick; src/index.ts evaluates the 28-entry table per tick.
-    // Verbatim schedules live in CRON_TABLE, diffable against vercel.json.
+    // Canonical schedules live in config/cron-registry.json and are pinned to
+    // CRON_TABLE by tests/cron-driver-coverage.test.ts.
     "crons": ["* * * * *"]
   },
   "observability": {
