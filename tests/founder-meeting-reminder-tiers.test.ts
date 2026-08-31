@@ -57,9 +57,11 @@ assert.deepEqual(
   [10],
   "a 20-minute lead time never invents T-60/T-30 reminders",
 );
-assert(reminderTierStillValid(60, 30));
+assert(!reminderTierStillValid(60, 30), "T-60 is superseded exactly when T-30 becomes due");
+assert(reminderTierStillValid(60, 31));
 assert(!reminderTierStillValid(60, 29));
-assert(reminderTierStillValid(30, 10));
+assert(!reminderTierStillValid(30, 10), "T-30 is superseded exactly when T-10 becomes due");
+assert(reminderTierStillValid(30, 11));
 assert(!reminderTierStillValid(30, 9));
 assert(reminderTierStillValid(10, 1));
 assert(!reminderTierStillValid(10, 0));

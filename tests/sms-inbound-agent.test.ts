@@ -15,8 +15,10 @@ import {
   suppressPhoneNumber,
 } from "../lib/sms-opt-out";
 import {
+  pendingTwilioCarrierAction,
   resolveTwilioInboundTenant,
   shouldHonorTwilioOptOut,
+  TWILIO_SYNC_DB_OPERATION_BUDGET,
   twilioMessageResponse,
   verifyTwilioSignature,
 } from "../lib/sms/twilio-inbound";
@@ -37,6 +39,7 @@ const base = [...params.entries()]
 const signature = createHmac("sha1", "auth-token").update(base, "utf8").digest("base64");
 assert(verifyTwilioSignature(url, params, signature, "auth-token"));
 assert(!verifyTwilioSignature(url, params, "wrong", "auth-token"));
+assert.equal(TWILIO_SYNC_DB_OPERATION_BUDGET, 13, "the synchronous webhook path has a fixed DB-operation ceiling");
 
 const decodedStop = twilioMessageResponse(STOP_CONFIRMATION)
   .replace(/^<Response><Message>/, "")
@@ -48,12 +51,41 @@ assert.equal(decodedStop, STOP_CONFIRMATION, "TwiML carries the carrier-approved
 assert.equal(twilioMessageResponse(), "<Response/>");
 assert(shouldHonorTwilioOptOut("please stop texting me"));
 assert(!shouldHonorTwilioOptOut("stop by at 3"), "ordinary scheduling language must not suppress a lead");
+assert(
+  !shouldHonorTwilioOptOut("Cancel my meeting and text me alternatives"),
+  "meeting cancellation plus a request for a text reply is not a global opt-out",
+);
+assert(
+  !shouldHonorTwilioOptOut("Please cancel the meeting; message me new times"),
+  "meeting cancellation plus a request for new times is not a global opt-out",
+);
+assert(shouldHonorTwilioOptOut("Cancel my meeting and STOP"), "an explicit STOP still wins the scheduling carve-out");
+assert(shouldHonorTwilioOptOut("Cancel my appointment and don't text me"));
+assert.equal(
+  pendingTwilioCarrierAction({ intent: "opt_out", proposed_action: "cancel_meeting", executed_action: null }),
+  "stop",
+);
+assert.equal(
+  pendingTwilioCarrierAction({ intent: "unknown", proposed_action: "release_suppression", executed_action: null }),
+  "start",
+);
+assert.equal(
+  pendingTwilioCarrierAction({
+    intent: "unknown",
+    proposed_action: "release_suppression",
+    executed_action: "release_suppression",
+  }),
+  null,
+  "a completed carrier action is not repeated on a normal retry",
+);
 
 const failingDb = {
   from(table: string) {
     return {
       select() { return this; },
       eq() { return this; },
+      order() { return this; },
+      limit() { return this; },
       maybeSingle: async () => ({
         data: null,
         error: table === "channel_accounts" ? { message: "no such table" } : { message: "credential read failed" },
@@ -65,10 +97,15 @@ const failingDb = {
   },
 };
 async function main() {
-const fallback = await resolveTwilioInboundTenant(failingDb as never, "+18005550199", {
+const unmatchedFallback = await resolveTwilioInboundTenant(failingDb as never, "+18005550199", {
   TWILIO_TENANT_ID: "tenant-fallback",
 });
-assert.deepEqual(fallback, { tenantId: "tenant-fallback", ownerUserId: null });
+assert.equal(unmatchedFallback, null, "an unmatched To number must never inherit the default tenant");
+const matchedFallback = await resolveTwilioInboundTenant(failingDb as never, "+1 (800) 555-0199", {
+  TWILIO_TENANT_ID: "tenant-fallback",
+  TWILIO_FROM_NUMBER: "+18005550199",
+});
+assert.deepEqual(matchedFallback, { tenantId: "tenant-fallback", ownerUserId: null });
 
 const raw = createClient({ url: ":memory:" });
 await raw.executeMultiple(`
@@ -123,6 +160,34 @@ assert.match(webhookSource, /website_sales_meeting_notifications/);
 assert.match(webhookSource, /opt_out_detected/);
 assert(!webhookSource.includes("queueInfer"));
 assert(!webhookSource.includes("sendSmsDirectTwilio"));
+assert.match(webhookSource, /loadExistingJob/);
+assert.match(webhookSource, /pendingTwilioCarrierAction/);
+assert.match(webhookSource, /TWILIO_SYNC_DB_OPERATION_BUDGET/);
+assert.match(webhookSource, /new SyncOperationBudget/);
+assert.doesNotMatch(
+  webhookSource,
+  /isUniqueViolationError\(insertedJob\.error\)\) return xmlResponse\(\)/,
+  "a duplicate delivery must reload and resume an incomplete carrier action",
+);
+for (const noncriticalCall of [
+  "persistCanonicalLeadTouch",
+  "writeAgentAlert",
+  "nudgeConversations",
+]) {
+  assert(!webhookSource.includes(noncriticalCall), `${noncriticalCall} must be deferred to the durable worker`);
+}
+assert.match(webhookSource, /ensureInboundInteraction/);
+assert.match(webhookSource, /interaction_id,intent,proposed_action,executed_action,received_at/);
+assert.match(webhookSource, /receivedAt: job\.received_at/);
+assert(
+  webhookSource.indexOf("await ensureInboundInteraction") < webhookSource.indexOf("await runPendingCarrierAction"),
+  "the durable interaction must exist before carrier effects and acknowledgement",
+);
+const resolverSource = readFileSync("lib/sms/twilio-inbound.ts", "utf8");
+assert.match(resolverSource, /MAX_TWILIO_CREDENTIAL_CANDIDATES/);
+assert.match(resolverSource, /\.order\("tenant_id"/);
+assert.match(resolverSource, /\.limit\(MAX_TWILIO_CREDENTIAL_CANDIDATES \+ 1\)/);
+assert.match(resolverSource, /TWILIO_FROM_NUMBER/);
 
 console.log("sms-inbound-agent: OK");
 }

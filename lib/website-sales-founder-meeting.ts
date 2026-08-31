@@ -8,6 +8,7 @@ import {
   FOUNDER_MEETING_TIMEZONE,
   founderMeetingDedupeKey,
   normalizeFounderMeetingContact,
+  normalizeFounderMeetingPhone,
   plannedReminderTiers,
   reminderDueAt,
   reminderKindFor,
@@ -28,6 +29,20 @@ const DEFAULT_RECONCILE_STALE_MS = 15 * 60_000;
 const DEFAULT_RECONCILE_LIMIT = 100;
 const DEFAULT_BACKFILL_HORIZON_MS = 48 * 60 * 60_000;
 const DEFAULT_BACKFILL_LIMIT = 25;
+const BACKFILL_SCAN_PAGE_SIZE = 50;
+const MAX_BACKFILL_SCAN = 500;
+const BACKFILL_ROTATION_MS = 5 * 60_000;
+
+export function founderMeetingBackfillChunkStart(candidateCount: number, nowMs: number): number {
+  if (!Number.isInteger(candidateCount) || candidateCount < 0 || !Number.isFinite(nowMs)) {
+    throw new Error("invalid_meeting_backfill_window");
+  }
+  if (candidateCount <= MAX_BACKFILL_SCAN) return 0;
+  const chunkCount = Math.ceil(candidateCount / MAX_BACKFILL_SCAN);
+  const tick = Math.floor(nowMs / BACKFILL_ROTATION_MS);
+  const chunkIndex = ((tick % chunkCount) + chunkCount) % chunkCount;
+  return chunkIndex * MAX_BACKFILL_SCAN;
+}
 
 type AppointmentRow = {
   id: string;
@@ -311,7 +326,7 @@ async function ensureNotificationRows(
   hostUserId: string,
   agenda: string,
   nowMs: number,
-) {
+): Promise<number> {
   const now = new Date(nowMs).toISOString();
   const tiers = plannedReminderTiers({ meetingAt: meeting.meetingAt, nowIso: now });
   const confirmationMessages = buildFounderMeetingMessages({
@@ -406,22 +421,32 @@ async function ensureNotificationRows(
     lead_id: string;
     sms_consent: number | boolean;
   };
+  const existingResult = await db
+    .from("website_sales_meeting_notifications")
+    .select("dedupe_key")
+    .eq("tenant_id", tenantId)
+    .eq("appointment_id", meeting.appointmentId);
+  if (existingResult.error) {
+    throw new Error(`meeting_notification_lookup_failed:${existingResult.error.message}`);
+  }
+  const existingKeys = new Set(
+    (existingResult.data || [])
+      .map((existing) => (existing as { dedupe_key?: unknown }).dedupe_key)
+      .filter((value): value is string => typeof value === "string"),
+  );
+  let insertedCount = 0;
   for (const row of rows) {
     if (row.channel === "sms" && !context.sms_consent) continue;
-    const existing = await db
-      .from("website_sales_meeting_notifications")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("appointment_id", meeting.appointmentId)
-      .eq("dedupe_key", row.dedupe_key as string)
-      .maybeSingle();
-    if (existing.error) throw new Error(`meeting_notification_lookup_failed:${existing.error.message}`);
-    if (existing.data) continue;
+    const dedupeKey = row.dedupe_key as string;
+    if (existingKeys.has(dedupeKey)) continue;
     const inserted = await db.from("website_sales_meeting_notifications").insert(row);
     if (inserted.error && !String(inserted.error.message).toLowerCase().includes("unique")) {
       throw new Error(`meeting_notification_insert_failed:${inserted.error.message}`);
     }
+    existingKeys.add(dedupeKey);
+    if (!inserted.error) insertedCount += 1;
   }
+  return insertedCount;
 }
 
 function contactFromAppointment(appointment: AppointmentRow): FounderMeetingContact {
@@ -526,8 +551,8 @@ async function backfillTenantFounderMeetingNotifications(
   };
   const nowIso = new Date(nowMs).toISOString();
   const horizonIso = new Date(nowMs + horizonMs).toISOString();
-  const candidates = await deps.db.from("call_appointments")
-    .select("*")
+  const candidateCountResult = await deps.db.from("call_appointments")
+    .select("id", { count: "exact", head: true })
     .eq("tenant_id", tenantId)
     .eq("meeting_kind", "founder_audit")
     .eq("workflow_status", "active")
@@ -535,37 +560,69 @@ async function backfillTenantFounderMeetingNotifications(
     .eq("calendar_status", "verified")
     .is("pending_request_id", null)
     .gte("scheduled_for", nowIso)
-    .lte("scheduled_for", horizonIso)
-    .order("scheduled_for", { ascending: true })
-    .limit(limit);
-  if (candidates.error) {
+    .lte("scheduled_for", horizonIso);
+  if (candidateCountResult.error || candidateCountResult.count == null) {
     result.failed = 1;
     result.errors.push("meeting_notification_backfill_query_failed");
     return result;
   }
-  for (const candidate of (candidates.data || []) as AppointmentRow[]) {
-    result.considered += 1;
-    try {
-      const appointment = await hydrateBackfillPhone(deps.db, candidate, nowIso);
-      if (!appointment.assigned_to) throw new Error("meeting_host_missing");
-      const meeting = meetingFromAppointment(
-        appointment,
-        appointment.booking_request_id || `backfill:${appointment.id}:r${appointment.revision}`,
-      );
-      await ensureNotificationRows(
-        deps.db,
-        meeting,
-        tenantId,
-        appointment.lead_id,
-        appointment.assigned_to,
-        appointment.client_agenda || "Review your current website and next steps.",
-        nowMs,
-      );
-      result.repaired += 1;
-    } catch (error) {
+  const candidateCount = candidateCountResult.count;
+  let offset = founderMeetingBackfillChunkStart(candidateCount, nowMs);
+  const chunkEnd = Math.min(candidateCount, offset + MAX_BACKFILL_SCAN);
+  while (result.repaired < limit && result.considered < MAX_BACKFILL_SCAN) {
+    const pageSize = Math.min(
+      BACKFILL_SCAN_PAGE_SIZE,
+      MAX_BACKFILL_SCAN - result.considered,
+      chunkEnd - offset,
+    );
+    if (pageSize <= 0) break;
+    const candidates = await deps.db.from("call_appointments")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("meeting_kind", "founder_audit")
+      .eq("workflow_status", "active")
+      .eq("status", "scheduled")
+      .eq("calendar_status", "verified")
+      .is("pending_request_id", null)
+      .gte("scheduled_for", nowIso)
+      .lte("scheduled_for", horizonIso)
+      .order("scheduled_for", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (candidates.error) {
       result.failed += 1;
-      result.errors.push(errorCode(error, "meeting_notification_backfill_failed"));
+      result.errors.push("meeting_notification_backfill_query_failed");
+      break;
     }
+    const page = (candidates.data || []) as AppointmentRow[];
+    if (page.length === 0) break;
+    for (const candidate of page) {
+      result.considered += 1;
+      try {
+        const appointment = await hydrateBackfillPhone(deps.db, candidate, nowIso);
+        if (!appointment.assigned_to) throw new Error("meeting_host_missing");
+        const meeting = meetingFromAppointment(
+          appointment,
+          appointment.booking_request_id || `backfill:${appointment.id}:r${appointment.revision}`,
+        );
+        const inserted = await ensureNotificationRows(
+          deps.db,
+          meeting,
+          tenantId,
+          appointment.lead_id,
+          appointment.assigned_to,
+          appointment.client_agenda || "Review your current website and next steps.",
+          nowMs,
+        );
+        if (inserted > 0) result.repaired += 1;
+      } catch (error) {
+        result.failed += 1;
+        result.errors.push(errorCode(error, "meeting_notification_backfill_failed"));
+      }
+      if (result.repaired >= limit || result.considered >= MAX_BACKFILL_SCAN) break;
+    }
+    offset += page.length;
+    if (page.length < pageSize) break;
   }
   return result;
 }
@@ -612,6 +669,7 @@ export async function grantFounderMeetingSmsConsent(input: {
   tenantId: string;
   leadId: string;
   appointmentId: string;
+  consentedPhone: unknown;
   capturedAt?: Date;
 }, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
   const deps = dependencies(dependencyOverrides);
@@ -620,8 +678,11 @@ export async function grantFounderMeetingSmsConsent(input: {
     throw new Error("invalid_sms_consent_timestamp");
   }
   let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
-  appointment = await hydrateBackfillPhone(deps.db, appointment, new Date(deps.now()).toISOString());
-  if (!appointment.client_phone_snapshot) throw new Error("client_phone_required");
+  const consentedPhone = normalizeFounderMeetingPhone(input.consentedPhone);
+  if (!consentedPhone) throw new Error("client_phone_required");
+  if (appointment.client_phone_snapshot && appointment.client_phone_snapshot !== consentedPhone) {
+    throw new Error("meeting_sms_consent_phone_mismatch");
+  }
   if (
     appointment.status !== "scheduled" ||
     appointment.workflow_status !== "active" ||
@@ -631,11 +692,12 @@ export async function grantFounderMeetingSmsConsent(input: {
     throw new Error("verified_meeting_required");
   }
 
-  if (!appointment.sms_consent) {
-    const updated = await deps.db.from("call_appointments")
+  if (!appointment.sms_consent || !appointment.client_phone_snapshot) {
+    let updateQuery = deps.db.from("call_appointments")
       .update({
+        client_phone_snapshot: consentedPhone,
         sms_consent: 1,
-        sms_consent_at: new Date(capturedAtMs).toISOString(),
+        sms_consent_at: appointment.sms_consent_at || new Date(capturedAtMs).toISOString(),
         updated_at: new Date(deps.now()).toISOString(),
       })
       .eq("tenant_id", input.tenantId)
@@ -645,7 +707,11 @@ export async function grantFounderMeetingSmsConsent(input: {
       .eq("status", "scheduled")
       .eq("workflow_status", "active")
       .eq("calendar_status", "verified")
-      .is("pending_request_id", null)
+      .is("pending_request_id", null);
+    updateQuery = appointment.client_phone_snapshot
+      ? updateQuery.eq("client_phone_snapshot", consentedPhone)
+      : updateQuery.is("client_phone_snapshot", null);
+    const updated = await updateQuery
       .select("*")
       .maybeSingle();
     if (updated.error || !updated.data) {

@@ -164,6 +164,7 @@ async function main() {
     tenantId: TENANT,
     leadId: LEAD,
     appointmentId: "legacy-meeting",
+    consentedPhone: "+14165550101",
     capturedAt: new Date("2026-09-01T14:01:00.000Z"),
   }, legacy.deps);
   const consented = await legacy.raw.execute({
@@ -180,6 +181,17 @@ async function main() {
     args: ["legacy-meeting"],
   });
   assert.equal(smsTiers.rows.length, 3, "late consent repairs every still-valid SMS tier");
+  await assert.rejects(
+    grantFounderMeetingSmsConsent({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: "legacy-meeting",
+      consentedPhone: "+16135550199",
+      capturedAt: new Date("2026-09-01T14:02:00.000Z"),
+    }, legacy.deps),
+    /meeting_sms_consent_phone_mismatch/,
+    "consent for a changed lead number must never enable sends to the old appointment snapshot",
+  );
   await legacy.raw.close();
 
   const serviceSource = readFileSync("lib/website-sales-founder-meeting.ts", "utf8");
@@ -198,6 +210,15 @@ async function main() {
   const routeSource = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
   assert.match(routeSource, /client_phone_required/);
   assert.match(routeSource, /founder_meeting_sms_consent_artifact/);
+  assert.match(routeSource, /consentedPhone\s*:\s*current\.phone/);
+
+  const pageSource = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
+  assert.match(pageSource, /call_appointments[\s\S]*?select\(["']sms_consent["']\)/);
+  assert.doesNotMatch(
+    pageSource,
+    /initialFounderMeetingSmsConsent=\{activeRecord\.data\.founder_meeting_sms_consent === true\}/,
+    "late-consent visibility must use the appointment truth so a failed grant remains retryable",
+  );
 
   console.log("founder-booking-phone-required: OK");
 }

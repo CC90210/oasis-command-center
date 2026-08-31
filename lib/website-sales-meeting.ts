@@ -37,6 +37,10 @@ function normalizePhone(value: unknown): string | null {
   throw new Error("invalid_client_phone");
 }
 
+export function normalizeFounderMeetingPhone(value: unknown): string | null {
+  return normalizePhone(value);
+}
+
 function normalizeWebsite(value: unknown): string | null {
   const raw = optionalText(value, 500);
   if (!raw) return null;
@@ -103,8 +107,8 @@ export function reminderTierStillValid(
   actualRemainingMinutes: number,
 ): boolean {
   if (!Number.isFinite(actualRemainingMinutes)) return false;
-  if (tier === 60) return actualRemainingMinutes >= 30;
-  if (tier === 30) return actualRemainingMinutes >= 10;
+  if (tier === 60) return actualRemainingMinutes > 30;
+  if (tier === 30) return actualRemainingMinutes > 10;
   return actualRemainingMinutes > 0;
 }
 

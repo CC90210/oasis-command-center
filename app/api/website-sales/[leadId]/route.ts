@@ -395,6 +395,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             tenantId:session.tenantId,
             leadId,
             appointmentId,
+            consentedPhone:current.phone,
             capturedAt:new Date(String(artifact.captured_at)),
           });
         } catch (error) {
@@ -1462,6 +1463,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         tenantId:session.tenantId,
         leadId,
         appointmentId:smsConsentAfterTransition.appointmentId,
+        consentedPhone:current.phone,
         capturedAt:smsConsentAfterTransition.capturedAt,
       });
     } catch (error) {

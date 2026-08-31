@@ -7,6 +7,7 @@ import {
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
+  founderMeetingBackfillChunkStart,
   prepareVerifiedFounderMeetingCancellation,
   reconcileFounderMeetingSagas,
   rescheduleVerifiedFounderMeeting,
@@ -261,6 +262,64 @@ async function testBackfillHydratesLatePhoneAndRepairsTiers() {
   assert.equal(reminders.rows.length, 6);
   assert.equal(reminders.rows.filter((row) => row.channel === "sms").length, 3);
   await raw.close();
+}
+
+async function testBackfillLimitScansPastAlreadyCompleteAppointments() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-backfill-complete-first",
+    scheduledFor: "2026-09-01T15:30:00.000Z",
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-backfill-missing-second",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  const initiallyMissing = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill-missing-second"],
+  });
+  assert.equal(Number(initiallyMissing.rows[0].count), 0, "the first bounded pass repairs only the earliest meeting");
+
+  const secondPass = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  assert.equal(secondPass.repaired, 1);
+  assert.equal(secondPass.considered, 2, "the scan moves past the complete first appointment");
+  const repairedLater = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill-missing-second"],
+  });
+  assert.equal(Number(repairedLater.rows[0].count), 6, "the later missing appointment is not starved by the limit");
+  await raw.close();
+}
+
+function testBackfillChunkRotatesBeyondFirstFiveHundred() {
+  assert.equal(founderMeetingBackfillChunkStart(500, NOW), 0);
+  const successiveStarts = [
+    founderMeetingBackfillChunkStart(501, NOW),
+    founderMeetingBackfillChunkStart(501, NOW + 5 * 60_000),
+  ].sort((a, b) => a - b);
+  assert.deepEqual(
+    successiveStarts,
+    [0, 500],
+    "successive five-minute runs rotate into the bounded chunk containing candidate 501",
+  );
 }
 
 async function testOrganizerMismatchCompensates() {
@@ -636,8 +695,10 @@ async function testFinalCompensationConflictLeavesRemindersRecoverable() {
 }
 
 async function main() {
+  testBackfillChunkRotatesBeyondFirstFiveHundred();
   await testCreateAuditAndFullIdempotency();
   await testBackfillHydratesLatePhoneAndRepairsTiers();
+  await testBackfillLimitScansPastAlreadyCompleteAppointments();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();
   await testExclusiveReservationAndNoShowRebook();
