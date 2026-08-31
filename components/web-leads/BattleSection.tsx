@@ -42,8 +42,18 @@
  * 2. Collapse state is CHROME, never content: a section renders the same
  *    children on every surface, or it does not render them. Nothing in here
  *    may branch on `embedded`.
- * 3. Motion respects prefers-reduced-motion via `motion-reduce:` classes; the
- *    chevron is the only thing that moves.
+ * 3. Motion respects prefers-reduced-motion via `motion-reduce:`/`motion-safe:`
+ *    classes; the chevron and the one-shot content fade are the only things
+ *    that move, and both are the rep's own click echoed back.
+ *
+ * ═══ THE FUTURIST CHROME (Adon, 2026-08-31, round 2) ════════════════════════
+ *
+ * "Even nicer and 3D, a futuristic look." The shell carries the section half
+ * of that system: glass panels (translucent bg + backdrop blur), a lit top
+ * edge (the one constant marker of a battle-card section), an accent tick on
+ * the title, and pill controls that glow on hover. Every piece is keyed to
+ * NOTHING -- it renders identically for a 4 and a 94, open or closed, which is
+ * what keeps rule 1 intact on a surface this decorated.
  */
 
 import {
@@ -103,19 +113,18 @@ export function SectionToolbar() {
   const bus = useBattleSections();
   if (!bus) return null;
   return (
-    <div className="flex items-center justify-end gap-1 text-[11px] font-semibold">
+    <div className="flex items-center justify-end gap-2 text-[11px] font-semibold">
       <button
         type="button"
         onClick={() => bus.setAll(true)}
-        className="rounded px-2 py-1 text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+        className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
       >
         Expand all
       </button>
-      <span aria-hidden className="text-fg-faint">·</span>
       <button
         type="button"
         onClick={() => bus.setAll(false)}
-        className="rounded px-2 py-1 text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+        className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
       >
         Collapse all
       </button>
@@ -183,7 +192,13 @@ export function BattleSection({
   }
 
   return (
-    <section className="rounded-xl border border-bg-border bg-bg-panel">
+    <section className="relative overflow-hidden rounded-xl border border-bg-border bg-bg-panel/75 shadow-card backdrop-blur-sm transition-shadow hover:shadow-elev motion-reduce:transition-none">
+      {/* The lit top edge -- the one constant marker of a battle-card section.
+          Keyed to nothing: identical for a 4 and a 94, open or closed. */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent"
+      />
       <button
         type="button"
         onClick={toggle}
@@ -192,12 +207,13 @@ export function BattleSection({
         className="group flex w-full items-start justify-between gap-4 rounded-xl px-5 py-4 text-left transition-colors hover:bg-bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none lg:px-6"
       >
         <span className="min-w-0 flex-1">
-          <h2 className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted transition-colors group-hover:text-fg motion-reduce:transition-none">
+          <h2 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted transition-colors group-hover:text-fg motion-reduce:transition-none">
+            <span aria-hidden className="h-3 w-[3px] shrink-0 rounded-full bg-accent/70 shadow-glow" />
             {title}
           </h2>
           {isOpen
-            ? sub != null && <span className="mt-1 block max-w-4xl text-xs leading-relaxed text-fg-dim">{sub}</span>
-            : teaser != null && <span className="mt-1 block truncate text-xs text-fg-dim">{teaser}</span>}
+            ? sub != null && <span className="mt-1 block max-w-4xl pl-[11px] text-xs leading-relaxed text-fg-dim">{sub}</span>
+            : teaser != null && <span className="mt-1 block truncate pl-[11px] text-xs text-fg-dim">{teaser}</span>}
         </span>
         <ChevronDown
           aria-hidden
@@ -205,7 +221,7 @@ export function BattleSection({
         />
       </button>
       {isOpen && (
-        <div id={`battle-section-${id}`} className="px-5 pb-5 lg:px-6 lg:pb-6">
+        <div id={`battle-section-${id}`} className="px-5 pb-5 motion-safe:animate-fade-in lg:px-6 lg:pb-6">
           {children}
         </div>
       )}
