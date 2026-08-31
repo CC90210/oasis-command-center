@@ -25,7 +25,14 @@ export const LEAD_DOC_BUCKET = "lead-documents";
 // registered font (v1 drew invisible text — canvas had no fonts on Vercel).
 // v3 (2026-06-29): NON-DESTRUCTIVE pdf-lib overlay (no longer rasterized) — bump
 // regenerates any v2 raster `_shopout_wm` copies as the high-quality overlay.
-export const WATERMARK_VERSION = 3;
+// v4 (2026-08-31): raster path gained a size budget (dual-encode q80/q55, 5MB
+// per document). The bump matters as much as the code: v3 raster copies of
+// ordinary scanned statements are cached at 7.4–9.7MB EACH, which is what put
+// 4-statement packages at ~35MB and made the mailer's 24MB cap refuse whole
+// deals (26 sunbiz_attachments_too_large threads, one deal retried 13x).
+// Without the bump the fixed renderer never runs — the oversized v3 copies
+// would keep being served from cache forever.
+export const WATERMARK_VERSION = 4;
 
 export type LeadDocumentUploadResult = {
   ok: true;
@@ -525,6 +532,12 @@ async function getOrCreateWatermarkedCopy(
         shopout_wm_at: new Date().toISOString(),
         shopout_wm_raster: wm.raster === true,
         shopout_wm_mime: wm.mimeType,
+        // Size in bytes + the JPEG quality the raster path chose (55 = the
+        // compact rung, i.e. this copy was size-degraded to fit the 5MB/doc
+        // budget). Both exist so an over-cap package or a quality complaint is
+        // diagnosable from the row instead of re-downloading the object.
+        shopout_wm_bytes: wm.bytes.length,
+        ...(typeof wm.quality === "number" ? { shopout_wm_quality: wm.quality } : {}),
       },
     })
     .eq("id", row.id);

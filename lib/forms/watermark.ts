@@ -67,7 +67,17 @@ const MAX_PAGES_RASTER = 120; // ~20s at 165ms/page — inside the 120s floor of
 // every route that watermarks (shop-out 120s, shop-out/run 300s, thread retries
 // 120s, watermark-variant 120s). Raster only runs for encrypted/unreadable
 // sources, so this ceiling is reached far less often than the overlay's.
-const PAGE_JPEG_QUALITY = 80; // raster page encode — bounds output PDF size
+const PAGE_JPEG_QUALITY = 80; // raster page encode — preferred when the doc fits the budget
+/** Compact rung for oversized raster output. q55 measured ~2.5–3x smaller than
+ *  q80 on scanned statements — a 9.7MB derivative lands ~3.5MB — while the
+ *  transactions stay legible (the raster path already targets ~144 DPI). */
+const COMPACT_PAGE_JPEG_QUALITY = 55;
+/** Per-DOCUMENT raster output budget. Sized against the mailer's 24MB package
+ *  cap (lib/integrations/sunbiz-lender-mail-send.ts MAX_TOTAL_BYTES): a
+ *  shop-out package is typically 3–5 statements + a small application PDF, so
+ *  5MB/doc keeps the whole package under the cap. Over-budget at full quality
+ *  → re-encode compact from the same canvases (no second render). */
+const RASTER_TARGET_BYTES = 5 * 1024 * 1024;
 const IMAGE_JPEG_QUALITY = 85;
 
 export type WatermarkProvenance = {
@@ -78,7 +88,17 @@ export type WatermarkProvenance = {
 };
 
 export type WatermarkResult =
-  | { ok: true; bytes: Buffer; mimeType: string; pages?: number; raster?: boolean }
+  | {
+      ok: true;
+      bytes: Buffer;
+      mimeType: string;
+      pages?: number;
+      raster?: boolean;
+      /** JPEG quality the raster path actually used (80 full / 55 compact),
+       *  so callers can stamp when a copy was size-degraded. Absent on the
+       *  overlay path, which never re-encodes. */
+      quality?: number;
+    }
   | { ok: false; error: string };
 
 const IMAGE_MIME = new Set([
@@ -430,7 +450,12 @@ async function watermarkPdf(bytes: Buffer, prov: WatermarkProvenance): Promise<W
   return { ok: false, error: `overlay_failed[${overlay.error}]|raster_failed[${raster.error}]` };
 }
 
-async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
+// Exported for scripts/test-watermark.ts ONLY: the app always enters through
+// watermarkBankStatement, which prefers the overlay and reaches this path just
+// for sources pdf-lib cannot open (encrypted/broken). The runtime harness needs
+// to drive the raster path directly to prove the size-budget rung selection —
+// a synthetic encrypted source is much harder to construct than a direct call.
+export async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Promise<WatermarkResult> {
   // Rasterize each page with pdfjs, paint the watermark into the pixels, and
   // reassemble a clean image-only PDF with pdf-lib. This is the only approach
   // that handles REAL bank statements (verified 2026-06-28 on production files):
@@ -528,7 +553,22 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
     const numPages = srcDoc.numPages;
 
     const wmAssets = await loadWatermarkAssets(canvasMod);
-    const outDoc = await PDFDocument.create();
+    // Dual-encode from the SAME rendered canvas: full quality plus a compact
+    // fallback. Encoding twice costs ~15ms/page; RE-RENDERING would cost
+    // ~165ms/page and blow the route time budget with several statements, so
+    // quality (not scale) is the only knob and it needs no second render pass.
+    //
+    // Why this exists (2026-08-31): raster output had NO size budget. Real
+    // scanned statements (~1MB, ~10pp originals) came out of this path at
+    // 7.4–9.7MB each (q80 @144dpi ≈ 1MB/page), so a 4-statement package hit
+    // 34.9MB, sunbiz-lender-mail-send's 24MB cap refused every send, and the
+    // operator retried one deal 13 times (application e7b40a64, threads say
+    // sunbiz_attachments_too_large). Per-DOCUMENT budget: a package is
+    // typically 3–5 statements plus a small application PDF, so 5MB/doc keeps
+    // the package comfortably under the mailer's cap.
+    const pagesFull: Buffer[] = [];
+    const pagesCompact: Buffer[] = [];
+    const pageDims: Array<[number, number]> = [];
     for (let p = 1; p <= numPages; p++) {
       const page = await srcDoc.getPage(p);
       const unit = page.getViewport({ scale: 1 }); // PDF points (physical size)
@@ -554,15 +594,40 @@ async function watermarkPdfRaster(bytes: Buffer, prov: WatermarkProvenance): Pro
       }).promise;
       drawWatermark(ctx, W, H, prov, wmAssets);
 
-      const jpeg = await canvas.encode("jpeg", PAGE_JPEG_QUALITY);
-      const img = await outDoc.embedJpg(jpeg);
-      const outPage = outDoc.addPage([unit.width || W, unit.height || H]);
-      outPage.drawImage(img, { x: 0, y: 0, width: unit.width || W, height: unit.height || H });
+      pagesFull.push(Buffer.from(await canvas.encode("jpeg", PAGE_JPEG_QUALITY)));
+      pagesCompact.push(Buffer.from(await canvas.encode("jpeg", COMPACT_PAGE_JPEG_QUALITY)));
+      pageDims.push([unit.width || W, unit.height || H]);
+    }
+
+    const totalOf = (arr: Buffer[]) => arr.reduce((n, b) => n + b.length, 0);
+    // Choose per DOCUMENT, never per page — mixed-quality pages inside one
+    // statement would look like tampering to a funder. Full quality when it
+    // fits the budget; compact otherwise. Compact over budget still SHIPS:
+    // a legitimately huge statement degraded to q55 beats a blocked deal (the
+    // clean original is preserved separately, and the mailer's 24MB package
+    // cap remains the backstop), while the page caps above keep time bounded.
+    const useFull = totalOf(pagesFull) <= RASTER_TARGET_BYTES;
+    const chosen = useFull ? pagesFull : pagesCompact;
+    const quality = useFull ? PAGE_JPEG_QUALITY : COMPACT_PAGE_JPEG_QUALITY;
+
+    const outDoc = await PDFDocument.create();
+    for (let i = 0; i < chosen.length; i++) {
+      const img = await outDoc.embedJpg(chosen[i]);
+      const [w, h] = pageDims[i];
+      const outPage = outDoc.addPage([w, h]);
+      outPage.drawImage(img, { x: 0, y: 0, width: w, height: h });
     }
     const outBytes = await outDoc.save();
     // raster:true — this copy is FLATTENED (lossy). Callers stamp it so a
     // rasterized watermark is never silent (e.g. metadata.shopout_wm_raster).
-    return { ok: true, bytes: Buffer.from(outBytes), mimeType: "application/pdf", pages: numPages, raster: true };
+    return {
+      ok: true,
+      bytes: Buffer.from(outBytes),
+      mimeType: "application/pdf",
+      pages: numPages,
+      raster: true,
+      quality,
+    };
   } finally {
     try {
       await loadingTask.destroy();

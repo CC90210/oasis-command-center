@@ -265,6 +265,85 @@ async function main() {
     }
   }
 
+  // 5) Raster SIZE BUDGET (2026-08-31). Real scanned statements came out of the
+  //    raster path at 7.4–9.7MB each (no output budget), a 4-statement package
+  //    hit 34.9MB, and the mailer's 24MB cap refused whole deals. The fix
+  //    dual-encodes each rendered page (q80 + q55) and picks per document.
+  //    Noise pages defeat JPEG compression, so a handful of them force the
+  //    full-quality total over the 5MB budget → the compact rung must engage.
+  {
+    const { watermarkPdfRaster } = await import("../lib/forms/watermark");
+    const { createCanvas } = await import("@napi-rs/canvas");
+
+    const noisePage = () => {
+      const c = createCanvas(1224, 1584);
+      const ctx = c.getContext("2d");
+      const img = ctx.createImageData(1224, 1584);
+      // Deterministic noise (LCG) — no Math.random, reproducible run to run.
+      let seed = 0x2f6e2b1;
+      for (let i = 0; i < img.data.length; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        img.data[i] = seed & 0xff;
+      }
+      ctx.putImageData(img, 0, 0);
+      return c.toBuffer("image/png");
+    };
+
+    const bigSrc = await PDFDocument.create();
+    const noise = await bigSrc.embedPng(noisePage());
+    // 9 pages ≈ 7.7MB of q80 JPEGs — decisively over the 5MB budget (6 pages
+    // measured 5.19MB assembled, within 1% of the line — too flaky to pin).
+    for (let i = 0; i < 9; i++) {
+      const p = bigSrc.addPage([612, 792]);
+      p.drawImage(noise, { x: 0, y: 0, width: 612, height: 792 });
+    }
+    const bigPdf = Buffer.from(await bigSrc.save());
+    const wmBig = await watermarkPdfRaster(bigPdf, prov);
+    if (!wmBig.ok || !isPdf(wmBig.bytes)) {
+      console.error("FAIL: oversized raster source did not brand at all:", wmBig);
+      failures++;
+    } else if (wmBig.quality !== 55) {
+      console.error(
+        `FAIL: over-budget raster output kept quality=${wmBig.quality} (expected the 55 compact rung); ` +
+          `bytes=${wmBig.bytes.length}. The 2026-08 34.9MB-package regression would recur.`,
+      );
+      failures++;
+    } else {
+      console.log(
+        `ok raster size budget engages: 9 noise pages -> compact q55, ${wmBig.bytes.length} bytes`,
+      );
+    }
+
+    // Under-budget documents must KEEP full quality — the budget is a
+    // fallback, not a blanket downgrade of every lender package.
+    const smallSrc = await PDFDocument.create();
+    const sFont = await smallSrc.embedFont(StandardFonts.Helvetica);
+    for (let i = 0; i < 2; i++) {
+      const p = smallSrc.addPage([612, 792]);
+      p.drawText(`Statement page ${i + 1} — balance 4,210.55`, { x: 50, y: 740, size: 12, font: sFont });
+    }
+    const smallPdf = Buffer.from(await smallSrc.save());
+    const wmSmall = await watermarkPdfRaster(smallPdf, prov);
+    if (!wmSmall.ok || wmSmall.quality !== 80) {
+      console.error("FAIL: small raster doc should keep q80, got:", wmSmall.ok ? wmSmall.quality : wmSmall);
+      failures++;
+    } else {
+      console.log(`ok raster keeps full q80 under budget: ${wmSmall.bytes.length} bytes`);
+    }
+
+    // Page count must survive rung selection (the assembly runs AFTER the
+    // choice now — a off-by-one there would ship truncated statements).
+    if (wmBig.ok) {
+      const reload = await PDFDocument.load(wmBig.bytes);
+      if (reload.getPageCount() !== 9) {
+        console.error(`FAIL: compact assembly page count ${reload.getPageCount()} != 9`);
+        failures++;
+      } else {
+        console.log("ok compact assembly preserves page count");
+      }
+    }
+  }
+
   console.log(failures === 0 ? "\nALL WATERMARK TESTS PASSED" : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
 }

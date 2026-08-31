@@ -122,7 +122,17 @@ export async function sendSunbizLenderMail(input: {
     const content = Buffer.from(await download.data.arrayBuffer());
     total += content.length;
     if (total > MAX_TOTAL_BYTES) {
-      return { ok: false, error: "sunbiz_attachments_too_large" };
+      // Name the numbers and the offending file: a bare slug sent operators
+      // into blind retries (one deal was retried 13 times against this exact
+      // refusal in Aug 2026, because nothing said WHAT was too large).
+      const mb = (n: number) => `${Math.ceil(n / 1048576)}MB`;
+      return {
+        ok: false,
+        error:
+          `sunbiz_attachments_too_large: over ${mb(MAX_TOTAL_BYTES)} at ` +
+          `${attachment.filename} (${mb(total)} so far of ${input.attachments.length} files). ` +
+          `Remove a document or re-run shop-out so oversized watermarked copies regenerate.`,
+      };
     }
     files.push({
       filename: attachment.filename,
