@@ -672,8 +672,10 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     /angle\.angle\.proof\.stat[\s\S]{0,400}?angle\.angle\.proof\.source/,
     `${view} must render a proof's source alongside the figure`,
   );
-  // The standing brush-offs are on the card, not in a rep's memory.
-  assert.match(src, /<ObjectionPanel \/>/, `${view} must render the objection panel`);
+  // The standing brush-offs are on the card, not in a rep's memory. `bare`
+  // because BattleSection provides the shell and heading -- the panel's copy
+  // is unchanged, and its own file is asserted on below either way.
+  assert.match(src, /<ObjectionPanel bare \/>/, `${view} must render the objection panel`);
 
   // The clean-answer instruction sits WITH the question, before the teach. A
   // rep reads down this card in real time, so the order on screen is the order
@@ -684,6 +686,84 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     /angle\.angle\.diagnostic[\s\S]{0,700}?IF_THE_ANSWER_IS_CLEAN[\s\S]{0,700}?angle\.angle\.cost/,
     `${view} must render the clean-answer instruction between the diagnostic and the teach`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// 8b. PROGRESSIVE DISCLOSURE (Adon, 2026-08-31): every section collapsible,
+//     with the call-critical ones open by default.
+//
+// The card originally rendered everything open; Adon reviewed it in use and
+// asked for per-section collapse ("it's just so much information that's in
+// front of your face"). The compromise that keeps the original mid-call
+// argument alive is THE DEFAULT MAP: the opening script, the lead line, the
+// two graphs and the competitors cost zero clicks, and only the reference
+// blocks start closed. This section pins that map, because the failure mode
+// of a collapsible card is one edit quietly flipping `defaultOpen` on "How to
+// open" and a rep discovering it mid-dial.
+// ---------------------------------------------------------------------------
+
+{
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+
+  // The map itself. Prop order (id, then defaultOpen) is part of the contract
+  // so these stay one-line greppable.
+  for (const [id, open] of [
+    ["facts", false],
+    ["lead-with", true],
+    ["opening", true],
+    ["brushoffs", false],
+    ["shape", true],
+    ["fixes", true],
+    ["competitors", true],
+    ["faults", false],
+    ["evidence", false],
+  ] as const) {
+    assert.match(
+      src,
+      new RegExp(`<BattleSection\\s+id="${id}"\\s+defaultOpen=\\{${open}\\}`),
+      `${view}: section "${id}" must default ${open ? "OPEN -- it is read mid-call and may not cost a click" : "CLOSED -- it is reference material behind a labelled teaser"}`,
+    );
+  }
+
+  // Every closed-by-default section carries a teaser. A closed section with no
+  // teaser is a mystery drawer, and a rep will not open a mystery mid-call.
+  for (const id of ["facts", "brushoffs", "faults", "evidence"]) {
+    assert.match(
+      src,
+      new RegExp(`id="${id}"[\\s\\S]{0,600}?teaser=`),
+      `${view}: closed section "${id}" must say what is inside it while closed`,
+    );
+  }
+
+  // The card's one write surface is NOT collapsible: logging an outcome IS the
+  // transfer to the pipeline, and it must never end a call behind a closed
+  // drawer. CallOutcomeLog stays in a plain Panel, not a BattleSection.
+  assert.doesNotMatch(
+    src,
+    /<BattleSection[^>]*>[\s\S]{0,400}?<CallOutcomeLog/,
+    `${view} must not put the call log behind a disclosure`,
+  );
+
+  // The escape hatch back to the original everything-open page.
+  assert.match(src, /<SectionToolbar \/>/, `${view} must render the expand-all / collapse-all controls`);
+
+  // The shell itself: accessible, persistent, and named per section.
+  const shell = read("components/web-leads/BattleSection.tsx");
+  assert.match(shell, /aria-expanded/, "BattleSection must expose its open state to assistive tech");
+  assert.match(shell, /localStorage/, "BattleSection must persist a rep's choice across leads");
+  assert.match(
+    shell,
+    /oasis\.battlecard\.section\./,
+    "BattleSection keys persistence per section -- one key for all sections is one preference pretending to be nine",
+  );
+  assert.match(shell, /Expand all/, "the toolbar must offer the one-click return to everything-open");
+
+  // The graphs' interactivity is selection, and selection is buttons in the
+  // dimension list -- the radar's pointer targets are a convenience layered on
+  // top, because the radar is display:none below `sm`. If the buttons go, the
+  // phone loses the interaction entirely.
+  assert.match(src, /aria-pressed=\{active\}/, `${view}: the dimension list must be the accessible selection path`);
 }
 
 // The panel itself renders every field of every objection. Asserting the data
