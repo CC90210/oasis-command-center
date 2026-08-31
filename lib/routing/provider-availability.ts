@@ -47,7 +47,10 @@ const REQUIRED_FIELDS: Record<ProviderId, string[][]> = {
   // from_number too: sendSmsDirectTwilio returns missing_twilio_credentials
   // without it, so advertising the lane on sid+token alone would offer an
   // SMS route that cannot send.
-  twilio: [["account_sid", "auth_token", "from_number"]],
+  twilio: [
+    ["account_sid", "auth_token", "from_number"],
+    ["account_sid", "auth_token", "messaging_service_sid"],
+  ],
 };
 
 /** Per-provider kill switch. Set to "0" to stop using a provider without
@@ -150,7 +153,7 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
     twilio: Boolean(
       process.env.TWILIO_ACCOUNT_SID &&
         process.env.TWILIO_AUTH_TOKEN &&
-        process.env.TWILIO_FROM_NUMBER,
+        (process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_MESSAGING_SERVICE_SID),
     ),
     gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_FROM_ADDRESS),
   };

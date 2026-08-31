@@ -1,6 +1,4 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import type { getServiceSupabase } from "@/lib/supabase-server";
 
 /**
  * Was this inbound reply an opt-out?
@@ -37,82 +35,55 @@ export function classifyOptOut(body: unknown) {
   return detectOptOut(typeof body === "string" ? body : "");
 }
 
-function findCaslComplianceScript(): string | null {
-  const roots = Array.from(new Set([
-    process.cwd(),
-    resolve(process.cwd(), "../.."),
-  ]));
+type Db = ReturnType<typeof getServiceSupabase>;
 
-  for (const root of roots) {
-    const candidate = join(root, "scripts", "casl_compliance.py");
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
+function phoneLast10(phone: string): string {
+  const digits = phone.replace(/\D/g, "").slice(-10);
+  if (digits.length !== 10) throw new Error("invalid_suppression_phone");
+  return digits;
 }
 
-export function suppressPhoneViaCasl(
-  phone: string,
-  source: "twilio_inbound" | "texttorrent_inbound",
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const script = findCaslComplianceScript();
-  if (!script) {
-    return Promise.resolve({ ok: false, error: "scripts/casl_compliance.py not found" });
-  }
+export async function suppressPhoneNumber(db: Db, input: {
+  tenantId: string;
+  phone: string;
+  reason: string;
+  source: string;
+}): Promise<void> {
+  const result = await db.from("sunbiz_phone_suppressions").upsert({
+    tenant_id: input.tenantId,
+    phone_last10: phoneLast10(input.phone),
+    reason: input.reason,
+    source: input.source,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "tenant_id,phone_last10" });
+  if (result.error) throw new Error(`suppression_write_failed:${result.error.message}`);
+}
 
-  const repoRoot = dirname(dirname(script));
-  const pythonBin = process.env.PYTHON_BIN || process.env.PYTHON || "python";
-
-  return new Promise((resolveResult) => {
-    let settled = false;
-    let stdout = "";
-    let stderr = "";
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-
-    const finish = (result: { ok: true } | { ok: false; error: string }) => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      resolveResult(result);
-    };
-
-    const proc = spawn(
-      pythonBin,
-      [
-        script,
-        "suppress-phone",
-        "--phone",
-        phone,
-        "--reason",
-        "stop_received",
-        "--source",
-        source,
-      ],
-      { cwd: repoRoot, shell: false, windowsHide: process.platform === "win32" },
-    );
-
-    timeout = setTimeout(() => {
-      if (!settled) {
-        proc.kill();
-        finish({ ok: false, error: "casl_compliance.py suppress-phone timed out" });
-      }
-    }, 10_000);
-
-    proc.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
-    proc.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-    proc.on("error", (err) => {
-      finish({ ok: false, error: err.message });
-    });
-    proc.on("close", (code) => {
-      if (code === 0) {
-        finish({ ok: true });
-      } else {
-        const detail = (stderr || stdout || `exit ${code}`).slice(0, 500);
-        finish({ ok: false, error: detail });
-      }
-    });
+export async function releasePhoneSuppression(db: Db, input: {
+  tenantId: string;
+  phone: string;
+  source: string;
+  leadId?: string | null;
+}): Promise<void> {
+  const last10 = phoneLast10(input.phone);
+  const removed = await db.from("sunbiz_phone_suppressions")
+    .delete()
+    .eq("tenant_id", input.tenantId)
+    .eq("phone_last10", last10);
+  if (removed.error) throw new Error(`suppression_release_failed:${removed.error.message}`);
+  const interaction = await db.from("lead_interactions").insert({
+    tenant_id: input.tenantId,
+    lead_id: input.leadId || null,
+    type: "sms_opt_in_restored",
+    channel: "sms",
+    direction: "inbound",
+    agent_source: input.source,
+    from_phone: input.phone,
+    metadata: {
+      opt_in_restored: true,
+      phone_last10: last10,
+    },
+    created_at: new Date().toISOString(),
   });
+  if (interaction.error) throw new Error(`suppression_release_audit_failed:${interaction.error.message}`);
 }

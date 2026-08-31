@@ -93,6 +93,9 @@ jobs:
           # OASIS website-sales appointment-setting workflow: role isolation,
           # lifecycle transitions, idempotent handoffs and production smoke.
           npm run test:website-sales
+          # Twilio carrier commands, durable inbound queue, sender selection,
+          # consent, suppression, and the existing SMS compliance invariants.
+          npm run test:sms-agent
           # ADDED 2026-08-16. Repo-wide invariant, not a feature suite: every
           # paged read must .order() by a unique key before it .range()s. This
           # repo has hit that bug four times (two found only by review), the fix

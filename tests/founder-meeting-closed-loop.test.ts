@@ -299,8 +299,8 @@ assert(
   "tracking retries are idempotent by durable notification id",
 );
 assert(
-  cron.includes("reconciliation.failed + trackingFailures"),
-  "a poisoned saga degrades health but cannot starve unrelated reminder deliveries",
+  cron.includes("reconciliation.failed + backfill.failed + trackingFailures"),
+  "a poisoned saga or backfill degrades health but cannot starve unrelated reminder deliveries",
 );
 assert(
   cron.includes("subject: deliveryRow.subject") && cron.includes("body: deliveryRow.body"),
