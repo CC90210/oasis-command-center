@@ -318,6 +318,16 @@ assert(
   cron.includes('sent.reason === "delivery_unknown"'),
   "ambiguous Gmail transport failures are terminal instead of risking a duplicate retry",
 );
+const tcpaFallbackGuard = cron.indexOf("quietHours.usedFallback");
+const tcpaWindowDecision = cron.indexOf("!quietHours.withinWindow");
+assert(
+  tcpaFallbackGuard >= 0 && tcpaFallbackGuard < tcpaWindowDecision,
+  "SMS delivery must fail closed before applying a fallback viewer/server timezone",
+);
+assert(
+  cron.includes('error: "sms_timezone_unresolved"'),
+  "an unresolved recipient timezone has a deterministic terminal outcome",
+);
 assert(cronRegistry.includes("dispatch-founder-meeting-reminders"), "the cron registry registers the meeting worker");
 assert(driver.includes("dispatch-founder-meeting-reminders"), "the live GitHub cron driver runs the worker");
 

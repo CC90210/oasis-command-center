@@ -9,7 +9,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, randomUUID } from "node:crypto";
 import { isUniqueViolationError } from "@/lib/api-helpers";
-import { releasePhoneSuppression, suppressPhoneNumber } from "@/lib/sms-opt-out";
+import {
+  normalizeInboundSmsPhone,
+  releasePhoneSuppression,
+  suppressPhoneNumber,
+} from "@/lib/sms-opt-out";
 import {
   HELP_RESPONSE,
   START_CONFIRMATION,
@@ -112,7 +116,7 @@ async function loadExistingJob(
 
 function assertSameDelivery(job: InboundJob, input: { from: string; to: string; body: string }): void {
   if (
-    job.from_phone !== input.from ||
+    normalizeInboundSmsPhone(job.from_phone) !== input.from ||
     job.to_phone !== input.to ||
     job.body !== input.body
   ) throw new Error("provider_message_id_payload_mismatch");
@@ -207,10 +211,11 @@ async function runStopComplianceEffects(
   job: InboundJob,
   budget: SyncOperationBudget,
 ): Promise<void> {
+  const normalizedRecipient = normalizeInboundSmsPhone(job.from_phone);
   budget.consume();
   await suppressPhoneNumber(db, {
     tenantId,
-    phone: job.from_phone,
+    phone: normalizedRecipient,
     reason: "OPT_OUT",
     source: "twilio_webhook",
   });
@@ -222,7 +227,7 @@ async function runStopComplianceEffects(
     updated_at: job.received_at,
   }).eq("tenant_id", tenantId)
     .eq("channel", "sms")
-    .eq("recipient", job.from_phone)
+    .eq("recipient", normalizedRecipient)
     .in("status", ["pending", "sending"]);
   if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
 }
@@ -268,7 +273,7 @@ export async function POST(req: NextRequest) {
     console.error("[webhooks.twilio.sms-inbound] unmapped destination", {
       to_last4: normalizedTwilioPhone(to).slice(-4),
     });
-    return new NextResponse("Unmapped destination", { status: 422 });
+    return new NextResponse("Forbidden", { status: 403 });
   }
   const { tenantId, ownerUserId } = resolved;
   budget.consume();
@@ -280,8 +285,13 @@ export async function POST(req: NextRequest) {
 
   const from = params.get("From") || "";
   const body = params.get("Body") || "";
-  const phoneLast10 = normalizedTwilioPhone(from).slice(-10);
-  if (phoneLast10.length !== 10) return new NextResponse("Invalid sender", { status: 400 });
+  let normalizedFrom: string;
+  try {
+    normalizedFrom = normalizeInboundSmsPhone(from);
+  } catch {
+    return new NextResponse("Invalid sender", { status: 400 });
+  }
+  const phoneLast10 = normalizedFrom.replace(/\D/g, "").slice(-10);
   const messageSid = params.get("MessageSid") || params.get("SmsMessageSid") || "";
   const providerMessageId = messageSid || `twilio-fp:${createHash("sha256").update(rawBody).digest("hex")}`;
   let leadId: string | null;
@@ -316,7 +326,7 @@ export async function POST(req: NextRequest) {
     tenant_id: tenantId,
     provider: "twilio",
     provider_message_id: providerMessageId,
-    from_phone: from,
+    from_phone: normalizedFrom,
     to_phone: to,
     phone_last10: phoneLast10,
     body,
@@ -343,7 +353,7 @@ export async function POST(req: NextRequest) {
       }
       deliveryWasDuplicate = true;
       job = await loadExistingJob(db, tenantId, providerMessageId, budget);
-      assertSameDelivery(job, { from, to, body });
+      assertSameDelivery(job, { from: normalizedFrom, to, body });
     } catch (error) {
       console.error("[webhooks.twilio.sms-inbound] replay recovery failed", error);
       return new NextResponse("Replay recovery failed", { status: 500 });
@@ -351,7 +361,7 @@ export async function POST(req: NextRequest) {
   } else {
     job = {
       id: jobId,
-      from_phone: from,
+      from_phone: normalizedFrom,
       to_phone: to,
       body,
       lead_id: leadId,

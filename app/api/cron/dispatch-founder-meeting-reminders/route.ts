@@ -395,6 +395,10 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
         return "skipped";
       }
       const quietHours = checkTcpaWindow(row.recipient, new Date());
+      if (quietHours.usedFallback) {
+        await mark(db, row, "skipped", { error: "sms_timezone_unresolved" });
+        return "skipped";
+      }
       if (!quietHours.withinWindow) {
         await mark(db, row, "skipped", { error: "outside_sms_hours" });
         return "skipped";

@@ -165,7 +165,7 @@ async function main() {
     leadId: LEAD,
     appointmentId: "legacy-meeting",
     consentedPhone: "+14165550101",
-    capturedAt: new Date("2026-09-01T14:01:00.000Z"),
+    capturedAt: new Date(NOW),
   }, legacy.deps);
   const consented = await legacy.raw.execute({
     sql: `SELECT sms_consent, sms_consent_at, client_phone_snapshot
@@ -187,7 +187,7 @@ async function main() {
       leadId: LEAD,
       appointmentId: "legacy-meeting",
       consentedPhone: "+16135550199",
-      capturedAt: new Date("2026-09-01T14:02:00.000Z"),
+      capturedAt: new Date(NOW),
     }, legacy.deps),
     /meeting_sms_consent_phone_mismatch/,
     "consent for a changed lead number must never enable sends to the old appointment snapshot",
@@ -211,6 +211,11 @@ async function main() {
   assert.match(routeSource, /client_phone_required/);
   assert.match(routeSource, /founder_meeting_sms_consent_artifact/);
   assert.match(routeSource, /consentedPhone\s*:\s*current\.phone/);
+  assert.match(routeSource, /readCurrentHttpsConsentArtifact\(value, nowMs\)/);
+  assert.match(
+    routeSource,
+    /const failure = founderMeetingSmsConsentErrorResponse\(error\);[\s\S]*?NextResponse\.json\(failure\.body/,
+  );
 
   const pageSource = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
   assert.match(pageSource, /call_appointments[\s\S]*?select\(["']sms_consent["']\)/);

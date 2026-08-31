@@ -34,7 +34,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { isStopCommand, suppressPhoneNumber } from "@/lib/sms-opt-out";
+import {
+  isInvalidSuppressionPhoneError,
+  isStopCommand,
+  suppressPhoneNumber,
+} from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -299,6 +303,9 @@ export async function POST(req: NextRequest) {
         source: "texttorrent_webhook",
       });
     } catch (error) {
+      if (isInvalidSuppressionPhoneError(error)) {
+        return NextResponse.json({ ok: false, error: "invalid_suppression_phone" }, { status: 400 });
+      }
       console.error("[webhooks.texttorrent.sms-inbound] suppression failed", error);
       return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
     }

@@ -318,6 +318,31 @@ async function cancelOutstandingNotifications(
   if (result.error) throw new Error(`meeting_notification_cancel_failed:${result.error.message}`);
 }
 
+const FOUNDER_SMS_CONSENT_STATE_ERRORS = new Set([
+  "client_phone_required",
+  "meeting_host_missing",
+  "meeting_notification_in_progress",
+  "meeting_sms_consent_phone_mismatch",
+  "verified_meeting_required",
+]);
+
+export function founderMeetingSmsConsentErrorResponse(error: unknown): {
+  status: 400 | 409 | 503;
+  body: { ok: false; error: string; detail: string };
+} {
+  const detail = error instanceof Error ? error.message : "meeting_sms_consent_update_failed";
+  const code = detail.split(":", 1)[0] || "meeting_sms_consent_update_failed";
+  const invalidInput = code === "invalid_sms_consent_artifact";
+  const stateConflict = code === "invalid_sms_consent_timestamp" ||
+    FOUNDER_SMS_CONSENT_STATE_ERRORS.has(code) ||
+    detail === "meeting_sms_consent_update_failed:row_changed" ||
+    detail === "meeting_notification_context_failed:row_changed";
+  return {
+    status: invalidInput ? 400 : stateConflict ? 409 : 503,
+    body: { ok: false, error: code, detail },
+  };
+}
+
 type NotificationContextRequirements = {
   requireActive?: boolean;
   expectedSmsConsent?: boolean;
@@ -439,7 +464,10 @@ async function ensureNotificationRows(
     contextQuery = contextQuery.eq("notification_lease_token", requirements.notificationLeaseToken);
   }
   const contextResult = await contextQuery.maybeSingle();
-  if (contextResult.error || !contextResult.data) throw new Error("meeting_notification_context_failed");
+  if (contextResult.error) {
+    throw new Error("meeting_notification_context_failed");
+  }
+  if (!contextResult.data) throw new Error("meeting_notification_context_failed:row_changed");
   const context = contextResult.data as {
     tenant_id: string;
     lead_id: string;
@@ -586,8 +614,9 @@ async function backfillTenantFounderMeetingNotifications(
   tenantId: string,
   nowMs: number,
   horizonMs: number,
-  limit: number,
+  repairLimit: number,
   deps: FounderMeetingServiceDependencies,
+  considerationLimit = MAX_BACKFILL_SCAN,
 ): Promise<FounderMeetingNotificationBackfillResult> {
   const result: FounderMeetingNotificationBackfillResult = {
     considered: 0,
@@ -615,10 +644,11 @@ async function backfillTenantFounderMeetingNotifications(
   const candidateCount = candidateCountResult.count;
   let offset = founderMeetingBackfillChunkStart(candidateCount, nowMs);
   const chunkEnd = Math.min(candidateCount, offset + MAX_BACKFILL_SCAN);
-  while (result.repaired < limit && result.considered < MAX_BACKFILL_SCAN) {
+  const scanLimit = Math.max(0, Math.min(MAX_BACKFILL_SCAN, considerationLimit));
+  while (result.repaired < repairLimit && result.considered < scanLimit) {
     const pageSize = Math.min(
       BACKFILL_SCAN_PAGE_SIZE,
-      MAX_BACKFILL_SCAN - result.considered,
+      scanLimit - result.considered,
       chunkEnd - offset,
     );
     if (pageSize <= 0) break;
@@ -664,7 +694,7 @@ async function backfillTenantFounderMeetingNotifications(
       const expectedKeys = expectedNotificationDedupeKeys(candidate, nowIso);
       const needsPhoneHydration = Boolean(candidate.sms_consent && !candidate.client_phone_snapshot);
       if (!needsPhoneHydration && expectedKeys.every((key) => existingKeys.has(key))) {
-        if (result.considered >= MAX_BACKFILL_SCAN) break;
+        if (result.considered >= scanLimit) break;
         continue;
       }
       try {
@@ -692,7 +722,7 @@ async function backfillTenantFounderMeetingNotifications(
         result.failed += 1;
         result.errors.push(errorCode(error, "meeting_notification_backfill_failed"));
       }
-      if (result.repaired >= limit || result.considered >= MAX_BACKFILL_SCAN) break;
+      if (result.repaired >= repairLimit || result.considered >= scanLimit) break;
     }
     offset += page.length;
     if (page.length < pageSize) break;
@@ -727,9 +757,19 @@ export async function backfillFounderMeetingNotifications(input: {
     return aggregate;
   }
   for (const row of (tenants.data || []) as Array<{ id?: unknown }>) {
+    const repairRemaining = limit - aggregate.repaired;
+    const considerationRemaining = limit - aggregate.considered;
+    if (repairRemaining <= 0 || considerationRemaining <= 0) break;
     const tenantId = typeof row.id === "string" ? row.id : "";
     if (!tenantId) continue;
-    const tenantResult = await backfillTenantFounderMeetingNotifications(tenantId, nowMs, horizonMs, limit, deps);
+    const tenantResult = await backfillTenantFounderMeetingNotifications(
+      tenantId,
+      nowMs,
+      horizonMs,
+      repairRemaining,
+      deps,
+      considerationRemaining,
+    );
     aggregate.considered += tenantResult.considered;
     aggregate.repaired += tenantResult.repaired;
     aggregate.failed += tenantResult.failed;
@@ -748,7 +788,12 @@ export async function grantFounderMeetingSmsConsent(input: {
   const deps = dependencies(dependencyOverrides);
   const operationNowMs = deps.now();
   const capturedAtMs = input.capturedAt?.getTime() ?? operationNowMs;
-  if (!Number.isFinite(capturedAtMs) || capturedAtMs > operationNowMs + 86_400_000) {
+  const maximumConsentAgeMs = 365 * 24 * 60 * 60_000;
+  if (
+    !Number.isFinite(capturedAtMs) ||
+    capturedAtMs > operationNowMs ||
+    capturedAtMs < operationNowMs - maximumConsentAgeMs
+  ) {
     throw new Error("invalid_sms_consent_timestamp");
   }
   let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
@@ -809,9 +854,32 @@ export async function grantFounderMeetingSmsConsent(input: {
   }
   appointment = updated.data as AppointmentRow;
 
+  const releaseNotificationLease = async (): Promise<boolean> => {
+    try {
+      const released = await deps.db.from("call_appointments")
+        .update({
+          notification_lease_token: null,
+          notification_lease_expires_at: null,
+          updated_at: new Date(deps.now()).toISOString(),
+        })
+        .eq("tenant_id", input.tenantId)
+        .eq("lead_id", input.leadId)
+        .eq("id", input.appointmentId)
+        .eq("revision", Number(appointment.revision))
+        .eq("notification_lease_token", notificationLeaseToken)
+        .eq("notification_lease_expires_at", notificationLeaseExpiresAt)
+        .select("id")
+        .maybeSingle();
+      return !released.error && Boolean(released.data);
+    } catch {
+      return false;
+    }
+  };
+
+  let meeting: VerifiedFounderMeeting;
   try {
     if (!appointment.assigned_to) throw new Error("meeting_host_missing");
-    const meeting = meetingFromAppointment(
+    meeting = meetingFromAppointment(
       appointment,
       appointment.booking_request_id || `consent:${appointment.id}:r${appointment.revision}`,
     );
@@ -829,26 +897,16 @@ export async function grantFounderMeetingSmsConsent(input: {
         notificationLeaseToken,
       },
     );
-    return meeting;
-  } finally {
-    const released = await deps.db.from("call_appointments")
-      .update({
-        notification_lease_token: null,
-        notification_lease_expires_at: null,
-        updated_at: new Date(deps.now()).toISOString(),
-      })
-      .eq("tenant_id", input.tenantId)
-      .eq("lead_id", input.leadId)
-      .eq("id", input.appointmentId)
-      .eq("revision", Number(appointment.revision))
-      .eq("notification_lease_token", notificationLeaseToken)
-      .eq("notification_lease_expires_at", notificationLeaseExpiresAt)
-      .select("id")
-      .maybeSingle();
-    if (released.error || !released.data) {
-      throw new Error(`meeting_notification_lease_release_failed:${released.error?.message || "row_changed"}`);
+  } catch (error) {
+    if (!await releaseNotificationLease()) {
+      console.error("[founder-meeting] consent notification lease release failed after operation error", {
+        code: "meeting_notification_lease_release_failed",
+      });
     }
+    throw error;
   }
+  if (!await releaseNotificationLease()) throw new Error("meeting_notification_lease_release_failed");
+  return meeting;
 }
 
 type NullableFilterQuery<T> = {

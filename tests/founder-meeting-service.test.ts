@@ -7,6 +7,7 @@ import {
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
+  founderMeetingSmsConsentErrorResponse,
   founderMeetingBackfillChunkStart,
   grantFounderMeetingSmsConsent,
   prepareVerifiedFounderMeetingCancellation,
@@ -24,6 +25,9 @@ const FUTURE = "2026-09-01T16:00:00.000Z";
 const LATER = "2026-09-01T17:00:00.000Z";
 
 const BASE_SCHEMA = `
+  CREATE TABLE tenants (
+    id TEXT PRIMARY KEY
+  );
   CREATE TABLE call_appointments (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -200,6 +204,8 @@ async function appointment(raw: Client, id: string) {
 
 async function insertVerifiedAppointment(raw: Client, values: {
   id: string;
+  tenantId?: string;
+  leadId?: string;
   scheduledFor?: string;
   status?: string;
   workflowStatus?: string;
@@ -224,7 +230,7 @@ async function insertVerifiedAppointment(raw: Client, values: {
       pending_started_at, pending_lease_token, previous_scheduled_for
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     args: [
-      values.id, TENANT, LEAD, "lead", values.scheduledFor ?? FUTURE, HOST,
+      values.id, values.tenantId ?? TENANT, values.leadId ?? LEAD, "lead", values.scheduledFor ?? FUTURE, HOST,
       values.status ?? "scheduled", ACTOR, "founder_audit", 15, "America/Toronto",
       "Taylor Smith", "North Star Dental", "taylor@example.com", "+14165550101",
       "https://northstardental.ca/", "Review the site.", "Qualified handoff.",
@@ -372,6 +378,48 @@ async function testBackfillLimitScansPastAlreadyCompleteAppointments() {
   await raw.close();
 }
 
+async function testBackfillLimitIsGlobalAcrossTenants() {
+  const { raw, deps } = await fixture();
+  await raw.batch([
+    { sql: "INSERT INTO tenants (id) VALUES (?)", args: [TENANT] },
+    { sql: "INSERT INTO tenants (id) VALUES (?)", args: ["tenant-b"] },
+  ]);
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-global-limit-a",
+    tenantId: TENANT,
+    leadId: LEAD,
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-global-limit-b",
+    tenantId: "tenant-b",
+    leadId: "lead-b",
+    workflowStatus: "active",
+  });
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+
+  const result = await backfillFounderMeetingNotifications({
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  assert.equal(result.considered, 1, "the candidate budget applies to the whole multi-tenant run");
+  assert.equal(result.repaired, 0, "a complete first-tenant candidate still consumes the global budget");
+  const laterTenantRows = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ?`,
+    args: ["meeting-global-limit-b"],
+  });
+  assert.equal(Number(laterTenantRows.rows[0].count), 0, "later tenants cannot receive a fresh copy of the limit");
+  await raw.close();
+}
+
 async function testBackfillBatchSkipsCompleteAppointments() {
   const { raw, deps } = await fixture();
   await insertVerifiedAppointment(raw, {
@@ -451,7 +499,7 @@ async function testIdempotentConsentReplayCannotRecreateRowsDuringTransition() {
       leadId: LEAD,
       appointmentId: "meeting-consent-race",
       consentedPhone: "+14165550101",
-      capturedAt: new Date("2026-09-01T14:00:30.000Z"),
+      capturedAt: new Date(NOW),
     }, { ...deps, db: instrumentedDb as never }),
     /meeting_notification_context_failed/,
   );
@@ -503,7 +551,7 @@ async function testConsentLeaseSerializesCancellationAfterContextRead() {
     leadId: LEAD,
     appointmentId: "meeting-consent-lease",
     consentedPhone: "+14165550101",
-    capturedAt: new Date("2026-09-01T14:00:30.000Z"),
+    capturedAt: new Date(NOW),
   }, { ...deps, db: instrumentedDb as never });
   assert(cancellationAttempted, "the cancellation was interleaved after context validation");
   assert.match(cancellationError, /meeting_notification_in_progress/);
@@ -518,6 +566,130 @@ async function testConsentLeaseSerializesCancellationAfterContextRead() {
     args: ["meeting-consent-lease"],
   });
   assert(Number(notifications.rows[0].count) > 0);
+  await raw.close();
+}
+
+async function testConsentTimestampRejectsFutureAndOverYearOldEvidence() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-invalid-consent-time",
+    workflowStatus: "active",
+  });
+  const consent = (capturedAt: Date) => grantFounderMeetingSmsConsent({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "meeting-invalid-consent-time",
+    consentedPhone: "+14165550101",
+    capturedAt,
+  }, deps);
+
+  await assert.rejects(consent(new Date(NOW + 1)), /invalid_sms_consent_timestamp/);
+  await assert.rejects(
+    consent(new Date(NOW - 365 * 24 * 60 * 60_000 - 1)),
+    /invalid_sms_consent_timestamp/,
+  );
+  await raw.close();
+}
+
+function testConsentReplayErrorResponseClassification() {
+  const invalid = founderMeetingSmsConsentErrorResponse(new Error("invalid_sms_consent_artifact"));
+  assert.deepEqual(invalid, {
+    status: 400,
+    body: {
+      ok: false,
+      error: "invalid_sms_consent_artifact",
+      detail: "invalid_sms_consent_artifact",
+    },
+  });
+  assert.equal("stageUpdated" in invalid.body, false, "idempotent replay errors must not claim a stage mutation");
+
+  for (const detail of [
+    "client_phone_required",
+    "invalid_sms_consent_timestamp",
+    "verified_meeting_required",
+    "meeting_notification_in_progress",
+    "meeting_sms_consent_phone_mismatch",
+    "meeting_sms_consent_update_failed:row_changed",
+    "meeting_notification_context_failed:row_changed",
+  ]) {
+    assert.equal(
+      founderMeetingSmsConsentErrorResponse(new Error(detail)).status,
+      409,
+      `${detail} is a state conflict`,
+    );
+  }
+  assert.equal(
+    founderMeetingSmsConsentErrorResponse(new Error("meeting_lookup_failed:database unavailable")).status,
+    503,
+    "database failures remain retryable infrastructure errors",
+  );
+}
+
+async function testConsentPreservesOperationErrorWhenLeaseReleaseAlsoFails() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-operation-and-release-fail",
+    workflowStatus: "active",
+  });
+  await raw.execute({
+    sql: "UPDATE call_appointments SET assigned_to = NULL WHERE id = ?",
+    args: ["meeting-operation-and-release-fail"],
+  });
+  await raw.execute(`CREATE TRIGGER reject_consent_release_after_operation_error
+    BEFORE UPDATE ON call_appointments
+    WHEN OLD.id = 'meeting-operation-and-release-fail'
+      AND OLD.notification_lease_token IS NOT NULL
+      AND NEW.notification_lease_token IS NULL
+    BEGIN SELECT RAISE(ABORT, 'release-secret-value'); END`);
+
+  const logs: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args); };
+  try {
+    await assert.rejects(
+      grantFounderMeetingSmsConsent({
+        tenantId: TENANT,
+        leadId: LEAD,
+        appointmentId: "meeting-operation-and-release-fail",
+        consentedPhone: "+14165550101",
+        capturedAt: new Date(NOW),
+      }, deps),
+      /meeting_host_missing/,
+      "the original operation failure must win over cleanup failure",
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  const logged = JSON.stringify(logs);
+  assert.match(logged, /lease release failed/);
+  assert.doesNotMatch(logged, /release-secret-value/, "cleanup diagnostics must not log provider/database detail");
+  await raw.close();
+}
+
+async function testConsentSuccessfulOperationStillSurfacesLeaseReleaseFailure() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-release-only-fail",
+    workflowStatus: "active",
+  });
+  await raw.execute(`CREATE TRIGGER reject_consent_release_after_success
+    BEFORE UPDATE ON call_appointments
+    WHEN OLD.id = 'meeting-release-only-fail'
+      AND OLD.notification_lease_token IS NOT NULL
+      AND NEW.notification_lease_token IS NULL
+    BEGIN SELECT RAISE(ABORT, 'release-secret-value'); END`);
+
+  await assert.rejects(
+    grantFounderMeetingSmsConsent({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: "meeting-release-only-fail",
+      consentedPhone: "+14165550101",
+      capturedAt: new Date(NOW),
+    }, deps),
+    (error: unknown) => error instanceof Error && error.message === "meeting_notification_lease_release_failed",
+    "a successful operation is not reported as successful when cleanup failed",
+  );
   await raw.close();
 }
 
@@ -908,11 +1080,16 @@ async function testFinalCompensationConflictLeavesRemindersRecoverable() {
 
 async function main() {
   testBackfillChunkRotatesBeyondFirstFiveHundred();
+  testConsentReplayErrorResponseClassification();
   await testCreateAuditAndFullIdempotency();
   await testBackfillHydratesLatePhoneAndRepairsTiers();
   await testBackfillLimitScansPastAlreadyCompleteAppointments();
+  await testBackfillLimitIsGlobalAcrossTenants();
   await testIdempotentConsentReplayCannotRecreateRowsDuringTransition();
   await testConsentLeaseSerializesCancellationAfterContextRead();
+  await testConsentTimestampRejectsFutureAndOverYearOldEvidence();
+  await testConsentPreservesOperationErrorWhenLeaseReleaseAlsoFails();
+  await testConsentSuccessfulOperationStillSurfacesLeaseReleaseFailure();
   await testBackfillBatchSkipsCompleteAppointments();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();

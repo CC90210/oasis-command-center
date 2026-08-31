@@ -44,12 +44,13 @@ import {
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
+  founderMeetingSmsConsentErrorResponse,
   grantFounderMeetingSmsConsent,
   prepareVerifiedFounderMeetingCancellation,
   rescheduleVerifiedFounderMeeting,
   type VerifiedFounderMeeting,
 } from "@/lib/website-sales-founder-meeting";
-import { readConsentArtifact } from "@/lib/sms/consent";
+import { readCurrentHttpsConsentArtifact } from "@/lib/sms/consent";
 import {
   SMS_CONSENT_DISCLOSURE,
   SMS_CONSENT_DISCLOSURE_VERSION,
@@ -89,15 +90,14 @@ function lifecycleInteractionType(action: string): string {
 }
 
 function verifiedFounderSmsConsentArtifact(value: unknown, nowMs: number): Record<string, unknown> {
-  const verdict = readConsentArtifact(value, nowMs);
+  const verdict = readCurrentHttpsConsentArtifact(value, nowMs);
   if (!verdict.ok) throw new Error("invalid_sms_consent_artifact");
   const artifact = verdict.artifact;
   if (
     artifact.disclosureText !== SMS_CONSENT_DISCLOSURE ||
     artifact.disclosureVersion !== SMS_CONSENT_DISCLOSURE_VERSION ||
     artifact.sellerNamed !== "OASIS AI Solutions" ||
-    artifact.method !== "verbal" ||
-    !artifact.sourceUrl
+    artifact.method !== "verbal"
   ) {
     throw new Error("invalid_sms_consent_artifact");
   }
@@ -399,9 +399,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             capturedAt:new Date(String(artifact.captured_at)),
           });
         } catch (error) {
-          const detail = error instanceof Error ? error.message : "meeting_sms_consent_update_failed";
-          const code = detail.split(":", 1)[0];
-          return NextResponse.json({ok:false,error:code,detail,stageUpdated:true},{status:code === "invalid_sms_consent_artifact" ? 400 : 503});
+          const failure = founderMeetingSmsConsentErrorResponse(error);
+          return NextResponse.json(failure.body, { status: failure.status });
         }
         return NextResponse.json({ok:true,idempotent:true});
       }

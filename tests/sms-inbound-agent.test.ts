@@ -11,6 +11,8 @@ import {
 } from "../lib/sms/auto-responses";
 import { countSegments } from "../lib/sms-segments";
 import {
+  isInvalidSuppressionPhoneError,
+  normalizeInboundSmsPhone,
   releasePhoneSuppression,
   suppressPhoneNumber,
 } from "../lib/sms-opt-out";
@@ -50,6 +52,10 @@ const decodedStop = twilioMessageResponse(STOP_CONFIRMATION)
   .replaceAll("&gt;", ">");
 assert.equal(decodedStop, STOP_CONFIRMATION, "TwiML carries the carrier-approved copy byte-for-byte");
 assert.equal(twilioMessageResponse(), "<Response/>");
+assert.equal(normalizeInboundSmsPhone("+1 (416) 555-0101"), "+14165550101");
+assert.equal(normalizeInboundSmsPhone("416-555-0101"), "+14165550101");
+assert.equal(normalizeInboundSmsPhone("+44 20 7946 0958"), "+442079460958");
+assert(isInvalidSuppressionPhoneError(new Error("invalid_suppression_phone")));
 assert(shouldHonorTwilioOptOut("please stop texting me"));
 assert(!shouldHonorTwilioOptOut("stop by at 3"), "ordinary scheduling language must not suppress a lead");
 assert(
@@ -261,12 +267,38 @@ await releasePhoneSuppression(db as never, {
 assert.equal((await raw.execute("SELECT count(*) AS n FROM sunbiz_phone_suppressions")).rows[0].n, 0);
 const restored = await raw.execute("SELECT metadata FROM lead_interactions");
 assert.match(String(restored.rows[0].metadata), /opt_in_restored/);
+await raw.execute({
+  sql: `INSERT INTO sunbiz_phone_suppressions
+    (tenant_id, phone_last10, reason, source) VALUES (?, ?, ?, ?)`,
+  args: ["tenant-a", "6475550102", "MANUAL_BLOCK", "operator"],
+});
+await releasePhoneSuppression(db as never, {
+  tenantId: "tenant-a",
+  phone: "+16475550102",
+  source: "twilio_webhook",
+});
+assert.equal(
+  (await raw.execute("SELECT count(*) AS n FROM sunbiz_phone_suppressions WHERE phone_last10 = '6475550102'"))
+    .rows[0].n,
+  1,
+  "START must not clear a non-opt-out suppression",
+);
+await assert.rejects(
+  suppressPhoneNumber(db as never, {
+    tenantId: "tenant-a",
+    phone: "not-a-phone",
+    reason: "OPT_OUT",
+    source: "texttorrent_webhook",
+  }),
+  /invalid_suppression_phone/,
+);
 await raw.close();
 
 const optOutSource = readFileSync("lib/sms-opt-out.ts", "utf8");
 assert(!optOutSource.includes("child_process"));
 const webhookSource = readFileSync("app/api/webhooks/twilio/sms-inbound/route.ts", "utf8");
 const webhookPostSource = webhookSource.slice(webhookSource.indexOf("export async function POST"));
+const textTorrentWebhookSource = readFileSync("app/api/webhooks/texttorrent/sms-inbound/route.ts", "utf8");
 assert.match(webhookSource, /sms_agent_jobs/);
 assert.match(webhookSource, /provider_message_id/);
 assert.match(webhookSource, /cancel_meeting/);
@@ -283,14 +315,29 @@ assert.doesNotMatch(webhookSource, /if \(job\.intent === "opt_out"\) return xmlR
 assert.match(webhookSource, /await persistCanonicalLeadTouch\(db, \{ tenantId, leadId: job\.lead_id, occurredAt: job\.received_at \}\)/);
 assert.match(webhookSource, /runStopComplianceEffects/);
 assert.match(webhookSource, /params\.get\("MessagingServiceSid"\)/);
+assert.match(webhookSource, /normalizedFrom = normalizeInboundSmsPhone\(from\)/);
+assert.match(webhookSource, /from_phone: normalizedFrom/);
+assert.match(webhookSource, /const normalizedRecipient = normalizeInboundSmsPhone\(job\.from_phone\)/);
+assert.match(webhookSource, /\.eq\("recipient", normalizedRecipient\)/);
+assert.match(webhookSource, /return new NextResponse\("Forbidden", \{ status: 403 \}\)/);
+assert.doesNotMatch(webhookSource, /return new NextResponse\("Unmapped destination"/);
+assert.match(textTorrentWebhookSource, /isInvalidSuppressionPhoneError/);
+assert.match(textTorrentWebhookSource, /status: 400/);
+const stopEffectsIndex = webhookPostSource.indexOf("await runStopComplianceEffects");
+const canonicalTouchIndex = webhookPostSource.indexOf("await persistCanonicalLeadTouch");
+const stopMarkIndex = webhookPostSource.indexOf(
+  'await markCarrierAction(db, tenantId, job.id, "suppress_and_cancel_sms"',
+);
 assert(
-  webhookPostSource.indexOf("await runStopComplianceEffects") <
-    webhookPostSource.indexOf("await persistCanonicalLeadTouch"),
+  stopEffectsIndex >= 0 && canonicalTouchIndex >= 0 && stopMarkIndex >= 0,
+  "STOP ordering anchors must all exist before their order is compared",
+);
+assert(
+  stopEffectsIndex < canonicalTouchIndex,
   "STOP suppression and outbox cancellation must precede canonical touch",
 );
 assert(
-  webhookPostSource.indexOf("await persistCanonicalLeadTouch") <
-    webhookPostSource.indexOf('await markCarrierAction(db, tenantId, job.id, "suppress_and_cancel_sms"'),
+  canonicalTouchIndex < stopMarkIndex,
   "STOP remains incomplete until canonical touch succeeds",
 );
 assert.doesNotMatch(webhookSource, /status: keyword === "help" \? "done" : "pending"/);

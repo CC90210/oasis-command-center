@@ -37,10 +37,21 @@ export function classifyOptOut(body: unknown) {
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
+export function isInvalidSuppressionPhoneError(error: unknown): boolean {
+  return error instanceof Error && error.message === "invalid_suppression_phone";
+}
+
+export function normalizeInboundSmsPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length < 11 || digits.length > 15 || digits.startsWith("0")) {
+    throw new Error("invalid_suppression_phone");
+  }
+  return `+${digits}`;
+}
+
 function phoneLast10(phone: string): string {
-  const digits = phone.replace(/\D/g, "").slice(-10);
-  if (digits.length !== 10) throw new Error("invalid_suppression_phone");
-  return digits;
+  return normalizeInboundSmsPhone(phone).replace(/\D/g, "").slice(-10);
 }
 
 export async function suppressPhoneNumber(db: Db, input: {
@@ -69,7 +80,8 @@ export async function releasePhoneSuppression(db: Db, input: {
   const removed = await db.from("sunbiz_phone_suppressions")
     .delete()
     .eq("tenant_id", input.tenantId)
-    .eq("phone_last10", last10);
+    .eq("phone_last10", last10)
+    .eq("reason", "OPT_OUT");
   if (removed.error) throw new Error(`suppression_release_failed:${removed.error.message}`);
   const interaction = await db.from("lead_interactions").insert({
     tenant_id: input.tenantId,
