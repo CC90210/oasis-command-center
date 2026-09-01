@@ -129,12 +129,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       // purpose: upsert(onConflict) against a PARTIAL unique index fails
       // silently on PostgREST -- see tests/partial-index-upsert.test.ts.)
       if (/unique|constraint/i.test(ins.error.message)) {
+        // ANY status: the winning request can finish (done/failed) between
+        // our insert conflicting and this lookup running, and a completed
+        // re-check is still a successful answer to "please re-check", never
+        // a 500. (Codex review, 2026-09-01.)
         const winner = await db
           .from("leadgen_recheck_requests")
           .select("id,status,requested_at")
           .eq("tenant_id", WEBDEV_TENANT_ID)
           .eq("lead_id", lid)
-          .in("status", ["pending", "running"])
           .order("requested_at", { ascending: false })
           .limit(1)
           .maybeSingle();
