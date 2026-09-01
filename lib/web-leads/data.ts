@@ -687,7 +687,16 @@ export function canViewerRead(
   const facts = factsFrom(data);
   // Unscoped roles (admins and every established role) are unchanged.
   if (!isScopedContractor(viewer)) return true;
-  if (managerCanReadAssignment(facts.assignedTo, viewer)) return true;
+  // Managers coach only the server-resolved sales roster. Unlike ordinary
+  // reps, they must never fall through to the shared claimable pool on a
+  // guessed by-id URL; their own assignment stays readable even if the roster
+  // lookup did not include their seat.
+  if (viewer.teamRole.trim().toLowerCase() === "manager") {
+    return (
+      managerCanReadAssignment(facts.assignedTo, viewer) ||
+      isInBookOf(facts, viewer.userId)
+    );
+  }
   if (isInBookOf(facts, viewer.userId)) return true;
   return isClaimable(data, now);
 }

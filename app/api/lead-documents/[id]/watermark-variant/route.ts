@@ -17,7 +17,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { setLeadDocumentVariant } from "@/lib/lead-documents";
-import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -81,15 +81,29 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   if (doc.lead_id) {
-    const access = await assertMayWorkLead({
-      teamRole: sess.teamRole,
-      userId: sess.userId,
-      tenantId,
-      leadId: doc.lead_id,
-      isOwner: sess.isTrueAdmin,
-      adminAccess: sess.adminAccess,
-      accessMode: "owned_oasis_sales",
-    });
+    const parent = await db
+      .from("tenant_records")
+      .select("entity_type")
+      .eq("tenant_id", tenantId)
+      .eq("id", doc.lead_id)
+      .maybeSingle();
+    const parentEntity = (parent.data as { entity_type?: unknown } | null)?.entity_type;
+    if (parentEntity !== "lead" && parentEntity !== "application") {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const access = await getWritableLead(
+      {
+        teamRole: sess.teamRole,
+        userId: sess.userId,
+        isOwner: sess.isTrueAdmin,
+        adminAccess: sess.adminAccess,
+      },
+      {
+        tenantId,
+        entity: parentEntity,
+        id: doc.lead_id,
+      },
+    );
     if (!access.ok) {
       return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
     }

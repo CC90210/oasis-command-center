@@ -43,6 +43,14 @@ async function resolveMutation(
     accessMode: "owned_oasis_sales",
   });
   if (!access.ok) {
+    if (access.status === 503) {
+      return {
+        response: NextResponse.json(
+          { ok: false, error: access.error, message: access.message },
+          { status: access.status },
+        ),
+      };
+    }
     return { response: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
   }
   return { noteId, sess, target };

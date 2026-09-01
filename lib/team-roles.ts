@@ -138,7 +138,9 @@ export function teamRoleLabel(role: TeamRole | string | null | undefined): strin
  * People whose assigned OASIS records make up a sales manager's read-only
  * team book. This deliberately excludes owner/admin/member/read_only: their
  * assigned records are founder, internal, or system work rather than a rep's
- * sales book. Legacy `agent` stays until its live rows are migrated.
+ * sales book. Marketing is deliberately included per CC's 2026-08-26 update:
+ * they may work only records assigned to them, and the sales manager must be
+ * able to coach that book. Legacy `agent` stays until its live rows migrate.
  */
 export const OASIS_PIPELINE_REP_ROLES: ReadonlySet<string> = new Set([
   "manager",

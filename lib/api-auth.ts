@@ -32,7 +32,10 @@ export async function resolveTenantId(): Promise<string | null> {
   const user = await getSessionUser();
   if (!user) return null;
   const resolved = await resolveActiveProfileForUser(user);
-  if (resolved.error) console.error("[api-auth.resolveTenantId]", resolved.error);
+  if (resolved.error) {
+    console.error("[api-auth.resolveTenantId]", resolved.error);
+    throw new Error("profile resolution unavailable");
+  }
   return resolved.profile?.tenant_id ?? null;
 }
 
@@ -69,7 +72,13 @@ export async function resolveSessionContext(): Promise<SessionContext> {
   const user = await getSessionUser();
   if (!user) return { ok: false, reason: "no_session" };
   const resolved = await resolveActiveProfileForUser(user);
-  if (resolved.error) console.error("[api-auth.resolveSessionContext]", resolved.error);
+  if (resolved.error) {
+    console.error("[api-auth.resolveSessionContext]", resolved.error);
+    // Do not turn a storage outage into a false authentication failure. Let
+    // the route fail loudly as a server error so operators and monitoring see
+    // the real fault and callers do not tell a signed-in user to log in again.
+    throw new Error("profile resolution unavailable");
+  }
   const profile = resolved.profile;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };

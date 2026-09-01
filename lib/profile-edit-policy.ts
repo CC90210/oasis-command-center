@@ -32,10 +32,11 @@ export function decideProfileEdit(
   body: Record<string, unknown>,
   actor: ProfileEditActor,
 ): ProfileEditDecision {
+  const role = (actor.teamRole || "").trim().toLowerCase();
   const canManageWorkspace =
     actor.isOwner ||
-    actor.teamRole === "owner" ||
-    actor.teamRole === "admin" ||
+    role === "owner" ||
+    role === "admin" ||
     actor.adminAccess;
   const requestedAdminFields = Object.keys(body).filter((key) => ADMIN_PROFILE_FIELDS.has(key));
   if (requestedAdminFields.length > 0 && !canManageWorkspace) {

@@ -101,5 +101,23 @@ assert.equal(
   true,
   "the by-id battlecard door honors the same roster-scoped manager read",
 );
+assert.equal(
+  canViewerRead(
+    { assigned_to: null, stage: "researched" },
+    MANAGER,
+    Date.parse("2026-08-31T12:01:00.000Z"),
+  ),
+  false,
+  "a manager cannot bypass the roster by opening an unassigned claimable lead by id",
+);
+assert.equal(
+  canViewerRead(
+    { assigned_to: MANAGER.userId, stage: "assigned" },
+    { ...MANAGER, readableAssigneeIds: [] },
+    Date.parse("2026-08-31T12:01:00.000Z"),
+  ),
+  true,
+  "a manager retains their own assigned lead even if the roster lookup omits their seat",
+);
 
 console.log("web-leads-scope ok");

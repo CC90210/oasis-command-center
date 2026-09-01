@@ -54,6 +54,10 @@ const VALID_STATUSES: ThreadStatus[] = [
   "triage",
 ];
 
+function emptyThreadResponse() {
+  return NextResponse.json({ ok: true, messages: [], tt_chat_id: null });
+}
+
 function isMissingTableError(err: unknown): boolean {
   const msg = (err as { message?: string } | null)?.message || "";
   const code = (err as { code?: string } | null)?.code || "";
@@ -81,11 +85,11 @@ export async function GET(
 
   const readPolicy = await resolveLeadReadPolicy(sess);
   if (readPolicy.mode === "denied") {
-    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+    return emptyThreadResponse();
   }
   const thread = await loadThreadMessages(sess.tenantId, key);
   if (!thread) {
-    return NextResponse.json({ ok: true, messages: [], tt_chat_id: null });
+    return emptyThreadResponse();
   }
   if (
     readPolicy.mode === "oasis" &&
@@ -96,7 +100,7 @@ export async function GET(
         readPolicy,
       )))
   ) {
-    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+    return emptyThreadResponse();
   }
   return NextResponse.json({ ok: true, messages: thread.messages, tt_chat_id: thread.tt_chat_id });
 }

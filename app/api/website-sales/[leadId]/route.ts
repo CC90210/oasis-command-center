@@ -191,7 +191,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (
     session.teamRole.trim().toLowerCase() === "manager" &&
     !session.isAdmin &&
-    !actorOwnsSalesLead
+    !assignedToUser
   ) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }

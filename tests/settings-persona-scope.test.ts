@@ -85,6 +85,7 @@ for (const teamRole of ["manager", "closer", "opener", "builder", "marketing", "
 for (const actor of [
   { teamRole: "owner", isOwner: true, adminAccess: false },
   { teamRole: "admin", isOwner: false, adminAccess: false },
+  { teamRole: " Admin ", isOwner: false, adminAccess: false },
   { teamRole: "closer", isOwner: false, adminAccess: true },
 ]) {
   assert.deepEqual(decideProfileEdit({ brand: "OASIS" }, actor), {
@@ -151,5 +152,10 @@ for (const consumer of ["lib/api-auth.ts", "lib/queries.ts", "app/api/profile/ro
     `${consumer} must use the shared duplicate-safe profile resolver`,
   );
 }
+const apiAuth = read("lib/api-auth.ts");
+assert.ok(
+  apiAuth.match(/resolved\.error[\s\S]*?throw new Error\("profile resolution unavailable"\)/g)?.length === 2,
+  "profile resolver outages must fail loudly instead of becoming false no-profile authentication failures",
+);
 
 console.log("settings-persona-scope.test.ts: OK");

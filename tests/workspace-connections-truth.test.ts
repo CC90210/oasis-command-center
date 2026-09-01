@@ -76,6 +76,10 @@ assert.ok(
   "a historical heartbeat must be freshness-checked before Settings says Connected",
 );
 assert.ok(
+  summary.includes('.order("last_ping_at", { ascending: false, nullsFirst: false })'),
+  "a null health timestamp must not hide the newest real workspace heartbeat",
+);
+assert.ok(
   store.includes("if (result.error)") &&
     store.includes("tenant_integration_status_decrypt_failed"),
   "credential lookup/decryption errors must fail closed instead of returning absent",

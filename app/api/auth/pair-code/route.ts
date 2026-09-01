@@ -59,6 +59,7 @@ export async function POST() {
   await db
     .from("bridge_pair_codes")
     .delete()
+    .eq("tenant_id", session.tenantId)
     .eq("auth_user_id", session.userId)
     .is("consumed_at", null);
 

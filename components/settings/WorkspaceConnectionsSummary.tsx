@@ -56,7 +56,7 @@ async function loadWorkspaceConnections(
       .select("service,status,last_ping_at")
       .eq("tenant_id", tenantId)
       .in("service", SERVICES.map((service) => service.key))
-      .order("last_ping_at", { ascending: false });
+      .order("last_ping_at", { ascending: false, nullsFirst: false });
     if (result.error) throw new Error(result.error.message);
     rows = new Map<string, WorkspaceConnectionRow>();
     for (const row of (result.data || []) as WorkspaceConnectionRow[]) {

@@ -13,13 +13,20 @@ assert.ok(
   integration.includes("getUserIntegrationBundleForStatus"),
   "personal Telegram status must use the strict credential read",
 );
+
+const bodyOf = (name: string): string => {
+  const body = integration.match(new RegExp(`export async function ${name}[\\s\\S]*?\\n}`))?.[0];
+  assert.ok(body, `${name} must remain an exported async function for this check to be meaningful`);
+  return body;
+};
+
 assert.doesNotMatch(
-  integration.match(/export async function getTelegramStatus[\s\S]*?\n}/)?.[0] || "",
+  bodyOf("getTelegramStatus"),
   /\.catch\(\(\) => \(\{\}/,
   "a status read failure must not be converted to an empty disconnected bundle",
 );
 assert.doesNotMatch(
-  integration.match(/export async function captureChatId[\s\S]*?\n}/)?.[0] || "",
+  bodyOf("captureChatId"),
   /getUserIntegrationBundle\([^\n]+\)\.catch/,
   "linking must not convert a credential-store outage into not connected",
 );

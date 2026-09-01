@@ -145,9 +145,9 @@ assert.ok(
 // not this predicate. A manager can close only a lead assigned to them (for
 // example when they host the audit); ownership is enforced separately.
 //
-// UPDATED 2026-08-25 (CC): `builder` LEFT this refused list — the
-// builder/marketing specialist sells his own book now, so he sits with the
-// closers. Manager still cannot: no live manager closes deals.
+// UPDATED 2026-08-31 (CC): `builder` and `manager` LEFT this refused list. The
+// builder sells his own book, and a manager assigned as the audit host may
+// close that own lead. `marketing` stays refused: it is not a closing role.
 for (const role of ["marketing", "member", "read_only", "loan_officer", "processor", "owner", "admin", ""]) {
   assert.equal(
     mayQuoteAndClose(role),

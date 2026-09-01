@@ -53,6 +53,12 @@ includesAll("lib/lead-document-access.ts", [
   "getReadableLeadTargetForSession",
   "!doc.lead_id && !session.isAdmin",
 ]);
+includesAll("app/api/lead-documents/[id]/watermark-variant/route.ts", [
+  "getWritableLead",
+  '.select("entity_type")',
+  'parentEntity !== "lead" && parentEntity !== "application"',
+  "entity: parentEntity",
+]);
 includesAll("app/api/lead-documents/legacy-baked/route.ts", ["resolveSessionContext", "!sess.isAdmin"]);
 includesAll("app/api/leads/missing-docs/route.ts", [
   "resolveLeadReadPolicy",

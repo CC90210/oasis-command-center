@@ -30,6 +30,7 @@ const TESTS = [
   "tests/sunbiz-import-routing.test.ts",
   "tests/lead-transfer-canonical.test.ts",
   "tests/pipeline-turnkey-lifecycle.test.ts",
+  "tests/coderabbit-api-boundaries.test.ts",
   "tests/pipeline-lead-workspace.test.ts",
   "tests/founder-booking-ui.test.ts",
   "tests/founder-meeting-calendar.test.ts",

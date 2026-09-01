@@ -464,7 +464,11 @@ assert.equal(
   false,
   "and does so WITHOUT company revenue — that pairing is the whole reason the role exists",
 );
-assert.equal(capabilitiesFor("marketing", OASIS).canSeeAllPipeline, false, "marketing does not work leads");
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeAllPipeline,
+  false,
+  "marketing works only its assigned book, never the tenant-wide pipeline",
+);
 assert.equal(capabilitiesFor("marketing", OASIS).canSeeCommissionLedger, false);
 assert.equal(capabilitiesFor("marketing", OASIS).canSeeInboundTape, false);
 assert.equal(

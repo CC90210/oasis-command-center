@@ -61,10 +61,14 @@ export async function PATCH(req: NextRequest) {
     update.custom_fields = { ...prev, ...(update.custom_fields as Record<string, unknown>) };
   }
 
-  const r = await db
+  const updateQuery = db
     .from("user_profiles")
     .update(update)
-    .eq("id", currentProfile.id)
+    .eq("id", currentProfile.id);
+  const tenantScopedUpdate = currentProfile.tenant_id
+    ? updateQuery.eq("tenant_id", currentProfile.tenant_id)
+    : updateQuery.is("tenant_id", null);
+  const r = await tenantScopedUpdate
     .select("*")
     .maybeSingle();
   if (r.error) return bad(500, r.error.message);

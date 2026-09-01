@@ -99,6 +99,7 @@ assert.equal(
 const read = (path: string) => readFileSync(path, "utf8");
 const page = read("app/pipeline/[id]/page.tsx");
 const toolbar = read("components/leads/LeadActionToolbar.tsx");
+const websiteSalesRoute = read("app/api/website-sales/[leadId]/route.ts");
 const strictRoutes = [
   "app/api/leads/[id]/email/route.ts",
   "app/api/leads/[id]/texttorrent/route.ts",
@@ -116,6 +117,21 @@ assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}
 assert.match(page, /canMutateLead && ownedSlug \? \([\s\S]*?<LeadContextEditor/);
 assert.match(page, /canMutateLead \? <LeadNoteComposer/);
 assert.match(page, /readableRepUserIds/);
+const managerGateStart = websiteSalesRoute.indexOf(
+  'session.teamRole.trim().toLowerCase() === "manager"',
+);
+const managerGateEnd = websiteSalesRoute.indexOf(
+  'return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"}',
+  managerGateStart,
+);
+assert.ok(managerGateStart >= 0 && managerGateEnd > managerGateStart, "manager write gate is present");
+const managerWriteGate = websiteSalesRoute.slice(managerGateStart, managerGateEnd);
+assert.match(managerWriteGate, /!assignedToUser/);
+assert.doesNotMatch(
+  managerWriteGate,
+  /actorOwnsSalesLead/,
+  "a manager collaborator must not gain cross-rep website-sales write access",
+);
 
 assert.match(toolbar, /Call now/);
 assert.match(toolbar, /\/api\/leads\/\$\{leadId\}\/call/);
