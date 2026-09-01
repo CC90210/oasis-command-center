@@ -1103,7 +1103,11 @@ const MODEL_CODES = [
   const recheckRoute = read("app/api/web-leads/[id]/recheck/route.ts");
   assert.match(recheckRoute, /validatedRecheckUrl/, "the recheck route must validate a supplied URL through the SSRF-hardened module");
   assert.match(recheckRoute, /\.in\("status", \["pending", "running"\]\)/, "the recheck route must dedupe open requests per lead");
-  assert.match(recheckRoute, /unique|constraint/i, "the dedupe must handle the atomic unique-index conflict path, not just the read");
+  assert.match(
+    recheckRoute,
+    /idx_recheck_one_open\|unique constraint/,
+    "the dedupe conflict path must match ONLY the uniqueness collision -- a CHECK or FK violation recovering as ok is a request silently never queued",
+  );
   assert.match(recheckRoute, /status: 202/, "a fresh queue insert answers 202");
 
   // THE SSRF GATE (Codex P1, 2026-09-01): a pasted re-check URL is fetched by

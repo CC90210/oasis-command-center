@@ -128,7 +128,12 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       // instead of a 500. (Codex review, 2026-09-01. Plain INSERT on
       // purpose: upsert(onConflict) against a PARTIAL unique index fails
       // silently on PostgREST -- see tests/partial-index-upsert.test.ts.)
-      if (/unique|constraint/i.test(ins.error.message)) {
+      // ONLY the uniqueness collision recovers -- libSQL spells it "UNIQUE
+      // constraint failed" (ideally naming idx_recheck_one_open). A CHECK or
+      // FOREIGN KEY violation says "constraint" without "unique" and must
+      // surface as the error it is, or a request that was never queued gets
+      // a false ok. (Codex review, 2026-09-01.)
+      if (/idx_recheck_one_open|unique constraint/i.test(ins.error.message)) {
         // ANY status: the winning request can finish (done/failed) between
         // our insert conflicting and this lookup running, and a completed
         // re-check is still a successful answer to "please re-check", never
