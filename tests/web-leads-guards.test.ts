@@ -13,6 +13,10 @@ for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  // Added 2026-09-01 with the per-lead re-check. A WRITE that names a lead
+  // id carries the identical gate stack as the reads: anyone who may read
+  // the card may queue a re-check; nobody else may learn the id exists.
+  "app/api/web-leads/[id]/recheck/route.ts",
 ]) {
   const src = read(route);
   assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
@@ -211,6 +215,7 @@ for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  "app/api/web-leads/[id]/recheck/route.ts",
 ]) {
   const src = read(route);
   const buildsViewerInline =
