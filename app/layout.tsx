@@ -34,6 +34,8 @@ import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import type { NavItem } from "@/lib/nav-config";
 import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
+import { PerfVitals } from "@/components/PerfVitals";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -57,6 +59,12 @@ export default async function RootLayout({
   // sidebar shell. The pathname is set as a header by middleware.ts.
   const hdrs = await headers();
   const pathname = hdrs.get("x-pathname") || hdrs.get("x-invoke-path") || "";
+  // P0 instrumentation (instant-load plan): time the layout's own data
+  // fetches — the "session tax" every navigation pays before any page
+  // content or loading state can stream. Additive only; spans wrap the
+  // existing calls without changing order, parallelism, or error handling.
+  const perfT0 = Date.now();
+  const perfSpans: PerfSpan[] = [];
   // Paths that render edge-to-edge (no operator sidebar, no footer, no
   // tenant manifest resolution). Anything aimed at a prospect / pre-auth
   // visitor or a fresh signup walks through here. Mirrors middleware.ts
@@ -132,7 +140,7 @@ export default async function RootLayout({
     // here blanked the dashboard with a 500. Each catch logs via safe()
     // so a stuck sidebar indicator is searchable in Vercel logs instead
     // of silently rendering as "offline".
-    profile = await safe("layout.profile", getActiveProfile(), null);
+    profile = await timed("profile", safe("layout.profile", getActiveProfile(), null), perfSpans);
 
     // Demo cookie is honoured ONLY when:
     //   - the operator is on /demo/sun (explicit opt-in via URL), OR
@@ -174,7 +182,7 @@ export default async function RootLayout({
     // primary_agent="atlas" or stale "bravo" would otherwise read another
     // tenant's heartbeat — cross-tenant signal leak. Fall back to the
     // manifest's primary slug (or first enabled) when the column is invalid.
-    const manifestForAgent = await getTenantManifestForUser(tenantId);
+    const manifestForAgent = await timed("manifest_scope", getTenantManifestForUser(tenantId), perfSpans);
     const manifestEnabledForAgent = resolveEnabledAgentSlugs({
       manifestAgents: manifestForAgent ? manifestForAgent.agents || [] : null,
       legacyProfileAgents: profile?.agents_enabled,
@@ -194,7 +202,7 @@ export default async function RootLayout({
     // custom_fields.command_center_profile_slug so one shell can render
     // different products cleanly.
     if (tenantId) {
-      tenantProfileSlug = await safe(
+      tenantProfileSlug = await timed("tenant_slug", safe(
         "layout.tenant_profile_slug",
         (async () => {
           // Was a second raw SELECT on `tenants` for columns the memoized read
@@ -211,7 +219,7 @@ export default async function RootLayout({
           });
         })(),
         null
-      );
+      ), perfSpans);
     }
 
     // Path slug wins when present and not in demo. Lets `/t/<slug>/...`
@@ -243,7 +251,7 @@ export default async function RootLayout({
     // header dot, Settings page, and any future caller agree on what
     // "online" means (last_seen_at within 5 minutes, revoked_at IS NULL).
     const emptySnap: { data: { last_tick_at?: string | null } | null } = { data: null };
-    const [snapRes, bridgeOnlineResolved, chatPropsResolved, surfaceResolved] = await Promise.all([
+    const [snapRes, bridgeOnlineResolved, chatPropsResolved, surfaceResolved] = await timed("side_channels", Promise.all([
       safe(
         "layout.agent_state_snapshot",
         (async () => {
@@ -268,7 +276,7 @@ export default async function RootLayout({
       // Persona for the sidebar. Batched with the other side-channel reads so
       // scoping the nav costs no extra wall-clock time on any page render.
       safe("layout.viewer_surface", resolveViewerSurface(), null),
-    ]);
+    ]), perfSpans);
     const snap = snapRes.data;
     if (snap?.last_tick_at) {
       primaryAgentLive =
@@ -284,7 +292,10 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
-  const manifest = isFullBleed ? null : await getManifest(manifestSlug);
+  const manifest = isFullBleed ? null : await timed("manifest", getManifest(manifestSlug), perfSpans);
+  // One `[perf]` line per shell render: the measured session tax. This is
+  // the P1 before/after number; remove only when the instant-load work ends.
+  logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);
 
   // Founders portal nav. Injected here rather than added to CC_NAV because
   // OASIS_SEED.nav IS navToManifest(CC_NAV) and getSeedManifest() falls back to
@@ -370,6 +381,11 @@ export default async function RootLayout({
           every scroll position — the thing CC kept pointing at. Scoped to
           the dashboard branch; marketing brings its own atmosphere. */}
       <body className={isFullBleed ? undefined : "grain"}>
+        {/* First-party web-vitals beacon (P0). Renders nothing; posts
+            TTFB/LCP/INP/CLS to /api/perf/vitals. First-party rather than
+            @vercel/speed-insights because the Cloudflare cutover is in
+            flight — this survives the host move. */}
+        <PerfVitals />
         {isFullBleed || !manifest ? (
           children
         ) : (
