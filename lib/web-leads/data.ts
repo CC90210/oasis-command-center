@@ -198,7 +198,7 @@ export type WebLeadRow = WebLead & {
  *            what stops two reps dialling the same business.
  *   "mine" — the caller's own book, including leads whose claim has lapsed.
  */
-export type LeadScope = "pool" | "mine";
+export type LeadScope = "pool" | "mine" | "team";
 
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
@@ -568,11 +568,11 @@ export async function fetchLeads(
      *             bounded separately by the 250-lead cap in claim.ts.
      */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
-      scope === "mine"
-        ? viewer.teamRole.trim().toLowerCase() === "manager"
-          ? canViewerRead(r.data || {}, viewer, now)
-          : isInBookOf(factsFrom(r.data || {}), viewer.userId)
-        : isClaimable(r.data || {}, now),
+      scope === "team"
+        ? canViewerRead(r.data || {}, viewer, now)
+        : scope === "mine"
+          ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+          : isClaimable(r.data || {}, now),
     )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
       const lead = toWebLead(r);

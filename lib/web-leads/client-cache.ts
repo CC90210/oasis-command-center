@@ -58,6 +58,7 @@ export function webLeadsRequestUrls(search: string): { facets: string; list: str
   const facetParams = filtersToParams({ ...filters, page: 1, leadId: null });
   const listParams = filtersToParams({ ...filters, leadId: null });
   if (filters.view === "mine") listParams.set("scope", "mine");
+  else if (filters.view === "team") listParams.set("scope", "team");
 
   return {
     facets: apiUrl("/api/web-leads/facets", facetParams),

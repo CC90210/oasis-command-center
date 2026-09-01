@@ -28,8 +28,8 @@
  * it. Old `?view=pipeline` links fall through to the default rather than
  * breaking, via the VALID_VIEWS check in parseFilters.
  */
-export type WebLeadView = "leads" | "mine" | "territories";
-const VALID_VIEWS: readonly WebLeadView[] = ["leads", "mine", "territories"];
+export type WebLeadView = "leads" | "mine" | "team" | "territories";
+const VALID_VIEWS: readonly WebLeadView[] = ["leads", "mine", "team", "territories"];
 
 /**
  * Score bands, as RANGES rather than judgements (2026-08-23).

@@ -61,7 +61,8 @@ export async function GET(req: NextRequest) {
     const viewer = await resolveWebLeadViewer(session);
     const filters = parseFilters(req.nextUrl.searchParams);
     const fresh = req.nextUrl.searchParams.get("fresh") === "1";
-    const scope = req.nextUrl.searchParams.get("scope") === "mine" ? "mine" : "pool";
+    const scopeParam = req.nextUrl.searchParams.get("scope");
+    const scope = scopeParam === "mine" ? "mine" : scopeParam === "team" ? "team" : "pool";
     // Concurrent, not serial: the score index is a tenant-wide read that does
     // not depend on which sheets the filters select, so it has no reason to
     // wait on fetchSheets().

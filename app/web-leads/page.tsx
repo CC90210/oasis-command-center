@@ -18,26 +18,26 @@ export default async function WebLeadsPage({
     session.ok &&
     session.tenantId === WEBDEV_TENANT_ID &&
     mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin);
-  const teamView =
+  const isManager =
     session.ok &&
     session.tenantId === WEBDEV_TENANT_ID &&
-    !session.isAdmin &&
-    session.teamRole.trim().toLowerCase() === "manager";
+    session.teamRole?.trim().toLowerCase() === "manager";
+  const canSeeTeamAndAssign = session.ok && session.tenantId === WEBDEV_TENANT_ID && (session.isAdmin || isManager);
   // A manager comes here to coach the roster, so land on that small, read-only
   // assigned book by default instead of the 31K shared prospect pool. An
   // explicit view=pool remains available when they intend to claim leads.
-  if (teamView && !rawParams.view) {
+  if (isManager && !rawParams.view) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(rawParams)) {
       if (Array.isArray(value)) value.forEach((item) => params.append(key, item));
       else if (value) params.set(key, value);
     }
-    params.set("view", "mine");
+    params.set("view", "team");
     redirect(`/web-leads?${params.toString()}`);
   }
   return (
     <Suspense fallback={<WebLeadsSkeleton />}>
-      <WebLeadsBrowser canMutate={canMutate} teamView={teamView} />
+      <WebLeadsBrowser canMutate={canMutate} canSeeTeamAndAssign={canSeeTeamAndAssign} />
     </Suspense>
   );
 }
