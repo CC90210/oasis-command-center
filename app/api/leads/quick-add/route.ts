@@ -27,6 +27,8 @@ import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { isWebsiteSalesTenantSlug, OASIS_INTAKE_STAGE } from "@/lib/leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -108,6 +110,19 @@ export async function POST(req: NextRequest) {
     // false merge (data loss).
     const found = await findExistingLead(tenantId, { email, phone });
     if (found) {
+      if (
+        !canMutateGenericLeadForTenant(
+          {
+            teamRole: sess.teamRole,
+            userId: sess.userId,
+            isOwner: sess.isTrueAdmin,
+            adminAccess: sess.adminAccess,
+          },
+          { id: found.id, data: found.data },
+        )
+      ) {
+        return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
+      }
       existing = true;
       leadId = found.id;
       fromStage = typeof found.data.stage === "string" ? found.data.stage : null;
@@ -131,6 +146,11 @@ export async function POST(req: NextRequest) {
           ...(contactName ? { contact_name: contactName } : {}),
           ...(phone ? { phone } : {}),
           ...(email ? { email } : {}),
+          ...(isWebsiteSalesWorkspace &&
+          !sess.isAdmin &&
+          roleMayOperateOasisSalesLead(sess.teamRole)
+            ? { assigned_to: sess.userId }
+            : {}),
           stage,
         },
       });

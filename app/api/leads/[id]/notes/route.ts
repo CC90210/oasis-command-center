@@ -17,7 +17,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLeadTarget } from "@/lib/lead-access";
+import { getAccessibleLeadTarget, getReadableLeadTargetForSession } from "@/lib/lead-access";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { updateRecord, RecordsError } from "@/lib/manifest/data";
 
@@ -51,8 +51,8 @@ export async function GET(
   // Per-agent lock + entity resolve: notes disclose lead context — an agent can't
   // read another agent's notes by guessing the id; the drawer opens for both lead
   // and application records, so resolve the linked lead id (Codex 2026-06-19 MEDIUM).
-  const target = await getAccessibleLeadTarget(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  const target = await getReadableLeadTargetForSession(
+    sess,
     { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {

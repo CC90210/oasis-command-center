@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,6 +32,21 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
   const { id: leadId } = await ctx.params;
+  const writable = await getWritableLead(
+    {
+      teamRole: session.teamRole,
+      userId: session.userId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    },
+    { tenantId: session.tenantId, id: leadId },
+  );
+  if (!writable.ok) {
+    return NextResponse.json(
+      { ok: false, error: writable.reason === "role_denied" ? "forbidden_role" : "not_found" },
+      { status: writable.reason === "role_denied" ? 403 : 404 },
+    );
+  }
 
   let body: { findings_summary?: unknown; risk_flag?: unknown; findings?: unknown } = {};
   try {

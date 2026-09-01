@@ -51,6 +51,8 @@ import { DevicesEditor } from "@/components/settings/DevicesEditor";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
+import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
+import { WorkspaceConnectionsSummary } from "@/components/settings/WorkspaceConnectionsSummary";
 import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
@@ -62,6 +64,15 @@ import { resolveAgentKey } from "@/lib/agents";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { getSessionUser } from "@/lib/supabase-server";
 import type { IntegrationHealth } from "@/lib/supabase";
+import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
+
+type ViewerSettingsAccess = {
+  persona: Persona;
+  canSeePersonalSettings: boolean;
+  canSeeTeamPerformance: boolean;
+  canSeeSystemSurfaces: boolean;
+  degraded: boolean;
+};
 
 /**
  * `previewMode = true` is set by TenantSettings when the operator is
@@ -80,9 +91,11 @@ export async function SettingsContent({
   previewMode = false,
   tenantSlug,
   hideHeader = false,
+  viewerAccess,
 }: {
   previewMode?: boolean;
   tenantSlug?: string;
+  viewerAccess?: ViewerSettingsAccess | null;
   /**
    * When mounted by the catch-all dispatcher under /t/<slug>/settings,
    * the dispatcher already renders its own PageHeader for the page —
@@ -97,12 +110,11 @@ export async function SettingsContent({
   }
 
   const profile = await safe("settings.profile", getActiveProfile(), null);
-  const [integrations, tenant, connectedAiSet, user, bridgeOnline] = await Promise.all([
-    safe("settings.integrations_health", integrationsHealth(profile?.tenant_id || null), []),
-    profile?.tenant_id ? safe("settings.tenant", getTenant(profile.tenant_id), null) : Promise.resolve(null),
-    safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
+  const [tenant, user] = await Promise.all([
+    profile?.tenant_id
+      ? safe("settings.tenant", getTenant(profile.tenant_id), null)
+      : Promise.resolve(null),
     getSessionUser().catch(() => null),
-    safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false),
   ]);
 
   const manifestSlug = tenant ? resolveClientProfileSlug(tenant) : null;
@@ -132,7 +144,36 @@ export async function SettingsContent({
     (teamProfile.is_owner ||
       teamProfile.team_role === "owner" ||
       teamProfile.team_role === "admin" ||
-      teamProfile.admin_access === true);
+      teamProfile.admin_access === true) &&
+    (viewerAccess?.canSeeSystemSurfaces ?? true);
+  const canSeeTeamPerformance = viewerAccess?.canSeeTeamPerformance === true;
+  const oasisSalesWorkspace = isOasisSurfaceTenant(tenant?.slug ?? null);
+
+  // Every authenticated persona owns their profile, password and personal
+  // connections. Non-admins stop here: no credential vault, AI/provider
+  // configuration, device inventory, team mutation, agent roster, cron or
+  // automation data is queried or rendered. Managers receive one additional
+  // read-only, query-scoped OASIS sales scorecard below.
+  if (profile && !canManageTenant) {
+    return (
+      <PersonalSettingsView
+        profile={profile}
+        tenantName={tenant?.name ?? null}
+        tenantId={profile.tenant_id}
+        hideHeader={hideHeader}
+        showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
+        showKixie={enabledAgents.includes("helios")}
+        showTeamPerformance={canSeeTeamPerformance && oasisSalesWorkspace}
+        accessDegraded={viewerAccess?.degraded === true}
+      />
+    );
+  }
+
+  const [integrations, connectedAiSet, bridgeOnline] = await Promise.all([
+    safe("settings.integrations_health", integrationsHealth(profile?.tenant_id || null), []),
+    safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
+    safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false),
+  ]);
   const visibleDefs = visibleIntegrationsForTenant(enabledAgents, { isOperator });
   const visibleServices = new Set(visibleDefs.map((d) => d.service));
   const visibleIntegrations = integrations.filter((h: IntegrationHealth) => visibleServices.has(h.service));
@@ -271,6 +312,10 @@ export async function SettingsContent({
               Gmail row is suppressed for shared-inbox tenants since
               outbound goes through the shared submissions@ identity
               and a personal Gmail OAuth has no effect. */}
+          {profile.tenant_id && (
+            <WorkspaceConnectionsSummary tenantId={profile.tenant_id} />
+          )}
+
           <SafeBoundary label="Personal integrations">
             <PersonalIntegrationsPanel
               showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
@@ -471,6 +516,15 @@ export async function SettingsContent({
               very important feature." Read-only operations view at the
               very bottom — daemons, sequences, employee activity in
               one place. Mutations live on the surfaces it tracks. */}
+          {canSeeTeamPerformance && oasisSalesWorkspace && profile.tenant_id && (
+            <SafeBoundary label="sales-team-performance">
+              <SalesTeamOperationsPanel
+                tenantId={profile.tenant_id}
+                tenantName={tenant?.name ?? null}
+              />
+            </SafeBoundary>
+          )}
+
           <SafeBoundary label="operations-tracker">
             <OperationsTrackerPanel
               tenantId={profile?.tenant_id ?? null}
@@ -478,6 +532,106 @@ export async function SettingsContent({
             />
           </SafeBoundary>
         </>
+      )}
+    </div>
+  );
+}
+
+async function PersonalSettingsView({
+  profile,
+  tenantName,
+  tenantId,
+  hideHeader,
+  showGmail,
+  showKixie,
+  showTeamPerformance,
+  accessDegraded,
+}: {
+  profile: NonNullable<Awaited<ReturnType<typeof getActiveProfile>>>;
+  tenantName: string | null;
+  tenantId: string | null;
+  hideHeader: boolean;
+  showGmail: boolean;
+  showKixie: boolean;
+  showTeamPerformance: boolean;
+  accessDegraded: boolean;
+}) {
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {!hideHeader && (
+        <PageHeader
+          title={tenantName ? `Settings · ${tenantName}` : "Settings"}
+          subtitle={
+            showTeamPerformance
+              ? "Your profile and account connections, plus a read-only scorecard for the OASIS sales team."
+              : "Your profile, password, and account connections. Workspace administration stays with an owner or admin."
+          }
+          action={
+            showTeamPerformance ? (
+              <Tag tone="info">Sales manager view</Tag>
+            ) : (
+              <Tag tone="neutral">Personal settings</Tag>
+            )
+          }
+        />
+      )}
+
+      {accessDegraded && (
+        <Card
+          title="Team access status unavailable"
+          subtitle="OASIS could not verify this workspace right now, so team performance is temporarily hidden instead of showing incomplete or unauthorized data. Refresh to retry."
+          action={<Tag tone="warm">Retry needed</Tag>}
+        >
+          <p className="text-sm text-fg-muted">
+            Your personal profile and connections remain available below. No team-access setting was changed.
+          </p>
+        </Card>
+      )}
+
+      <SettingsSection
+        defaultOpen
+        title="Your profile"
+        subtitle={`Signed in as ${profile.email}. Only your identity and contact information are editable here.`}
+        action={
+          showTeamPerformance ? (
+            <Link href="/settings/audit-log" className="text-xs text-accent hover:text-accent-bright">
+              Sales activity →
+            </Link>
+          ) : null
+        }
+      >
+        <SafeBoundary label="Personal profile editor">
+          <ProfileEditor profile={profile} tenantAgents={[]} personalOnly />
+        </SafeBoundary>
+      </SettingsSection>
+
+      {tenantId && <WorkspaceConnectionsSummary tenantId={tenantId} />}
+
+      <SettingsSection
+        defaultOpen
+        title="Your account"
+        subtitle="Connections in this section belong to your login only; they do not change shared workspace services."
+      >
+        <div className="space-y-3">
+          <SafeBoundary label="Personal integrations">
+            <PersonalIntegrationsPanel showGmail={showGmail} showKixie={showKixie} />
+          </SafeBoundary>
+          <SafeBoundary label="Personal Telegram bot">
+            <TelegramConnectCard />
+          </SafeBoundary>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="Password" subtitle="Change your sign-in password">
+        <SafeBoundary label="Password form">
+          <ChangePasswordForm />
+        </SafeBoundary>
+      </SettingsSection>
+
+      {showTeamPerformance && tenantId && (
+        <SafeBoundary label="sales-team-performance">
+          <SalesTeamOperationsPanel tenantId={tenantId} tenantName={tenantName} />
+        </SafeBoundary>
       )}
     </div>
   );
@@ -551,7 +705,7 @@ async function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string;
         <>
           <Card title="Profile" subtitle={`Signed in as ${profile.email}`}>
             <SafeBoundary label="Profile editor">
-              <ProfileEditor profile={profile} tenantAgents={[]} />
+              <ProfileEditor profile={profile} tenantAgents={[]} personalOnly />
             </SafeBoundary>
           </Card>
           <SafeBoundary label="Personal integrations">

@@ -6,6 +6,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getEnvelopeDetail } from "@/lib/esign/db";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   }
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(sess))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   const res = await getEnvelopeDetail(sess.tenantId, id);
   if (!res.ok) {

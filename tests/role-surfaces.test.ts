@@ -29,7 +29,9 @@ import { join } from "node:path";
 
 import {
   SALES_NAV_ALLOWLIST,
+  canReadOasisSalesTeamPipeline,
   invitableRoleOptionsFor,
+  invitableRoleOptionsForActor,
   roleAllowedForTenant,
   SURFACE_CAPABILITIES,
   capabilitiesFor,
@@ -93,6 +95,11 @@ assert.equal(resolvePersona({ teamRole: " CLOSER " }), "sales", "trim + case-fol
 assert.equal(resolvePersona({ teamRole: "Manager" }), "manager");
 // The escalation toggle outranks a sales title, same as it does every other role.
 assert.equal(resolvePersona({ teamRole: "closer", adminAccess: true }), "founder");
+assert.equal(
+  resolvePersona({ teamRole: "manager", adminAccess: true }),
+  "founder",
+  "the explicit owner-controlled admin toggle keeps its existing full-admin semantics",
+);
 assert.equal(resolvePersona({ teamRole: "manager", isTrueAdmin: true }), "founder");
 
 /* ───── TOTALITY. Every persona has a row, and only two may see money. ────────
@@ -106,6 +113,18 @@ for (const persona of ["founder", "manager", "sales", "marketing", "builder", "w
     Object.keys(SURFACE_CAPABILITIES[persona]).length,
     Object.keys(SURFACE_CAPABILITIES.founder).length,
     `${persona} must declare EVERY capability — a missing key is silently false`,
+  );
+  assert.equal(
+    SURFACE_CAPABILITIES[persona].canSeePersonalSettings,
+    true,
+    `${persona} must be able to manage their own profile and personal connections`,
+  );
+}
+for (const persona of ["sales", "marketing", "builder", "worker", "readonly", "legacy"] as Persona[]) {
+  assert.equal(
+    SURFACE_CAPABILITIES[persona].canSeeTeamPerformance,
+    false,
+    `${persona} must not receive manager/founder team-performance data`,
   );
 }
 for (const persona of ["manager", "sales", "marketing", "builder", "worker", "readonly"] as Persona[]) {
@@ -138,6 +157,8 @@ for (const slug of [OASIS, SUNBIZ, null]) {
   assert.equal(rep.canSeeInboundTape, false, `rep sees no company mailbox on ${slug}`);
   assert.equal(rep.canSeeMarketing, false, `rep sees no founders portal on ${slug}`);
   assert.equal(rep.canSeeSystemSurfaces, false, `rep reaches no system page on ${slug}`);
+  assert.equal(rep.canSeePersonalSettings, true, "every profile can manage its own connections");
+  assert.equal(rep.canSeeTeamPerformance, false, "a rep cannot read team performance");
   assert.equal(rep.canSeeDeliveryQueues, false, `rep sees no delivery board on ${slug}`);
   // What a rep DOES get.
   assert.equal(rep.canSeeOwnPipelineOnly, true);
@@ -168,7 +189,31 @@ assert.equal(mgr.canSeeCompanyFinancials, false, "a manager is a contractor, not
 assert.equal(mgr.canSeeInboundTape, false, "the company mailbox is not a management tool");
 assert.equal(mgr.canSeeMarketing, false, "the founders portal stays founders-only");
 assert.equal(mgr.canSeeSystemSurfaces, false, "/operations and /health are machinery, not management");
+assert.equal(mgr.canSeePersonalSettings, true);
+assert.equal(mgr.canSeeTeamPerformance, true);
 assert.equal(mgr.canAct, true);
+const managerWithAdminToggle = capabilitiesFor(
+  resolvePersona({ teamRole: "manager", adminAccess: true }),
+  OASIS,
+);
+assert.equal(
+  managerWithAdminToggle.canSeeSystemSurfaces,
+  true,
+  "manager/on deliberately retains the owner-controlled full-admin toggle",
+);
+assert.equal(capabilitiesFor("manager", SUNBIZ).canSeeTeamPerformance, false);
+assert.equal(
+  canReadOasisSalesTeamPipeline({ teamRole: "manager", tenantSlug: OASIS }),
+  true,
+);
+for (const denied of [
+  { teamRole: "manager", tenantSlug: SUNBIZ },
+  { teamRole: "closer", tenantSlug: OASIS },
+  { teamRole: "admin", tenantSlug: OASIS },
+  { teamRole: "manager", tenantSlug: null },
+]) {
+  assert.equal(canReadOasisSalesTeamPipeline(denied), false);
+}
 // A rep must not gain team scope by accident — this is the flag that separates them.
 assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamPipeline, false);
 assert.equal(capabilitiesFor("sales", OASIS).canSeeTeamCommission, false);
@@ -228,12 +273,12 @@ const FULL_NAV = [
 const repNav = filterNavForPersona(FULL_NAV, "sales");
 assert.deepEqual(
   repNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/playbook"],
-  "a rep's sidebar is Today, Schedule, Pipeline, Playbook — and nothing else",
+  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
+  "a rep gets work surfaces plus safe personal Settings",
 );
 // REMOVED, not disabled. Greying a tab is not removing it, and a disabled row
 // still advertises the surface exists.
-assert.equal(repNav.length, 4);
+assert.equal(repNav.length, 5);
 assert.equal(
   repNav.some((n) => "enabled" in n),
   false,
@@ -251,26 +296,25 @@ for (const persona of ["founder", "worker", "readonly", "legacy"] as Persona[]) 
 }
 
 /* ───── the manager's sidebar ────────────────────────────────────────────────
- * The rep's rows plus the leads board they coach from. Deliberately NOT
- * Analytics / Settings yet: requireSystemSurface 404s those for any persona
- * whose canSeeSystemSurfaces is false, and a visible row over a 404 is a broken
- * product. The rows land with the manager-scoped pages behind them. */
+ * The rep's rows plus read-only team performance inside safe Settings.
+ * Generic /leads is absent: it cannot express the manager's assigned-rep-only
+ * boundary, so /pipeline is the canonical coaching surface. */
 const mgrNav = filterNavForPersona(FULL_NAV, "manager");
 assert.deepEqual(
   mgrNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/leads", "/playbook"],
-  "a manager's sidebar is Today, Schedule, Pipeline, Leads, Playbook",
+  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
+  "a manager gets the roster-scoped pipeline and safe Settings",
 );
 assert.equal(
   personaMayVisit("manager", "/analytics"),
   false,
   "a manager must not be offered a page that would 404 on them",
 );
-assert.equal(personaMayVisit("manager", "/settings"), false);
+assert.equal(personaMayVisit("manager", "/settings"), true);
 assert.equal(personaMayVisit("manager", "/operations"), false);
 assert.equal(personaMayVisit("manager", "/founders/marketing"), false);
-assert.equal(personaMayVisit("manager", "/leads"), true, "the leads board is the manager's coaching surface");
-assert.equal(personaMayVisit("manager", "/leads/abc-123"), true, "and they can open one");
+assert.equal(personaMayVisit("manager", "/leads"), false, "generic leads cannot express manager scope");
+assert.equal(personaMayVisit("manager", "/leads/abc-123"), false);
 assert.equal(
   personaMayVisit("sales", "/leads"),
   false,
@@ -302,6 +346,21 @@ for (const unknown of [null, undefined, ""]) {
     "an unknown workspace must not be able to mint a sales role",
   );
 }
+assert.equal(
+  invitableRoleOptionsForActor(OASIS, false).some((option) => option.value === "admin"),
+  false,
+  "a temporary admin grant must not be offered a permanent Administrator invite",
+);
+assert.equal(
+  invitableRoleOptionsForActor(OASIS, true).some((option) => option.value === "admin"),
+  true,
+  "a permanent admin keeps the Administrator option",
+);
+assert.equal(
+  invitableRoleOptionsForActor(OASIS, false).some((option) => option.value === "agent"),
+  false,
+  "legacy Agent is never offered by either invite surface",
+);
 // owner is never invitable anywhere, by any path.
 for (const slug of [OASIS, SUNBIZ, null]) {
   assert.equal(roleAllowedForTenant("owner", slug), false, "owner is never invitable");
@@ -326,7 +385,7 @@ assert.equal(personaMayVisit("sales", "/playbooks-internal"), false, "a shared p
 assert.equal(personaMayVisit("sales", "/analytics"), false);
 assert.equal(personaMayVisit("sales", "/founders/marketing"), false);
 assert.equal(personaMayVisit("sales", "/"), true);
-assert.equal(personaMayVisit("sales", "/settings"), false);
+assert.equal(personaMayVisit("sales", "/settings"), true);
 assert.ok(SALES_NAV_ALLOWLIST.includes("/"), "Today is on the allowlist");
 
 /* ───────── 4. the sales render path never ASKS for company financials ────── */
@@ -405,7 +464,11 @@ assert.equal(
   false,
   "and does so WITHOUT company revenue — that pairing is the whole reason the role exists",
 );
-assert.equal(capabilitiesFor("marketing", OASIS).canSeeAllPipeline, false, "marketing does not work leads");
+assert.equal(
+  capabilitiesFor("marketing", OASIS).canSeeAllPipeline,
+  false,
+  "marketing works only its assigned book, never the tenant-wide pipeline",
+);
 assert.equal(capabilitiesFor("marketing", OASIS).canSeeCommissionLedger, false);
 assert.equal(capabilitiesFor("marketing", OASIS).canSeeInboundTape, false);
 assert.equal(
@@ -436,14 +499,13 @@ assert.equal(
 );
 assert.deepEqual(
   filterNavForPersona(FULL_NAV, "marketing").map((n) => n.href),
-  ["/", "/schedule", "/playbook", "/founders/marketing"],
-  "marketing nav: Today, their week, the playbook, the studio — no pipeline, no leads",
+  ["/", "/schedule", "/pipeline", "/playbook", "/settings", "/founders/marketing"],
+  "marketing nav includes the rep's own pipeline without exposing the tenant-wide book",
 );
 assert.equal(
   personaMayVisit("marketing", "/pipeline"),
-  false,
-  "marketing must not be offered the pipeline — putting the book in front of them is the " +
-    "client-data exposure this role exists to avoid",
+  true,
+  "marketing can work leads assigned to them; the API still enforces exact self scope",
 );
 assert.equal(personaMayVisit("marketing", "/leads"), false);
 assert.equal(personaMayVisit("marketing", "/analytics"), false, "system surfaces stay closed");
@@ -475,13 +537,11 @@ const pipelineCode = stripComments(pipelinePage);
  * were ever applied to the raw rows instead, it would become a way to look
  * sideways at a colleague's book. */
 assert.ok(
-  /assigneeScope = resolveOasisPipelineAssigneeScope\(\{[\s\S]*?isAdmin: pipelineAdmin,[\s\S]*?userId: session\.ok \? session\.userId : null,[\s\S]*?repFilter,/.test(pipelineCode) &&
-    /listOasisPipelineWindow\(\{[\s\S]*?stageKeys: assigneeScope\.allowed \? stages\.map[\s\S]*?assignedTo: assigneeScope\.allowed \? assigneeScope\.assignedTo : undefined,/.test(pipelineCode),
-  "THE SCOPING CHAIN. scopedRows is what filterWebsiteSalesRows already reduced to this " +
-    "viewer; workingRows drops the researched pool from THAT; the rep chips filter THAT. " +
-    "Every link must narrow the previous one — if any step reached back to namedRows or " +
-    "allRows, ?rep=<other> would quietly become a way to read a colleague pipeline and the " +
-    "page would look identical.",
+  /managerTeamRead =\s*session\.ok &&\s*canReadOasisSalesTeamPipeline/.test(pipelineCode) &&
+    /teamRepUserIds: \[\.\.\.managerRepRoster\.keys\(\)\]/.test(pipelineCode) &&
+    /assignedToAny: assigneeScope\.allowed \? assigneeScope\.assignedToAny : undefined/.test(pipelineCode),
+  "manager pipeline reads must pass through the OASIS tenant gate, the sales-role roster, " +
+    "and the database query scope; a forged ?rep must never select an arbitrary tenant id",
 );
 assert.ok(
   /repRoster\.size > 0 &&/.test(pipelineCode),
@@ -490,9 +550,8 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /session\.ok && pipelineAdmin \? await buildMemberNameMap/.test(pipelineCode),
-  "the roster behind the chips is built for admins only: a rep does not need a list of " +
-    "colleagues whose boards they cannot open",
+  /pipelineAdmin\s*\?\s*await buildMemberNameMap\(tenantId\)\s*:\s*managerRepRoster/.test(pipelineCode),
+  "admins get the full member filter while managers get only the sales-rep roster",
 );
 
 /* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
@@ -568,7 +627,7 @@ assert.equal(
 );
 assert.equal(personaMayVisit("builder", "/automations"), false, "never the automation controls");
 assert.equal(personaMayVisit("builder", "/operations"), false, "never the internal ops surface");
-assert.equal(personaMayVisit("builder", "/settings"), false);
+assert.equal(personaMayVisit("builder", "/settings"), true);
 assert.equal(personaMayVisit("builder", "/founders/marketing"), true);
 assert.ok(
   /viewerUserId=\{surface\.userId\}/.test(dispatcherCode),
@@ -632,6 +691,8 @@ for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
 
 const managerToday = read("components/today/ManagerToday.tsx");
 const managerCode = stripComments(managerToday);
+const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
+const teamPolicy = stripComments(read("lib/team.ts"));
 
 assert.ok(
   /surface\.persona === "manager"/.test(dispatcherCode),
@@ -649,9 +710,20 @@ for (const reader of FINANCIAL_READERS) {
   );
 }
 assert.ok(
-  managerCode.includes('.eq("manager_user_id"'),
-  "the manager's roster must be scoped in the QUERY by manager_user_id — a filter applied after fetching " +
-    "still ships every profile in the RSC payload",
+  managerCode.includes("getOasisSalesRepRoster(tenantId)") &&
+    salesPerformance.includes("getOasisSalesRepRoster(tenantId)"),
+  "ManagerToday must use the canonical OASIS sales roster",
+);
+assert.ok(
+  teamPolicy.includes('.eq("tenant_id", tenantId)') &&
+    teamPolicy.includes("canonicalizeTenantMembers((data || []) as MemberRow[]).filter") &&
+    teamPolicy.includes("isOasisPipelineRepRole(member.team_role)"),
+  "the canonical roster must canonicalize the full tenant before applying the sales-role allowlist",
+);
+assert.equal(
+  teamPolicy.includes('.in("team_role", [...OASIS_PIPELINE_REP_ROLES])'),
+  false,
+  "a query-level role filter can retain a stale sales duplicate after hiding its owner/admin row",
 );
 assert.ok(
   managerCode.includes('.in("rep_user_id"'),
@@ -769,7 +841,6 @@ const GATED_PAGES = [
   "app/operations/page.tsx",
   "app/automations/page.tsx",
   "app/health/page.tsx",
-  "app/settings/page.tsx",
   "app/agents/page.tsx",
 ];
 for (const page of GATED_PAGES) {
@@ -783,6 +854,19 @@ for (const page of GATED_PAGES) {
     `${page} must AWAIT the gate; a floating promise gates nothing`,
   );
 }
+
+const settingsPage = read("app/settings/page.tsx");
+assert.ok(
+  settingsPage.includes("resolveViewerSurface") &&
+    settingsPage.includes("surface.capabilities.canSeePersonalSettings") &&
+    /if \(!surface\.ok \|\| !surface\.capabilities\.canSeePersonalSettings\) notFound\(\)/.test(settingsPage),
+  "Settings must carry its own personal-settings server gate now that every profile can reach it",
+);
+assert.ok(
+  settingsPage.includes("canSeeTeamPerformance: surface.capabilities.canSeeTeamPerformance") &&
+    settingsPage.includes("canSeeSystemSurfaces: surface.capabilities.canSeeSystemSurfaces"),
+  "Settings must pass narrow capabilities downstream instead of treating reachability as admin access",
+);
 
 // The founders portal: tenant identity is necessary and no longer sufficient,
 // because reps share OASIS's own workspace.

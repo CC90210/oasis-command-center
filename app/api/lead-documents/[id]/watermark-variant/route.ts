@@ -16,8 +16,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { setLeadDocumentVariant } from "@/lib/lead-documents";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -74,23 +74,37 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
-  // Per-agent scope (confused-deputy): authorize the parent lead/application
-  // before mutating; deny with 404 so a foreign UUID can't confirm existence.
-  if (leadScopingEnabled() && doc.lead_id) {
+  // This is a WRITE even though the bytes are unchanged. OASIS managers may
+  // preview another rep's document for coaching, but only the assigned/
+  // collaborating rep (or admin) may switch the active clean/WM variant.
+  if (!doc.lead_id && !sess.isAdmin) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  if (doc.lead_id) {
     const parent = await db
       .from("tenant_records")
-      .select("data, entity_type")
+      .select("entity_type")
       .eq("tenant_id", tenantId)
       .eq("id", doc.lead_id)
       .maybeSingle();
-    const prow = parent.data as
-      | { data?: Record<string, unknown> | null; entity_type?: string | null }
-      | null;
-    if (
-      prow &&
-      (prow.entity_type === "lead" || prow.entity_type === "application") &&
-      !canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, prow.data || {}, true)
-    ) {
+    const parentEntity = (parent.data as { entity_type?: unknown } | null)?.entity_type;
+    if (parentEntity !== "lead" && parentEntity !== "application") {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const access = await getWritableLead(
+      {
+        teamRole: sess.teamRole,
+        userId: sess.userId,
+        isOwner: sess.isTrueAdmin,
+        adminAccess: sess.adminAccess,
+      },
+      {
+        tenantId,
+        entity: parentEntity,
+        id: doc.lead_id,
+      },
+    );
+    if (!access.ok) {
       return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
     }
   }

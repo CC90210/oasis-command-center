@@ -79,6 +79,13 @@ export type ListRecordsInput = {
   offset?: number;
   /** Equality filters on top-level data keys. Values are coerced to strings. */
   where?: Record<string, string | number | boolean | null>;
+  /**
+   * Inclusive filters on top-level data keys. Field names are validated and
+   * values are passed to PostgREST's parameterized `.in()` builder. An empty
+   * list is rejected instead of being treated as "no filter", because callers
+   * use this for authorization-scoped rosters.
+   */
+  whereIn?: Record<string, readonly string[]>;
   /** Top-level data keys where both a missing/null value and "" mean empty. */
   whereEmpty?: readonly string[];
   /**
@@ -96,6 +103,32 @@ export type ListRecordsResult = {
 
 const DATA_FIELD_RE = /^[a-z][a-z0-9_]{0,62}$/;
 const MAX_RECORD_SEARCH_CHARS = 160;
+const MAX_RECORD_IN_VALUES = 500;
+
+export function normalizeRecordWhereIn(
+  whereIn: ListRecordsInput["whereIn"],
+): ReadonlyArray<readonly [string, readonly string[]]> {
+  if (!whereIn) return [];
+  return Object.entries(whereIn).map(([field, rawValues]) => {
+    if (!DATA_FIELD_RE.test(field)) {
+      throw new RecordsError("validation", `invalid in-filter field "${field}"`);
+    }
+    if (!Array.isArray(rawValues) || rawValues.length === 0) {
+      throw new RecordsError("validation", `in-filter "${field}" requires at least one value`);
+    }
+    const values = [...new Set(rawValues.map((value) => String(value).trim()))];
+    if (values.some((value) => value.length === 0)) {
+      throw new RecordsError("validation", `in-filter "${field}" contains an empty value`);
+    }
+    if (values.length > MAX_RECORD_IN_VALUES) {
+      throw new RecordsError(
+        "validation",
+        `in-filter "${field}" exceeds ${MAX_RECORD_IN_VALUES} values`,
+      );
+    }
+    return [field, values] as const;
+  });
+}
 
 /**
  * Build a PostgREST `.or()` clause for JSONB top-level ILIKE filters.
@@ -155,6 +188,10 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
         q = q.eq(`data->>${k}`, String(v));
       }
     }
+  }
+
+  for (const [field, values] of normalizeRecordWhereIn(input.whereIn)) {
+    q = q.in(`data->>${field}`, [...values]);
   }
 
   if (input.whereEmpty) {

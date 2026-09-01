@@ -12,10 +12,14 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getRecord, listRecords } from "@/lib/manifest/data";
+import { listRecords } from "@/lib/manifest/data";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
+import {
+  getReadableLeadRecordForSession,
+  getReadableLeadTargetForSession,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,17 +47,19 @@ export async function GET(
   const url = new URL(req.url);
   const entity = url.searchParams.get("entity") === "application" ? "application" : "lead";
 
-  const record = await getRecord({ tenant_id: tenantId, entity, id }).catch(() => null);
-  if (!record) {
+  // Exact tenant-aware read boundary. OASIS never inherits the environment's
+  // broad filter-mode semantics: reps get own/collaborating records and a
+  // manager additionally gets canonical-roster coaching reads.
+  const readPolicy = await resolveLeadReadPolicy(sess);
+  const primary = await getReadableLeadRecordForSession(sess, {
+    tenantId,
+    id,
+    entityParam: entity,
+  }, readPolicy);
+  if (!primary) {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-
-  // Per-agent lock: an agent must not read another agent's lead/application by
-  // hitting this endpoint directly. Admins pass; agents only their own. Return
-  // not_found (not 403) so the endpoint doesn't confirm the record exists.
-  if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, record.data as Record<string, unknown>, leadScopingEnabled())) {
-    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-  }
+  const record = primary.record;
 
   // Documents — `lead_documents` row store is keyed by lead_id even when
   // the drawer is opened against an application; the application's
@@ -113,14 +119,14 @@ export async function GET(
   // already authorized the record itself above. (Codex audit 2026-06-22.)
   let linkedApplication: { id: string; data: Record<string, unknown> } | null = null;
   const linkedAppRow = apps.rows[0];
-  if (
-    linkedAppRow &&
-    canViewLead(
-      { isAdmin: sess.isAdmin, userId: sess.userId },
-      linkedAppRow.data as Record<string, unknown>,
-      leadScopingEnabled(),
-    )
-  ) {
+  const linkedAppTarget = linkedAppRow
+      ? await getReadableLeadTargetForSession(sess, {
+        tenantId,
+        id: linkedAppRow.id,
+        entityParam: "application",
+      }, readPolicy)
+    : null;
+  if (linkedAppRow && linkedAppTarget) {
     linkedApplication = {
       id: linkedAppRow.id,
       data: withAssignedName(linkedAppRow.data as Record<string, unknown>, nameMap),

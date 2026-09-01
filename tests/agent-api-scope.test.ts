@@ -41,6 +41,7 @@ import { OASIS_SALES_ROLE_OPTIONS, TENANT_WIDE_ROLES, SELF_SCOPED_ROLES } from "
 
 const ROUTE = "app/api/manifest/[slug]/records/[entity]/route.ts";
 const src = readFileSync(ROUTE, "utf8");
+const catchAll = readFileSync("app/t/[slug]/[...path]/page.tsx", "utf8");
 
 // The guard function exists with the same signature. Still a source match:
 // it is module-private to the route and cannot be imported.
@@ -66,7 +67,7 @@ assert.match(
 // ── The behavioural half: WHO is confined. ──────────────────────────────────
 // `agent` is legacy but is the role every current rep carries, so dropping it
 // would unscope everyone working today.
-for (const role of ["agent", "opener", "closer", "builder"]) {
+for (const role of ["agent", "manager", "opener", "closer", "builder"]) {
   assert.equal(
     mustSeeOwnRecordsOnly(role),
     true,
@@ -76,7 +77,7 @@ for (const role of ["agent", "opener", "closer", "builder"]) {
 // Roles that legitimately see the tenant must NOT be swept in. Confining every
 // non-admin would empty SunBiz's established boards, which is exactly what the
 // staging flag was protecting against.
-for (const role of ["owner", "admin", "manager", "read_only", "member", "loan_officer", "processor"]) {
+for (const role of ["owner", "admin", "read_only", "member", "loan_officer", "processor"]) {
   assert.equal(
     mustSeeOwnRecordsOnly(role),
     false,
@@ -103,7 +104,22 @@ assert.equal(mustSeeOwnRecordsOnly("ADMIN"), false, "matching must trim and lowe
 // The narrower membership helper is still correct for its own question, and is
 // still used where "is this a known sales seat" is what is being asked.
 assert.equal(isSelfScopedRole("opener"), true);
+assert.equal(isSelfScopedRole("manager"), true);
 assert.equal(isSelfScopedRole("some_new_role"), false);
+
+assert.ok(
+  catchAll.includes("const oasisDirectRole") &&
+    catchAll.includes("const isOasisLeadSurface") &&
+    catchAll.includes('"manager",') &&
+    catchAll.includes('"closer",') &&
+    catchAll.includes('"opener",') &&
+    catchAll.includes('"builder",') &&
+    catchAll.includes('"marketing",') &&
+    catchAll.includes('"agent"') &&
+    catchAll.includes("redirect(`/pipeline/${recordDetailId}`)") &&
+    catchAll.includes("redirect(`/pipeline${target.size"),
+  "generic OASIS job-role lead URLs must redirect to the exact-scope canonical pipeline",
+);
 
 // ── The drift guard, and the reason this file is worth keeping. ─────────────
 // The 2026-08-21 change added job titles to the invite menu and did not carry

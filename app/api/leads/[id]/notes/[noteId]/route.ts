@@ -3,6 +3,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getAccessibleLeadTarget } from "@/lib/lead-access";
 import { canWriteCrm } from "@/lib/role-gates";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,6 +31,26 @@ async function resolveMutation(
     { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {
+    return { response: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId: target.queryLeadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    if (access.status === 503) {
+      return {
+        response: NextResponse.json(
+          { ok: false, error: access.error, message: access.message },
+          { status: access.status },
+        ),
+      };
+    }
     return { response: NextResponse.json({ ok: false, error: "not_found" }, { status: 404 }) };
   }
   return { noteId, sess, target };

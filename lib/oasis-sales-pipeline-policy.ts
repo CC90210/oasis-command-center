@@ -31,6 +31,16 @@ export const CLOSER_PIPELINE_STAGE_KEYS = [
   "onboarding",
 ] as const;
 
+/**
+ * The manager coaches every assigned lead after it leaves the prospect pool.
+ * `researched` is deliberately absent: those are unworked directory prospects,
+ * not an assigned rep's pipeline. Assignment is enforced separately by the
+ * tenant sales-roster query, so lost and delivery history are safe to retain.
+ */
+export const MANAGER_PIPELINE_STAGE_KEYS: readonly string[] = OASIS_LEAD_STAGES
+  .map((stage) => stage.key)
+  .filter((stage) => stage !== "researched");
+
 export const BUILDER_DELIVERY_STAGE_KEYS = [
   "onboarding",
   "in_build",
@@ -44,6 +54,7 @@ export const BUILDER_VISIBLE_STAGE_KEYS = [
 const AGENT_STAGE_SET = new Set<string>(AGENT_PIPELINE_STAGE_KEYS);
 const OPENER_STAGE_SET = new Set<string>(OPENER_PIPELINE_STAGE_KEYS);
 const CLOSER_STAGE_SET = new Set<string>(CLOSER_PIPELINE_STAGE_KEYS);
+const MANAGER_STAGE_SET = new Set<string>(MANAGER_PIPELINE_STAGE_KEYS);
 const BUILDER_DELIVERY_STAGE_SET = new Set<string>(BUILDER_DELIVERY_STAGE_KEYS);
 // CC, 2026-08-25: the builder/marketing hire sells too, so his board carries
 // BOTH jobs — the nine sales stages his claimed deals travel, plus the four
@@ -60,7 +71,9 @@ function stageSetForOasisRole(role: string): ReadonlySet<string> {
   if (normalized === "opener") return OPENER_STAGE_SET;
   if (normalized === "closer") return CLOSER_STAGE_SET;
   if (normalized === "builder") return BUILDER_SALES_AND_DELIVERY_STAGE_SET;
-  if (normalized === "agent" || normalized === "manager") return AGENT_STAGE_SET;
+  if (normalized === "marketing") return AGENT_STAGE_SET;
+  if (normalized === "manager") return MANAGER_STAGE_SET;
+  if (normalized === "agent") return AGENT_STAGE_SET;
   return EMPTY_STAGE_SET;
 }
 
@@ -72,12 +85,11 @@ function stageSetForOasisRole(role: string): ReadonlySet<string> {
  *                    Keeping separate stage sets prevents a closer's deal
  *                    disappearing immediately after the demo.
  *
- *   manager          deliberately UNDER-permissive for now. A manager should see
- *                    their TEAM's book, which is a third scope this function
- *                    cannot express — `true` here would hand them the entire
- *                    tenant including CC's own leads, which is worse than
- *                    showing them too little. They see their own until the
- *                    team-scope read lands with the manager pages.
+ *   manager          receives a separate roster-scoped READ through
+ *                    canOpenOasisSalesRecord and oasis-pipeline-query. Keeping
+ *                    them false here is load-bearing: `true` would hand them
+ *                    unassigned, founder and system rows too. Cross-rep writes
+ *                    remain forbidden unless admin_access is explicitly on.
  *
  *   builder          was delivery-only; CC, 2026-08-25 widened him to his OWN
  *                    book at the full sales stage set (plus his delivery
@@ -86,10 +98,17 @@ function stageSetForOasisRole(role: string): ReadonlySet<string> {
  *                    is ownership-scoped rows only.
  *
  * Do not "fix" a role into this list to make a screen populate. Widening here
- * widens `filterWebsiteSalesRows` to every program row in the tenant.
+ * turns that role into a whole-tenant pipeline administrator.
  */
 export function isOasisPipelineAdmin(role: string, isOwner = false, adminAccess = false): boolean {
-  return isOwner || role === "owner" || role === "admin" || role === "member" || adminAccess;
+  const normalized = role.trim().toLowerCase();
+  return (
+    isOwner ||
+    normalized === "owner" ||
+    normalized === "admin" ||
+    normalized === "member" ||
+    adminAccess
+  );
 }
 
 export function stagesForOasisRole(role: string, isOwner = false, adminAccess = false): StageMeta[] {
@@ -100,7 +119,14 @@ export function stagesForOasisRole(role: string, isOwner = false, adminAccess = 
 
 type PipelineRow = { id: string; data: Record<string, unknown> };
 
-type OasisViewer = { role: string; userId: string | null; isOwner?: boolean; adminAccess?: boolean };
+type OasisViewer = {
+  role: string;
+  userId: string | null;
+  isOwner?: boolean;
+  adminAccess?: boolean;
+  /** Tenant-scoped rep ids resolved server-side for a manager READ. */
+  readableRepUserIds?: readonly string[];
+};
 
 export type OasisDeliveryQueueScope =
   | { mode: "all" }
@@ -212,6 +238,23 @@ export function roleMayOperateOasisSalesLead(teamRole: string | null | undefined
  */
 export function canOpenOasisSalesRecord(row: PipelineRow, viewer: OasisViewer): boolean {
   if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return true;
+  if (viewer.role.trim().toLowerCase() === "manager") {
+    // A manager's ordinary owned/collaborating lead remains fully theirs after
+    // a handoff. The roster is an ADDITIVE coaching read, not a replacement
+    // for the normal assignment/collaborator contract.
+    if (ownsOasisSalesRecord(row, viewer.userId)) return true;
+    const assignedTo =
+      typeof row.data.assigned_to === "string"
+        ? row.data.assigned_to.trim().toLowerCase()
+        : "";
+    if (!assignedTo) return false;
+    const roster = new Set(
+      (viewer.readableRepUserIds || [])
+        .map((id) => id.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    return roster.has(assignedTo);
+  }
   if (viewer.role.trim().toLowerCase() === "builder") {
     // Read must never sit BELOW write. Since 2026-08-25 a builder may mutate
     // rows he is a named collaborator on (ownsOasisSalesRecord), so the read
@@ -424,14 +467,16 @@ export function rejectedOasisGenericPatchKeys(patch: Record<string, unknown>): s
  * says exactly what it is. So the check is ownership AND a role floor.
  *
  * Allowlist, and `owner`/`admin` are absent because they never reach this
- * branch — they are already admins upstream. Marketing is absent too: it is
- * declared "never the sales pipeline" in lib/team-roles.ts.
+ * branch — they are already admins upstream. Marketing is included under
+ * CC's 2026-08-26 own-lead/cross-role-transfer directive; callers still prove
+ * ownership before this role gate is consulted.
  */
 export const SELF_EDIT_LEAD_ROLES = new Set<string>([
   "manager",
   "closer",
   "opener",
   "builder",
+  "marketing",
   "agent",
   "member",
   "loan_officer",

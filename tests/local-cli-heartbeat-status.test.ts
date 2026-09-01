@@ -76,6 +76,11 @@ assert.ok(
   localCliCard.includes("setLocalActionsAvailable(!isProxyModeRuntime())"),
   "interactive CLI mutations must only be enabled on the loopback dashboard",
 );
+assert.deepEqual(
+  normalizeCliSnapshot(metadata, "2026-08-25T16:31:00.000Z", NOW),
+  { ok: false, reason: "stale" },
+  "a future-dated heartbeat is not current installation proof",
+);
 
 const route = readFileSync(
   join(ROOT, "app", "api", "bridge", "cli-status", "route.ts"),

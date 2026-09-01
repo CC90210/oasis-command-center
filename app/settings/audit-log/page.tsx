@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
-import { canManageTeam, type TeamRole } from "@/lib/team";
 import { getActivityFeed } from "@/lib/audit/activity-feed";
 import { getActiveProfile, getTenant } from "@/lib/queries";
+import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,26 +30,39 @@ export default async function AuditLogPage({
   // tenant's activity despite every downstream query having an eq(tenant_id).
   const profile = await getActiveProfile();
   if (!profile?.tenant_id) redirect("/login?next=/settings/audit-log");
-  const accessProfile = profile as typeof profile & {
-    is_owner?: boolean | null;
-    team_role?: TeamRole | null;
-    admin_access?: boolean | null;
-  };
-  if (
-    !(
-      accessProfile.is_owner ||
-      canManageTeam(accessProfile.team_role || "member", accessProfile.admin_access === true)
-    )
-  ) {
-    redirect("/settings");
-  }
+  const surface = await resolveViewerSurface();
+  if (!surface.ok || !surface.capabilities.canSeeTeamPerformance) redirect("/settings");
+  const salesTeamScope = !surface.capabilities.canSeeSystemSurfaces;
 
   const params = (await searchParams) || {};
   const actorFilter = typeof params.actor === "string" ? params.actor.trim() : "";
-  const [{ rows, actors, errors }, tenant] = await Promise.all([
-    getActivityFeed(profile.tenant_id, { actor: actorFilter, limit: 200 }),
+  let salesRosterError: string | null = null;
+  const salesRoster = salesTeamScope
+    ? await getOasisSalesRepRoster(profile.tenant_id).catch((error) => {
+        console.error("[settings.audit-log.sales-roster]", error);
+        salesRosterError = "sales_roster_unavailable";
+        return [];
+      })
+    : [];
+  const [feed, tenant] = await Promise.all([
+    salesRosterError
+      ? Promise.resolve({ rows: [], actors: [], errors: [salesRosterError] })
+      : getActivityFeed(profile.tenant_id, {
+          actor: actorFilter,
+          limit: 200,
+          ...(salesTeamScope
+            ? {
+                scope: "sales_team" as const,
+                members: salesRoster,
+                salesActorUserIds: salesRoster
+                  .map((member) => member.auth_user_id || "")
+                  .filter(Boolean),
+              }
+            : {}),
+        }),
     getTenant(profile.tenant_id).catch(() => null),
   ]);
+  const { rows, actors, errors } = feed;
   const selectedActor = actors.find(
     (candidate) =>
       candidate.key === actorFilter ||
@@ -75,7 +89,11 @@ export default async function AuditLogPage({
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Activity Log"
-        subtitle={`Read-only trail for ${workspaceLabel}${rosterSummary ? ` across ${rosterSummary}` : ""}: calls, messages, automations, stage changes, chats, and team changes.`}
+        subtitle={
+          salesTeamScope
+            ? `Read-only OASIS sales activity for ${workspaceLabel}${rosterSummary ? ` across ${rosterSummary}` : ""}. Internal agents, automations, chats, crons, secrets, and admin changes are excluded.`
+            : `Read-only trail for ${workspaceLabel}${rosterSummary ? ` across ${rosterSummary}` : ""}: calls, messages, automations, stage changes, chats, and team changes.`
+        }
         action={
           <Link href="/settings" className="btn-secondary text-xs">
             Back to settings
@@ -85,8 +103,12 @@ export default async function AuditLogPage({
 
       <Card
         title="Recent activity"
-        subtitle="Latest 200 actions for this workspace. Filter by a current team member or enabled agent."
-        action={<Tag tone="engaged">Admin only</Tag>}
+        subtitle={
+          salesTeamScope
+            ? "Latest 200 rep-attributed lead actions. Filter by a current OASIS sales rep."
+            : "Latest 200 actions for this workspace. Filter by a current team member or enabled agent."
+        }
+        action={<Tag tone={salesTeamScope ? "info" : "engaged"}>{salesTeamScope ? "Sales team only" : "Admin only"}</Tag>}
       >
         <div className="space-y-4">
           <div className="flex flex-wrap gap-2">

@@ -69,13 +69,14 @@ assert(
   "lead websites are protocol-allowlisted and assigned closers get the full guided workflow",
 );
 assert(
-  actionToolbar.includes("Schedule founder audit") &&
+  lifecycle.includes("Host & time") &&
+    lifecycle.includes("Book meeting & send invite") &&
     actionToolbar.includes("Call now") &&
     actionToolbar.includes("/api/leads/${leadId}/call") &&
     !actionToolbar.includes("Send check-in") &&
     !actionToolbar.includes("Pause auto follow-ups") &&
     !actionToolbar.includes("AI tools"),
-  "the OASIS action surface is calendar-first and contains none of the retired AI/email/drip controls",
+  "the single next-step surface keeps calling and guided booking without retired AI/email/drip controls",
 );
 assert(
   detail.includes('href="#lead-lifecycle-control"') && lifecycle.includes('id="lead-lifecycle-control"'),
@@ -163,7 +164,8 @@ assert(
     lifecycle.includes("handoffComplete") &&
     !lifecycle.includes("calendarConfirmed") &&
     !lifecycle.includes("googleCalendarAuditUrl") &&
-    lifecycle.includes("schedulingAlsoQualifies") &&
+    lifecycle.includes('mayScheduleFounderAudit = currentStage === "qualified"') &&
+    lifecycle.includes("bookingStep") &&
     lifecycle.includes("qualification: {") &&
     !lifecycle.includes("BOOKING_URL") &&
     workflowRoute.includes("mayAgentBookFounder(currentStage, qualificationIncluded)") &&

@@ -3,12 +3,16 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { nextRenewalDate, estCommissionUsd, isTermUnit, type TermUnit } from "@/lib/renewals/derive";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(session))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
   const { id } = await params;
   const db = getServiceSupabase();
   const deal = await db.from("funded_deals").select("*").eq("tenant_id", session.tenantId).eq("id", id).maybeSingle();
@@ -25,7 +29,7 @@ export async function GET(_: NextRequest, { params }: { params: Promise<{ id: st
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canWriteCrm(session.teamRole)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!canWriteCrm(session.teamRole) || !(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   const { id } = await params;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
   const db = getServiceSupabase();
@@ -71,7 +75,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 export async function DELETE(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canWriteCrm(session.teamRole)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!canWriteCrm(session.teamRole) || !(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   const { id } = await params;
   const db = getServiceSupabase();
   const existing = await db.from("funded_deals").select("id").eq("tenant_id", session.tenantId).eq("id", id).maybeSingle();

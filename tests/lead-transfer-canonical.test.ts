@@ -244,12 +244,11 @@ assert.deepEqual(stampSalesProgramForTenant(merchantWithSite, "some-client"), {}
  */
 
 assert.equal(roleMaySelfEditLead("read_only"), false, "REGRESSION: read_only regained write access");
-assert.equal(roleMaySelfEditLead("marketing"), false, "marketing is never the sales pipeline");
 assert.equal(roleMaySelfEditLead(null), false, "fails closed");
 assert.equal(roleMaySelfEditLead(""), false);
 assert.equal(roleMaySelfEditLead("not_a_real_role"), false, "fails closed on an unknown role");
 
-for (const role of ["closer", "opener", "manager", "builder", "agent", "member"]) {
+for (const role of ["closer", "opener", "manager", "builder", "marketing", "agent", "member"]) {
   assert.equal(roleMaySelfEditLead(role), true, `${role} should be able to edit its own lead`);
 }
 

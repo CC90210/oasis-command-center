@@ -21,16 +21,23 @@ for (const field of ["name", "company", "email", "phone", "website"]) {
 assert.match(source, /timezone:\s*FOUNDER_TIMEZONE/);
 assert.match(source, /qualification:\s*\{/);
 assert.match(source, /confirmations:\s*\{/);
-for (const [key, value] of [
-  ["contactConfirmed", "effectiveContactConfirmed"],
-  ["clientAgreedToTime", "effectiveClientAgreedToTime"],
-  ["handoffComplete", "effectiveHandoffComplete"],
+for (const key of [
+  "contactConfirmed",
+  "clientAgreedToTime",
+  "handoffComplete",
 ] as const) {
   assert.match(
     source,
-    new RegExp(`confirmations:\\s*\\{[\\s\\S]*?${key}:\\s*${value}\\b`),
-    `booking payload must send the effective ${key} (${value}) — raw checkbox state breaks the implicit-confirm unlock`,
+    new RegExp(`confirmations:\\s*\\{[\\s\\S]*?${key}(?:,|\\s*:)`),
+    `booking payload must send the operator's explicit ${key} checkbox state`,
   );
+}
+for (const inferred of [
+  "effectiveContactConfirmed",
+  "effectiveClientAgreedToTime",
+  "effectiveHandoffComplete",
+]) {
+  assert(!source.includes(inferred), `${inferred} must not infer a confirmation from valid form data`);
 }
 assert.match(source, /smsConsent:\s*Boolean\(/);
 assert.match(source, /requestId:\s*founderBookingRequestId/);
@@ -46,6 +53,11 @@ assert(!source.includes('type="datetime-local"'), "all lifecycle dates use expli
 assert.match(source, /LifecycleDateTimeFields/, "follow-ups and reschedules share the guided Eastern-time control");
 assert.match(source, /Rescheduling updates the existing Google invite/i);
 assert.match(source, /outcomeConfirmed/);
+for (const step of ["Contact", "Host & time", "Agenda", "Confirm", "Review"]) {
+  assert(source.includes(step), `guided booking includes the ${step} step`);
+}
+assert.match(source, /aria-current=\{bookingStep === index \? "step"/);
+assert.match(source, /type="checkbox"/, "confirmations use native keyboard-accessible controls");
 
 assert(!source.includes("window.open"), "booking must not depend on the rep's browser Google account");
 assert(!source.includes("googleCalendarAuditUrl"), "the client must not construct a Calendar draft URL");

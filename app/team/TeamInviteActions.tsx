@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { isInvitableRole, type RoleOption } from "@/lib/team-roles";
+import { isInvitableRole, teamRoleLabel, type RoleOption } from "@/lib/team-roles";
 
 type ActiveInvite = {
   id: string;
@@ -36,6 +36,7 @@ export function TeamInviteActions({
   const normalizedEmail = email.trim().toLowerCase();
   const emailIsValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
     && normalizedEmail.length <= 254;
+  const selectedRole = roleOptions.find((option) => option.value === role);
 
   async function generate() {
     setError(null);
@@ -82,7 +83,7 @@ export function TeamInviteActions({
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-[1fr_12rem_8rem] gap-3 items-end">
+      <div className="grid grid-cols-1 gap-3 items-end md:grid-cols-[1fr_14rem_8rem]">
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-fg-dim">
             Work email
@@ -115,6 +116,11 @@ export function TeamInviteActions({
               </option>
             ))}
           </select>
+          {selectedRole && (
+            <span className="mt-1 block text-[11px] leading-4 text-fg-dim">
+              {selectedRole.description}
+            </span>
+          )}
         </label>
         <button
           type="button"
@@ -185,7 +191,7 @@ export function TeamInviteActions({
                 <span className="text-sm text-fg">
                   {inv.email || "(invalid legacy invite)"}
                 </span>
-                <span className="text-sm text-fg-muted">{inv.team_role}</span>
+                <span className="text-sm text-fg-muted">{teamRoleLabel(inv.team_role)}</span>
                 <span className="text-xs text-fg-dim">
                   expires {new Date(inv.expires_at).toLocaleDateString()}
                 </span>

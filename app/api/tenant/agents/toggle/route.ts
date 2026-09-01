@@ -21,7 +21,8 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { AGENT_REGISTRY, getAgentInfo, resolveAgentKey } from "@/lib/agents";
@@ -42,8 +43,8 @@ type ManifestAgent = {
 };
 
 export async function POST(req: NextRequest) {
-  const user = await getSessionUser();
-  if (!user) {
+  const session = await resolveSessionContext();
+  if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
@@ -65,19 +66,10 @@ export async function POST(req: NextRequest) {
 
   const db = getServiceSupabase();
   // Owner check — only the workspace owner can mutate the agent lineup.
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id, is_owner")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null; is_owner?: boolean } | null)?.tenant_id;
-  const isOwner = (profile.data as { is_owner?: boolean } | null)?.is_owner === true;
-  if (!tenantId) {
-    return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
-  }
-  if (!isOwner) {
+  const tenantId = session.tenantId;
+  if (!session.isAdmin) {
     return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Only the workspace owner can manage agents." },
+      { ok: false, error: "forbidden", message: "Administrator access is required to manage agents." },
       { status: 403 },
     );
   }

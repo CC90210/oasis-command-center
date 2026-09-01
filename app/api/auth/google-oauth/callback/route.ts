@@ -26,7 +26,8 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import { setUserIntegrationBundle } from "@/lib/user-integration-store";
 import { hasRequiredScope } from "@/lib/integrations/google-calendar";
 
@@ -217,15 +218,11 @@ export async function GET(req: NextRequest) {
   }
 
   if (needWorkScopes) {
-    const profile = await getServiceSupabase()
-      .from("user_profiles")
-      .select("email")
-      .eq("tenant_id", tenantId)
-      .eq("auth_user_id", user.id)
-      .maybeSingle();
-    const expectedWorkEmail = String(profile.data?.email || "").trim().toLowerCase();
+    const profile = await resolveActiveProfileForUser(user);
+    const expectedWorkEmail = String(profile.profile?.email || "").trim().toLowerCase();
     if (
       profile.error ||
+      profile.profile?.tenant_id !== tenantId ||
       !expectedWorkEmail ||
       gmailAddress.trim().toLowerCase() !== expectedWorkEmail
     ) {

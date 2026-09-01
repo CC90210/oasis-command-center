@@ -6,7 +6,6 @@ import { PageHeader, Card } from "@/components/Card";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
-import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 import { LeadWebsiteAuditBand } from "@/components/leads/LeadWebsiteAuditBand";
 import { LeadContextEditor } from "@/components/leads/LeadContextEditor";
 import { LeadNoteComposer } from "@/components/leads/LeadNoteComposer";
@@ -19,7 +18,7 @@ import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { findOasisStage, type StageMeta } from "@/lib/oasis-stage-meta";
 import { OASIS_STAGE_SLA_DAYS } from "@/lib/oasis-sla";
-import { nonEmptyString, relTime } from "@/lib/format-helpers";
+import { nonEmptyString } from "@/lib/format-helpers";
 import { BattleCard } from "@/components/web-leads/BattleCard";
 import { visibleToViewer } from "@/lib/web-leads/data";
 import { LeadLifecycleActions } from "./LeadLifecycleActions";
@@ -28,6 +27,7 @@ import {
   canMutateOasisSalesRecord,
   canOpenOasisSalesRecord,
   mayOperateOasisDeliveryStage,
+  ownsOasisSalesRecord,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { mayQuoteAndClose } from "@/lib/team-roles";
@@ -35,6 +35,8 @@ import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
+import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
 
@@ -77,10 +79,18 @@ export default async function PipelineLeadDetailPage({
     );
   }
 
-  const [record, session] = await Promise.all([
+  const [record, session, ownedSlug] = await Promise.all([
     getRecord({ tenant_id: tenantId, entity: "lead", id }).catch(() => null),
     resolveSessionContext(),
+    resolveOwnedSlug(tenantId),
   ]);
+
+  const readableRepUserIds =
+    session.ok && canReadOasisSalesTeamPipeline({ teamRole: session.teamRole, tenantSlug: ownedSlug })
+      ? (await safe("pipeline.detail.managerRoster", getOasisSalesRepRoster(tenantId), [])).flatMap((member) =>
+          member.auth_user_id ? [member.auth_user_id] : [],
+        )
+      : [];
 
   const activeRecord =
     record &&
@@ -90,6 +100,7 @@ export default async function PipelineLeadDetailPage({
       userId: session.userId,
       isOwner: session.isTrueAdmin,
       adminAccess: session.adminAccess,
+      readableRepUserIds,
     })
       ? record
       : null;
@@ -113,8 +124,7 @@ export default async function PipelineLeadDetailPage({
   }
 
   const appointmentId = nonEmptyString(activeRecord.data.calendar_appointment_id);
-  const [ownedSlug, metrics, memberNames, founderMeetingSmsConsent] = await Promise.all([
-    resolveOwnedSlug(tenantId),
+  const [metrics, memberNames, founderMeetingSmsConsent] = await Promise.all([
     loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at),
     buildMemberNameMap(tenantId),
     loadFounderMeetingSmsConsent(tenantId, id, appointmentId),
@@ -136,7 +146,7 @@ export default async function PipelineLeadDetailPage({
   const assignedTo = nonEmptyString(activeRecord.data.assigned_to)?.toLowerCase();
   const repOwnsDeal =
     session.ok &&
-    assignedTo === session.userId.toLowerCase();
+    ownsOasisSalesRecord(activeRecord, session.userId);
   const canRunDeal =
     session.ok &&
     // ONE list (DEAL_CLOSING_ROLES via mayQuoteAndClose) — a hand-copied array
@@ -147,6 +157,15 @@ export default async function PipelineLeadDetailPage({
   const canWorkLifecycle =
     (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
     canRunDelivery;
+  const managerCoachingView =
+    session.ok &&
+    session.teamRole.trim().toLowerCase() === "manager" &&
+    !canMutateLead;
+  const assignedRepName = assignedTo ? memberNames.get(assignedTo) || null : null;
+  const founderId =
+    nonEmptyString(activeRecord.data.audit_host_user_id) ||
+    nonEmptyString(activeRecord.data.booked_founder);
+  const bookedHostName = founderId ? memberNames.get(founderId) || null : null;
 
   // Is this a web-lead, i.e. does a battle card exist for it? Keyed on the
   // pointer JARVIS's crm-sink stamps at promotion time, the same field the
@@ -167,7 +186,8 @@ export default async function PipelineLeadDetailPage({
    * card inside it 404s.
    *
    * NOBODY IS LEFT WITH NOTHING, and that is why this is a gate rather than an
-   * error left to happen: `LeadWebsiteAuditBand` renders UNCONDITIONALLY above,
+   * error left to happen: `LeadWebsiteAuditBand` renders unconditionally in
+   * the Lead details disclosure below,
    * carrying the website, the industry, the condition and the findings for
    * every viewer. So a collaborator who cannot load the card still sees the
    * business; asking the same function the API asks just means they are not
@@ -180,7 +200,12 @@ export default async function PipelineLeadDetailPage({
    */
   const cardViewer =
     session.ok && session.userId
-      ? { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin }
+      ? {
+          userId: session.userId,
+          teamRole: session.teamRole,
+          isAdmin: session.isAdmin,
+          readableAssigneeIds: readableRepUserIds,
+        }
       : null;
   const willRenderBattleCard = Boolean(
     webLeadBusinessId && cardViewer && visibleToViewer(assignedTo ?? null, cardViewer),
@@ -194,40 +219,9 @@ export default async function PipelineLeadDetailPage({
         action={<BackToPipeline />}
       />
 
-      <CollapsibleSection
-        title="Contact and business"
-        storageKey="oasis.pipeline.contactBand.collapsed"
-        defaultCollapsed={false}
-        collapsedPreview={renderContactPreview(activeRecord.data)}
-      >
-        <LeadContactBand data={activeRecord.data} />
-      </CollapsibleSection>
-
       <LeadMetricsBand metrics={metrics} canChangeStage={canWorkLifecycle} />
 
-      {canMutateLead ? (
-        <LeadActionToolbar
-          leadId={id}
-          displayName={title}
-          phone={nonEmptyString(activeRecord.data.phone)}
-          currentStage={metrics.stageKey}
-        />
-      ) : (
-        <Card>
-          <div className="text-sm font-semibold text-fg">
-            {canRunDelivery ? "Builder delivery file" : "Read-only lead file"}
-          </div>
-          <div className="mt-1 text-sm text-fg-muted">
-            {canRunDelivery
-              ? "The sales history is read-only. Use the delivery lifecycle below to move this paid client through build, review, and launch."
-              : "You can review this lead and its history. Only an admin or an assigned sales rep can edit context, add notes, or move the sales lifecycle."}
-          </div>
-        </Card>
-      )}
-
-      <LeadWebsiteAuditBand data={activeRecord.data} />
-
-      {canWorkLifecycle ? (
+      {canWorkLifecycle || managerCoachingView ? (
         <LeadLifecycleActions
           leadId={id}
           leadName={nonEmptyString(activeRecord.data.name)}
@@ -239,6 +233,16 @@ export default async function PipelineLeadDetailPage({
           canManage={canManage}
           canRunDeal={canRunDeal}
           canRunDelivery={canRunDelivery}
+          viewerMode={managerCoachingView ? "coaching" : "operate"}
+          assignedRepName={assignedRepName}
+          bookedMeetingAt={nonEmptyString(activeRecord.data.founder_meeting_at)}
+          bookedHostName={bookedHostName}
+          initialHandoffNote={
+            nonEmptyString(activeRecord.data.founder_handoff_note) ||
+            nonEmptyString(activeRecord.data.last_handoff_note) ||
+            nonEmptyString(activeRecord.data.notes)
+          }
+          initialPromisedDemo={nonEmptyString(activeRecord.data.promised_demo)}
           initialFounderMeetingSmsConsent={founderMeetingSmsConsent}
           initialOffer={{
             packageId: nonEmptyString(activeRecord.data.recommended_tier),
@@ -262,6 +266,19 @@ export default async function PipelineLeadDetailPage({
           </div>
         </Card>
       ) : null}
+
+      <CollapsibleSection
+        title="Lead details"
+        subtitle="Contact, website context, and audit findings"
+        storageKey="oasis.pipeline.contactBand.collapsed"
+        defaultCollapsed
+        collapsedPreview={renderContactPreview(activeRecord.data)}
+      >
+        <div className="space-y-3">
+          <LeadContactBand data={activeRecord.data} />
+          <LeadWebsiteAuditBand data={activeRecord.data} />
+        </div>
+      </CollapsibleSection>
 
       {/*
         ═══ THE BATTLE CARD, ON THE CRM RECORD (Adon, 2026-08-25) ═════════════
@@ -287,8 +304,8 @@ export default async function PipelineLeadDetailPage({
         Placed AFTER the lifecycle actions on purpose: logging a call and
         advancing a stage are what the pipeline is FOR, and burying those
         controls under a full-height card would trade one dysfunction for
-        another. Open by default -- a card behind a click is a card a rep does
-        not read while a stranger is waiting.
+        another. It now stays behind the supporting-information disclosure so
+        the stage-specific next action remains the single visual priority.
       */}
       {willRenderBattleCard ? (
         <CollapsibleSection
@@ -304,10 +321,26 @@ export default async function PipelineLeadDetailPage({
         </CollapsibleSection>
       ) : null}
 
-      <HandoffSummary data={activeRecord.data} memberNames={memberNames} />
+      {["demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].includes(metrics.stageKey) ? (
+        <CollapsibleSection
+          title="Handoff and delivery brief"
+          subtitle="Meeting receipt, commercial context, and builder-ready requirements"
+          storageKey="oasis.pipeline.handoffSummary.collapsed"
+          defaultCollapsed
+        >
+          <HandoffSummary data={activeRecord.data} memberNames={memberNames} />
+        </CollapsibleSection>
+      ) : null}
 
       {canMutateLead && ownedSlug ? (
-        <LeadContextEditor leadId={id} tenantSlug={ownedSlug} initial={activeRecord.data} />
+        <CollapsibleSection
+          title="Edit lead details"
+          subtitle="Durable contact and business context"
+          storageKey="oasis.pipeline.contextEditor.collapsed"
+          defaultCollapsed
+        >
+          <LeadContextEditor leadId={id} tenantSlug={ownedSlug} initial={activeRecord.data} />
+        </CollapsibleSection>
       ) : canMutateLead ? (
         <Card>
           <div className="text-sm text-fg-muted">
@@ -317,9 +350,18 @@ export default async function PipelineLeadDetailPage({
         </Card>
       ) : null}
 
-      {canMutateLead ? <LeadNoteComposer leadId={id} /> : null}
-      <LeadTimelinePanel leadId={id} />
-      <LeadDocumentsPanel tenantId={tenantId} leadId={id} />
+      <CollapsibleSection
+        title="Activity and files"
+        subtitle="Notes, lifecycle history, messages, and documents"
+        storageKey="oasis.pipeline.activity.collapsed"
+        defaultCollapsed
+      >
+        <div className="space-y-4">
+          {canMutateLead ? <LeadNoteComposer leadId={id} /> : null}
+          <LeadTimelinePanel leadId={id} />
+          <LeadDocumentsPanel tenantId={tenantId} leadId={id} canMutate={canMutateLead} />
+        </div>
+      </CollapsibleSection>
     </div>
   );
 }
@@ -501,71 +543,70 @@ function LeadMetricsBand({
   const isOverdue = overdueDays !== null && overdueDays > 0;
 
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      <MetricBox label="Stage">
-        <div className="flex items-center gap-2">
-          {canChangeStage ? (
-            <a
-              href="#lead-lifecycle-control"
-              className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white ring-offset-2 ring-offset-bg-deep transition hover:ring-2 hover:ring-accent/50"
-              style={{ background: metrics.stageMeta?.bg || "#414957" }}
-              title="Open lifecycle controls"
-            >
-              {metrics.stageLabel} · change
-            </a>
-          ) : (
-            <span
-              className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white"
-              style={{ background: metrics.stageMeta?.bg || "#414957" }}
-            >
-              {metrics.stageLabel}
-            </span>
-          )}
-          {hasSla && <span className="font-mono text-[10px] text-fg-dim">{slaDays}d target</span>}
-        </div>
-        <div className="mt-2 text-xs text-fg-dim">
-          {metrics.daysInStage === null
-            ? "Stage history starts with the next tracked move"
-            : `${metrics.daysInStage} day${metrics.daysInStage === 1 ? "" : "s"} in stage`}
-        </div>
-      </MetricBox>
-
-      <MetricBox label="Last touch">
-        <MetricValue>
-          {metrics.daysSinceLastTouch === null
-            ? "No touch logged"
+    <section
+      aria-label="Lead status summary"
+      className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-xl border border-bg-border bg-bg-elev/25 px-4 py-3"
+    >
+      <div className="flex items-center gap-2">
+        {canChangeStage ? (
+          <a
+            href="#lead-lifecycle-control"
+            className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white ring-offset-2 ring-offset-bg-deep transition hover:ring-2 hover:ring-accent/50"
+            style={{ background: metrics.stageMeta?.bg || "#414957" }}
+          >
+            {metrics.stageLabel}
+          </a>
+        ) : (
+          <span
+            className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold text-white"
+            style={{ background: metrics.stageMeta?.bg || "#414957" }}
+          >
+            {metrics.stageLabel}
+          </span>
+        )}
+        {hasSla ? <span className="font-mono text-[10px] text-fg-dim">{slaDays}d target</span> : null}
+      </div>
+      <CompactMetric
+        label="Last touch"
+        value={
+          metrics.daysSinceLastTouch === null
+            ? "None"
             : metrics.daysSinceLastTouch === 0
               ? "Today"
-              : `${metrics.daysSinceLastTouch}d ago`}
-        </MetricValue>
-        <div className={`mt-2 text-xs ${isOverdue ? "font-medium text-status-warm" : "text-fg-dim"}`}>
-          {isOverdue
-            ? `${metrics.lastTouch ? "Overdue" : "First touch overdue"} by ${overdueDays}d · ${slaDays}d target`
-            : metrics.lastTouch
-              ? relTime(metrics.lastTouch)
-              : "Timeline is empty"}
-        </div>
-      </MetricBox>
-
-      <MetricBox label="Tracked touches">
-        <MetricValue>{metrics.touchCount === null ? "Unavailable" : metrics.touchCount}</MetricValue>
-        <div className="mt-2 text-xs text-fg-dim">
-          Calls, notes, lifecycle moves, messages, and handoffs in the interaction ledger.
-        </div>
-      </MetricBox>
-
-      <MetricBox label="Next scheduled (ET)">
-        <MetricValue>
-          {metrics.nextScheduledAt ? formatDateTime(metrics.nextScheduledAt) : "Not scheduled"}
-        </MetricValue>
-        <div className="mt-2 text-xs text-fg-dim">
-          {metrics.nextScheduledAt ? relTime(metrics.nextScheduledAt) : "Set the next touch or founder meeting"}
-        </div>
-      </MetricBox>
-    </div>
+              : `${metrics.daysSinceLastTouch}d ago`
+        }
+        warning={isOverdue}
+      />
+      <CompactMetric label="Touches" value={metrics.touchCount === null ? "—" : String(metrics.touchCount)} />
+      <CompactMetric
+        label="Next"
+        value={metrics.nextScheduledAt ? formatDateTime(metrics.nextScheduledAt) : "Not scheduled"}
+      />
+      {isOverdue ? (
+        <span className="ml-auto text-xs font-medium text-status-warm">Overdue by {overdueDays}d</span>
+      ) : null}
+    </section>
   );
 }
 
+function CompactMetric({
+  label,
+  value,
+  warning = false,
+}: {
+  label: string;
+  value: string;
+  warning?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[9px] font-bold uppercase tracking-wider text-fg-dim">{label}</div>
+      <div className={`mt-0.5 truncate text-xs font-semibold ${warning ? "text-status-warm" : "text-fg-muted"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
 function HandoffSummary({
   data,
   memberNames,
@@ -666,19 +707,6 @@ function SummaryCell({
       <div className="mt-1.5 whitespace-pre-wrap break-words text-sm text-fg-muted">{value || "—"}</div>
     </div>
   );
-}
-
-function MetricBox({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-      <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">{label}</div>
-      <div className="mt-2">{children}</div>
-    </div>
-  );
-}
-
-function MetricValue({ children }: { children: ReactNode }) {
-  return <div className="text-lg font-semibold leading-tight text-fg">{children}</div>;
 }
 
 function daysSince(iso: string): number {

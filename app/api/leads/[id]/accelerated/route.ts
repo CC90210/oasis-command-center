@@ -39,7 +39,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
   const on = body.on === true || body.on === "true";
 
-  const acc = await getWritableLead({ teamRole: sess.teamRole }, { tenantId: sess.tenantId, entity: "lead", id });
+  const acc = await getWritableLead(
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
+    { tenantId: sess.tenantId, entity: "lead", id },
+  );
   if (!acc.ok) {
     return acc.reason === "role_denied"
       ? NextResponse.json({ ok: false, error: "forbidden_role", message: "Read-only members can't do this." }, { status: 403 })

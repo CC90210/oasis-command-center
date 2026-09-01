@@ -52,8 +52,9 @@ assert(
 );
 assert(
   oauthCallback.includes("google_account_must_match_profile_email") &&
-    oauthCallback.includes('.eq("tenant_id", tenantId)') &&
-    oauthCallback.includes('.eq("auth_user_id", user.id)'),
+    oauthCallback.includes("resolveActiveProfileForUser(user)") &&
+    oauthCallback.includes("profile.profile?.tenant_id !== tenantId") &&
+    oauthCallback.includes("profile.profile?.email"),
   "work OAuth must reject a personal or cross-profile Google identity before storing its tokens",
 );
 

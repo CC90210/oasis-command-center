@@ -86,7 +86,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // may act on ANY lead/application in their tenant (LEAD_SCOPING_ENABLED
   // does not narrow this — matches the sibling application-signature route).
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity, id },
   );
   if (!acc.ok) {

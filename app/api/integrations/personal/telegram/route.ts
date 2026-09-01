@@ -23,7 +23,19 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const s = await resolveSessionContext();
   if (!s.ok) return NextResponse.json({ ok: false, error: s.reason }, { status: 401 });
-  return NextResponse.json({ ok: true, ...(await getTelegramStatus(s.tenantId, s.userId)) });
+  try {
+    return NextResponse.json({ ok: true, ...(await getTelegramStatus(s.tenantId, s.userId)) });
+  } catch (error) {
+    console.error("[personal-telegram-status] unable to read status", {
+      tenantId: s.tenantId,
+      userId: s.userId,
+      error,
+    });
+    return NextResponse.json(
+      { ok: false, error: "personal_telegram_status_unavailable" },
+      { status: 503 },
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -39,13 +51,21 @@ export async function POST(req: NextRequest) {
 
   if (body.action === "validate") {
     const r = await validateAndStoreBot(s.tenantId, s.userId, body.bot_token || "");
-    return NextResponse.json(r, { status: r.ok ? 200 : 400 });
+    return NextResponse.json(r, {
+      status: r.ok ? 200 : r.error === "telegram_store_failed" ? 503 : 400,
+    });
   }
   if (body.action === "link") {
     const r = await captureChatId(s.tenantId, s.userId);
     // no_message_yet is the "you haven't messaged the bot yet" case → 409 so the
     // UI can prompt "message your bot first" without treating it as a hard error.
-    const status = r.ok ? 200 : r.error === "no_message_yet" ? 409 : 400;
+    const status = r.ok
+      ? 200
+      : r.error === "no_message_yet"
+        ? 409
+        : r.error === "telegram_store_failed"
+          ? 503
+          : 400;
     return NextResponse.json(r, { status });
   }
   return NextResponse.json({ ok: false, error: "unknown_action" }, { status: 400 });
@@ -54,6 +74,17 @@ export async function POST(req: NextRequest) {
 export async function DELETE() {
   const s = await resolveSessionContext();
   if (!s.ok) return NextResponse.json({ ok: false, error: s.reason }, { status: 401 });
-  await disconnectTelegram(s.tenantId, s.userId);
+  const result = await disconnectTelegram(s.tenantId, s.userId);
+  if (!result.ok) {
+    console.error("[personal-telegram] unable to disconnect", {
+      tenantId: s.tenantId,
+      userId: s.userId,
+      error: result.error,
+    });
+    return NextResponse.json(
+      { ok: false, error: "personal_telegram_disconnect_failed" },
+      { status: 503 },
+    );
+  }
   return NextResponse.json({ ok: true });
 }

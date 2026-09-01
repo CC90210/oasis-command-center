@@ -45,14 +45,27 @@ export type TeamRole =
 /** A role an admin may hand out through the invite UI. `owner` is never invitable. */
 export type InvitableRole = Exclude<TeamRole, "owner">;
 
-export type RoleOption = { value: InvitableRole; label: string };
+export type RoleOption = {
+  value: InvitableRole;
+  label: string;
+  /** One plain-English sentence shown beside the selector. */
+  description: string;
+};
 
 /**
  * Roles offered in EVERY workspace. Infrastructure, not product.
  */
 export const PLATFORM_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
-  { value: "member", label: "Member" },
-  { value: "admin", label: "Admin" },
+  {
+    value: "member",
+    label: "Team member",
+    description: "Internal workspace access without sales-management or permanent admin powers.",
+  },
+  {
+    value: "admin",
+    label: "Administrator",
+    description: "Full workspace and team administration; only a permanent admin can grant this role.",
+  },
 ];
 
 /**
@@ -72,12 +85,78 @@ export const PLATFORM_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
  * belongs in that gate for exactly the same reason a closer does.
  */
 export const OASIS_SALES_ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
-  { value: "manager", label: "Sales manager" },
-  { value: "closer", label: "Closer" },
-  { value: "opener", label: "Opener" },
-  { value: "builder", label: "Builder" },
-  { value: "marketing", label: "Marketing" },
+  {
+    value: "manager",
+    label: "Sales manager",
+    description: "Reviews every rep's assigned sales book and team performance, but edits only their own leads.",
+  },
+  {
+    value: "closer",
+    label: "Closer",
+    description: "Works assigned deals from booked meeting through close and sees only their own book.",
+  },
+  {
+    value: "opener",
+    label: "Opener",
+    description: "Works assigned leads through qualification and handoff without pricing or closing powers.",
+  },
+  {
+    value: "builder",
+    label: "Builder",
+    description: "Works assigned delivery and selling records without tenant-wide administration.",
+  },
+  {
+    value: "marketing",
+    label: "Marketing",
+    description: "Uses OASIS marketing tools without company finance or system-administration access.",
+  },
 ];
+
+/** Human labels for existing rows, including roles that are no longer invitable. */
+export const TEAM_ROLE_LABELS: Readonly<Record<TeamRole, string>> = {
+  owner: "Owner",
+  admin: "Administrator",
+  read_only: "Read only",
+  manager: "Sales manager",
+  closer: "Closer",
+  opener: "Opener",
+  builder: "Builder",
+  marketing: "Marketing",
+  agent: "Sales rep (legacy)",
+  member: "Team member",
+  loan_officer: "Loan officer",
+  processor: "Processor",
+};
+
+/** Render a stored role without leaking raw enum syntax into the product UI. */
+export function teamRoleLabel(role: TeamRole | string | null | undefined): string {
+  const normalized = (role || "").trim().toLowerCase() as TeamRole;
+  return TEAM_ROLE_LABELS[normalized] || "Unknown role";
+}
+
+/**
+ * People whose assigned OASIS records make up a sales manager's read-only
+ * team book. This deliberately excludes owner/admin/member/read_only: their
+ * assigned records are founder, internal, or system work rather than a rep's
+ * sales book. Marketing is deliberately included per CC's 2026-08-26 update:
+ * they may work only records assigned to them, and the sales manager must be
+ * able to coach that book. Legacy `agent` stays until its live rows migrate.
+ */
+export const OASIS_PIPELINE_REP_ROLES: ReadonlySet<string> = new Set([
+  "manager",
+  "closer",
+  "opener",
+  "builder",
+  "marketing",
+  "agent",
+]);
+
+export function isOasisPipelineRepRole(role: unknown): boolean {
+  return (
+    typeof role === "string" &&
+    OASIS_PIPELINE_REP_ROLES.has(role.trim().toLowerCase())
+  );
+}
 
 /** The OASIS sales job titles, as a set — used to decide tenant eligibility. */
 export const OASIS_SALES_ROLES: ReadonlySet<string> = new Set(
@@ -137,9 +216,14 @@ export function isOasisSalesRole(role: unknown): boolean {
  */
 export const SELF_SCOPED_ROLES: ReadonlySet<string> = new Set([
   "agent",   // legacy contractor, still live on real rows
+  // Cross-rep manager visibility exists only on the dedicated OASIS pipeline.
+  // Generic tenant-record doors stay own-only so they cannot expose
+  // unassigned, founder, or system records.
+  "manager",
   "opener",
   "closer",
   "builder",
+  "marketing",
 ]);
 
 /** True when this role is a KNOWN self-scoped role. This answers set membership
@@ -162,10 +246,11 @@ export function isSelfScopedRole(role: unknown): boolean {
  * to stop. Deny-by-default has to be expressed as an allowlist of who may see
  * everything, never as a denylist of who may not.
  *
- * Verified before changing it: the live `user_profiles` table holds only
- * member(45), owner(4), admin(3), manager(1) and builder(1) — every one of them
- * a known value, so this flips the answer for ZERO current users. It is a guard
- * against the NEXT role someone adds, not a change to anyone's access today.
+ * `manager` is deliberately absent. A manager's cross-rep visibility is a
+ * narrower OASIS sales capability: assigned rows for known rep roles only.
+ * Treating the title as tenant-wide here also exposed unassigned, founder and
+ * system records through generic manifest endpoints. Their dedicated pipeline
+ * reader widens READ only; every generic door and every write stays own-only.
  *
  * `closer`, `opener` and `builder` were added here on 2026-08-26 by 01461615
  * ("enable lead access and cross-role transfers...") and are removed again. All
@@ -180,8 +265,6 @@ export function isSelfScopedRole(role: unknown): boolean {
 export const TENANT_WIDE_ROLES: ReadonlySet<string> = new Set([
   "owner",
   "admin",
-  "manager",
-  "marketing",
   "read_only",
   "member",        // legacy, and the column DEFAULT — 45 live rows
   "loan_officer",  // SunBiz's own portal roles; a different product
@@ -223,6 +306,10 @@ export function mustSeeOwnRecordsOnly(role: unknown): boolean {
  * they discover mid-call.
  */
 export const DEAL_CLOSING_ROLES: ReadonlySet<string> = new Set([
+  // A manager may be selected as the audit host. Once the booking assigns the
+  // lead to them, they need the same own-lead completion/exception path as a
+  // closer. Every caller still proves assignment/collaboration separately.
+  "manager",
   "closer",
   "agent",   // legacy, and grandfathered ON PURPOSE -- see above
   // CC, 2026-08-25: the builder/marketing specialist also sells, so he quotes

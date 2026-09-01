@@ -114,7 +114,7 @@ export async function POST(req: NextRequest) {
   // tenant (CRM-write tier, same as set-stage/promote). Fails closed on an
   // unrecognized/null role (getWritableLead -> canWriteCrm allowlist).
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity, id: leadId },
   );
   if (!acc.ok) {

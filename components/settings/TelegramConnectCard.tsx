@@ -27,6 +27,7 @@ function CopyBtn({ text }: { text: string }) {
 
 export function TelegramConnectCard() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<null | "validate" | "link" | "disconnect">(null);
   const [error, setError] = useState<string | null>(null);
@@ -36,8 +37,18 @@ export function TelegramConnectCard() {
     try {
       const r = await fetch("/api/integrations/personal/telegram", { cache: "no-store" });
       const b = (await r.json().catch(() => ({}))) as { ok?: boolean } & Status;
-      if (b.ok) setStatus({ connected: b.connected, username: b.username, linked: b.linked, chat_id: b.chat_id });
-    } catch { /* leave null → shows loading */ }
+      if (r.ok && b.ok) {
+        setStatus({ connected: b.connected, username: b.username, linked: b.linked, chat_id: b.chat_id });
+        setLoadState("ready");
+      } else {
+        setStatus(null);
+        setLoadState("unavailable");
+      }
+    } catch (refreshError) {
+      console.error("[TelegramConnectCard.refresh]", refreshError);
+      setStatus(null);
+      setLoadState("unavailable");
+    }
   }
   useEffect(() => { void refresh(); }, []);
 
@@ -49,9 +60,23 @@ export function TelegramConnectCard() {
         body: JSON.stringify({ action: "validate", bot_token: token.trim() }),
       });
       const b = (await r.json().catch(() => ({}))) as { ok?: boolean; username?: string; error?: string };
-      if (!b.ok) { setError(b.error === "invalid_token_format" ? "That doesn't look like a bot token (should be like 123456789:AA…)." : b.error === "telegram_rejected_token" ? "Telegram rejected that token. Copy it again from BotFather." : "Couldn't reach Telegram. Try again."); return; }
+      if (!b.ok) {
+        setError(
+          b.error === "invalid_token_format"
+            ? "That doesn't look like a bot token (should be like 123456789:AA…)."
+            : b.error === "telegram_rejected_token"
+              ? "Telegram rejected that token. Copy it again from BotFather."
+              : b.error === "telegram_store_failed"
+                ? "Telegram verified the bot, but OASIS couldn't save it. No connection was recorded; try again."
+                : "Couldn't reach Telegram. Try again.",
+        );
+        return;
+      }
       setToken(""); setFlash(`Saved — bot @${b.username}. Now message it and send /start below.`);
       await refresh();
+    } catch (validateError) {
+      console.error("[TelegramConnectCard.validate]", validateError);
+      setError("OASIS couldn't check or save this bot right now. No connection was recorded; try again.");
     } finally { setBusy(null); }
   }
 
@@ -63,19 +88,39 @@ export function TelegramConnectCard() {
         body: JSON.stringify({ action: "link" }),
       });
       const b = (await r.json().catch(() => ({}))) as { ok?: boolean; chat_name?: string; error?: string };
-      if (!b.ok) { setError(b.error === "no_message_yet" ? "I don't see a message yet. Open your bot in Telegram, tap Start (or send /start), then click Finish again." : "Couldn't link the chat. Try again."); return; }
+      if (!b.ok) {
+        setError(
+          b.error === "no_message_yet"
+            ? "I don't see a message yet. Open your bot in Telegram, tap Start (or send /start), then click Finish again."
+            : b.error === "telegram_store_failed"
+              ? "OASIS found your chat but couldn't save the link. It is not connected yet; try again."
+              : "Couldn't link the chat. Try again.",
+        );
+        return;
+      }
       setFlash(`Linked to ${b.chat_name}. You're connected ✓`);
       await refresh();
+    } catch (linkError) {
+      console.error("[TelegramConnectCard.link]", linkError);
+      setError("OASIS couldn't finish the link right now. It is not connected yet; try again.");
     } finally { setBusy(null); }
   }
 
   async function disconnect() {
     if (!confirm("Disconnect your Telegram bot?")) return;
-    setBusy("disconnect");
+    setBusy("disconnect"); setError(null);
     try {
-      await fetch("/api/integrations/personal/telegram", { method: "DELETE" });
+      const response = await fetch("/api/integrations/personal/telegram", { method: "DELETE" });
+      const body = (await response.json().catch(() => ({}))) as { ok?: boolean };
+      if (!response.ok || !body.ok) {
+        setError("OASIS couldn't disconnect this bot. The existing connection is unchanged; try again.");
+        return;
+      }
       setFlash(null); setError(null);
       await refresh();
+    } catch (disconnectError) {
+      console.error("[TelegramConnectCard.disconnect]", disconnectError);
+      setError("OASIS couldn't disconnect this bot. The existing connection is unchanged; try again.");
     } finally { setBusy(null); }
   }
 
@@ -88,8 +133,12 @@ export function TelegramConnectCard() {
         <div>
           <div className="flex items-center gap-2">
             <Send className="h-4 w-4 text-accent" />
-            <span className="font-semibold text-sm text-fg">Your Telegram bot</span>
-            {linked ? (
+            <span className="font-semibold text-sm text-fg">Your personal Telegram alert bot</span>
+            {loadState === "loading" ? (
+              <span className="inline-flex items-center gap-1 rounded border border-bg-border bg-bg-elev/60 px-1.5 py-0.5 text-[10px] font-medium text-fg-dim"><Loader2 className="h-3 w-3 animate-spin" /> Checking</span>
+            ) : loadState === "unavailable" ? (
+              <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">Status unavailable</span>
+            ) : linked ? (
               <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"><Check className="h-3 w-3" />Connected</span>
             ) : connected ? (
               <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">Bot saved · link your chat</span>
@@ -98,7 +147,7 @@ export function TelegramConnectCard() {
             )}
           </div>
           <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-            Create your own Telegram bot so alerts + your agent reach you directly. Takes about a minute.
+            This bot belongs only to your signed-in profile. The shared Telegram bridge shown above can be healthy even when you have not linked a personal alert bot.
           </div>
         </div>
         {(connected || linked) && (
@@ -111,8 +160,14 @@ export function TelegramConnectCard() {
       {flash && <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">{flash}</div>}
       {error && <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-200">{error}</div>}
 
+      {loadState === "unavailable" && (
+        <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-200">
+          Personal Telegram status could not be checked. This is unknown—not disconnected. Refresh the page to try again.
+        </div>
+      )}
+
       {/* STEP 1 — create the bot + paste token (until a token is saved) */}
-      {!connected && (
+      {loadState === "ready" && !connected && (
         <div className="mt-3 space-y-2 text-[12.5px] text-fg-muted">
           <ol className="list-decimal ml-5 space-y-1.5">
             <li>In Telegram, open <CopyBtn text="@BotFather" /> and start a chat.</li>
@@ -132,7 +187,7 @@ export function TelegramConnectCard() {
       )}
 
       {/* STEP 2 — link the chat (token saved, not yet linked) */}
-      {connected && !linked && (
+      {loadState === "ready" && connected && !linked && (
         <div className="mt-3 space-y-2 text-[12.5px] text-fg-muted">
           <ol className="list-decimal ml-5 space-y-1.5">
             <li>Open your bot <span className="font-mono text-accent">@{status?.username}</span> in Telegram.</li>
@@ -146,7 +201,7 @@ export function TelegramConnectCard() {
       )}
 
       {/* STEP 3 — done */}
-      {linked && (
+      {loadState === "ready" && linked && (
         <div className="mt-3 text-[12.5px] text-fg-muted">
           Bot <span className="font-mono text-accent">@{status?.username}</span> is linked to your Telegram. You&apos;ll get your alerts here.
         </div>

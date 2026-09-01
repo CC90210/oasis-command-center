@@ -28,6 +28,8 @@ import {
 } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
 import { nudgeBoards } from "@/lib/realtime/board-nudge";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -111,9 +113,28 @@ export async function POST(
   }
 
   const data = (existing.data as { data?: Record<string, unknown> }).data || {};
-  // currentOwner: used for the owner-not-collaborator check + the board nudge.
-  // Authorization already happened at the top (canWriteCrm).
-  const currentOwner = typeof data.assigned_to === "string" ? data.assigned_to.toLowerCase() : null;
+  // Managing the collaborator roster is stricter than working a shared lead.
+  // On the OASIS sales surface, a collaborator may edit the lead itself but may
+  // not grant or revoke somebody else's access. Only the assigned owner (or an
+  // admin capability) controls this list.
+  const currentOwner =
+    typeof data.assigned_to === "string" ? data.assigned_to.trim().toLowerCase() : null;
+  if (
+    !canMutateGenericLeadForTenant(
+      {
+        teamRole: sess.teamRole,
+        userId: sess.userId,
+        isOwner: sess.isTrueAdmin,
+        adminAccess: sess.adminAccess,
+      },
+      { id: recordId, data },
+    ) ||
+    (!sess.isAdmin &&
+      roleMayOperateOasisSalesLead(sess.teamRole) &&
+      currentOwner !== sess.userId.trim().toLowerCase())
+  ) {
+    return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
 
   // Compute the next collaborator set.
   let next = normalizeCollaborators(data);

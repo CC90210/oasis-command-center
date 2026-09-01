@@ -46,6 +46,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { fetchLead, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
 import { fetchAudit, fetchAuditSignals, businessIdForLead } from "@/lib/web-leads/audit";
 import { fetchCompetitorContext } from "@/lib/web-leads/competitors";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -62,9 +63,23 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const { id } = await ctx.params;
-  const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
 
   try {
+    // A manager's team read is an assigned-only roster boundary, not an admin
+    // impersonation. Resolve it independently at this API door so a browser
+    // cannot forge ids that were trusted by the server-rendered lead page.
+    const readableAssigneeIds =
+      session.teamRole.trim().toLowerCase() === "manager"
+        ? (await getOasisSalesRepRoster(session.tenantId)).flatMap((member) =>
+            member.auth_user_id ? [member.auth_user_id] : [],
+          )
+        : undefined;
+    const viewer: Viewer = {
+      userId: session.userId,
+      teamRole: session.teamRole,
+      isAdmin: session.isAdmin,
+      readableAssigneeIds,
+    };
     // Authorization happens exactly once, here, and the resolved lead is passed
     // through to fetchAudit rather than re-fetched inside it.
     const lead = await fetchLead(id, viewer);

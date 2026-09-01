@@ -16,7 +16,8 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveTenantId } from "@/lib/api-auth";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import {
   getUserIntegrationValue,
@@ -28,22 +29,12 @@ import { TEXTTORRENT_FROM_NUMBER_FIELD } from "@/lib/integrations/texttorrent-se
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function resolveTenantId(userId: string): Promise<string | null> {
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", userId)
-    .maybeSingle();
-  return (r.data as { tenant_id?: string | null } | null)?.tenant_id ?? null;
-}
-
 export async function GET() {
   const user = await getSessionUser();
   if (!user) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const tenantId = await resolveTenantId(user.id);
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
@@ -61,7 +52,7 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const tenantId = await resolveTenantId(user.id);
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
@@ -114,7 +105,7 @@ export async function DELETE(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const tenantId = await resolveTenantId(user.id);
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }

@@ -13,10 +13,11 @@
  */
 
 import { NextResponse, type NextRequest, after } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { canWriteCrm } from "@/lib/role-gates";
+import { getWritableLead } from "@/lib/lead-access";
+import { resolveSessionContext } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,24 +33,17 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "invalid_lead_id" }, { status: 400 });
   }
 
-  const user = await getSessionUser();
-  if (!user) {
+  const session = await resolveSessionContext();
+  if (!session.ok && session.reason === "no_session") {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id,team_role")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
-  if (!tenantId) {
+  if (!session.ok) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
+  const tenantId = session.tenantId;
   // Member+ gate: any CRM-write role may create an application; read_only and
   // unknown roles are denied. canWriteCrm is allowlist-based (fail-closed).
-  const teamRole = (profile.data as { team_role?: string | null } | null)?.team_role;
+  const teamRole = session.teamRole;
   if (!canWriteCrm(teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't start an application." },
@@ -57,15 +51,16 @@ export async function POST(
     );
   }
 
-  // Ownership: the lead must belong to the caller's tenant (mirrors the Call route).
-  const leadRow = await db
-    .from("tenant_records")
-    .select("id")
-    .eq("id", leadId)
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .maybeSingle();
-  if (!leadRow.data) {
+  const access = await getWritableLead(
+    {
+      teamRole,
+      userId: session.userId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    },
+    { tenantId, entity: "lead", id: leadId },
+  );
+  if (!access.ok) {
     return NextResponse.json(
       { ok: false, error: "lead_not_found", message: "Lead not found for this workspace." },
       { status: 404 },

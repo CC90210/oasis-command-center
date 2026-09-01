@@ -48,7 +48,7 @@ export async function POST(_req: NextRequest, ctx: { params: Promise<{ id: strin
   // Denies read_only regardless of LEAD_SCOPING_ENABLED so any full member can promote
   // any lead in the tenant (visibility scoping must not block this CRM action).
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity: "lead", id: leadId },
   );
   if (!acc.ok) {

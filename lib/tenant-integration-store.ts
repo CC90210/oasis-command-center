@@ -126,6 +126,7 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   },
   telegram: {
     bot_token: "TELEGRAM_BOT_TOKEN",
+    chat_id: "TELEGRAM_CHAT_ID",
   },
   // Kixie (SunBiz dialer): the whole team shares ONE Kixie account, so the
   // api_key + business_id resolve tenant-wide from env — same pattern as
@@ -148,6 +149,31 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
     client_secret: "APP_SECRET",
   },
 };
+
+// Ordered aliases for one logical lane. OASIS notifications intentionally use
+// OASIS_* first and the historical bare key second; SunBiz keys never appear
+// here, so status cannot borrow credentials from another tenant lane.
+const ENV_FALLBACK_ALIASES: Record<string, Record<string, readonly string[]>> = {
+  telegram: {
+    bot_token: ["OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
+    chat_id: ["OASIS_TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID"],
+  },
+};
+
+function envKeysFor(service: string, fieldKey: string): readonly string[] {
+  const aliases = ENV_FALLBACK_ALIASES[service]?.[fieldKey];
+  if (aliases) return aliases;
+  const fallback = ENV_FALLBACKS[service]?.[fieldKey];
+  return fallback ? [fallback] : [];
+}
+
+function readEnvFallback(service: string, fieldKey: string): string | null {
+  for (const envKey of envKeysFor(service, fieldKey)) {
+    const value = process.env[envKey];
+    if (value?.trim()) return value.trim();
+  }
+  return null;
+}
 
 /**
  * Resolve a single value. Returns null when neither the DB nor the
@@ -176,11 +202,8 @@ export async function getTenantIntegrationValue(
       // doesn't take the send path down entirely.
     }
   }
-  const envKey = ENV_FALLBACKS[service]?.[fieldKey];
-  if (envKey) {
-    const v = process.env[envKey];
-    if (v && v.trim()) return v.trim();
-  }
+  const envValue = readEnvFallback(service, fieldKey);
+  if (envValue) return envValue;
   return null;
 }
 
@@ -209,12 +232,66 @@ export async function getTenantIntegrationBundle(
     }
   }
   const envMap = ENV_FALLBACKS[service] || {};
-  for (const [fieldKey, envKey] of Object.entries(envMap)) {
+  for (const fieldKey of Object.keys(envMap)) {
     if (bundle[fieldKey]) continue;
-    const v = process.env[envKey];
-    if (v && v.trim()) bundle[fieldKey] = v.trim();
+    const value = readEnvFallback(service, fieldKey);
+    if (value) bundle[fieldKey] = value;
   }
   return bundle;
+}
+
+/**
+ * Strict, value-free credential readiness for operator-facing status UI.
+ *
+ * Send paths intentionally tolerate a broken DB row when a valid env fallback
+ * can carry the request. A Settings status must be stricter: a query failure or
+ * an unreadable stored credential with no fallback is "unavailable", never
+ * "not configured". Only booleans leave this function; plaintext never does.
+ */
+export async function getTenantIntegrationPresenceForStatus(
+  tenantId: string,
+  service: string,
+  fieldKeys: readonly string[],
+): Promise<Record<string, boolean>> {
+  if (!tenantId || !service) throw new Error("tenant_integration_status_scope_missing");
+  const db = getServiceSupabase();
+  const result = await db
+    .from("tenant_integration_credentials")
+    .select("field_key, encrypted_value")
+    .eq("tenant_id", tenantId)
+    .eq("service", service);
+  if (result.error) {
+    throw new Error(result.error.message || "tenant_integration_status_failed");
+  }
+
+  const stored = new Map(
+    ((result.data || []) as Array<{ field_key: string; encrypted_value: string | null }>).map(
+      (row) => [row.field_key, row.encrypted_value],
+    ),
+  );
+  const presence: Record<string, boolean> = {};
+  for (const fieldKey of fieldKeys) {
+    const envPresent = envKeysFor(service, fieldKey).some(
+      (envKey) => Boolean(process.env[envKey]?.trim()),
+    );
+    const encrypted = stored.get(fieldKey);
+    if (!encrypted) {
+      presence[fieldKey] = envPresent;
+      continue;
+    }
+    try {
+      presence[fieldKey] = Boolean(decryptField(encrypted).trim()) || envPresent;
+    } catch (error) {
+      console.error("[tenant-integration-store] status decrypt failed", {
+        service,
+        field: fieldKey,
+        error,
+      });
+      if (!envPresent) throw new Error("tenant_integration_status_decrypt_failed");
+      presence[fieldKey] = true;
+    }
+  }
+  return presence;
 }
 
 /**

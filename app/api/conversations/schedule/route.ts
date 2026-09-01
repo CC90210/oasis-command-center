@@ -22,8 +22,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getSessionContext } from "@/lib/team";
 import { isReadOnlyRole } from "@/lib/role-gates";
+import { getWritableLead } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 import {
   normalizePhoneE164,
   checkPhoneOptOut,
@@ -108,8 +109,7 @@ export async function POST(req: NextRequest) {
 
   // Same member+ write gate as the direct send routes (reply/email) — a
   // scheduled send is still a send.
-  const roleCtx = await getSessionContext();
-  if (!roleCtx || isReadOnlyRole(roleCtx.teamRole)) {
+  if (isReadOnlyRole(session.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't schedule messages." },
       { status: 403 },
@@ -132,6 +132,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_channel" }, { status: 400 });
   }
   const leadId = typeof body.lead_id === "string" && UUID_RE.test(body.lead_id) ? body.lead_id : null;
+  const exactOasisActor = !session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole);
+  if (exactOasisActor && !leadId) {
+    return NextResponse.json(
+      { ok: false, error: "lead_required", message: "OASIS sales messages must be linked to your lead." },
+      { status: 403 },
+    );
+  }
 
   const rawScheduledFor = typeof body.scheduled_for === "string" ? body.scheduled_for : "";
   const scheduledForMs = Date.parse(rawScheduledFor);
@@ -175,20 +182,46 @@ export async function POST(req: NextRequest) {
   }
 
   const db = getServiceSupabase();
+  let authorizedLeadData: Record<string, unknown> | null = null;
 
   // Tenant lead-ownership guard, mirrors app/api/conversations/reply/route.ts.
   if (leadId) {
-    const { data: ownedLead } = await db
-      .from("tenant_records")
-      .select("id")
-      .eq("id", leadId)
-      .eq("tenant_id", tenantId)
-      .maybeSingle();
-    if (!ownedLead) {
+    const writable = await getWritableLead(
+      {
+        teamRole: session.teamRole,
+        userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      },
+      { tenantId, id: leadId },
+    );
+    if (!writable.ok) {
       return NextResponse.json(
         { ok: false, error: "lead_not_found", message: "Lead not found for this workspace." },
         { status: 404 },
       );
+    }
+    authorizedLeadData = writable.record.data;
+  }
+
+  if (exactOasisActor && leadId && authorizedLeadData) {
+    if (threadKey !== `lead:${leadId}`) {
+      return NextResponse.json({ ok: false, error: "thread_lead_mismatch" }, { status: 400 });
+    }
+    if (channel === "sms") {
+      const allowedPhones = ["phone", "phone_number", "mobile", "contact_phone"]
+        .map((key) => normalizePhoneE164(String(authorizedLeadData?.[key] || "")))
+        .filter((value): value is string => Boolean(value));
+      if (!toPhone || !allowedPhones.includes(toPhone)) {
+        return NextResponse.json({ ok: false, error: "recipient_lead_mismatch" }, { status: 400 });
+      }
+    } else {
+      const allowedEmails = ["email", "email_address", "contact_email"]
+        .map((key) => String(authorizedLeadData?.[key] || "").trim().toLowerCase())
+        .filter(Boolean);
+      if (!toEmail || !allowedEmails.includes(toEmail.toLowerCase())) {
+        return NextResponse.json({ ok: false, error: "recipient_lead_mismatch" }, { status: 400 });
+      }
     }
   }
 
@@ -277,8 +310,7 @@ export async function DELETE(req: NextRequest) {
   }
   const { tenantId } = session;
 
-  const roleCtx = await getSessionContext();
-  if (!roleCtx || isReadOnlyRole(roleCtx.teamRole)) {
+  if (isReadOnlyRole(session.teamRole)) {
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Read-only members can't cancel scheduled messages." },
       { status: 403 },
@@ -295,6 +327,32 @@ export async function DELETE(req: NextRequest) {
   }
 
   const db = getServiceSupabase();
+  if (!session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole)) {
+    const existing = await db
+      .from("scheduled_sends")
+      .select("id, lead_id, actor_user_id")
+      .eq("id", id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    const row = existing.data as
+      | { id: string; lead_id: string | null; actor_user_id: string | null }
+      | null;
+    if (!row || row.actor_user_id !== session.userId || !row.lead_id) {
+      return NextResponse.json({ ok: false, error: "not_found_or_not_pending" }, { status: 404 });
+    }
+    const writable = await getWritableLead(
+      {
+        teamRole: session.teamRole,
+        userId: session.userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      },
+      { tenantId, id: row.lead_id },
+    );
+    if (!writable.ok) {
+      return NextResponse.json({ ok: false, error: "not_found_or_not_pending" }, { status: 404 });
+    }
+  }
   // Only a still-pending row can be cancelled — one already claimed
   // ('sending') or terminal ('sent'/'failed'/'cancelled') is left alone so
   // a cancel request can never race a send that's already in flight.

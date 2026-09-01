@@ -11,7 +11,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -29,6 +28,10 @@ function leadName(data: Record<string, unknown>): string {
 export async function GET(_req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  // Tenant-wide bank-statement remediation is an administrative worklist, not
+  // a coaching feed. A sales seat must never receive filenames or lead names
+  // across the whole workspace when the global lead-scoping flag is off.
+  if (!sess.isAdmin) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
 
   const db = getServiceSupabase();
   const tenantId = sess.tenantId;
@@ -62,13 +65,9 @@ export async function GET(_req: NextRequest) {
     }
   }
 
-  const scoping = leadScopingEnabled();
   const items: Array<{ lead_id: string | null; entity: string; lead_name: string; doc_id: string; filename: string }> = [];
   for (const d of docs) {
     const parent = d.lead_id ? parents.get(d.lead_id) : undefined;
-    if (scoping && parent && (parent.entity === "lead" || parent.entity === "application")) {
-      if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, parent.data, true)) continue;
-    }
     items.push({
       lead_id: d.lead_id,
       entity: parent?.entity || "lead",

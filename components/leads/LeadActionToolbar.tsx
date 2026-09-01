@@ -2,13 +2,13 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CalendarPlus, LoaderCircle, PhoneCall } from "lucide-react";
+import { LoaderCircle, PhoneCall } from "lucide-react";
 
 type Props = {
   leadId: string;
   displayName: string;
   phone: string | null;
-  currentStage: string;
+  onCallAccepted?: () => void;
 };
 
 type CallResponse = {
@@ -20,21 +20,14 @@ type CallResponse = {
 };
 
 /**
- * The two immediate rep actions on an OASIS lead file.
- *
- * Calling uses the authenticated server route so the provider request, acting
- * rep, timeline row, and canonical Last Touch stay tied to the lead. Calendar
- * booking remains inside the lifecycle control because its explicit save
- * confirmation and qualification facts must land in one Turso transition.
+ * The call trigger used inside the stage-specific Next step panel. It stays a
+ * separate component because provider acceptance and the canonical touch are
+ * one guarded operation, while the parent owns the follow-up outcome flow.
  */
-export function LeadActionToolbar({ leadId, displayName, phone, currentStage }: Props) {
+export function LeadActionToolbar({ leadId, displayName, phone, onCallAccepted }: Props) {
   const router = useRouter();
   const [calling, setCalling] = useState(false);
   const [callNotice, setCallNotice] = useState<string | null>(null);
-  const scheduleAvailable = ["assigned", "attempting_contact", "connected", "qualified"].includes(
-    currentStage,
-  );
-  const readyToBook = currentStage === "qualified";
   const callable = Boolean(phone?.trim());
 
   async function callNow() {
@@ -61,6 +54,7 @@ export function LeadActionToolbar({ leadId, displayName, phone, currentStage }: 
           : result.message || "The call provider accepted the request. Pick up your line to connect.",
       );
       window.dispatchEvent(new CustomEvent("oasis:lead-touch", { detail: { leadId } }));
+      onCallAccepted?.();
       router.refresh();
     } catch (error) {
       setCallNotice(error instanceof Error ? error.message : "The call could not be started.");
@@ -70,60 +64,35 @@ export function LeadActionToolbar({ leadId, displayName, phone, currentStage }: 
   }
 
   return (
-    <section className="space-y-2" aria-label="Lead actions">
-      <div className={`grid gap-3 ${scheduleAvailable ? "md:grid-cols-2" : ""}`}>
+    <div className="space-y-2">
+      <div className="flex flex-col gap-3 rounded-xl border border-status-engaged/35 bg-status-engaged/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <PhoneCall className="h-4 w-4 text-status-engaged" aria-hidden />
+            <span className="text-sm font-semibold text-fg">Call {displayName}</span>
+          </div>
+          <p className="mt-1 text-xs leading-5 text-fg-muted">
+            {callable
+              ? `Your rep line rings first, then connects to ${phone}.`
+              : "Add a valid phone number in Lead details before calling."}
+          </p>
+        </div>
         <button
           type="button"
           disabled={!callable || calling}
           onClick={() => void callNow()}
-          className="group flex items-center justify-between gap-4 rounded-xl border border-status-engaged/40 bg-status-engaged/5 px-5 py-4 text-left transition-colors hover:bg-status-engaged/10 disabled:cursor-not-allowed disabled:opacity-50"
+          className="btn-primary inline-flex shrink-0 items-center justify-center gap-2 !px-4 !py-2 text-sm"
         >
-          <div>
-            <div className="flex items-center gap-2">
-              {calling ? (
-                <LoaderCircle className="h-4 w-4 animate-spin text-status-engaged" aria-hidden />
-              ) : (
-                <PhoneCall className="h-4 w-4 text-status-engaged" aria-hidden />
-              )}
-              <span className="text-sm font-bold text-fg">{calling ? "Starting call..." : "Call now"}</span>
-            </div>
-            <p className="mt-1 text-xs text-fg-muted">
-              {callable
-                ? "Rings your rep line first, then bridges you to the lead. A live provider acceptance is tracked as a touch."
-                : "Add a valid phone number before calling this lead."}
-            </p>
-          </div>
-          <span className="text-xs font-semibold text-status-engaged">{phone || "No phone"}</span>
+          {calling ? <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden /> : null}
+          {calling ? "Starting call…" : "Call now"}
         </button>
-
-        {scheduleAvailable ? (
-          <a
-            href="#founder-audit-handoff"
-            className="group flex items-center justify-between gap-4 rounded-xl border border-accent/40 bg-accent/5 px-5 py-4 transition-colors hover:bg-accent/10"
-          >
-            <div>
-              <div className="flex items-center gap-2">
-                <CalendarPlus className="h-4 w-4 text-accent" aria-hidden />
-                <span className="text-sm font-bold text-fg">Schedule founder audit</span>
-              </div>
-              <p className="mt-1 text-xs text-fg-muted">
-                {readyToBook
-                  ? "Choose the exact time and host, open the prefilled 15-minute event, then confirm it was saved."
-                  : "You can schedule now, but all qualification gates and a handoff note are required before the event can move this lead."}
-              </p>
-            </div>
-            <span className="text-xs font-semibold text-accent transition-transform group-hover:translate-x-0.5">
-              {readyToBook ? "Book audit" : "Qualify + book"}
-            </span>
-          </a>
-        ) : null}
       </div>
       {callNotice ? (
         <div className="rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-xs text-fg-muted" role="status" aria-live="polite">
           {callNotice}
         </div>
       ) : null}
-    </section>
+    </div>
   );
 }
 

@@ -38,6 +38,7 @@ import {
   recentLeadsTurso,
   pipelineBreakdownTurso,
 } from "./turso-queries";
+import { resolveActiveProfileForUser } from "./active-profile-resolver";
 
 // ============================================================================
 // Profile + Tenant
@@ -48,15 +49,10 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   const user = await getSessionUser();
 
   if (user?.id) {
-    const r = await db.from("user_profiles").select("*").eq("auth_user_id", user.id).limit(20);
-    const rows = ((r.data || []) as ActiveUserProfile[]) || [];
-    if (rows.length > 0) return chooseActiveProfile(rows, user.email);
+    const active = await resolveActiveProfileForUser(user);
+    if (active.error) console.error("[queries.getActiveProfile]", active.error);
+    if (active.profile) return active.profile;
     // Auth user exists but no profile yet — try by email (post-migration link case)
-    if (user.email) {
-      const e = await db.from("user_profiles").select("*").eq("email", user.email).limit(20);
-      const emailRows = ((e.data || []) as ActiveUserProfile[]) || [];
-      if (emailRows.length > 0) return chooseActiveProfile(emailRows, user.email);
-    }
   }
 
   // OPERATOR_EMAIL fallback is single-tenant only. On a multi-tenant
@@ -69,9 +65,9 @@ export async function getActiveProfile(): Promise<UserProfile | null> {
   }
   const fallbackEmail = process.env.OPERATOR_EMAIL;
   if (!fallbackEmail) return null;
-  const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).maybeSingle();
-  if (r.error || !r.data) return null;
-  return r.data as UserProfile;
+  const r = await db.from("user_profiles").select("*").eq("email", fallbackEmail).limit(20);
+  if (r.error || !r.data?.length) return null;
+  return chooseActiveProfile(r.data as ActiveUserProfile[], fallbackEmail);
 }
 
 type ActiveUserProfile = UserProfile & {

@@ -13,8 +13,11 @@ import { canonicalizeTenantMembers, type MemberRow } from "@/lib/team";
 type Row = Record<string, unknown>;
 
 function fakeDatabase(tables: Record<string, Row[]>) {
+  const queriedTables: string[] = [];
   return {
+    queriedTables,
     from(table: string) {
+      queriedTables.push(table);
       let rows = [...(tables[table] || [])];
       let cap: number | null = null;
       // Test-only fluent adapter for the subset used by getActivityFeed().
@@ -25,6 +28,10 @@ function fakeDatabase(tables: Record<string, Row[]>) {
         },
         eq(column: string, value: unknown) {
           rows = rows.filter((row) => row[column] === value);
+          return chain;
+        },
+        in(column: string, values: unknown[]) {
+          rows = rows.filter((row) => values.includes(row[column]));
           return chain;
         },
         not(column: string, operator: string, value: unknown) {
@@ -328,6 +335,90 @@ const filtered = await getActivityFeed("oasis-tenant", {
 });
 assert.ok(filtered.rows.length > 0);
 assert.ok(filtered.rows.every((row) => row.actorKey === "human:profile-rep"));
+
+db.queriedTables.length = 0;
+const managerFeed = await getActivityFeed("oasis-tenant", {
+  scope: "sales_team",
+  salesActorUserIds: ["user-rep"],
+  members,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: db as any,
+});
+assert.deepEqual(
+  db.queriedTables,
+  ["lead_interactions"],
+  "manager activity must never query tenant audits, agents, chats, crons, or automations",
+);
+assert.deepEqual(managerFeed.actors.map((actor) => actor.label), ["OASIS Rep"]);
+assert.deepEqual(managerFeed.rows.map((row) => row.id), ["li:interaction-oasis-rep"]);
+assert.ok(managerFeed.rows.every((row) => row.actorType === "human"));
+const activitySource = readFileSync(
+  new URL("../lib/audit/activity-feed.ts", import.meta.url),
+  "utf8",
+);
+assert.equal(
+  activitySource.includes("getTenantMembers(tenantId).catch(() => [])"),
+  false,
+  "a roster outage must not silently relabel human activity as System",
+);
+assert.ok(activitySource.includes("errors: [`team_members:"));
+
+const skewMembers: MemberRow[] = [
+  {
+    ...members[1],
+    id: "profile-busy",
+    auth_user_id: "user-busy",
+    email: "busy@oasis.test",
+    full_name: "Busy Rep",
+  },
+  {
+    ...members[1],
+    id: "profile-quiet",
+    auth_user_id: "user-quiet",
+    email: "quiet@oasis.test",
+    full_name: "Quiet Rep",
+  },
+];
+const skewDb = fakeDatabase({
+  lead_interactions: [
+    ...Array.from({ length: 200 }, (_, index) => ({
+      id: `busy-${index}`,
+      tenant_id: "oasis-tenant",
+      actor_user_id: "user-busy",
+      metadata: {},
+      type: "call_started",
+      channel: "call",
+      direction: "outbound",
+      agent_source: "dashboard",
+      created_at: new Date(Date.parse(now) + index * 1_000).toISOString(),
+    })),
+    {
+      id: "quiet-older",
+      tenant_id: "oasis-tenant",
+      actor_user_id: "user-quiet",
+      metadata: {},
+      type: "note_added",
+      channel: "internal",
+      direction: "outbound",
+      agent_source: "dashboard",
+      created_at: "2026-08-01T00:00:00.000Z",
+    },
+  ],
+});
+const quietRepFeed = await getActivityFeed("oasis-tenant", {
+  actor: "human:profile-quiet",
+  limit: 1,
+  scope: "sales_team",
+  salesActorUserIds: ["user-busy", "user-quiet"],
+  members: skewMembers,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db: skewDb as any,
+});
+assert.deepEqual(
+  quietRepFeed.rows.map((row) => row.id),
+  ["li:quiet-older"],
+  "a selected quiet rep must be filtered in the database before busy teammates consume the row limit",
+);
 
 const rollup = buildEmployeeActivityRollup(
   members,

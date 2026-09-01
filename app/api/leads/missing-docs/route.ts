@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import {
+  canReadLeadRecordWithPolicy,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,17 +44,24 @@ export async function POST(req: Request) {
   }
 
   const db = getServiceSupabase();
+  const readPolicy = await resolveLeadReadPolicy(ctx);
 
   // 1. Scope to this tenant's own records (prevents cross-tenant doc probing).
   const { data: valid, error: vErr } = await db
     .from("tenant_records")
-    .select("id")
+    .select("id, data")
     .eq("tenant_id", ctx.tenantId)
     .in("id", leadIds);
   if (vErr) {
     return NextResponse.json({ ok: false, error: "scope_failed" }, { status: 500 });
   }
-  const validIds = (valid || []).map((r: { id: string }) => r.id);
+  const validIds = (
+    (valid || []) as Array<{ id: string; data: Record<string, unknown> | null }>
+  )
+    .filter((row) =>
+      canReadLeadRecordWithPolicy(readPolicy, { id: row.id, data: row.data || {} }),
+    )
+    .map((row) => row.id);
   if (!validIds.length) {
     return NextResponse.json({ ok: true, missing: {}, doc_types: EXPECTED_DOC_TYPES });
   }
