@@ -16,6 +16,7 @@ import {
   gmailFailureReason,
   gmailMessageIdForIdempotencyKey,
 } from "../lib/integrations/gmail-oauth-send";
+import { dispatchByTcpaWindow } from "../lib/tcpa-window";
 
 const migrationPath = "database/turso/167_founder_meeting_closed_loop.turso.sql";
 const migration = readFileSync(migrationPath, "utf8");
@@ -138,6 +139,9 @@ assert.match(messages.reminder.subject, /7 minutes/i);
 assert.doesNotMatch(messages.reminder.subject, /10 minutes/i);
 assert.match(messages.reminder.body, /meet\.google\.com\/abc-defg-hij/);
 assert.doesNotMatch(messages.reminder.body, /internal|handoff/i);
+assert.match(messages.confirmationSms, /^OASIS AI:/);
+assert.match(messages.reminder.sms, /^OASIS AI:/);
+assert.match(messages.reminder.sms, /meet\.google\.com\/abc-defg-hij/);
 assert.equal(
   minutesUntilMeeting(meetingAt, "2026-09-01T19:53:15.000Z"),
   7,
@@ -165,6 +169,27 @@ const rawMessage = Buffer.from(buildGmailRawMessage({
 assert.match(rawMessage, new RegExp(`Message-ID: ${firstMessageId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 
 async function main() {
+const fallbackEffects: string[] = [];
+const fallbackDisposition = await dispatchByTcpaWindow(
+  { usedFallback: true, withinWindow: true },
+  {
+    skip: async (reason) => {
+      fallbackEffects.push(`skip:${reason}`);
+      return "skipped" as const;
+    },
+    send: async () => {
+      fallbackEffects.push("send");
+      return "sent" as const;
+    },
+  },
+);
+assert.equal(fallbackDisposition, "skipped");
+assert.deepEqual(
+  fallbackEffects,
+  ["skip:sms_timezone_unresolved"],
+  "an unresolved recipient timezone must terminate as skipped without invoking the send branch",
+);
+
 // Execute the real Turso migration against libSQL. The uniqueness constraints
 // are the never-double-book / never-double-remind backstop, not UI convention.
 const db = createClient({ url: ":memory:" });
@@ -296,8 +321,8 @@ assert(
   "tracking retries are idempotent by durable notification id",
 );
 assert(
-  cron.includes("reconciliation.failed + trackingFailures"),
-  "a poisoned saga degrades health but cannot starve unrelated reminder deliveries",
+  cron.includes("reconciliation.failed + backfill.failed + trackingFailures"),
+  "a poisoned saga or backfill degrades health but cannot starve unrelated reminder deliveries",
 );
 assert(
   cron.includes("subject: deliveryRow.subject") && cron.includes("body: deliveryRow.body"),
@@ -315,6 +340,12 @@ assert(
   cron.includes('sent.reason === "delivery_unknown"'),
   "ambiguous Gmail transport failures are terminal instead of risking a duplicate retry",
 );
+const tcpaDispatchStart = cron.indexOf("await dispatchByTcpaWindow(quietHours");
+const tcpaDispatchEnd = cron.indexOf("const priorSms", tcpaDispatchStart);
+assert(tcpaDispatchStart >= 0 && tcpaDispatchEnd > tcpaDispatchStart, "the SMS branch must use the tested TCPA dispatcher");
+const tcpaDispatchBlock = cron.slice(tcpaDispatchStart, tcpaDispatchEnd);
+assert.match(tcpaDispatchBlock, /skip:[\s\S]*?await mark\(db, row, "skipped", \{ error \}\)/);
+assert.match(tcpaDispatchBlock, /if \(windowDisposition === "skipped"\) return "skipped"/);
 assert(cronRegistry.includes("dispatch-founder-meeting-reminders"), "the cron registry registers the meeting worker");
 assert(driver.includes("dispatch-founder-meeting-reminders"), "the live GitHub cron driver runs the worker");
 

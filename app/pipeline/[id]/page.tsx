@@ -38,6 +38,26 @@ import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
 
 export const dynamic = "force-dynamic";
 
+async function loadFounderMeetingSmsConsent(
+  tenantId: string,
+  leadId: string,
+  appointmentId: string | null,
+): Promise<boolean> {
+  if (!appointmentId) return false;
+  const meeting = await getServiceSupabase()
+    .from("call_appointments")
+    .select("sms_consent")
+    .eq("tenant_id", tenantId)
+    .eq("lead_id", leadId)
+    .eq("id", appointmentId)
+    .maybeSingle();
+  if (meeting.error) {
+    console.error("[pipeline-lead] founder meeting SMS consent lookup failed", meeting.error.message);
+    return false;
+  }
+  return Boolean((meeting.data as { sms_consent?: number | boolean } | null)?.sms_consent);
+}
+
 export default async function PipelineLeadDetailPage({
   params,
 }: {
@@ -92,10 +112,12 @@ export default async function PipelineLeadDetailPage({
     );
   }
 
-  const [ownedSlug, metrics, memberNames] = await Promise.all([
+  const appointmentId = nonEmptyString(activeRecord.data.calendar_appointment_id);
+  const [ownedSlug, metrics, memberNames, founderMeetingSmsConsent] = await Promise.all([
     resolveOwnedSlug(tenantId),
     loadLeadDetailMetrics(tenantId, id, activeRecord.data, activeRecord.created_at),
     buildMemberNameMap(tenantId),
+    loadFounderMeetingSmsConsent(tenantId, id, appointmentId),
   ]);
 
   const title =
@@ -217,6 +239,7 @@ export default async function PipelineLeadDetailPage({
           canManage={canManage}
           canRunDeal={canRunDeal}
           canRunDelivery={canRunDelivery}
+          initialFounderMeetingSmsConsent={founderMeetingSmsConsent}
           initialOffer={{
             packageId: nonEmptyString(activeRecord.data.recommended_tier),
             setupAmount: numberValue(activeRecord.data.quoted_setup_amount),

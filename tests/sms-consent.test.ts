@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readConsentArtifact, smsGate } from "../lib/sms/consent";
+import { readConsentArtifact, readCurrentHttpsConsentArtifact, smsGate } from "../lib/sms/consent";
 
 const NOW = Date.parse("2026-08-06T12:00:00Z");
 
@@ -65,6 +65,29 @@ assert.equal(readConsentArtifact({ ...goodArtifact, captured_at: "not a date" },
   assert.equal(old.ok, true);
   if (old.ok) assert.equal(old.stale, true, "consent over a year old is flagged for re-confirmation");
 }
+
+// Founder meeting consent is a fresh, browser-captured artifact. Unlike the
+// generic parser, this stricter verdict rejects stale proof and non-HTTPS
+// capture points before it can be persisted as current consent.
+assert.equal(readCurrentHttpsConsentArtifact(goodArtifact, NOW).ok, true);
+for (const source_url of [
+  "http://sunbizfunding.com/apply",
+  "javascript:alert(1)",
+  "not-a-url",
+  "",
+]) {
+  const verdict = readCurrentHttpsConsentArtifact({ ...goodArtifact, source_url }, NOW);
+  assert.deepEqual(verdict, { ok: false, reason: "https_source_url_required" });
+}
+assert.deepEqual(
+  readCurrentHttpsConsentArtifact({ ...goodArtifact, captured_at: "2024-01-01T00:00:00Z" }, NOW),
+  { ok: false, reason: "stale_consent_artifact" },
+);
+assert.equal(
+  readCurrentHttpsConsentArtifact({ ...goodArtifact, captured_at: new Date(NOW + 1).toISOString() }, NOW).ok,
+  false,
+  "even a slightly future timestamp is invalid",
+);
 
 // ── The gate ───────────────────────────────────────────────────────────────
 const base = {

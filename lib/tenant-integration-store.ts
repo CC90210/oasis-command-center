@@ -83,6 +83,7 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
     account_sid: "TWILIO_ACCOUNT_SID",
     auth_token: "TWILIO_AUTH_TOKEN",
     from_number: "TWILIO_FROM_NUMBER",
+    messaging_service_sid: "TWILIO_MESSAGING_SERVICE_SID",
   },
   texttorrent: {
     api_sid: "TEXTTORRENT_API_SID",

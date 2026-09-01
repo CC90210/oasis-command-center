@@ -7,14 +7,21 @@ import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
 import {
+  backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
+  type FounderMeetingNotificationBackfillResult,
   type FounderMeetingReconciliationResult,
 } from "@/lib/website-sales-founder-meeting";
 import {
   buildFounderMeetingMessages,
+  clampSmsBody,
   meetingNotificationDecision,
   minutesUntilMeeting,
+  reminderTierStillValid,
+  withSmsFooter,
+  type FounderReminderTier,
 } from "@/lib/website-sales-meeting";
 
 export const runtime = "nodejs";
@@ -31,7 +38,8 @@ type NotificationRow = {
   tenant_id: string;
   appointment_id: string;
   lead_id: string;
-  kind: "confirmation" | "ten_minute";
+  kind: "confirmation" | "reminder_60" | "reminder_30" | "ten_minute";
+  reminder_minutes_before: number | null;
   channel: "email" | "sms";
   due_at: string;
   recipient: string;
@@ -219,6 +227,7 @@ async function recordTouch(
       notification_id: row.id,
       appointment_revision: row.appointment_revision,
       reminder_kind: row.kind,
+      reminder_minutes_before: row.reminder_minutes_before,
       attempt_token: row.attempt_token,
       provider,
       provider_receipt: receipt,
@@ -323,10 +332,19 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
   let retainLeaseUntilRecovery = false;
   try {
     let deliveryRow = row;
-    if (row.kind === "ten_minute") {
+    if (row.reminder_minutes_before != null) {
+      const tier = Number(row.reminder_minutes_before);
       const actualMinutes = minutesUntilMeeting(appointment.scheduled_for, new Date().toISOString());
       if (actualMinutes <= 0) {
         await mark(db, row, "skipped", { error: "meeting_already_started" });
+        return "skipped";
+      }
+      if (![60, 30, 10].includes(tier)) {
+        await mark(db, row, "skipped", { error: "reminder_tier_invalid" });
+        return "skipped";
+      }
+      if (!reminderTierStillValid(tier as FounderReminderTier, actualMinutes)) {
+        await mark(db, row, "skipped", { error: "reminder_tier_superseded" });
         return "skipped";
       }
       const messages = buildFounderMeetingMessages({
@@ -376,6 +394,32 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
         await mark(db, row, "skipped", { error: "sms_consent_missing_or_recipient_changed" });
         return "skipped";
       }
+      const quietHours = checkTcpaWindow(row.recipient, new Date());
+      const windowDisposition = await dispatchByTcpaWindow(quietHours, {
+        skip: async (error) => {
+          await mark(db, row, "skipped", { error });
+          return "skipped" as const;
+        },
+        send: () => "send" as const,
+      });
+      if (windowDisposition === "skipped") return "skipped";
+      const priorSms = await db.from("website_sales_meeting_notifications")
+        .select("id")
+        .eq("tenant_id", row.tenant_id)
+        .eq("channel", "sms")
+        .eq("recipient", row.recipient)
+        .eq("status", "sent")
+        .limit(1);
+      if (priorSms.error) {
+        await retryOrFail(db, row, `sms_conversation_lookup_failed:${priorSms.error.message}`);
+        return "failed";
+      }
+      deliveryRow = {
+        ...deliveryRow,
+        body: clampSmsBody(withSmsFooter(deliveryRow.body, {
+          firstInConversation: (priorSms.data || []).length === 0,
+        })),
+      };
       if (!(await tenantHasDirectTwilio(row.tenant_id))) {
         await mark(db, row, "skipped", { error: "oasis_sms_not_configured" });
         return "skipped";
@@ -461,6 +505,19 @@ async function handle(req: NextRequest) {
       errors: ["meeting_saga_reconciliation_failed"],
     };
   }
+  let backfill: FounderMeetingNotificationBackfillResult;
+  try {
+    backfill = await backfillFounderMeetingNotifications({ now: new Date(now), limit: BATCH_LIMIT });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "meeting_notification_backfill_failed";
+    console.error("[founder-meeting-reminders] notification backfill degraded", detail);
+    backfill = {
+      considered: 0,
+      repaired: 0,
+      failed: 1,
+      errors: ["meeting_notification_backfill_failed"],
+    };
+  }
 
   const expiredLeases = await db.from("call_appointments")
     .update({ notification_lease_token: null, notification_lease_expires_at: null, updated_at: now })
@@ -487,7 +544,7 @@ async function handle(req: NextRequest) {
   }
 
   const tracking = await db.from("website_sales_meeting_notifications")
-    .select("id,tenant_id,appointment_id,lead_id,kind,channel,due_at,recipient,sender_user_id,subject,body,attempts,appointment_revision,attempt_token,provider,provider_receipt,sent_at,tracking_attempts")
+    .select("id,tenant_id,appointment_id,lead_id,kind,reminder_minutes_before,channel,due_at,recipient,sender_user_id,subject,body,attempts,appointment_revision,attempt_token,provider,provider_receipt,sent_at,tracking_attempts")
     .eq("status", "sent")
     .eq("tracking_status", "pending")
     .order("sent_at", { ascending: true })
@@ -527,7 +584,7 @@ async function handle(req: NextRequest) {
   let processed = 0;
   let sent = 0;
   let skipped = 0;
-  let failures = reconciliation.failed + trackingFailures + (deliveryUnknown.data?.length || 0);
+  let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0);
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
     const claimed = await db.from("website_sales_meeting_notifications")
@@ -535,7 +592,7 @@ async function handle(req: NextRequest) {
       .eq("tenant_id", candidate.tenant_id)
       .eq("id", candidate.id)
       .eq("status", "pending")
-      .select("id,tenant_id,appointment_id,lead_id,kind,channel,due_at,recipient,sender_user_id,subject,body,attempts,appointment_revision,attempt_token")
+      .select("id,tenant_id,appointment_id,lead_id,kind,reminder_minutes_before,channel,due_at,recipient,sender_user_id,subject,body,attempts,appointment_revision,attempt_token")
       .maybeSingle();
     if (claimed.error) {
       failures++;
@@ -574,6 +631,7 @@ async function handle(req: NextRequest) {
     delivery_unknown: deliveryUnknown.data?.length || 0,
     expired_leases: expiredLeases.data?.length || 0,
     reconciliation,
+    backfill,
     tracking_reconciled: tracked,
     tracking_failed: trackingFailures,
     claimed: processed,

@@ -34,7 +34,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { isStopCommand, suppressPhoneViaCasl } from "@/lib/sms-opt-out";
+import {
+  isStopCommand,
+  smsSuppressionFailureResponse,
+  suppressPhoneNumber,
+} from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -291,16 +295,20 @@ export async function POST(req: NextRequest) {
   }
   const { tenantId, userId: routedToUserId } = resolved;
   if (from && isStopCommand(messageText)) {
-    const digits = from.replace(/\D/g, "").slice(-10);
-    if (digits.length !== 10) return NextResponse.json({ ok: false, error: "invalid_stop_phone" }, { status: 400 });
-    const durable = await db.from("sunbiz_phone_suppressions").upsert({
-      tenant_id: tenantId, phone_last10: digits, reason: "OPT_OUT",
-      source: "texttorrent_webhook", updated_at: new Date().toISOString(),
-    }, { onConflict: "tenant_id,phone_last10" });
-    if (durable.error) return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
-    void suppressPhoneViaCasl(from, "texttorrent_inbound").then((result) => {
-      if (!result.ok) console.error("[webhooks.texttorrent.sms-inbound] CASL propagation failed", result.error);
-    });
+    try {
+      await suppressPhoneNumber(db, {
+        tenantId,
+        phone: from,
+        reason: "OPT_OUT",
+        source: "texttorrent_webhook",
+      });
+    } catch (error) {
+      const failure = smsSuppressionFailureResponse(error);
+      if (failure.status === 503) {
+        console.error("[webhooks.texttorrent.sms-inbound] suppression failed", error);
+      }
+      return NextResponse.json({ ok: false, error: failure.error }, { status: failure.status });
+    }
   }
 
   let leadId: string | null;

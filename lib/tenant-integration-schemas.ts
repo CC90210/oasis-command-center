@@ -60,6 +60,7 @@ export const INTEGRATION_SCHEMAS: IntegrationSchema[] = [
       { key: "account_sid", label: "Account SID", sensitive: false, validation: "alphanum_uppercase" },
       { key: "auth_token", label: "Auth Token", sensitive: true, hint: "Find this under Twilio → Account Info." },
       { key: "from_number", label: "From Number", sensitive: false, validation: "phone_e164", hint: "E.164 format, e.g. +14165551212" },
+      { key: "messaging_service_sid", label: "Messaging Service SID", sensitive: false, validation: "alphanum_uppercase", hint: "Optional MG... SID. When set, it replaces From Number for outbound sends." },
     ],
   },
   {

@@ -65,6 +65,36 @@ export type DirectTwilioResult =
       http_status: number;
     };
 
+export type TwilioCredentialBundle = {
+  account_sid?: string;
+  auth_token?: string;
+  from_number?: string;
+  messaging_service_sid?: string;
+};
+
+export function twilioCredentialsReady(bundle: TwilioCredentialBundle): boolean {
+  return Boolean(
+    bundle.account_sid &&
+    bundle.auth_token &&
+    (bundle.messaging_service_sid || bundle.from_number),
+  );
+}
+
+export function buildTwilioMessageForm(
+  bundle: TwilioCredentialBundle,
+  input: { to: string; body: string },
+): URLSearchParams {
+  const form = new URLSearchParams();
+  form.set("To", input.to);
+  if (bundle.messaging_service_sid) {
+    form.set("MessagingServiceSid", bundle.messaging_service_sid);
+  } else if (bundle.from_number) {
+    form.set("From", bundle.from_number);
+  }
+  form.set("Body", input.body);
+  return form;
+}
+
 /**
  * Returns true when the tenant has the minimum set of Twilio creds
  * (account_sid + auth_token + from_number) to dispatch via the
@@ -73,7 +103,7 @@ export type DirectTwilioResult =
  */
 export async function tenantHasDirectTwilio(tenantId: string): Promise<boolean> {
   const b = await getTenantIntegrationBundle(tenantId, "twilio");
-  return !!(b.account_sid && b.auth_token && b.from_number);
+  return twilioCredentialsReady(b);
 }
 
 export async function sendSmsDirectTwilio(input: {
@@ -95,8 +125,7 @@ export async function sendSmsDirectTwilio(input: {
   const creds = await getTenantIntegrationBundle(input.tenantId, "twilio");
   const sid = creds.account_sid;
   const token = creds.auth_token;
-  const from = creds.from_number;
-  if (!sid || !token || !from) {
+  if (!twilioCredentialsReady(creds) || !sid || !token) {
     return {
       ok: false,
       provider: "twilio_direct",
@@ -105,10 +134,7 @@ export async function sendSmsDirectTwilio(input: {
     };
   }
   const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`;
-  const form = new URLSearchParams();
-  form.set("To", input.to);
-  form.set("From", from);
-  form.set("Body", input.body);
+  const form = buildTwilioMessageForm(creds, input);
 
   try {
     const r = await fetch(url, {

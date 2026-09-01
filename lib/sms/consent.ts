@@ -47,6 +47,15 @@ export type ConsentVerdict =
   | { ok: true; artifact: ConsentArtifact; ageDays: number; stale: boolean }
   | { ok: false; reason: string };
 
+export type CurrentHttpsConsentVerdict =
+  | {
+      ok: true;
+      artifact: ConsentArtifact & { sourceUrl: string };
+      ageDays: number;
+      stale: false;
+    }
+  | { ok: false; reason: string };
+
 /** Consent older than this is flagged for re-confirmation. Numbers get
  *  reassigned, and a stale record is a weaker defence. Not a hard block: the
  *  caller decides whether to re-engage or suppress. */
@@ -101,6 +110,37 @@ export function readConsentArtifact(raw: unknown, nowMs: number): ConsentVerdict
     },
     ageDays,
     stale: ageDays > STALE_AFTER_DAYS,
+  };
+}
+
+/**
+ * A stricter consent verdict for capture flows that are asserting fresh
+ * consent now. Stored historical consent can still be parsed above, but a new
+ * founder-meeting attestation must be current and tied to an HTTPS page.
+ */
+export function readCurrentHttpsConsentArtifact(raw: unknown, nowMs: number): CurrentHttpsConsentVerdict {
+  const verdict = readConsentArtifact(raw, nowMs);
+  if (!verdict.ok) return verdict;
+  const capturedAtMs = Date.parse(verdict.artifact.capturedAtIso);
+  if (capturedAtMs > nowMs) return { ok: false, reason: "timestamp_in_future" };
+  if (nowMs - capturedAtMs > STALE_AFTER_DAYS * 86_400_000) {
+    return { ok: false, reason: "stale_consent_artifact" };
+  }
+  const sourceUrl = verdict.artifact.sourceUrl;
+  if (!sourceUrl) return { ok: false, reason: "https_source_url_required" };
+  try {
+    const parsed = new URL(sourceUrl);
+    if (parsed.protocol !== "https:" || !parsed.hostname) {
+      return { ok: false, reason: "https_source_url_required" };
+    }
+  } catch {
+    return { ok: false, reason: "https_source_url_required" };
+  }
+  return {
+    ok: true,
+    artifact: { ...verdict.artifact, sourceUrl },
+    ageDays: verdict.ageDays,
+    stale: false,
   };
 }
 

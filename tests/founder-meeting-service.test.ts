@@ -3,9 +3,13 @@ import { createClient, type Client } from "@libsql/client";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
 import {
   activateVerifiedFounderMeeting,
+  backfillFounderMeetingNotifications,
   cancelVerifiedFounderMeeting,
   closeVerifiedFounderMeeting,
   createVerifiedFounderMeeting,
+  founderMeetingSmsConsentErrorResponse,
+  founderMeetingBackfillChunkStart,
+  grantFounderMeetingSmsConsent,
   prepareVerifiedFounderMeetingCancellation,
   reconcileFounderMeetingSagas,
   rescheduleVerifiedFounderMeeting,
@@ -21,6 +25,9 @@ const FUTURE = "2026-09-01T16:00:00.000Z";
 const LATER = "2026-09-01T17:00:00.000Z";
 
 const BASE_SCHEMA = `
+  CREATE TABLE tenants (
+    id TEXT PRIMARY KEY
+  );
   CREATE TABLE call_appointments (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -59,12 +66,75 @@ type CalendarCalls = {
   cancelled: string[];
 };
 
+type InstrumentationHooks = {
+  onSelect?: (table: string, columns: string) => void;
+  onUpdate?: (table: string) => void;
+  beforeMaybeSingle?: (table: string, columns: string | null) => Promise<unknown> | null;
+  beforeExecute?: (table: string, columns: string | null) => Promise<unknown> | null;
+};
+
+function instrumentDb(db: unknown, hooks: InstrumentationHooks): unknown {
+  const target = db as {
+    from(table: string): {
+      select(columns?: string, options?: unknown): unknown;
+      update(values: Record<string, unknown>, options?: unknown): unknown;
+      maybeSingle(): PromiseLike<unknown>;
+      then(
+        onFulfilled?: ((value: unknown) => unknown) | null,
+        onRejected?: ((reason: unknown) => unknown) | null,
+      ): Promise<unknown>;
+    };
+  };
+  return new Proxy(target, {
+    get(object, property, receiver) {
+      if (property !== "from") {
+        const value = Reflect.get(object, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(object) : value;
+      }
+      return (table: string) => {
+        const builder = object.from(table);
+        let selectedColumns: string | null = null;
+        const originalSelect = builder.select.bind(builder);
+        builder.select = (columns = "*", options?: unknown) => {
+          selectedColumns = columns;
+          hooks.onSelect?.(table, columns);
+          return originalSelect(columns, options);
+        };
+        const originalUpdate = builder.update.bind(builder);
+        builder.update = (values: Record<string, unknown>, options?: unknown) => {
+          hooks.onUpdate?.(table);
+          return originalUpdate(values, options);
+        };
+        const originalMaybeSingle = builder.maybeSingle.bind(builder);
+        builder.maybeSingle = () => {
+          const query = originalMaybeSingle();
+          const before = hooks.beforeMaybeSingle?.(table, selectedColumns) ?? null;
+          if (!before) return query;
+          return {
+            then(onFulfilled, onRejected) {
+              return Promise.resolve(before).then(() => query).then(onFulfilled, onRejected);
+            },
+          };
+        };
+        const originalThen = builder.then.bind(builder);
+        builder.then = (onFulfilled, onRejected) => {
+          const before = hooks.beforeExecute?.(table, selectedColumns) ?? null;
+          if (!before) return originalThen(onFulfilled, onRejected);
+          return Promise.resolve(before).then(() => originalThen(onFulfilled, onRejected));
+        };
+        return builder;
+      };
+    },
+  });
+}
+
 async function fixture() {
   const raw = createClient({ url: ":memory:" });
-  const migration = await import("node:fs").then(({ readFileSync }) =>
+  const [migration167, migration169] = await import("node:fs").then(({ readFileSync }) => [
     readFileSync("database/turso/167_founder_meeting_closed_loop.turso.sql", "utf8"),
-  );
-  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration}`);
+    readFileSync("database/turso/169_founder_meeting_reminder_tiers.turso.sql", "utf8"),
+  ]);
+  await raw.executeMultiple(`${BASE_SCHEMA}\n${migration167}\n${migration169}`);
   const db = createTursoPostgrest(raw);
   const calls: CalendarCalls = { created: 0, updated: [], cancelled: [] };
   const deps = {
@@ -134,6 +204,8 @@ async function appointment(raw: Client, id: string) {
 
 async function insertVerifiedAppointment(raw: Client, values: {
   id: string;
+  tenantId?: string;
+  leadId?: string;
   scheduledFor?: string;
   status?: string;
   workflowStatus?: string;
@@ -158,7 +230,7 @@ async function insertVerifiedAppointment(raw: Client, values: {
       pending_started_at, pending_lease_token, previous_scheduled_for
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     args: [
-      values.id, TENANT, LEAD, "lead", values.scheduledFor ?? FUTURE, HOST,
+      values.id, values.tenantId ?? TENANT, values.leadId ?? LEAD, "lead", values.scheduledFor ?? FUTURE, HOST,
       values.status ?? "scheduled", ACTOR, "founder_audit", 15, "America/Toronto",
       "Taylor Smith", "North Star Dental", "taylor@example.com", "+14165550101",
       "https://northstardental.ca/", "Review the site.", "Qualified handoff.",
@@ -194,6 +266,21 @@ async function testCreateAuditAndFullIdempotency() {
   assert.equal(row.pending_operation, "book");
   assert.equal(row.workflow_status, "pending_transition");
 
+  const notificationRows = await raw.execute({
+    sql: `SELECT channel, kind, reminder_minutes_before
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ?
+          ORDER BY reminder_minutes_before DESC, channel`,
+    args: [meeting.appointmentId],
+  });
+  assert.equal(notificationRows.rows.length, 8, "confirmation plus three email/SMS reminder tiers are planned");
+  const reminders = notificationRows.rows.filter((notification) => notification.reminder_minutes_before !== null);
+  assert.equal(reminders.length, 6);
+  assert.deepEqual(
+    [...new Set(reminders.map((notification) => Number(notification.reminder_minutes_before)))].sort((a, b) => b - a),
+    [60, 30, 10],
+  );
+
   await createVerifiedFounderMeeting(bookingInput(), deps);
   assert.equal(calls.created, 1, "a byte-equivalent retry reuses the verified receipt");
   for (const [field, value] of [
@@ -210,6 +297,413 @@ async function testCreateAuditAndFullIdempotency() {
     /booking_request_mismatch/,
   );
   await raw.close();
+}
+
+async function testBackfillHydratesLatePhoneAndRepairsTiers() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, { id: "meeting-backfill", workflowStatus: "active" });
+  await raw.execute({
+    sql: `UPDATE call_appointments
+          SET client_phone_snapshot = NULL, sms_consent = 1
+          WHERE tenant_id = ? AND id = ?`,
+    args: [TENANT, "meeting-backfill"],
+  });
+  await setLead(raw, { phone: "+14165550101" });
+
+  const result = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 25,
+  }, deps);
+  assert.equal(result.considered, 1);
+  assert.equal(result.repaired, 1);
+  assert.equal(result.failed, 0);
+
+  const repaired = await appointment(raw, "meeting-backfill");
+  assert.equal(repaired.client_phone_snapshot, "+14165550101", "late phone data is copied into the immutable send snapshot");
+  const reminders = await raw.execute({
+    sql: `SELECT channel, reminder_minutes_before
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill"],
+  });
+  assert.equal(reminders.rows.length, 6);
+  assert.equal(reminders.rows.filter((row) => row.channel === "sms").length, 3);
+  await raw.close();
+}
+
+async function testBackfillLimitScansPastAlreadyCompleteAppointments() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-backfill-complete-first",
+    scheduledFor: "2026-09-01T15:30:00.000Z",
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-backfill-missing-second",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  const initiallyMissing = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill-missing-second"],
+  });
+  assert.equal(Number(initiallyMissing.rows[0].count), 0, "the first bounded pass repairs only the earliest meeting");
+
+  const secondPass = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  assert.equal(secondPass.repaired, 1);
+  assert.equal(secondPass.considered, 2, "the scan moves past the complete first appointment");
+  const repairedLater = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ? AND reminder_minutes_before IS NOT NULL`,
+    args: ["meeting-backfill-missing-second"],
+  });
+  assert.equal(Number(repairedLater.rows[0].count), 6, "the later missing appointment is not starved by the limit");
+  await raw.close();
+}
+
+async function testBackfillLimitIsGlobalAcrossTenants() {
+  const { raw, deps } = await fixture();
+  await raw.batch([
+    { sql: "INSERT INTO tenants (id) VALUES (?)", args: [TENANT] },
+    { sql: "INSERT INTO tenants (id) VALUES (?)", args: ["tenant-b"] },
+  ]);
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-global-limit-a",
+    tenantId: TENANT,
+    leadId: LEAD,
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-global-limit-b",
+    tenantId: "tenant-b",
+    leadId: "lead-b",
+    workflowStatus: "active",
+  });
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+
+  const result = await backfillFounderMeetingNotifications({
+    now: new Date(NOW),
+    horizonMs: 48 * 60 * 60_000,
+    limit: 1,
+  }, deps);
+  assert.equal(result.considered, 1, "the candidate budget applies to the whole multi-tenant run");
+  assert.equal(result.repaired, 0, "a complete first-tenant candidate still consumes the global budget");
+  const laterTenantRows = await raw.execute({
+    sql: `SELECT count(*) AS count
+          FROM website_sales_meeting_notifications
+          WHERE appointment_id = ?`,
+    args: ["meeting-global-limit-b"],
+  });
+  assert.equal(Number(laterTenantRows.rows[0].count), 0, "later tenants cannot receive a fresh copy of the limit");
+  await raw.close();
+}
+
+async function testBackfillBatchSkipsCompleteAppointments() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-batch-complete-a",
+    scheduledFor: "2026-09-01T15:30:00.000Z",
+    workflowStatus: "active",
+  });
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-batch-complete-b",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    limit: 2,
+  }, deps);
+
+  let notificationReads = 0;
+  let perAppointmentContextReads = 0;
+  const instrumentedDb = instrumentDb(deps.db, {
+    onSelect(table, columns) {
+      if (table === "website_sales_meeting_notifications") notificationReads += 1;
+      if (table === "call_appointments" && columns.includes("sms_consent")) {
+        perAppointmentContextReads += 1;
+      }
+    },
+  });
+  const result = await backfillFounderMeetingNotifications({
+    tenantId: TENANT,
+    now: new Date(NOW),
+    limit: 1,
+  }, { ...deps, db: instrumentedDb as never });
+  assert.equal(result.repaired, 0);
+  assert.equal(result.considered, 2);
+  assert.equal(notificationReads, 1, "one page-level outbox read replaces per-appointment dedupe reads");
+  assert.equal(perAppointmentContextReads, 0, "complete appointments never enter ensureNotificationRows");
+  await raw.close();
+}
+
+async function testIdempotentConsentReplayCannotRecreateRowsDuringTransition() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-consent-race",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  let guardedAppointmentUpdates = 0;
+  let transitionInjected = false;
+  const instrumentedDb = instrumentDb(deps.db, {
+    onUpdate(table) {
+      if (table === "call_appointments") guardedAppointmentUpdates += 1;
+    },
+    beforeMaybeSingle(table, columns) {
+      if (
+        transitionInjected ||
+        table !== "call_appointments" ||
+        !columns?.includes("sms_consent") ||
+        columns === "*"
+      ) return null;
+      transitionInjected = true;
+      return raw.execute({
+        sql: `UPDATE call_appointments
+              SET workflow_status = 'pending_transition',
+                  pending_request_id = 'consent-race',
+                  pending_operation = 'cancel',
+                  pending_started_at = ?
+              WHERE tenant_id = ? AND id = ?`,
+        args: ["2026-09-01T14:01:00.000Z", TENANT, "meeting-consent-race"],
+      });
+    },
+  });
+
+  await assert.rejects(
+    grantFounderMeetingSmsConsent({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: "meeting-consent-race",
+      consentedPhone: "+14165550101",
+      capturedAt: new Date(NOW),
+    }, { ...deps, db: instrumentedDb as never }),
+    /meeting_notification_context_failed/,
+  );
+  assert.equal(guardedAppointmentUpdates, 2, "an already-consented replay acquires and releases the guarded lease");
+  const notifications = await raw.execute({
+    sql: "SELECT count(*) AS count FROM website_sales_meeting_notifications WHERE appointment_id = ?",
+    args: ["meeting-consent-race"],
+  });
+  assert.equal(Number(notifications.rows[0].count), 0, "the pending transition prevents reminder recreation");
+  const failedAppointment = await appointment(raw, "meeting-consent-race");
+  assert.equal(failedAppointment.notification_lease_token, null, "a failed consent replay releases its notification lease");
+  assert.equal(failedAppointment.notification_lease_expires_at, null);
+  await raw.close();
+}
+
+async function testConsentLeaseSerializesCancellationAfterContextRead() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-consent-lease",
+    scheduledFor: "2026-09-01T16:00:00.000Z",
+    workflowStatus: "active",
+  });
+  let cancellationAttempted = false;
+  let cancellationError = "";
+  const instrumentedDb = instrumentDb(deps.db, {
+    beforeExecute(table, columns) {
+      if (
+        cancellationAttempted ||
+        table !== "website_sales_meeting_notifications" ||
+        columns !== "dedupe_key"
+      ) return null;
+      cancellationAttempted = true;
+      return prepareVerifiedFounderMeetingCancellation({
+        tenantId: TENANT,
+        leadId: LEAD,
+        appointmentId: "meeting-consent-lease",
+        requestId: "cancel-during-consent",
+      }, deps).then(
+        () => undefined,
+        (error: unknown) => {
+          cancellationError = error instanceof Error ? error.message : String(error);
+        },
+      );
+    },
+  });
+
+  await grantFounderMeetingSmsConsent({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "meeting-consent-lease",
+    consentedPhone: "+14165550101",
+    capturedAt: new Date(NOW),
+  }, { ...deps, db: instrumentedDb as never });
+  assert(cancellationAttempted, "the cancellation was interleaved after context validation");
+  assert.match(cancellationError, /meeting_notification_in_progress/);
+
+  const succeeded = await appointment(raw, "meeting-consent-lease");
+  assert.equal(succeeded.workflow_status, "active");
+  assert.equal(succeeded.pending_request_id, null, "cancellation never acquired the transition reservation");
+  assert.equal(succeeded.notification_lease_token, null, "successful consent releases its notification lease");
+  assert.equal(succeeded.notification_lease_expires_at, null);
+  const notifications = await raw.execute({
+    sql: "SELECT count(*) AS count FROM website_sales_meeting_notifications WHERE appointment_id = ?",
+    args: ["meeting-consent-lease"],
+  });
+  assert(Number(notifications.rows[0].count) > 0);
+  await raw.close();
+}
+
+async function testConsentTimestampRejectsFutureAndOverYearOldEvidence() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-invalid-consent-time",
+    workflowStatus: "active",
+  });
+  const consent = (capturedAt: Date) => grantFounderMeetingSmsConsent({
+    tenantId: TENANT,
+    leadId: LEAD,
+    appointmentId: "meeting-invalid-consent-time",
+    consentedPhone: "+14165550101",
+    capturedAt,
+  }, deps);
+
+  await assert.rejects(consent(new Date(NOW + 1)), /invalid_sms_consent_timestamp/);
+  await assert.rejects(
+    consent(new Date(NOW - 365 * 24 * 60 * 60_000 - 1)),
+    /invalid_sms_consent_timestamp/,
+  );
+  await raw.close();
+}
+
+function testConsentReplayErrorResponseClassification() {
+  const invalid = founderMeetingSmsConsentErrorResponse(new Error("invalid_sms_consent_artifact"));
+  assert.deepEqual(invalid, {
+    status: 400,
+    body: {
+      ok: false,
+      error: "invalid_sms_consent_artifact",
+      detail: "invalid_sms_consent_artifact",
+    },
+  });
+  assert.equal("stageUpdated" in invalid.body, false, "idempotent replay errors must not claim a stage mutation");
+
+  for (const detail of [
+    "client_phone_required",
+    "invalid_sms_consent_timestamp",
+    "verified_meeting_required",
+    "meeting_notification_in_progress",
+    "meeting_sms_consent_phone_mismatch",
+    "meeting_sms_consent_update_failed:row_changed",
+    "meeting_notification_context_failed:row_changed",
+  ]) {
+    assert.equal(
+      founderMeetingSmsConsentErrorResponse(new Error(detail)).status,
+      409,
+      `${detail} is a state conflict`,
+    );
+  }
+  assert.equal(
+    founderMeetingSmsConsentErrorResponse(new Error("meeting_lookup_failed:database unavailable")).status,
+    503,
+    "database failures remain retryable infrastructure errors",
+  );
+}
+
+async function testConsentPreservesOperationErrorWhenLeaseReleaseAlsoFails() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-operation-and-release-fail",
+    workflowStatus: "active",
+  });
+  await raw.execute({
+    sql: "UPDATE call_appointments SET assigned_to = NULL WHERE id = ?",
+    args: ["meeting-operation-and-release-fail"],
+  });
+  await raw.execute(`CREATE TRIGGER reject_consent_release_after_operation_error
+    BEFORE UPDATE ON call_appointments
+    WHEN OLD.id = 'meeting-operation-and-release-fail'
+      AND OLD.notification_lease_token IS NOT NULL
+      AND NEW.notification_lease_token IS NULL
+    BEGIN SELECT RAISE(ABORT, 'release-secret-value'); END`);
+
+  const logs: unknown[][] = [];
+  const originalConsoleError = console.error;
+  console.error = (...args: unknown[]) => { logs.push(args); };
+  try {
+    await assert.rejects(
+      grantFounderMeetingSmsConsent({
+        tenantId: TENANT,
+        leadId: LEAD,
+        appointmentId: "meeting-operation-and-release-fail",
+        consentedPhone: "+14165550101",
+        capturedAt: new Date(NOW),
+      }, deps),
+      /meeting_host_missing/,
+      "the original operation failure must win over cleanup failure",
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+  const logged = JSON.stringify(logs);
+  assert.match(logged, /lease release failed/);
+  assert.doesNotMatch(logged, /release-secret-value/, "cleanup diagnostics must not log provider/database detail");
+  await raw.close();
+}
+
+async function testConsentSuccessfulOperationStillSurfacesLeaseReleaseFailure() {
+  const { raw, deps } = await fixture();
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-release-only-fail",
+    workflowStatus: "active",
+  });
+  await raw.execute(`CREATE TRIGGER reject_consent_release_after_success
+    BEFORE UPDATE ON call_appointments
+    WHEN OLD.id = 'meeting-release-only-fail'
+      AND OLD.notification_lease_token IS NOT NULL
+      AND NEW.notification_lease_token IS NULL
+    BEGIN SELECT RAISE(ABORT, 'release-secret-value'); END`);
+
+  await assert.rejects(
+    grantFounderMeetingSmsConsent({
+      tenantId: TENANT,
+      leadId: LEAD,
+      appointmentId: "meeting-release-only-fail",
+      consentedPhone: "+14165550101",
+      capturedAt: new Date(NOW),
+    }, deps),
+    (error: unknown) => error instanceof Error && error.message === "meeting_notification_lease_release_failed",
+    "a successful operation is not reported as successful when cleanup failed",
+  );
+  await raw.close();
+}
+
+function testBackfillChunkRotatesBeyondFirstFiveHundred() {
+  assert.equal(founderMeetingBackfillChunkStart(500, NOW), 0);
+  const successiveStarts = [
+    founderMeetingBackfillChunkStart(501, NOW),
+    founderMeetingBackfillChunkStart(501, NOW + 5 * 60_000),
+  ].sort((a, b) => a - b);
+  assert.deepEqual(
+    successiveStarts,
+    [0, 500],
+    "successive five-minute runs rotate into the bounded chunk containing candidate 501",
+  );
 }
 
 async function testOrganizerMismatchCompensates() {
@@ -424,6 +918,23 @@ async function testSagaReconciliation() {
   }, deps);
   assert.equal(cancelled.cancelled, 1);
   assert.equal((await appointment(raw, "meeting-cancel-reconcile")).workflow_status, "cancelled");
+
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-client-cancel-reconcile", pendingRequestId: "client-cancel-reconcile",
+    pendingOperation: "cancel", pendingMeetingAt: FUTURE,
+    pendingStartedAt: "2026-09-01T13:30:00.000Z", pendingLeaseToken: "client-cancel-worker",
+    workflowStatus: "pending_transition",
+  });
+  await setLead(raw, {
+    stage: "qualified",
+    deal_outcome: null,
+    founder_meeting_status: "cancelled_by_client",
+  });
+  const clientCancelled = await reconcileFounderMeetingSagas({
+    tenantId: TENANT, now: new Date(NOW), staleAfterMs: 60_000,
+  }, deps);
+  assert.equal(clientCancelled.cancelled, 1);
+  assert.equal((await appointment(raw, "meeting-client-cancel-reconcile")).workflow_status, "cancelled");
   await raw.close();
 }
 
@@ -585,7 +1096,18 @@ async function testFinalCompensationConflictLeavesRemindersRecoverable() {
 }
 
 async function main() {
+  testBackfillChunkRotatesBeyondFirstFiveHundred();
+  testConsentReplayErrorResponseClassification();
   await testCreateAuditAndFullIdempotency();
+  await testBackfillHydratesLatePhoneAndRepairsTiers();
+  await testBackfillLimitScansPastAlreadyCompleteAppointments();
+  await testBackfillLimitIsGlobalAcrossTenants();
+  await testIdempotentConsentReplayCannotRecreateRowsDuringTransition();
+  await testConsentLeaseSerializesCancellationAfterContextRead();
+  await testConsentTimestampRejectsFutureAndOverYearOldEvidence();
+  await testConsentPreservesOperationErrorWhenLeaseReleaseAlsoFails();
+  await testConsentSuccessfulOperationStillSurfacesLeaseReleaseFailure();
+  await testBackfillBatchSkipsCompleteAppointments();
   await testOrganizerMismatchCompensates();
   await testNoShowUsesCanonicalStatusAndTimeGuard();
   await testExclusiveReservationAndNoShowRebook();

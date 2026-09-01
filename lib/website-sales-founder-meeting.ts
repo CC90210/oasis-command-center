@@ -8,7 +8,10 @@ import {
   FOUNDER_MEETING_TIMEZONE,
   founderMeetingDedupeKey,
   normalizeFounderMeetingContact,
+  normalizeFounderMeetingPhone,
+  plannedReminderTiers,
   reminderDueAt,
+  reminderKindFor,
   type FounderMeetingContact,
 } from "@/lib/website-sales-meeting";
 import {
@@ -24,6 +27,22 @@ type Db = ReturnType<typeof getServiceSupabase>;
 const OPERATION_LEASE_MS = 2 * 60_000;
 const DEFAULT_RECONCILE_STALE_MS = 15 * 60_000;
 const DEFAULT_RECONCILE_LIMIT = 100;
+const DEFAULT_BACKFILL_HORIZON_MS = 48 * 60 * 60_000;
+const DEFAULT_BACKFILL_LIMIT = 25;
+const BACKFILL_SCAN_PAGE_SIZE = 50;
+const MAX_BACKFILL_SCAN = 500;
+const BACKFILL_ROTATION_MS = 5 * 60_000;
+
+export function founderMeetingBackfillChunkStart(candidateCount: number, nowMs: number): number {
+  if (!Number.isInteger(candidateCount) || candidateCount < 0 || !Number.isFinite(nowMs)) {
+    throw new Error("invalid_meeting_backfill_window");
+  }
+  if (candidateCount <= MAX_BACKFILL_SCAN) return 0;
+  const chunkCount = Math.ceil(candidateCount / MAX_BACKFILL_SCAN);
+  const tick = Math.floor(nowMs / BACKFILL_ROTATION_MS);
+  const chunkIndex = ((tick % chunkCount) + chunkCount) % chunkCount;
+  return chunkIndex * MAX_BACKFILL_SCAN;
+}
 
 type AppointmentRow = {
   id: string;
@@ -118,6 +137,14 @@ export type FounderMeetingReconciliationResult = {
   released: number;
   failed: number;
   /** Stable machine codes only: never names, email addresses, notes, or lead data. */
+  errors: string[];
+};
+
+export type FounderMeetingNotificationBackfillResult = {
+  considered: number;
+  repaired: number;
+  failed: number;
+  /** Stable machine codes only: never names, phone numbers, or lead data. */
   errors: string[];
 };
 
@@ -291,6 +318,37 @@ async function cancelOutstandingNotifications(
   if (result.error) throw new Error(`meeting_notification_cancel_failed:${result.error.message}`);
 }
 
+const FOUNDER_SMS_CONSENT_STATE_ERRORS = new Set([
+  "client_phone_required",
+  "meeting_host_missing",
+  "meeting_notification_in_progress",
+  "meeting_sms_consent_phone_mismatch",
+  "verified_meeting_required",
+]);
+
+export function founderMeetingSmsConsentErrorResponse(error: unknown): {
+  status: 400 | 409 | 503;
+  body: { ok: false; error: string; detail: string };
+} {
+  const detail = error instanceof Error ? error.message : "meeting_sms_consent_update_failed";
+  const code = detail.split(":", 1)[0] || "meeting_sms_consent_update_failed";
+  const invalidInput = code === "invalid_sms_consent_artifact";
+  const stateConflict = code === "invalid_sms_consent_timestamp" ||
+    FOUNDER_SMS_CONSENT_STATE_ERRORS.has(code) ||
+    detail === "meeting_sms_consent_update_failed:row_changed" ||
+    detail === "meeting_notification_context_failed:row_changed";
+  return {
+    status: invalidInput ? 400 : stateConflict ? 409 : 503,
+    body: { ok: false, error: code, detail },
+  };
+}
+
+type NotificationContextRequirements = {
+  requireActive?: boolean;
+  expectedSmsConsent?: boolean;
+  notificationLeaseToken?: string;
+};
+
 async function ensureNotificationRows(
   db: Db,
   meeting: VerifiedFounderMeeting,
@@ -299,8 +357,11 @@ async function ensureNotificationRows(
   hostUserId: string,
   agenda: string,
   nowMs: number,
-) {
-  const messages = buildFounderMeetingMessages({
+  requirements: NotificationContextRequirements = {},
+): Promise<number> {
+  const now = new Date(nowMs).toISOString();
+  const tiers = plannedReminderTiers({ meetingAt: meeting.meetingAt, nowIso: now });
+  const confirmationMessages = buildFounderMeetingMessages({
     company: meeting.contact.company,
     contactName: meeting.contact.name,
     meetingAt: meeting.meetingAt,
@@ -308,8 +369,6 @@ async function ensureNotificationRows(
     meetLink: meeting.receipt.meetLink,
     clientAgenda: agenda,
   });
-  const now = new Date(nowMs).toISOString();
-  const reminderAt = reminderDueAt(meeting.meetingAt, 10);
   const rows: Array<Record<string, unknown>> = [
     {
       id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
@@ -317,75 +376,135 @@ async function ensureNotificationRows(
       recipient: meeting.contact.email, sender_user_id: hostUserId,
       subject: "Google Calendar invitation",
       body: "Google Calendar sent the verified event invitation.", status: "sent",
-      attempts: 1, appointment_revision: meeting.revision,
+      attempts: 1, appointment_revision: meeting.revision, reminder_minutes_before: null,
       dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "confirmation", "email"),
       provider: "google_calendar", provider_receipt: meeting.receipt.eventId,
       sent_at: now, updated_at: now,
     },
-    {
+  ];
+  for (const tier of tiers) {
+    const kind = reminderKindFor(tier);
+    const messages = buildFounderMeetingMessages({
+      company: meeting.contact.company,
+      contactName: meeting.contact.name,
+      meetingAt: meeting.meetingAt,
+      timezone: meeting.timezone,
+      meetLink: meeting.receipt.meetLink,
+      clientAgenda: agenda,
+      reminderMinutesBefore: tier,
+    });
+    rows.push({
       id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
-      lead_id: leadId, kind: "ten_minute", channel: "email", due_at: reminderAt,
+      lead_id: leadId, kind, reminder_minutes_before: tier,
+      channel: "email", due_at: reminderDueAt(meeting.meetingAt, tier),
       recipient: meeting.contact.email, sender_user_id: hostUserId,
       subject: messages.reminder.subject, body: messages.reminder.body,
       appointment_revision: meeting.revision,
-      dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "ten_minute", "email"),
+      dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, kind, "email"),
       updated_at: now,
-    },
-  ];
+    });
+  }
   if (meeting.contact.phone) {
-    rows.push(
-      {
+    rows.push({
+      id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
+      lead_id: leadId, kind: "confirmation", channel: "sms", due_at: now,
+      recipient: meeting.contact.phone, sender_user_id: hostUserId,
+      body: confirmationMessages.confirmationSms, status: "pending",
+      appointment_revision: meeting.revision, reminder_minutes_before: null,
+      dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "confirmation", "sms"),
+      updated_at: now,
+    });
+    for (const tier of tiers) {
+      const kind = reminderKindFor(tier);
+      const messages = buildFounderMeetingMessages({
+        company: meeting.contact.company,
+        contactName: meeting.contact.name,
+        meetingAt: meeting.meetingAt,
+        timezone: meeting.timezone,
+        meetLink: meeting.receipt.meetLink,
+        clientAgenda: agenda,
+        reminderMinutesBefore: tier,
+      });
+      rows.push({
         id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
-        lead_id: leadId, kind: "confirmation", channel: "sms", due_at: now,
-        recipient: meeting.contact.phone, sender_user_id: hostUserId,
-        body: messages.confirmationSms, status: "pending",
-        appointment_revision: meeting.revision,
-        dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "confirmation", "sms"),
-        updated_at: now,
-      },
-      {
-        id: randomUUID(), tenant_id: tenantId, appointment_id: meeting.appointmentId,
-        lead_id: leadId, kind: "ten_minute", channel: "sms", due_at: reminderAt,
+        lead_id: leadId, kind, reminder_minutes_before: tier,
+        channel: "sms", due_at: reminderDueAt(meeting.meetingAt, tier),
         recipient: meeting.contact.phone, sender_user_id: hostUserId,
         body: messages.reminder.sms, status: "pending",
         appointment_revision: meeting.revision,
-        dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, "ten_minute", "sms"),
+        dedupe_key: founderMeetingDedupeKey(meeting.appointmentId, meeting.revision, kind, "sms"),
         updated_at: now,
-      },
-    );
+      });
+    }
   }
 
   // This context read used to filter only by appointment id. Service-role reads
   // bypass RLS, so the tenant predicate is mandatory even for a UUID lookup.
-  const contextResult = await db
+  let contextQuery = db
     .from("call_appointments")
-    .select("tenant_id,lead_id,sms_consent")
+    .select("tenant_id,lead_id,status,workflow_status,calendar_status,pending_request_id,revision,sms_consent,client_phone_snapshot")
     .eq("tenant_id", tenantId)
     .eq("id", meeting.appointmentId)
     .eq("lead_id", leadId)
-    .maybeSingle();
-  if (contextResult.error || !contextResult.data) throw new Error("meeting_notification_context_failed");
+    .eq("revision", meeting.revision);
+  contextQuery = meeting.contact.phone
+    ? contextQuery.eq("client_phone_snapshot", meeting.contact.phone)
+    : contextQuery.is("client_phone_snapshot", null);
+  if (requirements.requireActive) {
+    contextQuery = contextQuery
+      .eq("status", "scheduled")
+      .eq("workflow_status", "active")
+      .eq("calendar_status", "verified")
+      .is("pending_request_id", null);
+  }
+  if (requirements.expectedSmsConsent !== undefined) {
+    contextQuery = contextQuery.eq("sms_consent", requirements.expectedSmsConsent ? 1 : 0);
+  }
+  if (requirements.notificationLeaseToken) {
+    contextQuery = contextQuery.eq("notification_lease_token", requirements.notificationLeaseToken);
+  }
+  const contextResult = await contextQuery.maybeSingle();
+  if (contextResult.error) {
+    throw new Error("meeting_notification_context_failed");
+  }
+  if (!contextResult.data) throw new Error("meeting_notification_context_failed:row_changed");
   const context = contextResult.data as {
     tenant_id: string;
     lead_id: string;
+    status: string;
+    workflow_status: string;
+    calendar_status: string;
+    pending_request_id: string | null;
+    revision: number;
     sms_consent: number | boolean;
+    client_phone_snapshot: string | null;
   };
+  const existingResult = await db
+    .from("website_sales_meeting_notifications")
+    .select("dedupe_key")
+    .eq("tenant_id", tenantId)
+    .eq("appointment_id", meeting.appointmentId);
+  if (existingResult.error) {
+    throw new Error(`meeting_notification_lookup_failed:${existingResult.error.message}`);
+  }
+  const existingKeys = new Set(
+    (existingResult.data || [])
+      .map((existing) => (existing as { dedupe_key?: unknown }).dedupe_key)
+      .filter((value): value is string => typeof value === "string"),
+  );
+  let insertedCount = 0;
   for (const row of rows) {
     if (row.channel === "sms" && !context.sms_consent) continue;
-    const existing = await db
-      .from("website_sales_meeting_notifications")
-      .select("id")
-      .eq("tenant_id", tenantId)
-      .eq("appointment_id", meeting.appointmentId)
-      .eq("dedupe_key", row.dedupe_key as string)
-      .maybeSingle();
-    if (existing.error) throw new Error(`meeting_notification_lookup_failed:${existing.error.message}`);
-    if (existing.data) continue;
+    const dedupeKey = row.dedupe_key as string;
+    if (existingKeys.has(dedupeKey)) continue;
     const inserted = await db.from("website_sales_meeting_notifications").insert(row);
     if (inserted.error && !String(inserted.error.message).toLowerCase().includes("unique")) {
       throw new Error(`meeting_notification_insert_failed:${inserted.error.message}`);
     }
+    existingKeys.add(dedupeKey);
+    if (!inserted.error) insertedCount += 1;
   }
+  return insertedCount;
 }
 
 function contactFromAppointment(appointment: AppointmentRow): FounderMeetingContact {
@@ -415,6 +534,379 @@ function meetingFromAppointment(
     receipt,
     revision: Number(appointment.revision || 1),
   };
+}
+
+function expectedNotificationDedupeKeys(appointment: AppointmentRow, nowIso: string): string[] {
+  const revision = Number(appointment.revision || 1);
+  const tiers = plannedReminderTiers({ meetingAt: appointment.scheduled_for, nowIso });
+  const keys = [founderMeetingDedupeKey(appointment.id, revision, "confirmation", "email")];
+  for (const tier of tiers) {
+    keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "email"));
+  }
+  if (appointment.sms_consent && appointment.client_phone_snapshot) {
+    keys.push(founderMeetingDedupeKey(appointment.id, revision, "confirmation", "sms"));
+    for (const tier of tiers) {
+      keys.push(founderMeetingDedupeKey(appointment.id, revision, reminderKindFor(tier), "sms"));
+    }
+  }
+  return keys;
+}
+
+function recordData(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function hydrateBackfillPhone(
+  db: Db,
+  appointment: AppointmentRow,
+  nowIso: string,
+): Promise<AppointmentRow> {
+  if (appointment.client_phone_snapshot) return appointment;
+  const leadResult = await db.from("tenant_records")
+    .select("data")
+    .eq("tenant_id", appointment.tenant_id)
+    .eq("entity_type", "lead")
+    .eq("id", appointment.lead_id)
+    .maybeSingle();
+  if (leadResult.error || !leadResult.data) return appointment;
+  const data = recordData((leadResult.data as { data?: unknown }).data);
+  if (!data.phone) return appointment;
+
+  let phone: string | null = null;
+  try {
+    phone = normalizeFounderMeetingContact({
+      name: appointment.client_name_snapshot,
+      company: appointment.company_snapshot,
+      email: appointment.client_email_snapshot,
+      phone: data.phone,
+      website: appointment.website_snapshot,
+    }).phone;
+  } catch {
+    return appointment;
+  }
+  if (!phone) return appointment;
+  const updated = await db.from("call_appointments")
+    .update({ client_phone_snapshot: phone, updated_at: nowIso })
+    .eq("tenant_id", appointment.tenant_id)
+    .eq("lead_id", appointment.lead_id)
+    .eq("id", appointment.id)
+    .eq("revision", Number(appointment.revision))
+    .is("client_phone_snapshot", null)
+    .select("*")
+    .maybeSingle();
+  if (updated.error) throw new Error(`meeting_phone_backfill_failed:${updated.error.message}`);
+  if (updated.data) return updated.data as AppointmentRow;
+  return loadById(db, appointment.tenant_id, appointment.id, appointment.lead_id);
+}
+
+async function backfillTenantFounderMeetingNotifications(
+  tenantId: string,
+  nowMs: number,
+  horizonMs: number,
+  repairLimit: number,
+  deps: FounderMeetingServiceDependencies,
+  considerationLimit = MAX_BACKFILL_SCAN,
+): Promise<FounderMeetingNotificationBackfillResult> {
+  const result: FounderMeetingNotificationBackfillResult = {
+    considered: 0,
+    repaired: 0,
+    failed: 0,
+    errors: [],
+  };
+  const nowIso = new Date(nowMs).toISOString();
+  const horizonIso = new Date(nowMs + horizonMs).toISOString();
+  const candidateCountResult = await deps.db.from("call_appointments")
+    .select("id", { count: "exact", head: true })
+    .eq("tenant_id", tenantId)
+    .eq("meeting_kind", "founder_audit")
+    .eq("workflow_status", "active")
+    .eq("status", "scheduled")
+    .eq("calendar_status", "verified")
+    .is("pending_request_id", null)
+    .gte("scheduled_for", nowIso)
+    .lte("scheduled_for", horizonIso);
+  if (candidateCountResult.error || candidateCountResult.count == null) {
+    result.failed = 1;
+    result.errors.push("meeting_notification_backfill_query_failed");
+    return result;
+  }
+  const candidateCount = candidateCountResult.count;
+  let offset = founderMeetingBackfillChunkStart(candidateCount, nowMs);
+  const chunkEnd = Math.min(candidateCount, offset + MAX_BACKFILL_SCAN);
+  const scanLimit = Math.max(0, Math.min(MAX_BACKFILL_SCAN, considerationLimit));
+  while (result.repaired < repairLimit && result.considered < scanLimit) {
+    const pageSize = Math.min(
+      BACKFILL_SCAN_PAGE_SIZE,
+      scanLimit - result.considered,
+      chunkEnd - offset,
+    );
+    if (pageSize <= 0) break;
+    const candidates = await deps.db.from("call_appointments")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("meeting_kind", "founder_audit")
+      .eq("workflow_status", "active")
+      .eq("status", "scheduled")
+      .eq("calendar_status", "verified")
+      .is("pending_request_id", null)
+      .gte("scheduled_for", nowIso)
+      .lte("scheduled_for", horizonIso)
+      .order("scheduled_for", { ascending: true })
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (candidates.error) {
+      result.failed += 1;
+      result.errors.push("meeting_notification_backfill_query_failed");
+      break;
+    }
+    const page = (candidates.data || []) as AppointmentRow[];
+    if (page.length === 0) break;
+    const existingResult = await deps.db.from("website_sales_meeting_notifications")
+      .select("appointment_id,dedupe_key")
+      .eq("tenant_id", tenantId)
+      .in("appointment_id", page.map((candidate) => candidate.id));
+    if (existingResult.error) {
+      result.failed += 1;
+      result.errors.push("meeting_notification_backfill_lookup_failed");
+      break;
+    }
+    const existingByAppointment = new Map<string, Set<string>>();
+    for (const row of (existingResult.data || []) as Array<{ appointment_id?: unknown; dedupe_key?: unknown }>) {
+      if (typeof row.appointment_id !== "string" || typeof row.dedupe_key !== "string") continue;
+      const keys = existingByAppointment.get(row.appointment_id) || new Set<string>();
+      keys.add(row.dedupe_key);
+      existingByAppointment.set(row.appointment_id, keys);
+    }
+    for (const candidate of page) {
+      result.considered += 1;
+      const existingKeys = existingByAppointment.get(candidate.id) || new Set<string>();
+      const expectedKeys = expectedNotificationDedupeKeys(candidate, nowIso);
+      const needsPhoneHydration = Boolean(candidate.sms_consent && !candidate.client_phone_snapshot);
+      if (!needsPhoneHydration && expectedKeys.every((key) => existingKeys.has(key))) {
+        if (result.considered >= scanLimit) break;
+        continue;
+      }
+      try {
+        const appointment = await hydrateBackfillPhone(deps.db, candidate, nowIso);
+        if (!appointment.assigned_to) throw new Error("meeting_host_missing");
+        const meeting = meetingFromAppointment(
+          appointment,
+          appointment.booking_request_id || `backfill:${appointment.id}:r${appointment.revision}`,
+        );
+        const inserted = await ensureNotificationRows(
+          deps.db,
+          meeting,
+          tenantId,
+          appointment.lead_id,
+          appointment.assigned_to,
+          appointment.client_agenda || "Review your current website and next steps.",
+          nowMs,
+          {
+            requireActive: true,
+            expectedSmsConsent: Boolean(appointment.sms_consent),
+          },
+        );
+        if (inserted > 0) result.repaired += 1;
+      } catch (error) {
+        result.failed += 1;
+        result.errors.push(errorCode(error, "meeting_notification_backfill_failed"));
+      }
+      if (result.repaired >= repairLimit || result.considered >= scanLimit) break;
+    }
+    offset += page.length;
+    if (page.length < pageSize) break;
+  }
+  return result;
+}
+
+export async function backfillFounderMeetingNotifications(input: {
+  tenantId?: string;
+  now?: Date;
+  horizonMs?: number;
+  limit?: number;
+} = {}, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<FounderMeetingNotificationBackfillResult> {
+  const deps = dependencies(dependencyOverrides);
+  const nowMs = input.now?.getTime() ?? deps.now();
+  const horizonMs = Math.max(0, Math.min(7 * 24 * 60 * 60_000, input.horizonMs ?? DEFAULT_BACKFILL_HORIZON_MS));
+  const limit = Math.max(1, Math.min(500, input.limit ?? DEFAULT_BACKFILL_LIMIT));
+  if (input.tenantId) {
+    return backfillTenantFounderMeetingNotifications(input.tenantId, nowMs, horizonMs, limit, deps);
+  }
+
+  const aggregate: FounderMeetingNotificationBackfillResult = {
+    considered: 0,
+    repaired: 0,
+    failed: 0,
+    errors: [],
+  };
+  const tenants = await deps.db.from("tenants").select("id").order("id", { ascending: true });
+  if (tenants.error) {
+    aggregate.failed = 1;
+    aggregate.errors.push("meeting_notification_backfill_tenant_enumeration_failed");
+    return aggregate;
+  }
+  for (const row of (tenants.data || []) as Array<{ id?: unknown }>) {
+    const repairRemaining = limit - aggregate.repaired;
+    const considerationRemaining = limit - aggregate.considered;
+    if (repairRemaining <= 0 || considerationRemaining <= 0) break;
+    const tenantId = typeof row.id === "string" ? row.id : "";
+    if (!tenantId) continue;
+    const tenantResult = await backfillTenantFounderMeetingNotifications(
+      tenantId,
+      nowMs,
+      horizonMs,
+      repairRemaining,
+      deps,
+      considerationRemaining,
+    );
+    aggregate.considered += tenantResult.considered;
+    aggregate.repaired += tenantResult.repaired;
+    aggregate.failed += tenantResult.failed;
+    aggregate.errors.push(...tenantResult.errors);
+  }
+  return aggregate;
+}
+
+export async function grantFounderMeetingSmsConsent(input: {
+  tenantId: string;
+  leadId: string;
+  appointmentId: string;
+  consentedPhone: unknown;
+  capturedAt?: Date;
+}, dependencyOverrides: Partial<FounderMeetingServiceDependencies> = {}): Promise<VerifiedFounderMeeting> {
+  const deps = dependencies(dependencyOverrides);
+  const operationNowMs = deps.now();
+  const capturedAtMs = input.capturedAt?.getTime() ?? operationNowMs;
+  const maximumConsentAgeMs = 365 * 24 * 60 * 60_000;
+  if (
+    !Number.isFinite(capturedAtMs) ||
+    capturedAtMs > operationNowMs ||
+    capturedAtMs < operationNowMs - maximumConsentAgeMs
+  ) {
+    throw new Error("invalid_sms_consent_timestamp");
+  }
+  let appointment = await loadById(deps.db, input.tenantId, input.appointmentId, input.leadId);
+  const consentedPhone = normalizeFounderMeetingPhone(input.consentedPhone);
+  if (!consentedPhone) throw new Error("client_phone_required");
+  if (appointment.client_phone_snapshot && appointment.client_phone_snapshot !== consentedPhone) {
+    throw new Error("meeting_sms_consent_phone_mismatch");
+  }
+  if (
+    appointment.status !== "scheduled" ||
+    appointment.workflow_status !== "active" ||
+    appointment.calendar_status !== "verified" ||
+    appointment.pending_request_id
+  ) {
+    throw new Error("verified_meeting_required");
+  }
+  if (notificationLeaseIsFresh(appointment, operationNowMs)) {
+    throw new Error("meeting_notification_in_progress");
+  }
+
+  const notificationLeaseToken = randomUUID();
+  const notificationLeaseExpiresAt = new Date(operationNowMs + OPERATION_LEASE_MS).toISOString();
+  let updateQuery = deps.db.from("call_appointments")
+    .update({
+      client_phone_snapshot: consentedPhone,
+      sms_consent: 1,
+      sms_consent_at: appointment.sms_consent_at || new Date(capturedAtMs).toISOString(),
+      notification_lease_token: notificationLeaseToken,
+      notification_lease_expires_at: notificationLeaseExpiresAt,
+      updated_at: new Date(operationNowMs).toISOString(),
+    })
+    .eq("tenant_id", input.tenantId)
+    .eq("lead_id", input.leadId)
+    .eq("id", input.appointmentId)
+    .eq("revision", Number(appointment.revision))
+    .eq("status", "scheduled")
+    .eq("workflow_status", "active")
+    .eq("calendar_status", "verified")
+    .is("pending_request_id", null);
+  updateQuery = appointment.client_phone_snapshot
+    ? updateQuery.eq("client_phone_snapshot", consentedPhone)
+    : updateQuery.is("client_phone_snapshot", null);
+  updateQuery = nullableMatch(
+    updateQuery,
+    "notification_lease_token",
+    appointment.notification_lease_token,
+  );
+  updateQuery = nullableMatch(
+    updateQuery,
+    "notification_lease_expires_at",
+    appointment.notification_lease_expires_at,
+  );
+  const updated = await updateQuery
+    .select("*")
+    .maybeSingle();
+  if (updated.error || !updated.data) {
+    throw new Error(`meeting_sms_consent_update_failed:${updated.error?.message || "row_changed"}`);
+  }
+  appointment = updated.data as AppointmentRow;
+
+  const releaseNotificationLease = async (): Promise<boolean> => {
+    try {
+      const released = await deps.db.from("call_appointments")
+        .update({
+          notification_lease_token: null,
+          notification_lease_expires_at: null,
+          updated_at: new Date(deps.now()).toISOString(),
+        })
+        .eq("tenant_id", input.tenantId)
+        .eq("lead_id", input.leadId)
+        .eq("id", input.appointmentId)
+        .eq("revision", Number(appointment.revision))
+        .eq("notification_lease_token", notificationLeaseToken)
+        .eq("notification_lease_expires_at", notificationLeaseExpiresAt)
+        .select("id")
+        .maybeSingle();
+      return !released.error && Boolean(released.data);
+    } catch {
+      return false;
+    }
+  };
+
+  let meeting: VerifiedFounderMeeting;
+  try {
+    if (!appointment.assigned_to) throw new Error("meeting_host_missing");
+    meeting = meetingFromAppointment(
+      appointment,
+      appointment.booking_request_id || `consent:${appointment.id}:r${appointment.revision}`,
+    );
+    await ensureNotificationRows(
+      deps.db,
+      meeting,
+      input.tenantId,
+      input.leadId,
+      appointment.assigned_to,
+      appointment.client_agenda || "Review your current website and next steps.",
+      deps.now(),
+      {
+        requireActive: true,
+        expectedSmsConsent: true,
+        notificationLeaseToken,
+      },
+    );
+  } catch (error) {
+    if (!await releaseNotificationLease()) {
+      console.error("[founder-meeting] consent notification lease release failed after operation error", {
+        code: "meeting_notification_lease_release_failed",
+      });
+    }
+    throw error;
+  }
+  if (!await releaseNotificationLease()) throw new Error("meeting_notification_lease_release_failed");
+  return meeting;
 }
 
 type NullableFilterQuery<T> = {
@@ -601,6 +1093,7 @@ export async function createVerifiedFounderMeeting(input: {
       leaseToken = takeover.leaseToken;
     }
   } else {
+    if (!contact.phone) throw new Error("client_phone_required");
     const appointmentId = randomUUID();
     leaseToken = randomUUID();
     const inserted = await db.from("call_appointments").insert({
@@ -1332,7 +1825,9 @@ function leadConfirmsAppointment(
   operation = appointment.pending_operation,
 ): boolean {
   if (operation === "cancel") {
-    return lead.stage === "lost" || lead.deal_outcome === "lost";
+    return lead.stage === "lost" ||
+      lead.deal_outcome === "lost" ||
+      lead.founder_meeting_status === "cancelled_by_client";
   }
   const expectedMeetingAt = operation === "reschedule"
     ? appointment.pending_meeting_at

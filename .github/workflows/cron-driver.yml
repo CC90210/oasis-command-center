@@ -80,10 +80,15 @@ jobs:
           # as this rollback workflow; use its direct URL until DNS cutover.
           BASE: https://oasis-command-center.oasisaisolutions.workers.dev
           SECRET: ${{ secrets.OASIS_CRON_SECRET }}
+          ATTEST: ${{ secrets.OASIS_CRON_ATTEST_SECRET }}
         run: |
           set -uo pipefail
           if [ -z "${SECRET}" ]; then
             echo "::error::OASIS_CRON_SECRET is not set; refusing to run blind"
+            exit 1
+          fi
+          if [ -z "${ATTEST}" ]; then
+            echo "::error::OASIS_CRON_ATTEST_SECRET is not set; refusing bearer-only cron auth"
             exit 1
           fi
 
@@ -109,6 +114,7 @@ jobs:
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
+                      /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email" ;;
             "*/10 * * * *")
@@ -154,6 +160,7 @@ jobs:
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
+                      /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email
                       /api/cron/health-check" ;;
@@ -188,7 +195,8 @@ jobs:
             : > /tmp/out.json
             code=$(curl -sS -o /tmp/out.json -w '%{http_code}' -m 330 \
                      "${BASE}${path}" \
-                     -H "Authorization: Bearer ${SECRET}") || code="000"
+                     -H "Authorization: Bearer ${SECRET}" \
+                     -H "x-oasis-cron-attest: ${ATTEST}") || code="000"
             body=$(head -c 400 /tmp/out.json 2>/dev/null | tr -d '\n')
             echo "${path} -> ${code} ${body}"
             case "${code}" in

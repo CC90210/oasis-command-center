@@ -1,9 +1,18 @@
+import { countSegments } from "./sms-segments";
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const GOOGLE_MEET_RE = /^https:\/\/meet\.google\.com\/[a-z0-9-]+$/i;
 
 export const FOUNDER_MEETING_TIMEZONE = "America/Toronto";
 export const FOUNDER_MEETING_DURATION_MINUTES = 15;
 export const FOUNDER_MEETING_TRANSITION_HOLD_MINUTES = 15;
+export const FOUNDER_REMINDER_TIERS = [60, 30, 10] as const;
+export type FounderReminderTier = (typeof FOUNDER_REMINDER_TIERS)[number];
+export type FounderReminderKind = "reminder_60" | "reminder_30" | "ten_minute";
+
+export const SMS_STOP_FOOTER =
+  "Reply STOP to opt out. HELP for help. Msg & data rates may apply.";
+const SMS_BRAND_PREFIX = "OASIS AI:";
 
 export type FounderMeetingContact = {
   name: string | null;
@@ -26,6 +35,10 @@ function normalizePhone(value: unknown): string | null {
   if (digits.length === 10) return `+1${digits}`;
   if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
   throw new Error("invalid_client_phone");
+}
+
+export function normalizeFounderMeetingPhone(value: unknown): string | null {
+  return normalizePhone(value);
 }
 
 function normalizeWebsite(value: unknown): string | null {
@@ -66,13 +79,91 @@ export function reminderDueAt(meetingAt: string, minutesBefore: number): string 
   return new Date(epoch - minutesBefore * 60_000).toISOString();
 }
 
+export function reminderKindFor(minutes: number): FounderReminderKind {
+  if (minutes === 60) return "reminder_60";
+  if (minutes === 30) return "reminder_30";
+  if (minutes === 10) return "ten_minute";
+  throw new Error("unsupported_reminder_tier");
+}
+
+export function plannedReminderTiers(input: {
+  meetingAt: string;
+  nowIso: string;
+  minLeadMs?: number;
+}): FounderReminderTier[] {
+  const meetingEpoch = Date.parse(input.meetingAt);
+  const nowEpoch = Date.parse(input.nowIso);
+  const minLeadMs = input.minLeadMs ?? 90_000;
+  if (!Number.isFinite(meetingEpoch) || !Number.isFinite(nowEpoch) || minLeadMs < 0) {
+    throw new Error("invalid_meeting_time");
+  }
+  return FOUNDER_REMINDER_TIERS.filter(
+    (tier) => meetingEpoch - tier * 60_000 - nowEpoch >= minLeadMs,
+  );
+}
+
+export function reminderTierStillValid(
+  tier: FounderReminderTier,
+  actualRemainingMinutes: number,
+): boolean {
+  if (!Number.isFinite(actualRemainingMinutes)) return false;
+  if (tier === 60) return actualRemainingMinutes > 30;
+  if (tier === 30) return actualRemainingMinutes > 10;
+  return actualRemainingMinutes > 0;
+}
+
 export function founderMeetingDedupeKey(
   appointmentId: string,
   revision: number,
-  kind: "confirmation" | "ten_minute",
+  kind: "confirmation" | FounderReminderKind,
   channel: "email" | "sms",
 ): string {
   return `${appointmentId}:${revision}:${kind}:${channel}`;
+}
+
+function withBrandPrefix(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return SMS_BRAND_PREFIX;
+  if (trimmed.toUpperCase().startsWith(SMS_BRAND_PREFIX)) return trimmed;
+  return `${SMS_BRAND_PREFIX} ${trimmed}`;
+}
+
+export function withSmsFooter(
+  body: string,
+  input: { firstInConversation: boolean },
+): string {
+  const branded = withBrandPrefix(body);
+  if (!input.firstInConversation || branded.includes(SMS_STOP_FOOTER)) return branded;
+  return `${branded}\n${SMS_STOP_FOOTER}`;
+}
+
+export function clampSmsBody(body: string, maxSegments = 2): string {
+  if (!Number.isInteger(maxSegments) || maxSegments < 1) {
+    throw new Error("invalid_sms_segment_budget");
+  }
+  const original = body.trim();
+  if (countSegments(original) <= maxSegments) return original;
+
+  // Agenda is useful context, but the join link and compliance footer are the
+  // delivery contract. Remove agenda text before shortening anything else.
+  const withoutAgenda = original
+    .split("\n")
+    .filter((line) => !/^\s*(agenda|we (?:will|'ll) cover)\s*:/i.test(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (countSegments(withoutAgenda) <= maxSegments) return withoutAgenda;
+
+  const meetLink = original.match(/https:\/\/meet\.google\.com\/[a-z0-9-]+/i)?.[0] ?? null;
+  const hasFooter = original.includes(SMS_STOP_FOOTER);
+  const protectedMessage = [
+    `${SMS_BRAND_PREFIX} Meeting reminder.`,
+    meetLink ? `Join: ${meetLink}` : null,
+    hasFooter ? SMS_STOP_FOOTER : null,
+  ].filter(Boolean).join("\n");
+  if (countSegments(protectedMessage) <= maxSegments) return protectedMessage;
+
+  throw new Error("sms_protected_content_exceeds_segment_budget");
 }
 
 export function meetingNotificationDecision(input: {
@@ -145,7 +236,9 @@ export function buildFounderMeetingMessages(input: {
   const reminderMinutes = Number.isInteger(input.reminderMinutesBefore) && Number(input.reminderMinutesBefore) > 0
     ? Number(input.reminderMinutesBefore)
     : 10;
-  const reminderWindow = `${reminderMinutes} ${reminderMinutes === 1 ? "minute" : "minutes"}`;
+  const reminderWindow = reminderMinutes === 60
+    ? "1 hour"
+    : `${reminderMinutes} ${reminderMinutes === 1 ? "minute" : "minutes"}`;
   const reminderBody = [
     greeting,
     "",
@@ -154,8 +247,8 @@ export function buildFounderMeetingMessages(input: {
     "",
     `We will cover: ${input.clientAgenda}`,
   ].join("\n");
-  const confirmationSms = `OASIS: your 15-minute website audit is booked for ${when}. Google Meet: ${meetLink}`;
-  const reminderSms = `OASIS reminder: your website audit starts in ${reminderWindow}. Join: ${meetLink}`;
+  const confirmationSms = `${SMS_BRAND_PREFIX} Your 15-minute website audit is booked for ${when}. Google Meet: ${meetLink}`;
+  const reminderSms = `${SMS_BRAND_PREFIX} Reminder: your website audit starts in ${reminderWindow}. Join: ${meetLink}`;
   return {
     confirmationSms,
     reminder: {

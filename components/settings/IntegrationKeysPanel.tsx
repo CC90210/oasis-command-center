@@ -193,7 +193,16 @@ export function IntegrationKeysPanel({
               field: f,
               status: statusFor(schema.service, f.key),
             }));
-            const allSet = fieldStatuses.every((fs) => fs.status?.has_value);
+            const allSet = schema.service === "twilio"
+              ? Boolean(
+                  statusFor("twilio", "account_sid")?.has_value &&
+                  statusFor("twilio", "auth_token")?.has_value &&
+                  (
+                    statusFor("twilio", "from_number")?.has_value ||
+                    statusFor("twilio", "messaging_service_sid")?.has_value
+                  ),
+                )
+              : fieldStatuses.every((fs) => fs.status?.has_value);
             const anyTested = fieldStatuses.some((fs) => fs.status?.last_tested_at);
             const lastTestOk = fieldStatuses.find(
               (fs) => fs.status?.last_test_ok === true,
