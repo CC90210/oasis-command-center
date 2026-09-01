@@ -350,6 +350,20 @@ for (const view of [
   // teaser span once (2026-08-31): the assertion failed as intended, and the
   // class was reverted.
   "components/web-leads/BattleSection.tsx",
+  // Added 2026-09-01 with the WebGL radar. It renders MORE audit data than any
+  // other file here (seven scored pillars and two score wireframes), and its
+  // colours are hex strings fed to three.js rather than Tailwind classes -- so
+  // the class ban catches less of it than usual, and what it does catch (a
+  // helper span, a legend, a future overlay) matters more. Proved to fire
+  // against this file by planting `text-red-400` on the host div once
+  // (2026-09-01): the assertion failed as intended, and the class was
+  // reverted. The identity-hue discipline for the hex colours is pinned
+  // separately in web-leads-battlecard.test.ts §8c-8d.
+  "components/web-leads/Radar3D.tsx",
+  // Added 2026-09-01 with the shared HUD palette. The one module every chart
+  // reads its colours from -- which makes it the highest-leverage place to
+  // sneak a verdict colour into the whole feature at once.
+  "components/web-leads/battle-hud.ts",
   // Added 2026-08-24 with the objection panel. It renders no audit data at all,
   // which is exactly why it earns the ban rather than an exemption: a surface
   // that is "obviously safe" today is the one a future editor tints to make a

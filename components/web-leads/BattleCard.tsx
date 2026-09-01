@@ -53,15 +53,28 @@
  * zero runtime requests), and the radar carries one piece of AMBIENT
  * decorative motion, a slowly rotating tick ring.
  *
+ * Round 4 (2026-09-01, "take a big leap... I'm saying 3D imaging"): the radar
+ * became a REAL WebGL hologram -- see Radar3D.tsx -- with the 2D SVG stack
+ * kept intact as the automatic fallback (phones, reduced motion, no WebGL,
+ * failed import: the card degrades to round 3, never to blank). A plexus
+ * particle canvas breathes behind the hero (the video-background ask, with
+ * no video asset), meters became segmented HUD readouts, the distribution
+ * strip went neon, and telemetry values moved to JetBrains Mono
+ * (--battle-data) beside Space Grotesk display (--battle-display), both from
+ * the already-vendored woff2.
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
- * identical treatment -- rule 1 survives the decoration); data marks never
- * move on their own (the one ambient element is a decorative ring carrying no
- * data, and it is motion-safe gated); pointer-driven motion is the rep's own
- * hand echoed back; and `prefers-reduced-motion` flattens ALL of it -- tilts
- * render flat, fades render settled, the ring, count and rotation render
- * finished and still (rule 4). CSS 3D, deliberately not three.js: a WebGL
- * context for a seven-point polygon fails the same ~90KB test recharts failed
- * below.
+ * identical treatment -- rule 1 survives the decoration); ambient motion is
+ * confined to decorative layers that carry no data (the rotating tick ring,
+ * the particle drifts, the idle orbit of the 3D stage -- the pillars and
+ * surfaces on that stage encode scores and rotate rigidly with it, never by
+ * themselves); pointer-driven motion is the rep's own hand echoed back; and
+ * `prefers-reduced-motion` flattens ALL of it -- tilts render flat, fades
+ * render settled, the ring, count and rotation render finished and still,
+ * and the WebGL scene is simply never mounted (rule 4). The old "CSS 3D,
+ * deliberately not three.js" weight rule was overridden by the operator for
+ * this one chart; what survives is its cost discipline -- three.js is
+ * code-split and loaded only where the scene actually runs (Radar3D.tsx).
  *
  * ═══ THE COMPETITOR SECTION IS THE POINT ════════════════════════════════════
  *
@@ -110,7 +123,7 @@
  * ~90KB of it. A radar is seven points on a circle.
  */
 
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import localFont from "next/font/local";
 import { ArrowLeft, ChevronDown, ExternalLink, Phone } from "lucide-react";
@@ -125,6 +138,8 @@ import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
+import { hueFor, GOLD, CYAN } from "./battle-hud";
+import { Radar3D } from "./Radar3D";
 
 /**
  * The display face for the HUD (Adon, 2026-09-01: "a nicer font"). Space
@@ -146,31 +161,24 @@ const displayFont = localFont({
 });
 
 /**
- * One fixed hue per DIMENSION — IDENTITY coding, never quality coding.
- *
- * This is how "make it colorful" coexists with rule 1: a colour on this card
- * answers "WHICH area is this" (trust is always this blue, mobile is always
- * this magenta, on every lead, at every score) or "WHOSE mark is this"
- * (cyan = this prospect, GOLD = the benchmark competitor). No hue ever
- * answers "how good is it" -- the cool-spectrum palette deliberately contains
- * no traffic-light red or green, and the banned-class tests still enforce
- * that nothing verdict-coloured can creep in.
+ * The telemetry face: JetBrains Mono (also already vendored, also loaded
+ * locally) for every measured value -- scores, points, crawl readouts. A
+ * monospaced figure reads as an instrument, and two different values can
+ * never render at two different widths mid-call.
  */
-const DIM_HUES: Record<string, { from: string; to: string }> = {
-  conversion: { from: "#22d3ee", to: "#67e8f9" },
-  trust: { from: "#3b82f6", to: "#93c5fd" },
-  design: { from: "#8b5cf6", to: "#c4b5fd" },
-  mobile: { from: "#d946ef", to: "#f0abfc" },
-  content: { from: "#0ea5e9", to: "#7dd3fc" },
-  performance: { from: "#6366f1", to: "#a5b4fc" },
-  discoverability: { from: "#14b8a6", to: "#5eead4" },
-};
-const FALLBACK_HUE = { from: "#38bdf8", to: "#7dd3fc" };
-const hueFor = (key: string) => DIM_HUES[key] || FALLBACK_HUE;
+const dataFont = localFont({
+  src: [
+    { path: "../../app/fonts/JetBrainsMono-400.woff2", weight: "400", style: "normal" },
+    { path: "../../app/fonts/JetBrainsMono-500.woff2", weight: "500", style: "normal" },
+  ],
+  variable: "--battle-data",
+});
 
-/** The benchmark competitor's mark, everywhere it appears: radar overlay,
- *  head-to-head ticks. A fixed identity, worn at every score. */
-const GOLD = "#fbbf24";
+// The identity palette (one fixed hue per dimension, cyan = prospect,
+// GOLD = benchmark) moved to ./battle-hud.ts so the WebGL radar shares the
+// exact same colours -- two charts disagreeing about which blue is "trust"
+// is the palette version of two copies of an address. Full rationale and the
+// identity-never-verdict rule live in that module's header.
 
 type Payload = {
   lead: WebLead;
@@ -291,8 +299,10 @@ function RemedyLines({ code }: { code: string }) {
 }
 
 /** The bar's LENGTH is the value; its colour, when a `hue` is given, is the
- *  dimension's fixed identity hue (see DIM_HUES) -- the same hue at 4 as at
- *  94, so rule 1 holds. With no hue it stays the neutral fill. */
+ *  dimension's fixed identity hue (see battle-hud.ts) -- the same hue at 4 as
+ *  at 94, so rule 1 holds. With no hue it stays the neutral fill. The tick
+ *  overlay segments the fill into a HUD readout; it is engraved on the track,
+ *  identical at every value. */
 function Meter({
   value, drawn, reduced, hue,
 }: {
@@ -303,7 +313,7 @@ function Meter({
 }) {
   const pct = Math.min(100, Math.max(0, value));
   return (
-    <span className="block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+    <span className="relative block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
       <span
         className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
         style={{
@@ -313,8 +323,96 @@ function Meter({
           boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
         }}
       />
+      <span
+        className="absolute inset-0"
+        style={{ background: "repeating-linear-gradient(90deg, transparent 0px, transparent 7px, rgba(6,7,10,0.6) 7px, rgba(6,7,10,0.6) 8px)" }}
+      />
     </span>
   );
+}
+
+/**
+ * ParticleField — the drifting plexus behind the hero (Adon, 2026-09-01:
+ * "have a video background, whatever it is"). A 2D canvas, ~70 points and
+ * the lines between near neighbours: the living-backdrop effect a looping
+ * video would give, with no licensed asset, no network fetch, and a couple
+ * of kilobytes of code. Chrome, keyed to nothing. Under reduced motion it
+ * draws exactly ONE still frame -- texture without motion -- and the loop
+ * never starts; a hidden tab pauses it.
+ */
+function ParticleField({ reduced }: { reduced: boolean }) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    const parent = canvas?.parentElement;
+    if (!canvas || !parent) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    let raf = 0;
+    let running = true;
+    const size = { w: 0, h: 0 };
+    const pts = Array.from({ length: 70 }, () => ({
+      x: Math.random(), y: Math.random(),
+      vx: (Math.random() - 0.5) * 0.0005, vy: (Math.random() - 0.5) * 0.0005,
+    }));
+    const frame = (still: boolean) => {
+      const { w, h } = size;
+      ctx.clearRect(0, 0, w, h);
+      if (!still) {
+        for (const p of pts) {
+          p.x += p.vx; p.y += p.vy;
+          if (p.x < 0 || p.x > 1) p.vx *= -1;
+          if (p.y < 0 || p.y > 1) p.vy *= -1;
+        }
+      }
+      ctx.fillStyle = "rgba(103,232,249,0.55)";
+      for (const p of pts) {
+        ctx.beginPath();
+        ctx.arc(p.x * w, p.y * h, 1.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const maxD = 120;
+      ctx.lineWidth = 0.6;
+      for (let i = 0; i < pts.length; i++) {
+        for (let j = i + 1; j < pts.length; j++) {
+          const dx = (pts[i].x - pts[j].x) * w;
+          const dy = (pts[i].y - pts[j].y) * h;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < maxD * maxD) {
+            ctx.strokeStyle = `rgba(59,130,246,${(0.26 * (1 - Math.sqrt(d2) / maxD)).toFixed(3)})`;
+            ctx.beginPath();
+            ctx.moveTo(pts[i].x * w, pts[i].y * h);
+            ctx.lineTo(pts[j].x * w, pts[j].y * h);
+            ctx.stroke();
+          }
+        }
+      }
+      if (!still && running) raf = requestAnimationFrame(() => frame(false));
+    };
+    const resize = () => {
+      size.w = canvas.width = parent.clientWidth || 1;
+      size.h = canvas.height = parent.clientHeight || 1;
+      if (reduced) frame(true);
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
+    ro.observe(parent);
+    if (reduced) frame(true);
+    else raf = requestAnimationFrame(() => frame(false));
+    const onVis = () => {
+      running = document.visibilityState === "visible";
+      cancelAnimationFrame(raf);
+      if (running && !reduced) raf = requestAnimationFrame(() => frame(false));
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      running = false;
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [reduced]);
+  return <canvas ref={ref} aria-hidden className="pointer-events-none absolute inset-0 opacity-50" />;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -584,6 +682,7 @@ function DistributionStrip({
   drawn: boolean;
   reduced: boolean;
 }) {
+  const gradId = useId();
   const max = Math.max(1, ...buckets);
   const usable = STRIP.w - STRIP.left - STRIP.right;
   const slot = usable / buckets.length;
@@ -597,6 +696,14 @@ function DistributionStrip({
       role="img"
       aria-label={`Score distribution in ten bands; this business falls in the ${leadBucket * 10} to ${leadBucket * 10 + 9} band`}
     >
+      <defs>
+        {/* ONE gradient for every bar. The corpus wears one colour; only the
+            marker says "you are here". */}
+        <linearGradient id={gradId} x1="0%" y1="100%" x2="0%" y2="0%">
+          <stop offset="0%" stopColor="#1d4ed8" stopOpacity="0.35" />
+          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.75" />
+        </linearGradient>
+      </defs>
       {buckets.map((count, i) => {
         const h = (count / max) * STRIP.plot;
         const x = STRIP.left + i * slot + 2;
@@ -612,8 +719,7 @@ function DistributionStrip({
             y={STRIP.top + STRIP.plot - (drawn ? h : 0)}
             height={drawn ? h : 0}
             rx={2}
-            className="fill-fg-dim"
-            fillOpacity={0.55}
+            fill={`url(#${gradId})`}
             style={{ transition: reduced ? "none" : `y 420ms ease-out ${i * 22}ms, height 420ms ease-out ${i * 22}ms` }}
           />
         );
@@ -622,18 +728,19 @@ function DistributionStrip({
       <line
         x1={markerX} x2={markerX}
         y1={STRIP.top - 4} y2={STRIP.top + STRIP.plot + 4}
-        stroke="currentColor" strokeOpacity={0.9} strokeWidth={1.5}
+        stroke={CYAN} strokeOpacity={0.95} strokeWidth={1.5}
+        style={{ filter: `drop-shadow(0 0 4px ${CYAN})` }}
       />
       <polygon
         points={`${markerX - 4},${STRIP.top + STRIP.plot + 5} ${markerX + 4},${STRIP.top + STRIP.plot + 5} ${markerX},${STRIP.top + STRIP.plot + 11}`}
-        className="fill-fg"
+        fill={CYAN}
       />
       <text
         x={Math.min(STRIP.w - 30, Math.max(30, markerX))}
         y={STRIP.h - 6}
         textAnchor="middle"
-        className="fill-fg"
-        style={{ fontSize: 11, fontWeight: 700 }}
+        fill="#e0f2fe"
+        style={{ fontSize: 11, fontWeight: 700, fontFamily: "var(--battle-display)" }}
       >
         {leadScore}
       </text>
@@ -771,7 +878,7 @@ export function BattleCard({
   const { lead, audit, competitors, signals } = state.payload;
 
   return (
-    <div className={`${displayFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
+    <div className={`${displayFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
       <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
       <BattleSections>
         <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
@@ -910,6 +1017,14 @@ function Hero({
         className="pointer-events-none absolute inset-0 opacity-60"
         style={{ background: "radial-gradient(50% 90% at 95% 115%, rgba(59,130,246,0.08), transparent 70%)" }}
       />
+      {/* The living backdrop: drifting plexus + a static CRT scanline
+          texture. Both chrome, both keyed to nothing. */}
+      <ParticleField reduced={reduced} />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-40"
+        style={{ background: "repeating-linear-gradient(0deg, rgba(59,130,246,0.04) 0px, rgba(59,130,246,0.04) 1px, transparent 1px, transparent 3px)" }}
+      />
       {/* HUD corner marks. Decoration with a job: they frame the header as the
           instrument panel the rest of the card hangs off. */}
       <span aria-hidden className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l-2 border-t-2 border-accent/30" />
@@ -1015,7 +1130,7 @@ function Hero({
                     <span className="sr-only">{audit.composite}</span>
                   </p>
                 </div>
-                <p className="mt-1 text-xs text-fg-dim">Measured {formatDate(audit.measuredAt)}</p>
+                <p className="mt-1 text-xs text-fg-dim [font-family:var(--battle-data)]">Measured {formatDate(audit.measuredAt)}</p>
               </>
             ) : (
               <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
@@ -1372,7 +1487,7 @@ function ScoredBody({
                       className="-mx-1.5 flex items-baseline justify-between gap-3 rounded px-1.5 py-1.5 transition-colors hover:bg-accent/5 motion-reduce:transition-none"
                     >
                       <dt className="text-xs text-fg-dim">{row.label}</dt>
-                      <dd className="shrink-0 text-xs font-medium tabular-nums text-fg-muted [font-family:var(--battle-display)]">{row.value}</dd>
+                      <dd className="shrink-0 text-xs font-medium tabular-nums text-fg-muted [font-family:var(--battle-data)]">{row.value}</dd>
                     </div>
                   ))}
                 </dl>
@@ -1416,16 +1531,41 @@ function DimensionShape({
 }) {
   const bus = useBattleSections();
   const [selected, setSelected] = useState<string | null>(null);
-  // The holo-table tilt: the radar sits on a gentle base pitch and leans
-  // toward the pointer. USER-DRIVEN motion only -- it is the rep's own hand
-  // echoed back, it never moves on its own, and reduced motion renders it
-  // flat and static (rule 4).
+  // The holo-table tilt for the 2D FALLBACK stack: the radar sits on a
+  // gentle base pitch and leans toward the pointer. USER-DRIVEN motion only.
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
+  // The WebGL radar's lifecycle: pending (initializing invisibly behind the
+  // SVG), on (3D live, SVG unmounted), off (probe/import/init failed -- the
+  // SVG stays, permanently, and nothing is retried or blank).
+  const [gl, setGl] = useState<"pending" | "on" | "off">("pending");
+  // Desktop check as STATE, not CSS: `hidden` would only hide the canvas --
+  // the effect behind it would still download three.js onto every phone.
+  // Read in an effect for the same hydration reason as useReducedMotion.
+  const [desktop, setDesktop] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 640px)");
+    setDesktop(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setDesktop(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   const sel = selected ?? worstFirst[0]?.key ?? null;
   const dim = dimensions.find((d) => d.key === sel) || null;
   const headToHead = competitors?.headToHead || null;
+  // Memoised: Radar3D rebuilds its whole GL scene when this identity
+  // changes, and a fresh array per render would rebuild it per click.
+  const leaderArr = useMemo(
+    () => headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null,
+    [headToHead],
+  );
   const leaderFor = dim ? headToHead?.dimensions.find((l) => l.key === dim.key) || null : null;
   const misses = dim ? dim.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points) : [];
+  // The ONE truth for "is the 3D radar actually on screen". The SVG hides on
+  // exactly this, not on `gl` alone: a rep who enables reduced motion after
+  // the scene initialized unmounts Radar3D while `gl` still says "on", and a
+  // fallback keyed to `gl` alone would leave a blank hole where a chart was.
+  // (Codex review, 2026-09-01.)
+  const glLive = drawn && !reduced && desktop && gl === "on";
 
   function jumpToFaults() {
     if (!bus || !dim) return;
@@ -1442,16 +1582,42 @@ function DimensionShape({
   return (
     <>
       {/* THE RADAR IS HIDDEN BELOW `sm`, AND NOTHING REPLACES IT, because
-          nothing has to. A seven-axis radar with wrapped labels is drawn
-          in a 420x340 viewBox; scaled into 326px of card it is a shape a
-          rep cannot read a single value off, and a chart that cannot be
-          read is worse than no chart -- it looks like information.
-          The seven dimension buttons below already carry every number the
-          radar encodes, labelled, in one column, and they were always
-          there. So the phone gets the buttons and the desktop gets both.
-          (The radar's own `aria-label` names all seven scores, so a screen
-          reader was never getting the picture either way.) */}
-      <div className="relative hidden justify-center sm:flex" style={{ perspective: "1100px" }}>
+          nothing has to. The seven dimension buttons below already carry
+          every number the radar encodes, labelled, in one column, and they
+          were always there. So the phone gets the buttons and the desktop
+          gets the chart.
+
+          On desktop the chart is the WebGL hologram (Radar3D) when it can
+          be: `drawn` gates the mount one frame so a reduced-motion
+          preference has already been read (a reduced-motion user never even
+          downloads three.js), and while the GL scene initializes -- or if it
+          fails -- the 2D SVG hologram stack below renders instead, so the
+          card is never blank and never waits. The SVG stack is also the
+          aria carrier; when the canvas takes over, an sr-only summary keeps
+          the same sentence available to assistive tech. */}
+      {drawn && !reduced && desktop && gl !== "off" && (
+        <div className={gl === "on" ? "relative" : "pointer-events-none absolute h-px w-px overflow-hidden opacity-0"}>
+          <Radar3D
+            dimensions={dimensions}
+            leader={leaderArr}
+            selected={sel}
+            onSelect={setSelected}
+            onStatus={(ok) => setGl(ok ? "on" : "off")}
+            className="h-[380px] w-full"
+          />
+          {gl === "on" && (
+            <>
+              <p className="sr-only">{`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}</p>
+              {headToHead && (
+                <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
+                  Gold outline: {headToHead.competitor.name} · drag to orbit, tap a pillar to inspect
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      <div className={glLive ? "hidden" : "relative hidden justify-center sm:flex"} style={{ perspective: "1100px" }}>
         {(() => {
           const radarProps = {
             dimensions,
@@ -1531,7 +1697,7 @@ function DimensionShape({
                   <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
                   <span className={active ? "truncate font-semibold text-fg" : "truncate text-fg-muted"}>{d.label}</span>
                 </span>
-                <span className={`tabular-nums [font-family:var(--battle-display)] ${active ? "text-fg" : "text-fg-dim"}`}>{d.score}</span>
+                <span className={`tabular-nums [font-family:var(--battle-data)] ${active ? "text-fg" : "text-fg-dim"}`}>{d.score}</span>
               </span>
               <span className="mt-1 block"><Meter value={d.score} drawn={drawn} reduced={reduced} hue={hue} /></span>
             </button>
@@ -1662,7 +1828,7 @@ function FixFirst({
                 </span>
                 {/* One constant cyan for every "+points" figure -- the metric's
                     own identity, not a grade. */}
-                <span className="shrink-0 tabular-nums [font-family:var(--battle-display)]" style={{ color: "#7dd3fc" }}>+{points.toFixed(1)}</span>
+                <span className="shrink-0 tabular-nums [font-family:var(--battle-data)]" style={{ color: "#7dd3fc" }}>+{points.toFixed(1)}</span>
               </span>
               <span className="mt-1.5 block">
                 <Meter value={(points / maxRecoverable) * 100} drawn={drawn} reduced={reduced} hue={hue} />
@@ -1848,7 +2014,7 @@ function Competitors({
                   <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(d.key).to, boxShadow: `0 0 6px ${hueFor(d.key).to}` }} />
                   <span className="truncate">{d.label}</span>
                 </span>
-                <span className="text-xs tabular-nums text-fg-dim [font-family:var(--battle-display)]">
+                <span className="text-xs tabular-nums text-fg-dim [font-family:var(--battle-data)]">
                   <span className="font-semibold text-fg">{d.theirs}</span> vs {d.leader}
                   {/* A signed number, not a colour and not an arrow. The sign is
                       a fact about two measurements; a red arrow is a verdict. */}
