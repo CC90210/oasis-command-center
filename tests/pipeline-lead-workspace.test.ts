@@ -63,6 +63,36 @@ assert.match(page, /canReadOasisSalesTeamPipeline/);
 assert.match(page, /getOasisSalesRepRoster/);
 assert.match(page, /readableRepUserIds/);
 assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}/);
+
+// A MANAGER OPERATES THEIR TEAM'S BOOK (2026-09-01).
+//
+// canMutateOasisSalesRecord answers ownership, and a manager owns nothing --
+// they are measured on their reps' deals. So gating the lifecycle purely on
+// ownership gave every manager the read-only coaching view on every lead and no
+// way to book an audit for the rep they were coaching. On the live tenant both
+// managers owned zero leads, so that was their entire pipeline.
+assert.match(
+  page,
+  /const managerWorksTeamBook[\s\S]*?readableRepUserIds\.length > 0/,
+  "a manager's operate rights must key on the server-resolved roster, not personal ownership",
+);
+assert.match(
+  page,
+  /const canWorkLifecycle =[\s\S]*?managerWorksTeamBook/,
+  "managerWorksTeamBook must actually widen canWorkLifecycle, not sit unused",
+);
+assert.match(
+  page,
+  /const managerCoachingView =[\s\S]*?!managerWorksTeamBook/,
+  "inside their roster a manager operates; coaching is the fallback for leads outside it",
+);
+// The roster boundary survives the widening: an off-roster assignment must
+// still fall through to coaching rather than becoming operable.
+assert.match(
+  page,
+  /managerWorksTeamBook =[\s\S]*?readableRepUserIds\.some\(/,
+  "an assigned lead must be checked against the roster, not blanket-granted",
+);
 assert.doesNotMatch(page, /<LeadActionToolbar/, "the call control appears only inside the single next-step panel");
 assert.match(page, /title="Activity and files"[\s\S]*defaultCollapsed/);
 assert.match(
