@@ -63,6 +63,16 @@
  * (--battle-data) beside Space Grotesk display (--battle-display), both from
  * the already-vendored woff2.
  *
+ * Round 5 (2026-09-01, "even cooler... really outlining the graph of what
+ * type of bad it is"): the display face became Chakra Petch with Orbitron on
+ * the hero numeral alone (both vendored, see OFL.md), the WebGL radar gained
+ * real bloom, beam sheaths, a radar sweep and PROJECTED LABELS so the chart
+ * names its own axes (Radar3D.tsx), every Panel wears the hero's corner
+ * marks, and the shape section opens with the DESIGNATION PLATE: the
+ * hand-written name for the shape of this lead's problem (lead-profile.ts --
+ * "Invisible storefront", "Full rebuild"), chosen by arithmetic over the
+ * same scores the radar draws, so a rep says what the graph shows.
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
  * identical treatment -- rule 1 survives the decoration); ambient motion is
  * confined to decorative layers that carry no data (the rotating tick ring,
@@ -141,24 +151,37 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { designateLead } from "@/lib/web-leads/lead-profile";
 
 /**
- * The display face for the HUD (Adon, 2026-09-01: "a nicer font"). Space
- * Grotesk, from the woff2 files ALREADY VENDORED in app/fonts/ for the
- * marketing site -- the same display face the brand wears in public, so the
- * card and the site agree on what OASIS looks like. next/font/local, never
- * next/font/google: tests/font-selfhost.test.ts bans the build-time Google
- * fetch that failed two deploys in August. Zero new binaries, zero runtime
- * requests. Scoped to this card through a CSS variable on its root; nothing
- * outside the battle card inherits it.
+ * The display face for the HUD (round 3: "a nicer font"; round 5, Adon: "a
+ * nicer, cooler looking font"). Round 4 borrowed the marketing site's Space
+ * Grotesk; round 5 gives the card its OWN voice: Chakra Petch, a squared
+ * mechanical face drawn for instrument panels -- it reads as HUD chrome in a
+ * section title and stays legible in a 10px tracking-wide label. Vendored
+ * latin woff2 in app/fonts/ (from @fontsource, see OFL.md), loaded with
+ * next/font/local, never next/font/google: tests/font-selfhost.test.ts bans
+ * the build-time Google fetch that failed two deploys in August. Scoped to
+ * this card through a CSS variable on its root; nothing outside the battle
+ * card inherits it.
  */
 const displayFont = localFont({
   src: [
-    { path: "../../app/fonts/SpaceGrotesk-500.woff2", weight: "500", style: "normal" },
-    { path: "../../app/fonts/SpaceGrotesk-600.woff2", weight: "600", style: "normal" },
-    { path: "../../app/fonts/SpaceGrotesk-700.woff2", weight: "700", style: "normal" },
+    { path: "../../app/fonts/ChakraPetch-500.woff2", weight: "500", style: "normal" },
+    { path: "../../app/fonts/ChakraPetch-600.woff2", weight: "600", style: "normal" },
+    { path: "../../app/fonts/ChakraPetch-700.woff2", weight: "700", style: "normal" },
   ],
   variable: "--battle-display",
+});
+
+/**
+ * The instrument numeral: Orbitron, for the hero score ONLY. One weight, one
+ * place -- the arc reactor gets a dial face and nothing else does, which is
+ * what keeps it special. Same vendored-woff2 discipline as the other faces.
+ */
+const numeralFont = localFont({
+  src: [{ path: "../../app/fonts/Orbitron-700.woff2", weight: "700", style: "normal" }],
+  variable: "--battle-numeral",
 });
 
 /**
@@ -268,7 +291,14 @@ function formatDate(iso: string): string {
 // ───────────────────────────────────────────────────────────────────────────
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">{children}</h2>;
+  return (
+    <h2 className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.18em] text-fg-muted [font-family:var(--battle-display)]">
+      {/* The HUD tab: a small lit dash before every section name, the same
+          accent at every score. Purely typographic chrome. */}
+      <span aria-hidden className="h-px w-3 shrink-0 bg-accent/60" />
+      {children}
+    </h2>
+  );
 }
 
 function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
@@ -280,6 +310,10 @@ function Panel({ children, className = "" }: { children: React.ReactNode; classN
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent"
       />
+      {/* HUD corner marks, echoing the hero's: every instrument panel on the
+          card wears the same frame. Constant chrome, keyed to nothing. */}
+      <span aria-hidden className="pointer-events-none absolute right-2 top-2 h-3 w-3 border-r border-t border-accent/25" />
+      <span aria-hidden className="pointer-events-none absolute bottom-2 left-2 h-3 w-3 border-b border-l border-accent/25" />
       {children}
     </section>
   );
@@ -905,7 +939,7 @@ export function BattleCard({
   const { lead, audit, competitors, signals } = state.payload;
 
   return (
-    <div className={`${displayFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
+    <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
       <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
       <BattleSections>
         <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
@@ -1152,7 +1186,7 @@ function Hero({
                       }}
                     />
                   </svg>
-                  <p className="text-5xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)] [font-family:var(--battle-display)]">
+                  <p className="text-[2.6rem] font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)] [font-family:var(--battle-numeral)]">
                     <span aria-hidden>{shownScore}</span>
                     <span className="sr-only">{audit.composite}</span>
                   </p>
@@ -1250,6 +1284,92 @@ function PercentileSentence({
         <p className="mt-1 text-center text-[10px] text-fg-faint">
           Score bands across the {slice.label} we have measured
         </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The DESIGNATION PLATE (round 5): the name of the shape, stamped above the
+ * chart that draws it.
+ *
+ * Every word comes verbatim from the hand-written tables in
+ * lib/web-leads/lead-profile.ts (battle-card rule 3); the classifier that
+ * picks WHICH entry applies is ordered arithmetic over the same dimension
+ * scores the radar renders, so the plate and the chart can never disagree.
+ * The plate wears the neutral accent at every designation -- "Full rebuild"
+ * and "Strong contender" get identical chrome (rule 1); the only hue on it
+ * is the identity dot of each defining dimension, the same dot those areas
+ * wear on the radar, the list and the fix ranking. The readouts on the right
+ * are the shape's own numbers: the floor (worst area), the ceiling (best),
+ * and the spread between them, in the telemetry face.
+ */
+function DesignationPlate({ audit }: { audit: Extract<AuditResult, { state: "scored" }> }) {
+  const designation = useMemo(
+    () => designateLead(audit.dimensions, audit.composite),
+    [audit.dimensions, audit.composite],
+  );
+  const byKey = useMemo(() => new Map(audit.dimensions.map((d) => [d.key, d])), [audit.dimensions]);
+  const scores = audit.dimensions.map((d) => d.score);
+  const floor = Math.min(...scores);
+  const ceiling = Math.max(...scores);
+
+  return (
+    <div className="relative mb-4 overflow-hidden rounded-lg border border-accent/25 bg-bg-raised/60 p-4 backdrop-blur-sm [clip-path:polygon(0_0,calc(100%-16px)_0,100%_16px,100%_100%,0_100%)]">
+      {/* The lit diagonal along the clipped corner, and a faint scan texture.
+          Constant chrome, identical for every designation. */}
+      <span aria-hidden className="pointer-events-none absolute -right-[7px] top-[4px] h-px w-6 rotate-45 bg-accent/60" />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-30"
+        style={{ background: "repeating-linear-gradient(0deg, rgba(59,130,246,0.05) 0px, rgba(59,130,246,0.05) 1px, transparent 1px, transparent 4px)" }}
+      />
+      <div className="relative flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+        <div className="min-w-0 max-w-2xl">
+          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-fg-muted [font-family:var(--battle-display)]">
+            Designation
+          </p>
+          <p className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl">
+            {designation.name}
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-fg-dim">{designation.meaning}</p>
+          <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">
+            <span className="font-medium text-fg-muted">The play:</span> {designation.play}
+          </p>
+          {/* The defining areas, wearing the same identity dots they wear on
+              every other surface of this card. Identity, never verdict. */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {designation.primary.map((key) => {
+              const d = byKey.get(key);
+              if (!d) return null;
+              const hue = hueFor(key);
+              return (
+                <span
+                  key={key}
+                  className="inline-flex items-center gap-1.5 rounded border border-bg-border bg-bg-panel/70 px-2 py-1 text-[11px] text-fg-muted"
+                >
+                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
+                  {d.label}
+                  <span className="tabular-nums text-fg [font-family:var(--battle-data)]">{d.score}</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+        <dl className="flex shrink-0 gap-4 text-right">
+          {(
+            [
+              ["Floor", floor],
+              ["Ceiling", ceiling],
+              ["Spread", ceiling - floor],
+            ] as const
+          ).map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-[9px] font-bold uppercase tracking-[0.18em] text-fg-muted [font-family:var(--battle-display)]">{label}</dt>
+              <dd className="mt-0.5 text-lg font-medium tabular-nums leading-none text-fg [font-family:var(--battle-data)]">{value}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
     </div>
   );
@@ -1398,6 +1518,7 @@ function ScoredBody({
           title="What kind of bad is it"
           sub="The shape of the problem across seven areas. Tap one, on the chart or in the list, to see what is failing inside it."
         >
+          <DesignationPlate audit={audit} />
           <DimensionShape
             dimensions={audit.dimensions}
             worstFirst={worstFirst}

@@ -33,6 +33,7 @@ import {
 } from "../lib/web-leads/competitors";
 import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
+import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
@@ -1161,6 +1162,163 @@ const MODEL_CODES = [
   // one screen invite a rep to wonder which one is current.
   const conditionUses = (src.match(/lead\.websiteCondition/g) || []).length;
   assert.equal(conditionUses, 0, `${view} must read the verbatim directory strings through BusinessFacts, once`);
+}
+
+// ---------------------------------------------------------------------------
+// 8e. THE DESIGNATION (round 5, Adon: "really outlining the graph of what
+//     type of bad it is"). lead-profile.ts names the SHAPE of a scored
+//     profile from hand-written tables; the plate on the card renders it
+//     verbatim. What gets pinned: the tables are COMPLETE (a crater in any
+//     dimension has a name -- one missing entry and the plate says less than
+//     the chart), no entry is a stub, the classifier is TOTAL (every profile
+//     in a sweep classifies -- a plate that can render blank is a question
+//     mark on the most prominent line of the section), and each ordered rule
+//     actually fires on the profile shape it exists for.
+// ---------------------------------------------------------------------------
+
+{
+  const mkDim = (key: string, score: number) => ({
+    key,
+    label: key,
+    score,
+    weight: 1,
+    checks: [],
+    missing: [],
+  });
+  const profile = (scores: Record<string, number>) => DIMENSION_KEYS.map((k) => mkDim(k, scores[k] ?? 70));
+
+  // The crater table covers every dimension, and nothing in either table is a
+  // stub. A one-word `meaning` or an empty `play` is a plate that stamps a
+  // name and then has nothing for the rep to SAY about it.
+  for (const key of DIMENSION_KEYS) {
+    const entry = CRATER_DESIGNATIONS[key];
+    assert.ok(entry, `lead-profile.ts: no crater designation for "${key}" -- a collapse there would render a generic label`);
+    assert.ok(entry.name.length >= 8, `${key}: crater name is a stub`);
+    assert.ok(entry.meaning.length >= 40, `${key}: crater meaning is a stub`);
+    assert.ok(entry.play.length >= 40, `${key}: crater play is a stub`);
+  }
+  assert.equal(
+    Object.keys(CRATER_DESIGNATIONS).length,
+    DIMENSION_KEYS.length,
+    "one crater designation per dimension, no extras -- an extra entry is dead copy nothing can select",
+  );
+  for (const [code, entry] of Object.entries(SHAPE_DESIGNATIONS)) {
+    assert.ok(entry.name.length >= 8, `${code}: shape name is a stub`);
+    assert.ok(entry.meaning.length >= 40, `${code}: shape meaning is a stub`);
+    assert.ok(entry.play.length >= 40, `${code}: shape play is a stub`);
+  }
+
+  // Each ordered rule fires on the shape it exists for.
+  for (const key of DIMENSION_KEYS) {
+    const d = designateLead(profile({ [key]: 20 }), 62);
+    assert.equal(d.code, `crater_${key}`, `one collapsed area (${key} at 20, rest 70) must classify as that crater`);
+    assert.deepEqual(d.primary, [key], `the ${key} crater's defining area must be ${key} itself`);
+  }
+  assert.equal(designateLead(profile(Object.fromEntries(DIMENSION_KEYS.map((k) => [k, 30]))), 30).code, "rebuild", "everything under 45 must classify as the rebuild");
+  assert.equal(designateLead(profile({ conversion: 72 }), 80).code, "contender", "a high composite with no crater must classify as the contender");
+  assert.equal(
+    designateLead(profile({ conversion: 40, trust: 42 }), 58).code,
+    "two_front",
+    "two areas dragging together (40/42 against a 70 field) must classify as the two-front fight",
+  );
+  assert.equal(
+    designateLead(profile({ conversion: 55, trust: 60, design: 62, mobile: 65, content: 68, performance: 70, discoverability: 72 }), 62).code,
+    "erosion",
+    "spread-out decay with no dominant crater must fall through to erosion",
+  );
+  // Rule ORDER: a deep crater on a site whose composite still clears the
+  // contender floor is sold as the crater -- "strong contender" above a
+  // radar with one axis on the floor is the plate contradicting the chart.
+  assert.equal(
+    designateLead(profile({ discoverability: 30 }), 78).code,
+    "crater_discoverability",
+    "a deep crater must outrank the contender floor",
+  );
+
+  // Totality sweep: every profile in a coarse grid classifies to a designation
+  // with words on it, and every defining area it names is real. 6^3 shapes x 7
+  // rotations covers all rule boundaries without a combinatorial test.
+  const GRID = [0, 20, 40, 60, 80, 100];
+  for (const worst of GRID) {
+    for (const mid of GRID) {
+      for (const rest of GRID) {
+        for (const key of DIMENSION_KEYS) {
+          const scores: Record<string, number> = Object.fromEntries(DIMENSION_KEYS.map((k) => [k, rest]));
+          scores[key] = worst;
+          scores[DIMENSION_KEYS[(DIMENSION_KEYS.indexOf(key) + 3) % DIMENSION_KEYS.length]] = mid;
+          const composite = Math.round(Object.values(scores).reduce((a, b) => a + b, 0) / DIMENSION_KEYS.length);
+          const d = designateLead(profile(scores), composite);
+          assert.ok(d && d.name.length >= 8 && d.meaning.length >= 40 && d.play.length >= 40, `unclassifiable profile: ${JSON.stringify(scores)}`);
+          assert.ok(d.primary.length >= 1 && d.primary.length <= 3, `designation for ${JSON.stringify(scores)} names ${d.primary.length} defining areas`);
+          for (const p of d.primary) assert.ok(DIMENSION_KEYS.includes(p), `designation names unknown area "${p}"`);
+        }
+      }
+    }
+  }
+
+  // The plate is ON the card, inside the shape section, rendering the
+  // hand-written entry verbatim -- name, meaning AND play. A plate that
+  // renders only the name is a verdict with no sentence to say.
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
+  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} \/>/, "the designation plate must open the shape section");
+  assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
+  assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
+  assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
+}
+
+// ---------------------------------------------------------------------------
+// 8f. THE HUD FACES (round 5): every font the card declares must exist as a
+//     vendored file. next/font/local fails the BUILD on a missing file, but
+//     only when the importing route builds -- this catches a lost woff2 at
+//     test time, with a message that names the file instead of a webpack
+//     stack. And the three faces stay three: display (Chakra Petch), numeral
+//     (Orbitron, the hero score only), telemetry (JetBrains Mono).
+// ---------------------------------------------------------------------------
+
+{
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+  const declared = [...src.matchAll(/path: "\.\.\/\.\.\/(app\/fonts\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(declared.length >= 6, `${view} declares only ${declared.length} font files -- the three-face system lost a weight`);
+  for (const rel of declared) {
+    assert.ok(fs.existsSync(path.join(process.cwd(), rel)), `${view} declares ${rel} but the file is not vendored -- the build will fail on it`);
+  }
+  for (const face of ["ChakraPetch-", "Orbitron-700", "JetBrainsMono-"]) {
+    assert.ok(declared.some((p) => p.includes(face)), `${view} lost the ${face} face`);
+  }
+  // Orbitron is the hero score's dial face and nothing else's: one declared
+  // weight, worn via --battle-numeral exactly once. The moment it spreads,
+  // it stops reading as an instrument and starts reading as a theme.
+  assert.equal(declared.filter((p) => p.includes("Orbitron")).length, 1, "Orbitron stays a single weight");
+  assert.equal((src.match(/--battle-numeral\)/g) || []).length, 1, "the numeral face is worn by the hero score alone");
+}
+
+// ---------------------------------------------------------------------------
+// 8g. ROUND 5 OF THE WEBGL RADAR: bloom is a TREATMENT, labels are DOM.
+//     What gets pinned is the failure discipline, same as 8d: the bloom
+//     modules load in a try whose catch leaves the round-4 direct render
+//     (never a blank chart because a postprocessing chunk failed), the
+//     screen-blend composite is only applied on the bloomed path, the
+//     composer's targets are disposed with everything else, and the
+//     projected labels ride OUTSIDE the GL scene as aria-hidden DOM -- the
+//     dimension list beside the chart stays the accessible path.
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /UnrealBloomPass/, "Radar3D must attempt the bloom treatment");
+  assert.match(r3d, /catch \{\s*composer = null;\s*\}/, "a failed postprocessing import must fall back to the direct render, not blank the chart");
+  assert.match(r3d, /mixBlendMode = "screen"/, "the bloomed path must composite onto the panel via screen blend (bloom cannot render on a transparent canvas)");
+  const stripped = stripComments(r3d);
+  assert.ok(
+    !/setClearColor\(0x000000, 1\)/.test(stripped.split("try")[0] || ""),
+    "the opaque clear colour belongs to the bloomed path only -- setting it unconditionally black-boxes the fallback render",
+  );
+  assert.match(r3d, /composer\?\.dispose\?\.\(\)/, "the composer's render targets must be disposed with the renderer");
+  assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
+  assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
+  assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");
 }
 
 console.log("web-leads-battlecard ok");
