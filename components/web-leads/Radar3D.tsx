@@ -169,6 +169,16 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
     if (!host) return;
     let dead = false;
     let cleanup: (() => void) | null = null;
+    // The selection AS OF MOUNT, captured synchronously BEFORE the async
+    // init. The change detector diffs against this, so a selection made
+    // while the scene was still loading (rep clicks the list during the
+    // first second) is seen as a change on the first frame and gets its
+    // flight -- while the mount-default selection (always non-null: the
+    // caller resolves it to the worst area) does not, because the boot
+    // should show the whole stage. (Codex review P2, 2026-09-01 -- their
+    // suggested init-from-current would fly the camera on EVERY mount;
+    // this captures the intent without that.)
+    const mountSel = selectedRef.current;
 
     (async () => {
       // WebGL probe before the heavy import: a machine that cannot run the
@@ -635,8 +645,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       // Selection as of the last frame: a CHANGE (from the list, the plate,
       // a label or a tap) is what engages a focus flight. Hover never
       // selects any more -- a camera that chases casual pointer travel is a
-      // chart that will not hold still mid-sentence.
-      let lastSelSeen = selectedRef.current;
+      // chart that will not hold still mid-sentence. Seeded from the
+      // PRE-INIT capture so a click that landed during the async load still
+      // reads as a change on the first frame.
+      let lastSelSeen = mountSel;
 
       const pick = (e: PointerEvent): string | null => {
         const rect = renderer.domElement.getBoundingClientRect();
@@ -728,8 +740,14 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         // ── rotation: focus flight beats inertia beats idle drift ──────
         const focusPillar = focusKey ? pillars.find((p) => p.key === focusKey) : undefined;
         if (focusPillar && !dragging) {
-          // Turn the shortest way so the chosen beam faces the camera.
-          const targetR = nearestTurn(rotY, Math.PI / 2 - focusPillar.azimuth);
+          // Turn the shortest way so the chosen beam faces the camera. A
+          // three.js Y-rotation by R moves azimuth `a` to `a - R`, and the
+          // camera-facing azimuth is +PI/2, so R = a - PI/2. The inverted
+          // form (PI/2 - a) happens to coincide for the first pillar (both
+          // are PI mod 2PI at a = -PI/2), which is exactly why an eyeball
+          // test on the default selection missed it. (Codex review P1,
+          // 2026-09-01.)
+          const targetR = nearestTurn(rotY, focusPillar.azimuth - Math.PI / 2);
           rotY += (targetR - rotY) * 0.07;
           tiltX += (-0.18 - tiltX) * 0.05;
           rotVel = 0;

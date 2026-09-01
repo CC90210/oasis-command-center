@@ -1490,6 +1490,17 @@ const MODEL_CODES = [
   const r3d = read("components/web-leads/Radar3D.tsx");
   assert.match(r3d, /rotVel \*= 0\.9/, "a released spin must decay toward rest -- undamped inertia never stops");
   assert.match(r3d, /const nearestTurn/, "a focus flight must rotate the shortest way to the chosen beam");
+  // The rotation SIGN: a three.js Y-rotation by R moves azimuth a to a - R,
+  // so facing the camera (+PI/2) needs R = a - PI/2. The inverted form
+  // coincides for the first pillar only, so the bug survives an eyeball
+  // test on the default selection. (Codex review P1, 2026-09-01.)
+  assert.match(r3d, /nearestTurn\(rotY, focusPillar\.azimuth - Math\.PI \/ 2\)/, "focus must rotate the beam TOWARD the camera, not behind the stage");
+  // A selection made while the scene was still initializing must still get
+  // its flight: the change detector seeds from a capture taken BEFORE the
+  // async load, not from whatever the ref says once loading finishes.
+  // (Codex review P2, 2026-09-01.)
+  assert.match(r3d, /const mountSel = selectedRef\.current;[\s\S]{0,900}?\(async \(\) =>/, "the mount selection must be captured before the async init");
+  assert.match(r3d, /let lastSelSeen = mountSel/, "the change detector must diff against the pre-init capture");
   assert.match(r3d, /bootT = Math\.min\(1,/, "the boot assembly must clamp at complete -- an unclamped boot re-eases forever");
   assert.match(r3d, /addEventListener\("dblclick", onDblClick\)/, "double-click must reset the camera to the home orbit");
   assert.match(r3d, /removeEventListener\("dblclick", onDblClick\)/, "the dblclick listener must be torn down with the scene");
