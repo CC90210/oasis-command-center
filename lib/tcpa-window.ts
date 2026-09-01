@@ -149,6 +149,25 @@ export type TcpaCheck = {
   timeLabel: string;
 };
 
+export type TcpaDispatchSkipReason = "sms_timezone_unresolved" | "outside_sms_hours";
+
+/**
+ * Route an SMS delivery through the recipient-local window verdict. Keeping
+ * the effect callbacks here makes the fail-closed branch executable in tests:
+ * an unresolved timezone can never fall through to the send callback.
+ */
+export async function dispatchByTcpaWindow<TSkip, TSend>(
+  check: Pick<TcpaCheck, "usedFallback" | "withinWindow">,
+  effects: {
+    skip: (reason: TcpaDispatchSkipReason) => TSkip | Promise<TSkip>;
+    send: () => TSend | Promise<TSend>;
+  },
+): Promise<TSkip | TSend> {
+  if (check.usedFallback) return effects.skip("sms_timezone_unresolved");
+  if (!check.withinWindow) return effects.skip("outside_sms_hours");
+  return effects.send();
+}
+
 /**
  * Resolve the TCPA calling-hours check for a recipient phone at a given
  * instant (default now). Falls back to the viewer's timezone (with

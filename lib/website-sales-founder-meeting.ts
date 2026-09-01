@@ -1825,7 +1825,9 @@ function leadConfirmsAppointment(
   operation = appointment.pending_operation,
 ): boolean {
   if (operation === "cancel") {
-    return lead.stage === "lost" || lead.deal_outcome === "lost";
+    return lead.stage === "lost" ||
+      lead.deal_outcome === "lost" ||
+      lead.founder_meeting_status === "cancelled_by_client";
   }
   const expectedMeetingAt = operation === "reschedule"
     ? appointment.pending_meeting_at

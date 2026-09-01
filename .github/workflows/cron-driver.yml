@@ -114,6 +114,7 @@ jobs:
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
+                      /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email" ;;
             "*/10 * * * *")
@@ -159,6 +160,7 @@ jobs:
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
+                      /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls
                       /api/cron/dispatch-bulk-email
                       /api/cron/health-check" ;;

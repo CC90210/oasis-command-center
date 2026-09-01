@@ -1,4 +1,5 @@
 import type { getServiceSupabase } from "@/lib/supabase-server";
+import { normalizePhoneE164 } from "@/lib/conversation-threading";
 
 /**
  * Was this inbound reply an opt-out?
@@ -42,12 +43,26 @@ export function isInvalidSuppressionPhoneError(error: unknown): boolean {
 }
 
 export function normalizeInboundSmsPhone(phone: string): string {
-  const digits = phone.replace(/\D/g, "");
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length < 11 || digits.length > 15 || digits.startsWith("0")) {
+  const trimmed = phone.trim();
+  const digits = trimmed.replace(/\D/g, "");
+  if (
+    digits.startsWith("0") ||
+    (!trimmed.startsWith("+") && digits.length !== 10 && digits.length < 11)
+  ) {
     throw new Error("invalid_suppression_phone");
   }
-  return `+${digits}`;
+  const normalized = normalizePhoneE164(phone);
+  if (!normalized) throw new Error("invalid_suppression_phone");
+  return normalized;
+}
+
+export function smsSuppressionFailureResponse(error: unknown): {
+  error: "invalid_suppression_phone" | "suppression_failed";
+  status: 400 | 503;
+} {
+  return isInvalidSuppressionPhoneError(error)
+    ? { error: "invalid_suppression_phone", status: 400 }
+    : { error: "suppression_failed", status: 503 };
 }
 
 function phoneLast10(phone: string): string {
@@ -68,6 +83,31 @@ export async function suppressPhoneNumber(db: Db, input: {
     updated_at: new Date().toISOString(),
   }, { onConflict: "tenant_id,phone_last10" });
   if (result.error) throw new Error(`suppression_write_failed:${result.error.message}`);
+}
+
+export async function applyInboundSmsStop(db: Db, input: {
+  tenantId: string;
+  phone: string;
+  receivedAt: string;
+  source: string;
+}): Promise<void> {
+  const normalizedRecipient = normalizeInboundSmsPhone(input.phone);
+  await suppressPhoneNumber(db, {
+    tenantId: input.tenantId,
+    phone: normalizedRecipient,
+    reason: "OPT_OUT",
+    source: input.source,
+  });
+  const cancelled = await db.from("website_sales_meeting_notifications").update({
+    status: "cancelled",
+    claimed_at: null,
+    last_error: "recipient_opted_out",
+    updated_at: input.receivedAt,
+  }).eq("tenant_id", input.tenantId)
+    .eq("channel", "sms")
+    .eq("recipient", normalizedRecipient)
+    .in("status", ["pending", "sending"]);
+  if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
 }
 
 export async function releasePhoneSuppression(db: Db, input: {

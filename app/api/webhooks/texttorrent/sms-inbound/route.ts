@@ -35,8 +35,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
-  isInvalidSuppressionPhoneError,
   isStopCommand,
+  smsSuppressionFailureResponse,
   suppressPhoneNumber,
 } from "@/lib/sms-opt-out";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
@@ -303,11 +303,11 @@ export async function POST(req: NextRequest) {
         source: "texttorrent_webhook",
       });
     } catch (error) {
-      if (isInvalidSuppressionPhoneError(error)) {
-        return NextResponse.json({ ok: false, error: "invalid_suppression_phone" }, { status: 400 });
+      const failure = smsSuppressionFailureResponse(error);
+      if (failure.status === 503) {
+        console.error("[webhooks.texttorrent.sms-inbound] suppression failed", error);
       }
-      console.error("[webhooks.texttorrent.sms-inbound] suppression failed", error);
-      return NextResponse.json({ ok: false, error: "suppression_failed" }, { status: 503 });
+      return NextResponse.json({ ok: false, error: failure.error }, { status: failure.status });
     }
   }
 

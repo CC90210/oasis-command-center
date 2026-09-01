@@ -918,6 +918,23 @@ async function testSagaReconciliation() {
   }, deps);
   assert.equal(cancelled.cancelled, 1);
   assert.equal((await appointment(raw, "meeting-cancel-reconcile")).workflow_status, "cancelled");
+
+  await insertVerifiedAppointment(raw, {
+    id: "meeting-client-cancel-reconcile", pendingRequestId: "client-cancel-reconcile",
+    pendingOperation: "cancel", pendingMeetingAt: FUTURE,
+    pendingStartedAt: "2026-09-01T13:30:00.000Z", pendingLeaseToken: "client-cancel-worker",
+    workflowStatus: "pending_transition",
+  });
+  await setLead(raw, {
+    stage: "qualified",
+    deal_outcome: null,
+    founder_meeting_status: "cancelled_by_client",
+  });
+  const clientCancelled = await reconcileFounderMeetingSagas({
+    tenantId: TENANT, now: new Date(NOW), staleAfterMs: 60_000,
+  }, deps);
+  assert.equal(clientCancelled.cancelled, 1);
+  assert.equal((await appointment(raw, "meeting-client-cancel-reconcile")).workflow_status, "cancelled");
   await raw.close();
 }
 

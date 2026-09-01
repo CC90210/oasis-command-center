@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { cronMatches } from "../src/cron-match";
 import { CRON_TABLE, forwardingEnabled } from "../src/index";
 
@@ -16,6 +17,11 @@ test("CRON_FORWARD is fail-closed for anything else", () => {
   for (const v of [undefined, "", "off", "false", "0", "no", "onn", "enabled", "y"]) {
     assert.equal(forwardingEnabled({ CRON_FORWARD: v }), false, `should stay dry: ${JSON.stringify(v)}`);
   }
+});
+
+test("fan-out releases every unread response body", () => {
+  const source = readFileSync("workers/oasis-cc-cron/src/index.ts", "utf8");
+  assert.match(source, /await res\.body\?\.cancel\(\)/);
 });
 
 const at = (iso: string) => new Date(iso);
@@ -80,6 +86,7 @@ test("a Vercel-identical minute fires the exact due set", () => {
     "/api/cron/kixie-compliance-scan?mode=weekly",
     "/api/cron/operator-email-agent?write=1",
     "/api/cron/scan-lender-replies?write=1",
+    "/api/cron/sms-reply-agent",
     "/api/cron/tps-enroll?write=1",
   ].sort());
 });

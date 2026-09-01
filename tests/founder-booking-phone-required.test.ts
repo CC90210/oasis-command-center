@@ -214,8 +214,14 @@ async function main() {
   assert.match(routeSource, /readCurrentHttpsConsentArtifact\(value, nowMs\)/);
   assert.match(
     routeSource,
-    /const failure = founderMeetingSmsConsentErrorResponse\(error\);[\s\S]*?NextResponse\.json\(failure\.body/,
+    /const failure = founderMeetingSmsConsentErrorResponse\(error\);[\s\S]*?NextResponse\.json\(failure\.body, \{ status: failure\.status \}\)/,
   );
+  const replayConsentStart = routeSource.indexOf('if (body.action === "founder_meeting_sms_consent")');
+  const replayConsentEnd = routeSource.indexOf("const checkout", replayConsentStart);
+  assert(replayConsentStart >= 0 && replayConsentEnd > replayConsentStart);
+  const replayConsentBranch = routeSource.slice(replayConsentStart, replayConsentEnd);
+  assert.doesNotMatch(replayConsentBranch, /stageUpdated/);
+  assert.doesNotMatch(replayConsentBranch, /status:\s*503/);
 
   const pageSource = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
   assert.match(pageSource, /call_appointments[\s\S]*?select\(["']sms_consent["']\)/);

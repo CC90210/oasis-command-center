@@ -7,11 +7,25 @@ type TenantResolution = { tenantId: string; ownerUserId: string | null };
 const MAX_TWILIO_CREDENTIAL_CANDIDATES = 25;
 export const TWILIO_SYNC_DB_OPERATION_BUDGET = 14;
 
+export function twilioInboundForbiddenResponse(): Response {
+  return new Response("Forbidden", { status: 403 });
+}
+
 export type TwilioCarrierJobState = {
   intent?: string | null;
   proposed_action?: string | null;
   executed_action?: string | null;
 };
+
+export function hasTwilioCarrierExecutedAction(
+  executedAction: string | null | undefined,
+  action: "suppress_and_cancel_sms" | "release_suppression" | "reply_help",
+): boolean {
+  return String(executedAction || "")
+    .split(",")
+    .map((part) => part.trim())
+    .includes(action);
+}
 
 export function pendingTwilioCarrierAction(
   job: TwilioCarrierJobState,
@@ -19,15 +33,15 @@ export function pendingTwilioCarrierAction(
   if (
     job.intent === "opt_out" &&
     job.proposed_action === "cancel_meeting" &&
-    job.executed_action !== "suppress_and_cancel_sms"
+    !hasTwilioCarrierExecutedAction(job.executed_action, "suppress_and_cancel_sms")
   ) return "stop";
   if (
     job.proposed_action === "release_suppression" &&
-    job.executed_action !== "release_suppression"
+    !hasTwilioCarrierExecutedAction(job.executed_action, "release_suppression")
   ) return "start";
   if (
     job.proposed_action === "reply_help" &&
-    job.executed_action !== "reply_help"
+    !hasTwilioCarrierExecutedAction(job.executed_action, "reply_help")
   ) return "help";
   return null;
 }
@@ -200,10 +214,30 @@ export function shouldHonorTwilioOptOut(body: string): boolean {
     .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+  if (/\bstop\s+by\b/i.test(cleaned)) return false;
+
+  const unambiguousBoundaryCommand =
+    /^(?:please\s+)?(?:stop(?:\s+all)?|unsubscribe|unsub|opt\s*-?\s*out|quit)\b/i.test(cleaned) ||
+    /\b(?:stop(?:\s+all)?|unsubscribe|unsub|opt\s*-?\s*out|quit)(?:\s+please)?$/i.test(cleaned);
+  if (unambiguousBoundaryCommand) return true;
+
+  const verdict = classifyOptOut(body);
+  const explicitNonCancelToken =
+    /\b(?:stop(?:\s+all)?|unsubscribe|unsub|opt\s*-?\s*out|revoke|quit)\b/i.test(cleaned);
+  if (
+    verdict.optOut &&
+    (verdict.confidence === "explicit" || verdict.confidence === "likely") &&
+    explicitNonCancelToken
+  ) return true;
+
   const exactGlobalCommand =
     /^(?:please\s+)?(?:stop\s*all|stop|unsubscribe|unsub|opt\s*-?\s*out|revoke|quit|end)(?:\s+please)?$/i.test(cleaned);
   const unmistakableGlobalRevocation =
     exactGlobalCommand ||
+    /\bopt\s+me\s+out\b/i.test(cleaned) ||
+    /\bunsubscribe\s+me\b/i.test(cleaned) ||
+    /\b(?:withdraw|revoke)(?:\s+my)?\s+consent\b/i.test(cleaned) ||
+    /\b(?:do not|don't)\s+send(?:\s+(?:me|any))?\s+(?:sms|texts?|messages?)\b/i.test(cleaned) ||
     /\b(?:take me off|remove me|leave me alone|lose my number|never contact me)\b/i.test(body) ||
     /\b(?:do\s*not|don't|never)\s+(?:text|message|contact|call)\s+me\b/i.test(body) ||
     /\bstop\s+(?:all\s+)?(?:texts?|texting|messages?|messaging|contacting)\b/i.test(body) ||
@@ -213,20 +247,14 @@ export function shouldHonorTwilioOptOut(body: string): boolean {
   if (unmistakableGlobalRevocation) return true;
 
   const meetingOnlyCancellation =
-    /\b(?:cancel|reschedule|move)\b[\s\S]{0,40}\b(?:meeting|appointment|audit|call)\b/i.test(body) ||
-    /\b(?:meeting|appointment|audit|call)\b[\s\S]{0,40}\b(?:cancel|reschedule|move)\b/i.test(body);
-  const schedulingFollowUp =
-    /\b(?:text|message)\s+me\b[\s\S]{0,40}\b(?:alternatives?|new\s+times?|other\s+times?|available\s+times?|slots?|options?)\b/i.test(body);
-  if (meetingOnlyCancellation && schedulingFollowUp) return false;
-  const verdict = classifyOptOut(body);
+    /\b(?:cancel|reschedule|move|end)\b[\s\S]{0,40}\b(?:meeting|appointment|audit|call)\b/i.test(body) ||
+    /\b(?:meeting|appointment|audit|call)\b[\s\S]{0,40}\b(?:cancel|reschedule|move|end)\b/i.test(body);
+  const itemOnlyCancellation =
+    /\b(?:cancel|end)\b[\s\S]{0,30}\b(?:item|order|booking|reservation|service|subscription|second\s+item)\b/i.test(body);
+  if (meetingOnlyCancellation || itemOnlyCancellation) return false;
   if (!verdict.optOut) return false;
-  if (verdict.confidence === "likely") return true;
-  if (
-    /\b(stop|cancel|unsubscribe|remove)\b/i.test(body) &&
-    /\b(text|texts|texting|message|messages|messaging|list|contact)\b/i.test(body)
-  ) return true;
-  const command = "(?:stopall|stop all|stop|unsubscribe|unsub|optout|opt out|opt-out|revoke|cancel|quit|end)";
-  return new RegExp(`^(?:please\\s+)?${command}(?:\\s+please)?$`, "i").test(cleaned);
+  if (verdict.confidence === "explicit" || verdict.confidence === "likely") return true;
+  return false;
 }
 
 function xmlEscape(value: string): string {

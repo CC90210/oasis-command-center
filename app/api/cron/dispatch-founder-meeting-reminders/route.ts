@@ -7,7 +7,7 @@ import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
-import { checkTcpaWindow } from "@/lib/tcpa-window";
+import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -395,14 +395,14 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
         return "skipped";
       }
       const quietHours = checkTcpaWindow(row.recipient, new Date());
-      if (quietHours.usedFallback) {
-        await mark(db, row, "skipped", { error: "sms_timezone_unresolved" });
-        return "skipped";
-      }
-      if (!quietHours.withinWindow) {
-        await mark(db, row, "skipped", { error: "outside_sms_hours" });
-        return "skipped";
-      }
+      const windowDisposition = await dispatchByTcpaWindow(quietHours, {
+        skip: async (error) => {
+          await mark(db, row, "skipped", { error });
+          return "skipped" as const;
+        },
+        send: () => "send" as const,
+      });
+      if (windowDisposition === "skipped") return "skipped";
       const priorSms = await db.from("website_sales_meeting_notifications")
         .select("id")
         .eq("tenant_id", row.tenant_id)

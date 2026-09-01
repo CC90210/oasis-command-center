@@ -10,9 +10,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, randomUUID } from "node:crypto";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import {
+  applyInboundSmsStop,
   normalizeInboundSmsPhone,
   releasePhoneSuppression,
-  suppressPhoneNumber,
 } from "@/lib/sms-opt-out";
 import {
   HELP_RESPONSE,
@@ -23,6 +23,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import {
+  hasTwilioCarrierExecutedAction,
   normalizedTwilioPhone,
   pendingTwilioCarrierAction,
   resolveTwilioInboundTenant,
@@ -30,6 +31,7 @@ import {
   TWILIO_SYNC_DB_OPERATION_BUDGET,
   twilioCarrierKeyword,
   twilioCarrierReplyForDelivery,
+  twilioInboundForbiddenResponse,
   twilioMessageResponse,
   verifyTwilioSignature,
 } from "@/lib/sms/twilio-inbound";
@@ -195,14 +197,42 @@ async function markCarrierAction(
   budget: SyncOperationBudget,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const patch = action !== "suppress_and_cancel_sms"
-    ? { status: "done", executed_action: action, completed_at: now, last_error: null }
-    : { executed_action: action, last_error: null };
-  budget.consume();
-  const updated = await db.from("sms_agent_jobs").update(patch)
-    .eq("tenant_id", tenantId)
-    .eq("id", jobId);
-  if (updated.error) throw new Error(`sms_job_complete_failed:${updated.error.message}`);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    budget.consume();
+    const selected = await db.from("sms_agent_jobs")
+      .select("status,executed_action")
+      .eq("tenant_id", tenantId)
+      .eq("id", jobId)
+      .maybeSingle();
+    if (selected.error || !selected.data) {
+      throw new Error(`sms_job_complete_failed:${selected.error?.message || "job_missing"}`);
+    }
+    const current = selected.data as { status: string; executed_action: string | null };
+    const actionAlreadyRecorded = hasTwilioCarrierExecutedAction(current.executed_action, action);
+    if (
+      actionAlreadyRecorded &&
+      (action === "suppress_and_cancel_sms" || current.status === "done")
+    ) return;
+    const nextAction = actionAlreadyRecorded
+      ? current.executed_action || action
+      : current.executed_action
+      ? `${current.executed_action},${action}`
+      : action;
+    const patch = action !== "suppress_and_cancel_sms"
+      ? { status: "done", executed_action: nextAction, completed_at: now, last_error: null }
+      : { executed_action: nextAction, last_error: null };
+    budget.consume();
+    let update = db.from("sms_agent_jobs").update(patch)
+      .eq("tenant_id", tenantId)
+      .eq("id", jobId);
+    update = current.executed_action
+      ? update.eq("executed_action", current.executed_action)
+      : update.is("executed_action", null);
+    const updated = await update.select("id").maybeSingle();
+    if (updated.error) throw new Error(`sms_job_complete_failed:${updated.error.message}`);
+    if (updated.data) return;
+  }
+  throw new Error("sms_job_complete_failed:concurrent_action_conflict");
 }
 
 async function runStopComplianceEffects(
@@ -211,25 +241,13 @@ async function runStopComplianceEffects(
   job: InboundJob,
   budget: SyncOperationBudget,
 ): Promise<void> {
-  const normalizedRecipient = normalizeInboundSmsPhone(job.from_phone);
-  budget.consume();
-  await suppressPhoneNumber(db, {
+  budget.consume(2);
+  await applyInboundSmsStop(db, {
     tenantId,
-    phone: normalizedRecipient,
-    reason: "OPT_OUT",
+    phone: job.from_phone,
+    receivedAt: job.received_at,
     source: "twilio_webhook",
   });
-  budget.consume();
-  const cancelled = await db.from("website_sales_meeting_notifications").update({
-    status: "cancelled",
-    claimed_at: null,
-    last_error: "recipient_opted_out",
-    updated_at: job.received_at,
-  }).eq("tenant_id", tenantId)
-    .eq("channel", "sms")
-    .eq("recipient", normalizedRecipient)
-    .in("status", ["pending", "sending"]);
-  if (cancelled.error) throw new Error(`sms_outbox_cancel_failed:${cancelled.error.message}`);
 }
 
 async function runPendingCarrierAction(
@@ -273,14 +291,14 @@ export async function POST(req: NextRequest) {
     console.error("[webhooks.twilio.sms-inbound] unmapped destination", {
       to_last4: normalizedTwilioPhone(to).slice(-4),
     });
-    return new NextResponse("Forbidden", { status: 403 });
+    return twilioInboundForbiddenResponse();
   }
   const { tenantId, ownerUserId } = resolved;
   budget.consume();
   const bundle = await getTenantIntegrationBundle(tenantId, "twilio");
   const authToken = bundle.auth_token || process.env.TWILIO_AUTH_TOKEN || "";
   if (!verifyTwilioSignature(req.url, params, req.headers.get("x-twilio-signature"), authToken)) {
-    return new NextResponse("Forbidden", { status: 403 });
+    return twilioInboundForbiddenResponse();
   }
 
   const from = params.get("From") || "";

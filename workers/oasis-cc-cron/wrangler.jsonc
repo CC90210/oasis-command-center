@@ -5,7 +5,7 @@
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["global_fetch_strictly_public"],
   "triggers": {
-    // One minute-tick; src/index.ts evaluates the 28-entry table per tick.
+    // One minute-tick; src/index.ts evaluates the 29-entry table per tick.
     // Canonical schedules live in config/cron-registry.json and are pinned to
     // CRON_TABLE by tests/cron-driver-coverage.test.ts.
     "crons": ["* * * * *"]

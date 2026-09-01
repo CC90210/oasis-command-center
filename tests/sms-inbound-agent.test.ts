@@ -11,17 +11,21 @@ import {
 } from "../lib/sms/auto-responses";
 import { countSegments } from "../lib/sms-segments";
 import {
+  applyInboundSmsStop,
   isInvalidSuppressionPhoneError,
   normalizeInboundSmsPhone,
   releasePhoneSuppression,
+  smsSuppressionFailureResponse,
   suppressPhoneNumber,
 } from "../lib/sms-opt-out";
 import {
+  hasTwilioCarrierExecutedAction,
   pendingTwilioCarrierAction,
   resolveTwilioInboundTenant,
   shouldHonorTwilioOptOut,
   TWILIO_SYNC_DB_OPERATION_BUDGET,
   twilioCarrierReplyForDelivery,
+  twilioInboundForbiddenResponse,
   twilioMessageResponse,
   verifyTwilioSignature,
 } from "../lib/sms/twilio-inbound";
@@ -55,9 +59,52 @@ assert.equal(twilioMessageResponse(), "<Response/>");
 assert.equal(normalizeInboundSmsPhone("+1 (416) 555-0101"), "+14165550101");
 assert.equal(normalizeInboundSmsPhone("416-555-0101"), "+14165550101");
 assert.equal(normalizeInboundSmsPhone("+44 20 7946 0958"), "+442079460958");
+assert.equal(
+  normalizeInboundSmsPhone("+47 912 34 567"),
+  "+4791234567",
+  "a plus-prefixed international E.164 number must not be reinterpreted as NANP",
+);
+assert.throws(
+  () => normalizeInboundSmsPhone("91234567"),
+  /invalid_suppression_phone/,
+  "a short number without an explicit country code is ambiguous",
+);
+assert.throws(() => normalizeInboundSmsPhone("+0123456789"), /invalid_suppression_phone/);
 assert(isInvalidSuppressionPhoneError(new Error("invalid_suppression_phone")));
 assert(shouldHonorTwilioOptOut("please stop texting me"));
+for (const explicitRevocation of [
+  "stop now",
+  "unsubscribe now",
+  "please stop now",
+  "quit now",
+  "end now",
+  "STOP 123",
+  "STOP reschedule our meeting",
+  "STOP, cancel our meeting",
+  "cancel our meeting STOP",
+  "reschedule our meeting unsubscribe",
+  "Please cancel our important founder meeting STOP",
+  "Please reschedule our important founder meeting and then STOP",
+  "quit and cancel our meeting",
+  "opt me out",
+  "unsubscribe me",
+  "withdraw my consent",
+  "revoke consent",
+  "do not send me SMS",
+  "don't send texts",
+]) {
+  assert(
+    shouldHonorTwilioOptOut(explicitRevocation),
+    `shared explicit opt-out verdict must be honored inline: ${explicitRevocation}`,
+  );
+}
 assert(!shouldHonorTwilioOptOut("stop by at 3"), "ordinary scheduling language must not suppress a lead");
+assert(!shouldHonorTwilioOptOut("bus stop before our meeting"), "a middle-word transit stop is not an opt-out");
+assert(!shouldHonorTwilioOptOut("can you cancel the second item"), "an item cancellation is not a global opt-out");
+assert(!shouldHonorTwilioOptOut("cancel my meeting"), "a meeting-only cancellation is handled by the reply agent");
+assert(!shouldHonorTwilioOptOut("please end our meeting"), "END used as a meeting verb is not a global opt-out");
+assert(!shouldHonorTwilioOptOut("our subscription ends tomorrow"), "ordinary use of 'ends' is not a carrier opt-out token");
+assert(!shouldHonorTwilioOptOut("please revoke the calendar invite"), "a long invite request is not consent revocation");
 assert(
   !shouldHonorTwilioOptOut("Cancel my meeting and text me alternatives"),
   "meeting cancellation plus a request for a text reply is not a global opt-out",
@@ -97,6 +144,30 @@ assert.equal(
   }),
   null,
   "a completed carrier action is not repeated on a normal retry",
+);
+assert(
+  hasTwilioCarrierExecutedAction(
+    "suppress_and_cancel_sms,cancel_meeting,reply_suppressed_for_stop",
+    "suppress_and_cancel_sms",
+  ),
+);
+assert.equal(
+  pendingTwilioCarrierAction({
+    intent: "opt_out",
+    proposed_action: "cancel_meeting",
+    executed_action: "suppress_and_cancel_sms,cancel_meeting,reply_suppressed_for_stop",
+  }),
+  null,
+  "worker action ledger entries after STOP must not replay carrier compliance",
+);
+assert.equal(
+  pendingTwilioCarrierAction({
+    intent: "question",
+    proposed_action: "reply_help",
+    executed_action: "reply_help,worker_observed",
+  }),
+  null,
+  "HELP completion is token-based when later actions are appended",
 );
 const completedStop = {
   intent: "opt_out",
@@ -176,6 +247,16 @@ const failingDb = {
   },
 };
 async function main() {
+const invalidSuppressionFailure = smsSuppressionFailureResponse(new Error("invalid_suppression_phone"));
+assert.deepEqual(invalidSuppressionFailure, { error: "invalid_suppression_phone", status: 400 });
+assert.deepEqual(
+  smsSuppressionFailureResponse(new Error("suppression_write_failed:database unavailable")),
+  { error: "suppression_failed", status: 503 },
+);
+const forbidden = twilioInboundForbiddenResponse();
+assert.equal(forbidden.status, 403);
+assert.equal(await forbidden.text(), "Forbidden");
+
 const unmatchedFallback = await resolveTwilioInboundTenant(failingDb as never, "+18005550199", {
   TWILIO_TENANT_ID: "tenant-fallback",
 });
@@ -250,6 +331,16 @@ await raw.executeMultiple(`
     metadata TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE website_sales_meeting_notifications (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    status TEXT NOT NULL,
+    claimed_at TEXT,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+  );
 `);
 const db = createTursoPostgrest(raw);
 await suppressPhoneNumber(db as never, {
@@ -292,6 +383,35 @@ await assert.rejects(
   }),
   /invalid_suppression_phone/,
 );
+await raw.batch([
+  {
+    sql: `INSERT INTO website_sales_meeting_notifications
+      (id, tenant_id, channel, recipient, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: ["sms-pending", "tenant-a", "sms", "+19055550103", "pending", "2026-09-01T14:00:00.000Z"],
+  },
+  {
+    sql: `INSERT INTO website_sales_meeting_notifications
+      (id, tenant_id, channel, recipient, status, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: ["email-pending", "tenant-a", "email", "+19055550103", "pending", "2026-09-01T14:00:00.000Z"],
+  },
+]);
+await applyInboundSmsStop(db as never, {
+  tenantId: "tenant-a",
+  phone: "+1 (905) 555-0103",
+  receivedAt: "2026-09-01T14:05:00.000Z",
+  source: "twilio_webhook",
+});
+const stoppedRows = await raw.execute(
+  "SELECT id,status,last_error FROM website_sales_meeting_notifications ORDER BY id",
+);
+assert.deepEqual(
+  stoppedRows.rows.map((row) => ({ id: row.id, status: row.status, last_error: row.last_error })),
+  [
+    { id: "email-pending", status: "pending", last_error: null },
+    { id: "sms-pending", status: "cancelled", last_error: "recipient_opted_out" },
+  ],
+  "a formatted inbound STOP cancels only the canonical pending SMS recipient",
+);
 await raw.close();
 
 const optOutSource = readFileSync("lib/sms-opt-out.ts", "utf8");
@@ -302,12 +422,14 @@ const textTorrentWebhookSource = readFileSync("app/api/webhooks/texttorrent/sms-
 assert.match(webhookSource, /sms_agent_jobs/);
 assert.match(webhookSource, /provider_message_id/);
 assert.match(webhookSource, /cancel_meeting/);
-assert.match(webhookSource, /website_sales_meeting_notifications/);
+assert.match(optOutSource, /website_sales_meeting_notifications/);
 assert.match(webhookSource, /opt_out_detected/);
 assert(!webhookSource.includes("queueInfer"));
 assert(!webhookSource.includes("sendSmsDirectTwilio"));
 assert.match(webhookSource, /loadExistingJob/);
 assert.match(webhookSource, /pendingTwilioCarrierAction/);
+assert.match(webhookSource, /select\("status,executed_action"\)/);
+assert.match(webhookSource, /current\.executed_action[\s\S]*?update\.eq\("executed_action", current\.executed_action\)/);
 assert.match(webhookSource, /deliveryWasDuplicate/);
 assert.match(webhookSource, /twilioCarrierReplyForDelivery/);
 assert.match(webhookSource, /const carrierReply = twilioCarrierReplyForDelivery/);
@@ -317,12 +439,21 @@ assert.match(webhookSource, /runStopComplianceEffects/);
 assert.match(webhookSource, /params\.get\("MessagingServiceSid"\)/);
 assert.match(webhookSource, /normalizedFrom = normalizeInboundSmsPhone\(from\)/);
 assert.match(webhookSource, /from_phone: normalizedFrom/);
-assert.match(webhookSource, /const normalizedRecipient = normalizeInboundSmsPhone\(job\.from_phone\)/);
-assert.match(webhookSource, /\.eq\("recipient", normalizedRecipient\)/);
-assert.match(webhookSource, /return new NextResponse\("Forbidden", \{ status: 403 \}\)/);
-assert.doesNotMatch(webhookSource, /return new NextResponse\("Unmapped destination"/);
-assert.match(textTorrentWebhookSource, /isInvalidSuppressionPhoneError/);
-assert.match(textTorrentWebhookSource, /status: 400/);
+assert.match(webhookSource, /await applyInboundSmsStop\(db,/);
+const unresolvedStart = webhookSource.indexOf("if (!resolved)");
+const resolvedBindingStart = webhookSource.indexOf("const { tenantId, ownerUserId }", unresolvedStart);
+assert(unresolvedStart >= 0 && resolvedBindingStart > unresolvedStart, "the unmapped Twilio branch must be locatable");
+const unresolvedBranch = webhookSource.slice(unresolvedStart, resolvedBindingStart);
+assert.match(unresolvedBranch, /return twilioInboundForbiddenResponse\(\)/);
+assert.doesNotMatch(unresolvedBranch, /422|Unmapped destination/);
+const suppressionCall = textTorrentWebhookSource.indexOf("await suppressPhoneNumber(db");
+const suppressionCatch = textTorrentWebhookSource.indexOf("} catch (error) {", suppressionCall);
+const leadLookup = textTorrentWebhookSource.indexOf("let leadId", suppressionCatch);
+assert(suppressionCall >= 0 && suppressionCatch > suppressionCall && leadLookup > suppressionCatch);
+const suppressionCatchBranch = textTorrentWebhookSource.slice(suppressionCatch, leadLookup);
+assert.match(suppressionCatchBranch, /const failure = smsSuppressionFailureResponse\(error\)/);
+assert.match(suppressionCatchBranch, /status: failure\.status/);
+assert.doesNotMatch(suppressionCatchBranch, /status: 503/);
 const stopEffectsIndex = webhookPostSource.indexOf("await runStopComplianceEffects");
 const canonicalTouchIndex = webhookPostSource.indexOf("await persistCanonicalLeadTouch");
 const stopMarkIndex = webhookPostSource.indexOf(

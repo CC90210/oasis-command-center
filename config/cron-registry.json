@@ -22,6 +22,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/cron/sms-reply-agent",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/cron/enroll-drips",
       "schedule": "*/15 * * * *"
     },

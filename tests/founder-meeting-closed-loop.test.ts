@@ -16,6 +16,7 @@ import {
   gmailFailureReason,
   gmailMessageIdForIdempotencyKey,
 } from "../lib/integrations/gmail-oauth-send";
+import { dispatchByTcpaWindow } from "../lib/tcpa-window";
 
 const migrationPath = "database/turso/167_founder_meeting_closed_loop.turso.sql";
 const migration = readFileSync(migrationPath, "utf8");
@@ -168,6 +169,27 @@ const rawMessage = Buffer.from(buildGmailRawMessage({
 assert.match(rawMessage, new RegExp(`Message-ID: ${firstMessageId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 
 async function main() {
+const fallbackEffects: string[] = [];
+const fallbackDisposition = await dispatchByTcpaWindow(
+  { usedFallback: true, withinWindow: true },
+  {
+    skip: async (reason) => {
+      fallbackEffects.push(`skip:${reason}`);
+      return "skipped" as const;
+    },
+    send: async () => {
+      fallbackEffects.push("send");
+      return "sent" as const;
+    },
+  },
+);
+assert.equal(fallbackDisposition, "skipped");
+assert.deepEqual(
+  fallbackEffects,
+  ["skip:sms_timezone_unresolved"],
+  "an unresolved recipient timezone must terminate as skipped without invoking the send branch",
+);
+
 // Execute the real Turso migration against libSQL. The uniqueness constraints
 // are the never-double-book / never-double-remind backstop, not UI convention.
 const db = createClient({ url: ":memory:" });
@@ -318,16 +340,12 @@ assert(
   cron.includes('sent.reason === "delivery_unknown"'),
   "ambiguous Gmail transport failures are terminal instead of risking a duplicate retry",
 );
-const tcpaFallbackGuard = cron.indexOf("quietHours.usedFallback");
-const tcpaWindowDecision = cron.indexOf("!quietHours.withinWindow");
-assert(
-  tcpaFallbackGuard >= 0 && tcpaFallbackGuard < tcpaWindowDecision,
-  "SMS delivery must fail closed before applying a fallback viewer/server timezone",
-);
-assert(
-  cron.includes('error: "sms_timezone_unresolved"'),
-  "an unresolved recipient timezone has a deterministic terminal outcome",
-);
+const tcpaDispatchStart = cron.indexOf("await dispatchByTcpaWindow(quietHours");
+const tcpaDispatchEnd = cron.indexOf("const priorSms", tcpaDispatchStart);
+assert(tcpaDispatchStart >= 0 && tcpaDispatchEnd > tcpaDispatchStart, "the SMS branch must use the tested TCPA dispatcher");
+const tcpaDispatchBlock = cron.slice(tcpaDispatchStart, tcpaDispatchEnd);
+assert.match(tcpaDispatchBlock, /skip:[\s\S]*?await mark\(db, row, "skipped", \{ error \}\)/);
+assert.match(tcpaDispatchBlock, /if \(windowDisposition === "skipped"\) return "skipped"/);
 assert(cronRegistry.includes("dispatch-founder-meeting-reminders"), "the cron registry registers the meeting worker");
 assert(driver.includes("dispatch-founder-meeting-reminders"), "the live GitHub cron driver runs the worker");
 
