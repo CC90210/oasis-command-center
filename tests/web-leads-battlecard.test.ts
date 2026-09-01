@@ -33,6 +33,7 @@ import {
 } from "../lib/web-leads/competitors";
 import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
+import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 /** Assertions about CODE must not trip on the prose explaining the code. */
@@ -851,6 +852,153 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     `${view}: the SVG fallback must key on the full is-3D-actually-visible condition, not on gl alone`,
   );
   assert.match(r3d, /webglcontextlost/, "Radar3D must fall back to the SVG when the GL context is lost");
+}
+
+// ---------------------------------------------------------------------------
+// 8e. THE SCORE EXPLAINS ITSELF (Adon, 2026-09-01): "you have to explain in
+//     detail why you're giving that score... pinpoint things in the website
+//     that are showing that. If it is just random numbers you're generating,
+//     that's a problem of its own."
+//
+// The numbers were never random -- every area score is check-points earned
+// out of 100, every check a boolean the crawler computed from a measured
+// signal (services/leadgen/lib/quality-model.js). What was missing was the
+// JOIN on the card: check-evidence.ts verbalizes the stored measurement
+// behind each check. These tests hold that layer to the same honesty rules
+// as everything else a rep reads aloud.
+// ---------------------------------------------------------------------------
+
+// The canonical code list, mirrored from quality-model.js CHECKS. If the
+// model gains a check, this list and check-evidence.ts must both learn it in
+// the same change -- an unexplained check renders as a bare verdict again.
+const MODEL_CODES = [
+  // conversion
+  "tel_link", "phone_in_header", "contact_form", "short_form", "cta_present",
+  "cta_above_fold", "booking", "email_route", "chat", "multi_route",
+  // trust
+  "testimonials", "review_platform", "credentials", "real_photos", "address",
+  "map", "years_trading", "guarantee", "social_proof",
+  // design
+  "modern_layout", "web_fonts", "not_default_tpl", "image_rich",
+  "no_dated_markup", "consistent_brand", "favicon", "no_builder_badge",
+  // mobile
+  "viewport", "responsive_css", "no_fixed_width", "tap_targets", "no_flash",
+  // content
+  "substantial", "service_detail", "headings", "service_area",
+  "pricing_signal", "fresh",
+  // performance
+  "fast_ttfb", "lean_html", "few_blocking", "https",
+  // discoverability
+  "title", "meta_desc", "local_schema", "og_tags", "h1", "analytics", "sitemap",
+];
+
+{
+  // Complete, and exactly complete: an orphan explanation is a sentence about
+  // a check that no longer exists, which a rep would still read aloud.
+  for (const code of MODEL_CODES) {
+    assert.ok(EXPLAINED_CODES.includes(code), `check-evidence.ts must explain "${code}"`);
+  }
+  assert.equal(
+    EXPLAINED_CODES.length,
+    MODEL_CODES.length,
+    "check-evidence.ts explains codes the model does not have -- stale copy about a retired check",
+  );
+
+  // NEVER INVENTS. An empty or missing blob produces no sentence for any
+  // code: a missing line is honest, a guessed one is not.
+  for (const code of MODEL_CODES) {
+    assert.equal(checkEvidenceFor(code, {}), null, `${code}: must render nothing when the crawl recorded nothing`);
+    assert.equal(checkEvidenceFor(code, null), null, `${code}: must render nothing for a null blob`);
+  }
+  assert.equal(checkEvidenceFor("not_a_check", { telLinks: 3 }), null, "an unknown code renders nothing, never a guess");
+
+  // A MEASURED ZERO IS A MEASUREMENT. "0 found" is the exact pinpoint the
+  // operator asked for; suppressing it would hide the strongest evidence.
+  assert.match(checkEvidenceFor("tel_link", { telLinks: 0 })!, /^0 tap-to-call links found/);
+  assert.match(checkEvidenceFor("substantial", { wordCount: 0 })!, /^0 words/);
+
+  // THE BARS ARE NAMED, WITH THE SITE'S OWN NUMBER BESIDE THEM. These
+  // literals are display copy of quality-model.js thresholds; if the model's
+  // bars ever move, this pin fails loudly instead of the copy lying quietly.
+  const ttfb = checkEvidenceFor("fast_ttfb", { ttfbMs: 2340 })!;
+  assert.match(ttfb, /2,340 ms/, "the site's own measured number must be in the sentence");
+  assert.match(ttfb, /800 ms/, "the pass bar must be named beside the measurement");
+  const weight = checkEvidenceFor("lean_html", { bytes: 4_404_019 })!;
+  assert.match(weight, /4\.2 MB/);
+  assert.match(weight, /500 KB/);
+  assert.match(checkEvidenceFor("substantial", { wordCount: 128 })!, /128 words[\s\S]*300 or more/);
+  assert.match(checkEvidenceFor("short_form", { formCount: 1, maxFormFields: 11 })!, /11 fields[\s\S]*six or fewer/);
+  assert.match(checkEvidenceFor("few_blocking", { blockingScripts: 9 })!, /9 scripts[\s\S]*five or fewer/);
+  assert.match(checkEvidenceFor("image_rich", { contentImages: 2 })!, /2 content images[\s\S]*six or more/);
+  assert.match(checkEvidenceFor("real_photos", { contentImages: 1, stockOnly: true })!, /stock[\s\S]*four or more/);
+  // Both measurements or nothing: a count without the stock verdict would let
+  // the sentence contradict the stored FAIL it explains. (Codex, 2026-09-01.)
+  assert.equal(
+    checkEvidenceFor("real_photos", { contentImages: 8 }),
+    null,
+    "real_photos must not render evidence from the image count alone",
+  );
+
+  // Every code produces a sentence when its signals ARE recorded, in both the
+  // failing and the passing shape, and every sentence obeys the house rules
+  // for words a rep reads aloud (same bans as angles.ts / remedies.ts).
+  const FAIL_BLOB: Record<string, unknown> = {
+    telLinks: 0, phoneInHeader: false, formCount: 0, maxFormFields: 0, ctaCount: 0,
+    ctaAboveFold: false, hasBooking: false, mailtoLinks: 0, hasChat: false,
+    hasTestimonials: false, hasReviewWidget: false, hasCredentials: false,
+    contentImages: 1, stockOnly: true, hasPostalAddress: false, hasMap: false,
+    hasYearsInBusiness: false, hasGuarantee: false, socialLinks: 0,
+    usesFlexOrGrid: false, hasWebFonts: false, looksDefaultTemplate: true,
+    deprecatedTagCount: 7, layoutTables: 5, hasLogo: false, distinctColors: 1,
+    hasFavicon: false, builderBadge: true, hasViewportMeta: false,
+    hasMediaQueries: false, hasResponsiveFramework: false, hasFixedWidthBody: true,
+    hasMobileNav: false, hasFlash: true, wordCount: 128, serviceMentions: 1,
+    internalPages: 1, headingCount: 1, mentionsServiceArea: false,
+    mentionsPricing: false, copyrightFresh: false, ttfbMs: 2340, bytes: 4_404_019,
+    blockingScripts: 9, isHttps: false, hasTitle: false, hasMetaDescription: false,
+    hasLocalBusinessSchema: false, hasOgTags: false, h1Count: 0,
+    hasAnalytics: false, hasSitemapRef: false,
+  };
+  const PASS_BLOB: Record<string, unknown> = {
+    telLinks: 2, phoneInHeader: true, formCount: 1, maxFormFields: 4, ctaCount: 3,
+    ctaAboveFold: true, hasBooking: true, mailtoLinks: 1, hasChat: true,
+    hasTestimonials: true, hasReviewWidget: true, hasCredentials: true,
+    contentImages: 8, stockOnly: false, hasPostalAddress: true, hasMap: true,
+    hasYearsInBusiness: true, hasGuarantee: true, socialLinks: 3,
+    usesFlexOrGrid: true, hasWebFonts: true, looksDefaultTemplate: false,
+    deprecatedTagCount: 0, layoutTables: 0, hasLogo: true, distinctColors: 4,
+    hasFavicon: true, builderBadge: false, hasViewportMeta: true,
+    hasMediaQueries: true, hasResponsiveFramework: true, hasFixedWidthBody: false,
+    hasMobileNav: true, hasFlash: false, wordCount: 900, serviceMentions: 6,
+    internalPages: 9, headingCount: 8, mentionsServiceArea: true,
+    mentionsPricing: true, copyrightFresh: true, ttfbMs: 240, bytes: 180_000,
+    blockingScripts: 1, isHttps: true, hasTitle: true, hasMetaDescription: true,
+    hasLocalBusinessSchema: true, hasOgTags: true, h1Count: 1,
+    hasAnalytics: true, hasSitemapRef: true,
+  };
+  const allLines: string[] = [];
+  for (const code of MODEL_CODES) {
+    const fail = checkEvidenceFor(code, FAIL_BLOB);
+    const pass = checkEvidenceFor(code, PASS_BLOB);
+    assert.ok(fail, `${code}: must produce a sentence from a fully-recorded failing crawl`);
+    assert.ok(pass, `${code}: must produce a sentence from a fully-recorded passing crawl`);
+    allLines.push(fail!, pass!);
+  }
+  const all = allLines.join(" ");
+  assert.ok(!all.includes("—"), "no em dashes in anything a rep reads aloud");
+  assert.doesNotMatch(all, /viewport|schema\.org|\bDOM\b|render-block|\bLCP\b|\bTTFB\b|\bCTA\b/i, "jargon in a measured sentence");
+  assert.doesNotMatch(all, /[$£€]\s?\d|\bdollars?\b/i, "a measured sentence puts money on a cost we never measured");
+
+  // And the card actually renders the join: the measured line beside every
+  // failing check in all three detail surfaces, and the arithmetic beside
+  // every area score.
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+  assert.match(src, /import \{ checkEvidenceFor \}/, `${view} must render the measured sentences`);
+  const measuredUses = (src.match(/<MeasuredLine code=/g) || []).length;
+  assert.ok(measuredUses >= 3, `${view}: the measured line must reach the faults list, the fix drill-down and the detail panel (found ${measuredUses})`);
+  assert.match(src, /of 100 points earned/, `${view} must show the area score's arithmetic`);
+  assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);
 }
 
 // The panel itself renders every field of every objection. Asserting the data
