@@ -27,6 +27,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
+import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
@@ -69,13 +70,16 @@ function managerCanReadAssignment(
   assignedTo: string | null | undefined,
   viewer: Viewer,
 ): boolean {
-  if (viewer.teamRole.trim().toLowerCase() !== "manager" || !assignedTo?.trim()) {
-    return false;
-  }
-  const normalizedAssignee = assignedTo.trim().toLowerCase();
-  return (viewer.readableAssigneeIds || []).some(
-    (candidate) => candidate.trim().toLowerCase() === normalizedAssignee,
-  );
+  // Delegates to the single definition in lib/role-surfaces.ts. This used to
+  // hold its own copy of the comparison, and app/pipeline/[id]/page.tsx grew a
+  // second one — two answers to the same question, which is the drift that put
+  // the Leads list and the Leads detail out of sync. The thin wrapper stays
+  // because callers here pass a Viewer, not three loose fields.
+  return managerRosterCoversAssignment({
+    teamRole: viewer.teamRole,
+    assignedTo,
+    readableAssigneeIds: viewer.readableAssigneeIds,
+  });
 }
 
 /**
@@ -754,14 +758,33 @@ export function canViewerRead(
   const facts = factsFrom(data);
   // Unscoped roles (admins and every established role) are unchanged.
   if (!isScopedContractor(viewer)) return true;
-  // Managers coach only the server-resolved sales roster. Unlike ordinary
-  // reps, they must never fall through to the shared claimable pool on a
-  // guessed by-id URL; their own assignment stays readable even if the roster
-  // lookup did not include their seat.
+  // Managers read their server-resolved sales roster, their own assignment
+  // (even if the roster lookup omitted their seat), AND the shared claimable
+  // pool.
+  //
+  // The pool clause was added 2026-09-01 because its absence was the bug, not
+  // the boundary. fetchLeads' "pool" scope returns isClaimable(...) for EVERY
+  // role including manager, so a manager's Leads page listed the whole
+  // claimable pool and every one of those rows 404'd on click. That is
+  // precisely the list/detail split the comment above fetchLead describes
+  // closing for contractors -- it was simply reintroduced one branch lower.
+  // Measured on the live tenant: 96,700 of 124,166 businesses are unassigned,
+  // so this was most of what a manager could see and none of what they could
+  // open.
+  //
+  // It widens nothing real. A pool lead is BY DEFINITION assigned to nobody,
+  // so reading one discloses no rep's book, and every opener could already
+  // open it -- the manager was the only sales role denied what its own reports
+  // have. The property that actually matters is untouched: isClaimable is
+  // false for a lead somebody currently holds, so an off-roster assignment
+  // (a founder's, an admin's) stays invisible. That is the boundary PR #237
+  // closed, and it is still closed -- asserted directly in
+  // tests/web-leads-scope.test.ts.
   if (viewer.teamRole.trim().toLowerCase() === "manager") {
     return (
       managerCanReadAssignment(facts.assignedTo, viewer) ||
-      isInBookOf(facts, viewer.userId)
+      isInBookOf(facts, viewer.userId) ||
+      isClaimable(data, now)
     );
   }
   if (isInBookOf(facts, viewer.userId)) return true;
