@@ -14,9 +14,12 @@ import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
 export function ProfileEditor({
   profile,
   tenantAgents,
+  personalOnly = false,
 }: {
   profile: UserProfile;
   tenantAgents?: string[];
+  /** Identity/contact fields only. Never exposes business targets or agent config. */
+  personalOnly?: boolean;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -56,12 +59,16 @@ export function ProfileEditor({
           full_name: fullName,
           display_name: displayName || null,
           personal_phone: personalPhone.trim() || null,
-          brand,
-          mrr_target_usd: Number(mrrTarget) || 0,
-          mrr_current_usd: Number(mrrCurrent) || 0,
-          mrr_target_date: mrrDate || null,
-          manifesto: manifesto || null,
-          ...(primaryAgent ? { primary_agent: primaryAgent } : {}),
+          ...(personalOnly
+            ? {}
+            : {
+                brand,
+                mrr_target_usd: Number(mrrTarget) || 0,
+                mrr_current_usd: Number(mrrCurrent) || 0,
+                mrr_target_date: mrrDate || null,
+                manifesto: manifesto || null,
+                ...(primaryAgent ? { primary_agent: primaryAgent } : {}),
+              }),
         }),
       });
       const body = await r.json();
@@ -99,49 +106,55 @@ export function ProfileEditor({
             Display-only. Outbound SMS still goes through your tenant&apos;s shared number; this is what agents quote when they tell a lead how to reach you directly.
           </p>
         </Field>
-        <Field label="Brand">
-          <input className="input" value={brand} onChange={(e) => setBrand(e.target.value)} />
-        </Field>
-        <Field label="Primary agent">
-          <select
-            className="select"
-            value={primaryAgent}
-            onChange={(e) => setPrimaryAgent(e.target.value)}
-            disabled={availableAgentKeys.length === 0}
-          >
-            {availableAgentKeys.length === 0 ? (
-              <option value="">No workspace agents enabled</option>
-            ) : availableAgentKeys.map((k) => (
-              <option key={k} value={k}>{AGENT_REGISTRY[k]?.label || k}</option>
-            ))}
-          </select>
-          <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">
-            This list comes from Workspace agents below. Enable or remove an agent there once for the whole team.
-          </p>
-        </Field>
-        <Field label="MRR target (USD)">
-          <input className="input" type="number" value={mrrTarget} onChange={(e) => setMrrTarget(e.target.value)} />
-        </Field>
-        <Field label="MRR current (USD)">
-          <input className="input" type="number" value={mrrCurrent} onChange={(e) => setMrrCurrent(e.target.value)} />
-        </Field>
-        <Field label="MRR target date">
-          <input className="input" type="date" value={mrrDate} onChange={(e) => setMrrDate(e.target.value)} />
-        </Field>
+        {!personalOnly && (
+          <>
+            <Field label="Brand">
+              <input className="input" value={brand} onChange={(e) => setBrand(e.target.value)} />
+            </Field>
+            <Field label="Primary agent">
+              <select
+                className="select"
+                value={primaryAgent}
+                onChange={(e) => setPrimaryAgent(e.target.value)}
+                disabled={availableAgentKeys.length === 0}
+              >
+                {availableAgentKeys.length === 0 ? (
+                  <option value="">No workspace agents enabled</option>
+                ) : availableAgentKeys.map((k) => (
+                  <option key={k} value={k}>{AGENT_REGISTRY[k]?.label || k}</option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">
+                This list comes from Workspace agents below. Enable or remove an agent there once for the whole team.
+              </p>
+            </Field>
+            <Field label="MRR target (USD)">
+              <input className="input" type="number" value={mrrTarget} onChange={(e) => setMrrTarget(e.target.value)} />
+            </Field>
+            <Field label="MRR current (USD)">
+              <input className="input" type="number" value={mrrCurrent} onChange={(e) => setMrrCurrent(e.target.value)} />
+            </Field>
+            <Field label="MRR target date">
+              <input className="input" type="date" value={mrrDate} onChange={(e) => setMrrDate(e.target.value)} />
+            </Field>
+          </>
+        )}
         <Field label="Email">
           <input className="input opacity-60" value={profile.email} disabled />
         </Field>
       </div>
 
-      <Field label="Manifesto / direction (shown on Today)">
-        <textarea
-          className="textarea"
-          value={manifesto}
-          onChange={(e) => setManifesto(e.target.value)}
-          rows={6}
-          placeholder="A line you want to read every morning."
-        />
-      </Field>
+      {!personalOnly && (
+        <Field label="Manifesto / direction (shown on Today)">
+          <textarea
+            className="textarea"
+            value={manifesto}
+            onChange={(e) => setManifesto(e.target.value)}
+            rows={6}
+            placeholder="A line you want to read every morning."
+          />
+        </Field>
+      )}
 
       <div className="flex items-center gap-3 pt-2">
         <button onClick={onSave} disabled={busy} className="btn-primary">

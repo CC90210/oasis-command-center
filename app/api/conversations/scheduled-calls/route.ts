@@ -10,6 +10,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { isReadOnlyRole } from "@/lib/role-gates";
+import { canMutateGenericLeadForTenant, getWritableLead } from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,14 +25,57 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: session.reason }, { status: session.reason === "no_session" ? 401 : 400 });
   }
   const db = getServiceSupabase();
+  const exactOasisActor = !session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole);
+  let upcomingQuery = db.from("scheduled_calls").select(COLS).eq("tenant_id", session.tenantId).eq("status", "pending");
+  let recentQuery = db.from("scheduled_calls").select(COLS).eq("tenant_id", session.tenantId).in("status", ["done", "missed", "cancelled"]);
+  if (exactOasisActor) {
+    upcomingQuery = upcomingQuery.eq("actor_user_id", session.userId).not("lead_id", "is", null);
+    recentQuery = recentQuery.eq("actor_user_id", session.userId).not("lead_id", "is", null);
+  }
   const [upcoming, recent] = await Promise.all([
-    db.from("scheduled_calls").select(COLS).eq("tenant_id", session.tenantId).eq("status", "pending").order("scheduled_for", { ascending: true }).limit(100),
-    db.from("scheduled_calls").select(COLS).eq("tenant_id", session.tenantId).in("status", ["done", "missed", "cancelled"]).order("scheduled_for", { ascending: false }).limit(50),
+    upcomingQuery.order("scheduled_for", { ascending: true }).limit(100),
+    recentQuery.order("scheduled_for", { ascending: false }).limit(50),
   ]);
+  let upcomingRows = (upcoming.data ?? []) as Array<Record<string, unknown>>;
+  let recentRows = (recent.data ?? []) as Array<Record<string, unknown>>;
+  if (exactOasisActor) {
+    const leadIds = [
+      ...new Set(
+        [...upcomingRows, ...recentRows]
+          .map((row) => (typeof row.lead_id === "string" ? row.lead_id : null))
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    const records = leadIds.length
+      ? await db
+          .from("tenant_records")
+          .select("id, data")
+          .eq("tenant_id", session.tenantId)
+          .eq("entity_type", "lead")
+          .in("id", leadIds)
+      : { data: [] };
+    const allowedIds = new Set(
+      ((records.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>)
+        .filter((record) =>
+          canMutateGenericLeadForTenant(
+            {
+              teamRole: session.teamRole,
+              userId: session.userId,
+              isOwner: session.isTrueAdmin,
+              adminAccess: session.adminAccess,
+            },
+            { id: record.id, data: record.data || {} },
+          ),
+        )
+        .map((record) => record.id),
+    );
+    upcomingRows = upcomingRows.filter((row) => allowedIds.has(String(row.lead_id || "")));
+    recentRows = recentRows.filter((row) => allowedIds.has(String(row.lead_id || "")));
+  }
   return NextResponse.json({
     ok: true,
-    upcoming: upcoming.data ?? [],
-    recent: recent.data ?? [],
+    upcoming: upcomingRows,
+    recent: recentRows,
   });
 }
 
@@ -54,6 +99,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid_params" }, { status: 400 });
   }
   const db = getServiceSupabase();
+  if (!session.isAdmin && roleMayOperateOasisSalesLead(session.teamRole)) {
+    const existing = await db
+      .from("scheduled_calls")
+      .select("id, lead_id, actor_user_id")
+      .eq("id", id)
+      .eq("tenant_id", session.tenantId)
+      .maybeSingle();
+    const row = existing.data as
+      | { id: string; lead_id: string | null; actor_user_id: string | null }
+      | null;
+    if (!row || row.actor_user_id !== session.userId || !row.lead_id) {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const writable = await getWritableLead(
+      {
+        teamRole: session.teamRole,
+        userId: session.userId,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      },
+      { tenantId: session.tenantId, id: row.lead_id },
+    );
+    if (!writable.ok) {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+  }
   const upd = await db
     .from("scheduled_calls")
     .update({ status })

@@ -17,6 +17,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,6 +46,21 @@ export async function POST(
   const leadId = typeof body.lead_id === "string" ? body.lead_id : "";
   if (!UUID_RE.test(leadId)) {
     return NextResponse.json({ ok: false, error: "invalid_lead_id" }, { status: 400 });
+  }
+  const writable = await getWritableLead(
+    {
+      teamRole: sess.teamRole,
+      userId: sess.userId,
+      isOwner: sess.isTrueAdmin,
+      adminAccess: sess.adminAccess,
+    },
+    { tenantId: sess.tenantId, id: leadId },
+  );
+  if (!writable.ok) {
+    return NextResponse.json(
+      { ok: false, error: writable.reason === "role_denied" ? "forbidden_role" : "lead_not_found" },
+      { status: writable.reason === "role_denied" ? 403 : 404 },
+    );
   }
 
   const db = getServiceSupabase();

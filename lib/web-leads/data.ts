@@ -53,7 +53,30 @@ export { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP };
  * reads the same tenant_records table through a different door and must
  * enforce the identical rule, or it reopens the exact leak #237 closed.
  */
-export type Viewer = { userId: string; teamRole: string; isAdmin: boolean };
+export type Viewer = {
+  userId: string;
+  teamRole: string;
+  isAdmin: boolean;
+  /**
+   * Server-resolved auth-user ids whose assigned leads this viewer may read.
+   * Only the manager role consumes this expansion; supplying it for any other
+   * role cannot widen access. It never authorizes an unassigned lead.
+   */
+  readableAssigneeIds?: readonly string[];
+};
+
+function managerCanReadAssignment(
+  assignedTo: string | null | undefined,
+  viewer: Viewer,
+): boolean {
+  if (viewer.teamRole.trim().toLowerCase() !== "manager" || !assignedTo?.trim()) {
+    return false;
+  }
+  const normalizedAssignee = assignedTo.trim().toLowerCase();
+  return (viewer.readableAssigneeIds || []).some(
+    (candidate) => candidate.trim().toLowerCase() === normalizedAssignee,
+  );
+}
 
 /**
  * True for any role that must always be scoped to its own leads -- see the
@@ -100,6 +123,7 @@ export function isScopedContractor(viewer: Viewer): boolean {
 export function visibleToViewer(assignedTo: string | null, viewer: Viewer): boolean {
   if (!isScopedContractor(viewer)) return true;
   if (!assignedTo) return false;
+  if (managerCanReadAssignment(assignedTo, viewer)) return true;
   return assignedTo.trim().toLowerCase() === viewer.userId.trim().toLowerCase();
 }
 
@@ -663,6 +687,7 @@ export function canViewerRead(
   const facts = factsFrom(data);
   // Unscoped roles (admins and every established role) are unchanged.
   if (!isScopedContractor(viewer)) return true;
+  if (managerCanReadAssignment(facts.assignedTo, viewer)) return true;
   if (isInBookOf(facts, viewer.userId)) return true;
   return isClaimable(data, now);
 }

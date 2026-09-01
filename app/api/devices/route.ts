@@ -7,26 +7,18 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-async function tenantOf(): Promise<string | null> {
-  const user = await getSessionUser();
-  if (!user) return null;
-  const db = getServiceSupabase();
-  const { data } = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  return (data?.tenant_id as string | null) || null;
-}
-
 export async function GET() {
-  const tenantId = await tenantOf();
-  if (!tenantId) return bad(401, "unauthorized");
+  const session = await resolveSessionContext();
+  if (!session.ok) return bad(401, "unauthorized");
+  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
+  const tenantId = session.tenantId;
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("bridge_pairings")
@@ -38,8 +30,10 @@ export async function GET() {
 }
 
 export async function DELETE(req: NextRequest) {
-  const tenantId = await tenantOf();
-  if (!tenantId) return bad(401, "unauthorized");
+  const session = await resolveSessionContext();
+  if (!session.ok) return bad(401, "unauthorized");
+  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
+  const tenantId = session.tenantId;
   const id = new URL(req.url).searchParams.get("id");
   if (!id) return bad(400, "id required");
   const db = getServiceSupabase();

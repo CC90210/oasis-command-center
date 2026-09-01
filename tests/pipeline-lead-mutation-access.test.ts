@@ -112,14 +112,14 @@ const strictRoutes = [
 ];
 
 assert.match(page, /canMutateOasisSalesRecord\(activeRecord,/);
-assert.match(page, /canMutateLead \? \(\s*<LeadActionToolbar/);
-assert.match(page, /canMutateLead && ownedSlug \? \(\s*<LeadContextEditor/);
+assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}/);
+assert.match(page, /canMutateLead && ownedSlug \? \([\s\S]*?<LeadContextEditor/);
 assert.match(page, /canMutateLead \? <LeadNoteComposer/);
-assert.match(page, /Read-only lead file/);
+assert.match(page, /readableRepUserIds/);
 
-assert.match(toolbar, /Schedule founder audit/);
 assert.match(toolbar, /Call now/);
 assert.match(toolbar, /\/api\/leads\/\$\{leadId\}\/call/);
+assert.doesNotMatch(toolbar, /Schedule founder audit/, "booking lives in the stage-specific next-step panel");
 for (const removed of ["Send check-in", "Pause auto follow-ups", "AI tools", "Suggest next move"]) {
   assert.equal(toolbar.includes(removed), false, `${removed} is removed from the OASIS lead UI`);
 }

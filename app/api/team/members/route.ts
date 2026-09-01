@@ -11,18 +11,13 @@ import {
   getTenantMembers,
   removeMember,
   setMemberRole,
+  tenantSlugFor,
   type TeamRole,
 } from "@/lib/team";
+import { roleAllowedForTenant } from "@/lib/role-surfaces";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const ROLE_VALUES: TeamRole[] = [
-  "admin",
-  "member",
-  "agent",
-];
-
 
 /**
  * Can this refresh token actually be spent? Asks Google, because there is no
@@ -312,8 +307,14 @@ export async function PATCH(req: NextRequest) {
     return bad(400, "invalid JSON");
   }
   if (!body.profile_id) return bad(400, "missing profile_id");
-  const newRole = body.role as TeamRole;
-  if (!ROLE_VALUES.includes(newRole)) return bad(400, "invalid role");
+  const requestedRole = body.role;
+  if (
+    typeof requestedRole !== "string" ||
+    !roleAllowedForTenant(requestedRole, await tenantSlugFor(ctx.tenantId))
+  ) {
+    return bad(400, "invalid role");
+  }
+  const newRole = requestedRole as TeamRole;
 
   try {
     await setMemberRole({

@@ -238,6 +238,13 @@ export async function logTenantAudit(input: {
 export type ActivityFeedOptions = {
   actor?: string | null;
   limit?: number;
+  /**
+   * `sales_team` is the manager-safe feed: human sales actions only. The
+   * caller must provide the allowed actor ids; internal audits, agents, chats,
+   * crons and unattributed/system activity are never queried in this mode.
+   */
+  scope?: "workspace" | "sales_team";
+  salesActorUserIds?: string[];
   /** Test/consumer injection: production callers omit these. */
   db?: ReturnType<typeof getServiceSupabase>;
   members?: MemberRow[];
@@ -250,17 +257,66 @@ export async function getActivityFeed(
   opts: ActivityFeedOptions = {},
 ): Promise<{ rows: ActivityRow[]; actors: ActivityActor[]; errors: string[] }> {
   const limit = opts.limit ?? 200;
-  const perSource = 150;
+  // Manager mode has one permitted source, so fetch the full advertised limit.
+  // Workspace mode merges several sources and keeps the smaller per-source cap.
+  const perSource = opts.scope === "sales_team" ? limit : 150;
   const db = opts.db ?? getServiceSupabase();
   const errors: string[] = [];
-  const members = opts.members ?? (await getTenantMembers(tenantId).catch(() => []));
+  const salesTeamScope = opts.scope === "sales_team";
+  const allowedSalesIds = new Set(
+    (opts.salesActorUserIds || []).map((value) => value.trim().toLowerCase()).filter(Boolean),
+  );
+  let loadedMembers = opts.members;
+  if (!loadedMembers) {
+    try {
+      loadedMembers = await getTenantMembers(tenantId);
+    } catch (error) {
+      console.error("[activity-feed.members]", { tenantId, error });
+      return {
+        rows: [],
+        actors: [],
+        errors: [`team_members: ${error instanceof Error ? error.message : "failed"}`],
+      };
+    }
+  }
+  const members = salesTeamScope
+    ? loadedMembers.filter(
+        (member) =>
+          Boolean(member.auth_user_id) &&
+          allowedSalesIds.has(String(member.auth_user_id).trim().toLowerCase()),
+      )
+    : loadedMembers;
   const humanMaps = buildHumanActorMaps(members);
-  const agentActors = dedupeActors(opts.agents ?? (await loadTenantAgents(tenantId)));
+  const requestedActor = (opts.actor || "").trim();
+  const requestedSalesActor =
+    salesTeamScope && requestedActor
+      ? humanMaps.actors.find(
+          (candidate) =>
+            candidate.key === requestedActor ||
+            candidate.label.toLowerCase() === requestedActor.toLowerCase(),
+        ) || null
+      : null;
+  const requestedSalesUserId = requestedSalesActor
+    ? [...humanMaps.byId.entries()].find(([, actor]) => actor.key === requestedSalesActor.key)?.[0] || null
+    : null;
+  const agentActors = salesTeamScope
+    ? []
+    : dedupeActors(opts.agents ?? (await loadTenantAgents(tenantId)));
   const human = (email?: string | null, userId?: string | null): ActivityActor | null =>
     (userId && humanMaps.byId.get(userId)) ||
     (email && humanMaps.byEmail.get(email.trim().toLowerCase())) ||
     null;
   const out: ActivityRow[] = [];
+
+  // Empty IN clauses are not portable across the Supabase/Turso adapters. More
+  // importantly, an empty manager roster must never fall through to a tenant-
+  // wide query. Return the honest empty feed before touching an activity table.
+  if (salesTeamScope && allowedSalesIds.size === 0) {
+    return { rows: [], actors: humanMaps.actors, errors: [] };
+  }
+  if (salesTeamScope && requestedActor && !requestedSalesUserId) {
+    return { rows: [], actors: humanMaps.actors, errors: [] };
+  }
 
   const push = (row: Omit<ActivityRow, "actorKey" | "actor" | "actorType">, actor: ActivityActor) => {
     out.push({
@@ -271,7 +327,7 @@ export async function getActivityFeed(
     });
   };
 
-  try {
+  if (!salesTeamScope) try {
     const result = await db
       .from("tenant_audit_log")
       .select("id, actor_email, actor_user_id, action_type, target_table, target_id, after, created_at")
@@ -298,10 +354,18 @@ export async function getActivityFeed(
   }
 
   try {
-    const result = await db
+    let query = db
       .from("lead_interactions")
       .select("id, type, channel, direction, agent_source, actor_user_id, metadata, to_email, created_at")
-      .eq("tenant_id", tenantId)
+      .eq("tenant_id", tenantId);
+    if (salesTeamScope) {
+      // Query-level actor scope is the security boundary. Metadata attribution
+      // is intentionally not enough for a manager because it is free-form.
+      query = requestedSalesUserId
+        ? query.eq("actor_user_id", requestedSalesUserId)
+        : query.in("actor_user_id", [...allowedSalesIds]);
+    }
+    const result = await query
       .order("created_at", { ascending: false })
       .limit(perSource);
     if (result.error) throw new Error(result.error.message);
@@ -342,7 +406,7 @@ export async function getActivityFeed(
     errors.push(`lead_interactions: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  try {
+  if (!salesTeamScope) try {
     const result = await db
       .from("agent_events")
       .select("id, event_type, publisher_agent, payload, created_at, published_at")
@@ -376,7 +440,7 @@ export async function getActivityFeed(
     errors.push(`agent_events: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  try {
+  if (!salesTeamScope) try {
     const result = await db
       .from("chat_sessions")
       .select("id, agent_key, user_id, created_at")
@@ -406,7 +470,7 @@ export async function getActivityFeed(
     errors.push(`chat_sessions: ${error instanceof Error ? error.message : "failed"}`);
   }
 
-  try {
+  if (!salesTeamScope) try {
     const result = await db
       .from("tenant_cron_jobs")
       .select("id, name, agent_key, schedule, last_run_at, last_run_status, run_count")
@@ -440,7 +504,6 @@ export async function getActivityFeed(
     ...(out.some((row) => row.actorKey === SYSTEM_ACTOR.key) ? [SYSTEM_ACTOR] : []),
   ]);
   let rows = out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
-  const requestedActor = (opts.actor || "").trim();
   if (requestedActor) {
     const match = actors.find(
       (candidate) =>

@@ -9,7 +9,8 @@ import {
   listActiveInvites,
   tenantSlugFor,
 } from "@/lib/team";
-import { invitableRoleOptionsFor } from "@/lib/role-surfaces";
+import { invitableRoleOptionsForActor } from "@/lib/role-surfaces";
+import { teamRoleLabel } from "@/lib/team-roles";
 import { computeSeatWarning } from "@/lib/seat-warning";
 import {
   TeamInviteActions,
@@ -20,16 +21,6 @@ import { redirect } from "next/navigation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const ROLE_LABEL: Record<string, string> = {
-  owner: "Owner",
-  admin: "Admin",
-  agent: "Agent",
-  loan_officer: "Loan officer",
-  processor: "Processor",
-  read_only: "Read only",
-  member: "Member",
-};
 
 export default async function TeamPage() {
   const ctx = await getSessionContext();
@@ -49,7 +40,7 @@ export default async function TeamPage() {
   // The OASIS sales titles appear only in an OASIS workspace. Resolved here, on
   // the server, so the client component never carries the tenant rules — and so
   // the menu cannot offer a role the invite API would reject.
-  const roleOptions = invitableRoleOptionsFor(tenantSlug);
+  const roleOptions = invitableRoleOptionsForActor(tenantSlug, canGrantAdmin);
 
   return (
     <div className="space-y-6">
@@ -128,7 +119,7 @@ export default async function TeamPage() {
                   )}
                 </div>
                 <div className="text-sm text-fg-muted">
-                  {ROLE_LABEL[m.team_role] ?? m.team_role}
+                  {teamRoleLabel(m.team_role)}
                 </div>
                 <div className="flex items-center justify-end gap-2 text-xs text-fg-dim">
                   {canGrantAdmin && !m.is_owner && (

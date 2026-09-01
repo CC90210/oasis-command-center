@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useTransition, type ReactNode } from "react";
+import { useEffect, useRef, useState, useTransition, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Check, CheckCircle2, Clock3 } from "lucide-react";
+import { ArrowLeft, ArrowRight, CheckCircle2, Clock3 } from "lucide-react";
 import {
   LeadBuildBriefForm,
   type BuildBriefDraft,
 } from "@/components/leads/LeadBuildBriefForm";
+import { LeadActionToolbar } from "@/components/leads/LeadActionToolbar";
 import { OASIS_LEAD_STAGES, findOasisStage } from "@/lib/oasis-stage-meta";
 import { mayHostAuditCall } from "@/lib/team-roles";
 import {
@@ -22,6 +23,12 @@ import {
   SMS_CONSENT_DISCLOSURE,
   SMS_CONSENT_DISCLOSURE_VERSION,
 } from "@/lib/sms/auto-responses";
+import {
+  PIPELINE_MILESTONES,
+  coachingNextStep,
+  pipelineMilestoneIndex,
+  type PipelineViewerMode,
+} from "./workflow-model";
 
 type Founder = {
   auth_user_id: string | null;
@@ -68,6 +75,12 @@ type Props = {
   canManage: boolean;
   canRunDeal: boolean;
   canRunDelivery: boolean;
+  viewerMode?: PipelineViewerMode;
+  assignedRepName?: string | null;
+  bookedMeetingAt?: string | null;
+  bookedHostName?: string | null;
+  initialHandoffNote?: string | null;
+  initialPromisedDemo?: string | null;
   initialFounderMeetingSmsConsent?: boolean;
   initialOffer?: InitialOffer;
   initialBuildBrief?: Partial<BuildBriefDraft> | null;
@@ -98,6 +111,7 @@ const FOUNDER_TIME_OPTIONS = Array.from({ length: 96 }, (_, index) => {
   return { value, label: `${labelHours}:${String(minutes).padStart(2, "0")} ${suffix}` };
 });
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const BOOKING_STEP_LABELS = ["Contact", "Host & time", "Agenda", "Confirm", "Review"] as const;
 
 function founderSmsConsentArtifact() {
   return {
@@ -288,6 +302,12 @@ export function LeadLifecycleActions({
   canManage,
   canRunDeal,
   canRunDelivery,
+  viewerMode = "operate",
+  assignedRepName = null,
+  bookedMeetingAt = null,
+  bookedHostName = null,
+  initialHandoffNote = null,
+  initialPromisedDemo = null,
   initialFounderMeetingSmsConsent = false,
   initialOffer,
   initialBuildBrief,
@@ -296,15 +316,26 @@ export function LeadLifecycleActions({
   const [refreshPending, startTransition] = useTransition();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageTone, setMessageTone] = useState<"success" | "error">("success");
+  const messageRef = useRef<HTMLDivElement>(null);
+  const bookingPanelRef = useRef<HTMLDivElement>(null);
+  const bookingHasNavigatedRef = useRef(false);
   const [transitionNote, setTransitionNote] = useState("");
   const [nextActionDate, setNextActionDate] = useState(() => founderDateChoice(0));
   const [nextActionTime, setNextActionTime] = useState("");
   const [lossReason, setLossReason] = useState("");
+  const [callAccepted, setCallAccepted] = useState(false);
+  const [callOutcome, setCallOutcome] = useState<"" | "attempted" | "voicemail" | "connected" | "lost">("");
+  const [bookingStep, setBookingStep] = useState(0);
+  const [bookedAction, setBookedAction] = useState<"complete" | "exception">("complete");
   const [dealOutcome, setDealOutcome] = useState<"follow_up" | "no_show" | "reschedule" | "lost">("follow_up");
   const [outcomeConfirmed, setOutcomeConfirmed] = useState(false);
   const [dealOutcomeRequestId, setDealOutcomeRequestId] = useState(() => crypto.randomUUID());
   const [checks, setChecks] = useState([false, false, false, false]);
   const [founders, setFounders] = useState<Founder[]>([]);
+  const [founderRosterState, setFounderRosterState] = useState<
+    "loading" | "ready" | "unavailable"
+  >("loading");
   const [builders, setBuilders] = useState<Founder[]>([]);
   const [founderUserId, setFounderUserId] = useState("");
   const [meetingDate, setMeetingDate] = useState(() => founderDateChoice(1));
@@ -361,15 +392,21 @@ export function LeadLifecycleActions({
   const [systemCalendarFallback, setSystemCalendarFallback] = useState(false);
 
   useEffect(() => {
+    if (viewerMode === "coaching") return;
     fetch("/api/team/members")
-      .then((response) => (response.ok ? response.json() : null))
+      .then((response) => {
+        if (!response.ok) throw new Error(`team_members_${response.status}`);
+        return response.json();
+      })
       .then((body) => {
+        if (!body || !Array.isArray(body.members)) throw new Error("team_members_invalid");
         setSystemCalendarFallback(body?.system_calendar_fallback === true);
-        const members = (body?.members || []) as Founder[];
+        const members = body.members as Founder[];
         const next = members.filter(
           (member: Founder) => member.is_owner || mayHostAuditCall(member.team_role),
         );
         setFounders(next);
+        setFounderRosterState("ready");
         const delivery = members.filter((member) => member.team_role === "builder");
         setBuilders(delivery);
         if (next[0]?.auth_user_id) setFounderUserId(next[0].auth_user_id);
@@ -377,8 +414,21 @@ export function LeadLifecycleActions({
           setBuilderUserId(delivery[0].auth_user_id);
         }
       })
-      .catch(() => setFounders([]));
-  }, [initialOffer?.builderUserId]);
+      .catch((error) => {
+        console.error("[LeadLifecycleActions.audit-host-roster]", error);
+        setFounders([]);
+        setFounderRosterState("unavailable");
+      });
+  }, [initialOffer?.builderUserId, viewerMode]);
+
+  useEffect(() => {
+    if (messageTone === "error" && message) messageRef.current?.focus();
+  }, [message, messageTone]);
+
+  useEffect(() => {
+    if (!bookingHasNavigatedRef.current) return;
+    bookingPanelRef.current?.focus();
+  }, [bookingStep]);
 
   const currentMeta = findOasisStage("lead", currentStage);
   const nextStage = nextOasisLifecycleStage(currentStage);
@@ -391,10 +441,7 @@ export function LeadLifecycleActions({
   const paymentCompletesSetup =
     collectedSetupAmount + Number(paymentDueAmount || 0) >= Number(setupAmount || 0);
   const showCallOutcomes = currentStage === "assigned" || currentStage === "attempting_contact";
-  const mayScheduleFounderAudit = ["assigned", "attempting_contact", "connected", "qualified"].includes(
-    currentStage,
-  );
-  const schedulingAlsoQualifies = currentStage !== "qualified";
+  const mayScheduleFounderAudit = currentStage === "qualified";
   const selectedFounder = founders.find((founder) => founder.auth_user_id === founderUserId) || null;
   /**
    * TWO DIFFERENT QUESTIONS, AND CONFLATING THEM BROKE BOOKING TWICE IN A DAY.
@@ -429,9 +476,9 @@ export function LeadLifecycleActions({
   const founderMeetingLabel = founderMeetingPreview(founderMeetingAt);
   const founderMeetingIsFuture =
     Boolean(founderMeetingAt) && new Date(founderMeetingAt as string).getTime() > Date.now();
-  const founderContactValid =
-    Boolean(bookingContact.name.trim() || bookingContact.company.trim()) &&
-    EMAIL_PATTERN.test(bookingContact.email.trim());
+  const founderNameValid = Boolean(bookingContact.name.trim() || bookingContact.company.trim());
+  const founderEmailValid = EMAIL_PATTERN.test(bookingContact.email.trim());
+  const founderContactValid = founderNameValid && founderEmailValid;
   const founderPhoneDigits = bookingContact.phone.replace(/\D/g, "");
   const founderPhoneValid = founderPhoneDigits.length >= 10 && founderPhoneDigits.length <= 15;
   const founderQualification = {
@@ -440,19 +487,15 @@ export function LeadLifecycleActions({
     timingConfirmed: currentStage === "qualified" ? true : checks[2],
     minimumInvestmentConfirmed: currentStage === "qualified" ? true : checks[3],
   };
-  const effectiveContactConfirmed = contactConfirmed || founderContactValid;
-  const effectiveClientAgreedToTime =
-    clientAgreedToTime || (Boolean(founderMeetingAt) && founderMeetingIsFuture);
-  const effectiveHandoffComplete = handoffComplete || Boolean(transitionNote.trim());
   const founderBookingReady =
     Boolean(founderUserId && founderMeetingAt && promisedDemo.trim() && transitionNote.trim()) &&
     founderMeetingIsFuture &&
     founderContactValid &&
     founderPhoneValid &&
     Object.values(founderQualification).every(Boolean) &&
-    effectiveContactConfirmed &&
-    effectiveClientAgreedToTime &&
-    effectiveHandoffComplete &&
+    contactConfirmed &&
+    clientAgreedToTime &&
+    handoffComplete &&
     // THE BUTTON ASKS "can a booking be created", not "is this host connected".
     // See the founderCanBook comment above: the shared workspace calendar can
     // carry it, and refusing here left the rep staring at a disabled button
@@ -467,6 +510,9 @@ export function LeadLifecycleActions({
     if (!founderContactValid) return "Enter a valid client email";
     if (!founderPhoneValid) return "Enter a valid client phone number";
     if (!Object.values(founderQualification).every(Boolean)) return "Complete qualification gates above";
+    if (!contactConfirmed) return "Confirm the client contact details";
+    if (!clientAgreedToTime) return "Confirm the client agreed to the selected time";
+    if (!handoffComplete) return "Confirm the internal handoff is complete";
     if (founderCanBook === false)
       return "Selected host must reconnect Google, and no shared workspace calendar is configured";
     return null;
@@ -480,6 +526,7 @@ export function LeadLifecycleActions({
   async function patch(body: Record<string, unknown>, success: string): Promise<WorkflowResponse | null> {
     setBusy(true);
     setMessage(null);
+    setMessageTone("success");
     try {
       const response = await fetch(`/api/website-sales/${leadId}`, {
         method: "PATCH",
@@ -514,11 +561,13 @@ export function LeadLifecycleActions({
         setManualPaymentConfirmed(false);
       }
       setTransitionNote("");
+      setMessageTone("success");
       setMessage(json.warning ? `${success} Tracking warning: ${json.warning}.` : success);
       window.dispatchEvent(new CustomEvent("oasis:lead-touch", { detail: { leadId } }));
       startTransition(() => router.refresh());
       return json;
     } catch (error) {
+      setMessageTone("error");
       setMessage(error instanceof Error ? error.message : "Update failed.");
       return null;
     } finally {
@@ -598,21 +647,15 @@ export function LeadLifecycleActions({
           timingConfirmed: founderQualification.timingConfirmed,
           minimumInvestmentConfirmed: founderQualification.minimumInvestmentConfirmed,
         },
-        // Send the effective values the readiness gate evaluated: when a rep
-        // relies on implicit confirmation (valid email, future time, written
-        // handoff note), raw checkbox state would still be false and the
-        // server's strict true-check would reject an otherwise valid booking.
         confirmations: {
-          contactConfirmed: effectiveContactConfirmed,
-          clientAgreedToTime: effectiveClientAgreedToTime,
-          handoffComplete: effectiveHandoffComplete,
+          contactConfirmed,
+          clientAgreedToTime,
+          handoffComplete,
         },
         smsConsent: Boolean(bookingContact.phone.trim() && smsConsent),
         smsConsentArtifact: smsConsent ? founderSmsConsentArtifact() : null,
       },
-      schedulingAlsoQualifies
-        ? "Meeting booked, Google invite sent, and qualification handed to the founder."
-        : "Meeting booked and the verified Google invite was sent to the client.",
+      "Meeting booked and the verified Google invite was sent to the client.",
     );
     if (!result) return;
     if (smsConsent) setFounderMeetingSmsConsent(true);
@@ -672,13 +715,183 @@ export function LeadLifecycleActions({
     }
   }
 
+  async function recordCallOutcome() {
+    if (!callOutcome) return;
+    const result = await patch(
+      {
+        action: "disposition",
+        disposition: callOutcome,
+        nextActionAt:
+          callOutcome === "attempted" || callOutcome === "voicemail" ? nextActionAt : undefined,
+        lossReason: callOutcome === "lost" ? lossReason.trim() : undefined,
+      },
+      callOutcome === "attempted"
+        ? "No answer recorded and follow-up scheduled."
+        : callOutcome === "voicemail"
+          ? "Voicemail recorded and follow-up scheduled."
+          : callOutcome === "connected"
+            ? "Connection recorded."
+            : "Lead closed as lost with the reason preserved.",
+    );
+    if (!result) return;
+    setCallAccepted(false);
+    setCallOutcome("");
+    setLossReason("");
+  }
+
+  const callOutcomeReady =
+    callAccepted &&
+    Boolean(callOutcome) &&
+    ((callOutcome === "attempted" || callOutcome === "voicemail")
+      ? Boolean(nextActionAt)
+      : callOutcome === "lost"
+        ? Boolean(lossReason.trim())
+        : true);
+  const bookingStepReady = [
+    founderContactValid && founderPhoneValid,
+    Boolean(founderUserId && founderMeetingAt && founderMeetingIsFuture) && founderCanBook !== false,
+    Boolean(promisedDemo.trim() && transitionNote.trim()),
+    contactConfirmed && clientAgreedToTime && handoffComplete,
+    founderBookingReady,
+  ][bookingStep];
+  const moveToBookingStep = (next: number) => {
+    bookingHasNavigatedRef.current = true;
+    setBookingStep(Math.max(0, Math.min(4, next)));
+  };
+  const activeMilestone = pipelineMilestoneIndex(currentStage);
+  const displayLeadName = leadCompany || leadName || "this lead";
+
+  const renderDealOutcomeForm = () => (
+    <fieldset className="space-y-4">
+      <legend className="text-sm font-semibold text-fg">Record an exception</legend>
+      <p className="text-xs leading-5 text-fg-muted">
+        Use this only when the planned milestone did not happen. The Calendar and reminder queue are updated by the same guarded action.
+      </p>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="text-xs text-fg-muted">
+          Outcome
+          <select
+            value={dealOutcome}
+            onChange={(event) => {
+              setDealOutcome(event.target.value as "follow_up" | "no_show" | "reschedule" | "lost");
+              setOutcomeConfirmed(false);
+              renewDealOutcomeRequest();
+            }}
+            className={`${INPUT} mt-1.5`}
+          >
+            <option value="follow_up">Follow-up required</option>
+            <option value="no_show">Client no-show</option>
+            <option value="reschedule">Rescheduled</option>
+            <option value="lost">Closed lost</option>
+          </select>
+        </label>
+        {dealOutcome !== "lost" ? (
+          <LifecycleDateTimeFields
+            label={dealOutcome === "reschedule" ? "New meeting" : "Next follow-up"}
+            date={nextActionDate}
+            time={nextActionTime}
+            onDateChange={updateNextActionDate}
+            onTimeChange={updateNextActionTime}
+          />
+        ) : (
+          <label className="text-xs text-fg-muted">
+            Loss reason
+            <input
+              value={lossReason}
+              onChange={(event) => {
+                setLossReason(event.target.value);
+                setOutcomeConfirmed(false);
+                renewDealOutcomeRequest();
+              }}
+              maxLength={500}
+              required
+              className={`${INPUT} mt-1.5`}
+            />
+          </label>
+        )}
+      </div>
+      {dealOutcome !== "lost" ? (
+        <label className="block text-xs text-fg-muted">
+          Outcome note
+          <textarea
+            value={transitionNote}
+            onChange={(event) => {
+              setTransitionNote(event.target.value);
+              setOutcomeConfirmed(false);
+              renewDealOutcomeRequest();
+            }}
+            rows={3}
+            maxLength={4000}
+            className={`${INPUT} mt-1.5`}
+          />
+        </label>
+      ) : null}
+      <label className="flex items-start gap-2 rounded-lg border border-bg-border/70 bg-bg-elev/30 px-3 py-2.5 text-xs leading-5 text-fg-muted">
+        <input
+          type="checkbox"
+          checked={outcomeConfirmed}
+          onChange={(event) => setOutcomeConfirmed(event.target.checked)}
+          className="mt-1"
+        />
+        {dealOutcome === "lost"
+          ? "I confirmed the loss reason and understand any active future invite will be cancelled."
+          : dealOutcome === "reschedule"
+            ? "I confirmed this new date and time with the client."
+            : dealOutcome === "no_show"
+              ? "I confirmed the client did not attend and the old reminders should stop."
+              : "I confirmed the follow-up time and recorded the context above."}
+      </label>
+      <button
+        type="button"
+        disabled={
+          disabled ||
+          !outcomeConfirmed ||
+          (dealOutcome === "lost" ? !lossReason.trim() : !nextActionAt || !transitionNote.trim())
+        }
+        onClick={() => void recordDealOutcome()}
+        className="btn-secondary !px-4 !py-2 text-sm"
+      >
+        Record exception
+      </button>
+    </fieldset>
+  );
+
+  if (viewerMode === "coaching") {
+    return (
+      <section id="lead-lifecycle-control" className="scroll-mt-24 overflow-hidden rounded-2xl border border-sky-400/25 bg-bg-deep/60">
+        <div className="border-b border-bg-border bg-bg-elev/45 px-4 py-3 sm:px-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">Next step</div>
+              <div className="mt-2"><StagePill label={currentMeta?.label || titleCase(currentStage)} color={currentMeta?.bg} /></div>
+            </div>
+            <div className="text-xs leading-5 text-fg-muted">{coachingNextStep(currentStage)}</div>
+          </div>
+        </div>
+        <LifecycleProgress activeIndex={activeMilestone} />
+        <div className="space-y-4 p-4 sm:p-5">
+          <div role="note" className="rounded-xl border border-sky-400/30 bg-sky-400/5 px-4 py-3">
+            <div className="text-sm font-semibold text-sky-100">Manager coaching view · read only</div>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              You are reviewing {assignedRepName ? `${assignedRepName}’s` : "another rep’s"} lead. Use the activity and context below to coach performance; only the assigned owner can record actions.
+            </p>
+          </div>
+          <div className="rounded-xl border border-bg-border bg-bg-elev/25 p-4">
+            <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">Owner action</div>
+            <p className="mt-2 text-sm leading-6 text-fg">{coachingNextStep(currentStage)}</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section id="lead-lifecycle-control" className="scroll-mt-24 overflow-hidden rounded-2xl border border-bg-border bg-bg-deep/60">
-      <div className="border-b border-bg-border bg-bg-elev/45 px-5 py-4">
+      <div className="border-b border-bg-border bg-bg-elev/45 px-4 py-3 sm:px-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">
-              Lifecycle control
+              Next step
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-sm font-semibold">
               <StagePill label={currentMeta?.label || titleCase(currentStage)} color={currentMeta?.bg} />
@@ -714,43 +927,16 @@ export function LeadLifecycleActions({
               )}
             </div>
           </div>
-          <div className="max-w-xl text-sm leading-6 text-fg-muted">
-            {instructionFor(currentStage, canManage || canRunDelivery)}
+          <div className="max-w-xl text-xs leading-5 text-fg-muted sm:text-sm">
+            {instructionFor(currentStage, canManage || canRunDeal || canRunDelivery)}
           </div>
         </div>
       </div>
 
-      <div className="space-y-5 p-5">
-        <label className="block">
-          <span className="mb-1.5 block text-xs font-semibold text-fg-muted">
-            {mayScheduleFounderAudit ? "Internal founder handoff note" : "Outcome and handoff note"}
-          </span>
-          <textarea
-            value={transitionNote}
-            onChange={(event) => {
-              setTransitionNote(event.target.value);
-              if (mayScheduleFounderAudit) {
-                setHandoffComplete(false);
-                renewFounderBookingRequest();
-              }
-              if (canRunDeal && ["founder_meeting_booked", "demo_completed", "proposal_sent"].includes(currentStage)) {
-                setOutcomeConfirmed(false);
-                renewDealOutcomeRequest();
-              }
-            }}
-            maxLength={4000}
-            rows={3}
-            placeholder='Capture what the client said and any timing commitment, e.g. "Requested the founder meeting for 4:00 p.m."'
-            className={INPUT}
-          />
-          <span className="mt-1 block text-[10px] text-fg-dim">
-            {mayScheduleFounderAudit
-              ? "Required for the founder handoff. This internal context is saved to the lead and never sent to the client."
-              : "Saved with the lifecycle event so the next owner sees why the lead moved."}
-          </span>
-        </label>
+      <LifecycleProgress activeIndex={activeMilestone} />
 
-        {mayAdvance && nextStage && (
+      <div className="space-y-5 p-4 sm:p-5">
+        {mayAdvance && nextStage && !showCallOutcomes && (
           <div className="rounded-xl border border-accent/30 bg-accent/5 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -780,77 +966,60 @@ export function LeadLifecycleActions({
         )}
 
         {showCallOutcomes && (
-          <fieldset className="space-y-3 rounded-xl border border-bg-border p-4">
-            <legend className="px-2 text-xs font-bold uppercase tracking-wider text-fg-muted">
-              Record call outcome
-            </legend>
-            <div className="block text-xs text-fg-muted">
-              <LifecycleDateTimeFields
-                label="Next follow-up"
-                date={nextActionDate}
-                time={nextActionTime}
-                onDateChange={updateNextActionDate}
-                onTimeChange={updateNextActionTime}
+          <div className="space-y-5 rounded-xl border border-accent/25 bg-accent/[0.025] p-4">
+            <div>
+              <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">1 · Place the call</div>
+              <LeadActionToolbar
+                leadId={leadId}
+                displayName={displayLeadName}
+                phone={leadPhone}
+                onCallAccepted={() => {
+                  setCallAccepted(true);
+                  setCallOutcome("");
+                }}
               />
+              {!callAccepted ? (
+                <div className="mt-3 flex flex-col gap-2 rounded-lg border border-bg-border bg-bg-elev/20 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-xs text-fg-muted">
+                    Use this for an inbound call or a call completed outside the dashboard.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => {
+                      setCallAccepted(true);
+                      setCallOutcome("");
+                    }}
+                    className="shrink-0 rounded-md border border-bg-border px-3 py-2 text-xs font-semibold text-fg transition-colors hover:border-accent/50 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Call already happened
+                  </button>
+                </div>
+              ) : null}
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={disabled || !nextActionAt}
-                onClick={() =>
-                  patch(
-                    {
-                      action: "disposition",
-                      disposition: "attempted",
-                      nextActionAt,
-                    },
-                    "No answer recorded and follow-up scheduled.",
-                  )
-                }
-                className="btn-secondary !px-3 !py-2 text-xs"
-              >
-                No answer
-              </button>
-              <button
-                type="button"
-                disabled={disabled || !nextActionAt}
-                onClick={() =>
-                  patch(
-                    {
-                      action: "disposition",
-                      disposition: "voicemail",
-                      nextActionAt,
-                    },
-                    "Voicemail recorded and follow-up scheduled.",
-                  )
-                }
-                className="btn-secondary !px-3 !py-2 text-xs"
-              >
-                Voicemail left
-              </button>
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() =>
-                  patch({ action: "disposition", disposition: "connected" }, "Connection recorded.")
-                }
-                className="btn-secondary !px-3 !py-2 text-xs"
-              >
-                Connected
-              </button>
-            </div>
-            <LossControl
-              disabled={disabled}
-              lossReason={lossReason}
-              setLossReason={setLossReason}
-              onLost={() =>
-                patch(
-                  { action: "disposition", disposition: "lost", lossReason },
-                  "Lead closed as lost with the reason preserved.",
-                )
-              }
-            />
-          </fieldset>
+            <fieldset disabled={!callAccepted || disabled} className="space-y-4 disabled:opacity-50">
+              <legend className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">2 · Choose one outcome</legend>
+              {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after the call provider accepts the call.</p> : null}
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                {[["attempted", "No answer"], ["voicemail", "Voicemail left"], ["connected", "Connected"], ["lost", "Close as lost"]].map(([value, label]) => (
+                  <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium ${callOutcome === value ? "border-accent/60 bg-accent/10 text-fg" : "border-bg-border bg-bg-elev/25 text-fg-muted"}`}>
+                    <input type="radio" name="call-outcome" value={value} checked={callOutcome === value} onChange={() => setCallOutcome(value as typeof callOutcome)} />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              {callOutcome === "attempted" || callOutcome === "voicemail" ? (
+                <LifecycleDateTimeFields label="Next follow-up" date={nextActionDate} time={nextActionTime} onDateChange={updateNextActionDate} onTimeChange={updateNextActionTime} />
+              ) : null}
+              {callOutcome === "lost" ? (
+                <label className="block text-xs text-fg-muted">
+                  Loss reason
+                  <input value={lossReason} onChange={(event) => setLossReason(event.target.value)} maxLength={500} required className={`${INPUT} mt-1.5`} />
+                </label>
+              ) : null}
+              <button type="button" disabled={!callOutcomeReady || disabled} onClick={() => void recordCallOutcome()} className="btn-primary !px-4 !py-2 text-sm">Save outcome</button>
+            </fieldset>
+          </div>
         )}
 
         {currentStage === "connected" && (
@@ -896,17 +1065,6 @@ export function LeadLifecycleActions({
               <CheckCircle2 className="h-4 w-4" aria-hidden />
               Mark qualified
             </button>
-            <LossControl
-              disabled={disabled}
-              lossReason={lossReason}
-              setLossReason={setLossReason}
-              onLost={() =>
-                patch(
-                  { action: "disposition", disposition: "lost", lossReason },
-                  "Lead closed as lost with the reason preserved.",
-                )
-              }
-            />
           </fieldset>
         )}
 
@@ -922,50 +1080,40 @@ export function LeadLifecycleActions({
                 event and Meet link, sends the client invite, records the touch, and then moves the lead.
               </span>
             </div>
-            {schedulingAlsoQualifies ? (
-              <div className="space-y-3 rounded-lg border border-accent/25 bg-accent/5 p-3">
-                <div>
-                  <div className="text-xs font-semibold text-fg">Scheduling will also mark this lead qualified</div>
-                  <p className="mt-1 text-xs leading-5 text-fg-muted">
-                    Confirm every gate and write the client context in the handoff note above. Nothing moves
-                    until the booking and invite are verified by the server.
-                  </p>
-                </div>
-                {currentStage === "connected" ? (
-                  <div className="text-xs text-fg-muted">
-                    Use the four qualification gates in the section above; the same checks protect this handoff.
-                  </div>
-                ) : (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {[
-                      "Decision-maker confirmed",
-                      "Website problem confirmed",
-                      "Timing confirmed",
-                      "Open to $2,000+",
-                    ].map((label, index) => (
-                      <QualificationGateCard
-                        key={`handoff-${label}`}
-                        label={label}
-                        checked={checks[index]}
-                        disabled={disabled}
-                        onChange={(checked) => setQualificationCheck(index, checked)}
-                      />
-                    ))}
-                  </div>
-                )}
-                {!transitionNote.trim() ? (
-                  <div className="text-xs text-amber-200">
-                    Add the client&apos;s needs, timing, and any promised preparation to the handoff note above.
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+            <ol className="grid grid-cols-2 gap-2 sm:grid-cols-5" aria-label="Booking steps">
+              {BOOKING_STEP_LABELS.map((label, index) => (
+                <li
+                  key={label}
+                  aria-current={bookingStep === index ? "step" : undefined}
+                  className={`rounded-lg border px-2.5 py-2 text-center text-[11px] font-semibold ${
+                    bookingStep === index
+                      ? "border-accent/60 bg-accent/10 text-accent"
+                      : index < bookingStep
+                        ? "border-emerald-400/25 text-emerald-300"
+                        : "border-bg-border text-fg-dim"
+                  }`}
+                >
+                  {index + 1}. {label}
+                </li>
+              ))}
+            </ol>
+            <div
+              ref={bookingPanelRef}
+              tabIndex={-1}
+              aria-labelledby="founder-booking-step-heading"
+              className="outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            >
+              <h3 id="founder-booking-step-heading" className="sr-only">
+                Booking step {bookingStep + 1} of {BOOKING_STEP_LABELS.length}: {BOOKING_STEP_LABELS[bookingStep]}
+              </h3>
+            {bookingStep === 1 ? (
             <div className="grid gap-4 rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
               <div>
                 <label className="text-xs font-semibold text-fg-muted">
                   Founder or closer hosting
                   <select
                     value={founderUserId}
+                    disabled={founderRosterState !== "ready"}
                     onChange={(event) => {
                       setFounderUserId(event.target.value);
                       renewFounderBookingRequest();
@@ -983,6 +1131,17 @@ export function LeadLifecycleActions({
                     )}
                   </select>
                 </label>
+                {founderRosterState === "loading" ? (
+                  <div role="status" className="mt-2 text-xs text-fg-muted">Loading eligible hosts…</div>
+                ) : founderRosterState === "unavailable" ? (
+                  <div role="alert" className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/5 px-2.5 py-2 text-xs text-amber-200">
+                    The host list could not be loaded. Refresh before continuing; no booking has been attempted.
+                  </div>
+                ) : founders.length === 0 ? (
+                  <div role="alert" className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/5 px-2.5 py-2 text-xs text-amber-200">
+                    No eligible founder, closer, or sales-manager host is connected to this workspace. Ask an administrator to assign one.
+                  </div>
+                ) : null}
                 {typeof selectedFounderCalendarReady === "boolean" ? (
                   <div
                     /*
@@ -1098,7 +1257,9 @@ export function LeadLifecycleActions({
                 ) : null}
               </div>
             </div>
+            ) : null}
 
+            {bookingStep === 0 ? (
             <div className="space-y-3 rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3">
               <div>
                 <div className="text-xs font-semibold text-fg">Confirm contact and business</div>
@@ -1140,11 +1301,18 @@ export function LeadLifecycleActions({
                   className="sm:col-span-2"
                 />
               </div>
-              {bookingContact.email.trim() && !EMAIL_PATTERN.test(bookingContact.email.trim()) ? (
-                <div className="text-xs text-amber-200">Enter a valid client email so the invite can be delivered.</div>
+              {!founderNameValid ? (
+                <div role="status" className="text-xs text-amber-200">To continue, enter the client or business name.</div>
+              ) : !founderEmailValid ? (
+                <div role="status" className="text-xs text-amber-200">To continue, enter a valid client email for the Calendar invite.</div>
+              ) : !founderPhoneValid ? (
+                <div role="status" className="text-xs text-amber-200">To continue, enter a valid client phone number with 10 to 15 digits.</div>
               ) : null}
             </div>
+            ) : null}
 
+            {bookingStep === 2 ? (
+            <>
             <label className="block text-xs font-semibold text-fg-muted">
               Client-facing meeting agenda
               <textarea
@@ -1163,19 +1331,32 @@ export function LeadLifecycleActions({
               </span>
             </label>
 
-            <div className="rounded-xl border border-bg-border/70 bg-bg-elev/20 p-3">
-              <div className="text-xs font-semibold text-fg">Internal founder handoff note</div>
-              <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-fg-muted">
-                {transitionNote.trim() || "Add the client needs, objections, timing, and sales context in the note above."}
-              </p>
-              <div className="mt-2 text-[10px] text-fg-dim">
-                This is visible to your team and never sent to the client.
-              </div>
-            </div>
+            <label className="block text-xs font-semibold text-fg-muted">
+              Internal founder handoff note
+              <textarea
+                value={transitionNote}
+                onChange={(event) => {
+                  setTransitionNote(event.target.value);
+                  setHandoffComplete(false);
+                  renewFounderBookingRequest();
+                }}
+                maxLength={4000}
+                rows={4}
+                placeholder="Client needs, objections, timing, and any commitments"
+                className={`${INPUT} mt-1.5`}
+              />
+              <span className="mt-1 block text-[10px] font-normal text-fg-dim">
+                Visible to the team and never sent to the client.
+              </span>
+            </label>
+            </>
+            ) : null}
 
+            {bookingStep === 3 ? (
+            <>
             <div className="grid gap-2 md:grid-cols-3">
               <ConfirmationCheckCard
-                checked={effectiveContactConfirmed}
+                checked={contactConfirmed}
                 onChange={setContactConfirmed}
                 label={
                   <>
@@ -1184,12 +1365,12 @@ export function LeadLifecycleActions({
                 }
               />
               <ConfirmationCheckCard
-                checked={effectiveClientAgreedToTime}
+                checked={clientAgreedToTime}
                 onChange={setClientAgreedToTime}
                 label={<>The client agreed to this date and time.</>}
               />
               <ConfirmationCheckCard
-                checked={effectiveHandoffComplete}
+                checked={handoffComplete}
                 disabled={!transitionNote.trim()}
                 onChange={setHandoffComplete}
                 label={<>The internal founder handoff note is complete.</>}
@@ -1210,48 +1391,99 @@ export function LeadLifecycleActions({
                 }
               />
             ) : null}
+            </>
+            ) : null}
 
-            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-bg-border/70 pt-4">
-              <div className="text-[11px] leading-5 font-medium">
-                {bookingBlockedReason ? (
-                  <span className="text-amber-200">Required to book: {bookingBlockedReason}</span>
-                ) : (
-                  <span className="text-emerald-300">✓ All details confirmed — ready to book meeting & send client invite</span>
-                )}
+            {bookingStep === 4 ? (
+              <div className="space-y-4">
+                <dl className="grid gap-3 sm:grid-cols-2">
+                  <SummaryItem label="Client" value={`${bookingContact.name || bookingContact.company} · ${bookingContact.email}`} />
+                  <SummaryItem label="Phone" value={bookingContact.phone} />
+                  <SummaryItem label="Host" value={selectedFounder?.display_name || selectedFounder?.full_name || "Not selected"} />
+                  <SummaryItem label="Meeting" value={founderMeetingLabel || "Not selected"} />
+                  <SummaryItem label="Agenda" value={promisedDemo} />
+                  <SummaryItem label="SMS reminders" value={smsConsent ? "Consented" : "Not consented"} />
+                </dl>
+                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-bg-border/70 pt-4">
+                  <div className="text-[11px] leading-5 font-medium">
+                    {bookingBlockedReason ? (
+                      <span className="text-amber-200">Required to book: {bookingBlockedReason}</span>
+                    ) : (
+                      <span className="text-emerald-300">All details explicitly confirmed — ready to book.</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={disabled || !founderBookingReady}
+                    onClick={() => void bookFounderMeeting()}
+                    className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
+                  >
+                    <CheckCircle2 className="h-4 w-4" aria-hidden />
+                    Book meeting & send invite
+                  </button>
+                </div>
               </div>
+            ) : null}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-bg-border/70 pt-4">
               <button
                 type="button"
-                disabled={disabled || !founderBookingReady}
-                onClick={() => void bookFounderMeeting()}
-                className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
+                disabled={bookingStep === 0 || disabled}
+                onClick={() => moveToBookingStep(bookingStep - 1)}
+                className="btn-secondary inline-flex items-center gap-2 !px-3 !py-2 text-xs"
               >
-                <CheckCircle2 className="h-4 w-4" aria-hidden />
-                {"Book meeting & send invite"}
+                <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+                Back
               </button>
+              {bookingStep < 4 ? (
+                <button
+                  type="button"
+                  disabled={!bookingStepReady || disabled}
+                  onClick={() => moveToBookingStep(bookingStep + 1)}
+                  className="btn-primary inline-flex items-center gap-2 !px-3 !py-2 text-xs"
+                >
+                  Continue
+                  <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              ) : null}
             </div>
           </fieldset>
         )}
 
-        {currentStage === "founder_meeting_booked" && leadPhone && !founderMeetingSmsConsent ? (
-          <div className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/20 p-4">
-            <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-              Optional SMS reminder consent
-            </div>
-            <p className="text-xs leading-5 text-fg-muted">
+        {canRunDeal && currentStage === "founder_meeting_booked" && leadPhone && !founderMeetingSmsConsent ? (
+          <details className="space-y-3 rounded-xl border border-bg-border bg-bg-elev/20 p-4">
+            <summary className="cursor-pointer text-xs font-bold uppercase tracking-wider text-fg-muted">
+              Optional late SMS reminder consent
+            </summary>
+            <p className="mt-3 text-xs leading-5 text-fg-muted">
               Read this disclosure verbatim to the client before recording consent: {SMS_CONSENT_DISCLOSURE}
             </p>
             <button
               type="button"
               disabled={disabled}
               onClick={() => void captureFounderMeetingSmsConsent()}
-              className="btn-secondary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
+              className="btn-secondary mt-3 inline-flex items-center gap-2 !px-4 !py-2 text-sm"
             >
               Record verbal SMS consent for {leadPhone}
             </button>
-          </div>
+          </details>
+        ) : null}
+        {canRunDeal && currentStage === "founder_meeting_booked" ? (
+          <fieldset>
+            <legend className="mb-2 text-xs font-semibold text-fg-muted">What happened?</legend>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {[["complete", "Complete the audit"], ["exception", "Record an exception"]].map(([value, label]) => (
+                <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 text-sm ${bookedAction === value ? "border-accent/60 bg-accent/10 text-fg" : "border-bg-border text-fg-muted"}`}>
+                  <input type="radio" name="booked-action" value={value} checked={bookedAction === value} onChange={() => setBookedAction(value as typeof bookedAction)} />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
         ) : null}
 
-        {canRunDeal && currentStage === "founder_meeting_booked" && (
+        {canRunDeal && currentStage === "founder_meeting_booked" && bookedAction === "complete" ? (
           <LeadBuildBriefForm
             disabled={disabled}
             initial={initialBuildBrief}
@@ -1262,9 +1494,9 @@ export function LeadLifecycleActions({
               )
             }
           />
-        )}
+        ) : null}
 
-        {canRunDeal && ["founder_meeting_booked", "demo_completed", "proposal_sent"].includes(currentStage) && (
+        {canRunDeal && currentStage === "founder_meeting_booked" && bookedAction === "exception" ? (
           <fieldset className="space-y-3 rounded-xl border border-bg-border p-4">
             <legend className="px-2 text-xs font-bold uppercase tracking-wider text-fg-muted">
               Meeting or deal outcome
@@ -1315,6 +1547,23 @@ export function LeadLifecycleActions({
                 </label>
               )}
             </div>
+            {dealOutcome !== "lost" ? (
+              <label className="block text-xs text-fg-muted">
+                Outcome note
+                <textarea
+                  value={transitionNote}
+                  onChange={(event) => {
+                    setTransitionNote(event.target.value);
+                    setOutcomeConfirmed(false);
+                    renewDealOutcomeRequest();
+                  }}
+                  rows={3}
+                  maxLength={4000}
+                  placeholder="What happened, what the client agreed to, and what the rep should do next"
+                  className={`${INPUT} mt-1.5`}
+                />
+              </label>
+            ) : null}
             {dealOutcome === "reschedule" ? (
               <div className="rounded-lg border border-accent/25 bg-accent/5 px-3 py-2 text-xs leading-5 text-fg-muted">
                 Rescheduling updates the existing Google invite, preserves its Meet link, and replaces the old
@@ -1349,9 +1598,22 @@ export function LeadLifecycleActions({
               Record outcome
             </button>
           </fieldset>
-        )}
+        ) : null}
+
+        {!canRunDeal && currentStage === "founder_meeting_booked" ? (
+          <div className="space-y-3 rounded-xl border border-emerald-400/25 bg-emerald-400/5 p-4">
+            <div className="text-sm font-semibold text-emerald-100">Handoff complete</div>
+            <dl className="grid gap-3 sm:grid-cols-2">
+              <SummaryItem label="Meeting" value={bookedMeetingAt ? founderMeetingPreview(bookedMeetingAt) || bookedMeetingAt : "See activity"} />
+              <SummaryItem label="Host" value={bookedHostName || "Assigned closer or founder"} />
+              <SummaryItem label="Client agenda" value={initialPromisedDemo || "Recorded with booking"} />
+              <SummaryItem label="Internal handoff" value={initialHandoffNote || "Recorded with booking"} />
+            </dl>
+          </div>
+        ) : null}
 
         {canRunDeal && currentStage === "demo_completed" && (
+          <div className="space-y-4">
           <OfferFields
             disabled={disabled}
             packageId={packageId}
@@ -1385,9 +1647,15 @@ export function LeadLifecycleActions({
               )
             }
           />
+          <details className="rounded-lg border border-bg-border px-3 py-2 text-xs text-fg-muted">
+            <summary className="cursor-pointer font-semibold text-fg">The deal did not advance</summary>
+            <div className="mt-4">{renderDealOutcomeForm()}</div>
+          </details>
+          </div>
         )}
 
         {canRunDeal && currentStage === "proposal_sent" && (
+          <div className="space-y-4">
           <div className="space-y-4 rounded-xl border border-emerald-400/25 bg-emerald-400/[0.035] p-4">
             <div>
               <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">
@@ -1538,9 +1806,14 @@ export function LeadLifecycleActions({
               {paymentCompletesSetup ? "Verify balance & start fulfillment" : "Verify setup deposit"}
             </button>
           </div>
+          <details className="rounded-lg border border-bg-border px-3 py-2 text-xs text-fg-muted">
+            <summary className="cursor-pointer font-semibold text-fg">The deal did not advance</summary>
+            <div className="mt-4">{renderDealOutcomeForm()}</div>
+          </details>
+          </div>
         )}
 
-        {postFounderRep && (
+        {postFounderRep && currentStage !== "founder_meeting_booked" && (
           <div className="rounded-xl border border-bg-border bg-bg-elev/30 p-4 text-sm text-fg-muted">
             Your handoff is complete. Founders and delivery owners control this phase; every update remains
             visible in the timeline.
@@ -1557,46 +1830,21 @@ export function LeadLifecycleActions({
 
         {message && (
           <div
-            role="status"
-            className="rounded-lg border border-bg-border bg-bg-elev/40 px-3 py-2 text-xs text-fg-muted"
+            ref={messageRef}
+            tabIndex={-1}
+            role={messageTone === "error" ? "alert" : "status"}
+            aria-live={messageTone === "error" ? "assertive" : "polite"}
+            className={`rounded-lg border px-3 py-2 text-xs ${
+              messageTone === "error"
+                ? "border-red-400/35 bg-red-400/5 text-red-100"
+                : "border-emerald-400/25 bg-emerald-400/5 text-emerald-100"
+            }`}
           >
             {message}
           </div>
         )}
       </div>
     </section>
-  );
-}
-
-function LossControl({
-  disabled,
-  lossReason,
-  setLossReason,
-  onLost,
-}: {
-  disabled: boolean;
-  lossReason: string;
-  setLossReason: (value: string) => void;
-  onLost: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-2 border-t border-bg-border/60 pt-3 sm:flex-row">
-      <input
-        value={lossReason}
-        onChange={(event) => setLossReason(event.target.value)}
-        maxLength={500}
-        placeholder="Loss reason (required)"
-        className={INPUT}
-      />
-      <button
-        type="button"
-        disabled={disabled || !lossReason.trim()}
-        onClick={onLost}
-        className="btn-secondary shrink-0 !border-red-400/30 !px-3 !py-2 text-xs !text-red-300"
-      >
-        Close as lost
-      </button>
-    </div>
   );
 }
 
@@ -1756,18 +2004,43 @@ function StagePill({ label, color }: { label: string; color?: string }) {
   );
 }
 
-function CheckSquare({ checked }: { checked: boolean }) {
+function LifecycleProgress({ activeIndex }: { activeIndex: number }) {
   return (
-    <span
-      aria-hidden
-      className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition ${
-        checked
-          ? "border-emerald-400/80 bg-emerald-400/90 text-bg-deep"
-          : "border-bg-border bg-bg-deep text-transparent"
-      }`}
-    >
-      <Check className="h-3 w-3" strokeWidth={3} />
-    </span>
+    <nav aria-label="Lead lifecycle progress" className="border-b border-bg-border px-3 py-3 sm:px-5">
+      <ol className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+        {PIPELINE_MILESTONES.map((step, index) => (
+          <li
+            key={step.key}
+            aria-current={index === activeIndex ? "step" : undefined}
+            className={`flex min-w-0 items-center gap-2 text-[10px] font-semibold sm:text-[11px] ${
+              index === activeIndex
+                ? "text-accent"
+                : index < activeIndex
+                  ? "text-emerald-300"
+                  : "text-fg-dim"
+            }`}
+          >
+            <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+              index === activeIndex
+                ? "border-accent bg-accent/15"
+                : index < activeIndex
+                  ? "border-emerald-400/40 bg-emerald-400/10"
+                  : "border-bg-border"
+            }`}>{index + 1}</span>
+            <span className="truncate">{step.label}</span>
+          </li>
+        ))}
+      </ol>
+    </nav>
+  );
+}
+
+function SummaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-bg-border/70 bg-bg-elev/25 p-3">
+      <dt className="text-[10px] font-bold uppercase tracking-wider text-fg-dim">{label}</dt>
+      <dd className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-fg-muted">{value || "—"}</dd>
+    </div>
   );
 }
 
@@ -1784,21 +2057,22 @@ function QualificationGateCard({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
+    <label
       className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${
         checked
           ? "border-emerald-500/50 bg-emerald-500/10 text-fg"
           : "border-bg-border bg-bg-elev/30 text-fg-muted hover:border-accent/40 hover:text-fg"
       }`}
     >
-      <CheckSquare checked={checked} />
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 shrink-0 accent-emerald-400"
+      />
       {label}
-    </button>
+    </label>
   );
 }
 
@@ -1815,23 +2089,22 @@ function ConfirmationCheckCard({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
+    <label
       className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left text-xs leading-5 transition disabled:cursor-not-allowed disabled:opacity-60 ${
         checked
           ? "border-emerald-500/50 bg-emerald-500/10 text-fg"
           : "border-bg-border bg-bg-elev/30 text-fg-muted hover:border-accent/40 hover:text-fg"
       }`}
     >
-      <span className="mt-0.5">
-        <CheckSquare checked={checked} />
-      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-1 h-4 w-4 shrink-0 accent-emerald-400"
+      />
       <span>{label}</span>
-    </button>
+    </label>
   );
 }
 

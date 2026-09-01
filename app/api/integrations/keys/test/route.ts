@@ -16,6 +16,7 @@ import {
   recordIntegrationTest,
 } from "@/lib/tenant-integration-store";
 import { findIntegrationSchema } from "@/lib/tenant-integration-schemas";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,9 @@ export async function POST(req: NextRequest) {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(sess))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
   let body: { service?: unknown };

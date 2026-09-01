@@ -1,12 +1,13 @@
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
 import { resolveActiveStoragePath } from "@/lib/lead-documents";
 import { normalizeLeadDocumentStoragePath } from "@/lib/lead-document-path";
+import { getReadableLeadTargetForSession } from "@/lib/lead-access";
 
 export type DocumentSession = {
   tenantId: string;
+  teamRole: string;
   isAdmin: boolean;
   userId: string | null;
 };
@@ -41,8 +42,11 @@ export async function getAuthorizedLeadDocument(
     .maybeSingle();
   const doc = row.data as Omit<AuthorizedLeadDocument, "activePath" | "activeVariant" | "isWatermarked" | "raster" | "cleanAvailable"> | null;
   if (!doc) return { ok: false, status: 404, error: "not_found" };
+  if (!doc.lead_id && !session.isAdmin) {
+    return { ok: false, status: 404, error: "not_found" };
+  }
 
-  if (leadScopingEnabled() && doc.lead_id) {
+  if (doc.lead_id) {
     const parent = await db
       .from("tenant_records")
       .select("data, entity_type")
@@ -50,13 +54,15 @@ export async function getAuthorizedLeadDocument(
       .eq("id", doc.lead_id)
       .maybeSingle();
     const record = parent.data as { data?: Record<string, unknown> | null; entity_type?: string | null } | null;
-    if (
-      record &&
-      (record.entity_type === "lead" || record.entity_type === "application") &&
-      !canViewLead({ isAdmin: session.isAdmin, userId: session.userId }, record.data || {}, true)
-    ) {
+    if (!record || (record.entity_type !== "lead" && record.entity_type !== "application")) {
       return { ok: false, status: 404, error: "not_found" };
     }
+    const parentTarget = await getReadableLeadTargetForSession(session, {
+      tenantId: session.tenantId,
+      id: doc.lead_id,
+      entityParam: record.entity_type,
+    });
+    if (!parentTarget) return { ok: false, status: 404, error: "not_found" };
   }
 
   const storagePath = normalizeLeadDocumentStoragePath(

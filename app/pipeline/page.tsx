@@ -41,6 +41,8 @@ import {
   stagesForOasisRole,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
+import { getOasisSalesRepRoster } from "@/lib/team";
+import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
@@ -137,11 +139,10 @@ export default async function PipelinePage({
 
   // Optional ?q= filter — match across the operator-relevant fields.
   // Search is applied by the database before each bounded stage window.
-  // WHO IS ON THE BOARD. Built from the tenant's own members, and applied
-  // AFTER filterWebsiteSalesRows — never instead of it. That ordering is the
-  // security property: a rep who hand-types ?rep=<someone-else> has already
-  // been narrowed to their own rows, so the filter can only ever subtract from
-  // what they were allowed to see. It cannot be used to look sideways.
+  // WHO IS ON THE BOARD. Admins use the tenant member directory. Managers use
+  // only the server-resolved OASIS sales roster, and that same allowlist is
+  // applied in the database query. A forged ?rep= id, `unassigned`, founder or
+  // system id is rejected before any lead query runs.
   // The board's write surfaces (inline edits, bulk actions) post to
   // /api/manifest/<slug>/... — send the slug this tenant owns, not "oasis".
   // RESEARCHED IS THE PROSPECT POOL, NOT PIPELINE WORK.
@@ -168,10 +169,27 @@ export default async function PipelinePage({
   const pipelineAdmin = session.ok
     ? isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
     : false;
+  const managerTeamRead =
+    session.ok &&
+    canReadOasisSalesTeamPipeline({
+      teamRole: session.teamRole,
+      tenantSlug,
+    });
+  const managerRepRoster = managerTeamRead
+    ? new Map(
+        (await getOasisSalesRepRoster(tenantId))
+          .map((member) => [
+            member.auth_user_id!.trim().toLowerCase(),
+            (member.display_name || member.full_name || member.email).trim(),
+          ]),
+      )
+    : new Map<string, string>();
   const assigneeScope = resolveOasisPipelineAssigneeScope({
     isAdmin: pipelineAdmin,
     userId: session.ok ? session.userId : null,
     repFilter,
+    canReadTeam: managerTeamRead,
+    teamRepUserIds: [...managerRepRoster.keys()],
   });
 
   // Bounded, database-first windows. Overview mode fetches at most 40 newest
@@ -190,6 +208,7 @@ export default async function PipelinePage({
       salesProgram: isWebsiteSalesTenant ? OASIS_WEBSITE_SALES_PROGRAM : null,
       salesMotion: isWebsiteSalesTenantSlug(tenantSlug) ? OASIS_COLD_OUTBOUND_MOTION : null,
       assignedTo: assigneeScope.allowed ? assigneeScope.assignedTo : undefined,
+      assignedToAny: assigneeScope.allowed ? assigneeScope.assignedToAny : undefined,
       query,
     });
   } catch (error) {
@@ -234,7 +253,10 @@ export default async function PipelinePage({
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.
-  const repRoster = session.ok && pipelineAdmin ? await buildMemberNameMap(tenantId) : new Map<string, string>();
+  const repRoster =
+    session.ok && pipelineAdmin
+      ? await buildMemberNameMap(tenantId)
+      : managerRepRoster;
   const ownedSlug = (await resolveOwnedSlug(tenantId)) || "oasis";
 
   const hrefWith = (changes: { stage?: string | null; page?: number | null; rep?: string | null }) => {
@@ -285,7 +307,7 @@ export default async function PipelinePage({
           <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
           {repChip("Everyone", null)}
           {[...repRoster.entries()].map(([id, name]) => repChip(name, id))}
-          {repChip("Unassigned", "unassigned")}
+          {pipelineAdmin && repChip("Unassigned", "unassigned")}
         </div>
       )}
 

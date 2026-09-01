@@ -66,7 +66,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   const access = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity, id },
   );
   if (!access.ok) {

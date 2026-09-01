@@ -28,6 +28,7 @@ import { updateRecord, RecordsError } from "@/lib/manifest/data";
 import { declineLeadToApplication } from "@/lib/applications/decline-lead";
 import { canViewLead } from "@/lib/lead-scope";
 import { canWriteCrm } from "@/lib/role-gates";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
 import { LEAD_PIPELINE_STAGES, OPPORTUNITY_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
@@ -530,6 +531,20 @@ export async function POST(req: NextRequest) {
         continue;
       }
       const leadData = (existing.data as { data?: Record<string, unknown> }).data || {};
+      if (
+        !canMutateGenericLeadForTenant(
+          {
+            teamRole: sess.teamRole,
+            userId: sess.userId,
+            isOwner: sess.isTrueAdmin,
+            adminAccess: sess.adminAccess,
+          },
+          { id, data: leadData },
+        )
+      ) {
+        out.skipped += 1;
+        continue;
+      }
       const dec = await declineLeadToApplication({ tenantId, leadId: id, leadData });
       if (!dec.ok) {
         out.failed += 1;

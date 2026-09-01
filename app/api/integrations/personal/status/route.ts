@@ -10,9 +10,10 @@
  */
 
 import { NextResponse } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import {
-  getUserIntegrationBundle,
+  getUserIntegrationBundleForStatus,
   listUserIntegrationStatus,
 } from "@/lib/user-integration-store";
 import { hasRequiredScope } from "@/lib/integrations/google-calendar";
@@ -26,21 +27,32 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id,email")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
+  const profile = await resolveActiveProfileForUser(user);
+  if (profile.error) {
+    console.error("[personal-integrations.status.profile]", profile.error);
+    return NextResponse.json(
+      { ok: false, availability: "unavailable", error: "personal_status_unavailable" },
+      { status: 503 },
+    );
+  }
+  const tenantId = profile.profile?.tenant_id;
   const expectedWorkEmail = String(
-    (profile.data as { email?: string | null } | null)?.email || "",
+    profile.profile?.email || "",
   ).trim().toLowerCase();
   if (!tenantId) {
-    return NextResponse.json({ ok: true, statuses: [] });
+    return NextResponse.json({ ok: true, availability: "available", statuses: [] });
   }
 
-  const rows = await listUserIntegrationStatus(tenantId, user.id);
+  let rows;
+  try {
+    rows = await listUserIntegrationStatus(tenantId, user.id);
+  } catch (error) {
+    console.error("[personal-integrations.status.rows]", error);
+    return NextResponse.json(
+      { ok: false, availability: "unavailable", error: "personal_status_unavailable" },
+      { status: 503 },
+    );
+  }
   // Collapse field-key rows into per-service summaries. A service is
   // "connected" if any of its required fields are present (for
   // gmail_oauth, refresh_token is the load-bearing one).
@@ -56,38 +68,47 @@ export async function GET() {
   // Hydrate user-visible Gmail fields (address, expiry) for the panel
   // without leaking the tokens themselves. Bundle returns plaintext —
   // we filter down to just the non-sensitive bits.
-  const statuses = await Promise.all(
-    Object.entries(services).map(async ([service, { connected }]) => {
-      if (service === "gmail_oauth") {
-        const bundle = await getUserIntegrationBundle(tenantId, user.id, "gmail_oauth");
-        const workspaceConnected = Boolean(bundle.refresh_token);
-        const calendarConnected =
-          workspaceConnected &&
-          // Same predicate the booking uses: the broader auth/calendar scope
-          // contains calendar.events, and reporting a more-privileged
-          // connection as not-connected is the #331 defect on another surface.
-          hasRequiredScope(bundle.scope) &&
-          Boolean(expectedWorkEmail) &&
-          String(bundle.gmail_address || "").trim().toLowerCase() === expectedWorkEmail;
-        const calendarIdentityMismatch =
-          workspaceConnected &&
-          Boolean(expectedWorkEmail) &&
-          Boolean(bundle.gmail_address) &&
-          String(bundle.gmail_address).trim().toLowerCase() !== expectedWorkEmail;
-        return {
-          service,
-          connected: workspaceConnected,
-          gmail_address: bundle.gmail_address || null,
-          expires_at: bundle.expires_at || null,
-          calendar_connected: calendarConnected,
-          calendar_reconnect_required: workspaceConnected && !calendarConnected,
-          calendar_identity_mismatch: calendarIdentityMismatch,
-          expected_work_email: expectedWorkEmail || null,
-        };
-      }
-      return { service, connected };
-    }),
-  );
+  let statuses;
+  try {
+    statuses = await Promise.all(
+      Object.entries(services).map(async ([service, { connected }]) => {
+        if (service === "gmail_oauth") {
+          const bundle = await getUserIntegrationBundleForStatus(tenantId, user.id, "gmail_oauth");
+          const workspaceConnected = Boolean(bundle.refresh_token);
+          const calendarConnected =
+            workspaceConnected &&
+            // Same predicate the booking uses: the broader auth/calendar scope
+            // contains calendar.events, and reporting a more-privileged
+            // connection as not-connected is the #331 defect on another surface.
+            hasRequiredScope(bundle.scope) &&
+            Boolean(expectedWorkEmail) &&
+            String(bundle.gmail_address || "").trim().toLowerCase() === expectedWorkEmail;
+          const calendarIdentityMismatch =
+            workspaceConnected &&
+            Boolean(expectedWorkEmail) &&
+            Boolean(bundle.gmail_address) &&
+            String(bundle.gmail_address).trim().toLowerCase() !== expectedWorkEmail;
+          return {
+            service,
+            connected: workspaceConnected,
+            gmail_address: bundle.gmail_address || null,
+            expires_at: bundle.expires_at || null,
+            calendar_connected: calendarConnected,
+            calendar_reconnect_required: workspaceConnected && !calendarConnected,
+            calendar_identity_mismatch: calendarIdentityMismatch,
+            expected_work_email: expectedWorkEmail || null,
+          };
+        }
+        return { service, connected };
+      }),
+    );
+  } catch (error) {
+    console.error("[personal-integrations.status.hydrate]", error);
+    return NextResponse.json(
+      { ok: false, availability: "unavailable", error: "personal_status_unavailable" },
+      { status: 503 },
+    );
+  }
 
-  return NextResponse.json({ ok: true, statuses });
+  return NextResponse.json({ ok: true, availability: "available", statuses });
 }

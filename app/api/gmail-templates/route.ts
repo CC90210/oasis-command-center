@@ -15,6 +15,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { canWriteCrm } from "@/lib/role-gates";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import type { GmailTemplate } from "@/lib/gmail-templates";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,6 +24,9 @@ export async function GET() {
   const sess = await resolveSessionContext();
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(sess))) {
+    return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
   }
   const db = getServiceSupabase();
   const res = await db
@@ -44,7 +48,7 @@ export async function POST(req: NextRequest) {
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!canWriteCrm(sess.teamRole) || !(await canAccessSharedTenantResource(sess))) {
     return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
   }
 

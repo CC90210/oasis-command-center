@@ -34,10 +34,12 @@ export function DocumentsViewer({
   docs,
   onClose,
   startIndex = 0,
+  canMutate = true,
 }: {
   docs: ViewerDoc[];
   onClose: () => void;
   startIndex?: number;
+  canMutate?: boolean;
 }) {
   const [index, setIndex] = useState(
     Math.min(Math.max(0, startIndex), Math.max(0, docs.length - 1)),
@@ -90,7 +92,7 @@ export function DocumentsViewer({
   const [variantError, setVariantError] = useState<string | null>(null);
   const setVariant = useCallback(
     async (d: ViewerDoc, target: "clean" | "watermarked") => {
-      if (toggling || variantOf(d) === target) return;
+      if (!canMutate || toggling || variantOf(d) === target) return;
       setToggling(target);
       setVariantError(null);
       try {
@@ -118,7 +120,7 @@ export function DocumentsViewer({
         setToggling(null);
       }
     },
-    [toggling, load, variantOf],
+    [canMutate, toggling, load, variantOf],
   );
 
   // Load the current doc + prefetch its neighbours for snappy navigation.
@@ -181,7 +183,7 @@ export function DocumentsViewer({
             WM · no clean
           </span>
         )}
-        {doc && doc.doc_type === "bank_statements_3mo" && !doc.legacy_baked && (
+        {canMutate && doc && doc.doc_type === "bank_statements_3mo" && !doc.legacy_baked && (
           <div className="inline-flex items-center rounded-md border border-bg-border overflow-hidden shrink-0" title="Toggle clean / watermarked">
             {(["clean", "watermarked"] as const).map((t, i) => {
               const active = variantOf(doc) === t;

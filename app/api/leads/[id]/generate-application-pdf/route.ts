@@ -56,7 +56,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // 2026-07-07: converted from getAccessibleLead (canViewLead/VISIBILITY) to
   // getWritableLead (canWriteCrm/ROLE) so LEAD_SCOPING_ENABLED no longer blocks members.
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity, id },
   );
   if (!acc.ok) {

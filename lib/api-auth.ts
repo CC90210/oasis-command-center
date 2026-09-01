@@ -19,7 +19,8 @@
  *     tenantId (e.g. created_by audit fields).
  */
 
-import { getSessionUser, getServiceSupabase } from "./supabase-server";
+import { getSessionUser } from "./supabase-server";
+import { resolveActiveProfileForUser } from "./active-profile-resolver";
 
 /**
  * Resolve the active tenant_id from the request's session cookie.
@@ -30,13 +31,9 @@ import { getSessionUser, getServiceSupabase } from "./supabase-server";
 export async function resolveTenantId(): Promise<string | null> {
   const user = await getSessionUser();
   if (!user) return null;
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  return (r.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
+  const resolved = await resolveActiveProfileForUser(user);
+  if (resolved.error) console.error("[api-auth.resolveTenantId]", resolved.error);
+  return resolved.profile?.tenant_id ?? null;
 }
 
 /**
@@ -71,21 +68,9 @@ export type SessionContext =
 export async function resolveSessionContext(): Promise<SessionContext> {
   const user = await getSessionUser();
   if (!user) return { ok: false, reason: "no_session" };
-  const db = getServiceSupabase();
-  const r = await db
-    .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const profile = r.data as
-    | {
-        id: string | null;
-        tenant_id: string | null;
-        team_role: string | null;
-        is_owner: boolean | null;
-        admin_access: boolean | null;
-      }
-    | null;
+  const resolved = await resolveActiveProfileForUser(user);
+  if (resolved.error) console.error("[api-auth.resolveSessionContext]", resolved.error);
+  const profile = resolved.profile;
   if (!profile) return { ok: false, reason: "no_profile" };
   if (!profile.tenant_id) return { ok: false, reason: "no_tenant" };
   // Fail-closed for authorization (Codex adversarial review round-2, 2026-07-07).

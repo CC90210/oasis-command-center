@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { requireTenantPreviewAccess } from "@/lib/tenant-access";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
@@ -71,6 +71,7 @@ import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -177,6 +178,30 @@ export default async function TenantCatchAllPage({
   const profileRow = profileRes.data as
     | { tenant_id: string | null; email: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
     | null;
+
+  // OASIS sales seats use the dedicated pipeline, whose query can express
+  // their exact role/stage/ownership boundary. The generic manifest lead
+  // surface obeys the environment rollout flag and filter mode, so a direct
+  // URL there cannot be allowed to become a second, broader records door.
+  // The generic manifest lead surface has only admin/all vs own semantics and
+  // therefore cannot safely represent that scope. Redirect both list and
+  // detail URLs before it can read data; direct/shared URLs are not an escape
+  // hatch into unassigned, founder, or system records.
+  const oasisDirectRole = profileRow?.team_role?.trim().toLowerCase() || "";
+  const isOasisLeadSurface = isOasisSurfaceTenant(normalised) && pageDef.entity === "lead";
+  if (
+    isOasisLeadSurface &&
+    ["manager", "closer", "opener", "builder", "marketing", "agent"].includes(
+      oasisDirectRole,
+    )
+  ) {
+    if (recordDetailId) redirect(`/pipeline/${recordDetailId}`);
+    const target = new URLSearchParams();
+    if (stageFilter) target.set("stage", stageFilter);
+    if (query) target.set("q", query);
+    if (agentFilter) target.set("rep", agentFilter);
+    redirect(`/pipeline${target.size ? `?${target.toString()}` : ""}`);
+  }
   const userTenantId = profileRow?.tenant_id ?? null;
   // Resolve which tenant_id should scope record reads. If the caller
   // isn't the owner of this manifest, dataTenantId is null and the

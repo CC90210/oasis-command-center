@@ -4,11 +4,13 @@ import {
   BUILDER_DELIVERY_STAGE_KEYS,
   BUILDER_VISIBLE_STAGE_KEYS,
   CLOSER_PIPELINE_STAGE_KEYS,
+  MANAGER_PIPELINE_STAGE_KEYS,
   OASIS_WEBSITE_SALES_PROGRAM,
   OPENER_PIPELINE_STAGE_KEYS,
   canOpenOasisSalesRecord,
   canMutateOasisSalesRecord,
   filterWebsiteSalesRows,
+  isOasisPipelineAdmin,
   mayOperateOasisDeliveryStage,
   resolveOasisDeliveryQueueScope,
   stagesForOasisRole,
@@ -44,6 +46,19 @@ assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["onboarding", "in_build", "client
 assert.deepEqual(stagesForOasisRole("agent").map((s) => s.key), AGENT_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("opener").map((s) => s.key), OPENER_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("closer").map((s) => s.key), CLOSER_PIPELINE_STAGE_KEYS);
+assert.deepEqual(
+  stagesForOasisRole("manager").map((stage) => stage.key),
+  MANAGER_PIPELINE_STAGE_KEYS,
+  "manager read covers every assigned lifecycle stage after the researched prospect pool",
+);
+for (const stage of ["lost", "in_build", "client_review", "launched"]) {
+  assert.equal(
+    MANAGER_PIPELINE_STAGE_KEYS.includes(stage),
+    true,
+    `manager performance review must retain ${stage}`,
+  );
+}
+assert.equal(MANAGER_PIPELINE_STAGE_KEYS.includes("researched"), false);
 // CC, 2026-08-25: the builder/marketing hire sells too, so his board is the
 // nine sales stages his claimed deals travel UNION the four delivery stages
 // his build work sits in. Neither half may be dropped by a later edit.
@@ -54,6 +69,12 @@ assert.deepEqual(
 );
 assert.equal(stagesForOasisRole("admin").length, 14);
 assert.equal(stagesForOasisRole("member").length, 14);
+assert.equal(isOasisPipelineAdmin("manager", false, false), false);
+assert.equal(
+  isOasisPipelineAdmin("manager", false, true),
+  true,
+  "the explicit owner-controlled admin toggle retains its existing semantics",
+);
 
 const rows = [
   { id: "fresh", data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "REP-1", stage: "assigned" } },
@@ -67,6 +88,70 @@ assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-1" }
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: null }), []);
+
+const managerReadable = {
+  id: "rep-owned",
+  data: { assigned_to: "rep-2", stage: "qualified" },
+};
+const founderOwned = {
+  id: "founder-owned",
+  data: { assigned_to: "founder-1", stage: "qualified" },
+};
+assert.equal(
+  canOpenOasisSalesRecord(managerReadable, {
+    role: "manager",
+    userId: "manager-1",
+    readableRepUserIds: ["manager-1", "rep-2"],
+  }),
+  true,
+  "manager/off can read another authorized rep's assigned lead",
+);
+assert.equal(
+  canOpenOasisSalesRecord(founderOwned, {
+    role: "manager",
+    userId: "manager-1",
+    readableRepUserIds: ["manager-1", "rep-2"],
+  }),
+  false,
+  "founder/system assignees outside the sales roster stay hidden",
+);
+assert.equal(
+  canOpenOasisSalesRecord(
+    { id: "none", data: { assigned_to: null } },
+    {
+      role: "manager",
+      userId: "manager-1",
+      readableRepUserIds: ["manager-1", "rep-2"],
+    },
+  ),
+  false,
+  "unassigned is never part of manager team scope",
+);
+assert.equal(
+  canMutateOasisSalesRecord(managerReadable, {
+    role: "manager",
+    userId: "manager-1",
+  }),
+  false,
+  "manager/off cannot mutate another rep's lead",
+);
+assert.equal(
+  canMutateOasisSalesRecord(
+    { id: "mine", data: { assigned_to: "manager-1", stage: "qualified" } },
+    { role: "manager", userId: "manager-1" },
+  ),
+  true,
+  "manager/off keeps ordinary own-record sales work",
+);
+assert.equal(
+  canMutateOasisSalesRecord(managerReadable, {
+    role: "manager",
+    userId: "manager-1",
+    adminAccess: true,
+  }),
+  true,
+  "manager/on deliberately retains the explicit full-admin toggle semantics",
+);
 
 /* ─── opening ONE record is an access question, not a board question ─────────
  * CC, 2026-08-21: every lead on /pipeline returned "Lead not found".

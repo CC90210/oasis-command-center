@@ -3,11 +3,12 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { lenderContact, lenderRenewalMessage, resolveAgentMailbox } from "@/lib/renewals/outreach";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
-  if (!canWriteCrm(session.teamRole)) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  if (!canWriteCrm(session.teamRole) || !(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   const { id } = await params;
   const body = await req.json().catch(() => ({})) as { action?: string };
   if (!["approve", "retry", "cancel"].includes(body.action || "")) return NextResponse.json({ ok: false, error: "invalid_action" }, { status: 400 });

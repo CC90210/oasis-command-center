@@ -34,6 +34,12 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadMessages } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import type { ThreadStatus } from "@/lib/conversation-threading";
+import {
+  getReadableLeadTargetForSession,
+  getWritableLead,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
+import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -73,9 +79,24 @@ export async function GET(
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
+  const readPolicy = await resolveLeadReadPolicy(sess);
+  if (readPolicy.mode === "denied") {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+  }
   const thread = await loadThreadMessages(sess.tenantId, key);
   if (!thread) {
     return NextResponse.json({ ok: true, messages: [], tt_chat_id: null });
+  }
+  if (
+    readPolicy.mode === "oasis" &&
+    (!thread.lead_id ||
+      !(await getReadableLeadTargetForSession(
+        sess,
+        { tenantId: sess.tenantId, id: thread.lead_id },
+        readPolicy,
+      )))
+  ) {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true, messages: thread.messages, tt_chat_id: thread.tt_chat_id });
 }
@@ -201,6 +222,23 @@ export async function PATCH(
     // "create on demand" case. Fail closed (404), don't fabricate a row.
     if (!row) {
       return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+    }
+    if (!sess.isAdmin && roleMayOperateOasisSalesLead(sess.teamRole)) {
+      if (!row.lead_id) {
+        return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+      }
+      const writable = await getWritableLead(
+        {
+          teamRole: sess.teamRole,
+          userId: sess.userId,
+          isOwner: sess.isTrueAdmin,
+          adminAccess: sess.adminAccess,
+        },
+        { tenantId, id: row.lead_id },
+      );
+      if (!writable.ok) {
+        return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+      }
     }
 
     const update = await db.from("conversation_threads").update(patch).eq("id", row.id);

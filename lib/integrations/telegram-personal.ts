@@ -12,7 +12,7 @@
 
 import "server-only";
 import {
-  getUserIntegrationBundle,
+  getUserIntegrationBundleForStatus,
   setUserIntegrationBundle,
   setUserIntegrationValue,
   clearUserIntegration,
@@ -35,10 +35,18 @@ export async function validateAndStoreBot(
     const r = await fetch(`${TG}/bot${token}/getMe`, { signal: AbortSignal.timeout(10_000) });
     const j = (await r.json().catch(() => ({}))) as { ok?: boolean; result?: { username?: string } };
     if (!j.ok || !j.result?.username) return { ok: false, error: "telegram_rejected_token" };
-    await setUserIntegrationBundle(tenantId, userId, SERVICE, {
+    const stored = await setUserIntegrationBundle(tenantId, userId, SERVICE, {
       bot_token: token,
       bot_username: j.result.username,
     });
+    if (!stored.ok || stored.written.length !== 2) {
+      console.error("[personal-telegram] unable to store validated bot", {
+        tenantId,
+        userId,
+        errors: stored.errors,
+      });
+      return { ok: false, error: "telegram_store_failed" };
+    }
     return { ok: true, username: j.result.username };
   } catch {
     return { ok: false, error: "telegram_unreachable" };
@@ -49,7 +57,17 @@ export async function captureChatId(
   tenantId: string,
   userId: string,
 ): Promise<{ ok: boolean; chat_id?: string; chat_name?: string; error?: string }> {
-  const b = await getUserIntegrationBundle(tenantId, userId, SERVICE).catch(() => ({} as Record<string, string>));
+  let b: Record<string, string>;
+  try {
+    b = await getUserIntegrationBundleForStatus(tenantId, userId, SERVICE);
+  } catch (error) {
+    console.error("[personal-telegram] unable to read bot before linking", {
+      tenantId,
+      userId,
+      error,
+    });
+    return { ok: false, error: "telegram_store_failed" };
+  }
   if (!b.bot_token) return { ok: false, error: "not_connected" };
   try {
     const r = await fetch(`${TG}/bot${b.bot_token}/getUpdates?limit=20`, { signal: AbortSignal.timeout(10_000) });
@@ -62,7 +80,15 @@ export async function captureChatId(
       if (c?.id != null) { chat = c; break; }
     }
     if (!chat) return { ok: false, error: "no_message_yet" };
-    await setUserIntegrationValue(tenantId, userId, SERVICE, "chat_id", String(chat.id));
+    const stored = await setUserIntegrationValue(tenantId, userId, SERVICE, "chat_id", String(chat.id));
+    if (!stored.ok) {
+      console.error("[personal-telegram] unable to store linked chat", {
+        tenantId,
+        userId,
+        error: stored.error,
+      });
+      return { ok: false, error: "telegram_store_failed" };
+    }
     const name =
       [chat.first_name, chat.last_name].filter(Boolean).join(" ") ||
       chat.username || chat.title || String(chat.id);
@@ -75,15 +101,18 @@ export async function captureChatId(
 type Chat = { id: number; first_name?: string; last_name?: string; username?: string; title?: string };
 
 export async function getTelegramStatus(tenantId: string, userId: string) {
-  const b = await getUserIntegrationBundle(tenantId, userId, SERVICE).catch(() => ({} as Record<string, string>));
+  // Settings must distinguish an empty credential bundle (not connected) from
+  // a storage/query/decryption failure (status unavailable). The strict read
+  // deliberately throws so the API can return 503 instead of a false negative.
+  const b = await getUserIntegrationBundleForStatus(tenantId, userId, SERVICE);
   return {
-    connected: !!b.bot_token,
+    connected: !!b.bot_token && !!b.bot_username,
     username: b.bot_username || null,
-    linked: !!b.chat_id,
+    linked: !!b.bot_token && !!b.bot_username && !!b.chat_id,
     chat_id: b.chat_id || null, // the user's own chat id — safe to surface to them
   };
 }
 
 export async function disconnectTelegram(tenantId: string, userId: string) {
-  await clearUserIntegration(tenantId, userId, SERVICE);
+  return clearUserIntegration(tenantId, userId, SERVICE);
 }

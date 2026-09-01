@@ -30,6 +30,7 @@ const TESTS = [
   "tests/sunbiz-import-routing.test.ts",
   "tests/lead-transfer-canonical.test.ts",
   "tests/pipeline-turnkey-lifecycle.test.ts",
+  "tests/pipeline-lead-workspace.test.ts",
   "tests/founder-booking-ui.test.ts",
   "tests/founder-meeting-calendar.test.ts",
   "tests/founder-meeting-closed-loop.test.ts",
@@ -42,6 +43,8 @@ const TESTS = [
   "tests/commission-payout-workflow.test.ts",
   "tests/atomic-pipeline-lifecycle.test.ts",
   "tests/oasis-pipeline-query.test.ts",
+  "tests/oasis-sales-pipeline-policy.test.ts",
+  "tests/manifest-data-in-filter.test.ts",
   "tests/oasis-sales-motion-split.test.ts",
   "tests/oasis-claim-touch-cutover.test.ts",
   "tests/canonical-touch-concurrency.test.ts",
@@ -68,7 +71,11 @@ const TESTS = [
   "tests/dashboard-send-mode.test.ts",
   "tests/bridge-exec-tool-role-gate.test.ts",
   "tests/settings-agent-roster.test.ts",
+  "tests/settings-persona-scope.test.ts",
+  "tests/sales-team-performance.test.ts",
   "tests/settings-bridge-consistency.test.ts",
+  "tests/telegram-personal-status.test.ts",
+  "tests/workspace-connections-truth.test.ts",
   "tests/local-cli-heartbeat-status.test.ts",
   "tests/intent-inquiry-lifecycle.test.ts",
   "tests/us-address.test.ts",
@@ -217,6 +224,7 @@ const TESTS = [
   "tests/web-leads-filter-memory.test.ts",
   "tests/parked-domains.test.ts",
   "tests/web-leads-scope.test.ts",
+  "tests/web-leads-manager-battlecard.test.ts",
   // Openers and closers. The 2026-08-21 job titles replaced `agent`, but the
   // scoping predicate and the deal gate still only knew the legacy name --
   // so a Closer could not close and an Opener saw the whole tenant.

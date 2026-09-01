@@ -2,15 +2,94 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   INVITE_TTL_DAYS,
+  canManageTeam,
+  canonicalizeTenantMembers,
   createInvite,
   inviteEmailMatchesUser,
   normalizeInviteEmail,
+  type MemberRow,
 } from "@/lib/team";
+import {
+  invitableRoleOptionsFor,
+  invitableRoleOptionsForActor,
+  roleAllowedForTenant,
+} from "@/lib/role-surfaces";
 import {
   INVITABLE_ROLES,
   INVITABLE_ROLE_OPTIONS,
   isInvitableRole,
+  isOasisPipelineRepRole,
 } from "@/lib/team-roles";
+
+assert.equal(canManageTeam("manager", false), false, "manager/off is not a team admin");
+assert.equal(
+  canManageTeam("manager", true),
+  true,
+  "manager/on retains the explicit owner-controlled full-admin toggle",
+);
+for (const role of ["manager", "closer", "opener", "builder", "marketing", "agent"]) {
+  assert.equal(isOasisPipelineRepRole(role), true, `${role} belongs to the manager sales roster`);
+}
+for (const role of ["owner", "admin", "member", "read_only", "loan_officer", "processor"]) {
+  assert.equal(
+    isOasisPipelineRepRole(role),
+    false,
+    `${role} must not authorize manager access to founder/internal/system records`,
+  );
+}
+
+assert.deepEqual(
+  invitableRoleOptionsFor("oasis-webdev").map((option) => option.value),
+  ["admin", "manager", "closer", "opener", "builder", "marketing"],
+  "OASIS exposes one consistent, explicit job-role menu without legacy Member/Agent roles",
+);
+assert.deepEqual(
+  invitableRoleOptionsFor("sunbiz").map((option) => option.value),
+  ["member", "admin"],
+  "non-OASIS tenants retain the platform role menu",
+);
+assert.equal(roleAllowedForTenant("member", "oasis-webdev"), false);
+assert.equal(roleAllowedForTenant("agent", "oasis-webdev"), false);
+assert.equal(roleAllowedForTenant("marketing", "oasis-webdev"), true);
+assert.deepEqual(
+  invitableRoleOptionsForActor("oasis-webdev", false).map((option) => option.value),
+  ["manager", "closer", "opener", "builder", "marketing"],
+  "temporary admin access cannot mint a permanent Administrator",
+);
+
+const member = (overrides: Partial<MemberRow>): MemberRow => ({
+  id: "profile-default",
+  auth_user_id: "auth-default",
+  email: "rep@oasisai.work",
+  full_name: "Rep",
+  display_name: "Rep",
+  team_role: "manager",
+  is_owner: false,
+  admin_access: false,
+  invited_by: null,
+  joined_at: "2026-01-01T00:00:00.000Z",
+  ...overrides,
+});
+const canonicalDuplicates = canonicalizeTenantMembers([
+  member({ id: "stale-manager", team_role: "manager", admin_access: true }),
+  member({ id: "base-admin", team_role: "admin", admin_access: false }),
+]);
+assert.deepEqual(
+  canonicalDuplicates.map((row) => row.id),
+  ["base-admin"],
+  "canonicalization must prefer a base admin over a stale manager/admin-access duplicate",
+);
+assert.deepEqual(
+  canonicalDuplicates.filter(
+    (row) =>
+      Boolean(row.auth_user_id?.trim()) &&
+      !row.is_owner &&
+      !row.admin_access &&
+      isOasisPipelineRepRole(row.team_role),
+  ),
+  [],
+  "a duplicate founder/admin identity must never enter the manager-readable sales roster",
+);
 
 assert.equal(
   inviteEmailMatchesUser("emliy@sunbizfunding.com", "emliy@sunbizfunding.com"),
@@ -97,7 +176,42 @@ for (const option of INVITABLE_ROLE_OPTIONS) {
     `${option.value} needs a human label — the dropdown renders this, and an empty ` +
       "string is an invisible menu row",
   );
+  assert.ok(
+    option.description.trim().length > 0,
+    `${option.value} needs a human explanation shared by Settings and /team`,
+  );
 }
+assert.equal(
+  INVITABLE_ROLE_OPTIONS.some((option) => option.value === "agent"),
+  false,
+  "the ambiguous legacy Agent role must not return to either invite form",
+);
+
+const QUICK_INVITE = readFileSync("components/settings/QuickInviteCard.tsx", "utf8");
+const TEAM_INVITE = readFileSync("app/team/TeamInviteActions.tsx", "utf8");
+const INVITE_ROUTE = readFileSync("app/api/team/invites/route.ts", "utf8");
+assert.equal(
+  /const ROLE_OPTIONS/.test(QUICK_INVITE),
+  false,
+  "Settings must not carry a second hardcoded role menu",
+);
+assert.ok(
+  QUICK_INVITE.includes('fetch("/api/team/invites", { cache: "no-store" })') &&
+    INVITE_ROUTE.includes("role_options: invitableRoleOptionsForActor"),
+  "Settings must consume the same tenant/actor-filtered role options as /team",
+);
+assert.ok(
+  QUICK_INVITE.includes('type="email"') &&
+    QUICK_INVITE.includes("email: normalizedEmail") &&
+    TEAM_INVITE.includes('type="email"'),
+  "both invite forms require and submit a pinned work email",
+);
+assert.ok(
+  QUICK_INVITE.includes("selectedRole.description") &&
+    TEAM_INVITE.includes("selectedRole.description"),
+  "both invite forms explain the selected human role",
+);
+assert.equal(/value:\s*["']agent["']/.test(QUICK_INVITE), false);
 
 // ── the invite INSERT must satisfy the table's real column contract ──────────
 // 2026-08-14, CC: the Team page returned "invite_create_failed" for every invite.

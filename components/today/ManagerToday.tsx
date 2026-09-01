@@ -8,9 +8,8 @@
  * falls through to FounderToday. When the `manager` persona was added, it fell
  * through — and although the MONEY was safe (FounderToday takes
  * `showFinancials`, which is false for a manager), FounderToday consults no
- * other capability. A manager would have seen the entire tenant's pipeline and
- * the company inbound tape, both of which their capability record explicitly
- * denies.
+ * other capability. A manager would have seen a founder dashboard whose scope
+ * and controls were not designed for sales-team operations.
  *
  * That is the exact failure lib/role-surfaces.ts was written to prevent,
  * reintroduced by adding a persona without a surface. A capability flag that no
@@ -19,10 +18,9 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * TEAM IS A THIRD SCOPE, AND IT IS THE POINT
  * ─────────────────────────────────────────────────────────────────────────────
- * A manager sees the reps who roll up to them (user_profiles.manager_user_id =
- * me) and nothing else. Not "all", which would hand them CC's own book; not
- * "own", which would make them unable to manage. Every query below is scoped by
- * that roster, and when the roster is empty the queries do not run at all.
+ * An OASIS manager sees every teammate in the canonical OASIS sales roster. The
+ * roster is tenant- and role-scoped before commission rows are queried, and
+ * when the roster is empty the downstream query does not run at all.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * AN ABSENT ANSWER IS NOT A ZERO
@@ -39,6 +37,7 @@ import { LiveClock } from "@/components/LiveClock";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorDateKey } from "@/lib/dates";
 import { MANAGER_OVERRIDE_BPS } from "@/lib/website-sales-comp";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 type Read<T> = { ok: true; value: T } | { ok: false };
@@ -51,19 +50,18 @@ type LineRow = { rep_user_id: string | null; amount_cents: number | null };
 const money = (cents: number) =>
   `$${(cents / 100).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-async function loadTeam(tenantId: string, managerUserId: string): Promise<Read<RepRow[]>> {
+async function loadTeam(tenantId: string): Promise<Read<RepRow[]>> {
   try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("user_profiles")
-      .select("auth_user_id, display_name, full_name, team_role")
-      .eq("tenant_id", tenantId)
-      .eq("manager_user_id", managerUserId)
-      // One level, never recursive: nothing stops a profile naming itself as
-      // its own manager, and a recursive roll-up would not terminate.
-      .order("auth_user_id", { ascending: true });
-    if (r.error) return { ok: false };
-    return { ok: true, value: (r.data || []) as RepRow[] };
+    const rows = await getOasisSalesRepRoster(tenantId);
+    return {
+      ok: true,
+      value: rows.map((row) => ({
+        auth_user_id: row.auth_user_id!,
+        display_name: row.display_name,
+        full_name: row.full_name,
+        team_role: row.team_role,
+      })),
+    };
   } catch {
     return { ok: false };
   }
@@ -141,7 +139,7 @@ export async function ManagerToday({
   managerName: string;
 }) {
   const dateKey = operatorDateKey();
-  const teamRead = await loadTeam(tenantId, userId);
+  const teamRead = await loadTeam(tenantId);
   const repIds = teamRead.ok ? teamRead.value.map((r) => r.auth_user_id).filter(Boolean) : [];
   const [rawLinesRead, overrideRead] = await Promise.all([
     loadTeamLines(tenantId, repIds),
@@ -181,9 +179,9 @@ export async function ManagerToday({
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Stat
-          label="Reps reporting to you"
+          label="OASIS sales reps"
           value={teamRead.ok ? String(teamRead.value.length) : "—"}
-          hint={teamRead.ok ? "assigned via their profile" : "couldn't load your roster"}
+          hint={teamRead.ok ? "canonical OASIS sales-rep roster" : "couldn't load the sales roster"}
         />
         <Stat
           label="Team commission (accrued)"
@@ -198,13 +196,13 @@ export async function ManagerToday({
       </div>
 
       <Card
-        title="Your team"
-        subtitle="Everyone whose profile names you as their manager."
+        title="OASIS sales team"
+        subtitle="Every profile in the canonical OASIS sales-rep roster for this workspace."
       >
         {!teamRead.ok ? (
           <EmptyState message="Couldn't load your roster. This read failed — it does not mean you have no reps. Reload in a minute." />
         ) : teamRead.value.length === 0 ? (
-          <EmptyState message="No reps are assigned to you yet. An admin assigns reps by setting you as their manager; until then this board stays empty." />
+          <EmptyState message="No OASIS sales profiles are connected to this workspace yet." />
         ) : (
           <div className="divide-y divide-bg-border">
             {teamRead.value.map((rep) => (
@@ -224,10 +222,10 @@ export async function ManagerToday({
 
       <Card
         title="Coaching"
-        subtitle="Your team's pipeline, scoped to the reps above."
+        subtitle="Open the all-rep pipeline to review ownership, follow-up, and stage progress."
       >
         <EmptyState
-          message="Your pipeline currently shows the leads assigned to you. Team-scoped coaching views are not wired yet — the roster and payouts above are live, the board is not team-filtered."
+          message="The pipeline is scoped to this OASIS sales roster. Use the rep filter to focus on one person without leaving the team view."
           cta={
             <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
               Go to pipeline

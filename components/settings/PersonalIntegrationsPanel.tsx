@@ -54,6 +54,7 @@ export function PersonalIntegrationsPanel({
   showKixie?: boolean;
 } = {}) {
   const [statuses, setStatuses] = useState<PersonalStatus[] | null>(null);
+  const [availability, setAvailability] = useState<"loading" | "available" | "unavailable">("loading");
   const [busyService, setBusyService] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Phase 5 of TT + Kixie embedding (2026-06-01): per-employee Kixie agent
@@ -89,16 +90,20 @@ export function PersonalIntegrationsPanel({
       const r = await fetch("/api/integrations/personal/status", { cache: "no-store" });
       const body = (await r.json().catch(() => ({}))) as {
         ok?: boolean;
+        availability?: "available" | "unavailable";
         statuses?: PersonalStatus[];
       };
-      if (body.ok && body.statuses) {
+      if (r.ok && body.ok && body.availability !== "unavailable" && body.statuses) {
         setStatuses(body.statuses);
+        setAvailability("available");
       } else {
         setStatuses([]);
+        setAvailability("unavailable");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
+      console.error("[PersonalIntegrationsPanel.refresh]", e);
       setStatuses([]);
+      setAvailability("unavailable");
     }
     // Load the user's Kixie agent email override (if any) in parallel.
     try {
@@ -367,10 +372,10 @@ export function PersonalIntegrationsPanel({
       <header>
         <h3 className="text-sm font-bold text-fg uppercase tracking-wider flex items-center gap-2">
           <Mail className="w-4 h-4 text-accent" />
-          Personal integrations
+          Your account connections
         </h3>
         <p className="text-[12px] text-fg-muted leading-relaxed mt-1">
-          Connect your OWN accounts. Sends from your seat will go from your address — teammates keep using their own. Workspace-shared keys{showKixie ? " (TextTorrent, Kixie, etc.)" : ""} stay above; this section is just for credentials that must be you personally.
+          These connections belong only to your signed-in profile. They do not describe the shared Google Workspace or Telegram bridge shown above. Sends from your seat use your account; teammates keep using their own.{showKixie ? " Personal Kixie and TextTorrent overrides also live here." : ""}
         </p>
       </header>
 
@@ -408,10 +413,20 @@ export function PersonalIntegrationsPanel({
         </div>
       )}
 
-      {statuses === null ? (
+      {availability === "loading" || statuses === null ? (
         <div className="flex items-center gap-2 text-sm text-fg-muted">
           <Loader2 className="w-4 h-4 animate-spin" />
-          Loading…
+          Checking your connections…
+        </div>
+      ) : availability === "unavailable" ? (
+        <div className="flex items-start gap-2 rounded-lg border border-status-warm/30 bg-status-warm/10 p-3 text-sm text-status-warm">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <div className="font-semibold">Personal status unavailable</div>
+            <div className="mt-1 text-xs leading-relaxed text-fg-muted">
+              The status check failed, so this page will not label your accounts disconnected. Refresh to try again.
+            </div>
+          </div>
         </div>
       ) : (
         <ul className="space-y-3">
@@ -420,7 +435,7 @@ export function PersonalIntegrationsPanel({
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-sm text-fg">Google Workspace (Gmail + Calendar)</span>
+                  <span className="font-semibold text-sm text-fg">Your work Google Workspace (Gmail + Calendar)</span>
                   {calendarConnected ? (
                     <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                       <Check className="w-3 h-3" />
@@ -446,7 +461,7 @@ export function PersonalIntegrationsPanel({
                       ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this profile must send client invitations as ${gmailStatus?.expected_work_email || "its OASIS work email"}. Reconnect with the matching work account.`
                     : calendarReconnectRequired
                       ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Founder hosts reconnect once to enable Calendar invites and Google Meet.`
-                      : "Connect your work Google account for Gmail sends, read-only deal-email monitoring, and founder-owned Calendar invites with Google Meet."}
+                      : "No personal Google OAuth is saved for this login. The shared workspace can still be connected above. Connect your own work account for Gmail sends, read-only deal-email monitoring, and Calendar invites with Google Meet."}
                 </div>
               </div>
               <div className="shrink-0 flex flex-col gap-1.5">

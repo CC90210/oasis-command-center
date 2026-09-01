@@ -18,8 +18,10 @@
 
 import { NextResponse } from "next/server";
 import { randomBytes } from "crypto";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,18 +44,10 @@ function mintCode(): string {
 }
 
 export async function POST() {
-  const user = await getSessionUser();
-  if (!user || !user.email) return bad(401, "unauthorized");
-
+  const session = await resolveSessionContext();
+  if (!session.ok || !session.email) return bad(401, "unauthorized");
+  if (!(await canAccessSharedTenantResource(session))) return bad(403, "forbidden");
   const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  if (profile.error || !profile.data?.tenant_id) {
-    return bad(412, "no tenant for this user");
-  }
 
   // Revoke any unconsumed prior codes from this user before minting a
   // fresh one. Without this, every "Generate code" click leaves the old
@@ -65,7 +59,7 @@ export async function POST() {
   await db
     .from("bridge_pair_codes")
     .delete()
-    .eq("auth_user_id", user.id)
+    .eq("auth_user_id", session.userId)
     .is("consumed_at", null);
 
   // Try a few times in case of unique-constraint collision (≈1 in 10^13).
@@ -76,9 +70,9 @@ export async function POST() {
     expiresAt = new Date(Date.now() + CODE_TTL_MIN * 60_000).toISOString();
     const ins = await db.from("bridge_pair_codes").insert({
       code,
-      tenant_id: profile.data.tenant_id,
-      auth_user_id: user.id,
-      email: user.email,
+      tenant_id: session.tenantId,
+      auth_user_id: session.userId,
+      email: session.email,
       expires_at: expiresAt,
     });
     if (!ins.error) break;

@@ -33,7 +33,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canViewLead, leadScopingEnabled } from "@/lib/lead-scope";
+import { getReadableLeadRecordForSession } from "@/lib/lead-access";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
 import {
@@ -110,22 +110,17 @@ export async function POST(req: NextRequest) {
   let leadFacts: Record<string, unknown> = {};
   let repUserId = sess.userId;
   if (leadId) {
-    const { data: leadRow } = await db
-      .from("tenant_records")
-      .select("data")
-      .eq("tenant_id", sess.tenantId)
-      .eq("entity_type", "lead")
-      .eq("id", leadId)
-      .maybeSingle();
-    const leadData = (leadRow as { data: Record<string, unknown> } | null)?.data ?? null;
-    if (leadData) {
-      if (!canViewLead({ isAdmin: sess.isAdmin, userId: sess.userId }, leadData, leadScopingEnabled())) {
-        return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
-      }
-      leadFacts = leadData;
-      if (typeof leadData.assigned_to === "string" && leadData.assigned_to.trim()) {
-        repUserId = leadData.assigned_to.trim();
-      }
+    const access = await getReadableLeadRecordForSession(sess, {
+      tenantId: sess.tenantId,
+      id: leadId,
+    });
+    if (!access) {
+      return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+    }
+    const leadData = access.record.data;
+    leadFacts = leadData;
+    if (typeof leadData.assigned_to === "string" && leadData.assigned_to.trim()) {
+      repUserId = leadData.assigned_to.trim();
     }
   }
 

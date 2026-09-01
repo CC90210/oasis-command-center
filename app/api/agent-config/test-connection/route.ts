@@ -45,7 +45,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { decryptField } from "@/lib/field-encryption";
-import { getSessionContext } from "@/lib/team";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import type { Provider } from "@/lib/providers";
 
 export const runtime = "nodejs";
@@ -167,9 +168,12 @@ async function pingProvider(provider: Provider, key: string): Promise<PingResult
 }
 
 export async function POST(req: NextRequest) {
-  const ctx = await getSessionContext();
-  if (!ctx) {
+  const ctx = await resolveSessionContext();
+  if (!ctx.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!(await canAccessSharedTenantResource(ctx))) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
   let body: { provider?: string; api_key?: string };
@@ -227,7 +231,7 @@ export async function POST(req: NextRequest) {
         .select("encrypted_api_key")
         .eq("tenant_id", ctx.tenantId)
         .eq("provider", provider)
-        .eq("user_id", ctx.authUserId)
+        .eq("user_id", ctx.userId)
         .not("encrypted_api_key", "is", null)
         .limit(1)
         .maybeSingle();

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,6 +9,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   const result = await getServiceSupabase()
     .from("cc_email_templates")
     .select("id,name,category,subject,preheader,html,updated_at")
@@ -25,6 +27,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  if (!(await canAccessSharedTenantResource(session))) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   let body: { name?: string; category?: string; subject?: string; preheader?: string; html?: string } = {};
   try { body = await req.json(); } catch { /* validated below */ }
   const name = String(body.name || "").trim();

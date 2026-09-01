@@ -22,11 +22,13 @@
  */
 
 import { NextResponse, type NextRequest } from "next/server";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { getKixieCredentials, addToPowerlist, type KixieCredentials } from "@/lib/integrations/kixie";
 import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { isReadOnlyRole } from "@/lib/role-gates";
+import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -60,28 +62,25 @@ function parsePowerlists(customFields: Record<string, unknown> | null): Map<stri
 
 /** Resolve session -> { userId, email, tenantId } with the call-route gates. */
 async function resolveActor(requireWrite: boolean): Promise<
-  | { ok: true; userId: string; email: string; tenantId: string }
+  | {
+      ok: true;
+      userId: string;
+      email: string;
+      tenantId: string;
+      teamRole: string;
+      isTrueAdmin: boolean;
+      adminAccess: boolean;
+    }
   | { ok: false; resp: NextResponse }
 > {
-  const user = await getSessionUser();
-  if (!user) {
+  const sess = await resolveSessionContext();
+  if (!sess.ok) {
     return { ok: false, resp: NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 }) };
-  }
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id,email,team_role")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
-  if (!tenantId) {
-    return { ok: false, resp: NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 }) };
   }
   if (requireWrite) {
     // Role gate — pushing leads into a live dialer queue is a member+
     // capability, for parity with the single-call route.
-    const teamRole = (profile.data as { team_role?: string | null } | null)?.team_role;
-    if (isReadOnlyRole(teamRole)) {
+    if (isReadOnlyRole(sess.teamRole)) {
       return {
         ok: false,
         resp: NextResponse.json(
@@ -93,9 +92,12 @@ async function resolveActor(requireWrite: boolean): Promise<
   }
   return {
     ok: true,
-    userId: user.id,
-    email: (profile.data as { email?: string | null } | null)?.email || "",
-    tenantId,
+    userId: sess.userId,
+    email: sess.email || "",
+    tenantId: sess.tenantId,
+    teamRole: sess.teamRole,
+    isTrueAdmin: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
   };
 }
 
@@ -211,7 +213,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: `lead_fetch_failed: ${fetched.error.message}` }, { status: 500 });
   }
   const byId = new Map(
-    ((fetched.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>).map((r) => [r.id, r.data || {}]),
+    ((fetched.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>)
+      .filter((row) =>
+        canMutateGenericLeadForTenant(
+          {
+            teamRole: actor.teamRole,
+            userId: actor.userId,
+            isOwner: actor.isTrueAdmin,
+            adminAccess: actor.adminAccess,
+          },
+          { id: row.id, data: row.data || {} },
+        ),
+      )
+      .map((r) => [r.id, r.data || {}]),
   );
 
   const dryRun = isDryRun("kixie");

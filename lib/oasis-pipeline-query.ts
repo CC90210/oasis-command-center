@@ -34,7 +34,12 @@ export type OasisPipelineWindow = {
 
 export type OasisPipelineAssigneeScope =
   | { allowed: false }
-  | { allowed: true; assignedTo: string | null | undefined };
+  | {
+      allowed: true;
+      assignedTo: string | null | undefined;
+      /** Manager-only union of known, tenant-scoped sales-rep auth ids. */
+      assignedToAny?: readonly string[];
+    };
 
 /**
  * Resolve the assignee clause before any data query runs.
@@ -47,11 +52,35 @@ export function resolveOasisPipelineAssigneeScope(input: {
   isAdmin: boolean;
   userId: string | null;
   repFilter: string | null;
+  canReadTeam?: boolean;
+  teamRepUserIds?: readonly string[];
 }): OasisPipelineAssigneeScope {
   const rep = input.repFilter?.trim().toLowerCase() || null;
   if (input.isAdmin) {
     if (!rep) return { allowed: true, assignedTo: undefined };
     return { allowed: true, assignedTo: rep === "unassigned" ? null : rep };
+  }
+
+  if (input.canReadTeam) {
+    const teamRepUserIds = [...new Set(
+      (input.teamRepUserIds || [])
+        .map((id) => id.trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    if (teamRepUserIds.length === 0) return { allowed: false };
+    // Manager scope contains assigned rep books only. A forged unassigned,
+    // founder/admin id, foreign tenant id, or random UUID fails before a query.
+    if (rep) {
+      if (rep === "unassigned" || !teamRepUserIds.includes(rep)) {
+        return { allowed: false };
+      }
+      return { allowed: true, assignedTo: rep };
+    }
+    return {
+      allowed: true,
+      assignedTo: undefined,
+      assignedToAny: teamRepUserIds,
+    };
   }
 
   const userId = input.userId?.trim().toLowerCase() || null;
@@ -80,6 +109,7 @@ type RecordLister = (input: {
   limit?: number;
   offset?: number;
   where?: Record<string, EqualityValue>;
+  whereIn?: Record<string, readonly string[]>;
   whereEmpty?: readonly string[];
   search?: { fields: readonly string[]; query: string };
 }) => Promise<ListRecordsResult>;
@@ -102,11 +132,23 @@ export async function listOasisPipelineWindow(
     salesProgram?: string | null;
     salesMotion?: string | null;
     assignedTo?: string | null;
+    /** Assigned sales-rep union for a manager's read-only team view. */
+    assignedToAny?: readonly string[];
     query?: string | null;
   },
   deps: { list: RecordLister } = { list: listRecords },
 ): Promise<OasisPipelineWindow> {
-  const stageKeys = [...new Set(input.stageKeys.filter(Boolean))];
+  const teamAssignees = input.assignedToAny
+    ? [...new Set(input.assignedToAny.map((id) => id.trim().toLowerCase()).filter(Boolean))]
+    : null;
+  // Passing both is a caller bug with authorization implications. Fail closed
+  // instead of guessing which scope should win.
+  const hasConflictingAssigneeScopes =
+    teamAssignees !== null && input.assignedTo !== undefined;
+  const hasEmptyTeamScope = teamAssignees !== null && teamAssignees.length === 0;
+  const stageKeys = hasConflictingAssigneeScopes || hasEmptyTeamScope
+    ? []
+    : [...new Set(input.stageKeys.filter(Boolean))];
   const activeStage = resolveOasisPipelineActiveStage(input.requestedStage, stageKeys);
   const requestedPage = normalizeOasisPipelinePage(input.requestedPage);
   const search = input.query?.trim()
@@ -141,6 +183,25 @@ export async function listOasisPipelineWindow(
     return where;
   };
 
+  const listPage = (
+    stage: string,
+    limit: number,
+    offset: number,
+  ): Promise<ListRecordsResult> =>
+    deps.list({
+      tenant_id: input.tenantId,
+      entity: "lead",
+      sort: "-updated_at",
+      limit,
+      offset,
+      where: whereFor(stage),
+      ...(teamAssignees ? { whereIn: { assigned_to: teamAssignees } } : {}),
+      ...(input.assignedTo === null
+        ? { whereEmpty: ["assigned_to"] }
+        : {}),
+      ...(search ? { search } : {}),
+    });
+
   const readStage = async (stage: string, page: number): Promise<ListRecordsResult> => {
     const includeRows = activeStage === null || activeStage === stage;
     const limit = includeRows
@@ -149,16 +210,7 @@ export async function listOasisPipelineWindow(
         : OASIS_PIPELINE_OVERVIEW_LIMIT
       : 1;
     const offset = activeStage && includeRows ? (page - 1) * OASIS_PIPELINE_STAGE_PAGE_SIZE : 0;
-    return deps.list({
-      tenant_id: input.tenantId,
-      entity: "lead",
-      sort: "-updated_at",
-      limit,
-      offset,
-      where: whereFor(stage),
-      ...(input.assignedTo === null ? { whereEmpty: ["assigned_to"] } : {}),
-      ...(search ? { search } : {}),
-    });
+    return listPage(stage, limit, offset);
   };
 
   let page = activeStage ? requestedPage : 1;

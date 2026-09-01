@@ -42,7 +42,7 @@ const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(
 //
 // This is the assertion that would have failed before the fix.
 // ---------------------------------------------------------------------------
-for (const role of ["agent", "opener", "closer", "builder"]) {
+for (const role of ["agent", "opener", "closer", "builder", "marketing"]) {
   assert.ok(
     isSelfScopedRole(role),
     `${role} must be scoped to its own records -- a tenant check alone does not stop someone who sits INSIDE the tenant`,
@@ -54,7 +54,7 @@ for (const role of ["agent", "opener", "closer", "builder"]) {
 }
 
 // An admin is never scoped, whatever their nominal role.
-for (const role of ["agent", "opener", "closer", "builder", "owner"]) {
+for (const role of ["agent", "opener", "closer", "builder", "marketing", "owner"]) {
   assert.equal(
     isScopedContractor({ userId: "u1", teamRole: role, isAdmin: true }),
     false,
@@ -64,7 +64,7 @@ for (const role of ["agent", "opener", "closer", "builder", "owner"]) {
 
 // Roles that are NOT self-scoped stay that way. Widening this set is how a
 // staged rollout for SunBiz's own roles would get trampled.
-for (const role of ["owner", "admin", "member", "read_only", "loan_officer", "processor", "marketing", ""]) {
+for (const role of ["owner", "admin", "member", "read_only", "loan_officer", "processor", ""]) {
   assert.equal(isSelfScopedRole(role), false, `${role || "(empty)"} must not be treated as a self-scoped contractor`);
 }
 // `isSelfScopedRole` answers set membership, so junk is correctly NOT a member.
@@ -141,14 +141,14 @@ assert.ok(
   "the legacy `agent` role must KEEP quote/close -- migrating a person is a deliberate role change, never a silent revocation they discover mid-call",
 );
 
-// Everyone else is refused, including roles that sound senior. A manager does
-// not close on a rep's book; an admin path exists separately and is checked by
-// `isTrueAdmin` at the call site, not by this predicate.
+// Everyone else is refused. Admins go through `isTrueAdmin` at the call site,
+// not this predicate. A manager can close only a lead assigned to them (for
+// example when they host the audit); ownership is enforced separately.
 //
 // UPDATED 2026-08-25 (CC): `builder` LEFT this refused list — the
 // builder/marketing specialist sells his own book now, so he sits with the
 // closers. Manager still cannot: no live manager closes deals.
-for (const role of ["manager", "marketing", "member", "read_only", "loan_officer", "processor", "owner", "admin", ""]) {
+for (const role of ["marketing", "member", "read_only", "loan_officer", "processor", "owner", "admin", ""]) {
   assert.equal(
     mayQuoteAndClose(role),
     false,
@@ -158,6 +158,10 @@ for (const role of ["manager", "marketing", "member", "read_only", "loan_officer
 assert.ok(
   mayQuoteAndClose("builder"),
   "CC 2026-08-25: the selling builder quotes and closes his OWN book -- ownership is enforced separately at every call site",
+);
+assert.ok(
+  mayQuoteAndClose("manager"),
+  "a manager assigned as the audit host must be able to close their OWN lead",
 );
 for (const junk of [null, undefined, 0, {}, []]) {
   assert.equal(mayQuoteAndClose(junk), false, `${JSON.stringify(junk)} must fail closed`);
@@ -178,7 +182,7 @@ assert.equal(mayQuoteAndClose("clos er"), false, "a mangled role must not match"
 const salesRoute = stripComments(read("app/api/website-sales/[leadId]/route.ts"));
 assert.match(
   salesRoute,
-  /mayQuoteAndClose\(session\.teamRole\)\s*&&\s*\(assignedToUser \|\| attributedToUser\)/,
+  /mayQuoteAndClose\(session\.teamRole\)\s*&&\s*\(assignedToUser \|\| attributedToUser \|\| actorOwnsSalesLead\)/,
   "the deal gate must require BOTH the role and ownership -- either alone is not a gate",
 );
 // The old bare-role check must not creep back.
@@ -264,16 +268,16 @@ assert.ok(
   !mayQuoteAndClose("opener"),
   "an opener may not PERFORM a close even though they may be PAID on one",
 );
-// UPDATED 2026-08-25 (CC): builder may now both be PAID and RUN his own deals.
-// The payee/actor distinction below still holds for opener; manager remains
-// the role that is paid from the ledger but runs nothing.
+// UPDATED 2026-08-25/31 (CC): builder may run his own deals, and a manager who
+// is assigned as the audit host may finish that own lead. The payee/actor
+// distinction still holds for opener.
 assert.ok(
   mayQuoteAndClose("builder"),
   "the selling builder performs closes on his own book (CC 2026-08-25) -- the close RPC already listed builder as a legitimate payee",
 );
 assert.ok(
-  !mayQuoteAndClose("manager"),
-  "a manager may be paid from the ledger but may not run a deal",
+  mayQuoteAndClose("manager"),
+  "an assigned manager host may run their own deal; ownership remains a separate gate",
 );
 // The RPC's own guard is defence in depth and must stay: the route gate is not
 // the only caller, and a server-side re-check is what makes a forged request

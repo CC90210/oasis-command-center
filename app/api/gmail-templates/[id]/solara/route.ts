@@ -28,6 +28,7 @@ import {
   type GmailTemplate,
   type GmailTemplateVariant,
 } from "@/lib/gmail-templates";
+import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -91,7 +92,7 @@ export async function POST(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  if (!canWriteCrm(sess.teamRole)) {
+  if (!canWriteCrm(sess.teamRole) || !(await canAccessSharedTenantResource(sess))) {
     return NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 });
   }
   if (!UUID_RE.test(id)) {

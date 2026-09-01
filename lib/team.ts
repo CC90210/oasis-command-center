@@ -2,10 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 
 import {
   INVITABLE_ROLES,
   isInvitableRole,
+  isOasisPipelineRepRole,
   type InvitableRole,
   type TeamRole,
 } from "@/lib/team-roles";
@@ -116,6 +118,7 @@ function memberPreferenceScore(member: MemberRow): number {
   return (
     (member.is_owner ? 1_000 : 0) +
     (member.team_role === "owner" ? 500 : 0) +
+    (member.team_role === "admin" ? 400 : 0) +
     (member.admin_access ? 200 : 0) +
     (member.auth_user_id ? 50 : 0) +
     (cleanMemberName(member.display_name) ? 20 : 0) +
@@ -257,13 +260,9 @@ export function inviteEmailMatchesUser(
 export async function getSessionContext(): Promise<SessionContext | null> {
   const user = await getSessionUser();
   if (!user) return null;
-  const supa = getServiceSupabase();
-  const { data, error } = await supa
-    .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  if (error || !data || !data.tenant_id) return null;
+  const resolved = await resolveActiveProfileForUser(user);
+  const data = resolved.profile;
+  if (resolved.error || !data?.tenant_id) return null;
   return {
     authUserId: user.id,
     profileId: data.id,
@@ -286,6 +285,36 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getTenantMembers", error);
   return canonicalizeTenantMembers((data ?? []) as MemberRow[]);
+}
+
+/**
+ * Tenant-scoped roster that defines a sales manager's cross-rep READ boundary.
+ * Owner/admin/member/read-only profiles and rows without an auth identity are
+ * intentionally excluded, so this list can never authorize unassigned,
+ * founder, or system records.
+ */
+export async function getOasisSalesRepRoster(tenantId: string): Promise<MemberRow[]> {
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("user_profiles")
+    .select(
+      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at",
+    )
+    .eq("tenant_id", tenantId)
+    .order("joined_at", { ascending: true });
+  if (error) throw dbError("getOasisSalesRepRoster", error);
+  // Canonicalize the FULL tenant before role filtering. Live pre-cutover data
+  // contains duplicate profiles for the same auth user/email. Filtering the
+  // query to sales roles first could discard the authoritative owner/admin row
+  // and retain a stale manager/agent duplicate, silently admitting a founder
+  // identity into the manager's cross-rep read boundary.
+  return canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
+    (member) =>
+      Boolean(member.auth_user_id?.trim()) &&
+      member.is_owner !== true &&
+      member.admin_access !== true &&
+      isOasisPipelineRepRole(member.team_role),
+  );
 }
 
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {

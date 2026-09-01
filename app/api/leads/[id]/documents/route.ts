@@ -13,7 +13,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getAccessibleLeadTarget } from "@/lib/lead-access";
+import { getAccessibleLeadTarget, getReadableLeadTargetForSession } from "@/lib/lead-access";
 import {
   uploadLeadDocument,
   softDeleteLeadDocument,
@@ -21,6 +21,7 @@ import {
   MAX_LEAD_DOC_BYTES,
 } from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
+import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,8 +40,8 @@ export async function GET(
   if (!sess.ok) {
     return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
   }
-  const target = await getAccessibleLeadTarget(
-    { isAdmin: sess.isAdmin, userId: sess.userId },
+  const target = await getReadableLeadTargetForSession(
+    sess,
     { tenantId: sess.tenantId, id, entityParam: req.nextUrl.searchParams.get("entity") },
   );
   if (!target) {
@@ -94,6 +95,18 @@ export async function POST(
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId: target.queryLeadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
   }
 
   let form: FormData;
@@ -207,6 +220,18 @@ export async function DELETE(
   );
   if (!target) {
     return NextResponse.json({ ok: false, error: "record_not_found" }, { status: 404 });
+  }
+  const access = await assertMayWorkLead({
+    teamRole: sess.teamRole,
+    userId: sess.userId,
+    tenantId: sess.tenantId,
+    leadId: target.queryLeadId,
+    isOwner: sess.isTrueAdmin,
+    adminAccess: sess.adminAccess,
+    accessMode: "owned_oasis_sales",
+  });
+  if (!access.ok) {
+    return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
   }
 
   const result = await softDeleteLeadDocument({

@@ -23,7 +23,8 @@
 
 import { NextResponse } from "next/server";
 import { randomBytes, createHmac } from "node:crypto";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
+import { resolveTenantId } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -86,13 +87,7 @@ export async function GET(req: Request) {
   // Resolve tenant_id so the callback can write to the right slot.
   // The session-user lookup gives us auth_user_id; tenant_id comes
   // from user_profiles.
-  const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
+  const tenantId = await resolveTenantId();
   if (!tenantId) {
     return NextResponse.json(
       { ok: false, error: "no_tenant", message: "Your account isn't attached to a workspace yet." },

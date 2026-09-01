@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { bad } from "@/lib/api-helpers";
 import { getAuthedSupabase } from "@/lib/supabase-server";
-import { roleAllowedForTenant } from "@/lib/role-surfaces";
+import {
+  invitableRoleOptionsForActor,
+  roleAllowedForTenant,
+} from "@/lib/role-surfaces";
 import {
   canManageTeam,
   createInvite,
@@ -12,7 +15,6 @@ import {
   normalizeInviteEmail,
   tenantSlugFor,
 } from "@/lib/team";
-import { isOasisSalesRole } from "@/lib/team-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,9 +23,16 @@ export async function GET() {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
   if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) return bad(403, "forbidden");
-  const invites = await listActiveInvites(ctx.tenantId);
+  const [invites, tenantSlug] = await Promise.all([
+    listActiveInvites(ctx.tenantId),
+    tenantSlugFor(ctx.tenantId),
+  ]);
   return NextResponse.json({
     ok: true,
+    role_options: invitableRoleOptionsForActor(
+      tenantSlug,
+      isTrueAdminRole(ctx.teamRole, ctx.isOwner),
+    ),
     invites: invites.map((i) => ({
       id: i.id,
       email: i.email,
@@ -61,7 +70,7 @@ export async function POST(req: NextRequest) {
   // The slug read happens ONLY on the sales-role path, so the ordinary
   // member/admin invite pays no extra query. An unresolvable slug is treated as
   // "not OASIS" and rejects, which is the fail-closed direction.
-  if (isOasisSalesRole(role) && !roleAllowedForTenant(role, await tenantSlugFor(ctx.tenantId))) {
+  if (!roleAllowedForTenant(role, await tenantSlugFor(ctx.tenantId))) {
     return bad(400, "invalid role");
   }
   // ESCALATION GUARD: minting a permanent ADMIN via invite is a TRUE-admin

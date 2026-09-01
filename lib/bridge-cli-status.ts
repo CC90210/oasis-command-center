@@ -60,7 +60,7 @@ export function normalizeCliSnapshot(
   if (!lastPingAt) return { ok: false, reason: "missing" };
   const pingMs = Date.parse(lastPingAt);
   if (!Number.isFinite(pingMs)) return { ok: false, reason: "stale" };
-  if (nowMs - pingMs > CLI_INVENTORY_MAX_AGE_MS) {
+  if (pingMs > nowMs || nowMs - pingMs > CLI_INVENTORY_MAX_AGE_MS) {
     return { ok: false, reason: "stale" };
   }
 

@@ -35,7 +35,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   // autofill an application for a lead they're working (role-gated, tenant-scoped).
   // Admin-only is reserved for automations + sequences MANAGEMENT — NOT per-lead AI.
   const acc = await getWritableLead(
-    { teamRole: sess.teamRole },
+    { teamRole: sess.teamRole, userId: sess.userId, isOwner: sess.isTrueAdmin, adminAccess: sess.adminAccess },
     { tenantId: sess.tenantId, entity: "lead", id },
   );
   if (!acc.ok) {

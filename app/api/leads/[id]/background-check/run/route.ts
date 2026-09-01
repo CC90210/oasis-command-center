@@ -14,8 +14,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { canWriteCrm } from "@/lib/role-gates";
 import { enqueueBackgroundCheck } from "@/lib/background-check/enqueue";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,15 +33,23 @@ export async function POST(
   // Per-lead AI is a MEMBER CRM tool (CC 2026-07-07): any non-read_only member may
   // run a background check on a lead they're working. Admin-only is reserved for
   // automations + sequences MANAGEMENT — NOT per-lead AI.
-  if (!canWriteCrm(session.teamRole)) {
-    return NextResponse.json(
-      { ok: false, error: "forbidden_role", message: "Read-only members can't run this." },
-      { status: 403 },
-    );
-  }
   const { id: leadId } = await ctx.params;
   if (!UUID_RE.test(leadId)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
+  }
+  const access = await getWritableLead(
+    {
+      teamRole: session.teamRole,
+      userId: session.userId,
+      isOwner: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    },
+    { tenantId: session.tenantId, entity: "lead", id: leadId },
+  );
+  if (!access.ok) {
+    return access.reason === "role_denied"
+      ? NextResponse.json({ ok: false, error: "forbidden_role" }, { status: 403 })
+      : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   const enq = await enqueueBackgroundCheck({

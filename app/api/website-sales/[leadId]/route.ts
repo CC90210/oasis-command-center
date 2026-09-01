@@ -182,6 +182,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   const currentStage = typeof current.stage === "string" ? current.stage : "";
   const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
   const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
+  const actorOwnsSalesLead = ownsOasisSalesRecord({ id: row.id, data: current }, session.userId);
+  // A manager's frozen attribution survives a handoff for reporting, but it is
+  // not continuing write authority. Managers operate their own assigned lead
+  // normally and coach every other roster lead read-only. The explicit
+  // admin_access toggle retains its existing tenant-wide semantics via
+  // session.isAdmin.
+  if (
+    session.teamRole.trim().toLowerCase() === "manager" &&
+    !session.isAdmin &&
+    !actorOwnsSalesLead
+  ) {
+    return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
+  }
   const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
   const builderOwnsDelivery = builderMayRunDelivery && ownsOasisSalesRecord(
     { id:row.id, data:current },
@@ -198,14 +211,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       error:builderMayRunDelivery ? "builder_not_assigned_to_lead" : "builder_delivery_stage_only",
     },{status:403});
   }
-  if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser) {
+  if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
   // Role and ownership are both load-bearing. Explicit closers and legacy
   // full-stack agents may quote or close; explicit openers cannot. Ownership
   // may come from current assignment or frozen attribution, so a legacy
   // full-stack rep keeps the ability to close a deal they originated.
-  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser);
+  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser || actorOwnsSalesLead);
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
   if (builderMayRunDelivery && !builderOnOwnSalesLead && body.action !== "advance") {

@@ -17,6 +17,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { createApplicationFromLead } from "@/lib/applications/create-from-lead";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { canWriteCrm } from "@/lib/role-gates";
+import { getWritableLead } from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,7 +41,7 @@ export async function POST(
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("tenant_id,team_role")
+    .select("tenant_id,team_role,is_owner,admin_access")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const tenantId = (profile.data as { tenant_id?: string | null } | null)?.tenant_id;
@@ -57,15 +58,21 @@ export async function POST(
     );
   }
 
-  // Ownership: the lead must belong to the caller's tenant (mirrors the Call route).
-  const leadRow = await db
-    .from("tenant_records")
-    .select("id")
-    .eq("id", leadId)
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .maybeSingle();
-  if (!leadRow.data) {
+  const profileData = profile.data as {
+    team_role?: string | null;
+    is_owner?: boolean | null;
+    admin_access?: boolean | null;
+  } | null;
+  const access = await getWritableLead(
+    {
+      teamRole,
+      userId: user.id,
+      isOwner: profileData?.is_owner === true,
+      adminAccess: profileData?.admin_access === true,
+    },
+    { tenantId, entity: "lead", id: leadId },
+  );
+  if (!access.ok) {
     return NextResponse.json(
       { ok: false, error: "lead_not_found", message: "Lead not found for this workspace." },
       { status: 404 },

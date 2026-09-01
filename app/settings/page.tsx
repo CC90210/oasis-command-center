@@ -8,22 +8,32 @@
  */
 
 import { SettingsContent } from "@/components/settings/SettingsContent";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { notFound } from "next/navigation";
+import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  // System surface — tenant branding, integration keys, provider credentials,
-  // team management. 404 for an outside contractor.
-  //
-  // KNOWN CONSEQUENCE, accepted deliberately: this page also hosts the
-  // change-password form, so a rep can no longer change their password from
-  // inside the app. /forgot-password is public and covers it. If reps end up
-  // needing more self-service, the right fix is a small /account page for
-  // everyone — not widening this one back open.
+  // Every authenticated OASIS persona receives its own profile, password, and
+  // personal-connection Settings. Capability checks inside SettingsContent
+  // keep tenant credentials and system controls founder/admin-only, while the
+  // manager capability adds the read-only sales scorecard.
   //
   // Gated HERE, not in SettingsContent: the same component is mounted at
   // /t/<slug>/settings for other tenants' operators and must stay untouched.
-  await requireSystemSurface();
-  return <SettingsContent />;
+  const surface = await resolveViewerSurface();
+  if (!surface.ok || !surface.capabilities.canSeePersonalSettings) notFound();
+  return (
+    <SettingsContent
+      viewerAccess={
+        {
+          persona: surface.persona,
+          canSeePersonalSettings: surface.capabilities.canSeePersonalSettings,
+          canSeeTeamPerformance: surface.capabilities.canSeeTeamPerformance,
+          canSeeSystemSurfaces: surface.capabilities.canSeeSystemSurfaces,
+          degraded: surface.degraded,
+        }
+      }
+    />
+  );
 }

@@ -24,6 +24,10 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { summarizeConversation } from "@/lib/ai-conversation-summarize";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
+import {
+  getReadableLeadTargetForSession,
+  resolveLeadReadPolicy,
+} from "@/lib/lead-access";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,8 +60,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "thread_key_required" }, { status: 400 });
   }
 
+  const readPolicy = await resolveLeadReadPolicy(sess);
+  if (readPolicy.mode === "denied") {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+  }
   const thread = await loadThreadForAi(sess.tenantId, threadKey, { limit: 30 });
   if (!thread || thread.messages.length === 0) {
+    return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
+  }
+  if (
+    readPolicy.mode === "oasis" &&
+    (!thread.lead_id ||
+      !(await getReadableLeadTargetForSession(
+        sess,
+        { tenantId: sess.tenantId, id: thread.lead_id },
+        readPolicy,
+      )))
+  ) {
     return NextResponse.json({ ok: false, error: "thread_not_found" }, { status: 404 });
   }
 
