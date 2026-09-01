@@ -36,11 +36,11 @@ const SECTIONS: PlaybookSection[] = [
       "A plain-language call guide for new appointment setters: 60-second preparation, a word-for-word opener, five qualification questions, easy objection responses, voicemail, booking, and the exact founder handoff.",
   },
   {
-    href: "/playbook/deals",
-    title: "Pipeline Operating Guide",
-    subtitle: "Rep queue - founder handoffs - proposals - fulfillment - commissions",
+    href: "/playbook/automations",
+    title: "Industry Automation Playbook",
+    subtitle: "Industry menus - discovery questions - website + custom builds",
     body:
-      "Run the operation from researched lead to launched website. Reps work assigned leads, CC and Adon receive qualified handoffs, and the same workspace tracks proposals, onboarding, fulfillment, and commissions.",
+      "A call-side catalog of automation opportunities organized by industry. Pick the business type, identify an operational leak, and see what can live on the website, connect to it, or become a custom workflow.",
   },
   {
     href: "/playbook/business",

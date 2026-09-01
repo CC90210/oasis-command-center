@@ -141,6 +141,7 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
 /**
  * The display face for the HUD (Adon, 2026-09-01: "a nicer font"). Space
@@ -943,6 +944,15 @@ export function BattleCard({
               reduced={reduced}
             />
           )}
+          <BattleSection
+            id="industry-automations"
+            defaultOpen={true}
+            title="What else you can automate for them"
+            sub="Matched to this business type. Ask the question first; treat every build and integration as founder-scoped."
+            teaser="Industry-specific website features, connected workflows, and custom automation opportunities"
+          >
+            <IndustryAutomationGuide initialIndustry={lead.industry} />
+          </BattleSection>
           <Panel>
             {/* Reused wholesale rather than restyled: one component owns the four
                 outcomes, and logging an outcome IS the transfer to the pipeline
