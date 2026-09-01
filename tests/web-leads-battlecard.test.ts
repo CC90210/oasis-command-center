@@ -764,6 +764,25 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // top, because the radar is display:none below `sm`. If the buttons go, the
   // phone loses the interaction entirely.
   assert.match(src, /aria-pressed=\{active\}/, `${view}: the dimension list must be the accessible selection path`);
+
+  // 8c. THE HUD PALETTE (Adon, 2026-09-01): colour is IDENTITY, never verdict.
+  // Every dimension must have its own fixed hue in DIM_HUES -- one area
+  // falling through to the grey fallback breaks the "this colour IS trust"
+  // coding on the radar, the list, and the fix ranking at once. The verdict
+  // colours stay banned by web-leads-guards.test.ts; this asserts the
+  // identity half of the rule.
+  for (const key of DIMENSION_KEYS) {
+    assert.match(
+      src,
+      new RegExp(`DIM_HUES[\\s\\S]{0,700}?\\b${key}:`),
+      `${view}: dimension "${key}" must carry a fixed identity hue in DIM_HUES`,
+    );
+  }
+  // The four hologram layers must all exist -- lose one and the radar either
+  // goes flat (no shadow/data separation) or dead (no hits).
+  for (const layerName of ['layer="base"', 'layer="shadow"', 'layer="data"', 'layer="hits"']) {
+    assert.ok(src.includes(layerName), `${view}: the hologram stack must render ${layerName}`);
+  }
 }
 
 // The panel itself renders every field of every objection. Asserting the data
