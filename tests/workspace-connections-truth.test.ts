@@ -7,6 +7,10 @@ import {
   isWorkspaceHeartbeatFresh,
   WORKSPACE_HEALTH_MAX_AGE_MS,
 } from "../lib/integrations/workspace-connection-status";
+import {
+  TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS,
+  findTenantManuallyEditableIntegrationSchema,
+} from "../lib/tenant-integration-schemas";
 
 assert.equal(
   classifyWorkspaceConnection({ lookupAvailable: true, configured: true, healthStatus: null, healthFresh: false }),
@@ -61,6 +65,30 @@ const summary = readFileSync(
   "utf8",
 );
 const store = readFileSync(join(root, "lib", "tenant-integration-store.ts"), "utf8");
+const availability = readFileSync(
+  join(root, "lib", "routing", "provider-availability.ts"),
+  "utf8",
+);
+const settings = readFileSync(
+  join(root, "components", "settings", "SettingsContent.tsx"),
+  "utf8",
+);
+const personal = readFileSync(
+  join(root, "components", "settings", "PersonalIntegrationsPanel.tsx"),
+  "utf8",
+);
+const keysPanel = readFileSync(
+  join(root, "components", "settings", "IntegrationKeysPanel.tsx"),
+  "utf8",
+);
+const keysRoute = readFileSync(
+  join(root, "app", "api", "integrations", "keys", "route.ts"),
+  "utf8",
+);
+const testRoute = readFileSync(
+  join(root, "app", "api", "integrations", "keys", "test", "route.ts"),
+  "utf8",
+);
 
 assert.ok(
   summary.includes('["app_password", "from_address"]') &&
@@ -90,6 +118,21 @@ assert.ok(
   "credential presence must include the canonical env fallback without exposing its value",
 );
 assert.ok(
+  store.includes("TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS") &&
+    store.includes('source: "environment"'),
+  "the Credentials API must synthesize value-free rows for deployment-backed configuration",
+);
+assert.ok(
+  store.includes('from_address: "GMAIL_USER"') &&
+    availability.includes("process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_USER"),
+  "Google app-password readiness must require the real SMTP login plus its App Password",
+);
+assert.equal(
+  store.includes('from_address: "GMAIL_FROM_ADDRESS"'),
+  false,
+  "a display From address alone must not make the Google SMTP login look configured",
+);
+assert.ok(
   store.includes('bot_token: ["OASIS_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"]'),
   "workspace Telegram status must use the same OASIS operator-lane token order as delivery",
 );
@@ -106,6 +149,80 @@ assert.equal(
   /presence\[fieldKey\]\s*=\s*decryptField/.test(store),
   false,
   "status presence must never return decrypted credential values",
+);
+
+const tenantEditableServices = TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS.map(
+  (schema) => schema.service,
+);
+assert.ok(tenantEditableServices.includes("gws"));
+assert.ok(tenantEditableServices.includes("telegram"));
+assert.equal(tenantEditableServices.includes("gmail_oauth"), false);
+assert.equal(tenantEditableServices.includes("constant_contact"), false);
+assert.equal(findTenantManuallyEditableIntegrationSchema("gmail_oauth"), null);
+assert.equal(findTenantManuallyEditableIntegrationSchema("constant_contact"), null);
+assert.ok(
+  findTenantManuallyEditableIntegrationSchema("telegram")?.fields.some(
+    (field) => field.key === "chat_id",
+  ),
+  "the shared Telegram setup must expose the destination required by its status contract",
+);
+assert.ok(
+  keysPanel.includes("TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS") &&
+    !keysPanel.includes("{INTEGRATION_SCHEMAS.filter"),
+  "the tenant editor must render only shared, manually provisioned integrations",
+);
+assert.ok(
+  (keysRoute.match(/findTenantManuallyEditableIntegrationSchema/g) || []).length >= 3,
+  "POST and DELETE must both enforce the tenant-manual schema boundary",
+);
+assert.ok(
+  testRoute.includes("findTenantManuallyEditableIntegrationSchema") &&
+    testRoute.includes("service_not_tenant_editable"),
+  "the provider test API must reject personal and OAuth-managed services too",
+);
+
+assert.equal(
+  settings.includes("WorkspaceConnectionsSummary"),
+  false,
+  "Settings must not render the redundant shared connection summary",
+);
+assert.equal(
+  settings.includes("QuickInviteCard"),
+  false,
+  "Settings must route team management to /team instead of mounting a second invite form",
+);
+assert.ok(
+  settings.includes("Manage team & invites") && settings.includes('href="/team"'),
+  "Settings must retain one clear Team management CTA",
+);
+assert.ok(
+  settings.includes('title="Credentials"') &&
+    settings.includes("<PersonalIntegrationsPanel") &&
+    settings.includes("<TelegramConnectCard"),
+  "personal Google and Telegram controls must live inside the consolidated Credentials sections",
+);
+assert.equal(
+  personal.includes("Your account connections"),
+  false,
+  "the personal controls must not create a second titled connection surface inside Credentials",
+);
+assert.ok(
+    keysPanel.includes('"Email-only"') &&
+    keysPanel.includes("twilioVerified") &&
+    testRoute.includes("missing_sender") &&
+    testRoute.includes('j.status !== "active"') &&
+    testRoute.includes("sender verified"),
+  "Twilio must remain visibly email-only until its account and sender pass Test",
+);
+assert.ok(
+  keysPanel.includes("configured in deployment") &&
+    keysPanel.includes("Connection test passed.") &&
+    testRoute.includes("await transport.verify()"),
+  "deployment-backed Google Workspace must render configured and support a side-effect-free SMTP auth test",
+);
+assert.ok(
+  testRoute.includes("/getChat?chat_id=") && testRoute.includes("missing_chat_id"),
+  "Telegram Test must verify the configured destination as well as the bot token",
 );
 
 console.log("workspace-connections-truth.test.ts: OK");

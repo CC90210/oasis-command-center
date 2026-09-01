@@ -110,6 +110,9 @@ assert.equal(isSelfScopedRole("some_new_role"), false);
 assert.ok(
   catchAll.includes("const oasisDirectRole") &&
     catchAll.includes("const isOasisLeadSurface") &&
+    catchAll.includes('"owner",') &&
+    catchAll.includes('"admin",') &&
+    catchAll.includes('"member",') &&
     catchAll.includes('"manager",') &&
     catchAll.includes('"closer",') &&
     catchAll.includes('"opener",') &&
@@ -118,7 +121,7 @@ assert.ok(
     catchAll.includes('"agent"') &&
     catchAll.includes("redirect(`/pipeline/${recordDetailId}`)") &&
     catchAll.includes("redirect(`/pipeline${target.size"),
-  "generic OASIS job-role lead URLs must redirect to the exact-scope canonical pipeline",
+  "every generic OASIS lead URL, including owner/admin profiles, must redirect to the canonical pipeline",
 );
 
 // ── The drift guard, and the reason this file is worth keeping. ─────────────

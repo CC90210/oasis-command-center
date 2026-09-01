@@ -1071,7 +1071,7 @@ export function LeadLifecycleActions({
         {mayScheduleFounderAudit && (
           <fieldset id="founder-audit-handoff" className="scroll-mt-24 space-y-4 rounded-xl border border-bg-border p-4">
             <legend className="px-2 text-xs font-bold uppercase tracking-wider text-fg-muted">
-              15-minute audit handoff
+              Create Google Meet invite
             </legend>
             <div className="flex items-start gap-2 text-xs leading-5 text-fg-muted">
               <Clock3 className="h-4 w-4 text-accent" aria-hidden />
@@ -1419,7 +1419,7 @@ export function LeadLifecycleActions({
                     className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-sm"
                   >
                     <CheckCircle2 className="h-4 w-4" aria-hidden />
-                    Book meeting & send invite
+                    Create Google Meet & send invite
                   </button>
                 </div>
               </div>

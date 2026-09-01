@@ -155,7 +155,7 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
         process.env.TWILIO_AUTH_TOKEN &&
         (process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_MESSAGING_SERVICE_SID),
     ),
-    gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_FROM_ADDRESS),
+    gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_USER),
   };
 
   return Object.fromEntries(

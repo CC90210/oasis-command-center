@@ -1,6 +1,11 @@
 import "server-only";
 
-import { listRecords, type ListRecordsResult, type TenantRecord } from "@/lib/manifest/data";
+import {
+  listRecords,
+  listRecordsForViewer,
+  type ListRecordsResult,
+  type TenantRecord,
+} from "@/lib/manifest/data";
 
 export const OASIS_PIPELINE_OVERVIEW_LIMIT = 40;
 export const OASIS_PIPELINE_STAGE_PAGE_SIZE = 100;
@@ -114,6 +119,103 @@ type RecordLister = (input: {
   search?: { fields: readonly string[]; query: string };
 }) => Promise<ListRecordsResult>;
 
+type ViewerRecordLister = (input: {
+  tenant_id: string;
+  entity: string;
+  userId: string;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}) => Promise<ListRecordsResult>;
+
+function normalizedSearchTerms(rawQuery: string | null | undefined): string[] {
+  return (rawQuery || "")
+    .normalize("NFKC")
+    .trim()
+    .slice(0, 160)
+    .toLowerCase()
+    .split(/[(),"'\\\s%*_]+/g)
+    .filter(Boolean);
+}
+
+function containsTermsInOrder(value: unknown, terms: readonly string[]): boolean {
+  const haystack = String(value ?? "").normalize("NFKC").toLowerCase();
+  let cursor = 0;
+  for (const term of terms) {
+    const index = haystack.indexOf(term, cursor);
+    if (index < 0) return false;
+    cursor = index + term.length;
+  }
+  return true;
+}
+
+function scopedWindowFromRows(input: {
+  rows: TenantRecord[];
+  stageKeys: readonly string[];
+  activeStage: string | null;
+  requestedPage: number;
+  salesProgram?: string | null;
+  salesMotion?: string | null;
+  query?: string | null;
+}): OasisPipelineWindow {
+  const queryTerms = normalizedSearchTerms(input.query);
+  const allowedStages = new Set(input.stageKeys);
+  const rows = input.rows.filter((row) => {
+    const data = row.data || {};
+    const stage = String(data.stage || "");
+    if (!allowedStages.has(stage)) return false;
+    if (input.salesProgram && data.sales_program !== input.salesProgram) return false;
+    if (input.salesMotion && data.sales_motion !== input.salesMotion) return false;
+    if (queryTerms.length === 0) return true;
+    return OASIS_PIPELINE_SEARCH_FIELDS.some((field) =>
+      containsTermsInOrder(data[field], queryTerms),
+    );
+  });
+
+  const byStage = new Map<string, TenantRecord[]>();
+  for (const stage of input.stageKeys) byStage.set(stage, []);
+  for (const row of rows) byStage.get(String(row.data.stage))?.push(row);
+  const stageCounts = Object.fromEntries(
+    input.stageKeys.map((stage) => [stage, byStage.get(stage)?.length ?? 0]),
+  );
+  const total = rows.length;
+  const activeTotal = input.activeStage ? stageCounts[input.activeStage] ?? 0 : total;
+  const pageSize = input.activeStage
+    ? OASIS_PIPELINE_STAGE_PAGE_SIZE
+    : OASIS_PIPELINE_OVERVIEW_LIMIT;
+  const lastPage = input.activeStage
+    ? Math.max(1, Math.ceil(activeTotal / pageSize))
+    : 1;
+  const page = Math.min(input.requestedPage, lastPage);
+  const visibleRows = input.activeStage
+    ? (byStage.get(input.activeStage) || []).slice((page - 1) * pageSize, page * pageSize)
+    : input.stageKeys.flatMap((stage) =>
+        (byStage.get(stage) || []).slice(0, OASIS_PIPELINE_OVERVIEW_LIMIT),
+      );
+  const shownFrom = visibleRows.length === 0 ? 0 : input.activeStage ? (page - 1) * pageSize + 1 : 1;
+  const shownTo = input.activeStage
+    ? Math.min(activeTotal, (page - 1) * pageSize + visibleRows.length)
+    : visibleRows.length;
+
+  return {
+    rows: visibleRows,
+    stageCounts,
+    total,
+    activeStage: input.activeStage,
+    page,
+    pageSize,
+    shownFrom,
+    shownTo,
+    hasPrevious: Boolean(input.activeStage && page > 1),
+    hasNext: Boolean(input.activeStage && page * pageSize < activeTotal),
+    truncatedStages: input.stageKeys.filter(
+      (stage) =>
+        !input.activeStage &&
+        (stageCounts[stage] ?? 0) > OASIS_PIPELINE_OVERVIEW_LIMIT,
+    ),
+  };
+}
+
 /**
  * Query the OASIS board in bounded stage windows.
  *
@@ -134,9 +236,16 @@ export async function listOasisPipelineWindow(
     assignedTo?: string | null;
     /** Assigned sales-rep union for a manager's read-only team view. */
     assignedToAny?: readonly string[];
+    /** Self-scoped rep read: assigned rows OR collaborator rows. */
+    viewerUserId?: string | null;
+    /** Builder delivery allocation stored outside assigned_to. */
+    fulfillmentOwnerId?: string | null;
     query?: string | null;
   },
-  deps: { list: RecordLister } = { list: listRecords },
+  deps: { list: RecordLister; listForViewer?: ViewerRecordLister } = {
+    list: listRecords,
+    listForViewer: listRecordsForViewer,
+  },
 ): Promise<OasisPipelineWindow> {
   const teamAssignees = input.assignedToAny
     ? [...new Set(input.assignedToAny.map((id) => id.trim().toLowerCase()).filter(Boolean))]
@@ -169,6 +278,106 @@ export async function listOasisPipelineWindow(
       hasNext: false,
       truncatedStages: [],
     };
+  }
+
+  const viewerUserId = input.viewerUserId?.trim().toLowerCase() || null;
+  const assignedTo = input.assignedTo?.trim().toLowerCase() || null;
+  if (teamAssignees) {
+    const scoped = await deps.list({
+      tenant_id: input.tenantId,
+      entity: "lead",
+      whereIn: { assigned_to: teamAssignees },
+      sort: "-updated_at",
+      limit: 2_000,
+    });
+    // A clipped roster read would understate a manager's team and stage totals.
+    // The live OASIS roster is far below this guard; fail loudly if it grows
+    // beyond the generic record-read ceiling rather than rendering partial data.
+    if (scoped.total >= 2_000) {
+      throw new Error("oasis_pipeline_team_scope_exceeds_safe_window");
+    }
+    return scopedWindowFromRows({
+      rows: scoped.rows,
+      stageKeys,
+      activeStage,
+      requestedPage,
+      salesProgram: input.salesProgram,
+      salesMotion: input.salesMotion,
+      query: input.query,
+    });
+  }
+  if (
+    viewerUserId &&
+    assignedTo === viewerUserId &&
+    deps.listForViewer
+  ) {
+    const fulfillmentOwnerId = input.fulfillmentOwnerId?.trim().toLowerCase() || null;
+    const [scoped, fulfillment] = await Promise.all([
+      deps.listForViewer({
+        tenant_id: input.tenantId,
+        entity: "lead",
+        userId: viewerUserId,
+        sort: "-updated_at",
+        limit: 2_000,
+      }),
+      fulfillmentOwnerId === viewerUserId
+        ? deps.list({
+            tenant_id: input.tenantId,
+            entity: "lead",
+            where: { fulfillment_owner_id: fulfillmentOwnerId },
+            sort: "-updated_at",
+            limit: 2_000,
+          })
+        : Promise.resolve({ rows: [], total: 0 }),
+    ]);
+    // A clipped scoped book would make the counts look exact while hiding old
+    // deals. The normal claim cap is 250; fail loudly if manual assignments ever
+    // push a seat to the generic record-read ceiling.
+    if (scoped.total >= 2_000 || fulfillment.total >= 2_000) {
+      throw new Error("oasis_pipeline_rep_scope_exceeds_safe_window");
+    }
+    const byId = new Map(scoped.rows.map((row) => [row.id, row]));
+    for (const row of fulfillment.rows) byId.set(row.id, row);
+    return scopedWindowFromRows({
+      rows: [...byId.values()].sort((left, right) =>
+        String(right.updated_at || "").localeCompare(String(left.updated_at || "")),
+      ),
+      stageKeys,
+      activeStage,
+      requestedPage,
+      salesProgram: input.salesProgram,
+      salesMotion: input.salesMotion,
+      query: input.query,
+    });
+  }
+
+  // Admin/owner boards are also small in the live OASIS sales program. Read
+  // the bounded working set once and group it in memory; if a future tenant
+  // grows past the generic ceiling, discard the partial window and fall back
+  // to the exact per-stage queries below.
+  if (input.assignedTo === undefined && !viewerUserId) {
+    const where: Record<string, EqualityValue> = {};
+    if (input.salesProgram) where.sales_program = input.salesProgram;
+    if (input.salesMotion) where.sales_motion = input.salesMotion;
+    const scoped = await deps.list({
+      tenant_id: input.tenantId,
+      entity: "lead",
+      sort: "-updated_at",
+      limit: 2_000,
+      ...(Object.keys(where).length ? { where } : {}),
+      ...(search ? { search } : {}),
+    });
+    if (scoped.total < 2_000) {
+      return scopedWindowFromRows({
+        rows: scoped.rows,
+        stageKeys,
+        activeStage,
+        requestedPage,
+        salesProgram: input.salesProgram,
+        salesMotion: input.salesMotion,
+        query: input.query,
+      });
+    }
   }
 
   const whereFor = (stage: string): Record<string, EqualityValue> => {

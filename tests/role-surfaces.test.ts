@@ -539,7 +539,8 @@ const pipelineCode = stripComments(pipelinePage);
 assert.ok(
   /managerTeamRead =\s*session\.ok &&\s*canReadOasisSalesTeamPipeline/.test(pipelineCode) &&
     /teamRepUserIds: \[\.\.\.managerRepRoster\.keys\(\)\]/.test(pipelineCode) &&
-    /assignedToAny: assigneeScope\.allowed \? assigneeScope\.assignedToAny : undefined/.test(pipelineCode),
+    /const teamAssigneeUnion = assigneeScope\.allowed/.test(pipelineCode) &&
+    /assignedToAny: assigneeScope\.allowed \? teamAssigneeUnion : undefined/.test(pipelineCode),
   "manager pipeline reads must pass through the OASIS tenant gate, the sales-role roster, " +
     "and the database query scope; a forged ?rep must never select an arbitrary tenant id",
 );
@@ -550,7 +551,8 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /pipelineAdmin\s*\?\s*await buildMemberNameMap\(tenantId\)\s*:\s*managerRepRoster/.test(pipelineCode),
+  /memberNameMapPromise = managerTeamRead\s*\?\s*Promise\.resolve\(managerRepRoster\)\s*:\s*buildMemberNameMap\(tenantId\)/.test(pipelineCode) &&
+    /session\.ok && pipelineAdmin\s*\?\s*memberNameMap\s*:\s*managerRepRoster/.test(pipelineCode),
   "admins get the full member filter while managers get only the sales-rep roster",
 );
 

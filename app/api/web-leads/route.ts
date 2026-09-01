@@ -24,12 +24,23 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { parseFilters } from "@/lib/web-leads/filters";
-import { selectSheetIds } from "@/lib/web-leads/queries";
-import { fetchSheets, fetchLeads, PAGE_SIZE, WEBDEV_TENANT_ID, type Viewer } from "@/lib/web-leads/data";
+import { buildFacets, selectSheetIds } from "@/lib/web-leads/queries";
+import {
+  fetchLeadProjection,
+  fetchSheets,
+  fetchSheetsScopedToViewer,
+  fetchLeads,
+  isScopedContractor,
+  PAGE_SIZE,
+  WEBDEV_TENANT_ID,
+} from "@/lib/web-leads/data";
 import { fetchScoreIndex } from "@/lib/web-leads/scores";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const PRIVATE_BROWSER_CACHE = "private, max-age=15, stale-while-revalidate=30";
 
 export async function GET(req: NextRequest) {
   const session = await resolveSessionContext();
@@ -47,8 +58,10 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
+    const viewer = await resolveWebLeadViewer(session);
     const filters = parseFilters(req.nextUrl.searchParams);
+    const fresh = req.nextUrl.searchParams.get("fresh") === "1";
+    const scope = req.nextUrl.searchParams.get("scope") === "mine" ? "mine" : "pool";
     // Concurrent, not serial: the score index is a tenant-wide read that does
     // not depend on which sheets the filters select, so it has no reason to
     // wait on fetchSheets().
@@ -69,21 +82,56 @@ export async function GET(req: NextRequest) {
     // next person reads the answer off the response instead. Visible in the
     // browser's network panel under Timing, and in `curl -i`.
     const t0 = Date.now();
-    const [sheets, scoreIndex] = await Promise.all([fetchSheets(), fetchScoreIndex()]);
+    const projectedRowsPromise = fetchLeadProjection(viewer, scope, fresh);
+    const sheetsPromise = scope === "pool" ? fetchSheets() : Promise.resolve([]);
+    const [sheets, scoreIndex, projectedRows] = await Promise.all([
+      sheetsPromise,
+      fetchScoreIndex(),
+      projectedRowsPromise,
+    ]);
     const tIndex = Date.now() - t0;
     const ids = selectSheetIds(sheets, filters);
     // scope=mine returns the caller's OWN book (including lapsed claims);
     // the default pool excludes every lead somebody currently holds, which is
     // what stops two reps dialling the same business. One clock for the whole
     // request so the expiry rules cannot see time move mid-read.
-    const scope = req.nextUrl.searchParams.get("scope") === "mine" ? "mine" : "pool";
     const t1 = Date.now();
-    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, { scope, now: Date.now() });
+    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, {
+      scope,
+      now: Date.now(),
+      fresh,
+      projectedRows,
+    });
     const tLeads = Date.now() - t1;
+    const facets = scope === "pool"
+      ? buildFacets(
+          isScopedContractor(viewer)
+            ? await fetchSheetsScopedToViewer(viewer, {
+                scope,
+                fresh,
+                projectedRows,
+                baseSheets: sheets,
+              })
+            : sheets,
+          filters,
+        )
+      : null;
     return NextResponse.json(
-      { leads, total, page: filters.page, pageSize: PAGE_SIZE },
+      {
+        leads,
+        total,
+        page: filters.page,
+        pageSize: PAGE_SIZE,
+        facets,
+      },
       {
         headers: {
+          // Authenticated tenant data may be reused only by this browser and
+          // only for the same session cookie. `private` keeps CDNs/shared
+          // proxies out; Vary prevents one signed-in identity reusing another's
+          // response in a shared browser cache.
+          "Cache-Control": PRIVATE_BROWSER_CACHE,
+          "Vary": "Cookie",
           // Both legs plus the total, so a slow page can be attributed without
           // reproducing it locally. Cache state is what separates a cold
           // instance from a warm one, and it is the difference that matters:
@@ -91,7 +139,7 @@ export async function GET(req: NextRequest) {
           // fresh instance pays full price no matter how warm its neighbours
           // are.
           "Server-Timing": [
-            `index;desc="sheets+scores";dur=${tIndex}`,
+            `index;desc="sheets+scores+projection";dur=${tIndex}`,
             `leads;desc="filter+page";dur=${tLeads}`,
             `total;dur=${Date.now() - t0}`,
           ].join(", "),

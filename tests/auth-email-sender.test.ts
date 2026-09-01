@@ -193,6 +193,9 @@ async function main() {
   assert.match(authEmailSource, /AUTH_SMTP_HOST/);
   assert.match(authEmailSource, /GMAIL_USER/);
   assert.match(authEmailSource, /PERSONAL_EMAIL_DOMAINS/);
+  assert.match(authEmailSource, /connectionTimeout:\s*10_000/);
+  assert.match(authEmailSource, /greetingTimeout:\s*10_000/);
+  assert.match(authEmailSource, /socketTimeout:\s*20_000/);
 
   console.log("auth email sender isolation: ok");
 }

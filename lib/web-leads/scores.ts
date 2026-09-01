@@ -116,6 +116,103 @@ export async function fetchScoreIndex(): Promise<ScoreIndex> {
   return memo("web-leads:scores", TTL.SCORES, loadScoreIndex);
 }
 
+type AuditStampRow = { business_id: string; fetched_at: string };
+type ScoredAuditRow = {
+  business_id: string;
+  quality_score: number | null;
+  fetched_at: string;
+};
+type UnreachableRow = { business_id: string };
+type ParkedCandidateRow = { business_id: string; signals: unknown };
+
+function assembleScoreIndex(
+  allRows: AuditStampRow[],
+  scoredRows: ScoredAuditRow[],
+  unreachableRows: UnreachableRow[],
+  parkedCandidates: ParkedCandidateRow[],
+): ScoreIndex {
+  const newestAt = new Map<string, string>();
+  for (const row of allRows) {
+    const previous = newestAt.get(row.business_id);
+    if (!previous || row.fetched_at > previous) newestAt.set(row.business_id, row.fetched_at);
+  }
+  const parked = confirmParked(parkedCandidates);
+  const scored = new Map<string, number>();
+  for (const row of scoredRows) {
+    if (newestAt.get(row.business_id) !== row.fetched_at) continue;
+    if (typeof row.quality_score !== "number") continue;
+    if (parked.has(row.business_id)) continue;
+    scored.set(row.business_id, row.quality_score);
+  }
+  return {
+    scored,
+    unreachable: new Set(unreachableRows.map((row) => row.business_id)),
+    parked,
+  };
+}
+
+/**
+ * Pipeline boards render at most a few hundred rows and do not filter/sort by
+ * score. Querying only those indexed business ids avoids the tenant-wide audit
+ * and leading-wildcard parked-domain scans used by the 31K-row prospect pool,
+ * while assembling the result through the exact same newest-row precedence.
+ */
+export async function fetchScoreIndexForBusinessIds(
+  businessIds: readonly string[],
+): Promise<ScoreIndex> {
+  const ids = [...new Set(businessIds.map((id) => id.trim()).filter(Boolean))];
+  if (ids.length === 0) return EMPTY_SCORE_INDEX;
+  if (ids.length > 600) throw new Error("targeted_score_index_exceeds_safe_window");
+
+  const db = getServiceSupabase();
+  const [allAudits, scoredAudits, unreachable, parkedRows] = await Promise.all([
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,fetched_at", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,quality_score,fetched_at", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .not("profile", "is", null)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_unreachable")
+      .select("business_id", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,signals", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .limit(LEAD_READ_CAP),
+  ]);
+
+  if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
+  if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
+  if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
+  if (parkedRows.error) throw new Error(`parked_index_read_failed: ${parkedRows.error.message}`);
+
+  const allRows = (allAudits.data || []) as AuditStampRow[];
+  const scoredRows = (scoredAudits.data || []) as ScoredAuditRow[];
+  const unreachableRows = (unreachable.data || []) as UnreachableRow[];
+  const candidates = (parkedRows.data || []) as ParkedCandidateRow[];
+  assertCompleteRead("audit_index_targeted", allRows, allAudits.count);
+  assertCompleteRead("audit_index_scored_targeted", scoredRows, scoredAudits.count);
+  assertCompleteRead("unreachable_index_targeted", unreachableRows, unreachable.count);
+  assertCompleteRead("parked_index_targeted", candidates, parkedRows.count);
+  return assembleScoreIndex(allRows, scoredRows, unreachableRows, candidates);
+}
+
 /**
  * The parked-domain candidate net, on its OWN cache entry.
  *
@@ -214,9 +311,9 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
   // is never memoised -- see its doc comment. Both guarantees still hold; they
   // are just enforced one level down now.
 
-  const allRows = (allAudits.data || []) as { business_id: string; fetched_at: string }[];
-  const scoredRows = (scoredAudits.data || []) as { business_id: string; quality_score: number | null; fetched_at: string }[];
-  const unreachableRows = (unreachable.data || []) as { business_id: string }[];
+  const allRows = (allAudits.data || []) as AuditStampRow[];
+  const scoredRows = (scoredAudits.data || []) as ScoredAuditRow[];
+  const unreachableRows = (unreachable.data || []) as UnreachableRow[];
 
   // Completeness is PROVED against each read's own match count, not inferred
   // from whether our cap was hit -- see assertCompleteRead() in tenant.ts for
@@ -250,36 +347,7 @@ async function loadScoreIndex(): Promise<ScoreIndex> {
    * query, which is precisely why it would have sat here unnoticed until the
    * next re-crawl wrote a profile-less row and quietly re-dated an old score.
    */
-  const newestAt = new Map<string, string>();
-  for (const r of allRows) {
-    const prev = newestAt.get(r.business_id);
-    if (!prev || r.fetched_at > prev) newestAt.set(r.business_id, r.fetched_at);
-  }
-
-  // The precise decision, not the query's coarse guess -- see confirmParked().
-  const parkedCandidates = parkedRes;
-  const parked = confirmParked(parkedCandidates);
-
-  const scored = new Map<string, number>();
-  for (const r of scoredRows) {
-    // Only if THIS row is the business's newest audit. Anything older is a
-    // superseded crawl and the panel would not show it either.
-    if (newestAt.get(r.business_id) !== r.fetched_at) continue;
-    if (typeof r.quality_score !== "number") continue; // never invent a 0
-    // A domain that is FOR SALE never carries a score. Excluded HERE, at the
-    // one place scores are built, rather than filtered at each of the places
-    // they are read -- the leads table, the band filters, the percentile
-    // denominator and the competitor peer groups all consume this map, and a
-    // rule applied at four call sites is a rule that will be missed at a fifth.
-    if (parked.has(r.business_id)) continue;
-    scored.set(r.business_id, r.quality_score);
-  }
-
-  return {
-    scored,
-    unreachable: new Set(unreachableRows.map((r) => r.business_id)),
-    parked,
-  };
+  return assembleScoreIndex(allRows, scoredRows, unreachableRows, parkedRes);
 }
 
 /**

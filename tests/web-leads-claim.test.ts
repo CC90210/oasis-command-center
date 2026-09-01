@@ -467,9 +467,13 @@ assert.equal(
     /onStartCalling=\{startCalling\}/,
     "Start calling must go through the claiming path, not straight into Call Mode",
   );
-  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[canMutate, mine, leads, push, filters\]\);/);
+  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[canOperateCurrentView, mine, leads, push, filters\]\);/);
   assert.ok(fn, "startCalling must be findable");
-  assert.match(fn![0], /if \(!canMutate\) return;/, "a read-only viewer must not enter the claiming/call path");
+  assert.match(
+    fn![0],
+    /if \(!canOperateCurrentView\) return;/,
+    "a read-only viewer or manager team view must not enter the claiming/call path",
+  );
   assert.match(
     fn![0],
     /if \(mine\) \{ setCalling\(true\); return; \}/,

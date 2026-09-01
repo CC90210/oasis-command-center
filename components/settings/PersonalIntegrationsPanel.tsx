@@ -23,7 +23,7 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2, Mail, Check, AlertCircle, X } from "lucide-react";
+import { Loader2, Check, AlertCircle, X } from "lucide-react";
 
 type PersonalStatus = {
   service: string;
@@ -368,16 +368,7 @@ export function PersonalIntegrationsPanel({
   const calendarIdentityMismatch = gmailStatus?.calendar_identity_mismatch === true;
 
   return (
-    <div className="rounded-2xl border border-bg-border bg-bg-elev/40 p-5 space-y-4">
-      <header>
-        <h3 className="text-sm font-bold text-fg uppercase tracking-wider flex items-center gap-2">
-          <Mail className="w-4 h-4 text-accent" />
-          Your account connections
-        </h3>
-        <p className="text-[12px] text-fg-muted leading-relaxed mt-1">
-          These connections belong only to your signed-in profile. They do not describe the shared Google Workspace or Telegram bridge shown above. Sends from your seat use your account; teammates keep using their own.{showKixie ? " Personal Kixie and TextTorrent overrides also live here." : ""}
-        </p>
-      </header>
+    <div className="space-y-4">
 
       {oauthFlash === "connected" && (
         <div className="flex items-start gap-2 text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-md p-3">
@@ -461,7 +452,7 @@ export function PersonalIntegrationsPanel({
                       ? `Connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this profile must send client invitations as ${gmailStatus?.expected_work_email || "its OASIS work email"}. Reconnect with the matching work account.`
                     : calendarReconnectRequired
                       ? `Gmail is connected as ${gmailStatus?.gmail_address || "(address unknown)"}, but this connection predates Calendar access. Founder hosts reconnect once to enable Calendar invites and Google Meet.`
-                      : "No personal Google OAuth is saved for this login. The shared workspace can still be connected above. Connect your own work account for Gmail sends, read-only deal-email monitoring, and Calendar invites with Google Meet."}
+                      : "No personal Google OAuth is saved for this login. A shared workspace sender may still be available, but this status describes only your seat. Connect your own work account for Gmail sends, read-only deal-email monitoring, and Calendar invites with Google Meet."}
                 </div>
               </div>
               <div className="shrink-0 flex flex-col gap-1.5">

@@ -3,7 +3,13 @@ import { normalizeCollaborators } from "@/lib/lead-scope";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 
-export const AGENT_PIPELINE_STAGE_KEYS = [
+/**
+ * Every sales seat retains its own complete deal history after a prospect is
+ * assigned. Stage controls still enforce the guided workflow; this list is a
+ * READ boundary only. `researched` stays out because it is the shared prospect
+ * pool, not anyone's assigned book.
+ */
+export const REP_PIPELINE_STAGE_KEYS = [
   "assigned",
   "attempting_contact",
   "connected",
@@ -12,24 +18,18 @@ export const AGENT_PIPELINE_STAGE_KEYS = [
   "demo_completed",
   "proposal_sent",
   "won",
+  "lost",
   "onboarding",
+  "in_build",
+  "client_review",
+  "launched",
 ] as const;
 
-export const OPENER_PIPELINE_STAGE_KEYS = [
-  "assigned",
-  "attempting_contact",
-  "connected",
-  "qualified",
-  "founder_meeting_booked",
-] as const;
-
-export const CLOSER_PIPELINE_STAGE_KEYS = [
-  "founder_meeting_booked",
-  "demo_completed",
-  "proposal_sent",
-  "won",
-  "onboarding",
-] as const;
+// Kept as named exports because call sites and tests describe the persona, but
+// visibility is deliberately identical across sales roles now.
+export const AGENT_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
+export const OPENER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
+export const CLOSER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
 
 /**
  * The manager coaches every assigned lead after it leaves the prospect pool.
@@ -61,7 +61,7 @@ const BUILDER_DELIVERY_STAGE_SET = new Set<string>(BUILDER_DELIVERY_STAGE_KEYS);
 // delivery stages his build work sits in. Union, not replacement: dropping the
 // delivery stages here would empty the pipeline half of his Today.
 const BUILDER_SALES_AND_DELIVERY_STAGE_SET = new Set<string>([
-  ...AGENT_PIPELINE_STAGE_KEYS,
+  ...REP_PIPELINE_STAGE_KEYS,
   ...BUILDER_VISIBLE_STAGE_KEYS,
 ]);
 const EMPTY_STAGE_SET = new Set<string>();
@@ -81,9 +81,9 @@ function stageSetForOasisRole(role: string): ReadonlySet<string> {
  * ALLOWLIST. The OASIS sales titles added 2026-08-21 — manager, closer, opener,
  * builder — are deliberately ABSENT, and each absence is a decision:
  *
- *   closer / opener  see their own book at the stages their job can act on.
- *                    Keeping separate stage sets prevents a closer's deal
- *                    disappearing immediately after the demo.
+ *   closer / opener  see their own complete assigned lifecycle, including
+ *                    won/lost and delivery history. Action gates stay
+ *                    separate, so visibility does not grant arbitrary moves.
  *
  *   manager          receives a separate roster-scoped READ through
  *                    canOpenOasisSalesRecord and oasis-pipeline-query. Keeping

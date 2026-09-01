@@ -48,7 +48,7 @@ assert.match(source, /never sent to the client/i);
 assert.match(source, /confirmed the client(?:'|&apos;)s contact details and email/i);
 assert.match(source, /client agreed to this date and time/i);
 assert.match(source, /internal founder handoff note is complete/i);
-assert.match(source, /Book meeting & send invite/);
+assert.match(source, /Create Google Meet & send invite/);
 assert(!source.includes('type="datetime-local"'), "all lifecycle dates use explicit date and time controls");
 assert.match(source, /LifecycleDateTimeFields/, "follow-ups and reschedules share the guided Eastern-time control");
 assert.match(source, /Rescheduling updates the existing Google invite/i);

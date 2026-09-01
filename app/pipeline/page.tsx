@@ -29,8 +29,6 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { PageHeader, Card, EmptyState } from "@/components/Card";
-import { getActiveProfile } from "@/lib/queries";
-import { safe } from "@/lib/api-helpers";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
@@ -40,7 +38,7 @@ import {
   isOasisPipelineAdmin,
   stagesForOasisRole,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { attachAssignedNames, buildMemberNameMap } from "@/lib/assigned-names";
+import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
 import { getOasisSalesRepRoster } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
@@ -82,17 +80,25 @@ export default async function PipelinePage({
   // render — strictly no worse than the pre-redirect behavior.
   // Captured for the query below: every OASIS sales tenant is narrowed to the
   // cold-outbound motion, and oasis-webdev also retains its program predicate.
+  const session = await resolveSessionContext();
+  const tenantId = session.ok ? session.tenantId : "";
   let tenantSlug: string | null = null;
+  let tenantScopeError: Error | null = null;
   try {
-    const sessionResult = await resolveSessionContext();
-    if (sessionResult.ok) {
+    if (session.ok) {
       const db = getServiceSupabase();
       const tenantRow = await db
         .from("tenants")
         .select("slug")
-        .eq("id", sessionResult.tenantId)
+        .eq("id", session.tenantId)
         .maybeSingle();
+      if (tenantRow.error) {
+        throw new Error(`pipeline_tenant_lookup_failed: ${tenantRow.error.message}`);
+      }
       const slug = (tenantRow.data as { slug: string | null } | null)?.slug;
+      if (!slug) {
+        throw new Error("pipeline_tenant_slug_missing");
+      }
       tenantSlug = slug ?? null;
       if (slug && !OASIS_PIPELINE_SLUGS.has(slug)) {
         redirect(`/t/${slug}/leads`);
@@ -107,6 +113,8 @@ export default async function PipelinePage({
     if (typeof digest === "string" && digest.startsWith("NEXT_REDIRECT")) {
       throw err;
     }
+    tenantScopeError = err instanceof Error ? err : new Error("pipeline_tenant_lookup_failed");
+    console.error("[pipeline.tenant]", tenantScopeError);
   }
 
   const sp = (await searchParams) || {};
@@ -117,16 +125,23 @@ export default async function PipelinePage({
   const repFilter = typeof sp.rep === "string" && sp.rep.trim() ? sp.rep.trim().toLowerCase() : null;
   const requestedPage = typeof sp.page === "string" ? sp.page : null;
 
-  const profile = await safe("pipeline.profile", getActiveProfile(), null);
-  const tenantId = profile?.tenant_id || "";
-  const session = await resolveSessionContext();
-
   if (!tenantId) {
     return (
       <div className="space-y-6 animate-fade-in">
         <PageHeader title="Pipeline" subtitle="Sign in to see your pipeline." />
         <Card>
           <EmptyState message="No tenant on this session. Finish onboarding to connect this workspace." />
+        </Card>
+      </div>
+    );
+  }
+
+  if (tenantScopeError) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Pipeline unavailable" subtitle="We could not verify this workspace's access boundary." />
+        <Card>
+          <EmptyState message="Refresh to try again. No reduced or partial lead view was shown." />
         </Card>
       </div>
     );
@@ -192,6 +207,25 @@ export default async function PipelinePage({
     teamRepUserIds: [...managerRepRoster.keys()],
   });
 
+  // Resolve the directory once. The former path fetched it once to label rows
+  // and again to build the rep chips, after resolving the same session/profile
+  // three times above. Start this read alongside the pipeline query instead.
+  const memberNameMapPromise = managerTeamRead
+    ? Promise.resolve(managerRepRoster)
+    : buildMemberNameMap(tenantId);
+  // The manager's default roster and an explicit rep chip use the same bounded
+  // one-read path. Treating ?rep= as a scalar scope fell back to one query per
+  // lifecycle stage even though it is simply a one-member roster.
+  const teamAssigneeUnion = assigneeScope.allowed
+    ? assigneeScope.assignedToAny
+      ?? (managerTeamRead && typeof assigneeScope.assignedTo === "string"
+        ? [assigneeScope.assignedTo]
+        : undefined)
+    : undefined;
+  const directAssignee = assigneeScope.allowed && !teamAssigneeUnion
+    ? assigneeScope.assignedTo
+    : undefined;
+
   // Bounded, database-first windows. Overview mode fetches at most 40 newest
   // rows per stage with exact totals; a selected stage exposes every older row
   // through 100-row pages. Program, role/rep, working stage and search all run
@@ -199,18 +233,34 @@ export default async function PipelinePage({
   // the former global 500-row cap. Legacy OASIS tenants omit only the program
   // predicate; migration 161 gives their cold working rows the motion marker.
   let pipelineWindow;
+  let memberNameMap: Map<string, string>;
+  let ownedSlug: string | null;
   try {
-    pipelineWindow = await listOasisPipelineWindow({
-      tenantId,
-      stageKeys: assigneeScope.allowed ? stages.map((stage) => stage.key) : [],
-      requestedStage: stageFilter,
-      requestedPage,
-      salesProgram: isWebsiteSalesTenant ? OASIS_WEBSITE_SALES_PROGRAM : null,
-      salesMotion: isWebsiteSalesTenantSlug(tenantSlug) ? OASIS_COLD_OUTBOUND_MOTION : null,
-      assignedTo: assigneeScope.allowed ? assigneeScope.assignedTo : undefined,
-      assignedToAny: assigneeScope.allowed ? assigneeScope.assignedToAny : undefined,
-      query,
-    });
+    [pipelineWindow, memberNameMap, ownedSlug] = await Promise.all([
+      listOasisPipelineWindow({
+        tenantId,
+        stageKeys: assigneeScope.allowed ? stages.map((stage) => stage.key) : [],
+        requestedStage: stageFilter,
+        requestedPage,
+        salesProgram: isWebsiteSalesTenant ? OASIS_WEBSITE_SALES_PROGRAM : null,
+        salesMotion: isWebsiteSalesTenantSlug(tenantSlug) ? OASIS_COLD_OUTBOUND_MOTION : null,
+        assignedTo: assigneeScope.allowed ? directAssignee : undefined,
+        assignedToAny: assigneeScope.allowed ? teamAssigneeUnion : undefined,
+        viewerUserId:
+          assigneeScope.allowed && !pipelineAdmin && !managerTeamRead
+            ? session.ok
+              ? session.userId
+              : null
+            : null,
+        fulfillmentOwnerId:
+          session.ok && session.teamRole.trim().toLowerCase() === "builder"
+            ? session.userId
+            : null,
+        query,
+      }),
+      memberNameMapPromise,
+      resolveOwnedSlug(tenantId),
+    ]);
   } catch (error) {
     console.error("[pipeline.rows]", error);
     return (
@@ -223,7 +273,10 @@ export default async function PipelinePage({
     );
   }
 
-  const named = await attachAssignedNames(pipelineWindow.rows, tenantId);
+  const named = pipelineWindow.rows.map((row) => ({
+    ...row,
+    data: withAssignedName(row.data, memberNameMap),
+  }));
   /**
    * The website score, joined server-side.
    *
@@ -232,11 +285,12 @@ export default async function PipelinePage({
    * the board's row model. The SCORE is the one exception: it lives in
    * leadgen_site_audits keyed by webdev_source_business_id, not on the lead.
    *
-   * Resolved against the SAME memoised index /web-leads uses, so the CRM board
-   * and the leads list cannot report different numbers for one business.
+    * Resolved through the SAME score-index assembler /web-leads uses, but with
+    * indexed reads for only this page's business ids. The number and precedence
+    * stay identical without scanning ~50K audit rows on every cold board.
    *
    * GATED ON THE TENANT. Three slugs render this page (`oasis`, `oasis-ai-cc`,
-   * `oasis-webdev`) but every query inside fetchScoreIndex is pinned to
+    * `oasis-webdev`) but every query inside the score resolver is pinned to
    * WEBDEV_TENANT_ID, which is `oasis-ai-cc`. Ungated, another tenant's board
    * would resolve its rows against a DIFFERENT tenant's audit index: a miss
    * renders "Not scored yet" on a lead that may be scored, and a colliding
@@ -249,15 +303,16 @@ export default async function PipelinePage({
    * rows rather than thirty-one thousand.
    */
   const rows =
-    tenantId === WEBDEV_TENANT_ID ? await attachWebsiteScores(named) : named;
+    tenantId === WEBDEV_TENANT_ID
+      ? await attachWebsiteScores(named)
+      : named;
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.
   const repRoster =
     session.ok && pipelineAdmin
-      ? await buildMemberNameMap(tenantId)
+      ? memberNameMap
       : managerRepRoster;
-  const ownedSlug = (await resolveOwnedSlug(tenantId)) || "oasis";
 
   const hrefWith = (changes: { stage?: string | null; page?: number | null; rep?: string | null }) => {
     const params = new URLSearchParams();
@@ -312,7 +367,7 @@ export default async function PipelinePage({
       )}
 
       <LeadPipelineView
-        slug={ownedSlug}
+        slug={ownedSlug || "oasis"}
         entityName="lead"
         entityLabel="Lead"
         stages={stages}

@@ -70,6 +70,7 @@ import { Card, PageHeader, Tag } from "@/components/Card";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
@@ -169,15 +170,12 @@ export default async function TenantCatchAllPage({
   const user = await getSessionUser();
   const service = getServiceSupabase();
   const profileRes = user
-    ? await service
-        .from("user_profiles")
-        .select("tenant_id, email, team_role, is_owner, admin_access")
-        .eq("auth_user_id", user.id)
-        .maybeSingle()
-    : { data: null };
-  const profileRow = profileRes.data as
-    | { tenant_id: string | null; email: string | null; team_role: string | null; is_owner: boolean | null; admin_access: boolean | null }
-    | null;
+    ? await resolveActiveProfileForUser(user)
+    : { profile: null, error: null };
+  if (profileRes.error) {
+    throw new Error(`active_profile_resolution_failed: ${profileRes.error}`);
+  }
+  const profileRow = profileRes.profile;
 
   // OASIS sales seats use the dedicated pipeline, whose query can express
   // their exact role/stage/ownership boundary. The generic manifest lead
@@ -191,7 +189,7 @@ export default async function TenantCatchAllPage({
   const isOasisLeadSurface = isOasisSurfaceTenant(normalised) && pageDef.entity === "lead";
   if (
     isOasisLeadSurface &&
-    ["manager", "closer", "opener", "builder", "marketing", "agent"].includes(
+    ["owner", "admin", "member", "manager", "closer", "opener", "builder", "marketing", "agent"].includes(
       oasisDirectRole,
     )
   ) {

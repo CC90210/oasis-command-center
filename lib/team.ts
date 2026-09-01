@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { cache } from "react";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
@@ -34,7 +35,7 @@ export type { InvitableRole, TeamRole };
  * by the two surfaces added for the sales roles; consolidating the rest is a
  * separate change and not one to make while shipping a feature.
  */
-export async function tenantSlugFor(tenantId: string): Promise<string | null> {
+export const tenantSlugFor = cache(async (tenantId: string): Promise<string | null> => {
   try {
     const supa = getServiceSupabase();
     const { data, error } = await supa
@@ -49,7 +50,7 @@ export async function tenantSlugFor(tenantId: string): Promise<string | null> {
     console.error("[team.tenantSlugFor]", err);
     return null;
   }
-}
+});
 
 /**
  * How long a fresh invite stays redeemable.
@@ -331,6 +332,46 @@ export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> 
     .order("created_at", { ascending: false });
   if (error) throw dbError("listActiveInvites", error);
   return (data ?? []) as InviteRow[];
+}
+
+/**
+ * Revoke earlier live grants for the same tenant and normalized mailbox.
+ *
+ * A retry cannot resend an earlier raw token because only its hash is stored.
+ * The role is deliberately NOT part of the match: correcting an Admin invite
+ * to Member must revoke the older higher-privilege token. Retiring the old row
+ * before minting the replacement keeps ordinary retries and double-clicks to
+ * one usable grant. The browser also blocks a second submit in flight.
+ */
+export async function supersedeActiveInvites(args: {
+  tenantId: string;
+  email: string;
+}): Promise<number> {
+  const email = normalizeInviteEmail(args.email);
+  if (!email) throw new Error("invite_email_required");
+
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("tenant_invites")
+    .select("id, email, team_role")
+    .eq("tenant_id", args.tenantId)
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .gt("expires_at", new Date().toISOString());
+  if (error) throw dbError("invite_supersede_read_failed", error);
+
+  const ids = ((data || []) as Array<{ id: string; email: string | null; team_role: string }>)
+    .filter((row) => normalizeInviteEmail(row.email) === email)
+    .map((row) => row.id);
+  if (ids.length === 0) return 0;
+
+  const update = await supa
+    .from("tenant_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("tenant_id", args.tenantId)
+    .in("id", ids);
+  if (update.error) throw dbError("invite_supersede_write_failed", update.error);
+  return ids.length;
 }
 
 export async function createInvite(

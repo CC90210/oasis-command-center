@@ -178,6 +178,9 @@ export async function sendAuthEmail(
         port: resolved.config.port,
         secure: resolved.config.secure,
         requireTLS: !resolved.config.secure,
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 20_000,
         auth: { user: resolved.config.user, pass: resolved.config.password },
       });
     }

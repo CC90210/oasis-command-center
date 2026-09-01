@@ -34,11 +34,13 @@ import {
   fetchSheetsScopedToViewer,
   isScopedContractor,
   WEBDEV_TENANT_ID,
-  type Viewer,
 } from "@/lib/web-leads/data";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const PRIVATE_BROWSER_CACHE = "private, max-age=15, stale-while-revalidate=30";
 
 export async function GET(req: NextRequest) {
   const session = await resolveSessionContext();
@@ -54,12 +56,23 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const viewer: Viewer = { userId: session.userId, teamRole: session.teamRole, isAdmin: session.isAdmin };
+    const viewer = await resolveWebLeadViewer(session);
+    const fresh = req.nextUrl.searchParams.get("fresh") === "1";
+    const filters = parseFilters(req.nextUrl.searchParams);
+    const scope = filters.view === "mine" ? "mine" : "pool";
     // Keep the fast tenant-wide counter path for the normal (unscoped) case;
     // only a scoped contractor pays for the per-lead re-derivation.
-    const sheets = isScopedContractor(viewer) ? await fetchSheetsScopedToViewer(viewer) : await fetchSheets();
-    const filters = parseFilters(req.nextUrl.searchParams);
-    return NextResponse.json(buildFacets(sheets, filters));
+    const sheets = isScopedContractor(viewer)
+      ? await fetchSheetsScopedToViewer(viewer, { fresh, scope, now: Date.now() })
+      : await fetchSheets();
+    return NextResponse.json(buildFacets(sheets, filters), {
+      headers: {
+        // Facet counts reveal a tenant's book just as the rows do. Brief
+        // browser reuse is safe; a CDN/shared proxy cache is not.
+        "Cache-Control": PRIVATE_BROWSER_CACHE,
+        "Vary": "Cookie",
+      },
+    });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "facets_failed" },

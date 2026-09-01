@@ -20,6 +20,11 @@ import {
   isInvitableRole,
   isOasisPipelineRepRole,
 } from "@/lib/team-roles";
+import {
+  teamInviteEmailText,
+  teamInviteOrigin,
+  teamInviteUrl,
+} from "@/lib/team-invite-email";
 
 assert.equal(canManageTeam("manager", false), false, "manager/off is not a team admin");
 assert.equal(
@@ -181,37 +186,68 @@ for (const option of INVITABLE_ROLE_OPTIONS) {
     `${option.value} needs a human explanation shared by Settings and /team`,
   );
 }
+
+assert.equal(
+  teamInviteOrigin({ PUBLIC_APP_URL: "https://oasisai.work" }),
+  "https://oasisai.work",
+);
+assert.equal(
+  teamInviteOrigin({ PUBLIC_APP_URL: "https://attacker.test/path" }),
+  "https://oasisai.work",
+  "an emailed invite never trusts a configured path or request host",
+);
+assert.equal(
+  teamInviteUrl("token/with spaces", { PUBLIC_APP_URL: "https://oasisai.work" }),
+  "https://oasisai.work/invite/token%2Fwith%20spaces",
+);
+const inviteMail = teamInviteEmailText({
+  roleLabel: "Sales Manager",
+  inviteUrl: "https://oasisai.work/invite/offline-token",
+  expiresAt: "2026-09-08T12:00:00.000Z",
+});
+assert.match(inviteMail, /OASIS AI Command Center/);
+assert.match(inviteMail, /Role: Sales Manager/);
+assert.match(inviteMail, /https:\/\/oasisai\.work\/invite\/offline-token/);
 assert.equal(
   INVITABLE_ROLE_OPTIONS.some((option) => option.value === "agent"),
   false,
   "the ambiguous legacy Agent role must not return to either invite form",
 );
 
-const QUICK_INVITE = readFileSync("components/settings/QuickInviteCard.tsx", "utf8");
 const TEAM_INVITE = readFileSync("app/team/TeamInviteActions.tsx", "utf8");
 const INVITE_ROUTE = readFileSync("app/api/team/invites/route.ts", "utf8");
+const TEAM_LIB = readFileSync("lib/team.ts", "utf8");
+const SETTINGS = readFileSync("components/settings/SettingsContent.tsx", "utf8");
 assert.equal(
-  /const ROLE_OPTIONS/.test(QUICK_INVITE),
+  /<QuickInviteCard/.test(SETTINGS),
   false,
-  "Settings must not carry a second hardcoded role menu",
+  "Settings must link to the canonical Team flow instead of rendering a second invite form",
 );
 assert.ok(
-  QUICK_INVITE.includes('fetch("/api/team/invites", { cache: "no-store" })') &&
-    INVITE_ROUTE.includes("role_options: invitableRoleOptionsForActor"),
-  "Settings must consume the same tenant/actor-filtered role options as /team",
+  INVITE_ROUTE.includes("role_options: invitableRoleOptionsForActor"),
+  "the canonical Team flow receives tenant/actor-filtered role options",
 );
 assert.ok(
-  QUICK_INVITE.includes('type="email"') &&
-    QUICK_INVITE.includes("email: normalizedEmail") &&
-    TEAM_INVITE.includes('type="email"'),
-  "both invite forms require and submit a pinned work email",
+  TEAM_INVITE.includes('type="email"') && TEAM_INVITE.includes("email: normalizedEmail"),
+  "the invite flow requires and submits a pinned work email",
 );
 assert.ok(
-  QUICK_INVITE.includes("selectedRole.description") &&
-    TEAM_INVITE.includes("selectedRole.description"),
-  "both invite forms explain the selected human role",
+  TEAM_INVITE.includes("selectedRole.description"),
+  "the invite flow explains the selected human role",
 );
-assert.equal(/value:\s*["']agent["']/.test(QUICK_INVITE), false);
+assert.match(TEAM_INVITE, /Send invite email/);
+assert.match(INVITE_ROUTE, /const delivery = await sendAuthEmail/);
+assert.match(INVITE_ROUTE, /invite_url: inviteUrl/);
+assert.doesNotMatch(INVITE_ROUTE, /raw_token:/);
+const supersedeSource = TEAM_LIB.match(
+  /export async function supersedeActiveInvites[\s\S]*?\n\}/,
+);
+assert.ok(supersedeSource, "the active-invite replacement guard exists");
+assert.doesNotMatch(
+  supersedeSource[0],
+  /\.eq\("team_role"/,
+  "correcting a role must revoke every older token for that email, including a higher-privilege invite",
+);
 
 // ── the invite INSERT must satisfy the table's real column contract ──────────
 // 2026-08-14, CC: the Team page returned "invite_create_failed" for every invite.
