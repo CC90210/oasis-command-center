@@ -34,25 +34,15 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { fetchLead, WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { businessIdForLead, safeFilterValue } from "@/lib/web-leads/audit";
 import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
+// SSRF-hardened URL validation (scheme allowlist + private/loopback/
+// link-local/metadata hostname refusal). Lives in its own module so the
+// rules are unit-tested directly; Next route files export handlers only.
+// The JARVIS worker applies the same refusal AND resolves the hostname
+// before fetching. (Codex review, 2026-09-01.)
+import { validatedRecheckUrl as validatedUrl } from "@/lib/web-leads/recheck-url";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-/** http/https, parseable, nothing else. Returns the normalized href or null. */
-function validatedUrl(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    const u = new URL(withScheme);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    if (!u.hostname.includes(".")) return null;
-    return u.href;
-  } catch {
-    return null;
-  }
-}
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const session = await resolveSessionContext();
@@ -129,7 +119,31 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       requested_at: new Date().toISOString(),
     };
     const ins = await db.from("leadgen_recheck_requests").insert(row);
-    if (ins.error) throw new Error(`recheck_insert_failed: ${ins.error.message}`);
+    if (ins.error) {
+      // The one-open-request invariant is enforced ATOMICALLY by a partial
+      // unique index on (tenant_id, lead_id) WHERE status IN
+      // ('pending','running') -- the read above is a fast path, not the
+      // guarantee. Two concurrent POSTs race past the read; the second
+      // insert hits the constraint and is answered with the winner's row
+      // instead of a 500. (Codex review, 2026-09-01. Plain INSERT on
+      // purpose: upsert(onConflict) against a PARTIAL unique index fails
+      // silently on PostgREST -- see tests/partial-index-upsert.test.ts.)
+      if (/unique|constraint/i.test(ins.error.message)) {
+        const winner = await db
+          .from("leadgen_recheck_requests")
+          .select("id,status,requested_at")
+          .eq("tenant_id", WEBDEV_TENANT_ID)
+          .eq("lead_id", lid)
+          .in("status", ["pending", "running"])
+          .order("requested_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (winner.data) {
+          return NextResponse.json({ ok: true, deduped: true, request: winner.data });
+        }
+      }
+      throw new Error(`recheck_insert_failed: ${ins.error.message}`);
+    }
 
     return NextResponse.json({ ok: true, request: { id: row.id, status: row.status, requested_at: row.requested_at } }, { status: 202 });
   } catch (err) {

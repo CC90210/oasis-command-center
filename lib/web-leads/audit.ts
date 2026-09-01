@@ -454,6 +454,25 @@ export async function fetchAudit(id: string, lead: WebLead): Promise<AuditResult
     return { state: "unreachable", reason: unreachableRow.reason, lastAttemptedAt: unreachableRow.last_attempted_at };
   }
 
+  // Parked is judged on the NEWEST row BEFORE any scored-row substitution: a
+  // newer crawl that saw the domain redirect to a parking lot is the current
+  // fact about this site, and swapping in an older scored row first would
+  // resurface a score for a domain now known to be dead. (Codex review,
+  // 2026-09-01.) The check runs again on the substituted row below, which is
+  // harmless and preserves the original behaviour when no substitution
+  // happened.
+  {
+    const newestFinal = finalUrlFromSignals(row.signals);
+    if (isParkedUrl(newestFinal)) {
+      return {
+        state: "parked",
+        url: row.url,
+        finalUrl: newestFinal as string,
+        measuredAt: row.fetched_at,
+      };
+    }
+  }
+
   if (!row.profile) {
     const scored = await db
       .from("leadgen_site_audits")

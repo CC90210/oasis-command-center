@@ -36,6 +36,7 @@ import { evidenceFrom } from "../lib/web-leads/evidence";
 import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
 import { assessTrust, isShellSuspect, STALE_AFTER_DAYS } from "../lib/web-leads/trust";
+import { validatedRecheckUrl, isPrivateIpv4 } from "../lib/web-leads/recheck-url";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 /** Assertions about CODE must not trip on the prose explaining the code. */
@@ -1100,10 +1101,48 @@ const MODEL_CODES = [
   assert.match(route, /recheck/, "the battlecard payload must carry the re-check status");
 
   const recheckRoute = read("app/api/web-leads/[id]/recheck/route.ts");
-  assert.match(recheckRoute, /validatedUrl/, "the recheck route must validate a supplied URL");
-  assert.match(recheckRoute, /u\.protocol !== "http:" && u\.protocol !== "https:"/, "the URL allowlist must be scheme-first");
+  assert.match(recheckRoute, /validatedRecheckUrl/, "the recheck route must validate a supplied URL through the SSRF-hardened module");
   assert.match(recheckRoute, /\.in\("status", \["pending", "running"\]\)/, "the recheck route must dedupe open requests per lead");
+  assert.match(recheckRoute, /unique|constraint/i, "the dedupe must handle the atomic unique-index conflict path, not just the read");
   assert.match(recheckRoute, /status: 202/, "a fresh queue insert answers 202");
+
+  // THE SSRF GATE (Codex P1, 2026-09-01): a pasted re-check URL is fetched by
+  // OUR crawler from OUR network. Loopback, private ranges, link-local (cloud
+  // metadata) and CGNAT must all be refused at validation, and the JARVIS
+  // worker re-refuses after DNS resolution at the point of use.
+  const urlMod = read("lib/web-leads/recheck-url.ts");
+  assert.match(urlMod, /u\.protocol !== "http:" && u\.protocol !== "https:"/, "the URL allowlist must be scheme-first");
+}
+
+{
+  // Direct unit coverage of the SSRF refusals -- imported, not regexed.
+  for (const bad of [
+    "http://127.0.0.1:3000",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.5/admin",
+    "http://172.16.4.4",
+    "http://192.168.1.1",
+    "http://100.64.1.1",
+    "http://0.0.0.0",
+    "http://localhost",
+    "http://foo.localhost",
+    "http://printer.local",
+    "http://db.internal",
+    "ftp://example.com",
+    "javascript:alert(1)",
+    "http://user:pass@example.com",
+    "http://[::1]/",
+    "not a url",
+  ]) {
+    assert.equal(validatedRecheckUrl(bad), null, `recheck URL validation must refuse ${JSON.stringify(bad)}`);
+  }
+  assert.equal(validatedRecheckUrl("example.com"), "https://example.com/", "a bare public domain gets https and passes");
+  assert.equal(validatedRecheckUrl("http://joesplumbing.ca/about"), "http://joesplumbing.ca/about", "a public http site passes untouched");
+  assert.equal(isPrivateIpv4("8.8.8.8"), false);
+  assert.equal(isPrivateIpv4("169.254.169.254"), true);
+  // The worker-side gate (post-DNS-resolution refusal) is pinned in the
+  // JARVIS repo's own tests -- this suite must stay runnable on machines
+  // without a JARVIS checkout.
 }
 
 // The panel itself renders every field of every objection. Asserting the data
