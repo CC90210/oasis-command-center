@@ -11,6 +11,7 @@
  */
 
 import { createClient, type Client } from "@libsql/client";
+import { instrumentTursoClient } from "@/lib/perf/server-timing";
 
 let _cached: Client | null = null;
 
@@ -23,12 +24,16 @@ export function getTursoClient(): Client {
   const remote = process.env.TURSO_DATABASE_URL || process.env.TURSO_DB_URL;
   const token = process.env.TURSO_AUTH_TOKEN;
 
+  // instrumentTursoClient is the P0 latency seam: EVERY app→Turso call
+  // (query builder, RPC shim, session verification) flows through this
+  // factory, so wrapping here measures all of them. Pass-through unless
+  // PERF_DB_VERBOSE=1; never logs bound args (PII lives there).
   if (path) {
-    _cached = createClient({ url: `file:${path}` });
+    _cached = instrumentTursoClient(createClient({ url: `file:${path}` }));
     return _cached;
   }
   if (remote) {
-    _cached = createClient({ url: remote, authToken: token });
+    _cached = instrumentTursoClient(createClient({ url: remote, authToken: token }));
     return _cached;
   }
   throw new Error(
