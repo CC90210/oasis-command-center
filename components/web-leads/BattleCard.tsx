@@ -134,12 +134,14 @@ import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
+import { checkEvidenceFor } from "@/lib/web-leads/check-evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
 /**
  * The display face for the HUD (Adon, 2026-09-01: "a nicer font"). Space
@@ -296,6 +298,32 @@ function RemedyLines({ code }: { code: string }) {
       <p><span className="font-medium text-fg-muted">We&apos;d fix it:</span> {remedy.fix}</p>
     </div>
   );
+}
+
+/**
+ * The pinpointed measurement behind one check (Adon, 2026-09-01: "you have to
+ * pinpoint things in the website that are showing that"). Renders the
+ * crawler's own numbers for THIS site next to the check they decided --
+ * "Server took 2,340 ms to send its first byte; under 800 ms earns the
+ * point." -- so a score is never a number a rep has to take on faith.
+ * Renders NOTHING when the crawl did not record what the sentence needs
+ * (lib/web-leads/check-evidence.ts rule 2): a missing line is honest, a
+ * guessed one is not.
+ */
+function MeasuredLine({ code, signals }: { code: string; signals: Record<string, unknown> | null }) {
+  const line = checkEvidenceFor(code, signals);
+  if (!line) return null;
+  return (
+    <p className="mt-1.5 text-xs leading-relaxed text-fg-muted [font-family:var(--battle-data)]">
+      <span className="font-medium" style={{ color: "#7dd3fc" }}>Seen on the site:</span> {line}
+    </p>
+  );
+}
+
+/** The arithmetic behind an area score, from the stored profile itself:
+ *  points earned by passing checks, out of the area's 100. */
+function earnedPoints(d: DimensionProfile): number {
+  return d.checks.reduce((n, c) => n + (c.has ? c.points : 0), 0);
 }
 
 /** The bar's LENGTH is the value; its colour, when a `hue` is given, is the
@@ -916,6 +944,15 @@ export function BattleCard({
               reduced={reduced}
             />
           )}
+          <BattleSection
+            id="industry-automations"
+            defaultOpen={true}
+            title="What else you can automate for them"
+            sub="Matched to this business type. Ask the question first; treat every build and integration as founder-scoped."
+            teaser="Industry-specific website features, connected workflows, and custom automation opportunities"
+          >
+            <IndustryAutomationGuide initialIndustry={lead.industry} />
+          </BattleSection>
           <Panel>
             {/* Reused wholesale rather than restyled: one component owns the four
                 outcomes, and logging an outcome IS the transfer to the pipeline
@@ -1375,6 +1412,7 @@ function ScoredBody({
             dimensions={audit.dimensions}
             worstFirst={worstFirst}
             competitors={competitors}
+            signals={signals}
             drawn={drawn}
             reduced={reduced}
           />
@@ -1391,6 +1429,7 @@ function ScoredBody({
             maxRecoverable={maxRecoverable}
             totalAreas={audit.dimensions.length}
             totalChecks={totalChecks}
+            signals={signals}
             drawn={drawn}
             reduced={reduced}
           />
@@ -1419,7 +1458,7 @@ function ScoredBody({
         id="faults"
         defaultOpen={false}
         title="Everything wrong with this site"
-        sub="Grouped by what it affects, worst first. Three separate things wrong with how a site earns trust is an argument; nineteen bullet points is noise."
+        sub="Grouped by what it affects, worst first. An area's score is plain arithmetic: the points its passing checks earn, out of 100. Every failing check below names what the crawler actually measured on this site, so no number here has to be taken on faith."
         teaser={`${failed.length} ${failed.length === 1 ? "check" : "checks"} failing across ${failingAreas} ${failingAreas === 1 ? "area" : "areas"}, worst first, with what each one costs them`}
       >
         <div className="space-y-6">
@@ -1429,8 +1468,9 @@ function ScoredBody({
               <div key={d.key} id={`battle-dim-${d.key}`} className="scroll-mt-24 border-t border-bg-border pt-4 first:border-t-0 first:pt-0">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h3 className="text-base font-semibold text-fg">{d.label}</h3>
-                  <p className="text-xs text-fg-muted">
+                  <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
                     Scores <span className="tabular-nums text-fg">{d.score}</span> ·{" "}
+                    {earnedPoints(d)} of 100 points earned ·{" "}
                     {misses.length === 0
                       ? "nothing failing here"
                       : `${misses.length} of ${d.checks.length} ${misses.length === 1 ? "check" : "checks"} failing`}
@@ -1445,7 +1485,16 @@ function ScoredBody({
                       .sort((a, b) => b.points - a.points)
                       .map((check: CheckResult) => (
                         <li key={check.code} className="rounded-lg border border-bg-border bg-bg-raised/60 p-3.5">
-                          <p className="text-sm font-semibold text-fg">{check.label}</p>
+                          <div className="flex items-baseline justify-between gap-3">
+                            <p className="text-sm font-semibold text-fg">{check.label}</p>
+                            {/* The check's exact worth in this area's 100 --
+                                the score is these numbers added up, and a rep
+                                should be able to do the addition out loud. */}
+                            <span className="shrink-0 text-[11px] tabular-nums text-fg-dim [font-family:var(--battle-data)]">
+                              {check.points} of this area&apos;s 100 pts
+                            </span>
+                          </div>
+                          <MeasuredLine code={check.code} signals={signals} />
                           <RemedyLines code={check.code} />
                         </li>
                       ))}
@@ -1521,11 +1570,12 @@ function ScoredBody({
  * selection already uses.
  */
 function DimensionShape({
-  dimensions, worstFirst, competitors, drawn, reduced,
+  dimensions, worstFirst, competitors, signals, drawn, reduced,
 }: {
   dimensions: DimensionProfile[];
   worstFirst: DimensionProfile[];
   competitors: CompetitorContext | null;
+  signals: Record<string, unknown> | null;
   drawn: boolean;
   reduced: boolean;
 }) {
@@ -1721,8 +1771,9 @@ function DimensionShape({
               <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(dim.key).to, boxShadow: `0 0 6px ${hueFor(dim.key).to}` }} />
               {dim.label}
             </p>
-            <p className="text-xs text-fg-muted">
+            <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
               Scores <span className="tabular-nums text-fg">{dim.score}</span> ·{" "}
+              {earnedPoints(dim)} of 100 points earned ·{" "}
               {misses.length === 0
                 ? "nothing failing here"
                 : `${misses.length} of ${dim.checks.length} ${misses.length === 1 ? "check" : "checks"} failing`}
@@ -1734,6 +1785,7 @@ function DimensionShape({
             <div className="mt-2.5">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Biggest gap in this area</p>
               <p className="mt-1 text-sm font-semibold text-fg">{misses[0].label}</p>
+              <MeasuredLine code={misses[0].code} signals={signals} />
               <RemedyLines code={misses[0].code} />
             </div>
           )}
@@ -1777,12 +1829,13 @@ function DimensionShape({
  * question to be about our arithmetic instead of their website.
  */
 function FixFirst({
-  worstFirst, maxRecoverable, totalAreas, totalChecks, drawn, reduced,
+  worstFirst, maxRecoverable, totalAreas, totalChecks, signals, drawn, reduced,
 }: {
   worstFirst: DimensionProfile[];
   maxRecoverable: number;
   totalAreas: number;
   totalChecks: number;
+  signals: Record<string, unknown> | null;
   drawn: boolean;
   reduced: boolean;
 }) {
@@ -1855,7 +1908,13 @@ function FixFirst({
                 <ul className="mb-1.5 ml-2 mt-1 space-y-2.5 rounded-lg border border-accent/15 bg-bg-raised/50 p-3 backdrop-blur-sm motion-safe:animate-fade-in">
                   {misses.map((check) => (
                     <li key={check.code}>
-                      <p className="text-sm font-semibold text-fg">{check.label}</p>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <p className="text-sm font-semibold text-fg">{check.label}</p>
+                        <span className="shrink-0 text-[11px] tabular-nums text-fg-dim [font-family:var(--battle-data)]">
+                          {check.points} of this area&apos;s 100 pts
+                        </span>
+                      </div>
+                      <MeasuredLine code={check.code} signals={signals} />
                       <RemedyLines code={check.code} />
                     </li>
                   ))}
