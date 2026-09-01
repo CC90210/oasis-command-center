@@ -33,7 +33,10 @@ import {
 } from "../lib/web-leads/competitors";
 import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
+import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
+import { assessTrust, isShellSuspect, STALE_AFTER_DAYS } from "../lib/web-leads/trust";
+import { validatedRecheckUrl, isPrivateIpv4 } from "../lib/web-leads/recheck-url";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 /** Assertions about CODE must not trip on the prose explaining the code. */
@@ -1001,6 +1004,151 @@ const MODEL_CODES = [
   assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);
 }
 
+// ---------------------------------------------------------------------------
+// 8f. TRUST, OR NO NUMBER (Adon, 2026-09-01): "if you can't scrape certain
+//     data, or you can't really score the website, or if you're uncertain,
+//     then you don't generate information. You just say it."
+//
+// His decision on the record: a score we cannot stand behind is HIDDEN with
+// the reason in plain words, never shown wearing a warning label. The trust
+// module derives everything from STORED data; these tests pin every verdict
+// and the wiring that renders them.
+// ---------------------------------------------------------------------------
+
+{
+  const scored = {
+    state: "scored" as const,
+    url: "https://example.test",
+    measuredAt: new Date().toISOString(),
+    composite: 42,
+    dimensions: [],
+  };
+  const unknownUrl = { verdict: "unknown" as const, verifiedAt: null };
+
+  // THE SHELL FINGERPRINT hides the score: almost no readable text plus
+  // machinery = a browser-built site our raw-HTTP crawler cannot read.
+  assert.equal(isShellSuspect({ wordCount: 12, blockingScripts: 9, bytes: 900_000 }), true);
+  const shell = assessTrust({ audit: scored, signals: { wordCount: 12, blockingScripts: 9, bytes: 900_000 }, urlVerification: unknownUrl });
+  assert.equal(shell.hide?.reason, "shell_suspect", "a shell-suspect score must be hidden, not warned over");
+
+  // A TRULY THIN site keeps its score -- low words WITHOUT the machinery is a
+  // genuinely empty site, and that thinness IS the pitch. Hiding it would
+  // delete the best leads.
+  assert.equal(isShellSuspect({ wordCount: 12, blockingScripts: 0, bytes: 40_000 }), false);
+  const thin = assessTrust({ audit: scored, signals: { wordCount: 12, blockingScripts: 0, bytes: 40_000 }, urlVerification: unknownUrl });
+  assert.equal(thin.hide, null, "a thin-but-honest site's score must stand");
+
+  // UNRECORDED wordCount never triggers the heuristic -- a missing
+  // measurement is not evidence of anything (the whole point of this work).
+  assert.equal(isShellSuspect({}), false);
+  assert.equal(isShellSuspect(null), false);
+
+  // REJECTED ownership hides everything, whatever the audit state: every
+  // number on file is about a stranger's website.
+  const rejected = assessTrust({ audit: scored, signals: null, urlVerification: { verdict: "rejected", verifiedAt: null } });
+  assert.equal(rejected.hide?.reason, "rejected_url");
+  const rejectedUnscored = assessTrust({ audit: { state: "not_scored" }, signals: null, urlVerification: { verdict: "rejected", verifiedAt: null } });
+  assert.equal(rejectedUnscored.hide?.reason, "rejected_url", "rejected ownership must hide the card's site facts even without a score");
+
+  // STALENESS warns (never hides) once the crawl is older than the window,
+  // with an injected clock so this test does not rot.
+  const old = { ...scored, measuredAt: "2026-01-01T00:00:00.000Z" };
+  const staleCheck = assessTrust({
+    audit: old, signals: { wordCount: 500 }, urlVerification: unknownUrl,
+    now: new Date(Date.parse(old.measuredAt) + (STALE_AFTER_DAYS + 40) * 86_400_000),
+  });
+  assert.ok(staleCheck.warnings.some((w) => w.code === "stale"), "an old measurement must warn");
+  assert.equal(staleCheck.hide, null, "staleness warns; it does not hide");
+  const freshCheck = assessTrust({
+    audit: old, signals: { wordCount: 500 }, urlVerification: unknownUrl,
+    now: new Date(Date.parse(old.measuredAt) + 10 * 86_400_000),
+  });
+  assert.ok(!freshCheck.warnings.some((w) => w.code === "stale"), "a fresh measurement must not cry stale");
+
+  // UNVERIFIED ownership warns calmly -- it is the default state for ~99% of
+  // the corpus (202 verified of ~27k, 2026-09-01 sweep), so the words are
+  // factual, not alarming, and verified produces NO warning.
+  assert.ok(thin.warnings.some((w) => w.code === "unverified_url"));
+  const verified = assessTrust({ audit: scored, signals: { wordCount: 500 }, urlVerification: { verdict: "verified", verifiedAt: null } });
+  assert.ok(!verified.warnings.some((w) => w.code === "unverified_url"));
+
+  // House copy rules on every rep-facing sentence the module can emit.
+  const allTrustCopy = [
+    shell.hide!.headline, shell.hide!.detail,
+    rejected.hide!.headline, rejected.hide!.detail,
+    ...staleCheck.warnings.map((w) => w.line),
+    ...thin.warnings.map((w) => w.line),
+  ].join(" ");
+  assert.ok(!allTrustCopy.includes("—"), "no em dashes in trust copy");
+  assert.doesNotMatch(allTrustCopy, /viewport|schema\.org|\bDOM\b|\bTTFB\b|\bCTA\b/i, "jargon in trust copy");
+
+  // THE WIRING: the card computes trust, hides through it, renders the
+  // honesty panel and the re-check control, and the API carries the fields.
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+  assert.match(src, /assessTrust\(\{ audit, signals, urlVerification \}\)/, `${view} must assess trust from the payload`);
+  assert.match(src, /trust\.hide \? \(/, `${view} must branch the body on the trust verdict`);
+  assert.match(src, /<UntrustedPanel hide=\{trust\.hide\} \/>/, `${view} must render the honest no-score panel when hidden`);
+  assert.match(src, /scoreHidden=\{Boolean\(trust\.hide\)\}/, `${view} must hide the hero score too -- a hidden body under a big glowing number is not hidden`);
+  assert.match(src, /<MeasurementHonesty/, `${view} must render the honesty strip on every card`);
+  assert.match(src, /Re-check this site now/, `${view} must offer the one-lead re-check`);
+  assert.match(src, /UNMEASURABLE_CHECKS/, `${view} must name checks the model cannot measure for prospects`);
+  assert.match(src, /sitemap:/, `${view}: the sitemap check must be annotated as unmeasurable (integrity finding 4)`);
+  assert.match(src, /Not recorded:/, `${view}: a failed check with no recorded signal must say so, never stay silent`);
+
+  const route = read("app/api/web-leads/[id]/battlecard/route.ts");
+  assert.match(route, /urlVerification/, "the battlecard payload must carry the URL-ownership verdict");
+  assert.match(route, /recheck/, "the battlecard payload must carry the re-check status");
+
+  const recheckRoute = read("app/api/web-leads/[id]/recheck/route.ts");
+  assert.match(recheckRoute, /validatedRecheckUrl/, "the recheck route must validate a supplied URL through the SSRF-hardened module");
+  assert.match(recheckRoute, /\.in\("status", \["pending", "running"\]\)/, "the recheck route must dedupe open requests per lead");
+  assert.match(
+    recheckRoute,
+    /idx_recheck_one_open\|unique constraint/,
+    "the dedupe conflict path must match ONLY the uniqueness collision -- a CHECK or FK violation recovering as ok is a request silently never queued",
+  );
+  assert.match(recheckRoute, /status: 202/, "a fresh queue insert answers 202");
+
+  // THE SSRF GATE (Codex P1, 2026-09-01): a pasted re-check URL is fetched by
+  // OUR crawler from OUR network. Loopback, private ranges, link-local (cloud
+  // metadata) and CGNAT must all be refused at validation, and the JARVIS
+  // worker re-refuses after DNS resolution at the point of use.
+  const urlMod = read("lib/web-leads/recheck-url.ts");
+  assert.match(urlMod, /u\.protocol !== "http:" && u\.protocol !== "https:"/, "the URL allowlist must be scheme-first");
+}
+
+{
+  // Direct unit coverage of the SSRF refusals -- imported, not regexed.
+  for (const bad of [
+    "http://127.0.0.1:3000",
+    "http://169.254.169.254/latest/meta-data/",
+    "http://10.0.0.5/admin",
+    "http://172.16.4.4",
+    "http://192.168.1.1",
+    "http://100.64.1.1",
+    "http://0.0.0.0",
+    "http://localhost",
+    "http://foo.localhost",
+    "http://printer.local",
+    "http://db.internal",
+    "ftp://example.com",
+    "javascript:alert(1)",
+    "http://user:pass@example.com",
+    "http://[::1]/",
+    "not a url",
+  ]) {
+    assert.equal(validatedRecheckUrl(bad), null, `recheck URL validation must refuse ${JSON.stringify(bad)}`);
+  }
+  assert.equal(validatedRecheckUrl("example.com"), "https://example.com/", "a bare public domain gets https and passes");
+  assert.equal(validatedRecheckUrl("http://joesplumbing.ca/about"), "http://joesplumbing.ca/about", "a public http site passes untouched");
+  assert.equal(isPrivateIpv4("8.8.8.8"), false);
+  assert.equal(isPrivateIpv4("169.254.169.254"), true);
+  // The worker-side gate (post-DNS-resolution refusal) is pinned in the
+  // JARVIS repo's own tests -- this suite must stay runnable on machines
+  // without a JARVIS checkout.
+}
+
 // The panel itself renders every field of every objection. Asserting the data
 // is complete (above) proves nothing if the component drops half of it.
 {
@@ -1161,6 +1309,169 @@ const MODEL_CODES = [
   // one screen invite a rep to wonder which one is current.
   const conditionUses = (src.match(/lead\.websiteCondition/g) || []).length;
   assert.equal(conditionUses, 0, `${view} must read the verbatim directory strings through BusinessFacts, once`);
+}
+
+// ---------------------------------------------------------------------------
+// 8e. THE DESIGNATION (round 5, Adon: "really outlining the graph of what
+//     type of bad it is"). lead-profile.ts names the SHAPE of a scored
+//     profile from hand-written tables; the plate on the card renders it
+//     verbatim. What gets pinned: the tables are COMPLETE (a crater in any
+//     dimension has a name -- one missing entry and the plate says less than
+//     the chart), no entry is a stub, the classifier is TOTAL (every profile
+//     in a sweep classifies -- a plate that can render blank is a question
+//     mark on the most prominent line of the section), and each ordered rule
+//     actually fires on the profile shape it exists for.
+// ---------------------------------------------------------------------------
+
+{
+  const mkDim = (key: string, score: number) => ({
+    key,
+    label: key,
+    score,
+    weight: 1,
+    checks: [],
+    missing: [],
+  });
+  const profile = (scores: Record<string, number>) => DIMENSION_KEYS.map((k) => mkDim(k, scores[k] ?? 70));
+
+  // The crater table covers every dimension, and nothing in either table is a
+  // stub. A one-word `meaning` or an empty `play` is a plate that stamps a
+  // name and then has nothing for the rep to SAY about it.
+  for (const key of DIMENSION_KEYS) {
+    const entry = CRATER_DESIGNATIONS[key];
+    assert.ok(entry, `lead-profile.ts: no crater designation for "${key}" -- a collapse there would render a generic label`);
+    assert.ok(entry.name.length >= 8, `${key}: crater name is a stub`);
+    assert.ok(entry.meaning.length >= 40, `${key}: crater meaning is a stub`);
+    assert.ok(entry.play.length >= 40, `${key}: crater play is a stub`);
+  }
+  assert.equal(
+    Object.keys(CRATER_DESIGNATIONS).length,
+    DIMENSION_KEYS.length,
+    "one crater designation per dimension, no extras -- an extra entry is dead copy nothing can select",
+  );
+  for (const [code, entry] of Object.entries(SHAPE_DESIGNATIONS)) {
+    assert.ok(entry.name.length >= 8, `${code}: shape name is a stub`);
+    assert.ok(entry.meaning.length >= 40, `${code}: shape meaning is a stub`);
+    assert.ok(entry.play.length >= 40, `${code}: shape play is a stub`);
+  }
+
+  // Each ordered rule fires on the shape it exists for.
+  for (const key of DIMENSION_KEYS) {
+    const d = designateLead(profile({ [key]: 20 }), 62);
+    assert.equal(d.code, `crater_${key}`, `one collapsed area (${key} at 20, rest 70) must classify as that crater`);
+    assert.deepEqual(d.primary, [key], `the ${key} crater's defining area must be ${key} itself`);
+  }
+  assert.equal(designateLead(profile(Object.fromEntries(DIMENSION_KEYS.map((k) => [k, 30]))), 30).code, "rebuild", "everything under 45 must classify as the rebuild");
+  assert.equal(designateLead(profile({ conversion: 72 }), 80).code, "contender", "a high composite with no crater must classify as the contender");
+  assert.equal(
+    designateLead(profile({ conversion: 40, trust: 42 }), 58).code,
+    "two_front",
+    "two areas dragging together (40/42 against a 70 field) must classify as the two-front fight",
+  );
+  assert.equal(
+    designateLead(profile({ conversion: 55, trust: 60, design: 62, mobile: 65, content: 68, performance: 70, discoverability: 72 }), 62).code,
+    "erosion",
+    "spread-out decay with no dominant crater must fall through to erosion",
+  );
+  // Rule ORDER: a deep crater on a site whose composite still clears the
+  // contender floor is sold as the crater -- "strong contender" above a
+  // radar with one axis on the floor is the plate contradicting the chart.
+  assert.equal(
+    designateLead(profile({ discoverability: 30 }), 78).code,
+    "crater_discoverability",
+    "a deep crater must outrank the contender floor",
+  );
+
+  // Totality sweep: every profile in a coarse grid classifies to a designation
+  // with words on it, and every defining area it names is real. 6^3 shapes x 7
+  // rotations covers all rule boundaries without a combinatorial test.
+  const GRID = [0, 20, 40, 60, 80, 100];
+  for (const worst of GRID) {
+    for (const mid of GRID) {
+      for (const rest of GRID) {
+        for (const key of DIMENSION_KEYS) {
+          const scores: Record<string, number> = Object.fromEntries(DIMENSION_KEYS.map((k) => [k, rest]));
+          scores[key] = worst;
+          scores[DIMENSION_KEYS[(DIMENSION_KEYS.indexOf(key) + 3) % DIMENSION_KEYS.length]] = mid;
+          const composite = Math.round(Object.values(scores).reduce((a, b) => a + b, 0) / DIMENSION_KEYS.length);
+          const d = designateLead(profile(scores), composite);
+          assert.ok(d && d.name.length >= 8 && d.meaning.length >= 40 && d.play.length >= 40, `unclassifiable profile: ${JSON.stringify(scores)}`);
+          assert.ok(d.primary.length >= 1 && d.primary.length <= 3, `designation for ${JSON.stringify(scores)} names ${d.primary.length} defining areas`);
+          for (const p of d.primary) assert.ok(DIMENSION_KEYS.includes(p), `designation names unknown area "${p}"`);
+        }
+      }
+    }
+  }
+
+  // The plate is ON the card, inside the shape section, rendering the
+  // hand-written entry verbatim -- name, meaning AND play. A plate that
+  // renders only the name is a verdict with no sentence to say.
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
+  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} \/>/, "the designation plate must open the shape section");
+  assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
+  assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
+  assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
+}
+
+// ---------------------------------------------------------------------------
+// 8f. THE HUD FACES (round 5): every font the card declares must exist as a
+//     vendored file. next/font/local fails the BUILD on a missing file, but
+//     only when the importing route builds -- this catches a lost woff2 at
+//     test time, with a message that names the file instead of a webpack
+//     stack. And the three faces stay three: display (Chakra Petch), numeral
+//     (Orbitron, the hero score only), telemetry (JetBrains Mono).
+// ---------------------------------------------------------------------------
+
+{
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+  const declared = [...src.matchAll(/path: "\.\.\/\.\.\/(app\/fonts\/[^"]+)"/g)].map((m) => m[1]);
+  assert.ok(declared.length >= 6, `${view} declares only ${declared.length} font files -- the three-face system lost a weight`);
+  for (const rel of declared) {
+    assert.ok(fs.existsSync(path.join(process.cwd(), rel)), `${view} declares ${rel} but the file is not vendored -- the build will fail on it`);
+  }
+  for (const face of ["ChakraPetch-", "Orbitron-700", "JetBrainsMono-"]) {
+    assert.ok(declared.some((p) => p.includes(face)), `${view} lost the ${face} face`);
+  }
+  // Orbitron is the hero score's dial face and nothing else's: one declared
+  // weight, worn via --battle-numeral exactly once. The moment it spreads,
+  // it stops reading as an instrument and starts reading as a theme.
+  assert.equal(declared.filter((p) => p.includes("Orbitron")).length, 1, "Orbitron stays a single weight");
+  assert.equal((src.match(/--battle-numeral\)/g) || []).length, 1, "the numeral face is worn by the hero score alone");
+}
+
+// ---------------------------------------------------------------------------
+// 8g. ROUND 5 OF THE WEBGL RADAR: bloom is a TREATMENT, labels are DOM.
+//     What gets pinned is the failure discipline, same as 8d: the bloom
+//     modules load in a try whose catch leaves the round-4 direct render
+//     (never a blank chart because a postprocessing chunk failed), the
+//     screen-blend composite is only applied on the bloomed path, the
+//     composer's targets are disposed with everything else, and the
+//     projected labels ride OUTSIDE the GL scene as aria-hidden DOM -- the
+//     dimension list beside the chart stays the accessible path.
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /UnrealBloomPass/, "Radar3D must attempt the bloom treatment");
+  assert.match(r3d, /catch \{\s*composer = null;\s*\}/, "a failed postprocessing import must fall back to the direct render, not blank the chart");
+  assert.match(r3d, /mixBlendMode = "screen"/, "the bloomed path must composite onto the panel via screen blend (bloom cannot render on a transparent canvas)");
+  const stripped = stripComments(r3d);
+  assert.ok(
+    !/setClearColor\(0x000000, 1\)/.test(stripped.split("try")[0] || ""),
+    "the opaque clear colour belongs to the bloomed path only -- setting it unconditionally black-boxes the fallback render",
+  );
+  assert.match(r3d, /composer\?\.dispose\?\.\(\)/, "the composer's render targets must be disposed with the renderer");
+  // composer.dispose() does NOT dispose added passes, and UnrealBloomPass
+  // owns its own pyramid of render targets -- without per-pass disposal,
+  // paging through leads leaks GPU memory until the tab dies. (Codex review,
+  // 2026-09-01.)
+  assert.match(r3d, /passDisposers\.push/, "each postprocessing pass that can dispose must be collected for teardown");
+  assert.match(r3d, /for \(const disposePass of passDisposers\) disposePass\(\)/, "the collected passes must actually be disposed in cleanup");
+  assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
+  assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
+  assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");
 }
 
 console.log("web-leads-battlecard ok");

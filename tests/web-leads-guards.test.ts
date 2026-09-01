@@ -13,6 +13,10 @@ for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  // Added 2026-09-01 with the per-lead re-check. A WRITE that names a lead
+  // id carries the identical gate stack as the reads: anyone who may read
+  // the card may queue a re-check; nobody else may learn the id exists.
+  "app/api/web-leads/[id]/recheck/route.ts",
 ]) {
   const src = read(route);
   assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
@@ -211,6 +215,7 @@ for (const route of [
   "app/api/web-leads/route.ts",
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
+  "app/api/web-leads/[id]/recheck/route.ts",
 ]) {
   const src = read(route);
   const buildsViewerInline =
@@ -383,6 +388,14 @@ for (const view of [
   // reads its colours from -- which makes it the highest-leverage place to
   // sneak a verdict colour into the whole feature at once.
   "components/web-leads/battle-hud.ts",
+  // Added 2026-09-01 (round 5) with the designation plate. This module NAMES
+  // the shape of the problem ("Full rebuild", "Invisible storefront") -- the
+  // one place in the feature where the copy itself is a verdict, which makes
+  // a verdict COLOUR beside it feel natural and be doubly wrong: the plate
+  // must wear identical chrome for the best news and the worst. Proved to
+  // fire against this file by planting `text-red-400` in a designation entry
+  // once (2026-09-01): the assertion failed as intended and was reverted.
+  "lib/web-leads/lead-profile.ts",
   // Added 2026-08-24 with the objection panel. It renders no audit data at all,
   // which is exactly why it earns the ban rather than an exemption: a surface
   // that is "obviously safe" today is the one a future editor tints to make a
