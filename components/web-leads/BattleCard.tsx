@@ -35,6 +35,23 @@
  *     place, which is what lets the full fault list live behind a disclosure
  *     without hiding anything a rep needs mid-sentence.
  *
+ * ═══ THE FUTURIST CHROME (Adon, 2026-08-31, round 2) ════════════════════════
+ *
+ * "Even nicer and 3D, a futuristic look and aesthetic." The system, chosen so
+ * twenty small details read as ONE surface rather than twenty gimmicks: glass
+ * panels with a lit top edge (BattleSection + Panel share it), a faint
+ * blueprint grid and HUD corner brackets on the hero, the score counting up
+ * inside a ring that draws once, the radar presented as a holo-table (CSS
+ * perspective tilt that follows the pointer), competitor cards that tilt in
+ * 3D under the cursor, and glow hovers on the controls. Three rules keep it
+ * honest: every piece of chrome is keyed to NOTHING (identical for a 4 and a
+ * 94 -- rule 1 survives the decoration); all pointer-driven motion is the
+ * rep's own hand echoed back, never ambient (nothing loops, nothing sweeps on
+ * its own); and `prefers-reduced-motion` flattens all of it -- tilts render
+ * flat, fades render settled, the ring and count render finished (rule 4).
+ * CSS 3D, deliberately not three.js: a WebGL context for a seven-point
+ * polygon fails the same ~90KB test recharts failed below.
+ *
  * ═══ THE COMPETITOR SECTION IS THE POINT ════════════════════════════════════
  *
  * Every number this feature produced until now was absolute, and an absolute
@@ -188,7 +205,13 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 function Panel({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
-    <section className={`rounded-xl border border-bg-border bg-bg-panel p-5 lg:p-6 ${className}`}>
+    <section className={`relative overflow-hidden rounded-xl border border-bg-border bg-bg-panel/75 p-5 shadow-card backdrop-blur-sm lg:p-6 ${className}`}>
+      {/* Same lit top edge as BattleSection, so the two shells read as one
+          system whether a block collapses or not. Keyed to nothing. */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent"
+      />
       {children}
     </section>
   );
@@ -726,6 +749,29 @@ function Hero({
         className="pointer-events-none absolute inset-0 opacity-70"
         style={{ background: "radial-gradient(60% 120% at 15% -10%, rgba(59,130,246,0.10), transparent 70%)" }}
       />
+      {/* The blueprint grid and the counter-glow. Chrome, keyed to nothing:
+          a 4 and a 94 get the same room. The grid fades out radially so it
+          reads as depth behind the header, not as a chart axis. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-40"
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(59,130,246,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.07) 1px, transparent 1px)",
+          backgroundSize: "36px 36px",
+          maskImage: "radial-gradient(85% 120% at 30% 0%, black, transparent 85%)",
+          WebkitMaskImage: "radial-gradient(85% 120% at 30% 0%, black, transparent 85%)",
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 opacity-60"
+        style={{ background: "radial-gradient(50% 90% at 95% 115%, rgba(59,130,246,0.08), transparent 70%)" }}
+      />
+      {/* HUD corner marks. Decoration with a job: they frame the header as the
+          instrument panel the rest of the card hangs off. */}
+      <span aria-hidden className="pointer-events-none absolute left-3 top-3 h-4 w-4 border-l-2 border-t-2 border-accent/30" />
+      <span aria-hidden className="pointer-events-none absolute right-3 top-3 h-4 w-4 border-r-2 border-t-2 border-accent/30" />
       <div className={embedded ? "relative px-4 py-6 lg:px-6" : "relative mx-auto max-w-6xl px-4 py-7 lg:px-8 lg:py-9"}>
         {!embedded && <BackLink />}
         <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between`}>
@@ -786,14 +832,38 @@ function Hero({
             {audit.state === "scored" ? (
               <>
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">Website score</p>
-                {/* The animated figure is theatre and is hidden from assistive
-                    tech; the sr-only span carries the real number so a screen
-                    reader never announces an intermediate frame. */}
-                <p className="mt-1 text-7xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)]">
-                  <span aria-hidden>{shownScore}</span>
-                  <span className="sr-only">{audit.composite}</span>
-                </p>
-                <p className="mt-2 text-xs text-fg-dim">Measured {formatDate(audit.measuredAt)}</p>
+                {/* The number counts up inside a ring that draws once around
+                    it. The ring's LENGTH is the score out of 100 -- the same
+                    encoding every Meter on this card already uses -- and its
+                    colour is one neutral stroke with a constant glow whether
+                    the score is 4 or 94 (rule 1). The animated figure is
+                    theatre and is hidden from assistive tech; the sr-only span
+                    carries the real number so a screen reader never announces
+                    an intermediate frame. */}
+                <div className="relative mt-2 inline-flex h-36 w-36 items-center justify-center">
+                  <svg viewBox="0 0 120 120" className="absolute inset-0 h-full w-full -rotate-90" aria-hidden>
+                    <circle cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" className="stroke-bg-border" />
+                    <circle
+                      cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" strokeLinecap="round"
+                      className="stroke-fg"
+                      strokeDasharray={`${(2 * Math.PI * 54).toFixed(2)}`}
+                      strokeDashoffset={
+                        drawn
+                          ? ((1 - Math.min(100, Math.max(0, audit.composite)) / 100) * 2 * Math.PI * 54).toFixed(2)
+                          : (2 * Math.PI * 54).toFixed(2)
+                      }
+                      style={{
+                        transition: reduced ? "none" : "stroke-dashoffset 900ms cubic-bezier(0.22, 1, 0.36, 1)",
+                        filter: "drop-shadow(0 0 6px rgba(59,130,246,0.45))",
+                      }}
+                    />
+                  </svg>
+                  <p className="text-5xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)]">
+                    <span aria-hidden>{shownScore}</span>
+                    <span className="sr-only">{audit.composite}</span>
+                  </p>
+                </div>
+                <p className="mt-1 text-xs text-fg-dim">Measured {formatDate(audit.measuredAt)}</p>
               </>
             ) : (
               <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
@@ -1191,6 +1261,11 @@ function DimensionShape({
 }) {
   const bus = useBattleSections();
   const [selected, setSelected] = useState<string | null>(null);
+  // The holo-table tilt: the radar sits on a gentle base pitch and leans
+  // toward the pointer. USER-DRIVEN motion only -- it is the rep's own hand
+  // echoed back, it never moves on its own, and reduced motion renders it
+  // flat and static (rule 4).
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
   const sel = selected ?? worstFirst[0]?.key ?? null;
   const dim = dimensions.find((d) => d.key === sel) || null;
   const headToHead = competitors?.headToHead || null;
@@ -1221,15 +1296,45 @@ function DimensionShape({
           there. So the phone gets the buttons and the desktop gets both.
           (The radar's own `aria-label` names all seven scores, so a screen
           reader was never getting the picture either way.) */}
-      <div className="hidden justify-center sm:flex">
-        <Radar
-          dimensions={dimensions}
-          leader={headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null}
-          leaderName={headToHead?.competitor.name || null}
-          drawn={drawn}
-          reduced={reduced}
-          selected={sel}
-          onSelect={setSelected}
+      <div className="relative hidden justify-center sm:flex" style={{ perspective: "1100px" }}>
+        <div
+          className="relative"
+          style={{
+            transform: reduced ? "none" : `rotateX(${(8 + tilt.x).toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
+            // Conditional like every other transition in this file: `reduced`
+            // starts false and corrects on mount, so an unconditional 180ms
+            // here animated the base pitch flat for exactly the users who
+            // asked for no motion. With it conditional, the correction is a
+            // one-frame snap. (Codex review, 2026-08-31.)
+            transition: reduced ? "none" : "transform 180ms ease-out",
+            transformStyle: "preserve-3d",
+          }}
+          onPointerMove={
+            reduced
+              ? undefined
+              : (e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  const px = (e.clientX - r.left) / r.width - 0.5;
+                  const py = (e.clientY - r.top) / r.height - 0.5;
+                  setTilt({ x: -py * 8, y: px * 10 });
+                }
+          }
+          onPointerLeave={() => setTilt({ x: 0, y: 0 })}
+        >
+          <Radar
+            dimensions={dimensions}
+            leader={headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null}
+            leaderName={headToHead?.competitor.name || null}
+            drawn={drawn}
+            reduced={reduced}
+            selected={sel}
+            onSelect={setSelected}
+          />
+        </div>
+        {/* The holo base: a soft light pool under the table. Constant. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -bottom-1 left-1/2 h-8 w-3/5 -translate-x-1/2 rounded-[100%] bg-accent/10 blur-xl"
         />
       </div>
       <div className="mt-4 space-y-1 sm:border-t sm:border-bg-border sm:pt-4">
@@ -1254,7 +1359,11 @@ function DimensionShape({
       </div>
 
       {dim && (
-        <div className="mt-4 rounded-lg border border-bg-border bg-bg-raised/60 p-4">
+        <div className="relative mt-4 rounded-lg border border-accent/15 bg-bg-raised/50 p-4 backdrop-blur-sm">
+          {/* The targeting brackets: this is the one inset on the card that
+              answers a selection, so it gets the HUD marks. Constant chrome. */}
+          <span aria-hidden className="pointer-events-none absolute left-1 top-1 h-2.5 w-2.5 border-l border-t border-accent/40" />
+          <span aria-hidden className="pointer-events-none absolute bottom-1 right-1 h-2.5 w-2.5 border-b border-r border-accent/40" />
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <p className="text-sm font-semibold text-fg">{dim.label}</p>
             <p className="text-xs text-fg-muted">
@@ -1382,7 +1491,7 @@ function FixFirst({
                 <div className="px-2 py-1.5">{row}</div>
               )}
               {expandable && openRow && (
-                <ul className="mb-1.5 ml-2 mt-1 space-y-2.5 rounded-lg border border-bg-border bg-bg-raised/60 p-3">
+                <ul className="mb-1.5 ml-2 mt-1 space-y-2.5 rounded-lg border border-accent/15 bg-bg-raised/50 p-3 backdrop-blur-sm motion-safe:animate-fade-in">
                   {misses.map((check) => (
                     <li key={check.code}>
                       <p className="text-sm font-semibold text-fg">{check.label}</p>
@@ -1400,6 +1509,46 @@ function FixFirst({
         costs them.
       </p>
     </>
+  );
+}
+
+/**
+ * A card that leans toward the pointer, in CSS 3D.
+ *
+ * The same contract as the holo-table tilt above: user-driven only (the card
+ * echoes the rep's own hand, nothing moves on its own), one neutral chrome
+ * whatever the numbers on the card say, and reduced motion renders it flat --
+ * the handlers are not even attached. Hover border/glow classes stay on the
+ * caller; the inline transition names border-color and box-shadow so those
+ * class transitions survive the inline `transition` property.
+ */
+function TiltCard({ reduced, className = "", children }: { reduced: boolean; className?: string; children: React.ReactNode }) {
+  const [t, setT] = useState({ x: 0, y: 0 });
+  return (
+    <div
+      className={className}
+      style={{
+        transform:
+          reduced || (t.x === 0 && t.y === 0)
+            ? undefined
+            : `perspective(700px) rotateX(${t.x.toFixed(2)}deg) rotateY(${t.y.toFixed(2)}deg)`,
+        transition: reduced ? undefined : "transform 160ms ease-out, border-color 160ms ease-out, box-shadow 160ms ease-out",
+        willChange: reduced ? undefined : "transform",
+      }}
+      onPointerMove={
+        reduced
+          ? undefined
+          : (e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              const px = (e.clientX - r.left) / r.width - 0.5;
+              const py = (e.clientY - r.top) / r.height - 0.5;
+              setT({ x: -py * 6, y: px * 8 });
+            }
+      }
+      onPointerLeave={() => setT({ x: 0, y: 0 })}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -1443,32 +1592,38 @@ function Competitors({
           return (
             <li
               key={`${c.name}-${i}`}
-              className="rounded-lg border border-bg-border bg-bg-raised/60 p-4 hover:border-accent/30"
               style={{
                 opacity: drawn ? 1 : 0,
                 transform: drawn ? "none" : "translateY(6px)",
                 transition: reduced ? "none" : `opacity 320ms ease-out ${i * 60}ms, transform 320ms ease-out ${i * 60}ms`,
               }}
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-fg">{c.name}</p>
-                  <p className="mt-0.5 truncate text-xs text-fg-dim">
-                    {[c.city, c.province].filter(Boolean).join(", ") || "Location not recorded"}
-                  </p>
+              {/* Entry stagger on the <li>, 3D tilt on the inner card: two
+                  transforms, two elements, no fighting over one style. */}
+              <TiltCard
+                reduced={reduced}
+                className="h-full rounded-lg border border-bg-border bg-bg-raised/60 p-4 hover:border-accent/40 hover:shadow-glow"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-fg">{c.name}</p>
+                    <p className="mt-0.5 truncate text-xs text-fg-dim">
+                      {[c.city, c.province].filter(Boolean).join(", ") || "Location not recorded"}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-2xl font-bold leading-none tabular-nums text-fg">{c.score}</span>
                 </div>
-                <span className="shrink-0 text-2xl font-bold leading-none tabular-nums text-fg">{c.score}</span>
-              </div>
-              {href && (
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-[color,border-color,transform] hover:border-accent/40 hover:text-fg active:translate-y-px focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-                >
-                  <ExternalLink className="h-3 w-3" />Open their site
-                </a>
-              )}
+                {href && (
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted transition-[color,border-color,transform] hover:border-accent/40 hover:text-fg active:translate-y-px focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+                  >
+                    <ExternalLink className="h-3 w-3" />Open their site
+                  </a>
+                )}
+              </TiltCard>
             </li>
           );
         })}
