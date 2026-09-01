@@ -1408,7 +1408,7 @@ const MODEL_CODES = [
   // renders only the name is a verdict with no sentence to say.
   const src = read("components/web-leads/BattleCard.tsx");
   assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
-  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} \/>/, "the designation plate must open the shape section");
+  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} selected=\{dimSel\} onSelect=\{setDimSel\} \/>/, "the designation plate must open the shape section, on the section's shared selection");
   assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
   assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
   assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
@@ -1472,6 +1472,50 @@ const MODEL_CODES = [
   assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
   assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
   assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");
+}
+
+// ---------------------------------------------------------------------------
+// 8h. ROUND 7 — THE STAGE IS OPERATED, NOT WATCHED. What gets pinned is,
+//     as ever, the failure discipline rather than the theatre: inertia must
+//     DECAY (an undamped spin is a chart that never stops moving), a focus
+//     flight must take the SHORTEST turn (the long way past five beams is
+//     disorientation as a feature), the boot must CLAMP and complete, every
+//     hand-rolled shader material must ride the disposal registry, the
+//     double-click reset must be torn down with the scene, and hover must
+//     never steal selection (a camera chasing casual pointer travel is a
+//     chart that will not hold still mid-sentence).
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /rotVel \*= 0\.9/, "a released spin must decay toward rest -- undamped inertia never stops");
+  assert.match(r3d, /const nearestTurn/, "a focus flight must rotate the shortest way to the chosen beam");
+  assert.match(r3d, /bootT = Math\.min\(1,/, "the boot assembly must clamp at complete -- an unclamped boot re-eases forever");
+  assert.match(r3d, /addEventListener\("dblclick", onDblClick\)/, "double-click must reset the camera to the home orbit");
+  assert.match(r3d, /removeEventListener\("dblclick", onDblClick\)/, "the dblclick listener must be torn down with the scene");
+  // Every hand-rolled ShaderMaterial goes through the disposal registry --
+  // rule 4 gained two new material classes this round and both must die
+  // with the scene.
+  const shaderMats = (r3d.match(/new THREE\.ShaderMaterial/g) || []).length;
+  const trackedShaderMats = (r3d.match(/track\(new THREE\.ShaderMaterial/g) || []).length;
+  assert.ok(shaderMats >= 2, "round 7 hand-rolls the sheath and surface shaders");
+  assert.equal(trackedShaderMats, shaderMats, "every ShaderMaterial must be tracked for disposal");
+  // Selection is a TAP: the pointerup path guards on !dragging via the
+  // TAP_SLOP travel threshold, and the hover path sets only hoverKey.
+  assert.match(r3d, /const TAP_SLOP/, "tap-vs-drag must be distinguished by a travel threshold");
+  assert.match(r3d, /if \(pointerDown && !dragging\) \{[\s\S]{0,200}?selectRef\.current/, "selection must fire on tap release, never mid-drag");
+  assert.doesNotMatch(r3d, /hoverKey = pick\(e\);\s*[^\n]*\n\s*[^\n]*selectRef\.current/, "hover must highlight only -- it must never select");
+  // The score surface's shader may respond to the viewpoint but never to
+  // time: rule 5, in GLSL. The sheath shader is the decorated exception and
+  // carries the uTime term on purpose.
+  assert.ok(!/SURFACE_FRAG[\s\S]*?uTime[\s\S]*?varying/.test(r3d.slice(r3d.indexOf("SURFACE_FRAG"), r3d.indexOf("export function Radar3D"))), "the score surface shader must not animate by itself");
+
+  // The shared-selection wiring: the plate's chips are buttons on the same
+  // state as the list and the stage.
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /const \[dimSel, setDimSel\] = useState<string \| null>\(null\)/, "ScoredBody must own the shape section's one selection");
+  assert.match(src, /<DimensionShape[\s\S]{0,400}?selected=\{dimSel\}/, "the dimension list must read the shared selection");
+  assert.match(src, /designation\.primary\.map[\s\S]{0,700}?aria-pressed=\{active\}/, "the plate's defining-area chips must be accessible toggles on the shared selection");
 }
 
 console.log("web-leads-battlecard ok");

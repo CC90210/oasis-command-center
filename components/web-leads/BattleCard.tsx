@@ -73,6 +73,21 @@
  * "Invisible storefront", "Full rebuild"), chosen by arithmetic over the
  * same scores the radar draws, so a rep says what the graph shows.
  *
+ * Round 7 (2026-09-01, "more interactive... truly next generation"): the
+ * stage became something a rep OPERATES, not just watches. Grounded in the
+ * FUI research (Jayse Hansen's Iron Man HUD rules: amplify the operator,
+ * never distract; ground the fantasy in real instrumentation) and the
+ * standard three.js interaction vocabulary (damped inertia, eased camera
+ * flights). The hologram BOOTS -- assembles itself once on mount; tapping a
+ * beam, a label, a list row or a designation-plate chip FLIES the stage to
+ * that dimension behind one shared selection owned by ScoredBody; a
+ * targeting reticle in the dimension's identity hue assembles at the
+ * selected beam's foot; a released drag carries inertia and decays;
+ * double-click resets the camera. Hover only brightens -- selection is a
+ * deliberate tap, so casual pointer travel never yanks the camera. The
+ * sheaths and score surface moved to hand-rolled fresnel shaders
+ * (Radar3D.tsx header explains which of them may animate and why).
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
  * identical treatment -- rule 1 survives the decoration); ambient motion is
  * confined to decorative layers that carry no data (the rotating tick ring,
@@ -1569,7 +1584,16 @@ function PercentileSentence({
  * are the shape's own numbers: the floor (worst area), the ceiling (best),
  * and the spread between them, in the telemetry face.
  */
-function DesignationPlate({ audit }: { audit: Extract<AuditResult, { state: "scored" }> }) {
+function DesignationPlate({
+  audit, selected, onSelect,
+}: {
+  audit: Extract<AuditResult, { state: "scored" }>;
+  /** The shape section's shared selection (round 7): the plate's chips are
+   *  the same control as the list rows and the beams -- tapping a defining
+   *  area here selects it there and flies the 3D stage to it. */
+  selected: string | null;
+  onSelect: (key: string) => void;
+}) {
   const designation = useMemo(
     () => designateLead(audit.dimensions, audit.composite),
     [audit.dimensions, audit.composite],
@@ -1602,21 +1626,28 @@ function DesignationPlate({ audit }: { audit: Extract<AuditResult, { state: "sco
             <span className="font-medium text-fg-muted">The play:</span> {designation.play}
           </p>
           {/* The defining areas, wearing the same identity dots they wear on
-              every other surface of this card. Identity, never verdict. */}
+              every other surface of this card. Identity, never verdict --
+              and since round 7 they are BUTTONS on the section's shared
+              selection: tapping one selects it in the list, opens its
+              detail, and flies the 3D stage to its beam. */}
           <div className="mt-3 flex flex-wrap gap-2">
             {designation.primary.map((key) => {
               const d = byKey.get(key);
               if (!d) return null;
               const hue = hueFor(key);
+              const active = selected === key;
               return (
-                <span
+                <button
                   key={key}
-                  className="inline-flex items-center gap-1.5 rounded border border-bg-border bg-bg-panel/70 px-2 py-1 text-[11px] text-fg-muted"
+                  type="button"
+                  onClick={() => onSelect(key)}
+                  aria-pressed={active}
+                  className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none ${active ? "border-accent/50 bg-bg-raised/80 text-fg" : "border-bg-border bg-bg-panel/70 text-fg-muted hover:border-accent/30 hover:text-fg"}`}
                 >
                   <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
                   {d.label}
                   <span className="tabular-nums text-fg [font-family:var(--battle-data)]">{d.score}</span>
-                </span>
+                </button>
               );
             })}
           </div>
@@ -1664,6 +1695,12 @@ function ScoredBody({
   const maxRecoverable = Math.max(1, ...worstFirst.map(recoverablePoints));
   const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
   const failingAreas = worstFirst.filter((d) => d.checks.some((c) => !c.has)).length;
+  // ONE selection for the whole shape section (round 7): the designation
+  // plate's chips, the dimension list, the SVG radar and the WebGL stage all
+  // share it, so tapping an area anywhere focuses it everywhere -- including
+  // the camera flight on the 3D stage. Null means "the worst area", resolved
+  // inside DimensionShape where worstFirst is already the ordering truth.
+  const [dimSel, setDimSel] = useState<string | null>(null);
 
   return (
     <>
@@ -1783,7 +1820,7 @@ function ScoredBody({
           title="What kind of bad is it"
           sub="The shape of the problem across seven areas. Tap one, on the chart or in the list, to see what is failing inside it."
         >
-          <DesignationPlate audit={audit} />
+          <DesignationPlate audit={audit} selected={dimSel} onSelect={setDimSel} />
           <DimensionShape
             dimensions={audit.dimensions}
             worstFirst={worstFirst}
@@ -1791,6 +1828,8 @@ function ScoredBody({
             signals={signals}
             drawn={drawn}
             reduced={reduced}
+            selected={dimSel}
+            onSelect={setDimSel}
           />
         </BattleSection>
 
@@ -1946,7 +1985,7 @@ function ScoredBody({
  * selection already uses.
  */
 function DimensionShape({
-  dimensions, worstFirst, competitors, signals, drawn, reduced,
+  dimensions, worstFirst, competitors, signals, drawn, reduced, selected, onSelect,
 }: {
   dimensions: DimensionProfile[];
   worstFirst: DimensionProfile[];
@@ -1954,9 +1993,14 @@ function DimensionShape({
   signals: Record<string, unknown> | null;
   drawn: boolean;
   reduced: boolean;
+  /** Selection is OWNED BY ScoredBody (round 7): the designation plate's
+   *  chips, this list, the SVG radar and the WebGL stage all read and write
+   *  the same state, so a tap anywhere focuses everywhere. */
+  selected: string | null;
+  onSelect: (key: string) => void;
 }) {
   const bus = useBattleSections();
-  const [selected, setSelected] = useState<string | null>(null);
+  const setSelected = onSelect;
   // The holo-table tilt for the 2D FALLBACK stack: the radar sits on a
   // gentle base pitch and leans toward the pointer. USER-DRIVEN motion only.
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -2036,7 +2080,7 @@ function DimensionShape({
               <p className="sr-only">{`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}</p>
               {headToHead && (
                 <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
-                  Gold outline: {headToHead.competitor.name} · drag to orbit, tap a pillar to inspect
+                  Gold outline: {headToHead.competitor.name} · tap a beam to focus · drag to orbit · double-click to reset
                 </p>
               )}
             </>

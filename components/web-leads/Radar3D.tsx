@@ -21,48 +21,55 @@
  *     list stays the keyboard path). If WebGL init or the import fails, the
  *     card looks exactly like round 3, never blank.
  *
- * ═══ WHAT IT DRAWS (round 5: "nicer and more detailed") ═════════════════════
+ * ═══ WHAT IT DRAWS (round 5: detail; round 7: interaction) ══════════════════
  *
  * A circular holo-platform (polar grid ringed by a tick dial), seven ENERGY
- * BEAMS rising from it -- bright core, translucent sheath, a lit ring at the
- * foot (height = that dimension's score, colour = its fixed identity hue from
- * battle-hud.ts) -- a translucent cyan score surface tented over the beam
- * tops, the benchmark competitor as a GOLD dashed wireframe with vertex
- * markers at its own heights, a slow RADAR SWEEP brushing the platform, and
- * a particle drift around the whole thing. When the postprocessing modules
- * load, the scene renders through REAL BLOOM (UnrealBloomPass) and the
- * canvas composites onto the panel with `mix-blend-mode: screen`, so light
- * blooms and black contributes nothing; if that import fails the scene
- * renders exactly as round 4 did, direct and transparent. The group idles in
- * rotation, the pointer drags to orbit, and hovering or tapping a beam
- * selects that dimension -- the same selection the list and detail panel
- * share.
+ * BEAMS rising from it -- bright core, holographic sheath (hand-rolled
+ * fresnel + scanline shader), a lit ring at the foot; height = the score,
+ * colour = the fixed identity hue from battle-hud.ts -- a fresnel-shaded
+ * cyan score surface tented over the beam tops, the benchmark competitor as
+ * a GOLD dashed wireframe with vertex markers, a slow radar sweep, and a
+ * particle drift. Bloom (UnrealBloomPass) when the postprocessing modules
+ * load; direct render when they do not. Projected DOM labels ride the beam
+ * tops. Round 7, grounded in the FUI research (Jayse Hansen's HUD rules:
+ * amplify the operator, never distract; ground the fantasy in real
+ * instrumentation) and the standard three.js interaction vocabulary (damped
+ * inertia for weight, eased camera flights for focus):
  *
- * Each beam also carries a PROJECTED LABEL: a DOM chip (dimension name in
- * the display face, score in the data face, wearing the identity hue) that
- * tracks its beam top through the camera every frame. This revises round 4's
- * "no text in the scene" rule by honouring what it protected: the text is
- * never IN the GL scene (it is real DOM -- crisp at any DPI, real fonts),
- * it is aria-hidden, and the dimension list beside the chart remains the
- * accessible and keyboard path. The graph now explains itself on sight
- * (Adon, round 5: "really outlining the graph of what type of bad it is").
+ *   - BOOT ASSEMBLY: the hologram builds itself once on mount -- platform
+ *     fades up, beams rise staggered to their measured heights, surface and
+ *     benchmark resolve last, labels arrive with them. ~1.4s, plays once,
+ *     never replays (the draw-once discipline every chart here follows).
+ *   - TAP TO FOCUS: tapping a beam (or its label, or a row in the list, or
+ *     a designation-plate chip) FLIES the stage to it -- the world turns the
+ *     shortest way to face that beam, the camera eases in, and a targeting
+ *     reticle in the dimension's own hue assembles at its foot. Double-click
+ *     resets to the home orbit. Hover only brightens; selection is a tap,
+ *     so casual pointer travel never yanks the camera around.
+ *   - INERTIA: a released drag keeps spinning and decays to rest -- the
+ *     stage has weight. Idle drift resumes once the spin settles.
  *
  * ═══ THE RULES ══════════════════════════════════════════════════════════════
  *
  * 1. Colour is identity, never verdict (battle-hud.ts). Beam HEIGHT is the
  *    score -- the same length encoding every Meter uses; hue never varies
- *    with the value. Bloom blooms every hue identically.
+ *    with the value. The reticle wears the selected dimension's identity
+ *    hue, chosen by the rep's tap, never by the number.
  * 2. This component simply does not mount under prefers-reduced-motion; the
- *    caller gates it. No "paused 3D" middle state to get wrong.
+ *    caller gates it. No "paused 3D" middle state to get wrong. The boot
+ *    sequence therefore never needs a reduced variant: reduced-motion users
+ *    get the SVG stack, already settled.
  * 3. No text in the GL scene. The projected labels are DOM, aria-hidden,
  *    and a pointer convenience; the accessible dimension list beside the
  *    chart is still the legend and the keyboard path.
- * 4. Everything disposed on unmount: geometries, materials, textures,
- *    composer targets, renderer. A rep pages through many leads in a shift;
- *    leaking a GL context per lead kills the tab by lunch.
- * 5. Ambient motion (sweep, ticks, idle orbit, particles) lives ONLY on
- *    decorative layers that carry no data. The beams and surfaces encode
- *    scores and rotate rigidly with the stage, never by themselves.
+ * 4. Everything disposed on unmount: geometries, materials (shader materials
+ *    included), textures, composer targets and passes, renderer. A rep pages
+ *    through many leads in a shift; leaking a GL context per lead kills the
+ *    tab by lunch.
+ * 5. Ambient motion (sweep, dial, idle drift, particles, sheath scanlines)
+ *    lives ONLY on decorative layers. The beam CORES, the score surface and
+ *    the benchmark wireframe encode measurements: they move rigidly with the
+ *    stage -- or with the boot, once -- never by themselves.
  */
 
 import { useEffect, useRef } from "react";
@@ -84,6 +91,67 @@ type Props = {
 
 const PLATFORM_R = 3;
 const PILLAR_MAX_H = 2.4;
+/** Pointer travel (px) below which a press-and-release is a TAP (select +
+ *  focus) rather than a drag. */
+const TAP_SLOP = 6;
+
+/** The shortest way around: the equivalent of `to` nearest `from`, so a
+ *  focus flight never takes the long way past five other beams. */
+const nearestTurn = (from: number, to: number): number => {
+  const TAU = Math.PI * 2;
+  let d = (to - from) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return from + d;
+};
+
+const phase = (t: number, a: number, b: number) => Math.min(1, Math.max(0, (t - a) / (b - a)));
+const easeOut = (x: number) => 1 - Math.pow(1 - x, 3);
+
+/** The holographic sheath: fresnel rim (bright where the surface grazes the
+ *  view) times a slow upward scanline crawl. Hand-rolled, ~20 lines of GLSL,
+ *  after the pattern the vanilla-holographic-material library popularised --
+ *  a dependency would ship colour opinions into a surface whose palette is
+ *  doctrine. */
+const SHEATH_VERT = /* glsl */ `
+  varying vec3 vNormal;
+  varying vec3 vView;
+  varying float vY;
+  void main() {
+    vNormal = normalize(normalMatrix * normal);
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    vView = -mv.xyz;
+    vY = position.y;
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const SHEATH_FRAG = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uTime;
+  uniform float uOpacity;
+  varying vec3 vNormal;
+  varying vec3 vView;
+  varying float vY;
+  void main() {
+    float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vView))), 2.0);
+    float scan = 0.72 + 0.28 * sin(vY * 34.0 - uTime * 2.6);
+    gl_FragColor = vec4(uColor, uOpacity * (0.2 + 0.8 * fres) * scan);
+  }
+`;
+/** The score surface's shader: fresnel only, NO time term -- the surface is
+ *  a measurement, and its shading may respond to the rep's own viewpoint but
+ *  never animate by itself (rule 5). */
+const SURFACE_FRAG = /* glsl */ `
+  uniform vec3 uColor;
+  uniform float uOpacity;
+  varying vec3 vNormal;
+  varying vec3 vView;
+  varying float vY;
+  void main() {
+    float fres = pow(1.0 - abs(dot(normalize(vNormal), normalize(vView))), 1.6);
+    gl_FragColor = vec4(uColor, uOpacity * (0.35 + 0.65 * fres));
+  }
+`;
 
 export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, className = "" }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -145,8 +213,11 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
 
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 60);
-      camera.position.set(0, 4.6, 8.2);
-      camera.lookAt(0, 0.7, 0);
+      const HOME_POS = new THREE.Vector3(0, 4.6, 8.2);
+      const HOME_LOOK = new THREE.Vector3(0, 0.7, 0);
+      const FOCUS_POS = new THREE.Vector3(0, 3.3, 6.7);
+      camera.position.copy(HOME_POS);
+      camera.lookAt(HOME_LOOK);
 
       const world = new THREE.Group();
       scene.add(world);
@@ -195,8 +266,14 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         composer = null;
       }
 
+      // Materials whose opacity the boot sequence scales in: kept with their
+      // resting value so the per-frame write is `base * bootPhase`, never a
+      // compounding multiply.
+      const bootFades: { mat: { opacity: number }; base: number; from: number; to: number }[] = [];
+
       // ── the holo platform: rings + spokes + tick dial ────────────────
       const gridMat = track(new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.22 }));
+      bootFades.push({ mat: gridMat, base: 0.22, from: 0, to: 0.3 });
       for (const frac of [0.25, 0.5, 0.75, 1]) {
         const pts: THREE_NS.Vector3[] = [];
         for (let s = 0; s <= 64; s++) {
@@ -219,6 +296,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       {
         const geo = track(new THREE.CircleGeometry(PLATFORM_R * 1.04, 64));
         const mat = track(new THREE.MeshBasicMaterial({ color: 0x0ea5e9, transparent: true, opacity: 0.05, side: THREE.DoubleSide }));
+        bootFades.push({ mat, base: 0.05, from: 0, to: 0.3 });
         const disc = new THREE.Mesh(geo, mat);
         disc.rotation.x = -Math.PI / 2;
         disc.position.y = -0.01;
@@ -238,6 +316,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         }
         const geo = track(new THREE.BufferGeometry().setFromPoints(pts));
         const mat = track(new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.3 }));
+        bootFades.push({ mat, base: 0.3, from: 0.05, to: 0.35 });
         tickRing.add(new THREE.LineSegments(geo, mat));
         world.add(tickRing);
       }
@@ -263,7 +342,8 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         const geo = track(new THREE.BufferGeometry());
         geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
         geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
-        const mat = track(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+        const mat = track(new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+        bootFades.push({ mat, base: 1, from: 0.1, to: 0.4 });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.y = 0.005;
         sweep.add(mesh);
@@ -288,6 +368,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       {
         const geo = track(new THREE.PlaneGeometry(PLATFORM_R * 1.9, PLATFORM_R * 1.9));
         const mat = track(new THREE.MeshBasicMaterial({ map: glowTex, color: 0x0e7490, transparent: true, opacity: 0.28, blending: THREE.AdditiveBlending, depthWrite: false }));
+        bootFades.push({ mat, base: 0.28, from: 0, to: 0.3 });
         const pool = new THREE.Mesh(geo, mat);
         pool.rotation.x = -Math.PI / 2;
         pool.position.y = 0.002;
@@ -298,10 +379,14 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       const pillarGroup = new THREE.Group();
       world.add(pillarGroup);
       const topPoints: THREE_NS.Vector3[] = [];
+      const sheathMats: THREE_NS.ShaderMaterial[] = [];
       const pillars: {
         key: string;
+        azimuth: number;
+        x: number;
+        z: number;
         mat: THREE_NS.MeshBasicMaterial;
-        sheathMat: THREE_NS.MeshBasicMaterial;
+        sheathMat: THREE_NS.ShaderMaterial;
         ringMat: THREE_NS.MeshBasicMaterial;
         mesh: THREE_NS.Mesh;
         sheath: THREE_NS.Mesh;
@@ -309,6 +394,8 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         glowMat: THREE_NS.SpriteMaterial;
         anchor: THREE_NS.Object3D;
         baseH: number;
+        bootFrom: number;
+        bootTo: number;
       }[] = [];
 
       dimensions.forEach((d, i) => {
@@ -326,11 +413,19 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         mesh.userData.dimKey = d.key;
         pillarGroup.add(mesh);
 
-        // The sheath: a wider, faint, additive shell that makes the core
-        // read as a volumetric beam instead of a stick. Same height -- it IS
-        // the same measurement, dressed.
+        // The sheath: the holographic dressing around the core -- fresnel rim
+        // and a slow scanline crawl (decorative; the core it wraps is rigid).
         const sheathGeo = track(new THREE.CylinderGeometry(0.11, 0.13, h, 12, 1, true));
-        const sheathMat = track(new THREE.MeshBasicMaterial({ color: hue, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+        const sheathMat = track(new THREE.ShaderMaterial({
+          vertexShader: SHEATH_VERT,
+          fragmentShader: SHEATH_FRAG,
+          uniforms: { uColor: { value: hue }, uTime: { value: 0 }, uOpacity: { value: 0.55 } },
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }));
+        sheathMats.push(sheathMat);
         const sheath = new THREE.Mesh(sheathGeo, sheathMat);
         sheath.position.set(x, h / 2, z);
         pillarGroup.add(sheath);
@@ -366,10 +461,16 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         world.add(anchor);
 
         topPoints.push(new THREE.Vector3(x, h, z));
-        pillars.push({ key: d.key, mesh, mat, sheath, sheathMat, ringMat, glow, glowMat, anchor, baseH: h });
+        pillars.push({
+          key: d.key, azimuth: a, x, z, mesh, mat, sheath, sheathMat, ringMat, glow, glowMat, anchor, baseH: h,
+          // Staggered rise: each beam starts a beat after its neighbour.
+          bootFrom: 0.18 + i * 0.05,
+          bootTo: 0.5 + i * 0.05,
+        });
       });
 
-      // ── the score surface: a translucent tent over the beam tops ─────
+      // ── the score surface: a fresnel tent over the beam tops ─────────
+      const surfaceUniforms = { uColor: { value: new THREE.Color(0x22d3ee) }, uOpacity: { value: 0 } };
       {
         const centroidY = topPoints.reduce((s, p) => s + p.y, 0) / n;
         const verts: number[] = [0, centroidY, 0];
@@ -380,11 +481,19 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
         geo.setIndex(idx);
         geo.computeVertexNormals();
-        const mat = track(new THREE.MeshBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.14, side: THREE.DoubleSide, depthWrite: false }));
+        const mat = track(new THREE.ShaderMaterial({
+          vertexShader: SHEATH_VERT,
+          fragmentShader: SURFACE_FRAG,
+          uniforms: surfaceUniforms,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }));
         world.add(new THREE.Mesh(geo, mat));
 
         const edgeGeo = track(new THREE.BufferGeometry().setFromPoints([...topPoints, topPoints[0]]));
         const edgeMat = track(new THREE.LineBasicMaterial({ color: new THREE.Color(CYAN), transparent: true, opacity: 0.95 }));
+        bootFades.push({ mat: edgeMat, base: 0.95, from: 0.6, to: 0.95 });
         world.add(new THREE.Line(edgeGeo, edgeMat));
       }
 
@@ -399,6 +508,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         });
         const geo = track(new THREE.BufferGeometry().setFromPoints([...pts, pts[0]]));
         const mat = track(new THREE.LineDashedMaterial({ color: goldCol, transparent: true, opacity: 0.9, dashSize: 0.16, gapSize: 0.12 }));
+        bootFades.push({ mat, base: 0.9, from: 0.65, to: 0.98 });
         const line = new THREE.Line(geo, mat);
         line.computeLineDistances();
         world.add(line);
@@ -406,12 +516,45 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         // corners survive the dash pattern and read as measurements.
         const markGeo = track(new THREE.OctahedronGeometry(0.045));
         const markMat = track(new THREE.MeshBasicMaterial({ color: goldCol, transparent: true, opacity: 0.9 }));
+        bootFades.push({ mat: markMat, base: 0.9, from: 0.65, to: 0.98 });
         for (const p of pts) {
           const m = new THREE.Mesh(markGeo, markMat);
           m.position.copy(p);
           world.add(m);
         }
       }
+
+      // ── the targeting reticle: assembles at the selected beam's foot ─
+      // A dashed ring and four brackets in the SELECTED dimension's identity
+      // hue -- the one colour decision here follows the rep's tap, never the
+      // value. Slow self-rotation: decorative chrome (rule 5).
+      const reticle = new THREE.Group();
+      const reticleRingMat = track(new THREE.LineDashedMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, dashSize: 0.06, gapSize: 0.05 }));
+      const reticleBracketMat = track(new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 }));
+      {
+        const pts: THREE_NS.Vector3[] = [];
+        for (let s = 0; s <= 48; s++) {
+          const a = (s / 48) * Math.PI * 2;
+          pts.push(new THREE.Vector3(Math.cos(a) * 0.34, 0, Math.sin(a) * 0.34));
+        }
+        const geo = track(new THREE.BufferGeometry().setFromPoints(pts));
+        const ring = new THREE.Line(geo, reticleRingMat);
+        ring.computeLineDistances();
+        reticle.add(ring);
+        // Four L-brackets at the compass points, just outside the ring.
+        const b: THREE_NS.Vector3[] = [];
+        const R = 0.46, L = 0.12;
+        for (const [cx, cz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const px = cx * R, pz = cz * R;
+          b.push(new THREE.Vector3(px - cz * L, 0, pz - cx * L), new THREE.Vector3(px, 0, pz));
+          b.push(new THREE.Vector3(px, 0, pz), new THREE.Vector3(px + cz * L, 0, pz + cx * L));
+        }
+        const bGeo = track(new THREE.BufferGeometry().setFromPoints(b));
+        reticle.add(new THREE.LineSegments(bGeo, reticleBracketMat));
+      }
+      reticle.position.y = 0.012;
+      reticle.visible = false;
+      world.add(reticle);
 
       // ── ambient particle drift ───────────────────────────────────────
       const particleGroup = new THREE.Group();
@@ -429,6 +572,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         const geo = track(new THREE.BufferGeometry());
         geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
         const mat = track(new THREE.PointsMaterial({ color: 0x67e8f9, size: 0.035, transparent: true, opacity: 0.5, depthWrite: false }));
+        bootFades.push({ mat, base: 0.5, from: 0, to: 0.5 });
         particleGroup.add(new THREE.Points(geo, mat));
         scene.add(particleGroup);
       }
@@ -436,8 +580,8 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       // ── the projected labels: DOM chips riding the beam tops ─────────
       // Real DOM so the type is crisp at any DPI and wears the card's own
       // faces; aria-hidden because the dimension list beside the chart is
-      // the accessible path (rule 3). Clicking a chip selects, same as
-      // clicking its beam.
+      // the accessible path (rule 3). Clicking a chip selects and focuses,
+      // same as tapping its beam.
       const labelLayer = document.createElement("div");
       labelLayer.setAttribute("aria-hidden", "true");
       labelLayer.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:none;";
@@ -458,7 +602,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         score.style.cssText = "font-family:var(--battle-data);font-size:11px;color:rgba(226,232,240,0.92);";
         el.appendChild(name);
         el.appendChild(score);
-        el.addEventListener("pointerdown", (e) => { e.stopPropagation(); selectRef.current(d.key); });
+        el.addEventListener("pointerdown", (e) => { e.stopPropagation(); focusKey = d.key; selectRef.current(d.key); });
         labelLayer.appendChild(el);
         return { key: d.key, el, name };
       });
@@ -477,13 +621,22 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       const ro = new ResizeObserver(resize);
       ro.observe(host);
 
-      // ── interaction: drag to orbit, hover/tap to select ──────────────
+      // ── interaction: tap to focus, drag to orbit (with weight) ───────
       const raycaster = new THREE.Raycaster();
       const pointerNdc = new THREE.Vector2();
+      let pointerDown = false;
       let dragging = false;
+      let moved = 0;
       let lastX = 0, lastY = 0;
       let tiltX = -0.12;
-      let userSpin = 0;
+      let rotY = 0;
+      let rotVel = 0;
+      let focusKey: string | null = null;
+      // Selection as of the last frame: a CHANGE (from the list, the plate,
+      // a label or a tap) is what engages a focus flight. Hover never
+      // selects any more -- a camera that chases casual pointer travel is a
+      // chart that will not hold still mid-sentence.
+      let lastSelSeen = selectedRef.current;
 
       const pick = (e: PointerEvent): string | null => {
         const rect = renderer.domElement.getBoundingClientRect();
@@ -498,61 +651,158 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         return null;
       };
 
+      let hoverKey: string | null = null;
       const onDown = (e: PointerEvent) => {
-        dragging = true;
+        pointerDown = true;
+        dragging = false;
+        moved = 0;
         lastX = e.clientX; lastY = e.clientY;
-        renderer.domElement.style.cursor = "grabbing";
         renderer.domElement.setPointerCapture(e.pointerId);
-        const key = pick(e);
-        if (key) selectRef.current(key);
       };
       const onMove = (e: PointerEvent) => {
-        if (dragging) {
-          userSpin += (e.clientX - lastX) * 0.005;
-          tiltX = Math.max(-0.5, Math.min(0.25, tiltX + (e.clientY - lastY) * 0.003));
+        if (pointerDown) {
+          const dx = e.clientX - lastX;
+          const dy = e.clientY - lastY;
+          moved += Math.abs(dx) + Math.abs(dy);
+          if (moved > TAP_SLOP) {
+            if (!dragging) {
+              dragging = true;
+              focusKey = null;
+              renderer.domElement.style.cursor = "grabbing";
+            }
+            rotY += dx * 0.005;
+            rotVel = dx * 0.005;
+            tiltX = Math.max(-0.5, Math.min(0.25, tiltX + dy * 0.003));
+          }
           lastX = e.clientX; lastY = e.clientY;
           return;
         }
-        const key = pick(e);
-        renderer.domElement.style.cursor = key ? "pointer" : "grab";
-        if (key) selectRef.current(key);
+        hoverKey = pick(e);
+        renderer.domElement.style.cursor = hoverKey ? "pointer" : "grab";
       };
-      const onUp = () => { dragging = false; renderer.domElement.style.cursor = "grab"; };
+      const onUp = (e: PointerEvent) => {
+        if (pointerDown && !dragging) {
+          const key = pick(e);
+          if (key) {
+            focusKey = key;
+            selectRef.current(key);
+          }
+        }
+        pointerDown = false;
+        dragging = false;
+        renderer.domElement.style.cursor = "grab";
+      };
+      // Double-click anywhere on the stage: back to the home orbit. The
+      // selection (and the detail panel it drives) stays where the rep put
+      // it -- only the CAMERA resets.
+      const onDblClick = () => { focusKey = null; };
       renderer.domElement.addEventListener("pointerdown", onDown);
       renderer.domElement.addEventListener("pointermove", onMove);
       renderer.domElement.addEventListener("pointerup", onUp);
       renderer.domElement.addEventListener("pointerleave", onUp);
+      renderer.domElement.addEventListener("dblclick", onDblClick);
 
       // ── the loop ─────────────────────────────────────────────────────
       let raf = 0;
-      let idle = 0;
+      let decorT = 0;
       let running = true;
+      const bootStart = performance.now();
+      const camPos = HOME_POS.clone();
+      const camLook = HOME_LOOK.clone();
+      const wantPos = HOME_POS.clone();
+      const wantLook = HOME_LOOK.clone();
+
       const tick = () => {
         if (!running) return;
-        idle += 0.0016;
-        world.rotation.y = idle + userSpin;
+        const bootT = Math.min(1, (performance.now() - bootStart) / 1400);
+        decorT += 0.0016;
+
+        // A selection that arrived from OUTSIDE the canvas (the list, the
+        // plate) engages the same focus flight a tap does.
+        const selNow = selectedRef.current;
+        if (selNow !== lastSelSeen) {
+          lastSelSeen = selNow;
+          if (selNow) focusKey = selNow;
+        }
+
+        // ── rotation: focus flight beats inertia beats idle drift ──────
+        const focusPillar = focusKey ? pillars.find((p) => p.key === focusKey) : undefined;
+        if (focusPillar && !dragging) {
+          // Turn the shortest way so the chosen beam faces the camera.
+          const targetR = nearestTurn(rotY, Math.PI / 2 - focusPillar.azimuth);
+          rotY += (targetR - rotY) * 0.07;
+          tiltX += (-0.18 - tiltX) * 0.05;
+          rotVel = 0;
+          wantPos.copy(FOCUS_POS);
+          wantLook.set(0, focusPillar.baseH * 0.55 + 0.25, 1.1);
+        } else {
+          if (!dragging) {
+            rotY += rotVel;
+            rotVel *= 0.94;
+            if (Math.abs(rotVel) < 0.00004) {
+              rotVel = 0;
+              rotY += 0.0016;
+            }
+          }
+          wantPos.copy(HOME_POS);
+          wantLook.copy(HOME_LOOK);
+        }
+        camPos.lerp(wantPos, 0.06);
+        camLook.lerp(wantLook, 0.08);
+        camera.position.copy(camPos);
+        camera.lookAt(camLook);
+
+        world.rotation.y = rotY;
         world.rotation.x = tiltX;
-        particleGroup.rotation.y = -(idle + userSpin) * 0.35;
+        particleGroup.rotation.y = -rotY * 0.35;
         // Decorative layers on their own clocks (rule 5): the sweep brushes
         // the platform, the tick dial counter-rotates, both slowly.
-        sweep.rotation.y = idle * 14;
-        tickRing.rotation.y = -idle * 2.5;
-        // The selected beam breathes brighter; everything else rests. Read
-        // from the ref so selection never rebuilds the scene.
+        sweep.rotation.y = decorT * 14;
+        tickRing.rotation.y = -decorT * 2.5;
+
+        // ── boot fades on the platform, surface and benchmark ──────────
+        for (const f of bootFades) f.mat.opacity = f.base * easeOut(phase(bootT, f.from, f.to));
+        surfaceUniforms.uOpacity.value = 0.3 * easeOut(phase(bootT, 0.6, 0.95));
+
+        // ── the beams: boot rise x selection state ─────────────────────
         const sel = selectedRef.current;
         for (const p of pillars) {
+          const rise = easeOut(phase(bootT, p.bootFrom, p.bootTo));
           const active = p.key === sel;
-          p.mat.opacity = active ? 1 : 0.85;
-          p.sheathMat.opacity = active ? 0.3 : 0.16;
-          p.ringMat.opacity = active ? 0.7 : 0.4;
-          p.glowMat.opacity = active ? 1 : 0.7;
-          p.glow.scale.setScalar(active ? 0.85 : 0.55);
+          const hot = active || p.key === hoverKey;
+          p.mesh.scale.y = Math.max(rise, 0.001);
+          p.mesh.position.y = (p.baseH * rise) / 2;
+          p.sheath.scale.y = Math.max(rise, 0.001);
+          p.sheath.position.y = (p.baseH * rise) / 2;
+          p.glow.position.y = p.baseH * rise;
+          p.anchor.position.y = p.baseH * rise + 0.3;
+          p.mat.opacity = (active ? 1 : hot ? 0.92 : 0.85) * rise;
+          p.sheathMat.uniforms.uTime.value = decorT * 1000 * 0.0026;
+          p.sheathMat.uniforms.uOpacity.value = (active ? 0.95 : hot ? 0.7 : 0.55) * rise;
+          p.ringMat.opacity = (active ? 0.7 : 0.4) * rise;
+          p.glowMat.opacity = (active ? 1 : hot ? 0.85 : 0.7) * rise;
+          p.glow.scale.setScalar((active ? 0.85 : 0.55) * Math.max(rise, 0.001));
           p.mesh.scale.x = p.mesh.scale.z = active ? 1.6 : 1;
           p.sheath.scale.x = p.sheath.scale.z = active ? 1.35 : 1;
         }
-        // The labels chase their anchors through the camera. Depth fades a
-        // chip on the far side of the stage so the near side reads first.
+
+        // ── the reticle rides the selected beam ────────────────────────
+        const selPillar = sel ? pillars.find((p) => p.key === sel) : undefined;
+        if (selPillar && bootT > 0.85) {
+          reticle.visible = true;
+          reticle.position.x = selPillar.x;
+          reticle.position.z = selPillar.z;
+          reticle.rotation.y = decorT * 3;
+          const hue = hueFor(selPillar.key).to;
+          reticleRingMat.color.set(hue);
+          reticleBracketMat.color.set(hue);
+        } else {
+          reticle.visible = false;
+        }
+
+        // ── the labels chase their anchors through the camera ──────────
         const rect = { w: renderer.domElement.clientWidth, h: renderer.domElement.clientHeight };
+        const labelBoot = phase(bootT, 0.7, 1);
         for (let i = 0; i < labels.length; i++) {
           const l = labels[i];
           pillars[i].anchor.getWorldPosition(projected);
@@ -562,13 +812,14 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
           const depth = Math.min(1, Math.max(0, (dist - 7.2) / 5.2));
           projected.project(camera);
           const off = projected.z > 1;
-          const opacity = off ? 0 : 1 - depth * 0.62;
           const active = l.key === sel;
+          const opacity = (off ? 0 : 1 - depth * 0.62) * labelBoot;
           l.el.style.transform = `translate(-50%,-100%) translate(${((projected.x * 0.5 + 0.5) * rect.w).toFixed(1)}px, ${((-projected.y * 0.5 + 0.5) * rect.h).toFixed(1)}px) scale(${(active ? 1.08 : 1 - depth * 0.18).toFixed(3)})`;
           l.el.style.opacity = opacity.toFixed(3);
           l.el.style.zIndex = String(1000 - Math.round(depth * 900));
           l.name.style.textShadow = active ? `0 0 12px ${hueFor(l.key).to}` : `0 0 8px ${hueFor(l.key).to}66`;
         }
+
         if (composer) composer.render();
         else renderer.render(scene, camera);
         raf = requestAnimationFrame(tick);
@@ -596,6 +847,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         renderer.domElement.removeEventListener("pointermove", onMove);
         renderer.domElement.removeEventListener("pointerup", onUp);
         renderer.domElement.removeEventListener("pointerleave", onUp);
+        renderer.domElement.removeEventListener("dblclick", onDblClick);
         for (const d of disposables) d.dispose();
         for (const disposePass of passDisposers) disposePass();
         composer?.dispose?.();
