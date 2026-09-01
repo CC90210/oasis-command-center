@@ -11,6 +11,7 @@
  * The session is read from Next.js cookies via @supabase/ssr.
  */
 
+import { cache } from "react";
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -326,7 +327,7 @@ async function makeAuthedSupabase() {
  * uses (id, email) with the same auth.users uuid — role lookups downstream
  * are unchanged. Supabase mode is byte-identical to before.
  */
-export async function getSessionUser() {
+async function getSessionUserUncached() {
   if (process.env.EMPIRE_AUTH_BACKEND === "turso" && process.env.AUTH_SESSION_SECRET) {
     const { cookies } = await import("next/headers");
     const { verifySessionAgainstDb, SESSION_COOKIE } = await import("@/lib/turso-auth");
@@ -350,3 +351,24 @@ export async function getSessionUser() {
   if (error || !data.user) return null;
   return data.user;
 }
+
+/**
+ * Per-request memo over the session read (2026-09-01, latency).
+ *
+ * Every call verified the cookie against the database — `verifySessionAgainstDb`
+ * is a real Turso round trip, not a signature check. Nothing deduplicated it, so
+ * a single page render paid for it once in the layout, again in the page, and
+ * again in every server component that asked who the viewer was. /pipeline alone
+ * resolved the same session twice before reading a single lead.
+ *
+ * React's `cache` is scoped to one request and cleared between them, so this
+ * collapses those to one round trip WITHOUT holding a session across requests —
+ * the property that would make it an auth bug rather than a speedup. Callers are
+ * unchanged; the export keeps its name and shape.
+ *
+ * Safe because no route mutates the session and re-reads it in the same request:
+ * the login/provision/redeem-invite/oauth-callback handlers each call this
+ * exactly once, before they write anything. Verify that still holds before
+ * adding a handler that re-reads after setting a cookie.
+ */
+export const getSessionUser = cache(getSessionUserUncached);

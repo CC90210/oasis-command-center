@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cache } from "react";
 import type { User } from "@supabase/supabase-js";
 import type { UserProfile } from "@/lib/supabase";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -55,32 +56,51 @@ export function chooseActiveProfile(
  * Resolve the same canonical profile for pages and APIs. Auth-id matching wins;
  * email is only the post-migration fallback used when no auth-linked row exists.
  */
+/**
+ * Keyed on the primitives, not on the user object (2026-09-01, latency).
+ *
+ * This is one — sometimes two — Turso round trips, and it ran once per caller
+ * because nothing deduplicated it. React's `cache` memoizes per request and
+ * clears between them, so a layout and a page asking the same question now pay
+ * for one lookup instead of two.
+ *
+ * The key is (id, email) rather than the object, deliberately: callers that
+ * build a fresh `{ id, email }` literal would miss an identity-keyed memo and
+ * silently keep the old cost. Primitives make the dedup independent of how the
+ * caller happened to construct its argument.
+ */
+const resolveActiveProfileCached = cache(
+  async (id: string, email: string | null): Promise<ActiveProfileResult> => {
+    const db = getServiceSupabase();
+    const byAuth = await db
+      .from("user_profiles")
+      .select("*")
+      .eq("auth_user_id", id)
+      .limit(20);
+    if (byAuth.error) return { profile: null, error: byAuth.error.message };
+
+    const authRows = (byAuth.data || []) as ActiveUserProfile[];
+    if (authRows.length > 0) {
+      return { profile: chooseActiveProfile(authRows, email ?? undefined), error: null };
+    }
+
+    if (!email) return { profile: null, error: null };
+    const byEmail = await db
+      .from("user_profiles")
+      .select("*")
+      .eq("email", email)
+      .limit(20);
+    if (byEmail.error) return { profile: null, error: byEmail.error.message };
+    const emailRows = (byEmail.data || []) as ActiveUserProfile[];
+    return {
+      profile: emailRows.length > 0 ? chooseActiveProfile(emailRows, email) : null,
+      error: null,
+    };
+  },
+);
+
 export async function resolveActiveProfileForUser(
   user: Pick<User, "id" | "email">,
 ): Promise<ActiveProfileResult> {
-  const db = getServiceSupabase();
-  const byAuth = await db
-    .from("user_profiles")
-    .select("*")
-    .eq("auth_user_id", user.id)
-    .limit(20);
-  if (byAuth.error) return { profile: null, error: byAuth.error.message };
-
-  const authRows = (byAuth.data || []) as ActiveUserProfile[];
-  if (authRows.length > 0) {
-    return { profile: chooseActiveProfile(authRows, user.email), error: null };
-  }
-
-  if (!user.email) return { profile: null, error: null };
-  const byEmail = await db
-    .from("user_profiles")
-    .select("*")
-    .eq("email", user.email)
-    .limit(20);
-  if (byEmail.error) return { profile: null, error: byEmail.error.message };
-  const emailRows = (byEmail.data || []) as ActiveUserProfile[];
-  return {
-    profile: emailRows.length > 0 ? chooseActiveProfile(emailRows, user.email) : null,
-    error: null,
-  };
+  return resolveActiveProfileCached(user.id, user.email ?? null);
 }

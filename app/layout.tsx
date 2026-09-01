@@ -4,7 +4,7 @@ import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
 import { MainShell } from "@/components/MainShell";
 import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";
-import { getActiveProfile, getBridgeOnline } from "@/lib/queries";
+import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { safe } from "@/lib/api-helpers";
 import {
@@ -197,13 +197,14 @@ export default async function RootLayout({
       tenantProfileSlug = await safe(
         "layout.tenant_profile_slug",
         (async () => {
-          const db = getServiceSupabase();
-          const r = await db
-            .from("tenants")
-            .select("slug, custom_fields")
-            .eq("id", tenantId)
-            .maybeSingle();
-          const tenant = (r.data as { slug?: string; custom_fields?: Record<string, unknown> | null } | null);
+          // Was a second raw SELECT on `tenants` for columns the memoized read
+          // already returns. getTenantManifestForUser above bottoms out in
+          // getTenant() for this same tenant id, and getTenant is React-cache()d
+          // per request — so this is now a warm hit instead of another full
+          // Turso round trip (measured ~140ms, 2026-09-01) on EVERY render of
+          // EVERY page. Same columns, same null-on-error degradation the
+          // surrounding safe() already expects.
+          const tenant = await getTenant(tenantId);
           return resolveClientProfileSlug({
             slug: tenant?.slug || "",
             custom_fields: tenant?.custom_fields || {},

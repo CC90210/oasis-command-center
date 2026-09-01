@@ -519,8 +519,33 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   assert.match(src, /status:\s*403/, `${route} must refuse a caller from another tenant`);
   // The outside-contractor role lives INSIDE this tenant (#237), so a tenant
   // match is not proof a caller may see every lead in it.
-  assert.match(src, /session\.teamRole/, `${route} must build a viewer carrying the caller's role`);
-  assert.match(src, /session\.isAdmin/, `${route} must build a viewer carrying the caller's admin flag`);
+  //
+  // Accept EITHER an inline viewer or delegation to the canonical resolver, and
+  // assert the resolver itself carries role + admin. This mirrors the identical
+  // check in tests/web-leads-guards.test.ts, and it is not a loosening: before,
+  // this grep only proved the route MENTIONED the role, which a route could do
+  // while dropping it on the floor. Pinning the shared resolver proves the bits
+  // actually reach the viewer for every route that delegates -- which this one
+  // now does, via lib/web-leads/viewer.ts.
+  const buildsViewerInline =
+    /session\.teamRole/.test(src) && /session\.isAdmin/.test(src);
+  const usesCanonicalViewer = /resolveWebLeadViewer\(session\)/.test(src);
+  assert.equal(
+    buildsViewerInline || usesCanonicalViewer,
+    true,
+    `${route} must build a viewer carrying the caller's role and admin flag, inline or via resolveWebLeadViewer`,
+  );
+  const battlecardViewerResolver = read("lib/web-leads/viewer.ts");
+  assert.match(
+    battlecardViewerResolver,
+    /session\.teamRole/,
+    "lib/web-leads/viewer.ts must put the caller's role on the viewer",
+  );
+  assert.match(
+    battlecardViewerResolver,
+    /session\.isAdmin/,
+    "lib/web-leads/viewer.ts must put the caller's admin flag on the viewer",
+  );
   // An id outside the viewer's scope must read exactly like an id that does not
   // exist, or the endpoint becomes a way to probe which leads exist.
   assert.match(src, /fetchLead\(id, viewer\)[\s\S]{0,200}?status:\s*404/, `${route} must 404 an out-of-scope id`);
