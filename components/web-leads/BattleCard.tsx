@@ -1560,6 +1560,12 @@ function DimensionShape({
   );
   const leaderFor = dim ? headToHead?.dimensions.find((l) => l.key === dim.key) || null : null;
   const misses = dim ? dim.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points) : [];
+  // The ONE truth for "is the 3D radar actually on screen". The SVG hides on
+  // exactly this, not on `gl` alone: a rep who enables reduced motion after
+  // the scene initialized unmounts Radar3D while `gl` still says "on", and a
+  // fallback keyed to `gl` alone would leave a blank hole where a chart was.
+  // (Codex review, 2026-09-01.)
+  const glLive = drawn && !reduced && desktop && gl === "on";
 
   function jumpToFaults() {
     if (!bus || !dim) return;
@@ -1611,7 +1617,7 @@ function DimensionShape({
           )}
         </div>
       )}
-      <div className={gl === "on" && desktop ? "hidden" : "relative hidden justify-center sm:flex"} style={{ perspective: "1100px" }}>
+      <div className={glLive ? "hidden" : "relative hidden justify-center sm:flex"} style={{ perspective: "1100px" }}>
         {(() => {
           const radarProps = {
             dimensions,

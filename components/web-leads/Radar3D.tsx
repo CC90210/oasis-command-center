@@ -114,6 +114,17 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       renderer.domElement.style.cursor = "grab";
       renderer.domElement.setAttribute("aria-hidden", "true");
 
+      // A GPU reset or context-pressure event after a successful init would
+      // otherwise leave a frozen-blank canvas over a hidden fallback: report
+      // failure so the caller flips back to the SVG. preventDefault stops the
+      // browser's own restore dance -- we are not restoring, we are falling
+      // back. (Codex review, 2026-09-01.)
+      const onContextLost = (e: Event) => {
+        e.preventDefault();
+        statusRef.current(false);
+      };
+      renderer.domElement.addEventListener("webglcontextlost", onContextLost);
+
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 60);
       camera.position.set(0, 4.6, 8.2);
@@ -359,6 +370,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         cancelAnimationFrame(raf);
         document.removeEventListener("visibilitychange", onVis);
         ro.disconnect();
+        renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
         renderer.domElement.removeEventListener("pointerdown", onDown);
         renderer.domElement.removeEventListener("pointermove", onMove);
         renderer.domElement.removeEventListener("pointerup", onUp);

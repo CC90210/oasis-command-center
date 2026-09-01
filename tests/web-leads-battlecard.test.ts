@@ -816,6 +816,16 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // The failure path must exist and must fall back, not blank: onStatus(false)
   // flips gl to "off", which re-mounts nothing and keeps the SVG stack.
   assert.match(src, /onStatus=\{\(ok\) => setGl\(ok \? "on" : "off"\)\}/, `${view}: the 3D radar must report failure so the SVG fallback stays`);
+  // Both Codex-found blank-radar holes, pinned (2026-09-01): the SVG hides on
+  // the LIVE condition (so a reduced-motion flip after init brings it back),
+  // and a lost GL context reports failure instead of freezing over a hidden
+  // fallback.
+  assert.match(
+    src,
+    /const glLive = drawn && !reduced && desktop && gl === "on"/,
+    `${view}: the SVG fallback must key on the full is-3D-actually-visible condition, not on gl alone`,
+  );
+  assert.match(r3d, /webglcontextlost/, "Radar3D must fall back to the SVG when the GL context is lost");
 }
 
 // The panel itself renders every field of every objection. Asserting the data
