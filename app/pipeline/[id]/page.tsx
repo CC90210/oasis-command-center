@@ -35,7 +35,10 @@ import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { buildMemberNameMap } from "@/lib/assigned-names";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 import { websiteBuildBriefIsReady } from "@/lib/website-sales-build-brief";
-import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
+import {
+  canReadOasisSalesTeamPipeline,
+  managerRosterCoversAssignment,
+} from "@/lib/role-surfaces";
 import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
@@ -175,12 +178,24 @@ export default async function PipelineLeadDetailPage({
   // passed above, which already requires the manager role on an OASIS surface
   // tenant. The explicit role check is kept anyway so this does not silently
   // widen if that resolution is ever reused for another role.
+  // Roster membership is answered by the shared predicate, never re-derived
+  // here: lib/web-leads/data.ts asks the identical question for the prospecting
+  // surface, and a second inline copy is how those two surfaces drift.
+  //
+  // The unassigned case is deliberately OUTSIDE the predicate. "Is this seat on
+  // my roster" and "may I work a lead nobody owns" are different questions, and
+  // folding the second into the shared helper would hand the claimable pool to
+  // every caller that only asked about the roster.
   const managerWorksTeamBook =
     session.ok &&
     session.teamRole.trim().toLowerCase() === "manager" &&
     readableRepUserIds.length > 0 &&
     (!assignedTo ||
-      readableRepUserIds.some((id) => id.trim().toLowerCase() === assignedTo));
+      managerRosterCoversAssignment({
+        teamRole: session.teamRole,
+        assignedTo,
+        readableAssigneeIds: readableRepUserIds,
+      }));
   const canWorkLifecycle =
     (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
     (managerWorksTeamBook && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||

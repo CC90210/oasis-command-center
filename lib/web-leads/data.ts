@@ -27,6 +27,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
+import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
@@ -69,13 +70,16 @@ function managerCanReadAssignment(
   assignedTo: string | null | undefined,
   viewer: Viewer,
 ): boolean {
-  if (viewer.teamRole.trim().toLowerCase() !== "manager" || !assignedTo?.trim()) {
-    return false;
-  }
-  const normalizedAssignee = assignedTo.trim().toLowerCase();
-  return (viewer.readableAssigneeIds || []).some(
-    (candidate) => candidate.trim().toLowerCase() === normalizedAssignee,
-  );
+  // Delegates to the single definition in lib/role-surfaces.ts. This used to
+  // hold its own copy of the comparison, and app/pipeline/[id]/page.tsx grew a
+  // second one — two answers to the same question, which is the drift that put
+  // the Leads list and the Leads detail out of sync. The thin wrapper stays
+  // because callers here pass a Viewer, not three loose fields.
+  return managerRosterCoversAssignment({
+    teamRole: viewer.teamRole,
+    assignedTo,
+    readableAssigneeIds: viewer.readableAssigneeIds,
+  });
 }
 
 /**
