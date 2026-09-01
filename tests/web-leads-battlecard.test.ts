@@ -906,6 +906,13 @@ const MODEL_CODES = [
   assert.match(checkEvidenceFor("few_blocking", { blockingScripts: 9 })!, /9 scripts[\s\S]*five or fewer/);
   assert.match(checkEvidenceFor("image_rich", { contentImages: 2 })!, /2 content images[\s\S]*six or more/);
   assert.match(checkEvidenceFor("real_photos", { contentImages: 1, stockOnly: true })!, /stock[\s\S]*four or more/);
+  // Both measurements or nothing: a count without the stock verdict would let
+  // the sentence contradict the stored FAIL it explains. (Codex, 2026-09-01.)
+  assert.equal(
+    checkEvidenceFor("real_photos", { contentImages: 8 }),
+    null,
+    "real_photos must not render evidence from the image count alone",
+  );
 
   // Every code produces a sentence when its signals ARE recorded, in both the
   // failing and the passing shape, and every sentence obeys the house rules

@@ -134,9 +134,14 @@ const LINES: Record<string, Line> = {
   },
   real_photos: (s) => {
     const n = num(s, "contentImages");
-    if (n === null) return null;
     const stock = bool(s, "stockOnly");
-    const stockNote = stock === true ? ", and every one came from a stock library" : "";
+    // BOTH measurements or nothing: this check is "enough photos AND they are
+    // real". A legacy blob carrying the count but not the stock verdict could
+    // otherwise render "8 photos found; four or more earns the point" beside
+    // a stored FAIL, and the evidence would contradict the score it exists to
+    // explain. (Codex review, 2026-09-01.)
+    if (n === null || stock === null) return null;
+    const stockNote = stock ? ", and every one came from a stock library" : "";
     return `${fmtInt(n)} content ${plural(n, "photo", "photos")} found${stockNote}; four or more real photos earns the point.`;
   },
   address: (s) => {
