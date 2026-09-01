@@ -137,7 +137,8 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import localFont from "next/font/local";
 import { ArrowLeft, ChevronDown, ExternalLink, Phone } from "lucide-react";
-import type { AuditResult, CheckResult, DimensionProfile } from "@/lib/web-leads/audit";
+import type { AuditResult, CheckResult, DimensionProfile, UrlVerification, RecheckStatus } from "@/lib/web-leads/audit";
+import { assessTrust, type TrustAssessment } from "@/lib/web-leads/trust";
 import type { CompetitorContext } from "@/lib/web-leads/competitors";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
@@ -210,6 +211,8 @@ type Payload = {
   audit: AuditResult;
   competitors: CompetitorContext | null;
   signals: Record<string, unknown> | null;
+  urlVerification?: UrlVerification | null;
+  recheck?: RecheckStatus | null;
 };
 
 type Fetched =
@@ -335,22 +338,199 @@ function RemedyLines({ code }: { code: string }) {
 }
 
 /**
+ * Checks the model scores but cannot currently MEASURE for prospects. Named
+ * here so every surface that renders a check says so in the same words
+ * instead of letting the rep argue a line we manufactured. `sitemap`: the
+ * crawler only fetches robots.txt for our own benchmark sites, so every
+ * prospect fails this check by construction (2026-09-01 integrity audit,
+ * finding 4). Removing it from the model is a coordinated MODEL_VERSION
+ * bump; until then the card refuses to sell it.
+ */
+const UNMEASURABLE_CHECKS: Record<string, string> = {
+  sitemap:
+    "This check cannot currently be measured for prospect sites (we never fetch their robots file), so it fails for every prospect. Do not quote it; it is a flaw in our model, not their site.",
+};
+
+/**
  * The pinpointed measurement behind one check (Adon, 2026-09-01: "you have to
  * pinpoint things in the website that are showing that"). Renders the
  * crawler's own numbers for THIS site next to the check they decided --
  * "Server took 2,340 ms to send its first byte; under 800 ms earns the
  * point." -- so a score is never a number a rep has to take on faith.
- * Renders NOTHING when the crawl did not record what the sentence needs
- * (lib/web-leads/check-evidence.ts rule 2): a missing line is honest, a
- * guessed one is not.
+ *
+ * Three states, all honest (Adon, 2026-09-01: "you don't generate
+ * information, you just say it"):
+ *   - measured   -> "Seen on the site: ..." with the site's own numbers
+ *   - unmeasured -> the crawl recorded other things but not what THIS check
+ *                   needs: said in words, never guessed
+ *   - unmeasurable -> a check our model cannot currently measure for any
+ *                   prospect: named as our flaw, with an instruction to
+ *                   ignore it
+ * Only when there is no signals blob at all does nothing render -- there is
+ * nothing to distinguish "unrecorded" from "very old row" without one.
  */
 function MeasuredLine({ code, signals }: { code: string; signals: Record<string, unknown> | null }) {
+  const unmeasurable = UNMEASURABLE_CHECKS[code];
+  if (unmeasurable) {
+    return (
+      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
+        <span className="font-medium text-fg-muted">Not measurable:</span> {unmeasurable}
+      </p>
+    );
+  }
   const line = checkEvidenceFor(code, signals);
-  if (!line) return null;
+  if (line) {
+    return (
+      <p className="mt-1.5 text-xs leading-relaxed text-fg-muted [font-family:var(--battle-data)]">
+        <span className="font-medium" style={{ color: "#7dd3fc" }}>Seen on the site:</span> {line}
+      </p>
+    );
+  }
+  if (signals) {
+    return (
+      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
+        <span className="font-medium text-fg-muted">Not recorded:</span> the crawl did not capture what this check
+        needs, so treat this line with caution and verify by eye before quoting it.
+      </p>
+    );
+  }
+  return null;
+}
+
+/**
+ * The honest-sentence panel that replaces the entire scored body when trust
+ * says the stored score cannot be stood behind (lib/web-leads/trust.ts).
+ * A sentence, never a chart -- the same discipline as NotScored (rule 2).
+ * The re-check control lives on the MeasurementHonesty panel directly above.
+ */
+function UntrustedPanel({ hide }: { hide: NonNullable<TrustAssessment["hide"]> }) {
   return (
-    <p className="mt-1.5 text-xs leading-relaxed text-fg-muted [font-family:var(--battle-data)]">
-      <span className="font-medium" style={{ color: "#7dd3fc" }}>Seen on the site:</span> {line}
-    </p>
+    <Panel>
+      <SectionTitle>Why there is no score</SectionTitle>
+      <p className="mt-3 max-w-3xl text-xl font-semibold leading-snug text-fg">{hide.headline}</p>
+      <p className="mt-3 max-w-3xl text-sm leading-relaxed text-fg-muted">{hide.detail}</p>
+    </Panel>
+  );
+}
+
+/**
+ * MeasurementHonesty — what this card knows about its OWN reliability, in one
+ * always-visible strip: URL-ownership state, trust warnings, what "measured"
+ * means, and the one-lead re-check control (Adon, 2026-09-01: fix bad cards
+ * one at a time instead of re-crawling 30,000).
+ *
+ * Copy rules as everywhere: hand-written, no verdict colours (the verified
+ * line uses the constant cyan every telemetry accent uses, worn identically
+ * whatever the verdict), no em dashes, nothing generated.
+ */
+function MeasurementHonesty({
+  audit, verification, warnings, hidden, recheck, canMutate, busy, postError, onRecheck,
+}: {
+  audit: AuditResult;
+  verification: UrlVerification;
+  warnings: TrustAssessment["warnings"];
+  hidden: boolean;
+  recheck: RecheckStatus | null;
+  canMutate: boolean;
+  busy: boolean;
+  postError: string | null;
+  onRecheck: (url?: string) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [showHow, setShowHow] = useState(false);
+  const open = recheck !== null && (recheck.status === "pending" || recheck.status === "running");
+
+  return (
+    <Panel>
+      <SectionTitle>How much to trust this card</SectionTitle>
+      <div className="mt-3 space-y-2 text-xs leading-relaxed">
+        {verification.verdict === "verified" && (
+          <p className="text-fg-muted">
+            <span className="font-medium" style={{ color: "#7dd3fc" }}>Ownership confirmed.</span> This website was
+            verified as this business&apos;s own site
+            {verification.verifiedAt ? ` on ${formatDate(verification.verifiedAt)}` : ""}.
+          </p>
+        )}
+        {warnings.map((w) => (
+          <p key={w.code} className="text-fg-muted">{w.line}</p>
+        ))}
+        {audit.state === "scored" && !hidden && (
+          <p className="text-fg-dim [font-family:var(--battle-data)]">
+            Every number on this card was measured by our crawler on {formatDate(audit.measuredAt)}. Nothing is
+            estimated; where we could not measure something, the card says so in words instead of showing a number.
+          </p>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setShowHow((v) => !v)}
+        aria-expanded={showHow}
+        className="mt-3 rounded text-[11px] font-semibold text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+      >
+        {showHow ? "Hide how we measure" : "How we measure, and what we cannot see"}
+      </button>
+      {showHow && (
+        <p className="mt-2 max-w-3xl text-xs leading-relaxed text-fg-dim motion-safe:animate-fade-in">
+          Our crawler reads the homepage&apos;s raw source and up to three of its stylesheets, once. It does not run
+          the site&apos;s code the way a browser does, so sites that build their page in the browser can look empty to
+          it, and it does not visit other pages, so a contact form living on a contact page is invisible to the
+          score. Styling hosted on another domain may not be read. Where any of that makes a number unsafe, this card
+          hides the number and says so rather than showing it.
+        </p>
+      )}
+
+      <div className="mt-4 border-t border-bg-border pt-3">
+        {open ? (
+          <p className="text-xs text-fg-muted [font-family:var(--battle-data)]">
+            Re-check {recheck.status === "running" ? "in progress" : "queued"}, requested{" "}
+            {formatDate(recheck.requestedAt)}. This card refreshes itself when the new measurement lands, usually
+            within a minute or two.
+          </p>
+        ) : canMutate ? (
+          <>
+            {recheck?.status === "failed" && (
+              <p className="mb-2 text-xs text-fg-muted">
+                The last re-check failed{recheck.error ? `: ${recheck.error}` : ""}. You can try again.
+              </p>
+            )}
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="Correct website link (optional)"
+                className="min-w-0 flex-1 rounded-lg border border-bg-border bg-bg-raised/50 px-3 py-2 text-xs text-fg placeholder:text-fg-faint focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 [font-family:var(--battle-data)]"
+              />
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onRecheck(url.trim() || undefined)}
+                className="shrink-0 rounded-lg border border-accent/40 px-4 py-2 text-xs font-semibold text-fg transition-[color,border-color,box-shadow] hover:border-accent/70 hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:opacity-50 motion-reduce:transition-none"
+              >
+                {busy ? "Queuing…" : "Re-check this site now"}
+              </button>
+            </div>
+            {postError && (
+              <p className="mt-2 text-xs text-fg-muted">
+                {postError === "invalid_url"
+                  ? "That link does not look like a website address. Check it and try again."
+                  : postError === "no_url_to_check"
+                    ? "There is no website on file to re-check. Paste the business's link first."
+                    : `Could not queue the re-check (${postError}). Try again, and tell an operator if it keeps failing.`}
+              </p>
+            )}
+            <p className="mt-2 text-[11px] leading-relaxed text-fg-faint">
+              Pasting a link records that YOU supplied it, updates the business&apos;s website on file, and re-measures
+              that site fresh. Leave it empty to re-measure the link already on file.
+            </p>
+          </>
+        ) : (
+          <p className="text-xs text-fg-dim">
+            A re-check can be requested by anyone who can work this lead; ask an operator if that is not you.
+          </p>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -889,12 +1069,19 @@ export function BattleCard({
   embedded?: boolean;
 }) {
   const [state, setState] = useState<Fetched>({ status: "loading" });
+  // Bumped to silently refetch the payload: after queuing a re-check, and on
+  // the poll while one is pending/running.
+  const [nonce, setNonce] = useState(0);
+  const [recheckPost, setRecheckPost] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
 
   useEffect(() => {
     let alive = true;
-    setState({ status: "loading" });
+    // A silent refresh keeps the rendered card; only a lead CHANGE shows the
+    // skeleton. Re-polling every few seconds while a re-check runs must not
+    // strobe the page a rep is reading from.
+    setState((prev) => (prev.status === "ready" ? prev : { status: "loading" }));
     fetch(`/api/web-leads/${encodeURIComponent(leadId)}/battlecard`)
       .then(async (r) => {
         if (r.status === 404) {
@@ -915,7 +1102,45 @@ export function BattleCard({
       })
       .catch(() => { if (alive) setState({ status: "error", message: "Could not load this lead." }); });
     return () => { alive = false; };
+  }, [leadId, nonce]);
+
+  // A lead change is a hard reset back to the skeleton (the silent-refresh
+  // rule above only applies within one lead).
+  useEffect(() => {
+    setState({ status: "loading" });
+    setNonce(0);
+    setRecheckPost({ busy: false, error: null });
   }, [leadId]);
+
+  // While a re-check is queued or running, poll: the worker writes a fresh
+  // audit within ~a minute and the card refreshes itself with it.
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    const r = state.payload.recheck;
+    if (!r || (r.status !== "pending" && r.status !== "running")) return;
+    const t = window.setTimeout(() => setNonce((n) => n + 1), 6000);
+    return () => window.clearTimeout(t);
+  }, [state]);
+
+  async function requestRecheck(url?: string) {
+    setRecheckPost({ busy: true, error: null });
+    try {
+      const r = await fetch(`/api/web-leads/${encodeURIComponent(leadId)}/recheck`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(url ? { url } : {}),
+      });
+      const body = (await r.json().catch(() => null)) as { error?: string } | null;
+      if (!r.ok) {
+        setRecheckPost({ busy: false, error: (body && body.error) || "request_failed" });
+        return;
+      }
+      setRecheckPost({ busy: false, error: null });
+      setNonce((n) => n + 1);
+    } catch {
+      setRecheckPost({ busy: false, error: "network_failed" });
+    }
+  }
 
   if (state.status === "error") {
     const error = state.message;
@@ -938,13 +1163,30 @@ export function BattleCard({
   if (state.status === "loading") return <CardSkeleton embedded={embedded} />;
 
   const { lead, audit, competitors, signals } = state.payload;
+  const urlVerification = state.payload.urlVerification ?? { verdict: "unknown" as const, verifiedAt: null };
+  const recheck = state.payload.recheck ?? null;
+  // Can this card's numbers be stood behind? Adon's 2026-09-01 decision: a
+  // score we cannot stand behind is HIDDEN with the reason in plain words,
+  // never shown wearing a warning label. lib/web-leads/trust.ts.
+  const trust = assessTrust({ audit, signals, urlVerification });
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
-      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
+      <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} scoreHidden={Boolean(trust.hide)} />
       <BattleSections>
         <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
           <SectionToolbar />
+          <MeasurementHonesty
+            audit={audit}
+            verification={urlVerification}
+            warnings={trust.warnings}
+            hidden={trust.hide !== null}
+            recheck={recheck}
+            canMutate={canMutate}
+            busy={recheckPost.busy}
+            postError={recheckPost.error}
+            onRecheck={requestRecheck}
+          />
           {/* FIRST SECTION ON THE PAGE, ABOVE EVERY CHART. A rep confirms who
               they are calling before they pitch, and the card shipped on
               2026-08-24 without this block at all -- address, postal code,
@@ -966,7 +1208,13 @@ export function BattleCard({
             <BusinessFacts lead={lead} layout="grid" />
           </BattleSection>
 
-          {audit.state !== "scored" ? (
+          {trust.hide ? (
+            // The score exists in the database but cannot be stood behind
+            // (browser-built shell, or a website flagged as not theirs).
+            // Adon's rule: hide it and say why -- never a number wearing a
+            // warning. The re-check control is on the honesty panel above.
+            <UntrustedPanel hide={trust.hide} />
+          ) : audit.state !== "scored" ? (
             <NotScored audit={audit} />
           ) : (
             <ScoredBody
@@ -1044,7 +1292,7 @@ function CardSkeleton({ embedded = false }: { embedded?: boolean }) {
  * one sentence that makes the score mean something.
  */
 function Hero({
-  lead, audit, competitors, drawn, reduced, canMutate, embedded = false,
+  lead, audit, competitors, drawn, reduced, canMutate, embedded = false, scoreHidden = false,
 }: {
   lead: WebLead;
   audit: AuditResult;
@@ -1053,12 +1301,15 @@ function Hero({
   reduced: boolean;
   canMutate: boolean;
   embedded?: boolean;
+  /** Trust said the stored score cannot be stood behind: render no number
+   *  anywhere, including here and the percentile it feeds. */
+  scoreHidden?: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
   const ringId = useId();
   // Hooks before any branch: the count-up runs for every state and simply
   // counts to 0 when there is no score to show.
-  const shownScore = useCountUp(audit.state === "scored" ? audit.composite : 0, reduced);
+  const shownScore = useCountUp(audit.state === "scored" && !scoreHidden ? audit.composite : 0, reduced);
   return (
     <header className="relative overflow-hidden border-b border-bg-border bg-bg-panel/60">
       {/* Ambient depth, keyed off NOTHING -- not the score, not the state. It
@@ -1157,7 +1408,11 @@ function Hero({
           </div>
 
           <div className="shrink-0 lg:text-right">
-            {audit.state === "scored" ? (
+            {audit.state === "scored" && scoreHidden ? (
+              <p className="max-w-xs text-base font-semibold leading-snug text-fg-muted">
+                No score is shown for this site. The measurement panel below says exactly why.
+              </p>
+            ) : audit.state === "scored" ? (
               <>
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted">Website score</p>
                 {/* The number counts up inside a ring that draws once around
@@ -1217,7 +1472,7 @@ function Hero({
           </div>
         </div>
 
-        {audit.state === "scored" && competitors && (
+        {audit.state === "scored" && !scoreHidden && competitors && (
           <PercentileSentence competitors={competitors} score={audit.composite} drawn={drawn} reduced={reduced} />
         )}
       </div>

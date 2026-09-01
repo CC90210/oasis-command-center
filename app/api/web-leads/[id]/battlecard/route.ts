@@ -44,7 +44,13 @@
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { fetchLead, WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
-import { fetchAudit, fetchAuditSignals, businessIdForLead } from "@/lib/web-leads/audit";
+import {
+  fetchAudit,
+  fetchAuditSignals,
+  fetchUrlVerification,
+  fetchRecheckStatus,
+  businessIdForLead,
+} from "@/lib/web-leads/audit";
 import { fetchCompetitorContext } from "@/lib/web-leads/competitors";
 import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
@@ -72,17 +78,28 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     if (!lead) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
 
     const audit = await fetchAudit(id, lead);
+    // Trust context rides on EVERY state, scored or not (2026-09-01, Adon's
+    // honesty mandate): the card must be able to say "ownership unverified"
+    // or show a queued re-check even when there is no score to show.
+    const businessId = await businessIdForLead(id);
+
+    const [urlVerification, recheck] = await Promise.all([
+      businessId
+        ? fetchUrlVerification(businessId)
+        : Promise.resolve({ verdict: "unknown" as const, verifiedAt: null }),
+      fetchRecheckStatus(id),
+    ]);
+
     if (audit.state !== "scored") {
-      return NextResponse.json({ lead, audit, competitors: null, signals: null });
+      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck });
     }
 
-    const businessId = await businessIdForLead(id);
     // A scored audit implies a business id -- fetchAudit cannot reach `scored`
     // without one. Handled rather than asserted: an assertion that can never
     // fire is not a guard, and a 500 here would blank a card that has a
     // perfectly good score on it.
     if (!businessId) {
-      return NextResponse.json({ lead, audit, competitors: null, signals: null });
+      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck });
     }
 
     const [competitors, signals] = await Promise.all([
@@ -97,7 +114,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       fetchAuditSignals(businessId),
     ]);
 
-    return NextResponse.json({ lead, audit, competitors, signals });
+    return NextResponse.json({ lead, audit, competitors, signals, urlVerification, recheck });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "battlecard_failed" },

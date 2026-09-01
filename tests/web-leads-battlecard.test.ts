@@ -35,6 +35,7 @@ import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoi
 import { evidenceFrom } from "../lib/web-leads/evidence";
 import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
+import { assessTrust, isShellSuspect, STALE_AFTER_DAYS } from "../lib/web-leads/trust";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 /** Assertions about CODE must not trip on the prose explaining the code. */
@@ -1000,6 +1001,109 @@ const MODEL_CODES = [
   assert.ok(measuredUses >= 3, `${view}: the measured line must reach the faults list, the fix drill-down and the detail panel (found ${measuredUses})`);
   assert.match(src, /of 100 points earned/, `${view} must show the area score's arithmetic`);
   assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);
+}
+
+// ---------------------------------------------------------------------------
+// 8f. TRUST, OR NO NUMBER (Adon, 2026-09-01): "if you can't scrape certain
+//     data, or you can't really score the website, or if you're uncertain,
+//     then you don't generate information. You just say it."
+//
+// His decision on the record: a score we cannot stand behind is HIDDEN with
+// the reason in plain words, never shown wearing a warning label. The trust
+// module derives everything from STORED data; these tests pin every verdict
+// and the wiring that renders them.
+// ---------------------------------------------------------------------------
+
+{
+  const scored = {
+    state: "scored" as const,
+    url: "https://example.test",
+    measuredAt: new Date().toISOString(),
+    composite: 42,
+    dimensions: [],
+  };
+  const unknownUrl = { verdict: "unknown" as const, verifiedAt: null };
+
+  // THE SHELL FINGERPRINT hides the score: almost no readable text plus
+  // machinery = a browser-built site our raw-HTTP crawler cannot read.
+  assert.equal(isShellSuspect({ wordCount: 12, blockingScripts: 9, bytes: 900_000 }), true);
+  const shell = assessTrust({ audit: scored, signals: { wordCount: 12, blockingScripts: 9, bytes: 900_000 }, urlVerification: unknownUrl });
+  assert.equal(shell.hide?.reason, "shell_suspect", "a shell-suspect score must be hidden, not warned over");
+
+  // A TRULY THIN site keeps its score -- low words WITHOUT the machinery is a
+  // genuinely empty site, and that thinness IS the pitch. Hiding it would
+  // delete the best leads.
+  assert.equal(isShellSuspect({ wordCount: 12, blockingScripts: 0, bytes: 40_000 }), false);
+  const thin = assessTrust({ audit: scored, signals: { wordCount: 12, blockingScripts: 0, bytes: 40_000 }, urlVerification: unknownUrl });
+  assert.equal(thin.hide, null, "a thin-but-honest site's score must stand");
+
+  // UNRECORDED wordCount never triggers the heuristic -- a missing
+  // measurement is not evidence of anything (the whole point of this work).
+  assert.equal(isShellSuspect({}), false);
+  assert.equal(isShellSuspect(null), false);
+
+  // REJECTED ownership hides everything, whatever the audit state: every
+  // number on file is about a stranger's website.
+  const rejected = assessTrust({ audit: scored, signals: null, urlVerification: { verdict: "rejected", verifiedAt: null } });
+  assert.equal(rejected.hide?.reason, "rejected_url");
+  const rejectedUnscored = assessTrust({ audit: { state: "not_scored" }, signals: null, urlVerification: { verdict: "rejected", verifiedAt: null } });
+  assert.equal(rejectedUnscored.hide?.reason, "rejected_url", "rejected ownership must hide the card's site facts even without a score");
+
+  // STALENESS warns (never hides) once the crawl is older than the window,
+  // with an injected clock so this test does not rot.
+  const old = { ...scored, measuredAt: "2026-01-01T00:00:00.000Z" };
+  const staleCheck = assessTrust({
+    audit: old, signals: { wordCount: 500 }, urlVerification: unknownUrl,
+    now: new Date(Date.parse(old.measuredAt) + (STALE_AFTER_DAYS + 40) * 86_400_000),
+  });
+  assert.ok(staleCheck.warnings.some((w) => w.code === "stale"), "an old measurement must warn");
+  assert.equal(staleCheck.hide, null, "staleness warns; it does not hide");
+  const freshCheck = assessTrust({
+    audit: old, signals: { wordCount: 500 }, urlVerification: unknownUrl,
+    now: new Date(Date.parse(old.measuredAt) + 10 * 86_400_000),
+  });
+  assert.ok(!freshCheck.warnings.some((w) => w.code === "stale"), "a fresh measurement must not cry stale");
+
+  // UNVERIFIED ownership warns calmly -- it is the default state for ~99% of
+  // the corpus (202 verified of ~27k, 2026-09-01 sweep), so the words are
+  // factual, not alarming, and verified produces NO warning.
+  assert.ok(thin.warnings.some((w) => w.code === "unverified_url"));
+  const verified = assessTrust({ audit: scored, signals: { wordCount: 500 }, urlVerification: { verdict: "verified", verifiedAt: null } });
+  assert.ok(!verified.warnings.some((w) => w.code === "unverified_url"));
+
+  // House copy rules on every rep-facing sentence the module can emit.
+  const allTrustCopy = [
+    shell.hide!.headline, shell.hide!.detail,
+    rejected.hide!.headline, rejected.hide!.detail,
+    ...staleCheck.warnings.map((w) => w.line),
+    ...thin.warnings.map((w) => w.line),
+  ].join(" ");
+  assert.ok(!allTrustCopy.includes("—"), "no em dashes in trust copy");
+  assert.doesNotMatch(allTrustCopy, /viewport|schema\.org|\bDOM\b|\bTTFB\b|\bCTA\b/i, "jargon in trust copy");
+
+  // THE WIRING: the card computes trust, hides through it, renders the
+  // honesty panel and the re-check control, and the API carries the fields.
+  const view = "components/web-leads/BattleCard.tsx";
+  const src = read(view);
+  assert.match(src, /assessTrust\(\{ audit, signals, urlVerification \}\)/, `${view} must assess trust from the payload`);
+  assert.match(src, /trust\.hide \? \(/, `${view} must branch the body on the trust verdict`);
+  assert.match(src, /<UntrustedPanel hide=\{trust\.hide\} \/>/, `${view} must render the honest no-score panel when hidden`);
+  assert.match(src, /scoreHidden=\{Boolean\(trust\.hide\)\}/, `${view} must hide the hero score too -- a hidden body under a big glowing number is not hidden`);
+  assert.match(src, /<MeasurementHonesty/, `${view} must render the honesty strip on every card`);
+  assert.match(src, /Re-check this site now/, `${view} must offer the one-lead re-check`);
+  assert.match(src, /UNMEASURABLE_CHECKS/, `${view} must name checks the model cannot measure for prospects`);
+  assert.match(src, /sitemap:/, `${view}: the sitemap check must be annotated as unmeasurable (integrity finding 4)`);
+  assert.match(src, /Not recorded:/, `${view}: a failed check with no recorded signal must say so, never stay silent`);
+
+  const route = read("app/api/web-leads/[id]/battlecard/route.ts");
+  assert.match(route, /urlVerification/, "the battlecard payload must carry the URL-ownership verdict");
+  assert.match(route, /recheck/, "the battlecard payload must carry the re-check status");
+
+  const recheckRoute = read("app/api/web-leads/[id]/recheck/route.ts");
+  assert.match(recheckRoute, /validatedUrl/, "the recheck route must validate a supplied URL");
+  assert.match(recheckRoute, /u\.protocol !== "http:" && u\.protocol !== "https:"/, "the URL allowlist must be scheme-first");
+  assert.match(recheckRoute, /\.in\("status", \["pending", "running"\]\)/, "the recheck route must dedupe open requests per lead");
+  assert.match(recheckRoute, /status: 202/, "a fresh queue insert answers 202");
 }
 
 // The panel itself renders every field of every objection. Asserting the data
