@@ -52,6 +52,20 @@ for (const route of [
 }
 
 const data = read("lib/web-leads/data.ts");
+const scopedFacetsBody = data.match(
+  /export async function fetchSheetsScopedToViewer[\s\S]*?\r?\n\}\r?\n/,
+);
+assert.ok(scopedFacetsBody, "must find fetchSheetsScopedToViewer() in lib/web-leads/data.ts");
+assert.match(
+  scopedFacetsBody[0],
+  /projectedRows \?\? fetchLeadProjection\(viewer, scope, fresh\)/,
+  "scoped facets must reuse the list projection or start the scope-appropriate projected read",
+);
+assert.doesNotMatch(
+  scopedFacetsBody[0],
+  /select\("id,data"/,
+  "scoped facets must not transfer every lead's full JSON blob",
+);
 assert.match(data, /WEBDEV_TENANT_ID/, "reads must pin the tenant");
 // Every table read pins the tenant. Count the reads and the pins together so a
 // new unpinned query cannot slip in beside the pinned ones.
@@ -187,10 +201,11 @@ assert.match(data, /LEAD_READ_CAP/, "fetchLeads must reference LEAD_READ_CAP");
 // see every lead in it. This branch reads the same tenant_records table
 // through a different door (the Web Leads browser) and would reopen the
 // exact leak #237 closed if it didn't apply the identical role scoping.
-// These assertions require each route to actually WIRE the scoping through
-// (reference the role/viewer), and require the data layer to key off
-// assigned_to -- not just assert that a scoping FUNCTION exists somewhere
-// unused, which would pass even if no route called it.
+// These assertions require each route to actually WIRE the scoping through,
+// either inline or through the canonical server-only viewer resolver, and
+// require the data layer to key off assigned_to -- not just assert that a
+// scoping FUNCTION exists somewhere unused, which would pass even if no route
+// called it.
 // ---------------------------------------------------------------------------
 for (const route of [
   "app/api/web-leads/route.ts",
@@ -198,17 +213,19 @@ for (const route of [
   "app/api/web-leads/[id]/route.ts",
 ]) {
   const src = read(route);
-  assert.match(
-    src,
-    /session\.teamRole/,
-    `${route} must reference session.teamRole -- tenant match alone does not exclude the outside-contractor role`,
-  );
-  assert.match(
-    src,
-    /session\.isAdmin/,
-    `${route} must reference session.isAdmin when building the viewer passed to the scoped data layer`,
+  const buildsViewerInline =
+    /session\.teamRole/.test(src) && /session\.isAdmin/.test(src);
+  const usesCanonicalViewer = /resolveWebLeadViewer\(session\)/.test(src);
+  assert.equal(
+    buildsViewerInline || usesCanonicalViewer,
+    true,
+    `${route} must pass role/admin state through the scoped data layer; tenant match alone does not exclude the outside-contractor role`,
   );
 }
+const viewerResolver = read("lib/web-leads/viewer.ts");
+assert.match(viewerResolver, /session\.teamRole/);
+assert.match(viewerResolver, /session\.isAdmin/);
+assert.match(viewerResolver, /canReadOasisSalesTeamPipeline/);
 assert.match(
   data,
   /assigned_to/,
@@ -242,7 +259,9 @@ assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
 // below: no caller ever receives a lead that belongs to someone else. It now
 // holds by construction rather than by a filter --
 //
-//   scope "mine" -> isInBookOf(.., viewer.userId), self-scoping by definition;
+//   scope "mine" -> ordinary reps use isInBookOf(.., viewer.userId); an OASIS
+//                   manager uses canViewerRead(), whose only widening is the
+//                   server-resolved roster;
 //   scope "pool" -> isClaimable(..), which excludes every currently-held lead.
 //
 // Plus: a pool lead can still carry a PREVIOUS owner (an expired claim, a
@@ -251,12 +270,12 @@ assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
 // which rep had which business.
 assert.match(
   fetchLeadsBody[0],
-  /scope === "mine"\s*\?\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)\s*:\s*isClaimable\(/,
+  /scope === "mine"\s*\?\s*viewer\.teamRole\.trim\(\)\.toLowerCase\(\) === "manager"\s*\?\s*canViewerRead\(r\.data \|\| \{\}, viewer, now\)\s*:\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)\s*:\s*isClaimable\(/,
   "fetchLeads must scope 'mine' to the caller's own book and 'pool' to unheld leads -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
 );
 assert.match(
   fetchLeadsBody[0],
-  /assignedTo: ownedByViewer \|\| viewer\.isAdmin \? facts\.assignedTo : null/,
+  /const assignmentVisible =\s*ownedByViewer \|\|\s*viewer\.isAdmin \|\|\s*managerCanReadAssignment\(facts\.assignedTo, viewer\);[\s\S]*?assignedTo: assignmentVisible \? facts\.assignedTo : null/,
   "fetchLeads must not surface another rep's user id on a pool lead -- an expired claim still names its previous owner",
 );
 

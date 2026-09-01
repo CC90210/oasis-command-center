@@ -39,6 +39,8 @@ assert.doesNotMatch(lifecycle, /role="checkbox"/, "qualification and confirmatio
 for (const step of ["Contact", "Host & time", "Agenda", "Confirm", "Review"]) {
   assert(lifecycle.includes(step), `booking keeps ${step} as a discrete screen`);
 }
+assert.match(lifecycle, /Create Google Meet invite/);
+assert.match(lifecycle, /Create Google Meet & send invite/);
 assert.match(lifecycle, /contactConfirmed &&[\s\S]*clientAgreedToTime &&[\s\S]*handoffComplete/);
 for (const inferred of [
   "effectiveContactConfirmed",
@@ -63,6 +65,11 @@ assert.match(page, /readableRepUserIds/);
 assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}/);
 assert.doesNotMatch(page, /<LeadActionToolbar/, "the call control appears only inside the single next-step panel");
 assert.match(page, /title="Activity and files"[\s\S]*defaultCollapsed/);
+assert.match(
+  page,
+  /\["founder_meeting_booked",[\s\S]*?<HandoffSummary/,
+  "a booked lead must expose its verified Google Meet and Calendar receipt before the demo",
+);
 
 assert.match(lifecycle, /Call already happened/);
 assert.match(lifecycle, /inbound call or a call completed outside the dashboard/);

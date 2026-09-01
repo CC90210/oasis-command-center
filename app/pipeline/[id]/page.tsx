@@ -312,7 +312,7 @@ export default async function PipelineLeadDetailPage({
           title="Website battle card"
           subtitle="The same analysis as the Leads tab: score, percentile, named competitors, what is wrong, and what to say."
           storageKey="oasis.pipeline.battleCard.collapsed"
-          defaultCollapsed={false}
+          defaultCollapsed
         >
           {/* `canMutate` mirrors the page: the card owns write controls (the
               call-outcome log), and a viewer who may not mutate this lead here
@@ -321,7 +321,7 @@ export default async function PipelineLeadDetailPage({
         </CollapsibleSection>
       ) : null}
 
-      {["demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].includes(metrics.stageKey) ? (
+      {["founder_meeting_booked", "demo_completed", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"].includes(metrics.stageKey) ? (
         <CollapsibleSection
           title="Handoff and delivery brief"
           subtitle="Meeting receipt, commercial context, and builder-ready requirements"

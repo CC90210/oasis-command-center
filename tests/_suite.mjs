@@ -221,11 +221,13 @@ const TESTS = [
   "tests/web-leads-data.test.ts",
   "tests/web-leads-counters.test.ts",
   "tests/web-leads-guards.test.ts",
+  "tests/web-leads-client-cache.test.ts",
   "tests/pipeline-web-lead-facts.test.ts",
   "tests/web-leads-filter-memory.test.ts",
   "tests/parked-domains.test.ts",
   "tests/web-leads-scope.test.ts",
   "tests/web-leads-manager-battlecard.test.ts",
+  "tests/web-leads-manager-access.test.ts",
   // Openers and closers. The 2026-08-21 job titles replaced `agent`, but the
   // scoping predicate and the deal gate still only knew the legacy name --
   // so a Closer could not close and an Opener saw the whole tenant.

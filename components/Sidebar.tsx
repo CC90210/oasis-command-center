@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useCallback, useEffect } from "react";
 import {
   Activity,
   BadgeDollarSign,
@@ -49,6 +50,7 @@ import {
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { CC_NAV, type NavIconKey, type NavItem } from "@/lib/nav-config";
 import { demoHref } from "@/lib/demo-href";
+import { prefetchRememberedWebLeads } from "@/lib/web-leads/client-cache";
 
 const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
   Activity,
@@ -145,6 +147,30 @@ export function Sidebar({
 }) {
   const pathname = usePathname();
   const navItems = items && items.length > 0 ? items : CC_NAV;
+  const onWebLeads = pathname === "/web-leads" || pathname.startsWith("/web-leads/");
+  const canPrefetchWebLeads =
+    !demoMode && !onWebLeads && navItems.some((item) => item.href === "/web-leads");
+  const prefetchWebLeads = useCallback(() => {
+    if (!canPrefetchWebLeads) return;
+    void prefetchRememberedWebLeads();
+  }, [canPrefetchWebLeads]);
+
+  // Route prefetch only warms Next's page shell. The list itself is a client
+  // read, so warm that separately once the browser is idle. Hover/focus below
+  // invokes the same shared request cache for operators who get there first.
+  useEffect(() => {
+    if (!canPrefetchWebLeads) return;
+    const idleWindow = window as typeof window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(prefetchWebLeads, { timeout: 1_500 });
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(prefetchWebLeads, 750);
+    return () => window.clearTimeout(handle);
+  }, [canPrefetchWebLeads, prefetchWebLeads]);
 
   // Longest-prefix-wins active highlight. The naive
   //   pathname.startsWith(item.href)
@@ -269,6 +295,7 @@ export function Sidebar({
                 badgeCount={item.badgeKey ? badgeMap[item.badgeKey] || 0 : 0}
                 demoMode={demoMode}
                 demoLandingPath={demoLandingPath}
+                onIntent={item.href === "/web-leads" ? prefetchWebLeads : undefined}
               />
             ))}
           </NavGroup>
@@ -390,12 +417,14 @@ function NavLink({
   badgeCount = 0,
   demoMode = false,
   demoLandingPath = "/demo/sun",
+  onIntent,
 }: {
   item: NavItem;
   isActive: boolean;
   badgeCount?: number;
   demoMode?: boolean;
   demoLandingPath?: string;
+  onIntent?: () => void;
 }) {
   const active = isActive;
   const Icon = NAV_ICONS[item.icon] || LayoutDashboard;
@@ -405,6 +434,8 @@ function NavLink({
       <Link
         href={href}
         prefetch={true}
+        onMouseEnter={onIntent}
+        onFocus={onIntent}
         className={`group flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all relative ${
           active
             ? "bg-accent-soft text-accent shadow-[inset_0_0_0_1px_rgba(59,130,246,0.25)]"

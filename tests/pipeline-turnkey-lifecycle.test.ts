@@ -8,6 +8,7 @@ const setStageRoute = readFileSync("app/api/leads/[id]/set-stage/route.ts", "utf
 const notesRoute = readFileSync("app/api/leads/[id]/notes/route.ts", "utf8");
 const pipeline = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
 const pipelinePage = readFileSync("app/pipeline/page.tsx", "utf8");
+const pipelineQuery = readFileSync("lib/oasis-pipeline-query.ts", "utf8");
 const claimOps = readFileSync("lib/web-leads/claim-ops.ts", "utf8");
 const assignRoute = readFileSync("app/api/leads/[id]/assign/route.ts", "utf8");
 const assignmentCore = readFileSync("lib/lifecycle-assignment.ts", "utf8");
@@ -70,7 +71,7 @@ assert(
 );
 assert(
   lifecycle.includes("Host & time") &&
-    lifecycle.includes("Book meeting & send invite") &&
+    lifecycle.includes("Create Google Meet & send invite") &&
     actionToolbar.includes("Call now") &&
     actionToolbar.includes("/api/leads/${leadId}/call") &&
     !actionToolbar.includes("Send check-in") &&
@@ -94,8 +95,11 @@ assert.equal(
 assert(
   pipelinePage.includes("listOasisPipelineWindow({") &&
     pipelinePage.includes("stageKeys: assigneeScope.allowed ? stages.map") &&
-    pipelinePage.includes("assignedTo: assigneeScope.allowed ? assigneeScope.assignedTo"),
-  "rep and working-stage filters run in the database before every bounded page query",
+    pipelinePage.includes("assignedToAny: assigneeScope.allowed ? teamAssigneeUnion") &&
+    pipelineQuery.includes('whereIn: { assigned_to: teamAssignees }') &&
+    pipelineQuery.includes("limit: 2_000") &&
+    pipelineQuery.includes("oasis_pipeline_team_scope_exceeds_safe_window"),
+  "team access is pushed into one bounded database query and fails closed before an incomplete roster book can render",
 );
 assert(
   pipeline.includes("created_at: null") && detail.includes("created_at: null"),
@@ -156,7 +160,7 @@ assert(
   "two-person closes preserve opener attribution while paying the assigned closer",
 );
 assert(
-  lifecycle.includes("Book meeting & send invite") &&
+  lifecycle.includes("Create Google Meet & send invite") &&
     lifecycle.includes("founderMeetingIso") &&
     lifecycle.includes("founderBookingRequestId") &&
     lifecycle.includes("contactConfirmed") &&

@@ -21,13 +21,11 @@
  * index to a plain object and ship ~23,000 entries to a browser rendering
  * eleven rows, each row is resolved here and carries two plain values.
  *
- * WHY IT REUSES fetchScoreIndex RATHER THAN QUERYING
- * A second scoring path is how two surfaces start disagreeing about the same
- * business. `fetchScoreIndex` is memoised (lib/web-leads/cache.ts) because the
- * underlying tables only change when a scoring batch runs, so the cost here is
- * a cache read, not three table scans. Sharing it means the number on the CRM
- * board and the number on the leads tab are the same number by construction --
- * not by two implementations agreeing today and drifting next month.
+ * WHY IT REUSES THE SCORE INDEX ASSEMBLER
+ * A second scoring rule is how two surfaces start disagreeing. The pipeline
+ * queries only the business ids it will render, but scores.ts assembles those
+ * rows with the same newest-audit, unreachable and parked-domain precedence as
+ * the full Leads index. Same decision code; much smaller database read.
  *
  * FAIL-CLOSED, AND WHAT THAT MEANS HERE
  * `fetchScoreIndex` throws on a short read rather than serving a plausible
@@ -37,7 +35,12 @@
  * yet" on the one screen a rep works from.
  */
 
-import { fetchScoreIndex, resolveScore, type ScoreIndex, type ScoreState } from "./scores";
+import {
+  fetchScoreIndexForBusinessIds,
+  resolveScore,
+  type ScoreIndex,
+  type ScoreState,
+} from "./scores";
 
 /** Field names written onto `data`. Prefixed `derived_` so nothing mistakes
  *  them for stored columns -- `website_condition` next door IS stored, and a
@@ -62,8 +65,12 @@ export async function attachWebsiteScores<
   // `injectedIndex` exists so the mapping below can be tested against a REAL
   // ScoreIndex rather than a hand-made stub of whatever shape the test author
   // imagined. A fake that implements the caller's own mistake cannot fail; this
-  // repo has been bitten by exactly that twice. Production never passes it.
-  const index = injectedIndex ?? (await fetchScoreIndex());
+  // repo has been bitten by exactly that twice.
+  const businessIds = rows.flatMap((row) => {
+    const id = str(row.data.webdev_source_business_id);
+    return id ? [id] : [];
+  });
+  const index = injectedIndex ?? (await fetchScoreIndexForBusinessIds(businessIds));
   return rows.map((r) => {
     const { score, scoreState } = resolveScore(
       str(r.data.website),

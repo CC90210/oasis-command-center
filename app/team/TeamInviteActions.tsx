@@ -29,8 +29,12 @@ export function TeamInviteActions({
   const [role, setRole] = useState(roleOptions[0]?.value ?? "member");
   const [email, setEmail] = useState("");
   const [pending, startTransition] = useTransition();
-  const [issuedToken, setIssuedToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [issuedUrl, setIssuedUrl] = useState<string | null>(null);
   const [issuedExpiry, setIssuedExpiry] = useState<string | null>(null);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [emailSent, setEmailSent] = useState<boolean | null>(null);
+  const [superseded, setSuperseded] = useState(0);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const normalizedEmail = email.trim().toLowerCase();
@@ -38,14 +42,19 @@ export function TeamInviteActions({
     && normalizedEmail.length <= 254;
   const selectedRole = roleOptions.find((option) => option.value === role);
 
-  async function generate() {
+  async function sendInvite() {
+    if (busy) return;
     setError(null);
-    setIssuedToken(null);
+    setIssuedUrl(null);
+    setEmailSent(null);
+    setSentTo(null);
+    setSuperseded(0);
     setCopied(false);
     if (!emailIsValid) {
       setError("Enter the teammate's valid work email.");
       return;
     }
+    setBusy(true);
     try {
       const res = await fetch("/api/team/invites", {
         method: "POST",
@@ -57,12 +66,21 @@ export function TeamInviteActions({
         setError(data.error || "Failed to create invite.");
         return;
       }
-      setIssuedToken(data.invite.raw_token);
+      if (typeof data.invite?.invite_url !== "string") {
+        setError("The invite was created, but its delivery receipt was incomplete.");
+        return;
+      }
+      setIssuedUrl(data.invite.invite_url);
       setIssuedExpiry(data.invite.expires_at);
+      setEmailSent(data.invite.email_sent === true);
+      setSentTo(normalizedEmail);
+      setSuperseded(Number(data.invite.superseded) || 0);
       setEmail("");
       startTransition(() => router.refresh());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create invite.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -76,10 +94,6 @@ export function TeamInviteActions({
     }
     startTransition(() => router.refresh());
   }
-
-  const inviteLink = issuedToken
-    ? `${typeof window !== "undefined" ? window.location.origin : ""}/invite/${issuedToken}`
-    : null;
 
   return (
     <div className="space-y-4">
@@ -124,11 +138,11 @@ export function TeamInviteActions({
         </label>
         <button
           type="button"
-          onClick={generate}
-          disabled={pending || !emailIsValid}
+          onClick={sendInvite}
+          disabled={pending || busy || !emailIsValid}
           className="bg-accent text-bg font-semibold py-2 px-3 rounded text-sm hover:opacity-90 disabled:opacity-50"
         >
-          {pending ? "..." : "Generate link"}
+          {busy ? "Sending..." : "Send invite email"}
         </button>
       </div>
 
@@ -138,24 +152,54 @@ export function TeamInviteActions({
         </div>
       )}
 
-      {inviteLink && (
-        <div className="rounded border border-accent/40 bg-bg-elevated p-3 space-y-2">
+      {issuedUrl && emailSent === true && (
+        <div className="rounded border border-status-engaged/40 bg-status-engaged/10 p-3 space-y-2">
+          <div className="text-sm font-semibold text-status-engaged">
+            Invite email sent to {sentTo}.
+          </div>
+          <div className="text-xs text-fg-muted">
+            The one-time link expires{" "}
+            {issuedExpiry ? new Date(issuedExpiry).toLocaleString() : "in 7 days"}.
+            {superseded > 0 ? " An earlier link for this person was revoked." : ""}
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(issuedUrl);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              } catch {
+                setCopied(false);
+              }
+            }}
+            className="text-xs text-fg-muted underline underline-offset-2 hover:text-fg"
+          >
+            {copied ? "Backup link copied" : "Copy backup link"}
+          </button>
+        </div>
+      )}
+
+      {issuedUrl && emailSent === false && (
+        <div className="rounded border border-status-attention/40 bg-status-attention/10 p-3 space-y-2">
+          <div className="text-sm font-semibold text-status-attention">
+            Email delivery failed. The invite is valid; send this backup link to {sentTo}.
+          </div>
           <div className="text-xs uppercase tracking-wider text-accent font-mono">
-            One-time link · copy now
+            Backup delivery link
           </div>
           <div className="flex items-center gap-2">
             <input
               readOnly
-              value={inviteLink}
+              value={issuedUrl}
               className="flex-1 bg-bg text-fg border border-bg-border rounded px-2 py-1.5 text-xs font-mono"
               onFocus={(e) => e.currentTarget.select()}
             />
             <button
               type="button"
               onClick={async () => {
-                if (!inviteLink) return;
                 try {
-                  await navigator.clipboard.writeText(inviteLink);
+                  await navigator.clipboard.writeText(issuedUrl);
                   setCopied(true);
                   setTimeout(() => setCopied(false), 2000);
                 } catch {
@@ -172,7 +216,7 @@ export function TeamInviteActions({
             {issuedExpiry
               ? new Date(issuedExpiry).toLocaleString()
               : "in 7 days"}
-            . This token will not be shown again — store it now.
+            . This backup is shown only because email delivery failed.
           </div>
         </div>
       )}

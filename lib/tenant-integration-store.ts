@@ -18,6 +18,7 @@
 import "server-only";
 import { getServiceSupabase } from "./supabase-server";
 import { encryptField, decryptField } from "./field-encryption";
+import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integration-schemas";
 
 /**
  * Sentinel `service` value for the arbitrary KEY=VALUE vault
@@ -54,6 +55,7 @@ export type IntegrationStatusRow = {
   last_test_ok: boolean | null;
   last_test_error: string | null;
   updated_at: string | null;
+  source: "stored" | "environment" | null;
 };
 
 export type IntegrationSetResult =
@@ -119,7 +121,10 @@ const ENV_FALLBACKS: Record<string, Record<string, string>> = {
   },
   gws: {
     app_password: "GMAIL_APP_PASSWORD",
-    from_address: "GMAIL_FROM_ADDRESS",
+    // The App Password belongs to the SMTP login, not an arbitrary display
+    // address. Matching auth-email + direct Gmail send paths keeps Settings
+    // from reporting a mailbox configured when GMAIL_USER is absent.
+    from_address: "GMAIL_USER",
   },
   late: {
     api_key: "LATE_API_KEY",
@@ -368,15 +373,64 @@ export async function listTenantIntegrationStatus(
     .from("tenant_integration_credentials")
     .select("service, field_key, last_tested_at, last_test_ok, last_test_error, updated_at, encrypted_value")
     .eq("tenant_id", tenantId);
-  return ((r.data || []) as StoreRow[]).map((row) => ({
-    service: row.service,
-    field_key: row.field_key,
-    has_value: !!row.encrypted_value,
-    last_tested_at: row.last_tested_at,
-    last_test_ok: row.last_test_ok,
-    last_test_error: row.last_test_error,
-    updated_at: row.updated_at,
-  }));
+  if (r.error) throw new Error(r.error.message || "tenant_integration_status_failed");
+
+  const rows = new Map<string, IntegrationStatusRow>();
+  for (const row of (r.data || []) as StoreRow[]) {
+    const envPresent = envKeysFor(row.service, row.field_key).some((envKey) =>
+      Boolean(process.env[envKey]?.trim()),
+    );
+    let storedPresent = false;
+    if (row.encrypted_value) {
+      try {
+        storedPresent = Boolean(decryptField(row.encrypted_value).trim());
+      } catch (error) {
+        console.error("[tenant-integration-store] list status decrypt failed", {
+          service: row.service,
+          field: row.field_key,
+          error,
+        });
+        if (!envPresent) throw new Error("tenant_integration_status_decrypt_failed");
+      }
+    }
+    rows.set(`${row.service}:${row.field_key}`, {
+      service: row.service,
+      field_key: row.field_key,
+      has_value: storedPresent || envPresent,
+      last_tested_at: row.last_tested_at,
+      last_test_ok: row.last_test_ok,
+      last_test_error: row.last_test_error,
+      updated_at: row.updated_at,
+      source: storedPresent ? "stored" : envPresent ? "environment" : null,
+    });
+  }
+
+  // Environment-backed integrations are real production configuration even
+  // when no encrypted tenant row exists. Synthesize value-free status rows so
+  // Credentials cannot say "not set" while the send path is actively using
+  // GMAIL_USER/GMAIL_APP_PASSWORD (or another canonical fallback).
+  for (const schema of TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS) {
+    for (const field of schema.fields) {
+      const key = `${schema.service}:${field.key}`;
+      if (rows.has(key)) continue;
+      const envPresent = envKeysFor(schema.service, field.key).some((envKey) =>
+        Boolean(process.env[envKey]?.trim()),
+      );
+      if (!envPresent) continue;
+      rows.set(key, {
+        service: schema.service,
+        field_key: field.key,
+        has_value: true,
+        last_tested_at: null,
+        last_test_ok: null,
+        last_test_error: null,
+        updated_at: null,
+        source: "environment",
+      });
+    }
+  }
+
+  return [...rows.values()];
 }
 
 export async function recordIntegrationTest(input: {

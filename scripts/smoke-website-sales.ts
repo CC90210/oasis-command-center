@@ -15,7 +15,11 @@ assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, [
   "demo_completed",
   "proposal_sent",
   "won",
+  "lost",
   "onboarding",
+  "in_build",
+  "client_review",
+  "launched",
 ]);
 assert(BOOKING_URL.startsWith("https://calendar.app.google/"));
 

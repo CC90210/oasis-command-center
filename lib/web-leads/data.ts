@@ -30,7 +30,7 @@ import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
-import { memo, TTL } from "./cache";
+import { invalidate, memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
 import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
 import { leadHours } from "./hours";
@@ -386,40 +386,91 @@ const FILTER_SELECT = `id,${FILTER_KEYS.map((k) => `data->${k}`).join(",")}`;
  * Full argument in lib/web-leads/cache.ts; writes invalidate it immediately.
  * IF THE SWAP EVER GOES, THIS CACHE MUST GO WITH IT.
  */
-async function allTenantLeads(): Promise<{ id: string; data: Record<string, unknown> }[]> {
-  return memo("web-leads:leads", TTL.LEADS, async () => {
+type ProjectedLeadRow = { id: string; data: Record<string, unknown> };
+
+function nestProjectedLeadRows(data: unknown[] | null): ProjectedLeadRow[] {
+  // supabase-js parses the select STRING at the type level to infer a row
+  // shape, and its parser does not model JSON-path projection -- it widens
+  // any select it cannot parse to GenericStringError[]. That is a limitation
+  // of the type, not of the query: both backends return one column per path
+  // (see FILTER_SELECT). The cast is confined to this one function and the
+  // loop below reads only names from FILTER_KEYS.
+  const rows = (data || []) as unknown as Record<string, unknown>[];
+  return rows.map((r) => {
+    const d: Record<string, unknown> = {};
+    for (const k of FILTER_KEYS) d[k] = r[k];
+    return { id: String(r.id), data: d };
+  });
+}
+
+async function loadAllTenantLeads(): Promise<ProjectedLeadRow[]> {
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`leads_read_failed: ${error.message}`);
+  // A short list that LOOKS complete is worse than a loud failure. Proved
+  // against the read's own match count, not against our cap -- PostgREST
+  // enforces its own server-side max-rows regardless of what `.limit()` asks
+  // for, and a cap comparison passes silently when that binds first. See
+  // assertCompleteRead() in ./tenant.
+  assertCompleteRead("leads_read", data || [], count);
+  return nestProjectedLeadRows(data);
+}
+
+async function allTenantLeads(fresh = false): Promise<ProjectedLeadRow[]> {
+  const key = "web-leads:leads";
+  if (fresh) invalidate(key);
+  return memo(key, TTL.LEADS, loadAllTenantLeads);
+}
+
+/**
+ * The assigned book path never needs the 31K-row tenant pool. Filtering by the
+ * server-resolved assignee allowlist in the database makes a rep/manager team
+ * view proportional to the book they can actually open (78 rows for the live
+ * OASIS roster at implementation time), while preserving the same projected
+ * row shape and completeness guard as the pool path.
+ */
+async function tenantLeadsAssignedTo(
+  assigneeIds: readonly string[],
+  fresh = false,
+): Promise<ProjectedLeadRow[]> {
+  const normalized = [...new Set(assigneeIds.map((id) => id.trim().toLowerCase()).filter(Boolean))]
+    .sort();
+  if (normalized.length === 0) return [];
+  const key = `web-leads:leads:assigned:${normalized.join(",")}`;
+  if (fresh) invalidate(key);
+  return memo(key, TTL.LEADS, async () => {
     const db = getServiceSupabase();
     const { data, error, count } = await db
       .from("tenant_records")
       .select(FILTER_SELECT, { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("entity_type", "lead")
+      .in("data->>assigned_to", normalized)
       .limit(LEAD_READ_CAP);
-    if (error) throw new Error(`leads_read_failed: ${error.message}`);
-    // A short list that LOOKS complete is worse than a loud failure. Proved
-    // against the read's own match count, not against our cap -- PostgREST
-    // enforces its own server-side max-rows regardless of what `.limit()` asks
-    // for, and a cap comparison passes silently when that binds first. See
-    // assertCompleteRead() in ./tenant.
-    assertCompleteRead("leads_read", data || [], count);
-    // Re-nest the flat projection back under `data`. Both backends return one
-    // column per path named after its last segment (ours via selectCol() in
-    // lib/turso-postgrest.ts, PostgREST natively), so this is a rename, not a
-    // reinterpretation -- every value keeps the type the JSON held.
-    // supabase-js parses the select STRING at the type level to infer a row
-    // shape, and its parser does not model JSON-path projection -- it widens
-    // any select it cannot parse to GenericStringError[]. That is a limitation
-    // of the type, not of the query: both backends return one column per path
-    // (see FILTER_SELECT). The cast is confined to this one line and the loop
-    // below reads only names from FILTER_KEYS, so nothing downstream depends on
-    // a shape the compiler was never able to check.
-    const rows = (data || []) as unknown as Record<string, unknown>[];
-    return rows.map((r) => {
-      const d: Record<string, unknown> = {};
-      for (const k of FILTER_KEYS) d[k] = r[k];
-      return { id: String(r.id), data: d };
-    });
+    if (error) throw new Error(`assigned_leads_read_failed: ${error.message}`);
+    assertCompleteRead("assigned_leads_read", data || [], count);
+    return nestProjectedLeadRows(data);
   });
+}
+
+/** Start the scope-appropriate projected read before sheets/scores resolve. */
+export function fetchLeadProjection(
+  viewer: Viewer,
+  scope: LeadScope,
+  fresh = false,
+): Promise<ProjectedLeadRow[]> {
+  if (scope === "mine") {
+    return tenantLeadsAssignedTo(
+      [viewer.userId, ...(viewer.readableAssigneeIds || [])],
+      fresh,
+    );
+  }
+  return allTenantLeads(fresh);
 }
 
 /**
@@ -464,12 +515,22 @@ export async function fetchLeads(
   // `now` is injected, never read here, for the same reason claim.ts takes it
   // as a parameter: ownership expiry is a pure derivation over timestamps, and
   // one request must not see the clock move between filtering and paging.
-  { scope, now }: { scope: LeadScope; now: number },
+  {
+    scope,
+    now,
+    fresh = false,
+    projectedRows,
+  }: {
+    scope: LeadScope;
+    now: number;
+    fresh?: boolean;
+    projectedRows?: ProjectedLeadRow[];
+  },
 ): Promise<{ leads: WebLeadRow[]; total: number }> {
   // A rep's own book is not confined to the sheets the filters selected, so an
   // empty sheet selection means "no leads" only for the shared pool.
   if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0 };
-  const data = await allTenantLeads();
+  const data = projectedRows ?? await fetchLeadProjection(viewer, scope, fresh);
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
@@ -504,7 +565,9 @@ export async function fetchLeads(
      */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
       scope === "mine"
-        ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+        ? viewer.teamRole.trim().toLowerCase() === "manager"
+          ? canViewerRead(r.data || {}, viewer, now)
+          : isInBookOf(factsFrom(r.data || {}), viewer.userId)
         : isClaimable(r.data || {}, now),
     )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
@@ -518,6 +581,10 @@ export async function fetchLeads(
         : null;
       const facts = factsFrom(r.data || {});
       const ownedByViewer = isInBookOf(facts, viewer.userId);
+      const assignmentVisible =
+        ownedByViewer ||
+        viewer.isAdmin ||
+        managerCanReadAssignment(facts.assignedTo, viewer);
       return {
         ...lead,
         ...resolveScore(lead.websiteUrl, bid, scoreIndex),
@@ -528,7 +595,7 @@ export async function fetchLeads(
         // information PR #237 closed. Non-admins see an owner id only for
         // leads in their own book; everyone else gets null, and the lead is
         // claimable either way.
-        assignedTo: ownedByViewer || viewer.isAdmin ? facts.assignedTo : null,
+        assignedTo: assignmentVisible ? facts.assignedTo : null,
         stage: facts.stage,
         released: isReleasedFromBook(facts, now),
         lastCallAt: facts.lastCallAt,
@@ -710,31 +777,45 @@ export function canViewerRead(
  * "Toronto 8,246" while the table renders zero rows tells that contractor
  * exactly how big and where the rest of the tenant's book is, which is the
  * same class of leak #237 closed on the manifest route (see the Viewer doc
- * comment). This walks every lead once, keeps only the ones visible to this
- * viewer, and re-tallies each sheet's four counters from that subset --
+ * comment). This walks the cached, narrow lead projection once, keeps only the
+ * ones visible to this viewer, and re-tallies each sheet's four counters from that subset --
  * same Sheet[] shape fetchSheets() returns, so buildFacets() can't tell the
  * difference. Unscoped viewers never call this and keep the O(sheets)
- * counter path in fetchSheets() -- this is the slow path, on purpose, only
- * for the narrow audience that must never see the fast one's true numbers.
+ * counter path in fetchSheets(). Scoped viewers still pay O(leads) CPU, but
+ * they no longer transfer every record's full JSON blob. The assigned-book
+ * projection carries only filter/ownership fields and is bounded to the
+ * server-resolved rep roster. The sheet lookup starts concurrently.
  */
-export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]> {
-  const db = getServiceSupabase();
-  const { data, error, count } = await db
-    .from("tenant_records")
-    .select("id,data", { count: "exact" })
-    .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("entity_type", "lead")
-    .limit(LEAD_READ_CAP);
-  if (error) throw new Error(`leads_read_failed: ${error.message}`);
-  // Completeness proved against the read's own match count, not inferred from
-  // our cap -- see assertCompleteRead() in ./tenant for what that catches.
-  assertCompleteRead("leads_read", data || [], count);
+export async function fetchSheetsScopedToViewer(
+  viewer: Viewer,
+  {
+    scope = "mine",
+    now = Date.now(),
+    fresh = false,
+    projectedRows,
+    baseSheets,
+  }: {
+    scope?: LeadScope;
+    now?: number;
+    fresh?: boolean;
+    projectedRows?: ProjectedLeadRow[];
+    baseSheets?: Sheet[];
+  } = {},
+): Promise<Sheet[]> {
+  const [rows, sheets] = await Promise.all([
+    projectedRows ?? fetchLeadProjection(viewer, scope, fresh),
+    baseSheets ?? fetchSheets(),
+  ]);
 
   type Bucket = { total: number; callable: number; noSite: number; callableNoSite: number };
   const counts = new Map<string, Bucket>();
-  for (const r of (data || []) as { id: string; data: Record<string, unknown> }[]) {
+  for (const r of rows) {
     const assignedTo = typeof r.data.assigned_to === "string" ? r.data.assigned_to : null;
-    if (!visibleToViewer(assignedTo, viewer)) continue;
+    if (
+      scope === "mine"
+        ? !visibleToViewer(assignedTo, viewer)
+        : !isClaimable(r.data, now)
+    ) continue;
     const lead = toWebLead(r);
     if (!lead.territoryId) continue;
     const bucket = counts.get(lead.territoryId) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
@@ -747,7 +828,6 @@ export async function fetchSheetsScopedToViewer(viewer: Viewer): Promise<Sheet[]
     counts.set(lead.territoryId, bucket);
   }
 
-  const sheets = await fetchSheets();
   return sheets.map((s) => {
     const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
     return {

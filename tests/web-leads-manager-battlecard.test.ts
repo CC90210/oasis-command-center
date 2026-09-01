@@ -20,18 +20,13 @@ assert.match(
 const route = read("app/api/web-leads/[id]/battlecard/route.ts");
 assert.match(
   route,
-  /getOasisSalesRepRoster\(session\.tenantId\)/,
-  "the battle-card API must independently resolve the tenant sales roster",
+  /resolveWebLeadViewer\(session\)/,
+  "the battle-card API must use the canonical manager viewer boundary",
 );
-assert.match(
+assert.doesNotMatch(
   route,
-  /session\.teamRole\.trim\(\)\.toLowerCase\(\) === "manager"/,
-  "only a manager may consume the roster read expansion",
-);
-assert.match(
-  route,
-  /readableAssigneeIds,/,
-  "the API must pass the server roster into the data-layer authorization predicate",
+  /getOasisSalesRepRoster|const readableAssigneeIds/,
+  "the battle-card route must not drift into a second roster implementation",
 );
 
 console.log("web-leads-manager-battlecard.test.ts: OK");

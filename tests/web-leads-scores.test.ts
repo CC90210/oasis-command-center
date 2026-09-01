@@ -204,7 +204,8 @@ assert.deepEqual(
   // with no limit applied, so comparing rows-returned against rows-matched
   // detects truncation from any source.
   //
-  // FOUR since 2026-08-25: a fourth read finds parked (for-sale) domains. The
+  // EIGHT: four tenant-wide reads for the Leads pool and the same four
+  // completeness-proved, business-id-bounded reads for the Pipeline. The
   // count is asserted exactly, not as a minimum, precisely so that adding a
   // read forces someone to come here and decide whether it needs the same
   // completeness proof. It did -- a truncated parked read leaves the parking
@@ -212,10 +213,10 @@ assert.deepEqual(
   // group, offered to prospects as their best competitor, with nothing on
   // screen looking wrong. This assertion is what caught that omission.
   const counted = src.match(/\{ count: "exact" \}/g) || [];
-  assert.equal(counted.length, 4, "all four score-index reads must request an exact count");
+  assert.equal(counted.length, 8, "all full and targeted score-index reads must request an exact count");
   // The open quote distinguishes a real call from a comment naming it.
   const asserted = src.match(/assertCompleteRead\("/g) || [];
-  assert.equal(asserted.length, 4, "all four score-index reads must prove completeness before being used");
+  assert.equal(asserted.length, 8, "all full and targeted score-index reads must prove completeness before being used");
   assert.doesNotMatch(
     src,
     /length >= LEAD_READ_CAP/,
@@ -225,7 +226,7 @@ assert.deepEqual(
   // Never invent a number for a null column.
   assert.match(
     src,
-    /typeof r\.quality_score !== "number"/,
+    /typeof row\.quality_score !== "number"/,
     "a null quality_score must be skipped, not coerced to 0",
   );
 
@@ -237,7 +238,7 @@ assert.deepEqual(
   // exactly why it would have gone unnoticed until the next re-crawl.)
   assert.match(
     src,
-    /newestAt\.get\(r\.business_id\) !== r\.fetched_at/,
+    /newestAt\.get\(row\.business_id\) !== row\.fetched_at/,
     "a score must be ignored unless its row is the business's NEWEST audit -- otherwise a superseded crawl resurfaces as a current score",
   );
   // An unfiltered read of every audit row, which is what the newest-per-business

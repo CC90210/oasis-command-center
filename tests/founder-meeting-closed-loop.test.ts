@@ -253,7 +253,7 @@ for (const name of ["tracking_status", "tracking_attempts", "tracking_last_error
 
 assert(!lifecycle.includes("calendarConfirmed"), "the UI cannot assert that a Calendar event exists");
 assert(!lifecycle.includes("googleCalendarAuditUrl"), "booking is server-side, not a browser Calendar draft");
-assert(lifecycle.includes("Book meeting & send invite"), "one action completes the verified handoff");
+assert(lifecycle.includes("Create Google Meet & send invite"), "one action completes the verified handoff");
 assert(workflow.includes("createVerifiedFounderMeeting"), "the route creates a provider-verified event");
 assert(workflow.includes("rescheduleVerifiedFounderMeeting"), "rescheduling updates the verified Calendar event");
 assert(workflow.includes("cancelVerifiedFounderMeeting"), "lost deals cancel the verified Calendar event");

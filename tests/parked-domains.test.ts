@@ -325,7 +325,7 @@ for (const junk of ["", "not json", "{broken", null, undefined, 42, {}, { finalU
   // And a parked business never reaches the scored map in the first place.
   assert.match(
     scores,
-    /if \(parked\.has\(r\.business_id\)\) continue;/,
+    /if \(parked\.has\((?:r|row)\.business_id\)\) continue;/,
     "parked businesses must be excluded where scores are BUILT, not filtered at each read site",
   );
 

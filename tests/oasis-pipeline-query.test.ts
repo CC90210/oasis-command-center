@@ -153,7 +153,7 @@ assert.deepEqual(overview.truncatedStages, ["assigned"]);
 assert.deepEqual(
   calls.map((call) => call.where?.stage),
   OPENER_PIPELINE_STAGE_KEYS,
-  "the opener's working lifecycle through founder meeting is queried and nothing later is leaked",
+  "the opener's full assigned lifecycle is queried without the researched pool",
 );
 for (const call of calls) {
   assert.equal(call.where?.sales_program, "website_sales_v1");
@@ -207,6 +207,130 @@ assert(
   "non-selected stages fetch one row only to obtain exact counts",
 );
 
+let viewerReads = 0;
+const viewerPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: OPENER_PIPELINE_STAGE_KEYS,
+    assignedTo: "rep-1",
+    viewerUserId: "REP-1",
+    salesMotion: "cold_outbound",
+  },
+  {
+    list: async () => {
+      throw new Error("self-scoped pipeline should use the owned-or-collaborating read");
+    },
+    listForViewer: async (input) => {
+      viewerReads += 1;
+      assert.equal(input.userId, "rep-1");
+      return {
+        total: 4,
+        rows: [
+          {
+            id: "owned-lost",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "lost", assigned_to: "rep-1", sales_motion: "cold_outbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-31T12:00:00.000Z",
+          },
+          {
+            id: "collaborating-launched",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: {
+              stage: "launched",
+              assigned_to: "closer-1",
+              collaborators: ["rep-1"],
+              sales_motion: "cold_outbound",
+            },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-30T12:00:00.000Z",
+          },
+          {
+            id: "prospect-pool",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "researched", assigned_to: "rep-1", sales_motion: "cold_outbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-29T12:00:00.000Z",
+          },
+          {
+            id: "wrong-motion",
+            tenant_id: input.tenant_id,
+            entity_type: "lead",
+            data: { stage: "won", assigned_to: "rep-1", sales_motion: "warm_inbound" },
+            created_at: "2026-08-01T00:00:00.000Z",
+            updated_at: "2026-08-28T12:00:00.000Z",
+          },
+        ],
+      };
+    },
+  },
+);
+assert.equal(viewerReads, 1, "one owned-or-collaborating read replaces one query per stage");
+assert.deepEqual(
+  viewerPage.rows.map((row) => row.id),
+  ["owned-lost", "collaborating-launched"],
+  "a rep retains own Lost history and collaborator-only launched deals without seeing the prospect pool",
+);
+assert.equal(viewerPage.stageCounts.lost, 1);
+assert.equal(viewerPage.stageCounts.launched, 1);
+
+let builderViewerReads = 0;
+let builderFulfillmentReads = 0;
+const builderPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["onboarding", "in_build", "client_review"],
+    assignedTo: "builder-1",
+    viewerUserId: "builder-1",
+    fulfillmentOwnerId: "BUILDER-1",
+  },
+  {
+    listForViewer: async (input) => {
+      builderViewerReads += 1;
+      return {
+        total: 1,
+        rows: [{
+          id: "builder-owned",
+          tenant_id: input.tenant_id,
+          entity_type: "lead",
+          data: { stage: "onboarding", assigned_to: "builder-1" },
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-30T12:00:00.000Z",
+        }],
+      };
+    },
+    list: async (input) => {
+      builderFulfillmentReads += 1;
+      assert.equal(input.where?.fulfillment_owner_id, "builder-1");
+      return {
+        total: 1,
+        rows: [{
+          id: "builder-delivery",
+          tenant_id: input.tenant_id,
+          entity_type: "lead",
+          data: {
+            stage: "in_build",
+            assigned_to: "closer-1",
+            fulfillment_owner_id: "builder-1",
+          },
+          created_at: "2026-08-01T00:00:00.000Z",
+          updated_at: "2026-08-31T12:00:00.000Z",
+        }],
+      };
+    },
+  },
+);
+assert.equal(builderViewerReads, 1);
+assert.equal(builderFulfillmentReads, 1);
+assert.deepEqual(
+  builderPage.rows.map((row) => row.id),
+  ["builder-owned", "builder-delivery"],
+  "the builder list includes both sales ownership and fulfillment-only delivery rows",
+);
+
 const teamCalls: ListRecordsInput[] = [];
 const teamList = async (input: ListRecordsInput): Promise<ListRecordsResult> => {
   teamCalls.push(input);
@@ -240,7 +364,7 @@ const teamList = async (input: ListRecordsInput): Promise<ListRecordsResult> => 
 const teamPage = await listOasisPipelineWindow(
   {
     tenantId: "tenant-1",
-    stageKeys: ["assigned"],
+    stageKeys: ["assigned", "lost"],
     requestedStage: "assigned",
     requestedPage: "2",
     assignedToAny: ["rep-1", "rep-2"],
@@ -254,13 +378,44 @@ assert.equal(teamPage.shownTo, 160);
 assert.deepEqual(
   teamCalls.map((call) => call.whereIn?.assigned_to),
   [["rep-1", "rep-2"]],
-  "one DB-native stage query replaces one remote query per rep",
+  "one DB-native roster query replaces one remote query per stage or rep",
+);
+assert.equal(
+  teamCalls[0]?.where?.stage,
+  undefined,
+  "the roster is fetched once and grouped into lifecycle stages in memory",
 );
 assert.equal(
   teamPage.rows.some((row) => row.data.assigned_to === null || !row.data.assigned_to),
   false,
   "manager union contains no unassigned records",
 );
+
+let adminReads = 0;
+const adminPage = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned", "lost"],
+    salesMotion: "cold_outbound",
+  },
+  {
+    list: async (input) => {
+      adminReads += 1;
+      assert.equal(input.where?.stage, undefined);
+      assert.equal(input.where?.sales_motion, "cold_outbound");
+      return {
+        total: 3,
+        rows: [
+          { id: "admin-assigned", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", sales_motion: "cold_outbound" }, created_at: "", updated_at: "3" },
+          { id: "admin-lost-1", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "lost", sales_motion: "cold_outbound" }, created_at: "", updated_at: "2" },
+          { id: "admin-lost-2", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "lost", sales_motion: "cold_outbound" }, created_at: "", updated_at: "1" },
+        ],
+      };
+    },
+  },
+);
+assert.equal(adminReads, 1, "a bounded admin board is read once, not once per lifecycle stage");
+assert.deepEqual(adminPage.stageCounts, { assigned: 1, lost: 2 });
 
 const conflicting = await listOasisPipelineWindow(
   {

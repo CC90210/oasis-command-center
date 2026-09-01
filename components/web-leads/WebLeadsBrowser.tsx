@@ -43,6 +43,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/Card";
 import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
 import { hasNoFilters, readRememberedFilters, rememberFilters } from "@/lib/web-leads/filter-memory";
+import {
+  fetchCachedWebLeadsJson,
+  invalidateWebLeadsClientCache,
+  webLeadsRequestUrls,
+} from "@/lib/web-leads/client-cache";
 import type { Facets } from "@/lib/web-leads/queries";
 // TYPE-ONLY. `lib/web-leads/data.ts` imports getServiceSupabase() -> next/headers
 // (server-only). A *value* import of PAGE_SIZE from there -- as a prior draft of
@@ -67,7 +72,15 @@ const VIEWS: { key: WebLeadView; label: string }[] = [
 /** A segmented control, not browser tabs -- one bordered pill, active state
  *  filled with the accent wash, matching ListTabs.tsx's own active treatment
  *  but sized for a primary nav role rather than a secondary filter. */
-function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v: WebLeadView) => void }) {
+function ViewSwitcher({
+  active,
+  onChange,
+  teamView,
+}: {
+  active: WebLeadView;
+  onChange: (v: WebLeadView) => void;
+  teamView: boolean;
+}) {
   return (
     <div role="tablist" aria-label="View" className="inline-flex items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
       {VIEWS.map((v) => (
@@ -84,14 +97,20 @@ function ViewSwitcher({ active, onChange }: { active: WebLeadView; onChange: (v:
             active === v.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
           }`}
         >
-          {v.label}
+          {v.key === "mine" && teamView ? "Team leads" : v.label}
         </button>
       ))}
     </div>
   );
 }
 
-export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
+export function WebLeadsBrowser({
+  canMutate,
+  teamView = false,
+}: {
+  canMutate: boolean;
+  teamView?: boolean;
+}) {
   const router = useRouter();
   const sp = useSearchParams();
   const filters = useMemo(() => parseFilters(new URLSearchParams(sp.toString())), [sp]);
@@ -243,37 +262,31 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
   // the same invariant for their own fetches.
   useEffect(() => {
     let alive = true;
-    const qs = filtersToParams({ ...filters, page: 1, leadId: null }).toString();
-    fetch(`/api/web-leads/facets?${qs}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((body) => {
-        if (!alive) return;
-        setFacets(body);
-        setFacetError(null);
-      })
-      .catch((e) => {
-        if (!alive) return;
-        setFacetError(e instanceof Error ? e.message : "failed");
-      });
-    return () => { alive = false; };
-  }, [filters]);
-
-  useEffect(() => {
-    let alive = true;
+    if (view === "territories") {
+      setLeads([]);
+      setLeadsKey(null);
+      setTotal(0);
+      setPageSize(Number.POSITIVE_INFINITY);
+      setFacets(null);
+      setFacetError(null);
+      setListError(null);
+      setLoading(false);
+      return () => { alive = false; };
+    }
     setLoading(true);
     const qs = filtersToParams({ ...filters, leadId: null }).toString();
     // scope=mine asks for the caller's own book; the default pool excludes
     // every lead somebody currently holds. `view` is already in `qs` (it is a
     // filter), but the server reads scope explicitly rather than inferring it
     // from a presentation concern.
-    fetch(`/api/web-leads?${qs}${filters.view === "mine" ? "&scope=mine" : ""}`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-        return r.json();
-      })
+    const url = webLeadsRequestUrls(qs).list;
+    fetchCachedWebLeadsJson<{
+      leads: WebLeadRow[];
+      total: number;
+      page: number;
+      pageSize: number;
+      facets: Facets | null;
+    }>(url)
       .then((body) => {
         if (!alive) return;
         setLeads(body.leads);
@@ -283,15 +296,20 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
         setLeadsKey(qs);
         setTotal(body.total);
         setPageSize(body.pageSize);
+        setFacets(body.facets);
+        setFacetError(null);
         setListError(null);
       })
       .catch((e) => {
         if (!alive) return;
-        setListError(e instanceof Error ? e.message : "failed");
+        const message = e instanceof Error ? e.message : "failed";
+        setListError(message);
+        setFacets(null);
+        setFacetError(message);
       })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [filters, refreshKey]);
+  }, [filters, refreshKey, view]);
 
   // Name the filter that emptied the list rather than saying a bare "0 results".
   const emptyHint = useMemo(() => {
@@ -338,6 +356,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
   );
 
   const mine = view === "mine";
+  const canOperateCurrentView = canMutate && !(teamView && mine);
 
   /**
    * Claim the ticked leads into my book, or (in My Leads) release them back to
@@ -352,7 +371,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
    * that reports success is worse than an error".
    */
   const runClaim = useCallback(async () => {
-    if (!canMutate) return;
+    if (!canOperateCurrentView) return;
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     setClaiming(true);
@@ -368,6 +387,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
         setClaimNote(body?.error ? `Could not do that: ${body.error}` : "Could not do that. Try again.");
         return;
       }
+      invalidateWebLeadsClientCache();
       if (mine) {
         const n = (body.released || []).length;
         const failed = (body.refused || []).length;
@@ -400,7 +420,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
     } finally {
       setClaiming(false);
     }
-  }, [canMutate, selected, mine]);
+  }, [canOperateCurrentView, selected, mine]);
 
   /**
    * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
@@ -422,7 +442,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
    * would drain the pool for everyone else in a single click.
    */
   const startCalling = useCallback(async () => {
-    if (!canMutate) return;
+    if (!canOperateCurrentView) return;
     if (mine) { setCalling(true); return; }
     const ids = leads.map((l) => l.id);
     if (ids.length === 0) return;
@@ -439,6 +459,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
         setClaimNote(body?.error ? `Could not start: ${body.error}` : "Could not start calling. Try again.");
         return;
       }
+      invalidateWebLeadsClientCache();
       const got: string[] = body.claimed || [];
       const trackingFailed = (body.trackingFailed || []).length;
       if (got.length === 0) {
@@ -461,7 +482,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
     } finally {
       setClaiming(false);
     }
-  }, [canMutate, mine, leads, push, filters]);
+  }, [canOperateCurrentView, mine, leads, push, filters]);
 
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {
@@ -519,7 +540,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
           onClaim={runClaim}
           claiming={claiming}
           claimLabel={mine ? "Release" : "Claim"}
-          canMutate={canMutate}
+          canMutate={canOperateCurrentView}
           filterCount={activeFilterCount(filters)}
           onOpenFilters={mine ? null : () => setFiltersOpen(true)}
         />
@@ -535,10 +556,10 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
           onPage={(n) => push({ ...filters, page: n })}
           onOpen={openLead}
           loading={loading} error={listError}
-          emptyHint={mine ? "Nothing in your book yet. Go to Leads, tick the ones you want and claim them." : emptyHint}
+          emptyHint={mine ? (teamView ? "No roster-assigned team leads yet." : "Nothing in your book yet. Go to Leads, tick the ones you want and claim them.") : emptyHint}
           selected={selected} onToggle={toggle} onToggleAll={toggleAll}
           showStage={mine}
-          canSelect={canMutate}
+          canSelect={canOperateCurrentView}
         />
       </div>
     </div>
@@ -547,13 +568,15 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title={mine ? "My leads" : "Leads"}
+        title={mine ? (teamView ? "Team leads" : "My leads") : "Leads"}
         subtitle={
           mine
-            ? "The leads you have claimed. Nobody else can call these while you hold them."
+            ? teamView
+              ? "Read-only roster view of every lead assigned to the OASIS sales team."
+              : "The leads you have claimed. Nobody else can call these while you hold them."
             : "Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
         }
-        action={<ViewSwitcher active={view} onChange={setView} />}
+        action={<ViewSwitcher active={view} onChange={setView} teamView={teamView} />}
       />
 
       {(view === "leads" || mine) && listBlock}
@@ -564,7 +587,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
         </div>
       )}
 
-      {calling && canMutate && (
+      {calling && canOperateCurrentView && (
         <CallMode
           leads={leads}
           // Page AND filter identity: a rep who changes a filter in another tab
@@ -586,7 +609,7 @@ export function WebLeadsBrowser({ canMutate }: { canMutate: boolean }) {
         />
       )}
 
-      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} canMutate={canMutate && mine} />}
+      {filters.leadId && <WebLeadDetail leadId={filters.leadId} onClose={closeLead} canMutate={canOperateCurrentView && mine} />}
     </div>
   );
 }

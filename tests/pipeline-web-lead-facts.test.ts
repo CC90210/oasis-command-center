@@ -206,6 +206,8 @@ async function run() {
   // ---------------------------------------------------------------------------
   {
     const page = read("app/pipeline/page.tsx");
+    const attachSource = read("lib/web-leads/attach-scores.ts");
+    const scoreSource = read("lib/web-leads/scores.ts");
     assert.match(
       page,
       /attachWebsiteScores\(named\)/,
@@ -213,17 +215,27 @@ async function run() {
     );
     assert.match(
       page,
-      /const named = await attachAssignedNames\(pipelineWindow\.rows, tenantId\)/,
+      /const named = pipelineWindow\.rows\.map\(\(row\) => \(\{[\s\S]*?withAssignedName\(row\.data, memberNameMap\)/,
       "the window from the DB query is what gets enriched -- not a re-fetched or wider set",
     );
     assert.match(page, /rows=\{rows\}/, "the view must receive the enriched rows");
+    assert.match(
+      attachSource,
+      /fetchScoreIndexForBusinessIds\(businessIds\)/,
+      "the Pipeline must not cold-scan the tenant-wide score corpus for one rendered page",
+    );
+    assert.match(
+      scoreSource,
+      /\.in\("business_id", ids\)/,
+      "targeted Pipeline score reads must be database-bounded to rendered business ids",
+    );
 
     // ─────────────────────────────────────────────────────────────────────
     // 7. THE SCORE JOIN IS GATED ON THE TENANT.
     //
     // Caught by independent review 2026-08-25. THREE slugs render this page
     // (`oasis`, `oasis-ai-cc`, `oasis-webdev`) but every query inside
-    // fetchScoreIndex is pinned to WEBDEV_TENANT_ID = oasis-ai-cc. Ungated,
+    // the score-index queries are pinned to WEBDEV_TENANT_ID = oasis-ai-cc. Ungated,
     // another tenant's board resolves its rows against a DIFFERENT tenant's
     // audit index: a miss shows "Not scored yet" on a lead that may be scored,
     // and a colliding business id would show one tenant a number measured from
@@ -231,8 +243,8 @@ async function run() {
     // ─────────────────────────────────────────────────────────────────────
     assert.match(
       page,
-      /tenantId === WEBDEV_TENANT_ID \? await attachWebsiteScores\(named\) : named/,
-      "the score join must be gated on the web-leads tenant -- fetchScoreIndex is pinned to it, so another tenant would resolve against the wrong index",
+      /tenantId === WEBDEV_TENANT_ID[\s\S]{0,160}?attachWebsiteScores\(named\)[\s\S]{0,80}?: named/,
+      "the score join must be gated on the web-leads tenant -- the score resolver is pinned to it, so another tenant would resolve against the wrong index",
     );
   }
 
@@ -356,12 +368,13 @@ async function run() {
       "there must be no BAND alternative branch -- the unconditional band above already covers it, and a second one is the duplication that was removed",
     );
 
-    // The card is READ, not hidden behind a click. A card a rep has to expand
-    // is a card they will not open while a stranger is waiting.
+    // Supporting analysis stays one click behind the stage-specific action.
+    // The lead file should load as a guided workflow rather than a wall of
+    // panels, while the full card remains available unchanged.
     assert.match(
       detail,
-      /storageKey="oasis\.pipeline\.battleCard\.collapsed"[\s\S]{0,120}?defaultCollapsed=\{false\}/,
-      "the battle card must be open by default on the pipeline record",
+      /storageKey="oasis\.pipeline\.battleCard\.collapsed"[\s\S]{0,120}?defaultCollapsed/,
+      "the battle card must default closed behind the supporting-information disclosure",
     );
 
     // ─── EMBEDDED CHANGES CHROME, NEVER CONTENT ───────────────────────────

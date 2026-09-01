@@ -7,6 +7,7 @@ import {
   MANAGER_PIPELINE_STAGE_KEYS,
   OASIS_WEBSITE_SALES_PROGRAM,
   OPENER_PIPELINE_STAGE_KEYS,
+  REP_PIPELINE_STAGE_KEYS,
   canOpenOasisSalesRecord,
   canMutateOasisSalesRecord,
   filterWebsiteSalesRows,
@@ -16,7 +17,7 @@ import {
   stagesForOasisRole,
 } from "../lib/oasis-sales-pipeline-policy";
 
-assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, [
+assert.deepEqual(REP_PIPELINE_STAGE_KEYS, [
   "assigned",
   "attempting_contact",
   "connected",
@@ -25,27 +26,27 @@ assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, [
   "demo_completed",
   "proposal_sent",
   "won",
+  "lost",
   "onboarding",
+  "in_build",
+  "client_review",
+  "launched",
 ]);
-assert.deepEqual(OPENER_PIPELINE_STAGE_KEYS, [
-  "assigned",
-  "attempting_contact",
-  "connected",
-  "qualified",
-  "founder_meeting_booked",
-]);
-assert.deepEqual(CLOSER_PIPELINE_STAGE_KEYS, [
-  "founder_meeting_booked",
-  "demo_completed",
-  "proposal_sent",
-  "won",
-  "onboarding",
-]);
+assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
+assert.deepEqual(OPENER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
+assert.deepEqual(CLOSER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
 assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["onboarding", "in_build", "client_review"]);
 
 assert.deepEqual(stagesForOasisRole("agent").map((s) => s.key), AGENT_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("opener").map((s) => s.key), OPENER_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("closer").map((s) => s.key), CLOSER_PIPELINE_STAGE_KEYS);
+for (const role of ["agent", "opener", "closer", "builder", "marketing"]) {
+  const visible = stagesForOasisRole(role).map((stage) => stage.key);
+  assert.equal(visible.includes("researched"), false, `${role} cannot read the unassigned prospect pool`);
+  for (const stage of ["lost", "won", "onboarding", "in_build", "client_review", "launched"]) {
+    assert.equal(visible.includes(stage), true, `${role} retains own ${stage} history`);
+  }
+}
 assert.deepEqual(
   stagesForOasisRole("manager").map((stage) => stage.key),
   MANAGER_PIPELINE_STAGE_KEYS,
@@ -64,7 +65,7 @@ assert.equal(MANAGER_PIPELINE_STAGE_KEYS.includes("researched"), false);
 // his build work sits in. Neither half may be dropped by a later edit.
 assert.deepEqual(
   new Set(stagesForOasisRole("builder").map((s) => s.key)),
-  new Set([...AGENT_PIPELINE_STAGE_KEYS, ...BUILDER_VISIBLE_STAGE_KEYS]),
+  new Set([...REP_PIPELINE_STAGE_KEYS, ...BUILDER_VISIBLE_STAGE_KEYS]),
   "a builder's pipeline carries BOTH jobs: his sales book and his delivery queue",
 );
 assert.equal(stagesForOasisRole("admin").length, 14);
@@ -85,8 +86,8 @@ const rows = [
 
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "admin", userId: "admin" }).map((r) => r.id), ["fresh", "other-rep", "post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh"]);
-assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["post-handoff"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
+assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: null }), []);
 
 const managerReadable = {

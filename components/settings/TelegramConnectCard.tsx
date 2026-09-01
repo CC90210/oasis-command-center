@@ -147,7 +147,7 @@ export function TelegramConnectCard() {
             )}
           </div>
           <div className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-            This bot belongs only to your signed-in profile. The shared Telegram bridge shown above can be healthy even when you have not linked a personal alert bot.
+            This bot belongs only to your signed-in profile. It is separate from the workspace Telegram bridge and from every teammate&apos;s alert bot.
           </div>
         </div>
         {(connected || linked) && (

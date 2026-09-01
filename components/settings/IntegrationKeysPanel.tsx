@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { CheckCircle2, AlertCircle, KeyRound, Trash2, Loader2 } from "lucide-react";
 import { Card } from "@/components/Card";
-import { INTEGRATION_SCHEMAS } from "@/lib/tenant-integration-schemas";
+import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "@/lib/tenant-integration-schemas";
 import { relTime } from "@/lib/format-helpers";
 
 type StatusRow = {
@@ -25,6 +25,7 @@ type StatusRow = {
   last_tested_at: string | null;
   last_test_ok: boolean | null;
   last_test_error: string | null;
+  source?: "stored" | "environment" | null;
 };
 
 type Drafts = Record<string, string>; // key: `${service}::${field_key}`
@@ -49,6 +50,9 @@ export function IntegrationKeysPanel({
   const [saving, setSaving] = useState<Saving>({});
   const [errors, setErrors] = useState<LastError>({});
   const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [testResults, setTestResults] = useState<
+    Record<string, { ok: boolean; detail: string | null; error: string | null }>
+  >({});
   const [loaded, setLoaded] = useState(false);
   // 2026-06-08: rows with `advanced: true` on their schema are hidden by
   // default. Most operators want Gmail not SMTP, etc. When this is true,
@@ -131,6 +135,11 @@ export function IntegrationKeysPanel({
 
   const test = async (service: string) => {
     setTesting((t) => ({ ...t, [service]: true }));
+    setTestResults((results) => {
+      const next = { ...results };
+      delete next[service];
+      return next;
+    });
     try {
       const r = await fetch("/api/integrations/keys/test", {
         method: "POST",
@@ -138,8 +147,34 @@ export function IntegrationKeysPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service }),
       });
-      await r.json().catch(() => ({}));
+      const body = (await r.json().catch(() => ({}))) as {
+        ok?: boolean;
+        detail?: string | null;
+        error?: string | null;
+      };
+      setTestResults((results) => ({
+        ...results,
+        [service]: {
+          ok: r.ok && body.ok === true,
+          detail: typeof body.detail === "string" ? body.detail : null,
+          error:
+            typeof body.error === "string"
+              ? body.error
+              : r.ok
+                ? "test_failed"
+                : `http_${r.status}`,
+        },
+      }));
       await reload();
+    } catch (error) {
+      setTestResults((results) => ({
+        ...results,
+        [service]: {
+          ok: false,
+          detail: null,
+          error: error instanceof Error ? error.message : "network_error",
+        },
+      }));
     } finally {
       setTesting((t) => ({ ...t, [service]: false }));
     }
@@ -188,7 +223,9 @@ export function IntegrationKeysPanel({
         </div>
       ) : (
         <div className="space-y-5">
-          {INTEGRATION_SCHEMAS.filter((s) => !s.advanced || showAdvanced).map((schema) => {
+          {TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS.filter(
+            (s) => !s.advanced || showAdvanced,
+          ).map((schema) => {
             const fieldStatuses = schema.fields.map((f) => ({
               field: f,
               status: statusFor(schema.service, f.key),
@@ -210,6 +247,8 @@ export function IntegrationKeysPanel({
             const lastTestFail = fieldStatuses.find(
               (fs) => fs.status?.last_test_ok === false,
             );
+            const twilioVerified =
+              schema.service === "twilio" && allSet && Boolean(lastTestOk) && !lastTestFail;
 
             return (
               <div
@@ -226,10 +265,36 @@ export function IntegrationKeysPanel({
                       {lastTestFail && (
                         <AlertCircle className="w-3.5 h-3.5 text-red-400" />
                       )}
+                      {schema.service === "twilio" && (
+                        <span
+                          className={
+                            twilioVerified
+                              ? "rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300"
+                              : "rounded border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-300"
+                          }
+                        >
+                          {twilioVerified ? "Credentials verified" : "Email-only"}
+                        </span>
+                      )}
+                      {schema.service !== "twilio" && allSet && !lastTestOk && !lastTestFail && (
+                        <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-bold text-sky-300">
+                          Configured
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-fg-muted leading-relaxed mt-0.5">
                       {schema.description}
                     </div>
+                    {schema.service === "twilio" && allSet && !twilioVerified && (
+                      <div className="mt-1 text-[10.5px] leading-relaxed text-amber-300">
+                        Credentials are saved, but SMS remains unavailable until Twilio passes Test.
+                      </div>
+                    )}
+                    {twilioVerified && (
+                      <div className="mt-1 text-[10.5px] leading-relaxed text-fg-dim">
+                        Account and sender are verified. Carrier registration and the live-send switch still control delivery.
+                      </div>
+                    )}
                   </div>
                   {allSet && (
                     <button
@@ -261,6 +326,19 @@ export function IntegrationKeysPanel({
                   </div>
                 )}
 
+                {testResults[schema.service] && (
+                  <div
+                    role="status"
+                    className={`mb-2 text-[11px] ${
+                      testResults[schema.service].ok ? "text-emerald-300" : "text-red-300"
+                    }`}
+                  >
+                    {testResults[schema.service].ok
+                      ? testResults[schema.service].detail || "Connection test passed."
+                      : `Connection test failed · ${testResults[schema.service].error || "unknown_error"}`}
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   {fieldStatuses.map(({ field, status: fStatus }) => {
                     const key = k(schema.service, field.key);
@@ -270,7 +348,9 @@ export function IntegrationKeysPanel({
                         <label className="text-[10.5px] uppercase tracking-wider text-fg-muted">
                           {field.label}
                           {hasValue ? (
-                            <span className="ml-1.5 text-emerald-400 normal-case">· set</span>
+                            <span className="ml-1.5 text-emerald-400 normal-case">
+                              · {fStatus?.source === "environment" ? "configured in deployment" : "saved"}
+                            </span>
                           ) : (
                             <span className="ml-1.5 text-fg-dim normal-case">· not set</span>
                           )}
@@ -323,7 +403,7 @@ export function IntegrationKeysPanel({
               integrations that most operators don't need. Keeps the
               default view clean while still letting power users find
               the option. */}
-          {INTEGRATION_SCHEMAS.some((s) => s.advanced) && (
+          {TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS.some((s) => s.advanced) && (
             <button
               type="button"
               onClick={() => setShowAdvanced((v) => !v)}

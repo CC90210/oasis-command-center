@@ -19,7 +19,7 @@ import {
   listTenantIntegrationStatus,
 } from "@/lib/tenant-integration-store";
 import {
-  findIntegrationSchema,
+  findTenantManuallyEditableIntegrationSchema,
   validateIntegrationValue,
 } from "@/lib/tenant-integration-schemas";
 
@@ -58,9 +58,12 @@ export async function POST(req: NextRequest) {
   const fieldKey = typeof body.field_key === "string" ? body.field_key.toLowerCase() : "";
   const value = typeof body.value === "string" ? body.value : "";
 
-  const schema = findIntegrationSchema(service);
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
   if (!schema) {
-    return NextResponse.json({ ok: false, error: "unknown_service" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "service_not_tenant_editable" },
+      { status: 400 },
+    );
   }
   const fieldDef = schema.fields.find((f) => f.key === fieldKey);
   if (!fieldDef) {
@@ -103,6 +106,16 @@ export async function DELETE(req: NextRequest) {
   const fieldKey = typeof body.field_key === "string" ? body.field_key.toLowerCase() : "";
   if (!service || !fieldKey) {
     return NextResponse.json({ ok: false, error: "missing_service_or_field" }, { status: 400 });
+  }
+  const schema = findTenantManuallyEditableIntegrationSchema(service);
+  if (!schema) {
+    return NextResponse.json(
+      { ok: false, error: "service_not_tenant_editable" },
+      { status: 400 },
+    );
+  }
+  if (!schema.fields.some((field) => field.key === fieldKey)) {
+    return NextResponse.json({ ok: false, error: "unknown_field" }, { status: 400 });
   }
   const result = await deleteTenantIntegrationValue({
     tenantId: sess.tenantId,

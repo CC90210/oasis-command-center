@@ -38,7 +38,6 @@ import { SettingsSection } from "@/components/settings/SettingsSection";
 import { OpenSectionOnHash } from "@/components/settings/OpenSectionOnHash";
 import { ProfileEditor } from "@/components/settings/ProfileEditor";
 import { BrandLogoCard } from "@/components/settings/BrandLogoCard";
-import { QuickInviteCard } from "@/components/settings/QuickInviteCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { AgentConfigEditor } from "@/components/settings/AgentConfigEditor";
 import { IntegrationKeysPanel } from "@/components/settings/IntegrationKeysPanel";
@@ -52,7 +51,6 @@ import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerP
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
-import { WorkspaceConnectionsSummary } from "@/components/settings/WorkspaceConnectionsSummary";
 import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
@@ -253,7 +251,7 @@ export async function SettingsContent({
           <SettingsSection
             defaultOpen
             title="Credentials"
-            subtitle="All your API keys, OAuth tokens, and webhook URLs in one place. Known integrations get health-checked; custom KEY=VALUE secrets cover anything else your agents need."
+            subtitle="Workspace app keys and the connections tied to your own login, in one place. Shared keys apply to the team; personal Google and Telegram connections apply only to you."
           >
             {/* FOLDED, 2026-08-17. Both panels rendered open, which made this one
                 card the tallest thing on the page and buried everything under it.
@@ -271,6 +269,25 @@ export async function SettingsContent({
                 <SafeBoundary label="Integration keys">
                   <IntegrationKeysPanel canManage={canManageTenant} />
                 </SafeBoundary>
+              </SettingsSection>
+
+              <SettingsSection
+                tone="nested"
+                title="Your Google & Telegram"
+                subtitle="Connect the accounts used by your own seat. These controls never overwrite a teammate's personal connections."
+                defaultOpen
+              >
+                <div className="space-y-3">
+                  <SafeBoundary label="Personal integrations">
+                    <PersonalIntegrationsPanel
+                      showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
+                      showKixie={enabledAgents.includes("helios")}
+                    />
+                  </SafeBoundary>
+                  <SafeBoundary label="Personal Telegram bot">
+                    <TelegramConnectCard />
+                  </SafeBoundary>
+                </div>
               </SettingsSection>
 
               {canManageTenant && (
@@ -297,44 +314,10 @@ export async function SettingsContent({
             </SafeBoundary>
           )}
 
-          {/* Phase 4 of SunBiz multi-employee personalization (2026-05-29):
-              per-user credentials section. Today this hosts Gmail OAuth
-              so each employee can send mail from their own address.
-              Tenant-shared credentials (TextTorrent, Kixie, etc.) stay
-              in the IntegrationKeysPanel above.
-              SunBiz directive 2026-05-31: hidden for shared-inbox tenants
-              since per-user OAuth has no effect on outbound (send_gateway
-              ignores it for these tenants — see user_gmail_oauth.py
-              _SHARED_INBOX_SLUGS). Showing the panel would tell the
-              operator to do something that doesn't change their sends. */}
-          {/* Personal integrations: always render so every employee can
-              set their Kixie agent email (Phase 5 of TT + Kixie embedding).
-              Gmail row is suppressed for shared-inbox tenants since
-              outbound goes through the shared submissions@ identity
-              and a personal Gmail OAuth has no effect. */}
-          {profile.tenant_id && (
-            <WorkspaceConnectionsSummary tenantId={profile.tenant_id} />
-          )}
-
-          <SafeBoundary label="Personal integrations">
-            <PersonalIntegrationsPanel
-              showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
-              // Kixie row only renders for tenants that have Helios enabled
-              // (the SunBiz click-to-call agent that consumes the per-employee
-              // Kixie email). CC 2026-06-06: OASIS personal (bravo/atlas/maven/
-              // aura) was showing the row even though it doesn't use Kixie.
-              showKixie={enabledAgents.includes("helios")}
-            />
-          </SafeBoundary>
-
-          <SafeBoundary label="Telegram bot">
-            <TelegramConnectCard />
-          </SafeBoundary>
-
           {canManageTenant && (
             <SettingsSection
               title="Team"
-              subtitle="Invite teammates so they can sign into this tenant. Each invite is a one-time link — send it via Slack / email / SMS."
+              subtitle="Invite teammates by work email. OASIS sends each person a one-time, 7-day link for the role you choose."
               action={
                 <a
                   href="/team"
@@ -344,12 +327,8 @@ export async function SettingsContent({
                 </a>
               }
             >
-              <SafeBoundary label="Team invites">
-                <QuickInviteCard />
-              </SafeBoundary>
-              <p className="text-[11px] text-fg-dim leading-relaxed mt-3">
-                Invitees land on /invite/&lt;token&gt;, sign up, and join this tenant automatically.
-                Enabled workspace agents recognize them by name and respect their role.
+              <p className="text-sm text-fg-muted leading-relaxed">
+                Add teammates, choose their job role, review pending invitations, and revoke access from the dedicated Team page.
               </p>
             </SettingsSection>
           )}
@@ -605,12 +584,10 @@ async function PersonalSettingsView({
         </SafeBoundary>
       </SettingsSection>
 
-      {tenantId && <WorkspaceConnectionsSummary tenantId={tenantId} />}
-
       <SettingsSection
         defaultOpen
-        title="Your account"
-        subtitle="Connections in this section belong to your login only; they do not change shared workspace services."
+        title="Credentials"
+        subtitle="Connect the Google and Telegram accounts used by your own login. These controls do not change the workspace's shared services or a teammate's account."
       >
         <div className="space-y-3">
           <SafeBoundary label="Personal integrations">
@@ -708,13 +685,20 @@ async function PreviewSettings({ tenantSlug, hideHeader }: { tenantSlug: string;
               <ProfileEditor profile={profile} tenantAgents={[]} personalOnly />
             </SafeBoundary>
           </Card>
-          <SafeBoundary label="Personal integrations">
-            {/* Your own Gmail / personal API keys — always yours to manage. */}
-            <PersonalIntegrationsPanel showGmail showKixie={false} />
-          </SafeBoundary>
-          <SafeBoundary label="Telegram bot">
-            <TelegramConnectCard />
-          </SafeBoundary>
+          <SettingsSection
+            defaultOpen
+            title="Credentials"
+            subtitle="Your personal Google and Telegram connections remain editable while tenant-wide settings stay read-only."
+          >
+            <div className="space-y-3">
+              <SafeBoundary label="Personal integrations">
+                <PersonalIntegrationsPanel showGmail showKixie={false} />
+              </SafeBoundary>
+              <SafeBoundary label="Telegram bot">
+                <TelegramConnectCard />
+              </SafeBoundary>
+            </div>
+          </SettingsSection>
         </>
       )}
       {PREVIEW_SECTIONS.map((s) => (

@@ -31,6 +31,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { OasisLogo } from "@/components/brand/OasisLogo";
 import { AlertCircle, ArrowRight, CheckCircle2, Mail, Shield } from "lucide-react";
 import { InviteRedeemForSignedInUser } from "./InviteRedeemForSignedInUser";
+import { teamRoleLabel } from "@/lib/team-roles";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -41,16 +42,6 @@ type Preview = {
   team_role: string;
   expires_at: string;
   email_pinned: string | null;
-};
-
-const ROLE_LABEL: Record<string, string> = {
-  admin: "Admin",
-  agent: "Sales Agent",
-  loan_officer: "Loan Officer",
-  processor: "Processor",
-  read_only: "Read-Only Viewer",
-  member: "Member",
-  owner: "Owner",
 };
 
 function hashToken(raw: string): string {
@@ -95,7 +86,7 @@ export default async function InviteLanding({
           <InviteRedeemForSignedInUser
             token={token}
             tenantName={preview.tenant_name}
-            roleLabel={ROLE_LABEL[preview.team_role] || preview.team_role}
+            roleLabel={teamRoleLabel(preview.team_role)}
             email={user.email || ""}
           />
         ) : (
@@ -132,7 +123,7 @@ function InvalidCard() {
         </Link>
         <p className="text-[11px] text-fg-dim leading-relaxed text-center">
           Need a fresh invite? Ask the person who sent you this link to send a new one — they can
-          generate it from their workspace&apos;s Team page.
+          send it from their workspace&apos;s Team page.
         </p>
       </div>
     </div>
@@ -140,7 +131,7 @@ function InvalidCard() {
 }
 
 function ValidCard({ token, preview }: { token: string; preview: Preview }) {
-  const roleLabel = ROLE_LABEL[preview.team_role] || preview.team_role;
+  const roleLabel = teamRoleLabel(preview.team_role);
   const expiresMs = Date.parse(preview.expires_at);
   const daysLeft = Number.isNaN(expiresMs)
     ? null
