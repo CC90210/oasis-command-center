@@ -207,7 +207,7 @@ export function BattleSection({
         className="group flex w-full items-start justify-between gap-4 rounded-xl px-5 py-4 text-left transition-colors hover:bg-bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none lg:px-6"
       >
         <span className="min-w-0 flex-1">
-          <h2 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted transition-colors group-hover:text-fg motion-reduce:transition-none">
+          <h2 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-muted transition-colors [font-family:var(--battle-display)] group-hover:text-fg motion-reduce:transition-none">
             <span aria-hidden className="h-3 w-[3px] shrink-0 rounded-full bg-accent/70 shadow-glow" />
             {title}
           </h2>

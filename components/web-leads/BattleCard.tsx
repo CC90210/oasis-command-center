@@ -35,22 +35,33 @@
  *     place, which is what lets the full fault list live behind a disclosure
  *     without hiding anything a rep needs mid-sentence.
  *
- * ═══ THE FUTURIST CHROME (Adon, 2026-08-31, round 2) ════════════════════════
+ * ═══ THE FUTURIST CHROME (Adon, 2026-08-31 round 2; 2026-09-01 round 3) ═════
  *
- * "Even nicer and 3D, a futuristic look and aesthetic." The system, chosen so
- * twenty small details read as ONE surface rather than twenty gimmicks: glass
- * panels with a lit top edge (BattleSection + Panel share it), a faint
- * blueprint grid and HUD corner brackets on the hero, the score counting up
- * inside a ring that draws once, the radar presented as a holo-table (CSS
- * perspective tilt that follows the pointer), competitor cards that tilt in
- * 3D under the cursor, and glow hovers on the controls. Three rules keep it
- * honest: every piece of chrome is keyed to NOTHING (identical for a 4 and a
- * 94 -- rule 1 survives the decoration); all pointer-driven motion is the
- * rep's own hand echoed back, never ambient (nothing loops, nothing sweeps on
- * its own); and `prefers-reduced-motion` flattens all of it -- tilts render
- * flat, fades render settled, the ring and count render finished (rule 4).
- * CSS 3D, deliberately not three.js: a WebGL context for a seven-point
- * polygon fails the same ~90KB test recharts failed below.
+ * Round 2 ("even nicer and 3D, a futuristic look"): glass panels with a lit
+ * top edge (BattleSection + Panel share it), blueprint grid + HUD corner
+ * brackets on the hero, the score counting up inside a ring that draws once,
+ * a perspective-tilted radar, competitor cards that tilt in 3D under the
+ * cursor, glow hovers on the controls.
+ *
+ * Round 3 ("Iron Man" -- the full HUD): the radar became a HOLOGRAM STACK
+ * (four SVG layers lifted to different Z depths inside one preserve-3d tilt,
+ * so they parallax against each other -- see the Radar docblock), every
+ * dimension gained a fixed identity hue worn on its vertex, label, list dot
+ * and meter, the benchmark competitor wears GOLD everywhere it appears, the
+ * score ring became an arc reactor (gradient stroke, pulsing halo), numerals
+ * and headings moved to a display face (Chakra Petch, self-hosted at build --
+ * zero runtime requests), and the radar carries one piece of AMBIENT
+ * decorative motion, a slowly rotating tick ring.
+ *
+ * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
+ * identical treatment -- rule 1 survives the decoration); data marks never
+ * move on their own (the one ambient element is a decorative ring carrying no
+ * data, and it is motion-safe gated); pointer-driven motion is the rep's own
+ * hand echoed back; and `prefers-reduced-motion` flattens ALL of it -- tilts
+ * render flat, fades render settled, the ring, count and rotation render
+ * finished and still (rule 4). CSS 3D, deliberately not three.js: a WebGL
+ * context for a seven-point polygon fails the same ~90KB test recharts failed
+ * below.
  *
  * ═══ THE COMPETITOR SECTION IS THE POINT ════════════════════════════════════
  *
@@ -64,15 +75,16 @@
  *
  * ═══ THE RULES THIS FILE DOES NOT GET TO BREAK ══════════════════════════════
  *
- * 1. NO COLOUR IS KEYED TO A SCORE. Not on a bar, not on a radar, not on a
- *    percentile marker, not on a head-to-head arrow. Every fill in here is one
- *    neutral colour whether the score is 4 or 94. A red 22 renders a judgement
- *    the measurement does not support, and a rep who sees red says something
- *    they cannot back up. tests/web-leads-guards.test.ts enforces this by
- *    banning the colour classes outright in this file. The accent that appears
- *    on a SELECTED dimension is keyed to the selection -- it follows the rep's
- *    tap, renders identically for a 4 and a 94, and says "you are looking at
- *    this one", never "this one is bad".
+ * 1. NO COLOUR IS KEYED TO A SCORE. Colour on this card answers exactly two
+ *    questions and neither is "how good is it": WHICH area (each dimension
+ *    wears one fixed hue from DIM_HUES -- trust is that blue at 4 and at 94)
+ *    and WHOSE mark (the prospect is always cyan, the benchmark competitor is
+ *    always gold). The palette is deliberately cool-spectrum with no
+ *    traffic-light red or green, because a red 22 renders a judgement the
+ *    measurement does not support, and a rep who sees red says something they
+ *    cannot back up. tests/web-leads-guards.test.ts still bans the verdict
+ *    colour classes outright in this file, and selection only BRIGHTENS a
+ *    dimension's own hue -- it follows the rep's tap, never the value.
  *
  * 2. THE THREE NON-SCORED STATES RENDER AS SENTENCES. Never a zero, never a
  *    blank, and above all never an empty chart -- a radar with all seven axes
@@ -98,8 +110,9 @@
  * ~90KB of it. A radar is seven points on a circle.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import Link from "next/link";
+import localFont from "next/font/local";
 import { ArrowLeft, ChevronDown, ExternalLink, Phone } from "lucide-react";
 import type { AuditResult, CheckResult, DimensionProfile } from "@/lib/web-leads/audit";
 import type { CompetitorContext } from "@/lib/web-leads/competitors";
@@ -112,6 +125,52 @@ import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
+
+/**
+ * The display face for the HUD (Adon, 2026-09-01: "a nicer font"). Space
+ * Grotesk, from the woff2 files ALREADY VENDORED in app/fonts/ for the
+ * marketing site -- the same display face the brand wears in public, so the
+ * card and the site agree on what OASIS looks like. next/font/local, never
+ * next/font/google: tests/font-selfhost.test.ts bans the build-time Google
+ * fetch that failed two deploys in August. Zero new binaries, zero runtime
+ * requests. Scoped to this card through a CSS variable on its root; nothing
+ * outside the battle card inherits it.
+ */
+const displayFont = localFont({
+  src: [
+    { path: "../../app/fonts/SpaceGrotesk-500.woff2", weight: "500", style: "normal" },
+    { path: "../../app/fonts/SpaceGrotesk-600.woff2", weight: "600", style: "normal" },
+    { path: "../../app/fonts/SpaceGrotesk-700.woff2", weight: "700", style: "normal" },
+  ],
+  variable: "--battle-display",
+});
+
+/**
+ * One fixed hue per DIMENSION — IDENTITY coding, never quality coding.
+ *
+ * This is how "make it colorful" coexists with rule 1: a colour on this card
+ * answers "WHICH area is this" (trust is always this blue, mobile is always
+ * this magenta, on every lead, at every score) or "WHOSE mark is this"
+ * (cyan = this prospect, GOLD = the benchmark competitor). No hue ever
+ * answers "how good is it" -- the cool-spectrum palette deliberately contains
+ * no traffic-light red or green, and the banned-class tests still enforce
+ * that nothing verdict-coloured can creep in.
+ */
+const DIM_HUES: Record<string, { from: string; to: string }> = {
+  conversion: { from: "#22d3ee", to: "#67e8f9" },
+  trust: { from: "#3b82f6", to: "#93c5fd" },
+  design: { from: "#8b5cf6", to: "#c4b5fd" },
+  mobile: { from: "#d946ef", to: "#f0abfc" },
+  content: { from: "#0ea5e9", to: "#7dd3fc" },
+  performance: { from: "#6366f1", to: "#a5b4fc" },
+  discoverability: { from: "#14b8a6", to: "#5eead4" },
+};
+const FALLBACK_HUE = { from: "#38bdf8", to: "#7dd3fc" };
+const hueFor = (key: string) => DIM_HUES[key] || FALLBACK_HUE;
+
+/** The benchmark competitor's mark, everywhere it appears: radar overlay,
+ *  head-to-head ticks. A fixed identity, worn at every score. */
+const GOLD = "#fbbf24";
 
 type Payload = {
   lead: WebLead;
@@ -231,16 +290,27 @@ function RemedyLines({ code }: { code: string }) {
   );
 }
 
-/** One neutral fill, always. See rule 1 in the module header. */
-function Meter({ value, drawn, reduced }: { value: number; drawn: boolean; reduced: boolean }) {
+/** The bar's LENGTH is the value; its colour, when a `hue` is given, is the
+ *  dimension's fixed identity hue (see DIM_HUES) -- the same hue at 4 as at
+ *  94, so rule 1 holds. With no hue it stays the neutral fill. */
+function Meter({
+  value, drawn, reduced, hue,
+}: {
+  value: number;
+  drawn: boolean;
+  reduced: boolean;
+  hue?: { from: string; to: string };
+}) {
   const pct = Math.min(100, Math.max(0, value));
   return (
     <span className="block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
       <span
-        className="block h-full rounded-full bg-fg-dim"
+        className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
         style={{
           width: drawn ? `${pct}%` : "0%",
           transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          background: hue ? `linear-gradient(90deg, ${hue.from}, ${hue.to})` : undefined,
+          boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
         }}
       />
     </span>
@@ -275,19 +345,48 @@ function wrapLabel(text: string, max = 16): string[] {
   return lines.slice(0, 3);
 }
 
+/**
+ * The radar, as a HOLOGRAM STACK (Adon, 2026-09-01: "3D-shaped... Iron Man").
+ *
+ * One component, four layers, each its own SVG so the caller can lift them to
+ * different Z depths inside a CSS `preserve-3d` tilt:
+ *
+ *   base   — grid rings, spokes, labels, the rotating tick ring, the legend.
+ *            The only layer with a role: it carries the aria-label naming all
+ *            seven scores, so assistive tech reads ONE chart, not four.
+ *   shadow — a dark blurred copy of the data polygon, low over the grid. This
+ *            is what makes the lifted layer read as floating.
+ *   data   — the holographic polygon (cool-spectrum gradient fill, cyan glow
+ *            edge), per-dimension hue vertices, and the GOLD dashed benchmark.
+ *   hits   — the transparent pointer targets, topmost.
+ *
+ * When the table tilts, the layers parallax against each other -- real depth,
+ * from CSS transforms and ~zero bytes of library. The rotating tick ring is
+ * the one AMBIENT motion on the card (Adon: it should feel alive); it is
+ * decoration on chrome, carries no data, and is `motion-safe:` gated so
+ * reduced-motion users never see it move.
+ *
+ * Colour on this chart is identity, never verdict: each vertex/label wears its
+ * dimension's fixed hue at every score; the prospect's outline is always cyan
+ * and the benchmark always gold (rule 1, as restated in the module header).
+ */
+type RadarLayer = "base" | "shadow" | "data" | "hits";
+
 function Radar({
-  dimensions, leader, leaderName, drawn, reduced, selected, onSelect,
+  dimensions, leader, leaderName, drawn, reduced, selected, onSelect, layer,
 }: {
   dimensions: DimensionProfile[];
   leader: { key: string; leader: number }[] | null;
   leaderName: string | null;
   drawn: boolean;
   reduced: boolean;
-  /** The dimension the rep is inspecting. Selection is the ONLY thing the
-   *  accent follows on this chart -- never the score (rule 1). */
+  /** The dimension the rep is inspecting. Selection brightens its axis; the
+   *  hue itself never changes with the value on it (rule 1). */
   selected?: string | null;
   onSelect?: (key: string) => void;
+  layer: RadarLayer;
 }) {
+  const uid = useId();
   const n = dimensions.length;
   if (n < 3) return null;
 
@@ -296,13 +395,117 @@ function Radar({
   const leaderPts = leader ? dimensions.map((d, i) => radarPoint(i, n, leaderByKey.get(d.key) ?? 0)) : null;
   const toPath = (pts: { x: number; y: number }[]) => pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
 
+  // Draws once on mount, from the centre outward, on every geometry layer at
+  // once. transformOrigin is given in user units because SVG has no
+  // percentage transform box here.
+  const drawnGroupStyle = {
+    transformOrigin: `${RADAR.cx}px ${RADAR.cy}px`,
+    transform: drawn ? "scale(1)" : "scale(0)",
+    transition: reduced ? "none" : "transform 480ms cubic-bezier(0.22, 1, 0.36, 1)",
+  } as const;
+
+  if (layer === "shadow") {
+    return (
+      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full" aria-hidden>
+        <g style={drawnGroupStyle}>
+          <polygon points={toPath(theirs)} fill="#020617" fillOpacity={0.55} style={{ filter: "blur(6px)" }} />
+        </g>
+      </svg>
+    );
+  }
+
+  if (layer === "data") {
+    return (
+      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full" aria-hidden>
+        <defs>
+          <radialGradient id={`holo-${uid}`} cx="50%" cy="50%" r="65%">
+            <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.45" />
+            <stop offset="60%" stopColor="#3b82f6" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.10" />
+          </radialGradient>
+        </defs>
+        <g style={drawnGroupStyle}>
+          {/* The benchmark competitor: gold, dashed, softly lit. Gold is WHOSE
+              mark this is, worn identically whether it beats the prospect on
+              an axis or loses to them. */}
+          {leaderPts && (
+            <polygon
+              points={toPath(leaderPts)}
+              fill="none"
+              stroke={GOLD}
+              strokeOpacity={0.85}
+              strokeWidth={1.5}
+              strokeDasharray="5 4"
+              style={{ filter: `drop-shadow(0 0 4px ${GOLD}66)` }}
+            />
+          )}
+          <polygon
+            points={toPath(theirs)}
+            fill={`url(#holo-${uid})`}
+            stroke="#67e8f9"
+            strokeOpacity={0.95}
+            strokeWidth={2}
+            style={{ filter: "drop-shadow(0 0 6px rgba(34,211,238,0.5))" }}
+          />
+          {theirs.map((p, i) => {
+            const d = dimensions[i];
+            const hue = hueFor(d.key);
+            const active = selected === d.key;
+            return (
+              <g key={d.key}>
+                {active && <circle cx={p.x} cy={p.y} r={7} fill="none" stroke="#e2e8f0" strokeOpacity={0.9} strokeWidth={1} />}
+                <circle
+                  cx={p.x} cy={p.y}
+                  r={active ? 4 : 3}
+                  fill={hue.to}
+                  style={{ filter: `drop-shadow(0 0 4px ${hue.to})` }}
+                />
+              </g>
+            );
+          })}
+        </g>
+      </svg>
+    );
+  }
+
+  if (layer === "hits") {
+    return (
+      <svg viewBox={`0 0 ${RADAR.w} ${RADAR.h}`} className="h-full w-full">
+        {/* Invisible hit targets, one per axis, covering the vertex and the
+            label. aria-hidden on purpose: the dimension list next to this
+            chart is the accessible, keyboard-reachable way to make the same
+            selection, and it is ALWAYS rendered (the radar itself is
+            display:none below `sm`). These exist so a mouse or a thumb can
+            use the chart itself. */}
+        {onSelect &&
+          dimensions.map((d, i) => {
+            const tip = radarPoint(i, n, 100);
+            const lx = RADAR.cx + ((tip.x - RADAR.cx) / RADAR.r) * RADAR.labelR;
+            const ly = RADAR.cy + ((tip.y - RADAR.cy) / RADAR.r) * RADAR.labelR;
+            return (
+              <g key={d.key} aria-hidden className="cursor-pointer">
+                <circle cx={tip.x} cy={tip.y} r={20} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
+                <circle cx={lx} cy={ly} r={18} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
+              </g>
+            );
+          })}
+      </svg>
+    );
+  }
+
+  // base
   return (
     <svg
       viewBox={`0 0 ${RADAR.w} ${RADAR.h}`}
-      className="h-auto w-full max-w-[420px] text-fg-dim"
+      className="h-auto w-full"
       role="img"
       aria-label={`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}
     >
+      {/* The rotating tick rings -- ambient decoration, motion-safe gated. */}
+      <g className="motion-safe:animate-[spin_75s_linear_infinite]" style={{ transformOrigin: `${RADAR.cx}px ${RADAR.cy}px` }}>
+        <circle cx={RADAR.cx} cy={RADAR.cy} r={150} fill="none" stroke="#22d3ee" strokeOpacity={0.18} strokeWidth={1} strokeDasharray="2 9" />
+        <circle cx={RADAR.cx} cy={RADAR.cy} r={144} fill="none" stroke="#3b82f6" strokeOpacity={0.12} strokeWidth={0.75} strokeDasharray="18 26" />
+      </g>
       {/* Rings. Four, unlabelled: this chart answers "what SHAPE of bad is
           this", and gridline numbers invite reading exact values off it, which
           is what the list beside it is for. */}
@@ -311,13 +514,13 @@ function Radar({
           key={ring}
           points={toPath(dimensions.map((_, i) => radarPoint(i, n, ring)))}
           fill="none"
-          stroke="currentColor"
-          strokeOpacity={ring === 100 ? 0.42 : 0.16}
+          stroke="#38bdf8"
+          strokeOpacity={ring === 100 ? 0.35 : 0.12}
           strokeWidth={1}
         />
       ))}
-      {/* Spokes. The selected axis carries the accent -- keyed to the tap,
-          not to the value on it. */}
+      {/* Spokes. The selected axis brightens in its own hue -- keyed to the
+          tap, not to the value on it. */}
       {dimensions.map((d, i) => {
         const p = radarPoint(i, n, 100);
         const active = selected === d.key;
@@ -325,59 +528,14 @@ function Radar({
           <line
             key={d.key}
             x1={RADAR.cx} y1={RADAR.cy} x2={p.x} y2={p.y}
-            className={active ? "stroke-accent" : undefined}
-            stroke="currentColor"
-            strokeOpacity={active ? 0.55 : 0.16}
+            stroke={active ? hueFor(d.key).to : "#38bdf8"}
+            strokeOpacity={active ? 0.7 : 0.14}
             strokeWidth={active ? 1.5 : 1}
           />
         );
       })}
-
-      {/* Draws once on mount, from the centre outward. transformOrigin is given
-          in user units because SVG has no percentage transform box here. */}
-      <g
-        style={{
-          transformOrigin: `${RADAR.cx}px ${RADAR.cy}px`,
-          transform: drawn ? "scale(1)" : "scale(0)",
-          transition: reduced ? "none" : "transform 480ms cubic-bezier(0.22, 1, 0.36, 1)",
-        }}
-      >
-        {/* The best local competitor, dashed. Distinguished by STROKE STYLE,
-            never by hue -- the whole point of the overlay is the gap between
-            the two outlines, and a colour on either one would say which is
-            good. */}
-        {leaderPts && (
-          <polygon
-            points={toPath(leaderPts)}
-            fill="none"
-            stroke="currentColor"
-            strokeOpacity={0.75}
-            strokeWidth={1.5}
-            strokeDasharray="5 4"
-          />
-        )}
-        <polygon
-          points={toPath(theirs)}
-          className="fill-fg-muted stroke-fg"
-          fillOpacity={0.14}
-          strokeOpacity={0.85}
-          strokeWidth={2}
-        />
-        {theirs.map((p, i) => {
-          const active = selected === dimensions[i].key;
-          return (
-            <circle
-              key={dimensions[i].key}
-              cx={p.x} cy={p.y}
-              r={active ? 4 : 2.6}
-              className={active ? "fill-accent" : "fill-fg"}
-              fillOpacity={0.9}
-            />
-          );
-        })}
-      </g>
-
-      {/* Axis labels, using the model's own rep-facing names. */}
+      {/* Axis labels, using the model's own rep-facing names, each in its
+          dimension's fixed hue. */}
       {dimensions.map((d, i) => {
         const p = radarPoint(i, n, 100);
         const dx = p.x - RADAR.cx;
@@ -392,8 +550,9 @@ function Radar({
             x={lx}
             y={ly - (lines.length - 1) * 5}
             textAnchor={anchor}
-            className={active ? "fill-fg" : "fill-fg-muted"}
-            style={{ fontSize: 10, fontWeight: active ? 700 : 400 }}
+            fill={active ? "#f1f5f9" : hueFor(d.key).to}
+            fillOpacity={active ? 1 : 0.85}
+            style={{ fontSize: 10, fontWeight: active ? 700 : 500, fontFamily: "var(--battle-display)" }}
           >
             {lines.map((line, li) => (
               <tspan key={line} x={lx} dy={li === 0 ? 0 : 11}>{line}</tspan>
@@ -401,26 +560,8 @@ function Radar({
           </text>
         );
       })}
-
-      {/* Invisible hit targets, one per axis, covering the vertex and the
-          label. aria-hidden on purpose: the dimension list next to this chart
-          is the accessible, keyboard-reachable way to make the same selection,
-          and it is ALWAYS rendered (the radar itself is display:none below
-          `sm`). These exist so a mouse or a thumb can use the chart itself. */}
-      {onSelect &&
-        dimensions.map((d, i) => {
-          const tip = radarPoint(i, n, 100);
-          const lx = RADAR.cx + ((tip.x - RADAR.cx) / RADAR.r) * RADAR.labelR;
-          const ly = RADAR.cy + ((tip.y - RADAR.cy) / RADAR.r) * RADAR.labelR;
-          return (
-            <g key={d.key} aria-hidden className="cursor-pointer">
-              <circle cx={tip.x} cy={tip.y} r={20} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
-              <circle cx={lx} cy={ly} r={18} fill="transparent" onClick={() => onSelect(d.key)} onMouseEnter={() => onSelect(d.key)} />
-            </g>
-          );
-        })}
       {leaderName && (
-        <text x={RADAR.cx} y={RADAR.h - 6} textAnchor="middle" className="fill-fg-dim" style={{ fontSize: 10 }}>
+        <text x={RADAR.cx} y={RADAR.h - 6} textAnchor="middle" fill={GOLD} fillOpacity={0.8} style={{ fontSize: 10, fontFamily: "var(--battle-display)" }}>
           Dashed outline: {leaderName}
         </text>
       )}
@@ -630,7 +771,7 @@ export function BattleCard({
   const { lead, audit, competitors, signals } = state.payload;
 
   return (
-    <div className={embedded ? "" : "min-h-screen bg-bg"}>
+    <div className={`${displayFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
       <Hero lead={lead} audit={audit} competitors={competitors} drawn={drawn} reduced={reduced} canMutate={canMutate} embedded={embedded} />
       <BattleSections>
         <div className={embedded ? "space-y-5 pt-5" : "mx-auto max-w-6xl space-y-5 px-4 pb-16 lg:px-8"}>
@@ -736,6 +877,7 @@ function Hero({
   embedded?: boolean;
 }) {
   const websiteHref = preferredSiteUrl(lead.websiteUrl);
+  const ringId = useId();
   // Hooks before any branch: the count-up runs for every state and simply
   // counts to 0 when there is no score to show.
   const shownScore = useCountUp(audit.state === "scored" ? audit.composite : 0, reduced);
@@ -776,7 +918,7 @@ function Hero({
         {!embedded && <BackLink />}
         <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between`}>
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg lg:text-4xl">{lead.name}</h1>
+            <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg [font-family:var(--battle-display)] lg:text-4xl">{lead.name}</h1>
             {/* The FULL address, street and postal code included -- not just
                 the city. A rep confirming a business by name needs the street
                 to be sure they have the right branch, and this line is the
@@ -841,11 +983,21 @@ function Hero({
                     carries the real number so a screen reader never announces
                     an intermediate frame. */}
                 <div className="relative mt-2 inline-flex h-36 w-36 items-center justify-center">
+                  {/* The arc-reactor halo: a constant pulse behind the ring,
+                      motion-safe gated, identical at every score. */}
+                  <div aria-hidden className="absolute inset-3 rounded-full bg-accent/10 blur-xl motion-safe:animate-pulse-slow" />
                   <svg viewBox="0 0 120 120" className="absolute inset-0 h-full w-full -rotate-90" aria-hidden>
+                    <defs>
+                      <linearGradient id={ringId} x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stopColor="#22d3ee" />
+                        <stop offset="100%" stopColor="#3b82f6" />
+                      </linearGradient>
+                    </defs>
                     <circle cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" className="stroke-bg-border" />
+                    <circle cx="60" cy="60" r="47" fill="none" strokeWidth="1" stroke="#22d3ee" strokeOpacity="0.18" strokeDasharray="1 6" />
                     <circle
                       cx="60" cy="60" r="54" fill="none" strokeWidth="2.5" strokeLinecap="round"
-                      className="stroke-fg"
+                      stroke={`url(#${ringId})`}
                       strokeDasharray={`${(2 * Math.PI * 54).toFixed(2)}`}
                       strokeDashoffset={
                         drawn
@@ -854,11 +1006,11 @@ function Hero({
                       }
                       style={{
                         transition: reduced ? "none" : "stroke-dashoffset 900ms cubic-bezier(0.22, 1, 0.36, 1)",
-                        filter: "drop-shadow(0 0 6px rgba(59,130,246,0.45))",
+                        filter: "drop-shadow(0 0 6px rgba(34,211,238,0.5))",
                       }}
                     />
                   </svg>
-                  <p className="text-5xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)]">
+                  <p className="text-5xl font-bold leading-none tracking-tight tabular-nums text-fg drop-shadow-[0_0_22px_rgba(59,130,246,0.26)] [font-family:var(--battle-display)]">
                     <span aria-hidden>{shownScore}</span>
                     <span className="sr-only">{audit.composite}</span>
                   </p>
@@ -1215,9 +1367,12 @@ function ScoredBody({
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{group.title}</p>
                 <dl className="mt-2 divide-y divide-bg-border/60">
                   {group.rows.map((row) => (
-                    <div key={row.label} className="flex items-baseline justify-between gap-3 py-1.5">
+                    <div
+                      key={row.label}
+                      className="-mx-1.5 flex items-baseline justify-between gap-3 rounded px-1.5 py-1.5 transition-colors hover:bg-accent/5 motion-reduce:transition-none"
+                    >
                       <dt className="text-xs text-fg-dim">{row.label}</dt>
-                      <dd className="shrink-0 text-xs font-medium tabular-nums text-fg-muted">{row.value}</dd>
+                      <dd className="shrink-0 text-xs font-medium tabular-nums text-fg-muted [font-family:var(--battle-display)]">{row.value}</dd>
                     </div>
                   ))}
                 </dl>
@@ -1297,40 +1452,60 @@ function DimensionShape({
           (The radar's own `aria-label` names all seven scores, so a screen
           reader was never getting the picture either way.) */}
       <div className="relative hidden justify-center sm:flex" style={{ perspective: "1100px" }}>
-        <div
-          className="relative"
-          style={{
-            transform: reduced ? "none" : `rotateX(${(8 + tilt.x).toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
-            // Conditional like every other transition in this file: `reduced`
-            // starts false and corrects on mount, so an unconditional 180ms
-            // here animated the base pitch flat for exactly the users who
-            // asked for no motion. With it conditional, the correction is a
-            // one-frame snap. (Codex review, 2026-08-31.)
-            transition: reduced ? "none" : "transform 180ms ease-out",
-            transformStyle: "preserve-3d",
-          }}
-          onPointerMove={
-            reduced
-              ? undefined
-              : (e) => {
-                  const r = e.currentTarget.getBoundingClientRect();
-                  const px = (e.clientX - r.left) / r.width - 0.5;
-                  const py = (e.clientY - r.top) / r.height - 0.5;
-                  setTilt({ x: -py * 8, y: px * 10 });
-                }
-          }
-          onPointerLeave={() => setTilt({ x: 0, y: 0 })}
-        >
-          <Radar
-            dimensions={dimensions}
-            leader={headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null}
-            leaderName={headToHead?.competitor.name || null}
-            drawn={drawn}
-            reduced={reduced}
-            selected={sel}
-            onSelect={setSelected}
-          />
-        </div>
+        {(() => {
+          const radarProps = {
+            dimensions,
+            leader: headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null,
+            leaderName: headToHead?.competitor.name || null,
+            drawn,
+            reduced,
+            selected: sel,
+            onSelect: setSelected,
+          };
+          return (
+            <div
+              className="relative w-full max-w-[420px]"
+              style={{
+                transform: reduced ? "none" : `rotateX(${(18 + tilt.x).toFixed(2)}deg) rotateY(${tilt.y.toFixed(2)}deg)`,
+                // Conditional like every other transition in this file:
+                // `reduced` starts false and corrects on mount, so an
+                // unconditional 180ms here animated the base pitch flat for
+                // exactly the users who asked for no motion. With it
+                // conditional, the correction is a one-frame snap. (Codex
+                // review, 2026-08-31.)
+                transition: reduced ? "none" : "transform 180ms ease-out",
+                transformStyle: "preserve-3d",
+              }}
+              onPointerMove={
+                reduced
+                  ? undefined
+                  : (e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      const px = (e.clientX - r.left) / r.width - 0.5;
+                      const py = (e.clientY - r.top) / r.height - 0.5;
+                      setTilt({ x: -py * 9, y: px * 12 });
+                    }
+              }
+              onPointerLeave={() => setTilt({ x: 0, y: 0 })}
+            >
+              {/* The hologram stack: grid on the table, shadow just above it,
+                  the data polygon floating over both, hit targets on top.
+                  Under tilt the layers parallax -- that gap IS the 3D. Flat
+                  (reduced motion) the layers align exactly and nothing is
+                  lost but the theatre. */}
+              <Radar {...radarProps} layer="base" />
+              <div aria-hidden className="pointer-events-none absolute inset-0" style={{ transform: "translateZ(10px)" }}>
+                <Radar {...radarProps} layer="shadow" />
+              </div>
+              <div aria-hidden className="pointer-events-none absolute inset-0" style={{ transform: "translateZ(28px)" }}>
+                <Radar {...radarProps} layer="data" />
+              </div>
+              <div className="absolute inset-0" style={{ transform: "translateZ(34px)" }}>
+                <Radar {...radarProps} layer="hits" />
+              </div>
+            </div>
+          );
+        })()}
         {/* The holo base: a soft light pool under the table. Constant. */}
         <div
           aria-hidden
@@ -1340,6 +1515,7 @@ function DimensionShape({
       <div className="mt-4 space-y-1 sm:border-t sm:border-bg-border sm:pt-4">
         {dimensions.map((d) => {
           const active = d.key === sel;
+          const hue = hueFor(d.key);
           return (
             <button
               key={d.key}
@@ -1349,23 +1525,36 @@ function DimensionShape({
               className={`block w-full rounded-md px-2 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none ${active ? "bg-bg-raised/70" : "hover:bg-bg-raised/40"}`}
             >
               <span className="flex items-center justify-between gap-3 text-xs">
-                <span className={active ? "font-semibold text-fg" : "text-fg-muted"}>{d.label}</span>
-                <span className={`tabular-nums ${active ? "text-fg" : "text-fg-dim"}`}>{d.score}</span>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {/* The dimension's identity hue -- the same dot at every
+                      score, matching its vertex on the radar above. */}
+                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
+                  <span className={active ? "truncate font-semibold text-fg" : "truncate text-fg-muted"}>{d.label}</span>
+                </span>
+                <span className={`tabular-nums [font-family:var(--battle-display)] ${active ? "text-fg" : "text-fg-dim"}`}>{d.score}</span>
               </span>
-              <span className="mt-1 block"><Meter value={d.score} drawn={drawn} reduced={reduced} /></span>
+              <span className="mt-1 block"><Meter value={d.score} drawn={drawn} reduced={reduced} hue={hue} /></span>
             </button>
           );
         })}
       </div>
 
       {dim && (
-        <div className="relative mt-4 rounded-lg border border-accent/15 bg-bg-raised/50 p-4 backdrop-blur-sm">
+        <div
+          className="relative mt-4 rounded-lg border bg-bg-raised/50 p-4 backdrop-blur-sm"
+          // The selected dimension's identity hue frames its own detail --
+          // the same hue this area wears everywhere, at every score.
+          style={{ borderColor: `${hueFor(dim.key).to}40` }}
+        >
           {/* The targeting brackets: this is the one inset on the card that
               answers a selection, so it gets the HUD marks. Constant chrome. */}
           <span aria-hidden className="pointer-events-none absolute left-1 top-1 h-2.5 w-2.5 border-l border-t border-accent/40" />
           <span aria-hidden className="pointer-events-none absolute bottom-1 right-1 h-2.5 w-2.5 border-b border-r border-accent/40" />
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <p className="text-sm font-semibold text-fg">{dim.label}</p>
+            <p className="flex items-center gap-1.5 text-sm font-semibold text-fg [font-family:var(--battle-display)]">
+              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(dim.key).to, boxShadow: `0 0 6px ${hueFor(dim.key).to}` }} />
+              {dim.label}
+            </p>
             <p className="text-xs text-fg-muted">
               Scores <span className="tabular-nums text-fg">{dim.score}</span> ·{" "}
               {misses.length === 0
@@ -1450,6 +1639,7 @@ function FixFirst({
           const misses = d.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points);
           const expandable = misses.length > 0;
           const openRow = openKeys.has(d.key);
+          const hue = hueFor(d.key);
           const row = (
             <>
               <span className="flex items-baseline justify-between gap-3 text-sm">
@@ -1460,6 +1650,9 @@ function FixFirst({
                       className={`h-3.5 w-3.5 shrink-0 text-fg-dim transition-transform motion-reduce:transition-none ${openRow ? "" : "-rotate-90"}`}
                     />
                   )}
+                  {/* The same identity hue this dimension wears on the radar
+                      and in the shape list -- one colour, three surfaces. */}
+                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
                   <span className="truncate text-fg">{d.label}</span>
                   {expandable && (
                     <span className="shrink-0 text-[10px] text-fg-faint">
@@ -1467,10 +1660,12 @@ function FixFirst({
                     </span>
                   )}
                 </span>
-                <span className="shrink-0 tabular-nums text-fg-muted">+{points.toFixed(1)}</span>
+                {/* One constant cyan for every "+points" figure -- the metric's
+                    own identity, not a grade. */}
+                <span className="shrink-0 tabular-nums [font-family:var(--battle-display)]" style={{ color: "#7dd3fc" }}>+{points.toFixed(1)}</span>
               </span>
               <span className="mt-1.5 block">
-                <Meter value={(points / maxRecoverable) * 100} drawn={drawn} reduced={reduced} />
+                <Meter value={(points / maxRecoverable) * 100} drawn={drawn} reduced={reduced} hue={hue} />
               </span>
             </>
           );
@@ -1611,7 +1806,7 @@ function Competitors({
                       {[c.city, c.province].filter(Boolean).join(", ") || "Location not recorded"}
                     </p>
                   </div>
-                  <span className="shrink-0 text-2xl font-bold leading-none tabular-nums text-fg">{c.score}</span>
+                  <span className="shrink-0 text-2xl font-bold leading-none tabular-nums text-fg [font-family:var(--battle-display)]" style={{ textShadow: "0 0 14px rgba(34,211,238,0.35)" }}>{c.score}</span>
                 </div>
                 {href && (
                   <a
@@ -1649,8 +1844,11 @@ function Competitors({
           <ul className="mt-4 space-y-3">
             {headToHead.dimensions.map((d) => (
               <li key={d.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
-                <span className="text-xs text-fg-muted">{d.label}</span>
-                <span className="text-xs tabular-nums text-fg-dim">
+                <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
+                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(d.key).to, boxShadow: `0 0 6px ${hueFor(d.key).to}` }} />
+                  <span className="truncate">{d.label}</span>
+                </span>
+                <span className="text-xs tabular-nums text-fg-dim [font-family:var(--battle-display)]">
                   <span className="font-semibold text-fg">{d.theirs}</span> vs {d.leader}
                   {/* A signed number, not a colour and not an arrow. The sign is
                       a fact about two measurements; a red arrow is a verdict. */}
@@ -1675,7 +1873,9 @@ function Competitors({
  * Deliberately not two stacked bars. Two bars invite a rep to read the LENGTHS
  * against each other, which is a comparison of two absolute scores; one track
  * with a tick puts the eye on the distance between them, which is the thing
- * being sold. Both marks are the same neutral colour.
+ * being sold. The colours are WHOSE-marks, fixed identities worn at every
+ * score: the prospect's fill is always cyan, the benchmark's tick is always
+ * gold -- the same pair the radar overlay wears (rule 1).
  */
 function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader: number; drawn: boolean; reduced: boolean }) {
   const t = Math.min(100, Math.max(0, theirs));
@@ -1683,12 +1883,23 @@ function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader
   return (
     <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
       <div
-        className="absolute inset-y-0 left-0 rounded-full bg-fg-dim"
-        style={{ width: drawn ? `${t}%` : "0%", transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)" }}
+        className="absolute inset-y-0 left-0 rounded-full"
+        style={{
+          width: drawn ? `${t}%` : "0%",
+          transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          background: "linear-gradient(90deg, #22d3ee, #60a5fa)",
+          boxShadow: "0 0 8px rgba(34,211,238,0.35)",
+        }}
       />
       <div
-        className="absolute inset-y-0 w-0.5 bg-fg"
-        style={{ left: `calc(${l}% - 1px)`, opacity: drawn ? 1 : 0, transition: reduced ? "none" : "opacity 420ms ease-out 120ms" }}
+        className="absolute inset-y-0 w-0.5"
+        style={{
+          left: `calc(${l}% - 1px)`,
+          opacity: drawn ? 1 : 0,
+          transition: reduced ? "none" : "opacity 420ms ease-out 120ms",
+          background: GOLD,
+          boxShadow: `0 0 6px ${GOLD}`,
+        }}
       />
     </div>
   );
