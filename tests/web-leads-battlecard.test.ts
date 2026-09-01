@@ -1316,6 +1316,12 @@ const MODEL_CODES = [
     "the opaque clear colour belongs to the bloomed path only -- setting it unconditionally black-boxes the fallback render",
   );
   assert.match(r3d, /composer\?\.dispose\?\.\(\)/, "the composer's render targets must be disposed with the renderer");
+  // composer.dispose() does NOT dispose added passes, and UnrealBloomPass
+  // owns its own pyramid of render targets -- without per-pass disposal,
+  // paging through leads leaks GPU memory until the tab dies. (Codex review,
+  // 2026-09-01.)
+  assert.match(r3d, /passDisposers\.push/, "each postprocessing pass that can dispose must be collected for teardown");
+  assert.match(r3d, /for \(const disposePass of passDisposers\) disposePass\(\)/, "the collected passes must actually be disposed in cleanup");
   assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
   assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
   assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");

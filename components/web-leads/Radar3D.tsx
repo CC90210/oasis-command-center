@@ -163,6 +163,13 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       // renders direct and transparent, exactly as round 4 shipped. Failure
       // here degrades the treatment, never the chart.
       let composer: { render: () => void; setSize: (w: number, h: number) => void; dispose?: () => void } | null = null;
+      // composer.dispose() releases only the composer's own render targets
+      // and copy pass, NOT the passes added to it -- and UnrealBloomPass owns
+      // a pyramid of blur targets and materials of its own. Each pass that
+      // can dispose is collected here and torn down in cleanup, or paging
+      // through leads accumulates GPU memory until the tab dies. (Codex
+      // review, 2026-09-01.)
+      const passDisposers: (() => void)[] = [];
       try {
         const [{ EffectComposer }, { RenderPass }, { UnrealBloomPass }] = await Promise.all([
           import("three/examples/jsm/postprocessing/EffectComposer.js"),
@@ -171,10 +178,16 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         ]);
         if (dead) { renderer.dispose(); return; }
         const comp = new EffectComposer(renderer);
-        comp.addPass(new RenderPass(scene, camera));
+        const renderPass = new RenderPass(scene, camera);
+        comp.addPass(renderPass);
         // Strength stays restrained: bloom is the glow the additive sprites
         // were faking, not a light show. Threshold keeps the dim grid crisp.
-        comp.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), 0.75, 0.55, 0.16));
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.75, 0.55, 0.16);
+        comp.addPass(bloomPass);
+        for (const pass of [renderPass, bloomPass]) {
+          const d = (pass as { dispose?: () => void }).dispose;
+          if (typeof d === "function") passDisposers.push(() => d.call(pass));
+        }
         renderer.setClearColor(0x000000, 1);
         renderer.domElement.style.mixBlendMode = "screen";
         composer = comp;
@@ -584,6 +597,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         renderer.domElement.removeEventListener("pointerup", onUp);
         renderer.domElement.removeEventListener("pointerleave", onUp);
         for (const d of disposables) d.dispose();
+        for (const disposePass of passDisposers) disposePass();
         composer?.dispose?.();
         renderer.dispose();
         if (labelLayer.parentNode === host) host.removeChild(labelLayer);
