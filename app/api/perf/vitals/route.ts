@@ -74,13 +74,36 @@ export async function POST(req: Request): Promise<NextResponse> {
     return new NextResponse(null, { status: 204 });
   }
 
+  // Enforce the size cap BEFORE buffering (Codex P2, 2026-09-01):
+  // a declared oversize is rejected from the header alone, and an
+  // undeclared/lying length is read through a byte-limited reader that
+  // aborts the moment the cap is crossed — req.text() would buffer an
+  // arbitrarily large body first and enforce nothing.
+  const declaredLength = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+    return NextResponse.json({ ok: false }, { status: 400 });
+  }
   let raw: string;
   try {
-    raw = await req.text();
+    if (!req.body) return NextResponse.json({ ok: false }, { status: 400 });
+    const reader = req.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        return NextResponse.json({ ok: false }, { status: 400 });
+      }
+      chunks.push(value);
+    }
+    raw = Buffer.concat(chunks).toString("utf8");
   } catch {
     return NextResponse.json({ ok: false }, { status: 400 });
   }
-  if (!raw || raw.length > MAX_BODY_BYTES) {
+  if (!raw) {
     return NextResponse.json({ ok: false }, { status: 400 });
   }
 

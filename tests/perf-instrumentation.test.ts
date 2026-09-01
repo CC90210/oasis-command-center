@@ -105,6 +105,36 @@ async function testDbWrapper(): Promise<void> {
     delete process.env.PERF_DB_VERBOSE;
   }
 
+  // Transaction-scoped queries are timed too (Codex P2 2026-09-01: the
+  // SMS reply agent and RPC shim run tx.execute — those must not vanish
+  // from the baseline).
+  const txReceived: Array<{ sql: string; args: unknown[] }> = [];
+  const fakeTx = {
+    transaction: async () => ({
+      execute: async (stmt: { sql: string; args: unknown[] }) => {
+        txReceived.push(stmt);
+        return { rows: [] };
+      },
+      commit: async () => {},
+      rollback: async () => {},
+    }),
+  } as unknown as Client;
+  const wrappedTx = instrumentTursoClient(fakeTx);
+  const capTx = captureLogs();
+  try {
+    process.env.PERF_DB_VERBOSE = "1";
+    const tx = await wrappedTx.transaction("write" as never);
+    await tx.execute({ sql: 'UPDATE "x" SET y = ?', args: [SENTINEL] } as never);
+    await tx.commit();
+    assert.equal(txReceived.length, 1, "tx.execute reaches the real transaction");
+    assert.equal(capTx.lines.length, 1, "tx.execute is logged in verbose mode");
+    assert.ok(capTx.lines[0].includes("tx.execute"), "tx queries carry their own kind");
+    assert.ok(!capTx.lines[0].includes(SENTINEL), "tx bound args are NEVER logged");
+  } finally {
+    capTx.restore();
+    delete process.env.PERF_DB_VERBOSE;
+  }
+
   // Logger explosion must not break the query (fail-open).
   const fake2 = { execute: async () => ({ rows: [] }) } as unknown as Client;
   const wrapped2 = instrumentTursoClient(fake2);
@@ -170,6 +200,7 @@ async function testVitalsRoute(): Promise<void> {
       ["array body", vitalsReq({ body: [GOOD], origin: "https://app.test" })],
       ["broken json", vitalsReq({ rawBody: "{nope", origin: "https://app.test" })],
       ["oversized", vitalsReq({ rawBody: JSON.stringify(GOOD) + " ".repeat(2000), origin: "https://app.test" })],
+      ["empty body", vitalsReq({ rawBody: "", origin: "https://app.test" })],
     ];
     const before = cap.lines.length;
     for (const [label, req] of badCases) {

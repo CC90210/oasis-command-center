@@ -95,27 +95,65 @@ function logDbCall(kind: string, stmt: InStatement | string, ms: number, rows: n
 
 /**
  * Wrap a libSQL client so execute()/batch() report per-call durations when
- * PERF_DB_VERBOSE=1. Everything else passes through untouched (bound
- * methods keep their original receiver). With the env var off the added
- * cost is one boolean check per call.
+ * PERF_DB_VERBOSE=1 — including inside transaction() scopes (Codex P2,
+ * 2026-09-01: lib/sms/reply-agent.ts and the RPC shim run tx.execute, and
+ * an unwrapped transaction would silently vanish from the baseline).
+ * Everything else passes through untouched (bound methods keep their
+ * original receiver). With the env var off the added cost is one boolean
+ * check per call.
  */
+function timedExecute<T extends { execute: (stmt: never) => Promise<unknown> }>(
+  target: T,
+  kind: string,
+) {
+  return async (stmt: InStatement | string) => {
+    const t0 = Date.now();
+    const res = await target.execute(stmt as never);
+    const rows = (res as { rows?: unknown[] } | null)?.rows;
+    logDbCall(kind, stmt, Date.now() - t0, Array.isArray(rows) ? rows.length : null);
+    return res;
+  };
+}
+
+function timedBatch<T extends { batch: (...args: never[]) => Promise<unknown> }>(
+  target: T,
+  kind: string,
+) {
+  return async (...args: unknown[]) => {
+    const t0 = Date.now();
+    const res = await (target.batch as (...a: unknown[]) => Promise<unknown>)(...args);
+    logDbCall(kind, `${kind}(${Array.isArray(args[0]) ? (args[0] as unknown[]).length : "?"} stmts)`, Date.now() - t0, null);
+    return res;
+  };
+}
+
+function instrumentTransaction<T extends object>(tx: T): T {
+  return new Proxy(tx, {
+    get(target, prop, receiver) {
+      if (prop === "execute" && typeof (target as { execute?: unknown }).execute === "function") {
+        return timedExecute(target as { execute: (stmt: never) => Promise<unknown> }, "tx.execute");
+      }
+      if (prop === "batch" && typeof (target as { batch?: unknown }).batch === "function") {
+        return timedBatch(target as { batch: (...args: never[]) => Promise<unknown> }, "tx.batch");
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+}
+
 export function instrumentTursoClient(client: Client): Client {
   return new Proxy(client, {
     get(target, prop, receiver) {
-      if (prop === "execute") {
-        return async (stmt: InStatement | string) => {
-          const t0 = Date.now();
-          const res = await target.execute(stmt as InStatement);
-          logDbCall("execute", stmt, Date.now() - t0, res?.rows ? res.rows.length : null);
-          return res;
-        };
-      }
-      if (prop === "batch") {
-        return async (...args: Parameters<Client["batch"]>) => {
-          const t0 = Date.now();
-          const res = await target.batch(...args);
-          logDbCall("batch", `batch(${Array.isArray(args[0]) ? args[0].length : "?"} stmts)`, Date.now() - t0, null);
-          return res;
+      if (prop === "execute") return timedExecute(target, "execute");
+      if (prop === "batch") return timedBatch(target, "batch");
+      if (prop === "transaction") {
+        return async (...args: unknown[]) => {
+          // transaction() is overloaded (with/without a mode arg); forward
+          // whatever the caller passed and wrap whatever comes back.
+          const factory = target.transaction as unknown as (...a: unknown[]) => Promise<object>;
+          const tx = await factory.apply(target, args);
+          return instrumentTransaction(tx);
         };
       }
       const value = Reflect.get(target, prop, receiver);
