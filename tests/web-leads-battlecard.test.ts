@@ -789,6 +789,68 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // top, because the radar is display:none below `sm`. If the buttons go, the
   // phone loses the interaction entirely.
   assert.match(src, /aria-pressed=\{active\}/, `${view}: the dimension list must be the accessible selection path`);
+
+  // 8c. THE HUD PALETTE (Adon, 2026-09-01): colour is IDENTITY, never verdict.
+  // Every dimension must have its own fixed hue in DIM_HUES (now in
+  // battle-hud.ts, shared by the SVG hologram and the WebGL radar so two
+  // charts can never disagree about which blue is "trust") -- one area
+  // falling through to the grey fallback breaks the "this colour IS trust"
+  // coding on the radar, the list, and the fix ranking at once. The verdict
+  // colours stay banned by web-leads-guards.test.ts; this asserts the
+  // identity half of the rule.
+  const hud = read("components/web-leads/battle-hud.ts");
+  for (const key of DIMENSION_KEYS) {
+    assert.match(
+      hud,
+      new RegExp(`DIM_HUES[\\s\\S]{0,700}?\\b${key}:`),
+      `battle-hud.ts: dimension "${key}" must carry a fixed identity hue in DIM_HUES`,
+    );
+  }
+  // The four SVG hologram layers must all exist -- they are the ONLY radar on
+  // phones, under reduced motion, and wherever WebGL is unavailable. Lose one
+  // and the fallback either goes flat (no shadow/data separation) or dead
+  // (no hits).
+  for (const layerName of ['layer="base"', 'layer="shadow"', 'layer="data"', 'layer="hits"']) {
+    assert.ok(src.includes(layerName), `${view}: the hologram stack must render ${layerName}`);
+  }
+
+  // 8d. THE WEBGL RADAR (Adon, 2026-09-01: "3D imaging... a big leap"). The
+  // operator overrode the no-chart-library weight rule for this one chart;
+  // what survives is its cost discipline, and THAT is what gets pinned:
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  // three.js must be code-split: a static import would put ~600KB into the
+  // shared bundle for every rep on every surface, including the phones and
+  // reduced-motion users who never see the scene.
+  assert.match(r3d, /await import\("three"\)/, "Radar3D must lazy-load three.js inside an effect");
+  assert.doesNotMatch(
+    r3d,
+    /^import (?!type\b)[^\n]*from "three"/m,
+    "Radar3D must not import three statically -- `import type` only, so the runtime library stays code-split",
+  );
+  // A rep pages through many leads a shift; a leaked GL context per lead
+  // kills the tab by lunch.
+  assert.match(r3d, /renderer\.dispose\(\)/, "Radar3D must dispose the WebGL renderer on unmount");
+  // The mount gate: never on phones (state, not CSS -- hidden canvas still
+  // downloads the library), never under reduced motion, and one frame late so
+  // the reduced-motion preference has actually been read.
+  assert.match(
+    src,
+    /drawn && !reduced && desktop && gl !== "off"/,
+    `${view}: the WebGL radar must be gated on drawn + reduced-motion + desktop + not-failed`,
+  );
+  // The failure path must exist and must fall back, not blank: onStatus(false)
+  // flips gl to "off", which re-mounts nothing and keeps the SVG stack.
+  assert.match(src, /onStatus=\{\(ok\) => setGl\(ok \? "on" : "off"\)\}/, `${view}: the 3D radar must report failure so the SVG fallback stays`);
+  // Both Codex-found blank-radar holes, pinned (2026-09-01): the SVG hides on
+  // the LIVE condition (so a reduced-motion flip after init brings it back),
+  // and a lost GL context reports failure instead of freezing over a hidden
+  // fallback.
+  assert.match(
+    src,
+    /const glLive = drawn && !reduced && desktop && gl === "on"/,
+    `${view}: the SVG fallback must key on the full is-3D-actually-visible condition, not on gl alone`,
+  );
+  assert.match(r3d, /webglcontextlost/, "Radar3D must fall back to the SVG when the GL context is lost");
 }
 
 // The panel itself renders every field of every objection. Asserting the data
