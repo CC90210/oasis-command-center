@@ -154,13 +154,44 @@ export default async function PipelineLeadDetailPage({
     (session.isTrueAdmin || (mayQuoteAndClose(session.teamRole) && repOwnsDeal));
   const canRunDelivery =
     session.ok && mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey);
+  // A sales manager works their TEAM's book, not just their own seat
+  // (CC directive, 2026-09-01, asked three times).
+  //
+  // canMutateOasisSalesRecord answers ownership, and a manager owns nothing --
+  // they are measured on their reps' deals, not their own. So the previous gate
+  // gave every manager the read-only coaching view on every lead in the company
+  // and no way to book a meeting for the rep they are actively coaching. On the
+  // live tenant both managers own zero leads, so this was their whole
+  // experience of the pipeline.
+  //
+  // Scoped to the roster the server already resolved, and it deliberately does
+  // NOT widen what may be changed: stage, assignment, collaborators and
+  // sales_program remain admin-only behind their audited routes
+  // (/api/leads/[id]/set-stage, /api/leads/[id]/assign), exactly as they are for
+  // a rep. This grants the lifecycle actions -- book the audit, correct a
+  // contact fact -- on leads their own reps hold, plus unassigned leads, which
+  // belong to nobody and which every opener can already work.
+  // readableRepUserIds is populated ONLY when canReadOasisSalesTeamPipeline
+  // passed above, which already requires the manager role on an OASIS surface
+  // tenant. The explicit role check is kept anyway so this does not silently
+  // widen if that resolution is ever reused for another role.
+  const managerWorksTeamBook =
+    session.ok &&
+    session.teamRole.trim().toLowerCase() === "manager" &&
+    readableRepUserIds.length > 0 &&
+    (!assignedTo ||
+      readableRepUserIds.some((id) => id.trim().toLowerCase() === assignedTo));
   const canWorkLifecycle =
     (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
+    (managerWorksTeamBook && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||
     canRunDelivery;
+  // Coaching is the fallback for a lead OUTSIDE their roster (a founder's or an
+  // admin's). Inside it they operate, so the wizard renders in "operate" mode.
   const managerCoachingView =
     session.ok &&
     session.teamRole.trim().toLowerCase() === "manager" &&
-    !canMutateLead;
+    !canMutateLead &&
+    !managerWorksTeamBook;
   const assignedRepName = assignedTo ? memberNames.get(assignedTo) || null : null;
   const founderId =
     nonEmptyString(activeRecord.data.audit_host_user_id) ||

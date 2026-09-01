@@ -101,14 +101,38 @@ assert.equal(
   true,
   "the by-id battlecard door honors the same roster-scoped manager read",
 );
+// A manager MAY open an unassigned claimable lead (changed 2026-09-01).
+//
+// This asserted false, and that was the bug rather than the boundary:
+// fetchLeads' "pool" scope returns isClaimable(...) for every role including
+// manager, so a manager's Leads page listed the entire claimable pool and every
+// row 404'd on click. A list you cannot click is the exact failure the comment
+// above fetchLead describes closing for contractors.
+//
+// Nothing is bypassed. A claimable lead is assigned to nobody, so opening one
+// discloses no rep's book, and every opener could already do it.
 assert.equal(
   canViewerRead(
     { assigned_to: null, stage: "researched" },
     MANAGER,
     Date.parse("2026-08-31T12:01:00.000Z"),
   ),
+  true,
+  "a manager may open an unassigned claimable lead -- the same pool their Leads page lists",
+);
+// THE BOUNDARY THAT ACTUALLY MATTERS, asserted directly rather than as a side
+// effect of the clause above. A lead HELD by someone off the roster is not
+// claimable, so widening to the pool must not have exposed it. If a future
+// change makes isClaimable() true for held leads, this fails and the roster
+// boundary does not quietly evaporate.
+assert.equal(
+  canViewerRead(
+    { assigned_to: "founder-1", stage: "assigned", claimed_at: "2026-08-31T12:00:00.000Z" },
+    MANAGER,
+    Date.parse("2026-08-31T12:01:00.000Z"),
+  ),
   false,
-  "a manager cannot bypass the roster by opening an unassigned claimable lead by id",
+  "a manager still cannot open a lead held by someone outside their roster",
 );
 assert.equal(
   canViewerRead(
