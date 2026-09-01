@@ -517,6 +517,40 @@ export function canReadOasisSalesTeamPipeline(input: {
 }
 
 /**
+ * Is `assignedTo` a seat inside this manager's server-resolved roster?
+ *
+ * ONE definition, because two are how surfaces drift apart. This was
+ * implemented twice as of 2026-09-01 — once as managerCanReadAssignment() in
+ * lib/web-leads/data.ts for the prospecting surface, and once inline in
+ * app/pipeline/[id]/page.tsx for the lead workspace. Two independent answers to
+ * "may this manager act on this assignment" is exactly the failure that put a
+ * manager's Leads list and Leads detail out of sync in the first place; keeping
+ * a second copy to fix the first one would have been the same bug one layer up.
+ *
+ * Fails closed on every degenerate input: a non-manager role, an unassigned
+ * lead, or an unresolved roster all return false. Callers that mean "unassigned
+ * is fine" must say so themselves — that is a different question, and folding it
+ * in here would silently grant the pool to any caller that only wanted the
+ * roster.
+ *
+ * Comparison is trimmed and lowercased on both sides: assigned_to is written
+ * from an already-lowercased auth user id, but this must not start failing
+ * quietly if that ever stops being true on some row.
+ */
+export function managerRosterCoversAssignment(input: {
+  teamRole: string | null | undefined;
+  assignedTo: string | null | undefined;
+  readableAssigneeIds: readonly string[] | null | undefined;
+}): boolean {
+  if ((input.teamRole || "").trim().toLowerCase() !== "manager") return false;
+  const assignee = (input.assignedTo || "").trim().toLowerCase();
+  if (!assignee) return false;
+  return (input.readableAssigneeIds || []).some(
+    (candidate) => (candidate || "").trim().toLowerCase() === assignee,
+  );
+}
+
+/**
  * Nav destinations a `sales` persona may reach. Prefix-matched, so `/playbook`
  * covers `/playbook/script` — the rep call guide, which is the single most
  * useful page on this list for someone about to dial.

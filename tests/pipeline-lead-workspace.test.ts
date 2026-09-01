@@ -87,11 +87,19 @@ assert.match(
   "inside their roster a manager operates; coaching is the fallback for leads outside it",
 );
 // The roster boundary survives the widening: an off-roster assignment must
-// still fall through to coaching rather than becoming operable.
+// still fall through to coaching rather than becoming operable -- and it must
+// be decided by the SHARED predicate, not a second inline copy. Two answers to
+// "is this seat on my roster" is what put the Leads list and Leads detail out
+// of sync; this assertion is what stops that being re-introduced here.
 assert.match(
   page,
-  /managerWorksTeamBook =[\s\S]*?readableRepUserIds\.some\(/,
-  "an assigned lead must be checked against the roster, not blanket-granted",
+  /managerWorksTeamBook =[\s\S]*?managerRosterCoversAssignment\(/,
+  "roster membership must come from lib/role-surfaces, never be re-derived in the page",
+);
+assert.doesNotMatch(
+  page,
+  /readableRepUserIds\.some\(/,
+  "a hand-rolled roster comparison here is the drift the shared predicate exists to prevent",
 );
 assert.doesNotMatch(page, /<LeadActionToolbar/, "the call control appears only inside the single next-step panel");
 assert.match(page, /title="Activity and files"[\s\S]*defaultCollapsed/);
