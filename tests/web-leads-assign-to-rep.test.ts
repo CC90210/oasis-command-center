@@ -168,6 +168,41 @@ describe('assigning a lead to another rep', () => {
     }
   });
 
+  it('decides which sheets EXIST from the rows, not the stored column', () => {
+    // The counts were derived in #377/#379 while MEMBERSHIP was still decided
+    // by the same dead number: fetchSheets() dropped any territory whose stored
+    // leads_total was 0, before anything had been counted. That is the one
+    // failure the derived counts cannot repair -- a territory holding real
+    // leads and a stale 0 never reaches the rail at all, so its leads are
+    // unreachable in pool scope no matter how accurate the number would be.
+    //
+    // 0 territories were hidden that way when measured on 2026-09-02 (the
+    // consolidation only REMOVED leads, so stored >= real for everything that
+    // existed then). New promotions are the exposure, and promotion is running.
+    const src = readFileSync('lib/web-leads/data.ts', 'utf8');
+    const fetchSheetsBody = src.slice(
+      src.indexOf('export async function fetchSheets('),
+      src.indexOf('export async function fetchSheetsScopedToViewer('),
+    );
+    assert.ok(
+      !/\.filter\(\s*\(r: Sheet\)\s*=>\s*\(r\.leads_total/.test(fetchSheetsBody),
+      'fetchSheets must not gate membership on the stored leads_total',
+    );
+  });
+
+  it('still hides genuinely empty sheets, on the derived number', () => {
+    // Dropping the stale filter without replacing it would list all 2,356
+    // territories, 1,871 of which were measured empty on 2026-09-02 -- a rail
+    // of zeros. The filter moves to where the number is true, after counting.
+    const src = readFileSync('lib/web-leads/data.ts', 'utf8');
+    const scoped = src.slice(src.indexOf('export async function fetchSheetsScopedToViewer('));
+    assert.match(
+      scoped,
+      /\.filter\(\(s\) => s\.leads_total > 0\)/,
+      'the derived view must drop sheets that really are empty',
+    );
+  });
+
   it('keeps the batch ceiling and the de-duplication', () => {
     // Assignment goes through the same body parsing, so the id list is still
     // bounded and de-duplicated -- the same id twice would otherwise burn two

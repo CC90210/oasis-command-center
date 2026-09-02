@@ -314,8 +314,14 @@ export async function fetchSheets(): Promise<Sheet[]> {
     )
     .eq("tenant_id", WEBDEV_TENANT_ID);
   if (error) throw new Error(`sheets_read_failed: ${error.message}`);
+  // NO stored-count filter. This used to drop any territory whose stored
+  // leads_total was 0, which decided EXISTENCE from a column that is written on
+  // promotion and never recomputed on removal. Counts are derived now; deciding
+  // membership from the dead number would leave a territory holding real leads
+  // invisible in pool scope -- accurate counts on a sheet nobody can select.
+  // The zero rows are dropped after derivation instead, in
+  // fetchSheetsScopedToViewer, where the number is true.
   return (data || [])
-    .filter((r: Sheet) => (r.leads_total || 0) > 0)
     .map((r: Sheet) => ({
       id: r.id,
       region: r.region,
@@ -866,16 +872,22 @@ export async function fetchSheetsScopedToViewer(
     counts.set(lead.territoryId, bucket);
   }
 
-  return sheets.map((s) => {
-    const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
-    return {
-      ...s,
-      leads_total: c.total,
-      leads_callable: c.callable,
-      leads_no_site: c.noSite,
-      leads_callable_no_site: c.callableNoSite,
-    };
-  });
+  // Filtered on the DERIVED total, so a sheet is listed exactly when it holds
+  // something this viewer can act on. Measured 2026-09-02: 1,871 of 2,356
+  // territories were listed while genuinely empty, because the filter used to
+  // run on the stored column before any counting happened.
+  return sheets
+    .map((s) => {
+      const c = counts.get(s.id) || { total: 0, callable: 0, noSite: 0, callableNoSite: 0 };
+      return {
+        ...s,
+        leads_total: c.total,
+        leads_callable: c.callable,
+        leads_no_site: c.noSite,
+        leads_callable_no_site: c.callableNoSite,
+      };
+    })
+    .filter((s) => s.leads_total > 0);
 }
 
 /**
