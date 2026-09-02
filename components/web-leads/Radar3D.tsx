@@ -938,15 +938,23 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         updateRunning();
       };
       document.addEventListener("visibilitychange", onVis);
-      const io = new IntersectionObserver((entries) => {
-        // isIntersecting alone is not enough: a drawer collapsed to 0fr can
-        // leave its clip rect EDGE-TOUCHING the still-sized host, which the
-        // spec counts as intersecting at zero area -- exactly the closed-
-        // drawer case this observer exists for. Require actual visible
-        // area. (Codex review P2 follow-up, 2026-09-02.)
-        hostVisible = entries.some((e) => e.isIntersecting && e.intersectionRatio > 0);
-        updateRunning();
-      });
+      const io = new IntersectionObserver(
+        (entries) => {
+          // isIntersecting alone is not enough: a drawer collapsed to 0fr
+          // can leave its clip rect EDGE-TOUCHING the still-sized host,
+          // which the spec counts as intersecting at zero area -- exactly
+          // the closed-drawer case this observer exists for. Require actual
+          // visible area. (Codex review P2 follow-up, 2026-09-02.)
+          hostVisible = entries.some((e) => e.isIntersecting && e.intersectionRatio > 0);
+          updateRunning();
+        },
+        // BOTH thresholds matter: with only the default 0, a ratio moving
+        // 0 -> positive while isIntersecting stays true crosses no threshold
+        // and fires no callback -- the drawer reopens and the stage stays
+        // paused forever. The 0.01 threshold makes gaining/losing real area
+        // an observable event. (Codex review P1, 2026-09-02.)
+        { threshold: [0, 0.01] },
+      );
       io.observe(host);
 
       statusRef.current(true);

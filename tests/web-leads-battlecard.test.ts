@@ -1605,6 +1605,10 @@ const MODEL_CODES = [
   // drawer's clip rect can touch the host's edge, which is exactly the case
   // the observer exists for. Positive area required.
   assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio > 0/, "resuming must require ACTUAL visible area, not an edge-touch");
+  // And the 0 -> positive-area transition must be OBSERVABLE: with only the
+  // default threshold, that change crosses nothing and fires no callback,
+  // so a reopened drawer would leave the stage paused forever.
+  assert.match(r3d, /\{ threshold: \[0, 0\.01\] \}/, "the observer must carry a positive threshold so regaining area fires");
   assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
   const shell = read("components/web-leads/BattleSection.tsx");
   assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
