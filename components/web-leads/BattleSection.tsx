@@ -58,6 +58,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -93,25 +94,28 @@ export function BattleSections({ children }: { children: ReactNode }) {
   const [broadcast, setBroadcast] = useState<Broadcast>(null);
   const [targeted, setTargeted] = useState<Targeted>(null);
   const [sections, setSections] = useState<SectionEntry[]>([]);
+  // Every callback is IDENTITY-STABLE (useCallback with no deps, functional
+  // setState only). The section effects depend on these identities; if they
+  // were recreated whenever `sections` changed, each registration would
+  // invalidate every section's effect, causing an unregister/re-register
+  // cascade that reorders the tab strip and can loop. (Codex review P1,
+  // 2026-09-02.)
+  const setAll = useCallback((open: boolean) => setBroadcast((p) => ({ seq: (p?.seq ?? 0) + 1, open })), []);
+  const openOne = useCallback((id: string) => setTargeted((p) => ({ seq: (p?.seq ?? 0) + 1, id })), []);
+  const registerSection = useCallback((id: string, title: string) => {
+    setSections((prev) => (prev.some((s) => s.id === id) ? prev : [...prev, { id, title, open: true }]));
+    return () => setSections((prev) => prev.filter((s) => s.id !== id));
+  }, []);
+  const reportOpen = useCallback((id: string, open: boolean) => {
+    setSections((prev) => {
+      const cur = prev.find((s) => s.id === id);
+      if (!cur || cur.open === open) return prev;
+      return prev.map((s) => (s.id === id ? { ...s, open } : s));
+    });
+  }, []);
   const value = useMemo(
-    () => ({
-      broadcast,
-      targeted,
-      sections,
-      setAll: (open: boolean) => setBroadcast((p) => ({ seq: (p?.seq ?? 0) + 1, open })),
-      openOne: (id: string) => setTargeted((p) => ({ seq: (p?.seq ?? 0) + 1, id })),
-      registerSection: (id: string, title: string) => {
-        setSections((prev) => (prev.some((s) => s.id === id) ? prev : [...prev, { id, title, open: true }]));
-        return () => setSections((prev) => prev.filter((s) => s.id !== id));
-      },
-      reportOpen: (id: string, open: boolean) =>
-        setSections((prev) => {
-          const cur = prev.find((s) => s.id === id);
-          if (!cur || cur.open === open) return prev;
-          return prev.map((s) => (s.id === id ? { ...s, open } : s));
-        }),
-    }),
-    [broadcast, targeted, sections],
+    () => ({ broadcast, targeted, sections, setAll, openOne, registerSection, reportOpen }),
+    [broadcast, targeted, sections, setAll, openOne, registerSection, reportOpen],
   );
   return <BattleSectionsContext.Provider value={value}>{children}</BattleSectionsContext.Provider>;
 }

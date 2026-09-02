@@ -1596,7 +1596,15 @@ const MODEL_CODES = [
   const scaleXDraws = (src.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
   assert.ok(scaleXDraws >= 2, "both the Meter and the head-to-head track must draw via scaleX");
 
+  // Registry callbacks are identity-stable: recreated callbacks invalidate
+  // every section's registration effect on every state change -- an
+  // unregister/re-register cascade that reorders the tab strip and can
+  // loop. (Codex review P1, 2026-09-02.)
+  assert.match(r3d, /new IntersectionObserver/, "the render loop must pause when the stage is out of view -- an always-mounted closed drawer would otherwise burn GPU forever (Codex P2, 2026-09-02)");
+  assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
   const shell = read("components/web-leads/BattleSection.tsx");
+  assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
+  assert.match(shell, /const reportOpen = useCallback\(/, "reportOpen must be identity-stable for the same reason");
   assert.match(shell, /registerSection/, "sections must self-register -- a hand-maintained tab list drifts from the page");
   assert.match(shell, /bus\.sections\.map/, "the tab strip must render from the registry");
   assert.match(shell, /gridTemplateRows: isOpen \? "1fr" : "0fr"/, "sections must animate open/close via grid-rows -- the one CSS-only unknown-height animation");

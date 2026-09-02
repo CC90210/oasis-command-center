@@ -913,14 +913,36 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       };
       raf = requestAnimationFrame(tick);
 
-      // Pause the loop when the tab is hidden -- a rep leaves the card open
-      // all shift; a hidden canvas must cost nothing.
+      // Pause the loop when the stage can't be seen -- for TWO reasons that
+      // compose: the tab is hidden, OR the host itself is out of view
+      // (scrolled away, or sitting inside a COLLAPSED section, which round
+      // 9's always-mounted drawers made possible -- inert and zero height
+      // do not pause an effect's rAF loop; this does). A rep leaves the
+      // card open all shift; an invisible canvas must cost nothing. (Codex
+      // review P2, 2026-09-02.)
+      let tabVisible = document.visibilityState === "visible";
+      let hostVisible = true;
+      const updateRunning = () => {
+        const should = tabVisible && hostVisible;
+        if (should && !running) {
+          running = true;
+          lastNow = performance.now();
+          raf = requestAnimationFrame(tick);
+        } else if (!should && running) {
+          running = false;
+          cancelAnimationFrame(raf);
+        }
+      };
       const onVis = () => {
-        running = document.visibilityState === "visible";
-        if (running) raf = requestAnimationFrame(tick);
-        else cancelAnimationFrame(raf);
+        tabVisible = document.visibilityState === "visible";
+        updateRunning();
       };
       document.addEventListener("visibilitychange", onVis);
+      const io = new IntersectionObserver((entries) => {
+        hostVisible = entries.some((e) => e.isIntersecting);
+        updateRunning();
+      });
+      io.observe(host);
 
       statusRef.current(true);
 
@@ -928,6 +950,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         running = false;
         cancelAnimationFrame(raf);
         document.removeEventListener("visibilitychange", onVis);
+        io.disconnect();
         ro.disconnect();
         renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
         renderer.domElement.removeEventListener("pointerdown", onDown);
