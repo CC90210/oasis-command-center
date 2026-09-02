@@ -148,6 +148,13 @@ const EXPECTED_WORKERS: Array<{
     // is read-modify-write with no row claim, so two consumers double-send.
     // That needs a compare-and-swap on metadata.status before this can run in
     // two places.
+    //
+    // Which is exactly why the controls are OFF (CodeRabbit, PR #376). Leaving
+    // this undefined defaults it to manageable, so the panel would render a
+    // live Start button whose only effect is to launch the local duplicate the
+    // comment above refuses to allow. Saying "must not run here" while shipping
+    // the button that makes it run here is worse than saying nothing.
+    manageable_via_pm2: false,
     not_expected_here: "Runs on the VPS so queued mail drains while this machine is off",
   },
   {
@@ -320,7 +327,18 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       // workers are controllable only once the VPS bridge proxy is configured
       // (sunbizControl); their actions route through the server proxy, not the
       // operator's localhost.
-      manageable_via_pm2: isSun ? sunbizControl : w.manageable_via_pm2 !== false,
+      //
+      // A worker that is not meant to run here is never locally controllable,
+      // enforced HERE rather than trusted to each entry. Forgetting the flag on
+      // one entry ships a live Start button whose only effect is to launch the
+      // duplicate that entry exists to prevent — and for the email sender, a
+      // duplicate means every queued message sends twice.
+      manageable_via_pm2:
+        "not_expected_here" in w && w.not_expected_here
+          ? false
+          : isSun
+            ? sunbizControl
+            : w.manageable_via_pm2 !== false,
       // B4 (2026-07-23): EXPECTED_WORKERS (CC's own local empire daemons)
       // predates the owner field and has no Breeze/adon entries — default
       // "cc". SUNBIZ_WORKERS always carries an explicit owner.
