@@ -32,7 +32,7 @@ import { PageHeader, Card, EmptyState } from "@/components/Card";
 import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTenant } from "@/lib/queries";
 import {
   OASIS_WEBSITE_SALES_PROGRAM,
   isOasisPipelineAdmin,
@@ -86,18 +86,16 @@ export default async function PipelinePage({
   let tenantScopeError: Error | null = null;
   try {
     if (session.ok) {
-      const db = getServiceSupabase();
-      const tenantRow = await db
-        .from("tenants")
-        .select("slug")
-        .eq("id", session.tenantId)
-        .maybeSingle();
-      if (tenantRow.error) {
-        throw new Error(`pipeline_tenant_lookup_failed: ${tenantRow.error.message}`);
-      }
-      const slug = (tenantRow.data as { slug: string | null } | null)?.slug;
+      // P1 instant-load (2026-09-01): read through the React-cache()d
+      // getTenant() the layout already resolved this render, instead of a
+      // second raw `tenants` round trip. getTenant collapses "read failed"
+      // and "row missing" into null; both threw to the same catch below
+      // before, so the failure behavior is unchanged — only the label is
+      // shared now.
+      const tenant = await getTenant(session.tenantId);
+      const slug = tenant?.slug;
       if (!slug) {
-        throw new Error("pipeline_tenant_slug_missing");
+        throw new Error("pipeline_tenant_lookup_failed_or_slug_missing");
       }
       tenantSlug = slug ?? null;
       if (slug && !OASIS_PIPELINE_SLUGS.has(slug)) {

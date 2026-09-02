@@ -15,7 +15,7 @@
 
 import { notFound } from "next/navigation";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getTenant } from "@/lib/queries";
 import {
   capabilitiesFor,
   resolvePersona,
@@ -66,19 +66,19 @@ export async function resolveViewerSurface(): Promise<ViewerSurface> {
   let tenantSlug: string | null = null;
   let degraded = false;
   try {
-    const db = getServiceSupabase();
-    const row = await db
-      .from("tenants")
-      .select("slug")
-      .eq("id", session.tenantId)
-      .maybeSingle();
-    if (row.error) {
-      degraded = true;
-    } else {
-      const slug = (row.data as { slug?: string | null } | null)?.slug;
-      if (slug) tenantSlug = slug.trim().toLowerCase();
-      else degraded = true;
-    }
+    // P1 instant-load (2026-09-01): reads through the React-cache()d
+    // getTenant() instead of firing its own raw `tenants` SELECT. The layout
+    // resolves the same tenant on every authenticated render, so this was a
+    // duplicate ~140ms Turso round trip on EVERY page that calls
+    // resolveViewerSurface (Today, Settings, Pipeline, Health, Analytics,
+    // Agents, Operations, Automations, audit-log). Failure semantics are
+    // unchanged: a failed or empty read still degrades rather than resolving
+    // slug-gated capabilities, and getTenant's null collapses "read failed"
+    // and "no row" — both of which already degraded identically here.
+    const tenant = await getTenant(session.tenantId);
+    const slug = tenant?.slug;
+    if (slug) tenantSlug = slug.trim().toLowerCase();
+    else degraded = true;
   } catch (err) {
     // Loud, not silent: a persistently broken tenants read is why a founder's
     // money vanished from their own dashboard, and a swallowed exception would
