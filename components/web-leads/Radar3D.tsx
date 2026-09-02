@@ -938,22 +938,24 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         updateRunning();
       };
       document.addEventListener("visibilitychange", onVis);
+      // The visibility cutoff: below 1% visible area the stage counts as
+      // hidden. The PREDICATE and the observer THRESHOLD must share this
+      // value exactly -- three Codex rounds proved every misalignment
+      // strands the loop in one direction or the other: isIntersecting
+      // alone counts zero-area edge-touches as visible (collapsed drawer
+      // keeps rendering); ratio > 0 with only the default threshold makes
+      // the 0 -> positive transition unobservable (reopened drawer stays
+      // paused); and a predicate looser than the threshold lets the
+      // DOWNWARD crossing fire while the ratio is still positive (collapse
+      // keeps rendering again). Same constant on both sides closes all
+      // three. (Codex reviews, 2026-09-02.)
+      const HIDE_RATIO = 0.01;
       const io = new IntersectionObserver(
         (entries) => {
-          // isIntersecting alone is not enough: a drawer collapsed to 0fr
-          // can leave its clip rect EDGE-TOUCHING the still-sized host,
-          // which the spec counts as intersecting at zero area -- exactly
-          // the closed-drawer case this observer exists for. Require actual
-          // visible area. (Codex review P2 follow-up, 2026-09-02.)
-          hostVisible = entries.some((e) => e.isIntersecting && e.intersectionRatio > 0);
+          hostVisible = entries.some((e) => e.isIntersecting && e.intersectionRatio >= HIDE_RATIO);
           updateRunning();
         },
-        // BOTH thresholds matter: with only the default 0, a ratio moving
-        // 0 -> positive while isIntersecting stays true crosses no threshold
-        // and fires no callback -- the drawer reopens and the stage stays
-        // paused forever. The 0.01 threshold makes gaining/losing real area
-        // an observable event. (Codex review P1, 2026-09-02.)
-        { threshold: [0, 0.01] },
+        { threshold: [0, HIDE_RATIO] },
       );
       io.observe(host);
 

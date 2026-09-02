@@ -1604,11 +1604,13 @@ const MODEL_CODES = [
   // Zero-area edge-touch counts as isIntersecting per spec -- the collapsed
   // drawer's clip rect can touch the host's edge, which is exactly the case
   // the observer exists for. Positive area required.
-  assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio > 0/, "resuming must require ACTUAL visible area, not an edge-touch");
-  // And the 0 -> positive-area transition must be OBSERVABLE: with only the
-  // default threshold, that change crosses nothing and fires no callback,
-  // so a reopened drawer would leave the stage paused forever.
-  assert.match(r3d, /\{ threshold: \[0, 0\.01\] \}/, "the observer must carry a positive threshold so regaining area fires");
+  // The visibility predicate and the observer threshold must share ONE
+  // cutoff constant: every misalignment strands the loop in one direction
+  // (edge-touch counts as visible; 0 -> positive is unobservable; the
+  // downward crossing fires while the ratio is still positive). Three
+  // Codex rounds, one constant.
+  assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio >= HIDE_RATIO/, "the visibility predicate must use the shared cutoff");
+  assert.match(r3d, /\{ threshold: \[0, HIDE_RATIO\] \}/, "the observer threshold must be the same shared cutoff");
   assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
   const shell = read("components/web-leads/BattleSection.tsx");
   assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
