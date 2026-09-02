@@ -350,10 +350,24 @@ for (const junk of ["", "not json", "{broken", null, undefined, 42, {}, { finalU
   );
   // And it must PROVE it read everything. Truncation here is the same failure
   // wearing a different hat: the parking pages beyond the cut keep their 82.
-  assert.match(
-    scores,
-    /assertCompleteRead\("parked_index"/,
-    "the parked read must prove completeness, like the three reads beside it",
+  //
+  // TIGHTENED 2026-09-02 (instant-load P2), NOT relaxed. The read became two
+  // tiers -- the stored `is_parked = 1` verdict (migration 012) plus the
+  // original LIKE net over rows not yet stamped -- so ONE proof would now
+  // leave the other tier able to truncate silently. Both are required, at
+  // both call sites (the memoised whole-corpus read and the targeted
+  // business-id read), which is four proofs in total.
+  const stampedProofs = scores.match(/assertCompleteRead\("parked_index_stamped/g) || [];
+  const unstampedProofs = scores.match(/assertCompleteRead\("parked_index_unstamped/g) || [];
+  assert.equal(
+    stampedProofs.length,
+    2,
+    "both parked call sites must prove the STORED-verdict tier read completely",
+  );
+  assert.equal(
+    unstampedProofs.length,
+    2,
+    "both parked call sites must prove the LIKE-net tier read completely -- a truncated net leaves for-sale pages at 82",
   );
 }
 
