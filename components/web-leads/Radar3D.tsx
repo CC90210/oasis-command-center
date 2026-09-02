@@ -75,6 +75,7 @@
 import { useEffect, useRef } from "react";
 import type * as THREE_NS from "three";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
+import { sfx } from "./battle-sfx";
 import type { DimensionProfile } from "@/lib/web-leads/audit";
 
 type Props = {
@@ -209,6 +210,9 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       renderer.domElement.style.display = "block";
       renderer.domElement.style.cursor = "grab";
       renderer.domElement.setAttribute("aria-hidden", "true");
+      // If the rep already opted into sound on a previous card, the context
+      // still may not exist until a gesture: arm the one-time unlock.
+      sfx.armUnlock(host);
 
       // A GPU reset or context-pressure event after a successful init would
       // otherwise leave a frozen-blank canvas over a hidden fallback: report
@@ -612,7 +616,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         score.style.cssText = "font-family:var(--battle-data);font-size:11px;color:rgba(226,232,240,0.92);";
         el.appendChild(name);
         el.appendChild(score);
-        el.addEventListener("pointerdown", (e) => { e.stopPropagation(); focusKey = d.key; selectRef.current(d.key); });
+        el.addEventListener("pointerdown", (e) => { e.stopPropagation(); focusKey = d.key; selectRef.current(d.key); sfx.play("tick"); });
         labelLayer.appendChild(el);
         return { key: d.key, el, name };
       });
@@ -696,8 +700,14 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         if (pointerDown && !dragging) {
           const key = pick(e);
           if (key) {
+            const prevFocus = focusKey;
             focusKey = key;
             selectRef.current(key);
+            sfx.play("tick");
+            // A re-tap of the already-selected beam after a camera reset:
+            // the selection detector below won't fire (nothing changed), so
+            // the flight's sound happens here.
+            if (prevFocus !== key && selectedRef.current === key) sfx.play("engage");
           }
         }
         pointerDown = false;
@@ -707,7 +717,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       // Double-click anywhere on the stage: back to the home orbit. The
       // selection (and the detail panel it drives) stays where the rep put
       // it -- only the CAMERA resets.
-      const onDblClick = () => { focusKey = null; };
+      const onDblClick = () => {
+        if (focusKey) sfx.play("disengage");
+        focusKey = null;
+      };
       renderer.domElement.addEventListener("pointerdown", onDown);
       renderer.domElement.addEventListener("pointermove", onMove);
       renderer.domElement.addEventListener("pointerup", onUp);
@@ -718,6 +731,8 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       let raf = 0;
       let decorT = 0;
       let running = true;
+      let lockT = 1;
+      let lastReticleKey: string | null = null;
       const bootStart = performance.now();
       const camPos = HOME_POS.clone();
       const camLook = HOME_LOOK.clone();
@@ -734,7 +749,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         const selNow = selectedRef.current;
         if (selNow !== lastSelSeen) {
           lastSelSeen = selNow;
-          if (selNow) focusKey = selNow;
+          if (selNow) {
+            focusKey = selNow;
+            sfx.play("engage");
+          }
         }
 
         // ── rotation: focus flight beats inertia beats idle drift ──────
@@ -804,18 +822,29 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
           p.sheath.scale.x = p.sheath.scale.z = active ? 1.35 : 1;
         }
 
-        // ── the reticle rides the selected beam ────────────────────────
+        // ── the reticle rides the selected beam, with a lock-on burst ──
         const selPillar = sel ? pillars.find((p) => p.key === sel) : undefined;
         if (selPillar && bootT > 0.85) {
+          if (lastReticleKey !== selPillar.key) {
+            lastReticleKey = selPillar.key;
+            lockT = 0;
+          }
+          lockT = Math.min(1, lockT + 0.06);
+          const burst = 1 - easeOut(lockT);
           reticle.visible = true;
           reticle.position.x = selPillar.x;
           reticle.position.z = selPillar.z;
-          reticle.rotation.y = decorT * 3;
+          // The ring snaps wide and settles onto the beam, spinning faster
+          // while it locks -- the acquisition gesture every targeting HUD
+          // uses, and it answers the rep's own tap (rule 5).
+          reticle.scale.setScalar(1 + burst * 0.55);
+          reticle.rotation.y = decorT * 3 + burst * 2;
           const hue = hueFor(selPillar.key).to;
           reticleRingMat.color.set(hue);
           reticleBracketMat.color.set(hue);
         } else {
           reticle.visible = false;
+          lastReticleKey = null;
         }
 
         // ── the labels chase their anchors through the camera ──────────

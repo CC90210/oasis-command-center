@@ -1408,7 +1408,7 @@ const MODEL_CODES = [
   // renders only the name is a verdict with no sentence to say.
   const src = read("components/web-leads/BattleCard.tsx");
   assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
-  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} selected=\{dimSel\} onSelect=\{setDimSel\} \/>/, "the designation plate must open the shape section, on the section's shared selection");
+  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} selected=\{dimSel\} onSelect=\{setDimSel\} reduced=\{reduced\} \/>/, "the designation plate must open the shape section, on the section's shared selection");
   assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
   assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
   assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
@@ -1527,6 +1527,40 @@ const MODEL_CODES = [
   assert.match(src, /const \[dimSel, setDimSel\] = useState<string \| null>\(null\)/, "ScoredBody must own the shape section's one selection");
   assert.match(src, /<DimensionShape[\s\S]{0,400}?selected=\{dimSel\}/, "the dimension list must read the shared selection");
   assert.match(src, /designation\.primary\.map[\s\S]{0,700}?aria-pressed=\{active\}/, "the plate's defining-area chips must be accessible toggles on the shared selection");
+}
+
+// ---------------------------------------------------------------------------
+// 8i. ROUND 8 — SOUND AND THE DECODE, AT ZERO COST. The pins are the safety
+//     properties: sound ships OFF and silent-by-structure (a rep is on the
+//     phone next to this card -- a HUD that beeps into a live call is
+//     sabotage dressed as polish), no audio FILE may ever join the repo
+//     (the palette is synthesized; a file is a cost, a licence and a
+//     fetch), the already-enabled unlock is a one-time gesture (autoplay
+//     policy, honoured rather than fought), and the designation decode
+//     renders settled under reduced motion with the real name on the
+//     aria-label so assistive tech never hears a scramble frame.
+// ---------------------------------------------------------------------------
+
+{
+  const sfxSrc = read("components/web-leads/battle-sfx.ts");
+  assert.match(sfxSrc, /oasis\.battlecard\.sfx/, "the sound preference must persist per rep");
+  assert.match(sfxSrc, /enabled = window\.localStorage\.getItem\(KEY\) === "1"/, "sound must be OFF unless the rep explicitly turned it on");
+  assert.match(sfxSrc, /\{ once: true, capture: true \}/, "the already-enabled unlock must be a one-time gesture listener");
+  assert.doesNotMatch(sfxSrc, /\.(mp3|wav|ogg|m4a|webm)\b/, "no audio files, ever -- the palette is synthesized from oscillators");
+  const gainM = sfxSrc.match(/const GAIN = (0\.\d+)/);
+  assert.ok(gainM && parseFloat(gainM[1]) <= 0.06, "the volume ceiling must stay under a phone call");
+  assert.match(sfxSrc, /if \(!enabled \|\| !ctx \|\| ctx\.state !== "running"\) return/, "play must be a no-op unless opted in AND gesture-unlocked");
+
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /aria-pressed=\{sfxOn\}/, "the SFX toggle must be an accessible toggle");
+  assert.match(src, /if \(reduced\) \{ setDisplay\(text\); return; \}/, "the decode must render settled under reduced motion");
+  assert.match(src, /aria-label=\{designation\.name\}/, "assistive tech must hear the real designation, never the scramble");
+
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount");
+  assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
+  assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
+  assert.match(r3d, /lockT = Math\.min\(1,/, "the lock-on burst must clamp -- an unclamped burst re-fires forever");
 }
 
 console.log("web-leads-battlecard ok");

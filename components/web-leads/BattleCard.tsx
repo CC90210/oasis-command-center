@@ -88,6 +88,17 @@
  * sheaths and score surface moved to hand-rolled fresnel shaders
  * (Radar3D.tsx header explains which of them may animate and why).
  *
+ * Round 8 (2026-09-01, "maximize it without any expenses... open sourced
+ * repos if you need"): everything zero-asset, zero-dependency. SOUND,
+ * synthesized from oscillators at play time (battle-sfx.ts -- no audio
+ * files exist and none may be added), attached to the operator's own
+ * actions only, OFF BY DEFAULT because this card sits next to a live phone
+ * call, opt-in per rep via the SFX toggle on the stage. The designation
+ * name resolves through a glyph DECODE on mount (a string permutation, not
+ * a library; aria-label carries the real name). The targeting reticle
+ * gained a lock-on burst. Patterns mined from the open-source FUI space
+ * (Arwes's sound-per-interaction grammar) without taking the dependency.
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
  * identical treatment -- rule 1 survives the decoration); ambient motion is
  * confined to decorative layers that carry no data (the rotating tick ring,
@@ -167,6 +178,7 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
@@ -297,6 +309,35 @@ function useCountUp(target: number, reduced: boolean): number {
     return () => cancelAnimationFrame(raf);
   }, [target, reduced]);
   return value;
+}
+
+/**
+ * Resolves `text` through a brief glyph scramble, once, on mount -- the
+ * decode-in every FUI plate uses (round 8, zero-asset: it is a string
+ * permutation, not an animation library). Reduced motion renders the final
+ * text immediately, and the caller carries the real text in an aria-label
+ * so assistive tech never hears an intermediate frame.
+ */
+function useDecode(text: string, reduced: boolean): string {
+  const [display, setDisplay] = useState(reduced ? text : "");
+  useEffect(() => {
+    if (reduced) { setDisplay(text); return; }
+    const GLYPHS = "<>/|=+*#%";
+    const TOTAL = 22;
+    let frame = 0;
+    let raf = 0;
+    const step = () => {
+      frame++;
+      const solved = Math.floor((frame / TOTAL) * text.length);
+      let out = text.slice(0, solved);
+      for (let i = solved; i < text.length; i++) out += text[i] === " " ? " " : GLYPHS[(i * 7 + frame) % GLYPHS.length];
+      setDisplay(frame >= TOTAL ? text : out);
+      if (frame < TOTAL) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [text, reduced]);
+  return display;
 }
 
 const fmt = (n: number) => n.toLocaleString("en-US");
@@ -1585,7 +1626,7 @@ function PercentileSentence({
  * and the spread between them, in the telemetry face.
  */
 function DesignationPlate({
-  audit, selected, onSelect,
+  audit, selected, onSelect, reduced,
 }: {
   audit: Extract<AuditResult, { state: "scored" }>;
   /** The shape section's shared selection (round 7): the plate's chips are
@@ -1593,11 +1634,13 @@ function DesignationPlate({
    *  area here selects it there and flies the 3D stage to it. */
   selected: string | null;
   onSelect: (key: string) => void;
+  reduced: boolean;
 }) {
   const designation = useMemo(
     () => designateLead(audit.dimensions, audit.composite),
     [audit.dimensions, audit.composite],
   );
+  const decodedName = useDecode(designation.name, reduced);
   const byKey = useMemo(() => new Map(audit.dimensions.map((d) => [d.key, d])), [audit.dimensions]);
   const scores = audit.dimensions.map((d) => d.score);
   const floor = Math.min(...scores);
@@ -1618,8 +1661,14 @@ function DesignationPlate({
           <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-fg-muted [font-family:var(--battle-display)]">
             Designation
           </p>
-          <p className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl">
-            {designation.name}
+          {/* The name resolves through a brief glyph decode (round 8); the
+              aria-label carries the real designation so assistive tech never
+              hears a scramble frame. */}
+          <p
+            aria-label={designation.name}
+            className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl"
+          >
+            <span aria-hidden>{decodedName || " "}</span>
           </p>
           <p className="mt-2 text-sm leading-relaxed text-fg-dim">{designation.meaning}</p>
           <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">
@@ -1820,7 +1869,7 @@ function ScoredBody({
           title="What kind of bad is it"
           sub="The shape of the problem across seven areas. Tap one, on the chart or in the list, to see what is failing inside it."
         >
-          <DesignationPlate audit={audit} selected={dimSel} onSelect={setDimSel} />
+          <DesignationPlate audit={audit} selected={dimSel} onSelect={setDimSel} reduced={reduced} />
           <DimensionShape
             dimensions={audit.dimensions}
             worstFirst={worstFirst}
@@ -2001,6 +2050,10 @@ function DimensionShape({
 }) {
   const bus = useBattleSections();
   const setSelected = onSelect;
+  // The SFX preference, mirrored into state so the toggle re-renders. Read
+  // in an effect for the same SSR-hydration reason as useReducedMotion.
+  const [sfxOn, setSfxOn] = useState(false);
+  useEffect(() => setSfxOn(sfx.enabled), []);
   // The holo-table tilt for the 2D FALLBACK stack: the radar sits on a
   // gentle base pitch and leans toward the pointer. USER-DRIVEN motion only.
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -2078,11 +2131,29 @@ function DimensionShape({
           {gl === "on" && (
             <>
               <p className="sr-only">{`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}</p>
-              {headToHead && (
-                <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
-                  Gold outline: {headToHead.competitor.name} · tap a beam to focus · drag to orbit · double-click to reset
-                </p>
-              )}
+              <div className="flex items-center justify-center gap-3">
+                {headToHead && (
+                  <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
+                    Gold outline: {headToHead.competitor.name} · tap a beam to focus · drag to orbit · double-click to reset
+                  </p>
+                )}
+                {/* Sound is OPT-IN, per rep: this card sits next to a live
+                    phone call, so the HUD ships silent and stays silent
+                    until the rep flips this. battle-sfx.ts synthesizes the
+                    palette from oscillators -- zero audio files. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !sfxOn;
+                    sfx.setEnabled(next);
+                    setSfxOn(next);
+                  }}
+                  aria-pressed={sfxOn}
+                  className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none [font-family:var(--battle-display)] ${sfxOn ? "border-accent/50 text-fg" : "border-bg-border text-fg-dim hover:text-fg-muted"}`}
+                >
+                  SFX {sfxOn ? "on" : "off"}
+                </button>
+              </div>
             </>
           )}
         </div>
