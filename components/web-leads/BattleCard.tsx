@@ -73,6 +73,43 @@
  * "Invisible storefront", "Full rebuild"), chosen by arithmetic over the
  * same scores the radar draws, so a rep says what the graph shows.
  *
+ * Round 7 (2026-09-01, "more interactive... truly next generation"): the
+ * stage became something a rep OPERATES, not just watches. Grounded in the
+ * FUI research (Jayse Hansen's Iron Man HUD rules: amplify the operator,
+ * never distract; ground the fantasy in real instrumentation) and the
+ * standard three.js interaction vocabulary (damped inertia, eased camera
+ * flights). The hologram BOOTS -- assembles itself once on mount; tapping a
+ * beam, a label, a list row or a designation-plate chip FLIES the stage to
+ * that dimension behind one shared selection owned by ScoredBody; a
+ * targeting reticle in the dimension's identity hue assembles at the
+ * selected beam's foot; a released drag carries inertia and decays;
+ * double-click resets the camera. Hover only brightens -- selection is a
+ * deliberate tap, so casual pointer travel never yanks the camera. The
+ * sheaths and score surface moved to hand-rolled fresnel shaders
+ * (Radar3D.tsx header explains which of them may animate and why).
+ *
+ * Round 8 (2026-09-01, "maximize it without any expenses... open sourced
+ * repos if you need"): everything zero-asset, zero-dependency. SOUND,
+ * synthesized from oscillators at play time (battle-sfx.ts -- no audio
+ * files exist and none may be added), attached to the operator's own
+ * actions only, OFF BY DEFAULT because this card sits next to a live phone
+ * call, opt-in per rep via the SFX toggle on the stage. The designation
+ * name resolves through a glyph DECODE on mount (a string permutation, not
+ * a library; aria-label carries the real name). The targeting reticle
+ * gained a lock-on burst. Patterns mined from the open-source FUI space
+ * (Arwes's sound-per-interaction grammar) without taking the dependency.
+ *
+ * Round 9 (2026-09-02, the audit round: "a full audit... the final
+ * iteration that will be a 10/10"): physics and wayfinding. No visual
+ * state may SNAP -- the stage's selection and hover emphasis blend through
+ * frame-rate-normalized damped mixes (Radar3D), meters draw with transform
+ * instead of width (compositor, not layout), sections animate open/close
+ * PHYSICALLY via grid-rows with closed content inert, every eyebrow label
+ * speaks the display face, and the SectionToolbar became the card's
+ * COMMAND STRIP: a sticky HUD tab per section, registry-driven, each
+ * showing its drawer's state and jumping a rep anywhere in one tap.
+ * All pinned by §8j.
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
  * identical treatment -- rule 1 survives the decoration); ambient motion is
  * confined to decorative layers that carry no data (the rotating tick ring,
@@ -152,6 +189,7 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
@@ -282,6 +320,35 @@ function useCountUp(target: number, reduced: boolean): number {
     return () => cancelAnimationFrame(raf);
   }, [target, reduced]);
   return value;
+}
+
+/**
+ * Resolves `text` through a brief glyph scramble, once, on mount -- the
+ * decode-in every FUI plate uses (round 8, zero-asset: it is a string
+ * permutation, not an animation library). Reduced motion renders the final
+ * text immediately, and the caller carries the real text in an aria-label
+ * so assistive tech never hears an intermediate frame.
+ */
+function useDecode(text: string, reduced: boolean): string {
+  const [display, setDisplay] = useState(reduced ? text : "");
+  useEffect(() => {
+    if (reduced) { setDisplay(text); return; }
+    const GLYPHS = "<>/|=+*#%";
+    const TOTAL = 22;
+    let frame = 0;
+    let raf = 0;
+    const step = () => {
+      frame++;
+      const solved = Math.floor((frame / TOTAL) * text.length);
+      let out = text.slice(0, solved);
+      for (let i = solved; i < text.length; i++) out += text[i] === " " ? " " : GLYPHS[(i * 7 + frame) % GLYPHS.length];
+      setDisplay(frame >= TOTAL ? text : out);
+      if (frame < TOTAL) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [text, reduced]);
+  return display;
 }
 
 const fmt = (n: number) => n.toLocaleString("en-US");
@@ -556,11 +623,16 @@ function Meter({
   const pct = Math.min(100, Math.max(0, value));
   return (
     <span className="relative block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+      {/* Drawn with transform, not width (round 9): width is a layout
+          property and animating it re-lays-out every frame; scaleX from a
+          left origin is the identical picture on the compositor. */}
       <span
         className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
         style={{
-          width: drawn ? `${pct}%` : "0%",
-          transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          width: `${pct}%`,
+          transform: drawn ? "scaleX(1)" : "scaleX(0)",
+          transformOrigin: "left",
+          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
           background: hue ? `linear-gradient(90deg, ${hue.from}, ${hue.to})` : undefined,
           boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
         }}
@@ -1569,11 +1641,22 @@ function PercentileSentence({
  * are the shape's own numbers: the floor (worst area), the ceiling (best),
  * and the spread between them, in the telemetry face.
  */
-function DesignationPlate({ audit }: { audit: Extract<AuditResult, { state: "scored" }> }) {
+function DesignationPlate({
+  audit, selected, onSelect, reduced,
+}: {
+  audit: Extract<AuditResult, { state: "scored" }>;
+  /** The shape section's shared selection (round 7): the plate's chips are
+   *  the same control as the list rows and the beams -- tapping a defining
+   *  area here selects it there and flies the 3D stage to it. */
+  selected: string | null;
+  onSelect: (key: string) => void;
+  reduced: boolean;
+}) {
   const designation = useMemo(
     () => designateLead(audit.dimensions, audit.composite),
     [audit.dimensions, audit.composite],
   );
+  const decodedName = useDecode(designation.name, reduced);
   const byKey = useMemo(() => new Map(audit.dimensions.map((d) => [d.key, d])), [audit.dimensions]);
   const scores = audit.dimensions.map((d) => d.score);
   const floor = Math.min(...scores);
@@ -1594,29 +1677,42 @@ function DesignationPlate({ audit }: { audit: Extract<AuditResult, { state: "sco
           <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-fg-muted [font-family:var(--battle-display)]">
             Designation
           </p>
-          <p className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl">
-            {designation.name}
+          {/* The name resolves through a brief glyph decode (round 8); the
+              aria-label carries the real designation so assistive tech never
+              hears a scramble frame. */}
+          <p
+            aria-label={designation.name}
+            className="mt-1 text-xl font-bold uppercase leading-none tracking-[0.06em] text-fg [font-family:var(--battle-display)] lg:text-2xl"
+          >
+            <span aria-hidden>{decodedName || " "}</span>
           </p>
           <p className="mt-2 text-sm leading-relaxed text-fg-dim">{designation.meaning}</p>
           <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">
             <span className="font-medium text-fg-muted">The play:</span> {designation.play}
           </p>
           {/* The defining areas, wearing the same identity dots they wear on
-              every other surface of this card. Identity, never verdict. */}
+              every other surface of this card. Identity, never verdict --
+              and since round 7 they are BUTTONS on the section's shared
+              selection: tapping one selects it in the list, opens its
+              detail, and flies the 3D stage to its beam. */}
           <div className="mt-3 flex flex-wrap gap-2">
             {designation.primary.map((key) => {
               const d = byKey.get(key);
               if (!d) return null;
               const hue = hueFor(key);
+              const active = selected === key;
               return (
-                <span
+                <button
                   key={key}
-                  className="inline-flex items-center gap-1.5 rounded border border-bg-border bg-bg-panel/70 px-2 py-1 text-[11px] text-fg-muted"
+                  type="button"
+                  onClick={() => onSelect(key)}
+                  aria-pressed={active}
+                  className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none ${active ? "border-accent/50 bg-bg-raised/80 text-fg" : "border-bg-border bg-bg-panel/70 text-fg-muted hover:border-accent/30 hover:text-fg"}`}
                 >
                   <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
                   {d.label}
                   <span className="tabular-nums text-fg [font-family:var(--battle-data)]">{d.score}</span>
-                </span>
+                </button>
               );
             })}
           </div>
@@ -1664,6 +1760,12 @@ function ScoredBody({
   const maxRecoverable = Math.max(1, ...worstFirst.map(recoverablePoints));
   const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
   const failingAreas = worstFirst.filter((d) => d.checks.some((c) => !c.has)).length;
+  // ONE selection for the whole shape section (round 7): the designation
+  // plate's chips, the dimension list, the SVG radar and the WebGL stage all
+  // share it, so tapping an area anywhere focuses it everywhere -- including
+  // the camera flight on the 3D stage. Null means "the worst area", resolved
+  // inside DimensionShape where worstFirst is already the ordering truth.
+  const [dimSel, setDimSel] = useState<string | null>(null);
 
   return (
     <>
@@ -1703,14 +1805,14 @@ function ScoredBody({
             </>
           }
         >
-          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
             1. Say this
           </p>
           <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
             &ldquo;{angle.angle.opener}&rdquo;
           </p>
 
-          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
             2. Then ask this, and stop talking
           </p>
           <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
@@ -1725,19 +1827,19 @@ function ScoredBody({
 
           <div className="mt-6 grid gap-5 border-t border-bg-border pt-5 md:grid-cols-3">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 3. Once they answer, this is why it costs them
               </p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.cost}</p>
             </div>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 If they say &ldquo;{angle.angle.objection.says}&rdquo;
               </p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.objection.response}</p>
             </div>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">What we&apos;d build</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">What we&apos;d build</p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.build}</p>
             </div>
           </div>
@@ -1750,7 +1852,7 @@ function ScoredBody({
               instead of guessing. */}
           {angle.angle.proof && (
             <div className="mt-5 rounded-lg border border-bg-border bg-bg-raised/60 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 Only if they push back on that
               </p>
               <p className="mt-1.5 max-w-4xl text-sm leading-relaxed text-fg-dim">{angle.angle.proof.stat}</p>
@@ -1783,7 +1885,7 @@ function ScoredBody({
           title="What kind of bad is it"
           sub="The shape of the problem across seven areas. Tap one, on the chart or in the list, to see what is failing inside it."
         >
-          <DesignationPlate audit={audit} />
+          <DesignationPlate audit={audit} selected={dimSel} onSelect={setDimSel} reduced={reduced} />
           <DimensionShape
             dimensions={audit.dimensions}
             worstFirst={worstFirst}
@@ -1791,6 +1893,8 @@ function ScoredBody({
             signals={signals}
             drawn={drawn}
             reduced={reduced}
+            selected={dimSel}
+            onSelect={setDimSel}
           />
         </BattleSection>
 
@@ -1904,7 +2008,7 @@ function ScoredBody({
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {evidence.map((group) => (
               <div key={group.title}>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{group.title}</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">{group.title}</p>
                 <dl className="mt-2 divide-y divide-bg-border/60">
                   {group.rows.map((row) => (
                     <div
@@ -1946,7 +2050,7 @@ function ScoredBody({
  * selection already uses.
  */
 function DimensionShape({
-  dimensions, worstFirst, competitors, signals, drawn, reduced,
+  dimensions, worstFirst, competitors, signals, drawn, reduced, selected, onSelect,
 }: {
   dimensions: DimensionProfile[];
   worstFirst: DimensionProfile[];
@@ -1954,9 +2058,18 @@ function DimensionShape({
   signals: Record<string, unknown> | null;
   drawn: boolean;
   reduced: boolean;
+  /** Selection is OWNED BY ScoredBody (round 7): the designation plate's
+   *  chips, this list, the SVG radar and the WebGL stage all read and write
+   *  the same state, so a tap anywhere focuses everywhere. */
+  selected: string | null;
+  onSelect: (key: string) => void;
 }) {
   const bus = useBattleSections();
-  const [selected, setSelected] = useState<string | null>(null);
+  const setSelected = onSelect;
+  // The SFX preference, mirrored into state so the toggle re-renders. Read
+  // in an effect for the same SSR-hydration reason as useReducedMotion.
+  const [sfxOn, setSfxOn] = useState(false);
+  useEffect(() => setSfxOn(sfx.enabled), []);
   // The holo-table tilt for the 2D FALLBACK stack: the radar sits on a
   // gentle base pitch and leans toward the pointer. USER-DRIVEN motion only.
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
@@ -2034,11 +2147,29 @@ function DimensionShape({
           {gl === "on" && (
             <>
               <p className="sr-only">{`Seven-dimension shape: ${dimensions.map((d) => `${d.label} ${d.score}`).join(", ")}`}</p>
-              {headToHead && (
-                <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
-                  Gold outline: {headToHead.competitor.name} · drag to orbit, tap a pillar to inspect
-                </p>
-              )}
+              <div className="flex items-center justify-center gap-3">
+                {headToHead && (
+                  <p className="text-center text-[10px] text-fg-dim [font-family:var(--battle-display)]" style={{ color: GOLD, opacity: 0.75 }}>
+                    Gold outline: {headToHead.competitor.name} · tap a beam to focus · drag to orbit · double-click to reset
+                  </p>
+                )}
+                {/* Sound is OPT-IN, per rep: this card sits next to a live
+                    phone call, so the HUD ships silent and stays silent
+                    until the rep flips this. battle-sfx.ts synthesizes the
+                    palette from oscillators -- zero audio files. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !sfxOn;
+                    sfx.setEnabled(next);
+                    setSfxOn(next);
+                  }}
+                  aria-pressed={sfxOn}
+                  className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none [font-family:var(--battle-display)] ${sfxOn ? "border-accent/50 text-fg" : "border-bg-border text-fg-dim hover:text-fg-muted"}`}
+                >
+                  SFX {sfxOn ? "on" : "off"}
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -2159,7 +2290,7 @@ function DimensionShape({
             <p className="mt-2 text-sm text-fg-dim">Everything we check in this area passed.</p>
           ) : (
             <div className="mt-2.5">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Biggest gap in this area</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">Biggest gap in this area</p>
               <p className="mt-1 text-sm font-semibold text-fg">{misses[0].label}</p>
               <MeasuredLine code={misses[0].code} signals={signals} />
               <RemedyLines code={misses[0].code} />
@@ -2483,11 +2614,14 @@ function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader
   const l = Math.min(100, Math.max(0, leader));
   return (
     <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+      {/* Same compositor discipline as Meter: transform, never width. */}
       <div
         className="absolute inset-y-0 left-0 rounded-full"
         style={{
-          width: drawn ? `${t}%` : "0%",
-          transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          width: `${t}%`,
+          transform: drawn ? "scaleX(1)" : "scaleX(0)",
+          transformOrigin: "left",
+          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
           background: "linear-gradient(90deg, #22d3ee, #60a5fa)",
           boxShadow: "0 0 8px rgba(34,211,238,0.35)",
         }}

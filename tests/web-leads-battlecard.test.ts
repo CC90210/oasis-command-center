@@ -1408,7 +1408,7 @@ const MODEL_CODES = [
   // renders only the name is a verdict with no sentence to say.
   const src = read("components/web-leads/BattleCard.tsx");
   assert.match(src, /import \{ designateLead \} from "@\/lib\/web-leads\/lead-profile"/, "the card must classify through lead-profile.ts, never inline");
-  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} \/>/, "the designation plate must open the shape section");
+  assert.match(src, /id="shape"[\s\S]{0,400}?<DesignationPlate audit=\{audit\} selected=\{dimSel\} onSelect=\{setDimSel\} reduced=\{reduced\} \/>/, "the designation plate must open the shape section, on the section's shared selection");
   assert.match(src, /\{designation\.name\}/, "the plate must render the designation's name");
   assert.match(src, /\{designation\.meaning\}/, "the plate must render what the shape means");
   assert.match(src, /\{designation\.play\}/, "the plate must render how to sell the shape");
@@ -1472,6 +1472,155 @@ const MODEL_CODES = [
   assert.match(r3d, /composer\?\.setSize/, "the composer must resize with the canvas or bloom renders at the mount-time resolution forever");
   assert.match(r3d, /labelLayer\.setAttribute\("aria-hidden", "true"\)/, "the projected labels are a pointer convenience -- the dimension list stays the accessible path");
   assert.match(r3d, /removeChild\(labelLayer\)/, "the label layer must be torn down with the scene");
+}
+
+// ---------------------------------------------------------------------------
+// 8h. ROUND 7 — THE STAGE IS OPERATED, NOT WATCHED. What gets pinned is,
+//     as ever, the failure discipline rather than the theatre: inertia must
+//     DECAY (an undamped spin is a chart that never stops moving), a focus
+//     flight must take the SHORTEST turn (the long way past five beams is
+//     disorientation as a feature), the boot must CLAMP and complete, every
+//     hand-rolled shader material must ride the disposal registry, the
+//     double-click reset must be torn down with the scene, and hover must
+//     never steal selection (a camera chasing casual pointer travel is a
+//     chart that will not hold still mid-sentence).
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /rotVel \*= Math\.pow\(0\.94, dt \* 60\)/, "a released spin must decay toward rest, frame-rate-normalized -- undamped inertia never stops, and unnormalized decay runs 2x on a 120Hz display");
+  assert.match(r3d, /const nearestTurn/, "a focus flight must rotate the shortest way to the chosen beam");
+  // The rotation SIGN: a three.js Y-rotation by R moves azimuth a to a - R,
+  // so facing the camera (+PI/2) needs R = a - PI/2. The inverted form
+  // coincides for the first pillar only, so the bug survives an eyeball
+  // test on the default selection. (Codex review P1, 2026-09-01.)
+  assert.match(r3d, /nearestTurn\(rotY, focusPillar\.azimuth - Math\.PI \/ 2\)/, "focus must rotate the beam TOWARD the camera, not behind the stage");
+  // A selection made while the scene was still initializing must still get
+  // its flight: the change detector seeds from a capture taken BEFORE the
+  // async load, not from whatever the ref says once loading finishes.
+  // (Codex review P2, 2026-09-01.)
+  assert.match(r3d, /const mountSel = selectedRef\.current;[\s\S]{0,900}?\(async \(\) =>/, "the mount selection must be captured before the async init");
+  assert.match(r3d, /let lastSelSeen = mountSel/, "the change detector must diff against the pre-init capture");
+  assert.match(r3d, /bootT = Math\.min\(1,/, "the boot assembly must clamp at complete -- an unclamped boot re-eases forever");
+  assert.match(r3d, /addEventListener\("dblclick", onDblClick\)/, "double-click must reset the camera to the home orbit");
+  assert.match(r3d, /removeEventListener\("dblclick", onDblClick\)/, "the dblclick listener must be torn down with the scene");
+  // Every hand-rolled ShaderMaterial goes through the disposal registry --
+  // rule 4 gained two new material classes this round and both must die
+  // with the scene.
+  const shaderMats = (r3d.match(/new THREE\.ShaderMaterial/g) || []).length;
+  const trackedShaderMats = (r3d.match(/track\(new THREE\.ShaderMaterial/g) || []).length;
+  assert.ok(shaderMats >= 2, "round 7 hand-rolls the sheath and surface shaders");
+  assert.equal(trackedShaderMats, shaderMats, "every ShaderMaterial must be tracked for disposal");
+  // Selection is a TAP: the pointerup path guards on !dragging via the
+  // TAP_SLOP travel threshold, and the hover path sets only hoverKey.
+  assert.match(r3d, /const TAP_SLOP/, "tap-vs-drag must be distinguished by a travel threshold");
+  assert.match(r3d, /if \(pointerDown && !dragging\) \{[\s\S]{0,200}?selectRef\.current/, "selection must fire on tap release, never mid-drag");
+  assert.doesNotMatch(r3d, /hoverKey = pick\(e\);\s*[^\n]*\n\s*[^\n]*selectRef\.current/, "hover must highlight only -- it must never select");
+  // The score surface's shader may respond to the viewpoint but never to
+  // time: rule 5, in GLSL. The sheath shader is the decorated exception and
+  // carries the uTime term on purpose.
+  assert.ok(!/SURFACE_FRAG[\s\S]*?uTime[\s\S]*?varying/.test(r3d.slice(r3d.indexOf("SURFACE_FRAG"), r3d.indexOf("export function Radar3D"))), "the score surface shader must not animate by itself");
+
+  // The shared-selection wiring: the plate's chips are buttons on the same
+  // state as the list and the stage.
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /const \[dimSel, setDimSel\] = useState<string \| null>\(null\)/, "ScoredBody must own the shape section's one selection");
+  assert.match(src, /<DimensionShape[\s\S]{0,400}?selected=\{dimSel\}/, "the dimension list must read the shared selection");
+  assert.match(src, /designation\.primary\.map[\s\S]{0,700}?aria-pressed=\{active\}/, "the plate's defining-area chips must be accessible toggles on the shared selection");
+}
+
+// ---------------------------------------------------------------------------
+// 8i. ROUND 8 — SOUND AND THE DECODE, AT ZERO COST. The pins are the safety
+//     properties: sound ships OFF and silent-by-structure (a rep is on the
+//     phone next to this card -- a HUD that beeps into a live call is
+//     sabotage dressed as polish), no audio FILE may ever join the repo
+//     (the palette is synthesized; a file is a cost, a licence and a
+//     fetch), the already-enabled unlock is a one-time gesture (autoplay
+//     policy, honoured rather than fought), and the designation decode
+//     renders settled under reduced motion with the real name on the
+//     aria-label so assistive tech never hears a scramble frame.
+// ---------------------------------------------------------------------------
+
+{
+  const sfxSrc = read("components/web-leads/battle-sfx.ts");
+  assert.match(sfxSrc, /oasis\.battlecard\.sfx/, "the sound preference must persist per rep");
+  assert.match(sfxSrc, /enabled = window\.localStorage\.getItem\(KEY\) === "1"/, "sound must be OFF unless the rep explicitly turned it on");
+  assert.match(sfxSrc, /\{ once: true, capture: true \}/, "the already-enabled unlock must be a one-time gesture listener");
+  assert.doesNotMatch(sfxSrc, /\.(mp3|wav|ogg|m4a|webm)\b/, "no audio files, ever -- the palette is synthesized from oscillators");
+  const gainM = sfxSrc.match(/const GAIN = (0\.\d+)/);
+  assert.ok(gainM && parseFloat(gainM[1]) <= 0.06, "the volume ceiling must stay under a phone call");
+  assert.match(sfxSrc, /if \(!enabled \|\| !ctx \|\| ctx\.state !== "running"\) return/, "play must be a no-op unless opted in AND gesture-unlocked");
+
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.match(src, /aria-pressed=\{sfxOn\}/, "the SFX toggle must be an accessible toggle");
+  assert.match(src, /if \(reduced\) \{ setDisplay\(text\); return; \}/, "the decode must render settled under reduced motion");
+  assert.match(src, /aria-label=\{designation\.name\}/, "assistive tech must hear the real designation, never the scramble");
+
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /disarmSfx = sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount, keeping the disarm");
+  // The arm flag is module-global: a stage unmounting before any gesture
+  // must disarm, or every later stage refuses to arm and SFX shows "on"
+  // while permanently silent -- and the disarm must live in the OUTER
+  // teardown, because an unmount during the async init never builds
+  // `cleanup` at all. (Codex review P2 + follow-up, 2026-09-01.)
+  assert.match(r3d, /dead = true;\s*disarmSfx\(\);/, "the unlock arm must be released in the outer teardown, which runs on every unmount path");
+  assert.match(read("components/web-leads/battle-sfx.ts"), /armUnlock\(el: HTMLElement\): \(\) => void/, "armUnlock must hand back a disarm");
+  assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
+  assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
+  assert.match(r3d, /lockT = Math\.min\(1,/, "the lock-on burst must clamp -- an unclamped burst re-fires forever");
+}
+
+// ---------------------------------------------------------------------------
+// 8j. ROUND 9 — THE FINAL POLISH IS PHYSICS AND WAYFINDING. Audit findings,
+//     each pinned so it cannot regress: no visual state may SNAP (selection
+//     and hover blend through damped mixes), no animation may run on a
+//     layout property (width -> transform), all per-frame damping is
+//     frame-rate-normalized (a flight takes the same time on 60Hz and
+//     144Hz), sections animate open/close PHYSICALLY (grid-rows, content
+//     inert while closed so a hidden drawer can't swallow focus), and the
+//     card gained a section tab strip so a rep six sections deep can jump
+//     anywhere -- driven by a registry, never a hand-maintained list that
+//     drifts from the page.
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /const damp = \(k: number, dt: number\)/, "per-frame damping must be frame-rate-normalized");
+  assert.match(r3d, /camPos\.lerp\(wantPos, damp\(/, "the camera flight must use normalized damping");
+  assert.match(r3d, /p\.selMix \+= \(\(active \? 1 : 0\) - p\.selMix\) \* damp\(/, "selection emphasis must blend, never snap");
+  assert.match(r3d, /p\.hotMix \+= \(\(hot \? 1 : 0\) - p\.hotMix\) \* damp\(/, "hover emphasis must blend, never snap");
+  assert.doesNotMatch(r3d, /scale\.x = p\.mesh\.scale\.z = active \?/, "the selected beam's scale must ride the damped mix, not a ternary snap");
+
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.doesNotMatch(src, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
+  const scaleXDraws = (src.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
+  assert.ok(scaleXDraws >= 2, "both the Meter and the head-to-head track must draw via scaleX");
+
+  // Registry callbacks are identity-stable: recreated callbacks invalidate
+  // every section's registration effect on every state change -- an
+  // unregister/re-register cascade that reorders the tab strip and can
+  // loop. (Codex review P1, 2026-09-02.)
+  assert.match(r3d, /new IntersectionObserver/, "the render loop must pause when the stage is out of view -- an always-mounted closed drawer would otherwise burn GPU forever (Codex P2, 2026-09-02)");
+  // Zero-area edge-touch counts as isIntersecting per spec -- the collapsed
+  // drawer's clip rect can touch the host's edge, which is exactly the case
+  // the observer exists for. Positive area required.
+  // The visibility predicate and the observer threshold must share ONE
+  // cutoff constant: every misalignment strands the loop in one direction
+  // (edge-touch counts as visible; 0 -> positive is unobservable; the
+  // downward crossing fires while the ratio is still positive). Three
+  // Codex rounds, one constant.
+  assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio >= HIDE_RATIO/, "the visibility predicate must use the shared cutoff");
+  assert.match(r3d, /\{ threshold: \[0, HIDE_RATIO\] \}/, "the observer threshold must be the same shared cutoff");
+  assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
+  const shell = read("components/web-leads/BattleSection.tsx");
+  assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
+  assert.match(shell, /const reportOpen = useCallback\(/, "reportOpen must be identity-stable for the same reason");
+  assert.match(shell, /registerSection/, "sections must self-register -- a hand-maintained tab list drifts from the page");
+  assert.match(shell, /bus\.sections\.map/, "the tab strip must render from the registry");
+  assert.match(shell, /gridTemplateRows: isOpen \? "1fr" : "0fr"/, "sections must animate open/close via grid-rows -- the one CSS-only unknown-height animation");
+  assert.match(shell, /inert=\{!isOpen\}/, "closed content stays mounted but must be inert -- a hidden drawer must not swallow keyboard focus");
+  assert.match(shell, /aria-hidden=\{!isOpen\}/, "closed content must be hidden from assistive tech");
+  assert.match(shell, /openOne\(id\)/, "a tab must OPEN its section, not just scroll to a closed drawer");
 }
 
 console.log("web-leads-battlecard ok");
