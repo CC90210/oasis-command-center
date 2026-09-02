@@ -56,6 +56,7 @@ const SORTS: { key: LeadSort; label: string }[] = [
 export function LeadsToolbar({
   filters, onChange, total, loading, queryDraft, onQueryDraft, onStartCalling, canStartCalling,
   selectedCount, onClaim, claiming, claimLabel, canMutate, filterCount, onOpenFilters,
+  assignOptions = [], assignTo = "", onAssignTo,
 }: {
   filters: WebLeadFilters;
   onChange: (f: WebLeadFilters) => void;
@@ -75,6 +76,12 @@ export function LeadsToolbar({
   /** Server-resolved sales mutation capability. Read-only viewers keep every
    *  targeting/read control but never receive claim or call affordances. */
   canMutate: boolean;
+  /** Reps an admin or manager may hand the ticked leads to. Empty for everyone
+   *  else, which is what hides the picker -- assignment is an extra
+   *  destination for Claim, not a separate control. */
+  assignOptions?: Array<{ id: string; name: string }>;
+  assignTo?: string;
+  onAssignTo?: (id: string) => void;
   /** How many of the RAIL's filters are on, for the Filters button's badge.
    *  Counted by FilterRail.activeFilterCount so the badge and the sheet can
    *  never disagree about what "a filter" is. */
@@ -212,6 +219,25 @@ export function LeadsToolbar({
               lead{total === 1 ? "" : "s"}
             </p>
           )}
+          {canMutate && selectedCount > 0 && assignOptions.length > 0 && onAssignTo && (
+            // Sits BEFORE the button and changes its label, so the destination
+            // is read before the action is taken rather than discovered after.
+            <label className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-bg-border bg-bg-panel px-3 text-sm text-fg-muted xl:min-h-0 xl:py-2">
+              <span className="sr-only">Assign the selected leads to</span>
+              <UserPlus className="h-4 w-4 shrink-0" aria-hidden />
+              <select
+                value={assignTo}
+                onChange={(e) => onAssignTo(e.target.value)}
+                disabled={claiming}
+                className="min-w-0 bg-transparent text-sm text-fg outline-none disabled:opacity-50"
+              >
+                <option value="">Claim for myself</option>
+                {assignOptions.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           {canMutate && selectedCount > 0 && (
             <button
               type="button"
@@ -220,7 +246,7 @@ export function LeadsToolbar({
               className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3.5 text-sm font-bold text-accent transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 disabled:pointer-events-none disabled:opacity-50 sm:flex-none xl:min-h-0 xl:py-2"
             >
               {claiming ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserPlus className="h-4 w-4" />}
-              {claimLabel} {selectedCount}
+              {assignTo && claimLabel !== "Release" ? "Assign" : claimLabel} {selectedCount}
             </button>
           )}
           {canMutate && (
