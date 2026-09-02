@@ -64,6 +64,22 @@ const EXPECTED_WORKERS: Array<{
   manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
+  /**
+   * Set when this worker is NOT supposed to be running on the operator's
+   * machine. The string is the reason, shown on the tile.
+   *
+   * Added 2026-09-02. Two tiles had been red for months for reasons that were
+   * not faults: the Skool daemon is retired code kept on disk deliberately,
+   * and the dashboard email consumer is hosted on the VPS. Rendering both as
+   * "Down — stopped reporting" made the board unreadable — an operator who
+   * learns that some red is normal stops reading the red that is not, which is
+   * how the same board hid three genuinely dead daemons.
+   *
+   * These are excluded from the healthy/total pill: a denominator that counts
+   * workers nobody intends to run here can never reach full, so it stops
+   * meaning anything.
+   */
+  not_expected_here?: string;
 }> = [
   {
     service: "pm2.bravo-scheduler",
@@ -123,6 +139,16 @@ const EXPECTED_WORKERS: Array<{
     service: "pm2.dashboard-email-consumer",
     label: "Dashboard email sender",
     purpose: "Sends emails queued from the Command Center's lead-drawer composer. Polls lead_interactions every 10s.",
+    // Hosted on the VPS, not the operator's machine: ecosystem.config.js gates
+    // it behind IS_LINUX so queued mail still drains when the laptop is off.
+    // The operator's bridge therefore has no process to report, which is why
+    // this tile read "Down — stopped reporting" rather than "runs elsewhere".
+    //
+    // A second copy here is NOT the fix: dashboard_email_consumer._mark_status
+    // is read-modify-write with no row claim, so two consumers double-send.
+    // That needs a compare-and-swap on metadata.status before this can run in
+    // two places.
+    not_expected_here: "Runs on the VPS so queued mail drains while this machine is off",
   },
   {
     service: "pm2.atlas-telegram",
@@ -142,11 +168,11 @@ const EXPECTED_WORKERS: Array<{
     // which suggested it was retired permanently. It's just stopped — code
     // is still on disk at scripts/_archive/skool/ for revival when the
     // operator launches their own community.
-    purpose: "Stopped. Posts/replies in a Skool community. Code preserved at scripts/_archive/skool/ — revive only when the operator launches their own community.",
-    // Standalone Python script — owns its own lock file. pm2 doesn't know
-    // about it, so the Start/Stop/Restart buttons are hidden for this
-    // tile (sending `pm2 start skool_engine` would fail).
+    purpose: "Posts/replies in a Skool community. Code preserved at scripts/_archive/skool/ — revive only when the operator launches their own community.",
+    // Standalone Python script — owns its own lock file. The supervisor does
+    // not know about it, so the Start/Stop/Restart buttons are hidden.
     manageable_via_pm2: false,
+    not_expected_here: "Retired 2026-05-18 — nothing runs it until you launch a community",
   },
 ];
 
@@ -299,6 +325,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       // predates the owner field and has no Breeze/adon entries — default
       // "cc". SUNBIZ_WORKERS always carries an explicit owner.
       owner: "owner" in w ? w.owner : "cc",
+      not_expected_here: "not_expected_here" in w ? w.not_expected_here : undefined,
       ...(archived && {
         archived_on: w.archived_on,
         archived_reason: w.archived_reason,
@@ -328,6 +355,10 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       service: "cloud.founder-meeting-reminders",
       label: "Founder meeting reminders",
       purpose: "Sends consent-aware booking confirmations and 10-minute reminders from the verified Google Calendar handoff.",
+      // Cloud-hosted, but it DOES report here (website_sales_meeting_worker_health),
+      // so it is a real member of the pill's denominator — unlike the two
+      // workers that carry a reason string.
+      not_expected_here: undefined,
       status: !health ? "unconfigured" : stale ? "down" : health.status,
       stale,
       metadata: health ? {
