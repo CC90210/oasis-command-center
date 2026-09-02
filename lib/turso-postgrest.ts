@@ -271,7 +271,7 @@ function compileOp(col: string, op: string, value: unknown): Cond {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const entries = Object.entries(parsed as Record<string, unknown>);
       if (entries.length === 0) return { sql: "1=1", args: [] };
-      const args: unknown[] = [];
+      const args: InValue[] = [];
       const conds = entries.map(([k, v]) => {
         if (!/^[\w$]+$/.test(k)) throw new Error(`unsafe contains key: ${k}`);
         // A JSON null needs json_type, not equality. `json_extract(...) = ?`
