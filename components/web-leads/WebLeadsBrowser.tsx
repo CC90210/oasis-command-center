@@ -300,17 +300,10 @@ export function WebLeadsBrowser({
   // the same invariant for their own fetches.
   useEffect(() => {
     let alive = true;
-    if (view === "territories") {
-      setLeads([]);
-      setLeadsKey(null);
-      setTotal(0);
-      setPageSize(Number.POSITIVE_INFINITY);
-      setFacets(null);
-      setFacetError(null);
-      setListError(null);
-      setLoading(false);
-      return () => { alive = false; };
-    }
+    // The Assign view fetches the pool like every other list. It used to blank
+    // the list here and render only the sheet control, which is why "assign"
+    // could only ever mean "hand someone an entire city+industry sheet" --
+    // 1,158 leads or nothing. Assigning ONE lead was not expressible.
     setLoading(true);
     const qs = filtersToParams({ ...filters, leadId: null }).toString();
     // scope=mine asks for the caller's own book; the default pool excludes
@@ -394,6 +387,7 @@ export function WebLeadsBrowser({
     [filters],
   );
 
+  const assignView = view === "territories";
   const mine = view === "mine";
   const team = view === "team";
   const canOperateCurrentView = canMutate && !team;
@@ -634,12 +628,21 @@ export function WebLeadsBrowser({
         action={<ViewSwitcher active={view} onChange={setView} canSeeTeamAndAssign={canSeeTeamAndAssign} />}
       />
 
-      {(view === "leads" || mine || team) && listBlock}
+      {(view === "leads" || mine || team || assignView) && listBlock}
 
-      {view === "territories" && (
-        <div className="max-w-3xl">
-          <TerritoryAssignment />
-        </div>
+      {assignView && (
+        // Kept, demoted. Handing a rep a whole sheet is still occasionally the
+        // right move when a territory is genuinely one person's patch, but it
+        // is the exception -- so it sits below the list, closed, instead of
+        // being the only thing the tab could do.
+        <details className="max-w-3xl rounded-xl border border-bg-border bg-bg-panel/40 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-fg-muted">
+            Bulk: give a rep an entire sheet
+          </summary>
+          <div className="mt-4">
+            <TerritoryAssignment />
+          </div>
+        </details>
       )}
 
       {calling && canOperateCurrentView && (

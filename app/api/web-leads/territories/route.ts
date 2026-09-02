@@ -16,7 +16,8 @@
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
+import { WEBDEV_TENANT_ID, fetchSheetsScopedToViewer } from "@/lib/web-leads/data";
+import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
 
 
 export const runtime = "nodejs";
@@ -53,7 +54,24 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: territories.error.message }, { status: 500 });
   }
 
+  // COUNT THE ROWS, NOT THE STORED COLUMN. leadgen_territories.leads_callable
+  // is written when a lead is promoted and never recomputed when one leaves, so
+  // after the board was consolidated it advertised sheets that no longer exist
+  // at that size -- "Montreal, QC - Restaurants & Bars (1158)" against a few
+  // dozen real rows. #377 fixed the list and facet endpoints and missed this
+  // one, which is the door the Assign screen reads.
+  //
+  // The same derivation the other two use, over the same projection, so all
+  // three surfaces cannot disagree about how many leads a sheet holds.
+  const viewer = await resolveWebLeadViewer(session);
+  const live = await fetchSheetsScopedToViewer(viewer, {
+    scope: "pool",
+    now: Date.now(),
+  });
+  const liveCallable = new Map(live.map((sheet) => [sheet.id, sheet.leads_callable]));
+
   const rows = ((territories.data || []) as TerritoryRow[])
+    .map((t) => ({ ...t, leads_callable: liveCallable.get(t.id) ?? 0 }))
     .filter((t) => (t.leads_callable || 0) > 0)
     .sort((a, b) => (b.leads_callable || 0) - (a.leads_callable || 0));
   return NextResponse.json({ ok: true, territories: rows });

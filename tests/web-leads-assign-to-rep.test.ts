@@ -119,6 +119,55 @@ describe('assigning a lead to another rep', () => {
     assert.match(toolbar, /assignOptions\.length > 0 && onAssignTo/);
   });
 
+  it('shows the actual leads on the Assign tab', () => {
+    // THE BUG THIS TAB HAD. The view short-circuited the fetch and rendered
+    // only the sheet control, so "assign" could only mean "hand someone an
+    // entire city+industry sheet" -- 1,158 leads or nothing. Assigning ONE lead
+    // was not expressible on the screen named Assign.
+    const browser = readFileSync('components/web-leads/WebLeadsBrowser.tsx', 'utf8');
+    assert.match(
+      browser,
+      /view === "leads" \|\| mine \|\| team \|\| assignView\) && listBlock/,
+      'the Assign view must render the lead list',
+    );
+    assert.ok(
+      !/if \(view === "territories"\) \{\s*setLeads\(\[\]\)/.test(browser),
+      'the Assign view must not blank the list before fetching',
+    );
+  });
+
+  it('keeps sheet assignment, demoted rather than deleted', () => {
+    // Handing a rep a whole sheet is still occasionally right when a territory
+    // is genuinely one person's patch. It stays, closed, BELOW the list --
+    // available without being the only thing the tab can do.
+    const browser = readFileSync('components/web-leads/WebLeadsBrowser.tsx', 'utf8');
+    assert.match(browser, /<details[\s\S]{0,400}<TerritoryAssignment \/>/);
+    assert.match(browser, /Bulk: give a rep an entire sheet/);
+  });
+
+  it('every endpoint that reports a sheet size counts the rows', () => {
+    // #377 fixed the list and facet endpoints and MISSED the territories one,
+    // which is the door the Assign screen reads -- so the dropdown still
+    // advertised "Montreal, QC - Restaurants & Bars (1158)" against a board
+    // holding a few dozen. Three surfaces quote a sheet size; all three must
+    // derive it, or the one left behind becomes the number an operator trusts.
+    for (const route of [
+      'app/api/web-leads/route.ts',
+      'app/api/web-leads/facets/route.ts',
+      'app/api/web-leads/territories/route.ts',
+    ]) {
+      const routeSrc = readFileSync(route, 'utf8');
+      const routeCode = routeSrc
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '');
+      assert.match(
+        routeCode,
+        /fetchSheetsScopedToViewer\(/,
+        `${route} must derive sheet counts from the rows`,
+      );
+    }
+  });
+
   it('keeps the batch ceiling and the de-duplication', () => {
     // Assignment goes through the same body parsing, so the id list is still
     // bounded and de-duplicated -- the same id twice would otherwise burn two
