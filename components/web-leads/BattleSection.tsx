@@ -68,12 +68,19 @@ import { ChevronDown } from "lucide-react";
 
 type Broadcast = { seq: number; open: boolean } | null;
 type Targeted = { seq: number; id: string } | null;
+/** One row per mounted section, in mount (= DOM) order: the tab strip's
+ *  source of truth. `open` mirrors the section's live state so a tab can
+ *  show whether its drawer is open without owning that state. */
+type SectionEntry = { id: string; title: string; open: boolean };
 
 const BattleSectionsContext = createContext<{
   broadcast: Broadcast;
   targeted: Targeted;
+  sections: SectionEntry[];
   setAll: (open: boolean) => void;
   openOne: (id: string) => void;
+  registerSection: (id: string, title: string) => () => void;
+  reportOpen: (id: string, open: boolean) => void;
 } | null>(null);
 
 /** Read by sections (to obey broadcasts) and by anything that wants to open a
@@ -85,14 +92,26 @@ export function useBattleSections() {
 export function BattleSections({ children }: { children: ReactNode }) {
   const [broadcast, setBroadcast] = useState<Broadcast>(null);
   const [targeted, setTargeted] = useState<Targeted>(null);
+  const [sections, setSections] = useState<SectionEntry[]>([]);
   const value = useMemo(
     () => ({
       broadcast,
       targeted,
+      sections,
       setAll: (open: boolean) => setBroadcast((p) => ({ seq: (p?.seq ?? 0) + 1, open })),
       openOne: (id: string) => setTargeted((p) => ({ seq: (p?.seq ?? 0) + 1, id })),
+      registerSection: (id: string, title: string) => {
+        setSections((prev) => (prev.some((s) => s.id === id) ? prev : [...prev, { id, title, open: true }]));
+        return () => setSections((prev) => prev.filter((s) => s.id !== id));
+      },
+      reportOpen: (id: string, open: boolean) =>
+        setSections((prev) => {
+          const cur = prev.find((s) => s.id === id);
+          if (!cur || cur.open === open) return prev;
+          return prev.map((s) => (s.id === id ? { ...s, open } : s));
+        }),
     }),
-    [broadcast, targeted],
+    [broadcast, targeted, sections],
   );
   return <BattleSectionsContext.Provider value={value}>{children}</BattleSectionsContext.Provider>;
 }
@@ -107,27 +126,60 @@ function persist(id: string, open: boolean) {
   }
 }
 
-/** The two whole-card controls. Text, not icons: "Expand all" is an escape
- *  hatch back to the original everything-open page and must read as one. */
+/**
+ * The card's command strip (round 9): one HUD tab per section, in page
+ * order, plus the two whole-card controls. Sticky, so a rep six sections
+ * deep can jump anywhere without scrolling home first. Each tab carries a
+ * lit dot when its drawer is open -- state SHOWN, never colour-judged --
+ * and a click opens the section and takes the rep there. These are jump
+ * controls over disclosure state, not ARIA tabs: every section stays
+ * independently open-able, which is the whole point of the card.
+ */
 export function SectionToolbar() {
   const bus = useBattleSections();
   if (!bus) return null;
+  const jump = (id: string) => {
+    bus.openOne(id);
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.setTimeout(() => {
+      document.getElementById(`battle-sec-${id}`)?.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    }, 60);
+  };
   return (
-    <div className="flex items-center justify-end gap-2 text-[11px] font-semibold">
-      <button
-        type="button"
-        onClick={() => bus.setAll(true)}
-        className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-      >
-        Expand all
-      </button>
-      <button
-        type="button"
-        onClick={() => bus.setAll(false)}
-        className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-      >
-        Collapse all
-      </button>
+    <div className="sticky top-2 z-20 -mx-1 flex flex-wrap items-center gap-1 rounded-lg border border-bg-border bg-bg-panel/85 px-2 py-1.5 shadow-card backdrop-blur-md">
+      <span aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent" />
+      {bus.sections.map((s) => (
+        <button
+          key={s.id}
+          type="button"
+          onClick={() => jump(s.id)}
+          className="group/tab inline-flex items-center gap-1.5 rounded px-2 py-1 text-[9px] font-bold uppercase tracking-[0.12em] text-fg-dim transition-colors hover:bg-bg-raised/60 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none [font-family:var(--battle-display)]"
+        >
+          {/* Open state as SHAPE: a lit dot for open, a hollow ring for
+              closed. Neutral accent at every value. */}
+          <span
+            aria-hidden
+            className={`h-1.5 w-1.5 shrink-0 rounded-full transition-[background-color,box-shadow] motion-reduce:transition-none ${s.open ? "bg-accent/80 shadow-glow" : "border border-fg-dim/50"}`}
+          />
+          {s.title}
+        </button>
+      ))}
+      <span className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold">
+        <button
+          type="button"
+          onClick={() => bus.setAll(true)}
+          className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+        >
+          Expand all
+        </button>
+        <button
+          type="button"
+          onClick={() => bus.setAll(false)}
+          className="rounded-full border border-bg-border px-3 py-1 text-fg-dim transition-[color,border-color,box-shadow] hover:border-accent/40 hover:text-fg hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
+        >
+          Collapse all
+        </button>
+      </span>
     </div>
   );
 }
@@ -185,6 +237,14 @@ export function BattleSection({
 
   const isOpen = open ?? defaultOpen;
 
+  // The tab strip's registry: this section announces itself on mount (mount
+  // order IS page order) and reports its live open state, so a tab can show
+  // the drawer's state without owning it.
+  const registerSection = bus?.registerSection;
+  const reportOpen = bus?.reportOpen;
+  useEffect(() => registerSection?.(id, title), [registerSection, id, title]);
+  useEffect(() => { reportOpen?.(id, isOpen); }, [reportOpen, id, isOpen]);
+
   function toggle() {
     const next = !isOpen;
     setOpen(next);
@@ -192,7 +252,10 @@ export function BattleSection({
   }
 
   return (
-    <section className="relative overflow-hidden rounded-xl border border-bg-border bg-bg-panel/75 shadow-card backdrop-blur-sm transition-shadow hover:shadow-elev motion-reduce:transition-none">
+    <section
+      id={`battle-sec-${id}`}
+      className="relative scroll-mt-16 overflow-hidden rounded-xl border border-bg-border bg-bg-panel/75 shadow-card backdrop-blur-sm transition-shadow hover:shadow-elev motion-reduce:transition-none"
+    >
       {/* The lit top edge -- the one constant marker of a battle-card section.
           Keyed to nothing: identical for a 4 and a 94, open or closed. */}
       <span
@@ -220,11 +283,28 @@ export function BattleSection({
           className={`mt-0.5 h-4 w-4 shrink-0 text-fg-dim transition-transform duration-200 motion-reduce:transition-none ${isOpen ? "" : "-rotate-90"}`}
         />
       </button>
-      {isOpen && (
-        <div id={`battle-section-${id}`} className="px-5 pb-5 motion-safe:animate-fade-in lg:px-6 lg:pb-6">
-          {children}
+      {/* The drawer animates PHYSICALLY (round 9): grid-template-rows
+          0fr <-> 1fr, the one CSS-only way to animate to an unknown height
+          on the compositor's terms -- no measured heights, no layout pop in
+          either direction. Content stays MOUNTED while closed (which also
+          means cross-link anchors always exist) but is `inert` + hidden
+          from assistive tech, so a closed drawer can't swallow focus or be
+          read into a screen reader out of order. Reduced motion snaps. */}
+      <div
+        className="grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none"
+        style={{ gridTemplateRows: isOpen ? "1fr" : "0fr" }}
+      >
+        <div className="overflow-hidden">
+          <div
+            id={`battle-section-${id}`}
+            inert={!isOpen}
+            aria-hidden={!isOpen}
+            className={`px-5 pb-5 transition-opacity duration-200 ease-out motion-reduce:transition-none lg:px-6 lg:pb-6 ${isOpen ? "opacity-100" : "opacity-0"}`}
+          >
+            {children}
+          </div>
         </div>
-      )}
+      </div>
     </section>
   );
 }

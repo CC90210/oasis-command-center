@@ -99,6 +99,17 @@
  * gained a lock-on burst. Patterns mined from the open-source FUI space
  * (Arwes's sound-per-interaction grammar) without taking the dependency.
  *
+ * Round 9 (2026-09-02, the audit round: "a full audit... the final
+ * iteration that will be a 10/10"): physics and wayfinding. No visual
+ * state may SNAP -- the stage's selection and hover emphasis blend through
+ * frame-rate-normalized damped mixes (Radar3D), meters draw with transform
+ * instead of width (compositor, not layout), sections animate open/close
+ * PHYSICALLY via grid-rows with closed content inert, every eyebrow label
+ * speaks the display face, and the SectionToolbar became the card's
+ * COMMAND STRIP: a sticky HUD tab per section, registry-driven, each
+ * showing its drawer's state and jumping a rep anywhere in one tap.
+ * All pinned by §8j.
+ *
  * What keeps the theatre honest: chrome is keyed to NOTHING (a 4 and a 94 get
  * identical treatment -- rule 1 survives the decoration); ambient motion is
  * confined to decorative layers that carry no data (the rotating tick ring,
@@ -612,11 +623,16 @@ function Meter({
   const pct = Math.min(100, Math.max(0, value));
   return (
     <span className="relative block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+      {/* Drawn with transform, not width (round 9): width is a layout
+          property and animating it re-lays-out every frame; scaleX from a
+          left origin is the identical picture on the compositor. */}
       <span
         className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
         style={{
-          width: drawn ? `${pct}%` : "0%",
-          transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          width: `${pct}%`,
+          transform: drawn ? "scaleX(1)" : "scaleX(0)",
+          transformOrigin: "left",
+          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
           background: hue ? `linear-gradient(90deg, ${hue.from}, ${hue.to})` : undefined,
           boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
         }}
@@ -1789,14 +1805,14 @@ function ScoredBody({
             </>
           }
         >
-          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
             1. Say this
           </p>
           <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
             &ldquo;{angle.angle.opener}&rdquo;
           </p>
 
-          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          <p className="mt-5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
             2. Then ask this, and stop talking
           </p>
           <p className="mt-1.5 max-w-4xl text-lg font-semibold leading-relaxed text-fg">
@@ -1811,19 +1827,19 @@ function ScoredBody({
 
           <div className="mt-6 grid gap-5 border-t border-bg-border pt-5 md:grid-cols-3">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 3. Once they answer, this is why it costs them
               </p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.cost}</p>
             </div>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 If they say &ldquo;{angle.angle.objection.says}&rdquo;
               </p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.objection.response}</p>
             </div>
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">What we&apos;d build</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">What we&apos;d build</p>
               <p className="mt-1.5 text-sm leading-relaxed text-fg-dim">{angle.angle.build}</p>
             </div>
           </div>
@@ -1836,7 +1852,7 @@ function ScoredBody({
               instead of guessing. */}
           {angle.angle.proof && (
             <div className="mt-5 rounded-lg border border-bg-border bg-bg-raised/60 p-4">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">
                 Only if they push back on that
               </p>
               <p className="mt-1.5 max-w-4xl text-sm leading-relaxed text-fg-dim">{angle.angle.proof.stat}</p>
@@ -1992,7 +2008,7 @@ function ScoredBody({
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
             {evidence.map((group) => (
               <div key={group.title}>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">{group.title}</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">{group.title}</p>
                 <dl className="mt-2 divide-y divide-bg-border/60">
                   {group.rows.map((row) => (
                     <div
@@ -2274,7 +2290,7 @@ function DimensionShape({
             <p className="mt-2 text-sm text-fg-dim">Everything we check in this area passed.</p>
           ) : (
             <div className="mt-2.5">
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Biggest gap in this area</p>
+              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted [font-family:var(--battle-display)]">Biggest gap in this area</p>
               <p className="mt-1 text-sm font-semibold text-fg">{misses[0].label}</p>
               <MeasuredLine code={misses[0].code} signals={signals} />
               <RemedyLines code={misses[0].code} />
@@ -2598,11 +2614,14 @@ function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader
   const l = Math.min(100, Math.max(0, leader));
   return (
     <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
+      {/* Same compositor discipline as Meter: transform, never width. */}
       <div
         className="absolute inset-y-0 left-0 rounded-full"
         style={{
-          width: drawn ? `${t}%` : "0%",
-          transition: reduced ? "none" : "width 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+          width: `${t}%`,
+          transform: drawn ? "scaleX(1)" : "scaleX(0)",
+          transformOrigin: "left",
+          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
           background: "linear-gradient(90deg, #22d3ee, #60a5fa)",
           boxShadow: "0 0 8px rgba(34,211,238,0.35)",
         }}

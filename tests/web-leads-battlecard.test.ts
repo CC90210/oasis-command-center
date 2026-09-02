@@ -1488,7 +1488,7 @@ const MODEL_CODES = [
 
 {
   const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /rotVel \*= 0\.9/, "a released spin must decay toward rest -- undamped inertia never stops");
+  assert.match(r3d, /rotVel \*= Math\.pow\(0\.94, dt \* 60\)/, "a released spin must decay toward rest, frame-rate-normalized -- undamped inertia never stops, and unnormalized decay runs 2x on a 120Hz display");
   assert.match(r3d, /const nearestTurn/, "a focus flight must rotate the shortest way to the chosen beam");
   // The rotation SIGN: a three.js Y-rotation by R moves azimuth a to a - R,
   // so facing the camera (+PI/2) needs R = a - PI/2. The inverted form
@@ -1568,6 +1568,41 @@ const MODEL_CODES = [
   assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
   assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
   assert.match(r3d, /lockT = Math\.min\(1,/, "the lock-on burst must clamp -- an unclamped burst re-fires forever");
+}
+
+// ---------------------------------------------------------------------------
+// 8j. ROUND 9 — THE FINAL POLISH IS PHYSICS AND WAYFINDING. Audit findings,
+//     each pinned so it cannot regress: no visual state may SNAP (selection
+//     and hover blend through damped mixes), no animation may run on a
+//     layout property (width -> transform), all per-frame damping is
+//     frame-rate-normalized (a flight takes the same time on 60Hz and
+//     144Hz), sections animate open/close PHYSICALLY (grid-rows, content
+//     inert while closed so a hidden drawer can't swallow focus), and the
+//     card gained a section tab strip so a rep six sections deep can jump
+//     anywhere -- driven by a registry, never a hand-maintained list that
+//     drifts from the page.
+// ---------------------------------------------------------------------------
+
+{
+  const r3d = read("components/web-leads/Radar3D.tsx");
+  assert.match(r3d, /const damp = \(k: number, dt: number\)/, "per-frame damping must be frame-rate-normalized");
+  assert.match(r3d, /camPos\.lerp\(wantPos, damp\(/, "the camera flight must use normalized damping");
+  assert.match(r3d, /p\.selMix \+= \(\(active \? 1 : 0\) - p\.selMix\) \* damp\(/, "selection emphasis must blend, never snap");
+  assert.match(r3d, /p\.hotMix \+= \(\(hot \? 1 : 0\) - p\.hotMix\) \* damp\(/, "hover emphasis must blend, never snap");
+  assert.doesNotMatch(r3d, /scale\.x = p\.mesh\.scale\.z = active \?/, "the selected beam's scale must ride the damped mix, not a ternary snap");
+
+  const src = read("components/web-leads/BattleCard.tsx");
+  assert.doesNotMatch(src, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
+  const scaleXDraws = (src.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
+  assert.ok(scaleXDraws >= 2, "both the Meter and the head-to-head track must draw via scaleX");
+
+  const shell = read("components/web-leads/BattleSection.tsx");
+  assert.match(shell, /registerSection/, "sections must self-register -- a hand-maintained tab list drifts from the page");
+  assert.match(shell, /bus\.sections\.map/, "the tab strip must render from the registry");
+  assert.match(shell, /gridTemplateRows: isOpen \? "1fr" : "0fr"/, "sections must animate open/close via grid-rows -- the one CSS-only unknown-height animation");
+  assert.match(shell, /inert=\{!isOpen\}/, "closed content stays mounted but must be inert -- a hidden drawer must not swallow keyboard focus");
+  assert.match(shell, /aria-hidden=\{!isOpen\}/, "closed content must be hidden from assistive tech");
+  assert.match(shell, /openOne\(id\)/, "a tab must OPEN its section, not just scroll to a closed drawer");
 }
 
 console.log("web-leads-battlecard ok");

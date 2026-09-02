@@ -108,6 +108,11 @@ const nearestTurn = (from: number, to: number): number => {
 
 const phase = (t: number, a: number, b: number) => Math.min(1, Math.max(0, (t - a) / (b - a)));
 const easeOut = (x: number) => 1 - Math.pow(1 - x, 3);
+/** Frame-rate-normalized damping: the per-frame blend that equals `k` at
+ *  60fps. A bare `x += (t - x) * k` runs twice as fast on a 120Hz display
+ *  and half as fast under load -- a focus flight should take the same
+ *  fraction of a second on every machine a rep owns. */
+const damp = (k: number, dt: number) => 1 - Math.pow(1 - k, dt * 60);
 
 /** The holographic sheath: fresnel rim (bright where the surface grazes the
  *  view) times a slow upward scanline crawl. Hand-rolled, ~20 lines of GLSL,
@@ -420,6 +425,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         baseH: number;
         bootFrom: number;
         bootTo: number;
+        /** Damped emphasis mixes (round 9): eased toward 1 while selected /
+         *  hovered, so no visual property ever snaps between states. */
+        selMix: number;
+        hotMix: number;
       }[] = [];
 
       dimensions.forEach((d, i) => {
@@ -490,6 +499,8 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
           // Staggered rise: each beam starts a beat after its neighbour.
           bootFrom: 0.18 + i * 0.05,
           bootTo: 0.5 + i * 0.05,
+          selMix: 0,
+          hotMix: 0,
         });
       });
 
@@ -617,7 +628,11 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         el.tabIndex = -1;
         el.style.cssText =
           "position:absolute;left:0;top:0;pointer-events:auto;cursor:pointer;background:none;border:0;padding:2px 4px;" +
-          "display:flex;flex-direction:column;align-items:center;gap:1px;white-space:nowrap;transform:translate(-50%,-100%);";
+          "display:flex;flex-direction:column;align-items:center;gap:1px;white-space:nowrap;transform:translate(-50%,-100%);" +
+          // Opacity may transition (depth fades read smoother); transform
+          // may NOT -- it is written per frame and a transition would fight
+          // the projection.
+          "transition:opacity 140ms linear;";
         const name = document.createElement("span");
         name.textContent = d.label;
         name.style.cssText = `font-family:var(--battle-display);font-size:10px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:${hue};text-shadow:0 0 8px ${hue}66;`;
@@ -749,10 +764,16 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       const wantPos = HOME_POS.clone();
       const wantLook = HOME_LOOK.clone();
 
+      let lastNow = performance.now();
       const tick = () => {
         if (!running) return;
-        const bootT = Math.min(1, (performance.now() - bootStart) / 1400);
-        decorT += 0.0016;
+        const now = performance.now();
+        // Clamped so a tab resume does not integrate an hour of "elapsed"
+        // spin in one frame.
+        const dt = Math.min(0.05, (now - lastNow) / 1000);
+        lastNow = now;
+        const bootT = Math.min(1, (now - bootStart) / 1400);
+        decorT += dt * 0.096;
 
         // A selection that arrived from OUTSIDE the canvas (the list, the
         // plate) engages the same focus flight a tap does.
@@ -776,25 +797,25 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
           // test on the default selection missed it. (Codex review P1,
           // 2026-09-01.)
           const targetR = nearestTurn(rotY, focusPillar.azimuth - Math.PI / 2);
-          rotY += (targetR - rotY) * 0.07;
-          tiltX += (-0.18 - tiltX) * 0.05;
+          rotY += (targetR - rotY) * damp(0.07, dt);
+          tiltX += (-0.18 - tiltX) * damp(0.05, dt);
           rotVel = 0;
           wantPos.copy(FOCUS_POS);
           wantLook.set(0, focusPillar.baseH * 0.55 + 0.25, 1.1);
         } else {
           if (!dragging) {
-            rotY += rotVel;
-            rotVel *= 0.94;
+            rotY += rotVel * dt * 60;
+            rotVel *= Math.pow(0.94, dt * 60);
             if (Math.abs(rotVel) < 0.00004) {
               rotVel = 0;
-              rotY += 0.0016;
+              rotY += dt * 0.096;
             }
           }
           wantPos.copy(HOME_POS);
           wantLook.copy(HOME_LOOK);
         }
-        camPos.lerp(wantPos, 0.06);
-        camLook.lerp(wantLook, 0.08);
+        camPos.lerp(wantPos, damp(0.06, dt));
+        camLook.lerp(wantLook, damp(0.08, dt));
         camera.position.copy(camPos);
         camera.lookAt(camLook);
 
@@ -810,26 +831,35 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
         for (const f of bootFades) f.mat.opacity = f.base * easeOut(phase(bootT, f.from, f.to));
         surfaceUniforms.uOpacity.value = 0.3 * easeOut(phase(bootT, 0.6, 0.95));
 
-        // ── the beams: boot rise x selection state ─────────────────────
+        // ── the beams: boot rise x DAMPED selection/hover mixes ────────
+        // Round 9: no state may SNAP. Each beam carries two smoothed mixes
+        // (selected, hovered) eased toward their targets with frame-rate-
+        // normalized damping, and every visual property blends through
+        // them -- a selection glides into emphasis over ~180ms instead of
+        // teleporting between two looks on a frame boundary.
         const sel = selectedRef.current;
         for (const p of pillars) {
           const rise = easeOut(phase(bootT, p.bootFrom, p.bootTo));
           const active = p.key === sel;
-          const hot = active || p.key === hoverKey;
+          const hot = p.key === hoverKey && !active;
+          p.selMix += ((active ? 1 : 0) - p.selMix) * damp(0.16, dt);
+          p.hotMix += ((hot ? 1 : 0) - p.hotMix) * damp(0.22, dt);
+          const s = p.selMix;
+          const h = p.hotMix;
           p.mesh.scale.y = Math.max(rise, 0.001);
           p.mesh.position.y = (p.baseH * rise) / 2;
           p.sheath.scale.y = Math.max(rise, 0.001);
           p.sheath.position.y = (p.baseH * rise) / 2;
           p.glow.position.y = p.baseH * rise;
           p.anchor.position.y = p.baseH * rise + 0.3;
-          p.mat.opacity = (active ? 1 : hot ? 0.92 : 0.85) * rise;
-          p.sheathMat.uniforms.uTime.value = decorT * 1000 * 0.0026;
-          p.sheathMat.uniforms.uOpacity.value = (active ? 0.95 : hot ? 0.7 : 0.55) * rise;
-          p.ringMat.opacity = (active ? 0.7 : 0.4) * rise;
-          p.glowMat.opacity = (active ? 1 : hot ? 0.85 : 0.7) * rise;
-          p.glow.scale.setScalar((active ? 0.85 : 0.55) * Math.max(rise, 0.001));
-          p.mesh.scale.x = p.mesh.scale.z = active ? 1.6 : 1;
-          p.sheath.scale.x = p.sheath.scale.z = active ? 1.35 : 1;
+          p.mat.opacity = (0.85 + 0.15 * s + 0.07 * h) * rise;
+          p.sheathMat.uniforms.uTime.value = decorT * 2.6;
+          p.sheathMat.uniforms.uOpacity.value = (0.55 + 0.4 * s + 0.15 * h) * rise;
+          p.ringMat.opacity = (0.4 + 0.3 * s) * rise;
+          p.glowMat.opacity = (0.7 + 0.3 * s + 0.15 * h) * rise;
+          p.glow.scale.setScalar((0.55 + 0.3 * s) * Math.max(rise, 0.001));
+          p.mesh.scale.x = p.mesh.scale.z = 1 + 0.6 * s;
+          p.sheath.scale.x = p.sheath.scale.z = 1 + 0.35 * s;
         }
 
         // ── the reticle rides the selected beam, with a lock-on burst ──
@@ -839,7 +869,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
             lastReticleKey = selPillar.key;
             lockT = 0;
           }
-          lockT = Math.min(1, lockT + 0.06);
+          lockT = Math.min(1, lockT + dt * 3.6);
           const burst = 1 - easeOut(lockT);
           reticle.visible = true;
           reticle.position.x = selPillar.x;
