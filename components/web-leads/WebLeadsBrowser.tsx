@@ -183,11 +183,7 @@ export function WebLeadsBrowser({
    * an extra destination for the same action, not a separate mode.
    */
   const [assignTo, setAssignTo] = useState<string>("");
-  const [reps, setReps] = useState<Array<{
-    auth_user_id: string | null;
-    display_name: string | null;
-    full_name: string | null;
-  }>>([]);
+  const [reps, setReps] = useState<Array<{ id: string; name: string }>>([]);
   const [claiming, setClaiming] = useState(false);
   const [claimNote, setClaimNote] = useState<string | null>(null);
   /**
@@ -208,17 +204,26 @@ export function WebLeadsBrowser({
   // exists to prevent.
   useEffect(() => { setSelected(new Set()); setClaimNote(null); }, [sp]);
 
-  // Roster for the assign picker. Reuses the existing team-roster endpoint
-  // rather than adding a second members source -- TerritoryAssignment already
-  // reads it. Best-effort: if it fails the picker stays empty and plain
-  // self-claim still works, because losing the roster must not take the Claim
-  // button down with it.
+  // Roster for the assign picker.
+  //
+  // NOT /api/team/members, which is every profile on the tenant. The claim
+  // route validates the target against getOasisSalesRepRoster, which excludes
+  // owners, admin_access holders and non-rep roles -- so the members list
+  // offered names the server then refused with target_not_on_sales_roster. On
+  // the live tenant that was 8 names for 6 valid targets: picking CC or Adon
+  // failed, on a name the picker had just presented as a choice.
+  //
+  // /api/web-leads/assignable-reps serves the SAME roster function the claim
+  // route checks, so the dropdown cannot offer an id the server will reject.
+  //
+  // Best-effort: if it fails the picker stays empty and plain self-claim still
+  // works, because losing the roster must not take the Claim button down.
   useEffect(() => {
     if (!canSeeTeamAndAssign) return;
     let alive = true;
-    fetch("/api/team/members", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : { members: [] }))
-      .then((m) => { if (alive) setReps(m.members || []); })
+    fetch("/api/web-leads/assignable-reps", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { reps: [] }))
+      .then((m) => { if (alive) setReps(Array.isArray(m.reps) ? m.reps : []); })
       .catch(() => {});
     return () => { alive = false; };
   }, [canSeeTeamAndAssign]);
@@ -226,8 +231,8 @@ export function WebLeadsBrowser({
   /** Name a rep for a message. Falls back to the id so a missing roster entry
    *  still produces a sentence an operator can act on. */
   const repLabel = useCallback((id: string) => {
-    const m = reps.find((r) => (r.auth_user_id || "").toLowerCase() === id.toLowerCase());
-    return (m?.display_name || m?.full_name || id).trim();
+    const m = reps.find((r) => r.id.toLowerCase() === id.toLowerCase());
+    return (m?.name || id).trim();
   }, [reps]);
 
   // Local draft for the search box, synced from the URL. See LeadsToolbar's
@@ -582,11 +587,7 @@ export function WebLeadsBrowser({
           claimLabel={mine ? "Release" : "Claim"}
           // Only on the pool: "assigning" a lead already in someone's book is
           // a transfer, which is a different decision with different rules.
-          assignOptions={!mine && !team
-            ? reps.flatMap((r) => (r.auth_user_id
-                ? [{ id: r.auth_user_id, name: (r.display_name || r.full_name || r.auth_user_id).trim() }]
-                : []))
-            : []}
+          assignOptions={!mine && !team ? reps : []}
           assignTo={assignTo}
           onAssignTo={setAssignTo}
           canMutate={canOperateCurrentView}

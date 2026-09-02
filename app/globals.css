@@ -24,6 +24,28 @@ body {
   color: #f5f7fa;
 }
 
+/* Native <select> popups paint their OWN background, and `color-scheme: dark`
+ * above stops covering it the moment an author background lands on the select.
+ * A picker styled `bg-transparent text-fg` -- which is how you make a select
+ * blend into the pill around it -- therefore drops near-white option text onto
+ * the browser's white popup. The control looks right until it is opened, and
+ * then it is a blank white box. Reported on the Assign tab's rep picker, where
+ * only the hover-highlighted row was legible.
+ *
+ * Styling every option here rather than per-select because this is the third
+ * time a dropdown has rendered unreadably in this app for the same underlying
+ * reason (see tailwind.config.ts on `bg-deep`, which ~85 components referenced
+ * before it was ever defined). A per-instance fix leaves the next one to be
+ * found by an operator.
+ *
+ * `optgroup` too: an unstyled group label is the same white-on-white.
+ */
+select option,
+select optgroup {
+  background-color: #0e1014; /* bg-panel */
+  color: #faf9f5; /* fg */
+}
+
 /* Chat fullscreen — uses the browser Fullscreen API on the chat
    container itself (same as Claude / ChatGPT). The :fullscreen
    pseudo-class fires when element.requestFullscreen() is active.
@@ -562,6 +584,18 @@ body:has(.form-light) {
 .form-light select:focus {
   --tw-ring-color: rgba(23, 86, 55, 0.28) !important;
   border-color: #3d8a64 !important;
+}
+/* The global `select option` rule above is dark, which is right everywhere in
+ * this app EXCEPT here. Without this pair, a prospect opening a dropdown on a
+ * light SunBiz form gets a dark popup hanging off a cream field. `color-scheme`
+ * is set alongside the colours because on macOS the popup is drawn by the OS
+ * and ignores the option colours entirely -- it reads `color-scheme` instead,
+ * so the two together are what actually covers both platforms. */
+.form-light { color-scheme: light; }
+.form-light select option,
+.form-light select optgroup {
+  background-color: #ffffff !important;
+  color: #10201a !important;
 }
 .form-light input[type="checkbox"] { accent-color: #175637 !important; }
 .form-light input[type="file"]::file-selector-button {

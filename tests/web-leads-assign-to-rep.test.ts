@@ -203,6 +203,66 @@ describe('assigning a lead to another rep', () => {
     );
   });
 
+  it('gives the rep dropdown readable options', () => {
+    // THE GLITCH CC SCREENSHOTTED. The select is deliberately bg-transparent so
+    // it blends into the pill around it -- and that is exactly what makes the
+    // native popup fall back to WHITE, while the options inherit text-fg
+    // (#faf9f5). White on white: the operator saw a blank box with only the
+    // hover-highlighted row legible. color-scheme:dark on :root does not cover
+    // it once an author background lands on the select.
+    const bar = readFileSync('components/web-leads/LeadsToolbar.tsx', 'utf8');
+    const picker = bar.slice(bar.indexOf('Assign the selected leads to'));
+    const opts = picker.slice(0, picker.indexOf('</select>')).match(/<option[^>]*>/g) || [];
+    assert.ok(opts.length >= 2, 'expected the picker to render options');
+    for (const o of opts) {
+      assert.match(o, /className="[^"]*bg-bg-panel[^"]*"/, `option needs a background: ${o}`);
+      assert.match(o, /className="[^"]*text-fg[^"]*"/, `option needs a colour: ${o}`);
+    }
+  });
+
+  it('styles every option app-wide, not just this one', () => {
+    // Third dropdown in this app to render unreadably for the same underlying
+    // reason (see tailwind.config.ts on bg-deep, referenced by ~85 components
+    // before it was ever defined). A per-instance fix leaves the next one to be
+    // found by an operator, so the rule is global -- with the light-theme
+    // counterpart, or a prospect on a light SunBiz form gets a dark popup
+    // hanging off a cream field.
+    const css = readFileSync('app/globals.css', 'utf8');
+    assert.match(css, /select option,\s*\nselect optgroup \{/, 'need a global option rule');
+    assert.match(css, /\.form-light select option/, 'need the light-theme counterpart');
+    assert.match(css, /\.form-light \{ color-scheme: light; \}/, 'macOS draws the popup natively and reads color-scheme, not the option colours');
+  });
+
+  it('offers only reps the server will actually accept', () => {
+    // The picker read /api/team/members -- EVERY profile on the tenant -- while
+    // the claim route validates the target against getOasisSalesRepRoster,
+    // which excludes owners, admin_access holders and non-rep roles. Measured
+    // on the live tenant 2026-09-02: 8 names offered, 6 accepted. Choosing CC
+    // (is_owner) or Adon (team_role 'admin') returned 400
+    // target_not_on_sales_roster -- on a name the UI had just offered.
+    const browser = readFileSync('components/web-leads/WebLeadsBrowser.tsx', 'utf8');
+    assert.match(browser, /fetch\("\/api\/web-leads\/assignable-reps"/);
+    assert.ok(
+      !/fetch\("\/api\/team\/members"/.test(browser),
+      'the picker must not read the full tenant member list',
+    );
+
+    // Same function on both sides, so they cannot drift. A client-side copy of
+    // OASIS_PIPELINE_REP_ROLES would go stale the first time a role is added,
+    // and it would go stale silently.
+    const route = readFileSync('app/api/web-leads/assignable-reps/route.ts', 'utf8');
+    const claim = readFileSync('app/api/web-leads/claim/route.ts', 'utf8');
+    for (const src of [route, claim]) {
+      assert.match(src, /getOasisSalesRepRoster/);
+      assert.match(src, /isOasisPipelineAdmin\(/);
+      assert.match(src, /canReadOasisSalesTeamPipeline\(/);
+    }
+    // Enumerating the roster is itself gated: a rep must not be able to read
+    // the team list through the picker's endpoint.
+    assert.match(route, /assign_requires_manager/);
+    assert.match(route, /wrong_tenant/);
+  });
+
   it('keeps the batch ceiling and the de-duplication', () => {
     // Assignment goes through the same body parsing, so the id list is still
     // bounded and de-duplicated -- the same id twice would otherwise burn two

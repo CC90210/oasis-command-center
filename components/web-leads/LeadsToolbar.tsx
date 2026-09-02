@@ -231,9 +231,17 @@ export function LeadsToolbar({
                 disabled={claiming}
                 className="min-w-0 bg-transparent text-sm text-fg outline-none disabled:opacity-50"
               >
-                <option value="">Claim for myself</option>
+                {/* Explicit option colours, matching the sort select above.
+                    The select is deliberately `bg-transparent` so it blends
+                    into the pill, and that is exactly what makes the native
+                    popup fall back to white -- inheriting `text-fg` onto it
+                    produced a blank white box with only the hovered row
+                    legible. app/globals.css now styles every option in the app
+                    for this reason; these stay so the component reads
+                    correctly on its own. */}
+                <option value="" className="bg-bg-panel text-fg">Claim for myself</option>
                 {assignOptions.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name}</option>
+                  <option key={r.id} value={r.id} className="bg-bg-panel text-fg">{r.name}</option>
                 ))}
               </select>
             </label>
