@@ -293,7 +293,11 @@ export async function listRecordsForViewer(input: {
     .select("id, tenant_id, entity_type, data, created_at, updated_at")
     .eq("tenant_id", input.tenant_id)
     .eq("entity_type", input.entity)
-    .contains("data->collaborators", JSON.stringify([id]))
+    // The array itself, not JSON.stringify(...) of it. supabase-js and the
+    // Turso shim both take an array here; the stringified form read as one
+    // opaque scalar and matched nothing, which silently emptied every opener's
+    // board the moment a lead was handed to a closer.
+    .contains("data->collaborators", [id])
     .limit(MAX_RECORD_LIST_LIMIT);
   if (input.entity === "lead") {
     sq = applyLeadsBoardFilter(sq);

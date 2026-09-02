@@ -210,6 +210,25 @@ function selectCol(col: string): string {
   return `${sql} AS "${last}"`;
 }
 
+/**
+ * Decode a string that is really JSON, leave every other string alone.
+ *
+ * Callers reach `.contains()` both ways: some pass a real array, some pass
+ * `JSON.stringify([...])` because that is what PostgREST's wire format wants.
+ * Treating the second as an opaque scalar is what made the collaborator read
+ * match nothing. A string that is not JSON stays a string and is matched as a
+ * single element, which is the only reading that cannot surprise a caller.
+ */
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("[") && !trimmed.startsWith("{")) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
 function compileOp(col: string, op: string, value: unknown): Cond {
   if (op === "in") {
     const arr = Array.isArray(value) ? value : String(value).replace(/^\(|\)$/g, "").split(",");
@@ -225,11 +244,65 @@ function compileOp(col: string, op: string, value: unknown): Cond {
     throw new Error(`unsupported is. value: ${String(value)}`);
   }
   if (op === "cs" || op === "contains") {
-    // array/jsonb containment on a JSON-encoded TEXT column
-    const items = Array.isArray(value) ? value : [value];
-    const conds = items.map(() =>
-      `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`);
-    return { sql: `(${conds.join(" AND ")})`, args: items.map(toSql) };
+    // jsonb containment on a JSON-encoded TEXT column.
+    //
+    // THIS USED TO SILENTLY MATCH NOTHING FOR TWO OF ITS THREE CALLERS, and a
+    // query that matches nothing is indistinguishable from data that is not
+    // there. Both live cases were measured 2026-09-02:
+    //
+    //   .contains("data->collaborators", JSON.stringify([id]))
+    //     A STRING, so Array.isArray was false and the whole literal
+    //     '["<id>"]' was compared against each element. 0 rows where 1 exists.
+    //     Effect: an opener lost every lead the moment it was handed off,
+    //     because the collaborator read behind their board returned empty.
+    //
+    //   .contains("payload", { lead_id })
+    //     An OBJECT. Array-element matching cannot express "this object has
+    //     this key with this value", so it compared each of payload's VALUES
+    //     against the filter object's JSON. 0 rows where json_extract finds 74.
+    //     Effect: lead timelines and open-tracking rendered empty.
+    //
+    // Three shapes now, and anything else THROWS rather than degrading to a
+    // false negative — the whole class of bug above came from returning [] for
+    // an operation this compiler did not implement.
+    const parsed = typeof value === "string" ? tryParseJson(value) : value;
+
+    // 1. Object → subset containment: every key must match at that JSON path.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const entries = Object.entries(parsed as Record<string, unknown>);
+      if (entries.length === 0) return { sql: "1=1", args: [] };
+      const conds = entries.map(([k]) => {
+        if (!/^[\w$]+$/.test(k)) throw new Error(`unsafe contains key: ${k}`);
+        return `json_extract(${q(col)}, '$.${k}') = ?`;
+      });
+      return { sql: `(${conds.join(" AND ")})`, args: entries.map(([, v]) => toSql(v)) };
+    }
+
+    // 2. Array (or a JSON string that decodes to one) → element containment.
+    if (Array.isArray(parsed)) {
+      if (parsed.length === 0) return { sql: "1=1", args: [] };
+      const conds = parsed.map(() =>
+        `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`);
+      return { sql: `(${conds.join(" AND ")})`, args: parsed.map(toSql) };
+    }
+
+    // 3. A bare scalar is a single element. Enumerated rather than written as
+    //    `typeof !== "object"`, which lets a function or a symbol through as a
+    //    "scalar" and puts us back where we started: a value the compiler does
+    //    not understand, quietly turned into a query that matches nothing.
+    if (
+      parsed === null
+      || typeof parsed === "string"
+      || typeof parsed === "number"
+      || typeof parsed === "boolean"
+    ) {
+      return {
+        sql: `EXISTS (SELECT 1 FROM json_each(${q(col)}) WHERE json_each.value = ?)`,
+        args: [toSql(parsed)],
+      };
+    }
+
+    throw new Error(`unsupported contains value: ${typeof value}`);
   }
   const sqlOp = OPS[op];
   if (!sqlOp) throw new Error(`unsupported operator: ${op}`);
