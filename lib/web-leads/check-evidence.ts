@@ -157,7 +157,10 @@ const LINES: Record<string, Line> = {
     const tables = num(s, "layoutTables");
     if (b === null) return null;
     if (!b) return "No modern layout engine in the stylesheet; this is how sites were built over a decade ago.";
-    if (tables !== null && tables > 0) return `Modern layout engine present, but ${fmtInt(tables)} layout ${plural(tables, "table", "tables")} still ${plural(tables, "holds", "hold")} parts of the page together; a modern engine with zero layout tables earns the point.`;
+    // The PASS claims two facts (engine present, zero layout tables); with
+    // the table count unrecorded, claiming the second would invent evidence.
+    if (tables === null) return null;
+    if (tables > 0) return `Modern layout engine present, but ${fmtInt(tables)} layout ${plural(tables, "table", "tables")} still ${plural(tables, "holds", "hold")} parts of the page together; a modern engine with zero layout tables earns the point.`;
     return "Built on a modern layout engine with no table-built sections.";
   },
   web_fonts: (s) => {

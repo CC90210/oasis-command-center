@@ -99,8 +99,8 @@ export const REMEDIES: Record<string, Remedy> = {
 
   // ---- design ----
   layout_quality: {
-    costs: "The page is held together with outdated table code, so it does not line up cleanly and it reads as unfinished.",
-    fix: "A layout built with current tools that lines up correctly on any screen size, with the patched-together code gone.",
+    costs: "The page layout is built the way sites were built over a decade ago, so it does not line up cleanly and it reads as unfinished.",
+    fix: "A layout rebuilt with current tools that lines up correctly on any screen size.",
   },
   web_fonts: {
     costs: "The text is set in whatever plain font a visitor happens to have installed, so the site looks unfinished before anyone reads a word.",
