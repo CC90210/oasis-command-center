@@ -170,6 +170,13 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
     if (!host) return;
     let dead = false;
     let cleanup: (() => void) | null = null;
+    // Held at EFFECT scope and released in the outer teardown, which runs on
+    // every unmount path -- including an unmount mid-way through the async
+    // init, where `cleanup` is still null and the in-flight branch just
+    // returns. A disarm living only inside `cleanup` misses exactly that
+    // path and re-creates the stuck-silent state it exists to fix. (Codex
+    // review P2 follow-up, 2026-09-01.)
+    let disarmSfx: () => void = () => {};
     // The selection AS OF MOUNT, captured synchronously BEFORE the async
     // init. The change detector diffs against this, so a selection made
     // while the scene was still loading (rep clicks the list during the
@@ -212,9 +219,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       renderer.domElement.setAttribute("aria-hidden", "true");
       // If the rep already opted into sound on a previous card, the context
       // still may not exist until a gesture: arm the one-time unlock. The
-      // disarm runs in cleanup -- an armed flag left behind by an unmounted
-      // stage would mute every later one. (Codex review P2, 2026-09-01.)
-      const disarmSfx = sfx.armUnlock(host);
+      // disarm is released by the OUTER teardown -- an armed flag left
+      // behind by an unmounted stage would mute every later one. (Codex
+      // review P2, 2026-09-01.)
+      disarmSfx = sfx.armUnlock(host);
 
       // A GPU reset or context-pressure event after a successful init would
       // otherwise leave a frozen-blank canvas over a hidden fallback: report
@@ -889,7 +897,6 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       cleanup = () => {
         running = false;
         cancelAnimationFrame(raf);
-        disarmSfx();
         document.removeEventListener("visibilitychange", onVis);
         ro.disconnect();
         renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
@@ -909,6 +916,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
 
     return () => {
       dead = true;
+      disarmSfx();
       if (cleanup) cleanup();
     };
     // Rebuild only when the DATA changes (a new lead). Selection flows

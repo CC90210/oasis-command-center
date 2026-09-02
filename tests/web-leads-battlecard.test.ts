@@ -1557,11 +1557,13 @@ const MODEL_CODES = [
   assert.match(src, /aria-label=\{designation\.name\}/, "assistive tech must hear the real designation, never the scramble");
 
   const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /const disarmSfx = sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount, keeping the disarm");
+  assert.match(r3d, /disarmSfx = sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount, keeping the disarm");
   // The arm flag is module-global: a stage unmounting before any gesture
   // must disarm, or every later stage refuses to arm and SFX shows "on"
-  // while permanently silent. (Codex review P2, 2026-09-01.)
-  assert.match(r3d, /disarmSfx\(\);/, "the unlock arm must be released in cleanup");
+  // while permanently silent -- and the disarm must live in the OUTER
+  // teardown, because an unmount during the async init never builds
+  // `cleanup` at all. (Codex review P2 + follow-up, 2026-09-01.)
+  assert.match(r3d, /dead = true;\s*disarmSfx\(\);/, "the unlock arm must be released in the outer teardown, which runs on every unmount path");
   assert.match(read("components/web-leads/battle-sfx.ts"), /armUnlock\(el: HTMLElement\): \(\) => void/, "armUnlock must hand back a disarm");
   assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
   assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
