@@ -30,7 +30,6 @@ import {
   fetchSheets,
   fetchSheetsScopedToViewer,
   fetchLeads,
-  isScopedContractor,
   PAGE_SIZE,
   WEBDEV_TENANT_ID,
 } from "@/lib/web-leads/data";
@@ -104,16 +103,30 @@ export async function GET(req: NextRequest) {
       projectedRows,
     });
     const tLeads = Date.now() - t1;
+    // Counts are DERIVED from the rows this response is built from, for every
+    // viewer — not read off leadgen_territories' denormalized columns.
+    //
+    // Those columns are written when leads are promoted and never recomputed
+    // when they leave. After the board was consolidated from ~27,000 rows to
+    // ~1,800 they were wrong by 72x: the rail advertised 133,599 leads against
+    // 1,846 that exist, and "Toronto, ON - Restaurants & Bars" offered 6,225
+    // where 37 remain. A rep picked a sheet and got a near-empty table.
+    //
+    // The derivation already existed but was gated on isScopedContractor,
+    // because at 31,000 rows walking them was a real cost worth paying only to
+    // close a leak. At 1,846 it is one pass over an array already in memory:
+    // `projectedRows` is fetched for every request regardless, and `baseSheets`
+    // reuses the territory read for its labels. So the fast path bought nothing
+    // and cost correctness for exactly the people who trust the number most --
+    // admins and managers, the only viewers who were still on it.
     const facets = scope === "pool"
       ? buildFacets(
-          isScopedContractor(viewer)
-            ? await fetchSheetsScopedToViewer(viewer, {
-                scope,
-                fresh,
-                projectedRows,
-                baseSheets: sheets,
-              })
-            : sheets,
+          await fetchSheetsScopedToViewer(viewer, {
+            scope,
+            fresh,
+            projectedRows,
+            baseSheets: sheets,
+          }),
           filters,
         )
       : null;
