@@ -205,10 +205,22 @@ assert.match(
   "managers land on the roster-scoped Team leads queue unless they explicitly choose the pool",
 );
 const dataSource = readFileSync(join(root, "lib/web-leads/data.ts"), "utf8");
+// RE-AIMED 2026-09-02, NOT RELAXED. This matched "manager check … then
+// canViewerRead" as ONE ordered run of file text. The manager check has since
+// moved INSIDE canViewerRead, so the only appearance of that order is now
+// reversed (the list calls canViewerRead ~200 lines above the definition) and
+// the guard could never match again. Same property, asserted at both ends:
+// the list routes the team scope through canViewerRead, and canViewerRead is
+// where the roster predicate lives — so list and detail cannot drift apart.
 assert.match(
   dataSource,
-  /viewer\.teamRole\.trim\(\)\.toLowerCase\(\) === "manager"[\s\S]*?canViewerRead/,
-  "the manager's team-book list must use the same roster-scoped predicate as detail reads",
+  /scope === "team"\s*\?\s*canViewerRead\(/,
+  "the manager's team-book LIST must go through canViewerRead -- the same predicate detail reads use, or the list and the detail page disagree about what a manager may see",
+);
+assert.match(
+  dataSource,
+  /export function canViewerRead\([\s\S]*?viewer\.teamRole\.trim\(\)\.toLowerCase\(\) === "manager"[\s\S]*?managerCanReadAssignment\(facts\.assignedTo, viewer\)/,
+  "canViewerRead must be where the manager roster predicate lives -- if it moves out, the team list stops being roster-scoped without any caller changing",
 );
 assert.match(
   dataSource,
