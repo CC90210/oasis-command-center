@@ -113,11 +113,21 @@ assert.ok(
   "chat must reject a stale primary agent outside the canonical roster",
 );
 
-for (const file of [join(ROOT, "app", "layout.tsx"), join(ROOT, "app", "agents", "page.tsx")]) {
-  assert.ok(
-    readFileSync(file, "utf8").includes("resolveEnabledAgentSlugs"),
-    `${file} must resolve the same manifest-first roster`,
-  );
-}
+// P1 instant-load (2026-09-01): the layout's inline resolveEnabledAgentSlugs
+// call moved into lib/shell-status.ts resolvePrimaryAgent, shared with
+// /api/shell/status so the two cannot drift. The guarantee is unchanged —
+// pinned link by link: layout → resolvePrimaryAgent → resolveEnabledAgentSlugs.
+assert.ok(
+  readFileSync(join(ROOT, "app", "layout.tsx"), "utf8").includes("resolvePrimaryAgent"),
+  "app/layout.tsx must resolve the primary agent via the shared manifest-first guard",
+);
+assert.ok(
+  readFileSync(join(ROOT, "lib", "shell-status.ts"), "utf8").includes("resolveEnabledAgentSlugs"),
+  "lib/shell-status.ts must resolve the same manifest-first roster",
+);
+assert.ok(
+  readFileSync(join(ROOT, "app", "agents", "page.tsx"), "utf8").includes("resolveEnabledAgentSlugs"),
+  "app/agents/page.tsx must resolve the same manifest-first roster",
+);
 
 console.log("settings-agent-roster.test.ts: OK");

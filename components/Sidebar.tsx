@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
   BadgeDollarSign,
@@ -104,8 +104,9 @@ export function Sidebar({
   operatorName,
   operatorEmail,
   primaryAgent = "bravo",
-  primaryAgentLive = false,
-  bridgeOnline = false,
+  primaryAgentLive: primaryAgentLiveProp = false,
+  bridgeOnline: bridgeOnlineProp = false,
+  deferStatus = false,
   inboxUnread = 0,
   demoMode = false,
   demoLabel = "Client demo",
@@ -127,6 +128,11 @@ export function Sidebar({
   primaryAgent?: string;
   primaryAgentLive?: boolean;
   bridgeOnline?: boolean;
+  /** P1 instant-load: when true, the live/bridge dots start from the passed
+   *  booleans (typically false) and self-resolve from /api/shell/status
+   *  after paint — the layout no longer blocks first byte on those reads.
+   *  Preview/demo shells pass false and keep their forced-off dots. */
+  deferStatus?: boolean;
   inboxUnread?: number;
   demoMode?: boolean;
   demoLabel?: string;
@@ -146,6 +152,37 @@ export function Sidebar({
   isDesktopCollapsed?: boolean;
 }) {
   const pathname = usePathname();
+  // Deferred chrome status (P1 instant-load): fetched once after paint so
+  // the layout never blocks first byte on the snapshot/bridge reads. A
+  // failed fetch leaves the dots at their passed (off) values — chrome
+  // degrades, the page does not.
+  const [fetchedStatus, setFetchedStatus] = useState<{
+    primaryAgentLive: boolean;
+    bridgeOnline: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (!deferStatus) return;
+    let cancelled = false;
+    fetch("/api/shell/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return;
+        setFetchedStatus({
+          primaryAgentLive: d.primaryAgentLive === true,
+          bridgeOnline: d.bridgeOnline === true,
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [deferStatus]);
+  const primaryAgentLive = deferStatus
+    ? fetchedStatus?.primaryAgentLive ?? primaryAgentLiveProp
+    : primaryAgentLiveProp;
+  const bridgeOnline = deferStatus
+    ? fetchedStatus?.bridgeOnline ?? bridgeOnlineProp
+    : bridgeOnlineProp;
   const navItems = items && items.length > 0 ? items : CC_NAV;
   const onWebLeads = pathname === "/web-leads" || pathname.startsWith("/web-leads/");
   const canPrefetchWebLeads =
