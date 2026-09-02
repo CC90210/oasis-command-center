@@ -189,6 +189,7 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
+import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
@@ -2573,6 +2574,14 @@ function Competitors({
               : `Among the top-scoring ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}. We do not hold an area-by-area breakdown for the highest-scoring one, so this is the closest that we do.`}{" "}
             It scores {headToHead.composite} where this one scores {audit.composite}.
           </p>
+          <div className="mt-5">
+            <CompetitorArena3D
+              dimensions={headToHead.dimensions}
+              prospectName={lead.name}
+              competitorName={headToHead.competitor.name}
+              reduced={reduced}
+            />
+          </div>
           <ul className="mt-4 space-y-3">
             {headToHead.dimensions.map((d) => (
               <li key={d.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
