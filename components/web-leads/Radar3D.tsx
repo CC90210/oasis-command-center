@@ -939,7 +939,12 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       };
       document.addEventListener("visibilitychange", onVis);
       const io = new IntersectionObserver((entries) => {
-        hostVisible = entries.some((e) => e.isIntersecting);
+        // isIntersecting alone is not enough: a drawer collapsed to 0fr can
+        // leave its clip rect EDGE-TOUCHING the still-sized host, which the
+        // spec counts as intersecting at zero area -- exactly the closed-
+        // drawer case this observer exists for. Require actual visible
+        // area. (Codex review P2 follow-up, 2026-09-02.)
+        hostVisible = entries.some((e) => e.isIntersecting && e.intersectionRatio > 0);
         updateRunning();
       });
       io.observe(host);

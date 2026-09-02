@@ -1601,6 +1601,10 @@ const MODEL_CODES = [
   // unregister/re-register cascade that reorders the tab strip and can
   // loop. (Codex review P1, 2026-09-02.)
   assert.match(r3d, /new IntersectionObserver/, "the render loop must pause when the stage is out of view -- an always-mounted closed drawer would otherwise burn GPU forever (Codex P2, 2026-09-02)");
+  // Zero-area edge-touch counts as isIntersecting per spec -- the collapsed
+  // drawer's clip rect can touch the host's edge, which is exactly the case
+  // the observer exists for. Positive area required.
+  assert.match(r3d, /e\.isIntersecting && e\.intersectionRatio > 0/, "resuming must require ACTUAL visible area, not an edge-touch");
   assert.match(r3d, /io\.disconnect\(\)/, "the visibility observer must be torn down with the scene");
   const shell = read("components/web-leads/BattleSection.tsx");
   assert.match(shell, /const registerSection = useCallback\(/, "registry callbacks must be identity-stable or registration cascades");
