@@ -112,16 +112,17 @@ export type StoredProfile = {
  * `benchmark.mjs --set` run rather than trusting either figure blindly.
  */
 const OUR_BENCHMARK = {
-  measuredAt: "2026-08-21T17:49:34.449Z",
-  composite: 74,
+  // Model v2 measurement (benchmark.mjs --set under MODEL_VERSION 2).
+  measuredAt: "2026-09-02T19:59:29.009Z",
+  composite: 73,
   dimensions: [
-    { key: "conversion", label: "Turning visitors into calls", score: 64 },
-    { key: "trust", label: "Looking credible", score: 50 },
-    { key: "design", label: "Looking current", score: 86 },
-    { key: "mobile", label: "Working on a phone", score: 100 },
+    { key: "conversion", label: "Turning visitors into calls", score: 60 },
+    { key: "trust", label: "Looking credible", score: 61 },
+    { key: "design", label: "Looking current", score: 84 },
+    { key: "mobile", label: "Working on a phone", score: 80 },
     { key: "content", label: "Explaining the service", score: 84 },
     { key: "performance", label: "Speed and security", score: 100 },
-    { key: "discoverability", label: "Being found", score: 66 },
+    { key: "discoverability", label: "Being found", score: 64 },
   ],
 } as const;
 

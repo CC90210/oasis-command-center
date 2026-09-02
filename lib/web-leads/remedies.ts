@@ -46,10 +46,6 @@ export const REMEDIES: Record<string, Remedy> = {
     costs: "A visitor can read the whole page and still not know what you want them to do next, so they do nothing.",
     fix: "One clear button on every page telling a visitor exactly what to do next, like Call Now or Get a Quote.",
   },
-  cta_above_fold: {
-    costs: "The only button telling someone what to do is buried below a screen of scrolling. Most people never see it.",
-    fix: "That same button moved to the very top of the page, so it is the first thing anyone sees.",
-  },
   booking: {
     costs: "Someone deciding at eleven at night has no way to lock in a time. By morning they have called someone else.",
     fix: "An online booking calendar so a customer can grab a slot themselves, any hour of the day.",
@@ -100,15 +96,11 @@ export const REMEDIES: Record<string, Remedy> = {
     costs: "There is no promise backing the work, so a nervous customer has no reason to pick you over a competitor who offers one.",
     fix: "Your guarantee or warranty spelled out plainly, so hesitation has an answer before it becomes an objection.",
   },
-  social_proof: {
-    costs: "There are no active social profiles linked from the site, so a visitor checking you out one more time before calling finds nothing.",
-    fix: "Your social profiles linked and kept current, so a last look before calling finds an active business.",
-  },
 
   // ---- design ----
-  modern_layout: {
-    costs: "The page does not line up cleanly on different screens. Boxes overlap or spill off the side, and it reads as unfinished.",
-    fix: "A layout that lines up correctly on any screen size, built with current tools instead of patched-together code.",
+  layout_quality: {
+    costs: "The page is held together with outdated table code, so it does not line up cleanly and it reads as unfinished.",
+    fix: "A layout built with current tools that lines up correctly on any screen size, with the patched-together code gone.",
   },
   web_fonts: {
     costs: "The text is set in whatever plain font a visitor happens to have installed, so the site looks unfinished before anyone reads a word.",
@@ -155,10 +147,6 @@ export const REMEDIES: Record<string, Remedy> = {
   tap_targets: {
     costs: "The phone number and menu are sized for a mouse, not a thumb. On a phone, tapping the right thing takes two or three tries.",
     fix: "Buttons, the phone number and the menu all sized for a thumb, so tapping the right thing works the first time.",
-  },
-  no_flash: {
-    costs: "Part of the page relies on old plugin technology that phones and current browsers refuse to run at all, so that section is simply invisible to most visitors.",
-    fix: "That section rebuilt in current code that every phone and browser can actually display.",
   },
 
   // ---- content ----
@@ -225,14 +213,6 @@ export const REMEDIES: Record<string, Remedy> = {
   h1: {
     costs: "The page has no obvious main heading, so a visitor landing there and a search engine scanning it both have to guess what the page is even about.",
     fix: "One clear main heading at the top of each page stating exactly what it is about.",
-  },
-  analytics: {
-    costs: "There is no way to see how many people visit the site, where they come from, or what they do once they land, so every marketing decision is a guess.",
-    fix: "Visitor tracking installed so you can see real numbers and know what is actually working before you spend on more marketing.",
-  },
-  sitemap: {
-    costs: "There is no list of pages handed to search engines, so some pages on your own site may never get found and indexed at all.",
-    fix: "A page list submitted to search engines, so every page you have gets found and indexed properly.",
   },
 };
 

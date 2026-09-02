@@ -408,16 +408,17 @@ function RemedyLines({ code }: { code: string }) {
 /**
  * Checks the model scores but cannot currently MEASURE for prospects. Named
  * here so every surface that renders a check says so in the same words
- * instead of letting the rep argue a line we manufactured. `sitemap`: the
- * crawler only fetches robots.txt for our own benchmark sites, so every
- * prospect fails this check by construction (2026-09-01 integrity audit,
- * finding 4). Removing it from the model is a coordinated MODEL_VERSION
- * bump; until then the card refuses to sell it.
+ * instead of letting the rep argue a line we manufactured.
+ *
+ * Model v2 (2026-09-02) retired the one entry this carried: `sitemap` failed
+ * 99.5% of the corpus by construction (the crawler never fetched a
+ * prospect's robots file), and v2's answer was the coordinated
+ * MODEL_VERSION bump the previous docblock here called for -- remove the
+ * check rather than keep apologising for it. The map STAYS, empty: the
+ * honest-disclaimer machinery is the feature, and the next unmeasurable
+ * check will need it.
  */
-const UNMEASURABLE_CHECKS: Record<string, string> = {
-  sitemap:
-    "This check cannot currently be measured for prospect sites (we never fetch their robots file), so it fails for every prospect. Do not quote it; it is a flaw in our model, not their site.",
-};
+const UNMEASURABLE_CHECKS: Record<string, string> = {};
 
 /**
  * The pinpointed measurement behind one check (Adon, 2026-09-01: "you have to

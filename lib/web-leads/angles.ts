@@ -463,11 +463,12 @@ export const OBJECTIONS: Objection[] = [
  * rep opens with.
  *
  * WEIGHTED, NOT RAW: dimensions normalise to 100 independently and then carry
- * very different weights into the composite (conversion 0.28, discoverability
- * 0.05). A discoverability 20 and a conversion 60 both look bad, but fixing the
- * conversion 60 is worth eleven composite points and fixing the discoverability
- * 20 is worth four. Ranking on the raw score sends a rep into the smaller
- * conversation and, worse, into the smaller build.
+ * very different weights into the composite (model v2: conversion 0.26,
+ * discoverability 0.08). A discoverability 20 and a conversion 60 both look
+ * bad, but fixing the conversion 60 is worth far more composite points.
+ * Ranking on the raw score sends a rep into the smaller conversation and,
+ * worse, into the smaller build. The weights ride each stored profile row,
+ * so this module carries no copy of the constants to drift.
  *
  * TIEBREAK toward `conversion`, then `trust`, per the spec: those two convert
  * into money the fastest for the prospect and are the cheapest for us to build,
