@@ -113,11 +113,25 @@ export const sfx = {
   },
   /** For mounts where the preference was already on: arm a ONE-TIME unlock
    *  on the next pointerdown anywhere in the stage, because creating audio
-   *  outside a gesture is blocked by autoplay policy (and rightly so). */
-  armUnlock(el: HTMLElement) {
-    if (!enabled || unlockArmed || ctx) return;
+   *  outside a gesture is blocked by autoplay policy (and rightly so).
+   *
+   *  Returns a DISARM the caller must run on unmount: `unlockArmed` is
+   *  module-global, so a stage that unmounts before any gesture would
+   *  otherwise leave the flag true against a dead listener, and every later
+   *  stage would refuse to arm -- SFX showing "on" while permanently silent.
+   *  (Codex review P2, 2026-09-01.) */
+  armUnlock(el: HTMLElement): () => void {
+    if (!enabled || unlockArmed || ctx) return () => {};
     unlockArmed = true;
-    el.addEventListener("pointerdown", () => { if (enabled) ensureCtx(); }, { once: true, capture: true });
+    const onFirst = () => {
+      unlockArmed = false;
+      if (enabled) ensureCtx();
+    };
+    el.addEventListener("pointerdown", onFirst, { once: true, capture: true });
+    return () => {
+      unlockArmed = false;
+      el.removeEventListener("pointerdown", onFirst, { capture: true });
+    };
   },
   play(name: SfxName) {
     if (!enabled || !ctx || ctx.state !== "running") return;

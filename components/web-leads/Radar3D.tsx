@@ -211,8 +211,10 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       renderer.domElement.style.cursor = "grab";
       renderer.domElement.setAttribute("aria-hidden", "true");
       // If the rep already opted into sound on a previous card, the context
-      // still may not exist until a gesture: arm the one-time unlock.
-      sfx.armUnlock(host);
+      // still may not exist until a gesture: arm the one-time unlock. The
+      // disarm runs in cleanup -- an armed flag left behind by an unmounted
+      // stage would mute every later one. (Codex review P2, 2026-09-01.)
+      const disarmSfx = sfx.armUnlock(host);
 
       // A GPU reset or context-pressure event after a successful init would
       // otherwise leave a frozen-blank canvas over a hidden fallback: report
@@ -887,6 +889,7 @@ export function Radar3D({ dimensions, leader, selected, onSelect, onStatus, clas
       cleanup = () => {
         running = false;
         cancelAnimationFrame(raf);
+        disarmSfx();
         document.removeEventListener("visibilitychange", onVis);
         ro.disconnect();
         renderer.domElement.removeEventListener("webglcontextlost", onContextLost);

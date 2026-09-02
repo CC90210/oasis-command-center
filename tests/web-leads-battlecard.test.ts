@@ -1557,7 +1557,12 @@ const MODEL_CODES = [
   assert.match(src, /aria-label=\{designation\.name\}/, "assistive tech must hear the real designation, never the scramble");
 
   const r3d = read("components/web-leads/Radar3D.tsx");
-  assert.match(r3d, /sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount");
+  assert.match(r3d, /const disarmSfx = sfx\.armUnlock\(host\)/, "an already-on preference must arm the gesture unlock on mount, keeping the disarm");
+  // The arm flag is module-global: a stage unmounting before any gesture
+  // must disarm, or every later stage refuses to arm and SFX shows "on"
+  // while permanently silent. (Codex review P2, 2026-09-01.)
+  assert.match(r3d, /disarmSfx\(\);/, "the unlock arm must be released in cleanup");
+  assert.match(read("components/web-leads/battle-sfx.ts"), /armUnlock\(el: HTMLElement\): \(\) => void/, "armUnlock must hand back a disarm");
   assert.match(r3d, /sfx\.play\("tick"\)/, "the tap must tick");
   assert.match(r3d, /sfx\.play\("disengage"\)/, "the camera reset must answer audibly when sound is on");
   assert.match(r3d, /lockT = Math\.min\(1,/, "the lock-on burst must clamp -- an unclamped burst re-fires forever");
