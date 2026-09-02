@@ -142,20 +142,14 @@ export function LeadsToolbar({
           </button>
         )}
 
-        <button
-          type="button"
-          onClick={() => set({ industries: filters.industries.includes("CC Leads") ? filters.industries.filter((i) => i !== "CC Leads") : ["CC Leads"] })}
-          aria-pressed={filters.industries.includes("CC Leads")}
-          title="Toggle CC Leads (trade & contractor businesses)"
-          className={`inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold transition-all xl:min-h-0 xl:py-1.5 ${
-            filters.industries.includes("CC Leads")
-              ? "border-accent bg-accent text-bg-deep shadow-md shadow-accent/20"
-              : "border-accent/60 bg-accent/10 text-accent hover:border-accent hover:bg-accent/20"
-          }`}
-        >
-          🔥 CC Leads
-        </button>
-
+        {/* The pinned "🔥 CC Leads" toggle was REMOVED 2026-09-02. It set the
+            industry filter to the literal string "CC Leads", and ZERO leads
+            carry that industry — measured, not assumed. So the one button
+            styled to look like the most important control on the page
+            guaranteed an empty result, and it is what was switched on in the
+            screenshot of a manager staring at "0 leads". A filter that can
+            only ever return nothing is worse than no filter. Industries remain
+            selectable in the rail like every other facet. */}
         <div className="hidden h-6 w-px bg-bg-border sm:block" aria-hidden />
 
         <div role="group" aria-label="Website score" className="inline-flex flex-wrap items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">

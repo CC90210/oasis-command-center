@@ -199,10 +199,22 @@ assert.match(
   "the Team view is READ-ONLY: a manager coaches the roster, they do not mutate another rep's lead from it",
 );
 const pageSource = readFileSync(join(root, "app/web-leads/page.tsx"), "utf8");
+// INVERTED 2026-09-02, DELIBERATELY. This used to require that managers be
+// redirected to view=team. That redirect landed them on a read-only roster view
+// of ASSIGNED leads — and with almost nothing assigned, on a blank page with no
+// Claim button, which is exactly what a manager reported. `manager` is in
+// OASIS_SALES_LEAD_OPERATOR_ROLES, so the role could always claim; only the
+// landing view stopped it. The guard now pins the OPPOSITE property, so nobody
+// reinstates the dead end by reflex.
+assert.doesNotMatch(
+  pageSource,
+  /params\.set\("view", "team"\)/,
+  "managers must NOT be auto-redirected to the read-only Team view: it shows only assigned leads, hides the Claim button, and left a manager staring at an empty page",
+);
 assert.match(
   pageSource,
-  /if \(isManager && !rawParams\.view\)[\s\S]*?params\.set\("view", "team"\)/,
-  "managers land on the roster-scoped Team leads queue unless they explicitly choose the pool",
+  /canMutate=\{canMutate\}/,
+  "the browser must still receive canMutate, which is what lets an authorised manager claim from the pool",
 );
 const dataSource = readFileSync(join(root, "lib/web-leads/data.ts"), "utf8");
 // RE-AIMED 2026-09-02, NOT RELAXED. This matched "manager check … then
