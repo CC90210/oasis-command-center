@@ -271,11 +271,21 @@ function compileOp(col: string, op: string, value: unknown): Cond {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const entries = Object.entries(parsed as Record<string, unknown>);
       if (entries.length === 0) return { sql: "1=1", args: [] };
-      const conds = entries.map(([k]) => {
+      const args: unknown[] = [];
+      const conds = entries.map(([k, v]) => {
         if (!/^[\w$]+$/.test(k)) throw new Error(`unsafe contains key: ${k}`);
+        // A JSON null needs json_type, not equality. `json_extract(...) = ?`
+        // with a bound NULL is never true in SQL — NULL = NULL is NULL — so
+        // { lead_id: null } would match nothing while looking like a filter
+        // that ran. That is the same silent false negative this whole change
+        // exists to remove, so it does not get to survive inside the fix.
+        // json_type also distinguishes a PRESENT null from a MISSING key,
+        // which equality cannot do either. (CodeRabbit, PR #375.)
+        if (v === null) return `json_type(${q(col)}, '$.${k}') = 'null'`;
+        args.push(toSql(v));
         return `json_extract(${q(col)}, '$.${k}') = ?`;
       });
-      return { sql: `(${conds.join(" AND ")})`, args: entries.map(([, v]) => toSql(v)) };
+      return { sql: `(${conds.join(" AND ")})`, args };
     }
 
     // 2. Array (or a JSON string that decodes to one) → element containment.

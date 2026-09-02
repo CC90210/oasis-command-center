@@ -93,6 +93,28 @@ describe('turso shim: contains', () => {
     assert.equal(miss.data?.length, 0, 'a wrong value on any key must exclude the row');
   });
 
+  it('matches a JSON null, and tells it apart from a missing key', async () => {
+    // `json_extract(col,'$.k') = ?` with a bound NULL is never true — NULL =
+    // NULL is NULL — so a null filter would match nothing while looking like a
+    // filter that ran: the same silent false negative this file exists for.
+    // json_type also separates a PRESENT null from an ABSENT key, which
+    // equality cannot express at all.
+    const { db, pg } = await seeded();
+    await db.execute({
+      sql: `INSERT INTO agent_events (id, payload) VALUES ('evt_null',?), ('evt_absent',?)`,
+      args: [JSON.stringify({ lead_id: null }), JSON.stringify({ kind: 'no_lead_key' })],
+    });
+
+    const hit = await pg.from('agent_events').select('id').contains('payload', { lead_id: null });
+    assert.equal(hit.error, null);
+    assert.equal(hit.data?.length, 1, 'a present JSON null must match');
+    assert.equal(String(hit.data?.[0]?.id), 'evt_null');
+
+    // The row with no lead_id at all must NOT be swept in by the null filter.
+    const ids = (hit.data ?? []).map((r) => String(r.id));
+    assert.ok(!ids.includes('evt_absent'), 'a missing key is not a null value');
+  });
+
   it('throws on an unsafe key instead of interpolating it', async () => {
     // Keys become a JSON path inside the SQL text, so they cannot be bound as
     // parameters. It THROWS rather than returning an empty result, and that
