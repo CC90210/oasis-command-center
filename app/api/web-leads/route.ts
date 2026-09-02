@@ -96,9 +96,17 @@ export async function GET(req: NextRequest) {
     // what stops two reps dialling the same business. One clock for the whole
     // request so the expiry rules cannot see time move mid-read.
     const t1 = Date.now();
+    // ONE availability clock for the whole response. fetchLeads decides which
+    // leads are claimable and the facets count the claimable ones; reading
+    // Date.now() twice lets a claim expire between them, so the rail and the
+    // table would disagree by one lead for reasons no one could reproduce.
+    // The file already says this above -- "One clock for the whole request so
+    // the expiry rules cannot see time move mid-read" -- and passing the facets
+    // their own default broke it. (CodeRabbit, PR #377.)
+    const availabilityNow = Date.now();
     const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, {
       scope,
-      now: Date.now(),
+      now: availabilityNow,
       fresh,
       projectedRows,
     });
@@ -123,6 +131,7 @@ export async function GET(req: NextRequest) {
       ? buildFacets(
           await fetchSheetsScopedToViewer(viewer, {
             scope,
+            now: availabilityNow,
             fresh,
             projectedRows,
             baseSheets: sheets,

@@ -98,9 +98,32 @@ async function main() {
       src.includes("fetchSheetsScopedToViewer("),
       `${route} must derive its counts from the rows`,
     );
+    // Semantic, not textual. Asserting on one spelling of the ternary let any
+    // other formatting of the same branch pass. The branch NEEDED a role
+    // predicate to exist, so the durable invariant is that neither route
+    // consults one when counting -- reintroducing the fast path means calling
+    // isScopedContractor again, whatever shape it is written in.
+    // (CodeRabbit, PR #377.)
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     assert.ok(
-      !src.includes("? await fetchSheetsScopedToViewer"),
-      `${route} must not branch facet counts on the viewer's role`,
+      !code.includes("isScopedContractor"),
+      `${route} must not consult a role predicate when counting`,
+    );
+  }
+
+  // Rows and facets must read ONE availability clock. Two calls to Date.now()
+  // let a claim expire between them, so the rail and the table disagree by a
+  // lead for a reason nobody can reproduce.
+  {
+    const src = readFileSync("app/api/web-leads/route.ts", "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.equal(
+      (code.match(/now: availabilityNow/g) || []).length, 2,
+      "fetchLeads and the facet derivation must share one timestamp",
+    );
+    assert.ok(
+      !/now:\s*Date\.now\(\)/.test(code),
+      "no inline Date.now() may be passed as an availability clock",
     );
   }
 
