@@ -18,7 +18,7 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/fetch-json";
 import { runWorkerAction, type WorkerAction } from "@/lib/automations/worker-control";
-import { formatLastSeen, isOperatorStopped } from "@/lib/automations/worker-status";
+import { countsTowardHealth, formatLastSeen, isOperatorStopped } from "@/lib/automations/worker-status";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 /**
@@ -55,6 +55,10 @@ type Worker = {
   manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
+  /** Set when this worker is not meant to run on this machine — the string is
+   * the reason. Excluded from the healthy/total pill and rendered neutrally
+   * rather than as a fault. See the API's EXPECTED_WORKERS. */
+  not_expected_here?: string;
   /** B4 (2026-07-23): who this daemon belongs to. The API always sends this
    * now (defaults "cc" server-side for the pre-existing CC-only worker list)
    * — optional here only as a defensive fallback against a stale API. */
@@ -130,7 +134,13 @@ export function BackgroundWorkersPanel() {
     );
   }
 
-  const active = data.workers.filter((w) => w.status !== "archived");
+  // The pill counts only what is MEANT to run here (2026-09-02). Two tiles are
+  // deliberately not running on this machine — retired code, and a daemon
+  // hosted on the VPS — and counting them made the denominator unreachable:
+  // "8/12 HEALTHY" was the best score the board could ever show. A gauge that
+  // can never read full teaches the operator to ignore it, which is how three
+  // genuinely dead daemons sat unnoticed behind the same number.
+  const active = data.workers.filter(countsTowardHealth);
   const healthy = active.filter((w) => w.status === "healthy").length;
   const total = active.length;
 
@@ -255,8 +265,11 @@ function WorkerRow({
   // Suppressed while an optimistic flip is pending: that flip has no fresh
   // supervisor reading behind it.
   const operatorStopped = optimisticStatus === null && isOperatorStopped(worker);
+  // Not a fault and must not be coloured like one — see the API's
+  // EXPECTED_WORKERS.not_expected_here.
+  const byDesign = Boolean(worker.not_expected_here) && optimisticStatus === null;
 
-  const Icon = operatorStopped
+  const Icon = byDesign || operatorStopped
     ? MinusCircle
     : effectiveStatus === "healthy"
       ? CheckCircle2
@@ -265,7 +278,7 @@ function WorkerRow({
         : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
-  const iconClass = operatorStopped
+  const iconClass = byDesign || operatorStopped
     ? "text-fg-dim"
     : effectiveStatus === "healthy"
       ? "text-status-engaged"
@@ -304,7 +317,9 @@ function WorkerRow({
     optimisticStatus === null && worker.last_ping_at
       ? ` · last seen ${formatLastSeen(worker.last_ping_at)}`
       : "";
-  const statusLabel = operatorStopped
+  const statusLabel = byDesign
+    ? `Not running here — ${worker.not_expected_here}`
+    : operatorStopped
     ? `Off — you stopped this. Start it to resume.${lastSeen}`
     : effectiveStatus === "healthy"
       ? uptimeStr
@@ -329,11 +344,13 @@ function WorkerRow({
   return (
     <div
       className={`rounded-lg border p-3 ${
-        effectiveStatus === "healthy"
-          ? "border-bg-border bg-bg-elev/30"
-          : effectiveStatus === "down"
-            ? "border-status-warm/30 bg-status-warm/5"
-            : "border-bg-border bg-bg-deep/40 opacity-80"
+        byDesign || operatorStopped
+          ? "border-bg-border bg-bg-deep/40 opacity-70"
+          : effectiveStatus === "healthy"
+            ? "border-bg-border bg-bg-elev/30"
+            : effectiveStatus === "down"
+              ? "border-status-warm/30 bg-status-warm/5"
+              : "border-bg-border bg-bg-deep/40 opacity-80"
       }`}
       title={detailTooltip}
     >

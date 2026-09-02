@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 
 import {
   SUPERVISOR_DISABLED,
+  countsTowardHealth,
   formatLastSeen,
   isOperatorStopped,
 } from "../lib/automations/worker-status";
@@ -119,6 +120,39 @@ import {
 {
   assert.equal(formatLastSeen("not-a-timestamp"), "not-a-timestamp");
   assert.equal(formatLastSeen(""), "");
+}
+
+// ── 5. The healthy/total pill must be able to read FULL ───────────────────
+//
+// Counting workers nobody intends to run here capped the board at 8/12 — its
+// best possible score. An operator who learns that some red is normal stops
+// reading the red that is not, and three genuinely dead daemons sat unnoticed
+// behind exactly that number.
+{
+  const board = [
+    { status: "healthy" as const },                                       // scheduler
+    { status: "healthy" as const },                                       // bridge
+    { status: "down" as const, not_expected_here: "Runs on the VPS" },     // email sender
+    { status: "down" as const, not_expected_here: "Retired 2026-05-18" },  // skool
+    { status: "archived" as const },
+  ];
+  const counted = board.filter(countsTowardHealth);
+  assert.equal(counted.length, 2, "only workers meant to run here are counted");
+  assert.equal(
+    counted.filter((w) => w.status === "healthy").length,
+    counted.length,
+    "with both real workers healthy the pill must read FULL, not 2/4",
+  );
+}
+
+// A genuinely dead worker is still counted. The point of the exclusion is to
+// make real failures legible, not to hide them.
+{
+  assert.equal(countsTowardHealth({ status: "down" }), true,
+    "a down worker with no reason string is a real outage and must count");
+  assert.equal(countsTowardHealth({ status: "degraded" }), true,
+    "a degraded worker must count");
+  assert.equal(countsTowardHealth({ status: "healthy" }), true);
 }
 
 console.log("worker-status: all assertions passed");

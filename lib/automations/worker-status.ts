@@ -14,7 +14,22 @@
 export type WorkerStatusInput = {
   status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
   metadata?: Record<string, unknown> | null;
+  /** Reason this worker is not meant to run on this machine, if it isn't. */
+  not_expected_here?: string;
 };
+
+/**
+ * The workers the healthy/total pill should actually count.
+ *
+ * Two tiles were permanently red for reasons that were not faults — retired
+ * code kept on disk deliberately, and a daemon hosted on the VPS. Counting
+ * them put the pill's best possible reading at 8/12: a gauge that can never
+ * read full, which teaches the operator that some red is normal. Three
+ * genuinely dead daemons then sat unnoticed behind exactly that number.
+ */
+export function countsTowardHealth(worker: WorkerStatusInput): boolean {
+  return worker.status !== "archived" && !worker.not_expected_here;
+}
 
 /**
  * The supervisor's word for "the operator switched this off".
