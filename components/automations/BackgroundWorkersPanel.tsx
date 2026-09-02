@@ -248,16 +248,35 @@ function WorkerRow({
   const [optimisticStatus, setOptimisticStatus] = useState<Worker["status"] | null>(null);
   const effectiveStatus = optimisticStatus ?? worker.status;
 
-  const Icon =
-    effectiveStatus === "healthy"
+  // "Off" is a fourth state, and it is NOT a fault (2026-09-02).
+  //
+  // fleet_watchdog.classify keeps `disabled` distinct from `down` precisely so
+  // a deliberate stop never pages anyone — then the bridge collapses disabled
+  // onto the "degraded" health value, and this tile turned that into
+  // "Degraded — check logs". CC read that about a daemon he had switched off
+  // himself and went looking for logs that do not exist. The supervisor still
+  // says which it is, in metadata.pm2_status, so read that rather than adding
+  // a new value to the stored status vocabulary.
+  const supervisorState = String(
+    (worker.metadata as Record<string, unknown> | undefined)?.pm2_status ?? "",
+  );
+  const operatorStopped =
+    optimisticStatus === null &&
+    worker.status === "degraded" &&
+    supervisorState === "disabled by operator";
+
+  const Icon = operatorStopped
+    ? MinusCircle
+    : effectiveStatus === "healthy"
       ? CheckCircle2
       : effectiveStatus === "down"
         ? MinusCircle
         : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
-  const iconClass =
-    effectiveStatus === "healthy"
+  const iconClass = operatorStopped
+    ? "text-fg-dim"
+    : effectiveStatus === "healthy"
       ? "text-status-engaged"
       : effectiveStatus === "down"
         ? "text-status-warm"
@@ -283,12 +302,20 @@ function WorkerRow({
   // with no timestamp and a 20-minute-old silence look identical otherwise.
   // The optimistic flip has no fresh ping to quote, so it shows plain
   // "Stopped"/"Running" until the next heartbeat lands.
+  //
+  // The DATE is not optional (2026-09-02). This printed toLocaleTimeString()
+  // alone, so the Skool daemon's "last seen 7:31 PM" was 18 May — 106 days old
+  // — and rendered identically to a worker that dropped out twenty minutes ago.
+  // A relic and a live incident MUST NOT look the same. Anything older than
+  // today carries its date; today's pings stay time-only so the common case
+  // reads short.
   const lastSeen =
     optimisticStatus === null && worker.last_ping_at
-      ? ` · last seen ${new Date(worker.last_ping_at).toLocaleTimeString()}`
+      ? ` · last seen ${formatLastSeen(worker.last_ping_at)}`
       : "";
-  const statusLabel =
-    effectiveStatus === "healthy"
+  const statusLabel = operatorStopped
+    ? `Off — you stopped this. Start it to resume.${lastSeen}`
+    : effectiveStatus === "healthy"
       ? uptimeStr
         ? `Running · up ${uptimeStr}`
         : "Running"
@@ -523,4 +550,28 @@ function formatUptime(ms: number): string {
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
+}
+
+/**
+ * "last seen" that cannot disguise an old relic as a fresh outage.
+ *
+ * Today  → "3:42:10 PM"            (short; the common case)
+ * Older  → "May 18, 7:31:48 PM"    (the date is the whole point)
+ * Stale by more than a year → the year too.
+ * Unparseable → the raw value, never a silent "Invalid Date".
+ */
+function formatLastSeen(iso: string): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return iso;
+  const now = new Date();
+  const sameDay =
+    then.getFullYear() === now.getFullYear() &&
+    then.getMonth() === now.getMonth() &&
+    then.getDate() === now.getDate();
+  if (sameDay) return then.toLocaleTimeString();
+  const opts: Intl.DateTimeFormatOptions =
+    then.getFullYear() === now.getFullYear()
+      ? { month: "short", day: "numeric" }
+      : { year: "numeric", month: "short", day: "numeric" };
+  return `${then.toLocaleDateString(undefined, opts)}, ${then.toLocaleTimeString()}`;
 }
