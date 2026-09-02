@@ -18,6 +18,7 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/fetch-json";
 import { runWorkerAction, type WorkerAction } from "@/lib/automations/worker-control";
+import { formatLastSeen, isOperatorStopped } from "@/lib/automations/worker-status";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 /**
@@ -248,16 +249,25 @@ function WorkerRow({
   const [optimisticStatus, setOptimisticStatus] = useState<Worker["status"] | null>(null);
   const effectiveStatus = optimisticStatus ?? worker.status;
 
-  const Icon =
-    effectiveStatus === "healthy"
+  // "Off" is a fourth state, and it is NOT a fault (2026-09-02). The rule lives
+  // in lib/automations/worker-status so a test can execute it — see that file
+  // for why "Degraded — check logs" was being shown for a deliberate stop.
+  // Suppressed while an optimistic flip is pending: that flip has no fresh
+  // supervisor reading behind it.
+  const operatorStopped = optimisticStatus === null && isOperatorStopped(worker);
+
+  const Icon = operatorStopped
+    ? MinusCircle
+    : effectiveStatus === "healthy"
       ? CheckCircle2
       : effectiveStatus === "down"
         ? MinusCircle
         : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
-  const iconClass =
-    effectiveStatus === "healthy"
+  const iconClass = operatorStopped
+    ? "text-fg-dim"
+    : effectiveStatus === "healthy"
       ? "text-status-engaged"
       : effectiveStatus === "down"
         ? "text-status-warm"
@@ -283,12 +293,20 @@ function WorkerRow({
   // with no timestamp and a 20-minute-old silence look identical otherwise.
   // The optimistic flip has no fresh ping to quote, so it shows plain
   // "Stopped"/"Running" until the next heartbeat lands.
+  //
+  // The DATE is not optional (2026-09-02). This printed toLocaleTimeString()
+  // alone, so the Skool daemon's "last seen 7:31 PM" was 18 May — 106 days old
+  // — and rendered identically to a worker that dropped out twenty minutes ago.
+  // A relic and a live incident MUST NOT look the same. Anything older than
+  // today carries its date; today's pings stay time-only so the common case
+  // reads short.
   const lastSeen =
     optimisticStatus === null && worker.last_ping_at
-      ? ` · last seen ${new Date(worker.last_ping_at).toLocaleTimeString()}`
+      ? ` · last seen ${formatLastSeen(worker.last_ping_at)}`
       : "";
-  const statusLabel =
-    effectiveStatus === "healthy"
+  const statusLabel = operatorStopped
+    ? `Off — you stopped this. Start it to resume.${lastSeen}`
+    : effectiveStatus === "healthy"
       ? uptimeStr
         ? `Running · up ${uptimeStr}`
         : "Running"
