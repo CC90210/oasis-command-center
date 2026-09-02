@@ -141,6 +141,16 @@ export type WebLead = {
   address: string | null;
   postal: string | null;
   websiteUrl: string | null;
+  /**
+   * The person who owns the business, read off their own About/Team page by
+   * the JARVIS enrichment pass, with the page that proved it. Null means
+   * nobody has been identified — never "there is no owner".
+   */
+  ownerName: string | null;
+  ownerTitle: string | null;
+  /** A line the site labels as the owner's cell/direct, NOT the main number. */
+  ownerPhone: string | null;
+  ownerEvidenceUrl: string | null;
   websiteCondition: string;
   auditFindings: string;
   territoryId: string | null;
@@ -198,7 +208,7 @@ export type WebLeadRow = WebLead & {
  *            what stops two reps dialling the same business.
  *   "mine" — the caller's own book, including leads whose claim has lapsed.
  */
-export type LeadScope = "pool" | "mine";
+export type LeadScope = "pool" | "mine" | "team";
 
 const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
@@ -260,6 +270,10 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     address: str(d.business_address),
     postal: str(d.business_zip),
     websiteUrl: str(d.website),
+    ownerName: str(d.owner_name),
+    ownerTitle: str(d.owner_title),
+    ownerPhone: str(d.owner_phone),
+    ownerEvidenceUrl: str(d.owner_evidence_url),
     // VERBATIM. Nothing in this pipeline has fetched these websites — OpenStreetMap
     // lacking a website tag means nobody mapped one, not that no site exists. A rep
     // reading a fabricated finding aloud on a live call is the worst outcome this
@@ -568,11 +582,11 @@ export async function fetchLeads(
      *             bounded separately by the 250-lead cap in claim.ts.
      */
     .filter((r: { id: string; data: Record<string, unknown> }) =>
-      scope === "mine"
-        ? viewer.teamRole.trim().toLowerCase() === "manager"
-          ? canViewerRead(r.data || {}, viewer, now)
-          : isInBookOf(factsFrom(r.data || {}), viewer.userId)
-        : isClaimable(r.data || {}, now),
+      scope === "team"
+        ? canViewerRead(r.data || {}, viewer, now)
+        : scope === "mine"
+          ? isInBookOf(factsFrom(r.data || {}), viewer.userId)
+          : isClaimable(r.data || {}, now),
     )
     .map((r: { id: string; data: Record<string, unknown> }): WebLeadRow => {
       const lead = toWebLead(r);
@@ -612,6 +626,7 @@ export async function fetchLeads(
     .filter((l) => (scope === "mine" ? true : l.territoryId && wanted.has(l.territoryId)))
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
+    .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
     // OPEN NOW, in the BUSINESS's time zone, evaluated against this request's
     // clock rather than anything cached. `now` is already injected for the
     // claim-expiry rules, so the whole page still sees one instant.

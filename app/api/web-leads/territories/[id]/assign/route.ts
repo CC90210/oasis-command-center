@@ -38,10 +38,10 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (session.tenantId !== WEBDEV_TENANT_ID) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
-  // ADMIN ONLY. `agent` is the commission-only outside-contractor role and
   // lives INSIDE this tenant (#237) — passing the tenant check above is not
   // proof this caller may hand out books of business.
-  if (!session.isAdmin) {
+  const isManager = session.teamRole?.trim().toLowerCase() === "manager";
+  if (!session.isAdmin && !isManager) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 

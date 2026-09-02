@@ -165,7 +165,7 @@ export async function fetchScoreIndexForBusinessIds(
   if (ids.length > 600) throw new Error("targeted_score_index_exceeds_safe_window");
 
   const db = getServiceSupabase();
-  const [allAudits, scoredAudits, unreachable, parkedRows] = await Promise.all([
+  const [allAudits, scoredAudits, unreachable, parkedStamped, parkedUnstamped] = await Promise.all([
     db
       .from("leadgen_site_audits")
       .select("business_id,fetched_at", { count: "exact" })
@@ -188,29 +188,46 @@ export async function fetchScoreIndexForBusinessIds(
       .eq("audit_version", MODEL_VERSION)
       .in("business_id", ids)
       .limit(LEAD_READ_CAP),
+    // Same two-tier shape as loadParkedCandidates (see its P2 header):
+    // stamped verdict rows + the LIKE net over only unstamped rows. This
+    // read previously pulled the signals BLOB for every requested id; now
+    // signals transfer only for actual candidates.
     db
       .from("leadgen_site_audits")
       .select("business_id,signals", { count: "exact" })
       .eq("tenant_id", WEBDEV_TENANT_ID)
       .eq("audit_version", MODEL_VERSION)
       .in("business_id", ids)
+      .eq("is_parked", 1)
+      .limit(LEAD_READ_CAP),
+    db
+      .from("leadgen_site_audits")
+      .select("business_id,signals", { count: "exact" })
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("audit_version", MODEL_VERSION)
+      .in("business_id", ids)
+      .is("is_parked", null)
+      .or(parkedSignalsOrFilter())
       .limit(LEAD_READ_CAP),
   ]);
 
   if (allAudits.error) throw new Error(`audit_index_read_failed: ${allAudits.error.message}`);
   if (scoredAudits.error) throw new Error(`audit_index_read_failed: ${scoredAudits.error.message}`);
   if (unreachable.error) throw new Error(`unreachable_index_read_failed: ${unreachable.error.message}`);
-  if (parkedRows.error) throw new Error(`parked_index_read_failed: ${parkedRows.error.message}`);
+  if (parkedStamped.error) throw new Error(`parked_index_read_failed: ${parkedStamped.error.message}`);
+  if (parkedUnstamped.error) throw new Error(`parked_index_read_failed: ${parkedUnstamped.error.message}`);
 
   const allRows = (allAudits.data || []) as AuditStampRow[];
   const scoredRows = (scoredAudits.data || []) as ScoredAuditRow[];
   const unreachableRows = (unreachable.data || []) as UnreachableRow[];
-  const candidates = (parkedRows.data || []) as ParkedCandidateRow[];
+  const stampedRows = (parkedStamped.data || []) as ParkedCandidateRow[];
+  const unstampedRows = (parkedUnstamped.data || []) as ParkedCandidateRow[];
   assertCompleteRead("audit_index_targeted", allRows, allAudits.count);
   assertCompleteRead("audit_index_scored_targeted", scoredRows, scoredAudits.count);
   assertCompleteRead("unreachable_index_targeted", unreachableRows, unreachable.count);
-  assertCompleteRead("parked_index_targeted", candidates, parkedRows.count);
-  return assembleScoreIndex(allRows, scoredRows, unreachableRows, candidates);
+  assertCompleteRead("parked_index_stamped_targeted", stampedRows, parkedStamped.count);
+  assertCompleteRead("parked_index_unstamped_targeted", unstampedRows, parkedUnstamped.count);
+  return assembleScoreIndex(allRows, scoredRows, unreachableRows, [...stampedRows, ...unstampedRows]);
 }
 
 /**
@@ -241,20 +258,59 @@ export async function fetchScoreIndexForBusinessIds(
  * candidate properly. ~57 rows, so the extra column costs nothing; getting this
  * wrong strips a real business of its score.
  */
+/**
+ * ═══ P2 (2026-09-01): THE STORED COLUMN LANDED — TWO-TIER READ ══════════════
+ *
+ * `is_parked` is now stamped by the JARVIS audit worker at write time
+ * (services/leadgen migration 012 + lib/parked-domains.js port of THIS
+ * repo's detector) and backfilled across the corpus. The read is two cheap
+ * queries instead of one full scan:
+ *
+ *   tier 1  is_parked = 1        indexed point lookup — the verdict rows
+ *   tier 2  is_parked IS NULL    the ORIGINAL LIKE net, over ONLY unstamped
+ *                                rows (a writer older than the migration, or
+ *                                rows written between backfill and worker
+ *                                restart). Converges to ~zero rows.
+ *
+ * This shape is correct in EVERY deploy state: before the backfill tier 2 IS
+ * the old query (cost unchanged), after it tier 2 is near-free. No cross-repo
+ * deploy ordering required.
+ *
+ * confirmParked() REMAINS THE VERDICT on the union. A 1-stamp is JARVIS's
+ * list; the net is ours; re-checking ~57 rows costs nothing and protects
+ * against a bad backfill AND cross-repo list drift.
+ *
+ * 🚨 IF PARKING_HOSTS GROWS: rows stamped 0 under the OLD list stay excluded
+ * until re-stamped. Growing the list REQUIRES re-running the JARVIS backfill
+ * with --all (services/leadgen/backfill-parked.mjs) in the same change.
+ */
 async function loadParkedCandidates(): Promise<{ business_id: string; signals: unknown }[]> {
   return memo("web-leads:parked", TTL.PARKED, async () => {
     const db = getServiceSupabase();
-    const res = await db
-      .from("leadgen_site_audits")
-      .select("business_id,signals", { count: "exact" })
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("audit_version", MODEL_VERSION)
-      .or(parkedSignalsOrFilter())
-      .limit(LEAD_READ_CAP);
-    if (res.error) throw new Error(`parked_index_read_failed: ${res.error.message}`);
-    const rows = (res.data || []) as unknown as { business_id: string; signals: unknown }[];
-    assertCompleteRead("parked_index", rows, res.count);
-    return rows;
+    const [stamped, unstamped] = await Promise.all([
+      db
+        .from("leadgen_site_audits")
+        .select("business_id,signals", { count: "exact" })
+        .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("audit_version", MODEL_VERSION)
+        .eq("is_parked", 1)
+        .limit(LEAD_READ_CAP),
+      db
+        .from("leadgen_site_audits")
+        .select("business_id,signals", { count: "exact" })
+        .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("audit_version", MODEL_VERSION)
+        .is("is_parked", null)
+        .or(parkedSignalsOrFilter())
+        .limit(LEAD_READ_CAP),
+    ]);
+    if (stamped.error) throw new Error(`parked_index_read_failed: ${stamped.error.message}`);
+    if (unstamped.error) throw new Error(`parked_index_read_failed: ${unstamped.error.message}`);
+    const stampedRows = (stamped.data || []) as unknown as { business_id: string; signals: unknown }[];
+    const unstampedRows = (unstamped.data || []) as unknown as { business_id: string; signals: unknown }[];
+    assertCompleteRead("parked_index_stamped", stampedRows, stamped.count);
+    assertCompleteRead("parked_index_unstamped", unstampedRows, unstamped.count);
+    return [...stampedRows, ...unstampedRows];
   });
 }
 

@@ -4,8 +4,8 @@ import "./globals.css";
 import { SidebarShell } from "@/components/SidebarShell";
 import { MainShell } from "@/components/MainShell";
 import { SIDEBAR_BOOT_SCRIPT } from "@/lib/useSidebarCollapsed";
-import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getActiveProfile, getTenant } from "@/lib/queries";
+import { resolvePrimaryAgent } from "@/lib/shell-status";
 import { safe } from "@/lib/api-helpers";
 import {
   DEMO_CLIENT_PROFILE_COOKIE,
@@ -20,7 +20,6 @@ import {
 } from "@/lib/manifest/loader";
 import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
-import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
 import { matchesPathPrefix } from "@/lib/path-prefix";
@@ -34,6 +33,8 @@ import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import type { NavItem } from "@/lib/nav-config";
 import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
+import { PerfVitals } from "@/components/PerfVitals";
 
 // Default metadata — tenant-neutral. Individual pages override via
 // generateMetadata (forms, leads, etc.) with their own titles. Keeping
@@ -57,6 +58,12 @@ export default async function RootLayout({
   // sidebar shell. The pathname is set as a header by middleware.ts.
   const hdrs = await headers();
   const pathname = hdrs.get("x-pathname") || hdrs.get("x-invoke-path") || "";
+  // P0 instrumentation (instant-load plan): time the layout's own data
+  // fetches — the "session tax" every navigation pays before any page
+  // content or loading state can stream. Additive only; spans wrap the
+  // existing calls without changing order, parallelism, or error handling.
+  const perfT0 = Date.now();
+  const perfSpans: PerfSpan[] = [];
   // Paths that render edge-to-edge (no operator sidebar, no footer, no
   // tenant manifest resolution). Anything aimed at a prospect / pre-auth
   // visitor or a fresh signup walks through here. Mirrors middleware.ts
@@ -88,9 +95,7 @@ export default async function RootLayout({
   const isFullBleed = FULL_BLEED_PREFIXES.some((p) => matchesPathPrefix(pathname, p));
 
   let profile = null;
-  let primaryAgentLive = false;
   let resolvedPrimaryAgent: string | null = null;
-  let bridgeOnline = false;
   let tenantProfileSlug: string | null = null;
   let demoProfileSlug: string | null = null;
   let pathOverrideSlug: string | null = null;
@@ -132,7 +137,7 @@ export default async function RootLayout({
     // here blanked the dashboard with a 500. Each catch logs via safe()
     // so a stuck sidebar indicator is searchable in Vercel logs instead
     // of silently rendering as "offline".
-    profile = await safe("layout.profile", getActiveProfile(), null);
+    profile = await timed("profile", safe("layout.profile", getActiveProfile(), null), perfSpans);
 
     // Demo cookie is honoured ONLY when:
     //   - the operator is on /demo/sun (explicit opt-in via URL), OR
@@ -174,19 +179,11 @@ export default async function RootLayout({
     // primary_agent="atlas" or stale "bravo" would otherwise read another
     // tenant's heartbeat — cross-tenant signal leak. Fall back to the
     // manifest's primary slug (or first enabled) when the column is invalid.
-    const manifestForAgent = await getTenantManifestForUser(tenantId);
-    const manifestEnabledForAgent = resolveEnabledAgentSlugs({
-      manifestAgents: manifestForAgent ? manifestForAgent.agents || [] : null,
-      legacyProfileAgents: profile?.agents_enabled,
-    });
-    const requestedAgent = (profile?.primary_agent || "").toLowerCase();
-    const manifestPrimary = manifestForAgent?.agents?.find(
-      (a) => a.primary && a.enabled,
-    )?.slug?.toLowerCase();
-    const agent = manifestEnabledForAgent.includes(requestedAgent)
-      ? requestedAgent
-      : (manifestPrimary || manifestEnabledForAgent[0] || requestedAgent || "bravo");
-    resolvedPrimaryAgent = agent;
+    const manifestForAgent = await timed("manifest_scope", getTenantManifestForUser(tenantId), perfSpans);
+    // Shared with /api/shell/status (lib/shell-status.ts) so the
+    // manifest-validation guard on the agent slug cannot drift between the
+    // sidebar label (resolved here) and the deferred live-dot lookup.
+    resolvedPrimaryAgent = resolvePrimaryAgent(profile, manifestForAgent);
 
     // Resolve the operator's tenant slug FIRST so the path-override gate
     // below can share the same access policy the /t/[slug] page uses
@@ -194,7 +191,7 @@ export default async function RootLayout({
     // custom_fields.command_center_profile_slug so one shell can render
     // different products cleanly.
     if (tenantId) {
-      tenantProfileSlug = await safe(
+      tenantProfileSlug = await timed("tenant_slug", safe(
         "layout.tenant_profile_slug",
         (async () => {
           // Was a second raw SELECT on `tenants` for columns the memoized read
@@ -211,7 +208,7 @@ export default async function RootLayout({
           });
         })(),
         null
-      );
+      ), perfSpans);
     }
 
     // Path slug wins when present and not in demo. Lets `/t/<slug>/...`
@@ -238,43 +235,24 @@ export default async function RootLayout({
       }
     }
 
-    // Run agent-state + bridge lookups in parallel, isolated.
-    // Bridge-online check uses the shared getBridgeOnline() helper so the
-    // header dot, Settings page, and any future caller agree on what
-    // "online" means (last_seen_at within 5 minutes, revoked_at IS NULL).
-    const emptySnap: { data: { last_tick_at?: string | null } | null } = { data: null };
-    const [snapRes, bridgeOnlineResolved, chatPropsResolved, surfaceResolved] = await Promise.all([
-      safe(
-        "layout.agent_state_snapshot",
-        (async () => {
-          const db = getServiceSupabase();
-          const r = await db
-            .from("agent_state_snapshot")
-            .select("last_tick_at")
-            .eq("agent_name", agent)
-            .maybeSingle();
-          return { data: r.data as { last_tick_at?: string | null } | null };
-        })(),
-        emptySnap
-      ),
-      safe("layout.bridge_online", getBridgeOnline(tenantId), false),
-      // Persistent-chat props, resolved in parallel so this adds no
-      // wall-clock latency to the layout (just one more concurrent query set).
+    // Chat props + persona stay blocking: the persona filters the nav
+    // (correctness, not cosmetics) and the chat shell needs its props to
+    // render at all. The agent-heartbeat + bridge reads moved OUT of the
+    // layout to /api/shell/status, fetched by the Sidebar after first
+    // paint (P1 instant-load, 2026-09-01): they are cosmetic chrome, and
+    // the bridge check is internally sequential (two round trips), so
+    // they were the long pole of this block on every full page load. The
+    // "online means last_seen_at within 5 minutes" definition still lives
+    // solely in the shared bridge helper (lib/queries.ts), now called by
+    // the status route instead of here.
+    const [chatPropsResolved, surfaceResolved] = await timed("side_channels", Promise.all([
       safe(
         "layout.chat_props",
         resolveChatShellProps({ profile, userEmail: profile?.email }),
         null,
       ),
-      // Persona for the sidebar. Batched with the other side-channel reads so
-      // scoping the nav costs no extra wall-clock time on any page render.
       safe("layout.viewer_surface", resolveViewerSurface(), null),
-    ]);
-    const snap = snapRes.data;
-    if (snap?.last_tick_at) {
-      primaryAgentLive =
-        Date.now() - new Date(snap.last_tick_at).getTime() < 15 * 60 * 1000;
-    }
-    bridgeOnline = bridgeOnlineResolved;
+    ]), perfSpans);
     chatProps = chatPropsResolved;
     navPersona = surfaceResolved?.ok ? surfaceResolved.persona : null;
     // tenantProfileSlug already resolved above so canPreviewTenantSlug
@@ -284,7 +262,10 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
-  const manifest = isFullBleed ? null : await getManifest(manifestSlug);
+  const manifest = isFullBleed ? null : await timed("manifest", getManifest(manifestSlug), perfSpans);
+  // One `[perf]` line per shell render: the measured session tax. This is
+  // the P1 before/after number; remove only when the instant-load work ends.
+  logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);
 
   // Founders portal nav. Injected here rather than added to CC_NAV because
   // OASIS_SEED.nav IS navToManifest(CC_NAV) and getSeedManifest() falls back to
@@ -370,6 +351,11 @@ export default async function RootLayout({
           every scroll position — the thing CC kept pointing at. Scoped to
           the dashboard branch; marketing brings its own atmosphere. */}
       <body className={isFullBleed ? undefined : "grain"}>
+        {/* First-party web-vitals beacon (P0). Renders nothing; posts
+            TTFB/LCP/INP/CLS to /api/perf/vitals. First-party rather than
+            @vercel/speed-insights because the Cloudflare cutover is in
+            flight — this survives the host move. */}
+        <PerfVitals />
         {isFullBleed || !manifest ? (
           children
         ) : (
@@ -422,22 +408,17 @@ export default async function RootLayout({
                   ? (manifestPrimaryAgentSlug(manifest) ?? "bravo")
                   : (resolvedPrimaryAgent || manifestPrimaryAgentSlug(manifest) || "bravo")
               }
-              primaryAgentLive={
-                // Suppress the live indicator in preview mode — it
-                // was reading the operator's agent_state_snapshot
-                // even when showing the tenant's manifest agent
-                // label, which misrepresented the indicator. Owned
-                // tenant routes still get the real live indicator.
-                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
-                  ? false
-                  : primaryAgentLive
-              }
-              bridgeOnline={
-                // Same — preview mode shouldn't show CC's bridge as
-                // "online" inside the Sun Biz shell.
-                demoMode || (pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug)
-                  ? false
-                  : bridgeOnline
+              primaryAgentLive={false}
+              bridgeOnline={false}
+              deferStatus={
+                // The dots start OFF and self-resolve from
+                // /api/shell/status after paint (P1 instant-load) —
+                // except in demo/preview shells, where they stay
+                // forced off: the live indicator would read the
+                // OPERATOR's heartbeat while showing the previewed
+                // tenant's agent label, misrepresenting the dot
+                // (same suppression this prop replaced).
+                !(demoMode || (!!pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug))
               }
               demoMode={demoMode}
               demoLabel={`${manifest.brand.name} demo`}

@@ -57,16 +57,16 @@ import type { Facets } from "@/lib/web-leads/queries";
 // of truth without crossing the server/client line.
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import { activeFilterCount, FilterRail, FilterSheet } from "./FilterRail";
+
 import { LeadsTable } from "./LeadsTable";
 import { LeadsToolbar } from "./LeadsToolbar";
 import { WebLeadDetail } from "./WebLeadDetail";
 import { TerritoryAssignment } from "./TerritoryAssignment";
 import { CallMode } from "./CallMode";
 
-const VIEWS: { key: WebLeadView; label: string }[] = [
+const BASE_VIEWS: { key: WebLeadView; label: string }[] = [
   { key: "leads", label: "Leads" },
   { key: "mine", label: "My leads" },
-  { key: "territories", label: "Assign" },
 ];
 
 /** A segmented control, not browser tabs -- one bordered pill, active state
@@ -75,15 +75,20 @@ const VIEWS: { key: WebLeadView; label: string }[] = [
 function ViewSwitcher({
   active,
   onChange,
-  teamView,
+  canSeeTeamAndAssign,
 }: {
   active: WebLeadView;
   onChange: (v: WebLeadView) => void;
-  teamView: boolean;
+  canSeeTeamAndAssign: boolean;
 }) {
+  const views = useMemo(() => [
+    ...BASE_VIEWS,
+    ...(canSeeTeamAndAssign ? [{ key: "team" as WebLeadView, label: "Team leads" }, { key: "territories" as WebLeadView, label: "Assign" }] : []),
+  ], [canSeeTeamAndAssign]);
+
   return (
     <div role="tablist" aria-label="View" className="inline-flex items-center gap-0.5 rounded-lg border border-bg-border bg-bg-panel p-0.5">
-      {VIEWS.map((v) => (
+      {views.map((v) => (
         <button
           key={v.key}
           type="button"
@@ -97,7 +102,7 @@ function ViewSwitcher({
             active === v.key ? "bg-accent/15 text-accent" : "text-fg-dim hover:bg-bg-elev hover:text-fg"
           }`}
         >
-          {v.key === "mine" && teamView ? "Team leads" : v.label}
+          {v.label}
         </button>
       ))}
     </div>
@@ -106,10 +111,10 @@ function ViewSwitcher({
 
 export function WebLeadsBrowser({
   canMutate,
-  teamView = false,
+  canSeeTeamAndAssign = false,
 }: {
   canMutate: boolean;
-  teamView?: boolean;
+  canSeeTeamAndAssign?: boolean;
 }) {
   const router = useRouter();
   const sp = useSearchParams();
@@ -318,6 +323,7 @@ export function WebLeadsBrowser({
     if (filters.cities.length) parts.push(`in ${filters.cities.join(" or ")}`);
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
+    if (filters.ownerOnly) parts.push("where we know the owner's name");
     // Named explicitly because this is the filter most likely to have emptied
     // the page for a reason that has nothing to do with the rep's targeting:
     // it is 7am where they are, or the directory holds no hours for any of them.
@@ -356,7 +362,8 @@ export function WebLeadsBrowser({
   );
 
   const mine = view === "mine";
-  const canOperateCurrentView = canMutate && !(teamView && mine);
+  const team = view === "team";
+  const canOperateCurrentView = canMutate && !team;
 
   /**
    * Claim the ticked leads into my book, or (in My Leads) release them back to
@@ -510,7 +517,7 @@ export function WebLeadsBrowser({
       {/* The rail narrows the shared pool. A rep's own book is small enough to
           scan and is not filtered by geography -- filtering your own 100 leads
           by province is a question nobody has. */}
-      {!mine && (
+      {!mine && !team && (
         <>
           <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
           <FilterSheet
@@ -542,7 +549,7 @@ export function WebLeadsBrowser({
           claimLabel={mine ? "Release" : "Claim"}
           canMutate={canOperateCurrentView}
           filterCount={activeFilterCount(filters)}
-          onOpenFilters={mine ? null : () => setFiltersOpen(true)}
+          onOpenFilters={mine || team ? null : () => setFiltersOpen(true)}
         />
 
         {claimNote && (
@@ -556,9 +563,9 @@ export function WebLeadsBrowser({
           onPage={(n) => push({ ...filters, page: n })}
           onOpen={openLead}
           loading={loading} error={listError}
-          emptyHint={mine ? (teamView ? "No roster-assigned team leads yet." : "Nothing in your book yet. Go to Leads, tick the ones you want and claim them.") : emptyHint}
+          emptyHint={team ? "No roster-assigned team leads yet." : mine ? "Nothing in your book yet. Go to Leads, tick the ones you want and claim them." : emptyHint}
           selected={selected} onToggle={toggle} onToggleAll={toggleAll}
-          showStage={mine}
+          showStage={mine || team}
           canSelect={canOperateCurrentView}
         />
       </div>
@@ -568,18 +575,18 @@ export function WebLeadsBrowser({
   return (
     <div className="space-y-6">
       <PageHeader
-        title={mine ? (teamView ? "Team leads" : "My leads") : "Leads"}
+        title={team ? "Team leads" : mine ? "My leads" : "Leads"}
         subtitle={
-          mine
-            ? teamView
-              ? "Read-only roster view of every lead assigned to the OASIS sales team."
-              : "The leads you have claimed. Nobody else can call these while you hold them."
+          team
+            ? "Read-only roster view of every lead assigned to the OASIS sales team."
+            : mine
+            ? "The leads you have claimed. Nobody else can call these while you hold them."
             : "Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
         }
-        action={<ViewSwitcher active={view} onChange={setView} teamView={teamView} />}
+        action={<ViewSwitcher active={view} onChange={setView} canSeeTeamAndAssign={canSeeTeamAndAssign} />}
       />
 
-      {(view === "leads" || mine) && listBlock}
+      {(view === "leads" || mine || team) && listBlock}
 
       {view === "territories" && (
         <div className="max-w-3xl">

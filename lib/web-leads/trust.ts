@@ -105,7 +105,9 @@ export function assessTrust(input: {
           detail:
             "This site builds its page in the browser, and our crawler reads only the raw page source, " +
             "so it saw an almost empty shell. Scoring that would punish the business for how the site is built, " +
-            "not for what a visitor sees. Re-check below, or verify the site by eye before saying anything about it.",
+            "not for what a visitor sees. Open the site in a browser and trust your eyes: if it looks like a real, " +
+            "working site, treat it as one. A re-check reads the same raw source, so it only helps when the link " +
+            "on file was wrong; pasting the correct link is what fixes that case.",
         },
         warnings,
       };

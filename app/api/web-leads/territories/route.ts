@@ -18,6 +18,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 
+
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,8 @@ export async function GET() {
   if (session.tenantId !== WEBDEV_TENANT_ID) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
-  if (!session.isAdmin) {
+  const isManager = session.teamRole?.trim().toLowerCase() === "manager";
+  if (!session.isAdmin && !isManager) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 

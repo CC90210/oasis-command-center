@@ -47,3 +47,17 @@ import { parseFilters, filtersToParams, EMPTY_FILTERS } from "../lib/web-leads/f
 }
 
 console.log("web-leads-filters ok");
+
+// The owner filter is a URL-level filter like the others: it must parse, it
+// must survive a round trip, and it must default OFF. A rep who bookmarks
+// "owner=1" is asking for the small queue where a person is named; anyone
+// arriving with no parameter gets the whole board.
+{
+  const f = parseFilters(new URLSearchParams("owner=1"));
+  assert.equal(f.ownerOnly, true);
+  assert.deepEqual(parseFilters(filtersToParams(f)), f, "ownerOnly must survive a URL round trip");
+
+  assert.equal(parseFilters(new URLSearchParams("")).ownerOnly, false, "off by default");
+  assert.equal(parseFilters(new URLSearchParams("owner=maybe")).ownerOnly, false, "only '1' turns it on");
+  assert.equal(EMPTY_FILTERS.ownerOnly, false);
+}

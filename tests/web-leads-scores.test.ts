@@ -204,7 +204,7 @@ assert.deepEqual(
   // with no limit applied, so comparing rows-returned against rows-matched
   // detects truncation from any source.
   //
-  // EIGHT: four tenant-wide reads for the Leads pool and the same four
+  // TEN: five tenant-wide reads for the Leads pool and the same five
   // completeness-proved, business-id-bounded reads for the Pipeline. The
   // count is asserted exactly, not as a minimum, precisely so that adding a
   // read forces someone to come here and decide whether it needs the same
@@ -212,11 +212,20 @@ assert.deepEqual(
   // pages it missed sitting in `scored` at 82, back at the top of every peer
   // group, offered to prospects as their best competitor, with nothing on
   // screen looking wrong. This assertion is what caught that omission.
+  //
+  // WAS EIGHT until 2026-09-02 (instant-load P2). The parked read became TWO
+  // reads per call site: the stored `is_parked = 1` verdict (migration 012,
+  // indexed) plus the original LIKE net restricted to rows not yet stamped.
+  // This assertion did its job again -- both new reads had to come here and
+  // prove they carry the same exact-count completeness proof. They do.
   const counted = src.match(/\{ count: "exact" \}/g) || [];
-  assert.equal(counted.length, 8, "all full and targeted score-index reads must request an exact count");
+  assert.equal(counted.length, 10, "all full and targeted score-index reads must request an exact count");
   // The open quote distinguishes a real call from a comment naming it.
+  // Ten for the same reason as above: each of the two parked tiers proves its
+  // own completeness at each call site. One shared proof would let the other
+  // tier truncate silently.
   const asserted = src.match(/assertCompleteRead\("/g) || [];
-  assert.equal(asserted.length, 8, "all full and targeted score-index reads must prove completeness before being used");
+  assert.equal(asserted.length, 10, "all full and targeted score-index reads must prove completeness before being used");
   assert.doesNotMatch(
     src,
     /length >= LEAD_READ_CAP/,
