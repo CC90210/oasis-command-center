@@ -1,5 +1,7 @@
 import assert from "node:assert";
 import { buildFacets, selectSheetIds, type Sheet } from "../lib/web-leads/queries";
+import { readFileSync } from "node:fs";
+import { fetchSheetsScopedToViewer } from "../lib/web-leads/data";
 import { EMPTY_FILTERS } from "../lib/web-leads/filters";
 
 // leads_callable can never exceed leads_total, and leads_no_site can never
@@ -48,4 +50,87 @@ for (const s of sheets) {
   assert.ok(narrow <= wide, "narrowing a filter must never increase the count");
 }
 
-console.log("web-leads-counters ok");
+// ---------------------------------------------------------------------------
+// The rail must count the ROWS, not a stored column.
+//
+// leadgen_territories carries denormalized leads_total/callable/no_site,
+// written when a lead is promoted and never recomputed when one leaves. After
+// the board went from ~27,000 rows to ~1,800 the rail advertised 133,599 leads
+// against 1,846 that existed -- "Toronto, ON - Restaurants & Bars" offered
+// 6,225 where 37 remained, so a rep picked a sheet and got a near-empty table.
+// That is precisely the drift the comment above warns about, arriving through
+// the one path that was not derived.
+//
+// Wrapped in main() because this file is transformed to CJS, which has no
+// top-level await.
+// ---------------------------------------------------------------------------
+async function main() {
+  const STALE: Sheet[] = [
+    { id: "terr_1", region: "ON", locality: "Toronto", vertical: "Restaurants & Bars",
+      leads_total: 6225, leads_callable: 5000, leads_no_site: 4000, leads_callable_no_site: 3000 },
+  ];
+  // Two real claimable rows in that territory; one of them has no website.
+  const rows = [
+    { id: "l1", data: { webdev_territory_id: "terr_1", phone: "+15550100", website: "https://x.test",
+                        stage: "researched", assigned_to: null, claimed_at: null } },
+    { id: "l2", data: { webdev_territory_id: "terr_1", phone: "+15550101", website: null,
+                        stage: "researched", assigned_to: null, claimed_at: null } },
+  ];
+  const viewer = { userId: "u1", teamRole: "admin", isAdmin: true };
+  const derived = await fetchSheetsScopedToViewer(viewer, {
+    scope: "pool", now: Date.parse("2026-09-02T12:00:00.000Z"),
+    projectedRows: rows as never, baseSheets: STALE,
+  });
+  assert.equal(derived.length, 1);
+  assert.equal(derived[0]!.leads_total, 2, "the stored 6,225 must be replaced by the 2 rows that exist");
+  assert.equal(derived[0]!.leads_callable, 2, "both rows carry a phone");
+  assert.equal(derived[0]!.leads_no_site, 1, "exactly one row has no website");
+  // Labels still come from the territory row -- only the counts are re-derived.
+  assert.equal(derived[0]!.locality, "Toronto");
+  assert.equal(derived[0]!.vertical, "Restaurants & Bars");
+
+  // Neither endpoint may take the stored-counter shortcut for ANY viewer. This
+  // was gated on isScopedContractor, which left admins and managers -- the
+  // people who trust the number most -- reading the stale column.
+  for (const route of ["app/api/web-leads/route.ts", "app/api/web-leads/facets/route.ts"]) {
+    const src = readFileSync(route, "utf8");
+    assert.ok(
+      src.includes("fetchSheetsScopedToViewer("),
+      `${route} must derive its counts from the rows`,
+    );
+    // Semantic, not textual. Asserting on one spelling of the ternary let any
+    // other formatting of the same branch pass. The branch NEEDED a role
+    // predicate to exist, so the durable invariant is that neither route
+    // consults one when counting -- reintroducing the fast path means calling
+    // isScopedContractor again, whatever shape it is written in.
+    // (CodeRabbit, PR #377.)
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.ok(
+      !code.includes("isScopedContractor"),
+      `${route} must not consult a role predicate when counting`,
+    );
+  }
+
+  // Rows and facets must read ONE availability clock. Two calls to Date.now()
+  // let a claim expire between them, so the rail and the table disagree by a
+  // lead for a reason nobody can reproduce.
+  {
+    const src = readFileSync("app/api/web-leads/route.ts", "utf8");
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    assert.equal(
+      (code.match(/now: availabilityNow/g) || []).length, 2,
+      "fetchLeads and the facet derivation must share one timestamp",
+    );
+    assert.ok(
+      !/now:\s*Date\.now\(\)/.test(code),
+      "no inline Date.now() may be passed as an availability clock",
+    );
+  }
+
+  console.log("web-leads-counters ok");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
