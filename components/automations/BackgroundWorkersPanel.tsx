@@ -18,6 +18,7 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "@/lib/fetch-json";
 import { runWorkerAction, type WorkerAction } from "@/lib/automations/worker-control";
+import { formatLastSeen, isOperatorStopped } from "@/lib/automations/worker-status";
 import { Cpu, CheckCircle2, AlertCircle, MinusCircle, HelpCircle, Activity, Play, Square, RotateCw, Loader2 } from "lucide-react";
 
 /**
@@ -248,22 +249,12 @@ function WorkerRow({
   const [optimisticStatus, setOptimisticStatus] = useState<Worker["status"] | null>(null);
   const effectiveStatus = optimisticStatus ?? worker.status;
 
-  // "Off" is a fourth state, and it is NOT a fault (2026-09-02).
-  //
-  // fleet_watchdog.classify keeps `disabled` distinct from `down` precisely so
-  // a deliberate stop never pages anyone — then the bridge collapses disabled
-  // onto the "degraded" health value, and this tile turned that into
-  // "Degraded — check logs". CC read that about a daemon he had switched off
-  // himself and went looking for logs that do not exist. The supervisor still
-  // says which it is, in metadata.pm2_status, so read that rather than adding
-  // a new value to the stored status vocabulary.
-  const supervisorState = String(
-    (worker.metadata as Record<string, unknown> | undefined)?.pm2_status ?? "",
-  );
-  const operatorStopped =
-    optimisticStatus === null &&
-    worker.status === "degraded" &&
-    supervisorState === "disabled by operator";
+  // "Off" is a fourth state, and it is NOT a fault (2026-09-02). The rule lives
+  // in lib/automations/worker-status so a test can execute it — see that file
+  // for why "Degraded — check logs" was being shown for a deliberate stop.
+  // Suppressed while an optimistic flip is pending: that flip has no fresh
+  // supervisor reading behind it.
+  const operatorStopped = optimisticStatus === null && isOperatorStopped(worker);
 
   const Icon = operatorStopped
     ? MinusCircle
@@ -550,28 +541,4 @@ function formatUptime(ms: number): string {
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
   if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h`;
   return `${Math.round(ms / 86_400_000)}d`;
-}
-
-/**
- * "last seen" that cannot disguise an old relic as a fresh outage.
- *
- * Today  → "3:42:10 PM"            (short; the common case)
- * Older  → "May 18, 7:31:48 PM"    (the date is the whole point)
- * Stale by more than a year → the year too.
- * Unparseable → the raw value, never a silent "Invalid Date".
- */
-function formatLastSeen(iso: string): string {
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return iso;
-  const now = new Date();
-  const sameDay =
-    then.getFullYear() === now.getFullYear() &&
-    then.getMonth() === now.getMonth() &&
-    then.getDate() === now.getDate();
-  if (sameDay) return then.toLocaleTimeString();
-  const opts: Intl.DateTimeFormatOptions =
-    then.getFullYear() === now.getFullYear()
-      ? { month: "short", day: "numeric" }
-      : { year: "numeric", month: "short", day: "numeric" };
-  return `${then.toLocaleDateString(undefined, opts)}, ${then.toLocaleTimeString()}`;
 }
