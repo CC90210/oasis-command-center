@@ -68,6 +68,18 @@ export type WebLeadFilters = {
   industries: string[];
   noSiteOnly: boolean;
   /**
+   * Only leads where we know the OWNER by name.
+   *
+   * A main line reaches whoever answers; a name lets a rep ask for the person
+   * who can actually say yes. The name is read off the business's own About or
+   * Team page and stored with the page that proved it, so this filter is
+   * "someone verified a human here", not a guess.
+   *
+   * Off by default: the enriched share of the board is small, and a rep who
+   * lands on an empty-looking queue assumes the board is broken.
+   */
+  ownerOnly: boolean;
+  /**
    * Only businesses OPEN RIGHT NOW, in their own time zone.
    *
    * Evaluated per request against a fresh clock (see fetchLeads), never baked
@@ -103,6 +115,7 @@ export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
   noSiteOnly: false,
+  ownerOnly: false,
   openNow: false,
   band: "all",
   sort: "opportunity",
@@ -147,6 +160,7 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
+    ownerOnly: sp.get("owner") === "1",
     openNow: sp.get("open") === "1",
     // Unrecognised values fall back to the default rather than throwing: these
     // come from a URL a rep can hand-edit or a stale bookmark, and a filter
@@ -175,6 +189,7 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   put("city", f.cities);
   put("ind", f.industries);
   if (f.noSiteOnly) sp.set("nosite", "1");
+  if (f.ownerOnly) sp.set("owner", "1");
   if (f.openNow) sp.set("open", "1");
   if (f.query) sp.set("q", f.query);
   if (f.page > 1) sp.set("page", String(f.page));

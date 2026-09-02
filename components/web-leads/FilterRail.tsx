@@ -80,7 +80,8 @@ export function activeFilterCount(filters: WebLeadFilters): number {
     filters.provinces.length +
     filters.cities.length +
     filters.industries.length +
-    (filters.noSiteOnly ? 1 : 0)
+    (filters.noSiteOnly ? 1 : 0) +
+    (filters.ownerOnly ? 1 : 0)
   );
 }
 
@@ -145,6 +146,19 @@ function FilterTree({
           onChange={() => set({ noSiteOnly: !filters.noSiteOnly })}
         />
         <span>No website found yet</span>
+      </label>
+
+      {/* The owner's name is the difference between "is the owner in?" and
+          "can I speak to Marie?". Sits beside the website filter because a rep
+          picks both the same way: what do I know before I dial. */}
+      <label className={ROW}>
+        <input
+          type="checkbox"
+          className={BOX}
+          checked={filters.ownerOnly}
+          onChange={() => set({ ownerOnly: !filters.ownerOnly })}
+        />
+        <span>Owner identified by name</span>
       </label>
 
       <div className="rounded-lg border border-bg-border bg-bg-panel/40 p-3">
