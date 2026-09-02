@@ -56,6 +56,18 @@ const LIVE_WINDOW_MS = 15 * 60 * 1000;
  * The two dot values, resolved in parallel and individually isolated — one
  * failing read renders its dot "off", never a 500 (same safe() degradation
  * the layout used when these lived there).
+ *
+ * KNOWN LIMIT, INHERITED NOT INTRODUCED (Codex P2, 2026-09-01):
+ * agent_state_snapshot has NO tenant_id column — it is per-agent_name
+ * globally (documented at lib/queries.ts:700 and :721, where the column is
+ * explicitly awaited). Two tenants enabling the same shared agent slug read
+ * the same heartbeat row; the layout ran this exact query with this exact
+ * semantic before P1 moved it here. Mitigations that DO hold today: the
+ * slug is manifest-validated per tenant (resolvePrimaryAgent), the route is
+ * session-gated, and ONLY two booleans ever leave the server — no snapshot
+ * fields pass through (pinned in tests/perf-p1.test.ts). When the tenant
+ * column lands, add `.eq("tenant_id", ...)` here and in lib/queries.ts's
+ * readers in the same change.
  */
 export async function getShellStatus(
   agent: string,

@@ -81,6 +81,22 @@ async function main(): Promise<void> {
   assert.ok(statusRoute.includes("no-store"), "status route is never cached");
   assert.ok(statusRoute.includes("resolvePrimaryAgent"), "status route shares the agent guard");
 
+  // The endpoint may never widen beyond the two booleans: the snapshot table
+  // is per-agent_name GLOBAL (no tenant_id yet — lib/queries.ts:721), so any
+  // richer passthrough (working_memory, tick contents, health_status) would
+  // turn an inherited shared-fleet dot into a real cross-tenant leak.
+  const shellStatus = src("lib/shell-status.ts");
+  assert.ok(
+    shellStatus.includes('.select("last_tick_at")'),
+    "the heartbeat read must project last_tick_at only — never widen to the full snapshot row",
+  );
+  for (const field of ["working_memory", "pending_actions", "health_status"]) {
+    assert.ok(
+      !statusRoute.includes(field) && !shellStatus.includes(`"${field}"`),
+      `snapshot field ${field} must never pass through the shell-status path`,
+    );
+  }
+
   console.log("perf-p1: all assertions passed");
 }
 
