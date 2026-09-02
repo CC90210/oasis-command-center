@@ -323,6 +323,7 @@ export function WebLeadsBrowser({
     if (filters.cities.length) parts.push(`in ${filters.cities.join(" or ")}`);
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
+    if (filters.ownerOnly) parts.push("where we know the owner's name");
     // Named explicitly because this is the filter most likely to have emptied
     // the page for a reason that has nothing to do with the rep's targeting:
     // it is 7am where they are, or the directory holds no hours for any of them.

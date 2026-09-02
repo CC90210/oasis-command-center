@@ -95,12 +95,13 @@ export function LeadsToolbar({
     ...filters.cities.map((c) => ({ label: c, clear: () => set({ cities: filters.cities.filter((x) => x !== c) }) })),
     ...filters.industries.map((i) => ({ label: i, clear: () => set({ industries: filters.industries.filter((x) => x !== i) }) })),
     ...(filters.noSiteOnly ? [{ label: "No website found yet", clear: () => set({ noSiteOnly: false }) }] : []),
+    ...(filters.ownerOnly ? [{ label: "Owner identified by name", clear: () => set({ ownerOnly: false }) }] : []),
     ...(filters.openNow ? [{ label: "Open right now", clear: () => set({ openNow: false }) }] : []),
     ...(filters.query ? [{ label: `"${filters.query}"`, clear: () => { onQueryDraft(""); set({ query: "" }); } }] : []),
   ];
 
   const clearAll = () =>
-    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, openNow: false, band: "all", query: "" });
+    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, ownerOnly: false, openNow: false, band: "all", query: "" });
 
   return (
     <div className="space-y-3">

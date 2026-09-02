@@ -273,10 +273,34 @@ assert.ok(fetchLeadsBody, "must find fetchLeads() in lib/web-leads/data.ts");
 // recycled loss), so the owner id is nulled for anyone but that lead's own
 // holder or an admin -- otherwise the pool would quietly tell a contractor
 // which rep had which business.
+// RE-AIMED 2026-09-02, NOT RELAXED. The manager branch used to be nested
+// inside `scope === "mine"`; it is now its own `scope === "team"` (managers
+// land on their roster's book, see app/web-leads/page.tsx). The regex above
+// pinned the OLD nesting by exact text, so the refactor turned this guard red
+// on `main` for four consecutive merges while the property it protects was
+// never actually broken. Re-aiming beats deleting -- and beats leaving main red,
+// which is how a real regression gets waved through as "that test is always
+// red".
+//
+// The property is unchanged and each branch is asserted SEPARATELY below, so a
+// future edit that collapses one of them cannot pass by matching the others:
+//   "team" -> canViewerRead(), whose only widening is the server-resolved roster
+//   "mine" -> isInBookOf() against THIS viewer's id, so it cannot be widened
+//   pool   -> isClaimable(), which excludes every currently-held lead
 assert.match(
   fetchLeadsBody[0],
-  /scope === "mine"\s*\?\s*viewer\.teamRole\.trim\(\)\.toLowerCase\(\) === "manager"\s*\?\s*canViewerRead\(r\.data \|\| \{\}, viewer, now\)\s*:\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)\s*:\s*isClaimable\(/,
-  "fetchLeads must scope 'mine' to the caller's own book and 'pool' to unheld leads -- tenant-pinning the read alone is not enough, an agent-role contractor sits INSIDE the tenant",
+  /scope === "team"\s*\?\s*canViewerRead\(r\.data \|\| \{\}, viewer, now\)/,
+  "fetchLeads must route the 'team' scope through canViewerRead -- a manager reads their roster, never the whole tenant",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /scope === "mine"\s*\?\s*isInBookOf\(factsFrom\(r\.data \|\| \{\}\), viewer\.userId\)/,
+  "fetchLeads must scope 'mine' to the caller's OWN book by comparing against viewer.userId -- an agent-role contractor sits INSIDE the tenant, so tenant-pinning the read alone is not enough",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /:\s*isClaimable\(r\.data \|\| \{\}, now\)/,
+  "the pool scope must be isClaimable() -- anything else hands a contractor leads that are already in another rep's book",
 );
 assert.match(
   fetchLeadsBody[0],

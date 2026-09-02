@@ -112,6 +112,15 @@ export function LeadCards({
                   <span className="mt-1 block truncate text-xs text-fg-dim">
                     {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
                   </span>
+                  {/* The name a rep asks for. Shown only when someone was
+                      actually identified — an "Ask for —" with nothing after it
+                      teaches a rep to ignore the line. */}
+                  {l.ownerName ? (
+                    <span className="mt-1 block truncate text-xs font-medium text-fg-muted">
+                      Ask for {l.ownerName}
+                      {l.ownerTitle ? <span className="font-normal text-fg-dim"> · {l.ownerTitle}</span> : null}
+                    </span>
+                  ) : null}
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-fg-dim" aria-hidden />
               </button>
