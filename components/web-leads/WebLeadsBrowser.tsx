@@ -177,6 +177,17 @@ export function WebLeadsBrowser({
    * the kind of bug a rep only discovers after the calls are made.
    */
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  /**
+   * Who the ticked leads go to, for an admin or manager. Empty string means
+   * "me", which is the ordinary claim every rep already does -- assignment is
+   * an extra destination for the same action, not a separate mode.
+   */
+  const [assignTo, setAssignTo] = useState<string>("");
+  const [reps, setReps] = useState<Array<{
+    auth_user_id: string | null;
+    display_name: string | null;
+    full_name: string | null;
+  }>>([]);
   const [claiming, setClaiming] = useState(false);
   const [claimNote, setClaimNote] = useState<string | null>(null);
   /**
@@ -196,6 +207,28 @@ export function WebLeadsBrowser({
   // and claiming rows a rep cannot see is exactly the surprise this feature
   // exists to prevent.
   useEffect(() => { setSelected(new Set()); setClaimNote(null); }, [sp]);
+
+  // Roster for the assign picker. Reuses the existing team-roster endpoint
+  // rather than adding a second members source -- TerritoryAssignment already
+  // reads it. Best-effort: if it fails the picker stays empty and plain
+  // self-claim still works, because losing the roster must not take the Claim
+  // button down with it.
+  useEffect(() => {
+    if (!canSeeTeamAndAssign) return;
+    let alive = true;
+    fetch("/api/team/members", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { members: [] }))
+      .then((m) => { if (alive) setReps(m.members || []); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [canSeeTeamAndAssign]);
+
+  /** Name a rep for a message. Falls back to the id so a missing roster entry
+   *  still produces a sentence an operator can act on. */
+  const repLabel = useCallback((id: string) => {
+    const m = reps.find((r) => (r.auth_user_id || "").toLowerCase() === id.toLowerCase());
+    return (m?.display_name || m?.full_name || id).trim();
+  }, [reps]);
 
   // Local draft for the search box, synced from the URL. See LeadsToolbar's
   // input for why this exists instead of defaultValue.
@@ -387,7 +420,9 @@ export function WebLeadsBrowser({
       const r = await fetch(`/api/web-leads/claim${mine ? "?release=1" : ""}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ leadIds: ids }),
+        // `assignTo` only when one is chosen: an empty string would be a
+        // named target the server must reject, rather than "claim for me".
+        body: JSON.stringify(assignTo ? { leadIds: ids, assignTo } : { leadIds: ids }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -414,7 +449,11 @@ export function WebLeadsBrowser({
             gone ? `${gone} were already held.` : "",
             capped ? `${capped} would put you over your ${body.cap} lead limit.` : "",
             trackingFailed ? `${trackingFailed} claims saved, but their activity tracking needs an admin check.` : "",
-            `You now hold ${body.held} of ${body.cap}.`,
+            // Named, not just counted: a manager who mis-picks a rep needs to
+            // see WHOSE board the leads landed on.
+            assignTo
+              ? `Assigned to ${repLabel(assignTo)} - they now hold ${body.held} of ${body.cap}.`
+              : `You now hold ${body.held} of ${body.cap}.`,
           ].filter(Boolean).join(" "),
         );
       }
@@ -427,7 +466,7 @@ export function WebLeadsBrowser({
     } finally {
       setClaiming(false);
     }
-  }, [canOperateCurrentView, selected, mine]);
+  }, [canOperateCurrentView, selected, mine, assignTo, repLabel]);
 
   /**
    * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
@@ -547,6 +586,15 @@ export function WebLeadsBrowser({
           onClaim={runClaim}
           claiming={claiming}
           claimLabel={mine ? "Release" : "Claim"}
+          // Only on the pool: "assigning" a lead already in someone's book is
+          // a transfer, which is a different decision with different rules.
+          assignOptions={!mine && !team
+            ? reps.flatMap((r) => (r.auth_user_id
+                ? [{ id: r.auth_user_id, name: (r.display_name || r.full_name || r.auth_user_id).trim() }]
+                : []))
+            : []}
+          assignTo={assignTo}
+          onAssignTo={setAssignTo}
           canMutate={canOperateCurrentView}
           filterCount={activeFilterCount(filters)}
           onOpenFilters={mine || team ? null : () => setFiltersOpen(true)}

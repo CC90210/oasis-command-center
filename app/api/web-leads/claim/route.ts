@@ -20,6 +20,9 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { claimLeads, releaseLeads } from "@/lib/web-leads/claim-ops";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
+import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
+import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
+import { getOasisSalesRepRoster, tenantSlugFor } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,6 +70,49 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ASSIGNING TO SOMEONE ELSE (2026-09-02).
+  //
+  // The Assign surface handed out whole territories -- a rep got every lead in
+  // "Toronto, ON - Restaurants & Bars" or none. That shape made sense when the
+  // board held ~27,000 rows and a sheet was a week of work; at ~1,800 it is the
+  // wrong unit entirely, and there was no way to give one rep one lead.
+  //
+  // No new write path: claimLeads() already claims FOR a userId, so naming a
+  // different one inherits every guard it enforces -- the per-rep cap (counted
+  // against the TARGET, not the caller), the compare-and-set that stops two
+  // people taking one lead, the missing-id report, and touch tracking. A second
+  // bespoke "assign" implementation is how those rules drift apart.
+  //
+  // Two gates, because assignment moves commission:
+  //   - only an admin or a manager may name someone else. A rep must not be
+  //     able to push work onto a colleague, or quietly take a lead off one.
+  //   - the target must be on the server-resolved sales roster, so this cannot
+  //     park a lead on a founder, a builder, or an id someone typed.
+  const assignToRaw = (body as { assignTo?: unknown })?.assignTo;
+  let claimFor = session.userId;
+  if (typeof assignToRaw === "string" && assignToRaw.trim()) {
+    const target = assignToRaw.trim().toLowerCase();
+    const mayAssignOthers =
+      isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
+      || canReadOasisSalesTeamPipeline({
+        teamRole: session.teamRole,
+        tenantSlug: await tenantSlugFor(session.tenantId),
+      });
+    if (!mayAssignOthers) {
+      return NextResponse.json({ ok: false, error: "assign_requires_manager" }, { status: 403 });
+    }
+    if (target !== session.userId.trim().toLowerCase()) {
+      const roster = await getOasisSalesRepRoster(session.tenantId);
+      const onRoster = roster.some(
+        (m) => (m.auth_user_id || "").trim().toLowerCase() === target,
+      );
+      if (!onRoster) {
+        return NextResponse.json({ ok: false, error: "target_not_on_sales_roster" }, { status: 400 });
+      }
+    }
+    claimFor = target;
+  }
+
   try {
     if (req.nextUrl.searchParams.get("release") === "1") {
       const result = await releaseLeads(session.userId, session.isAdmin, leadIds);
@@ -74,8 +120,8 @@ export async function POST(req: NextRequest) {
     }
     // One clock for the whole request: the expiry rules must not see time move
     // between deciding a lead is claimable and writing the claim.
-    const result = await claimLeads(session.userId, leadIds, Date.now());
-    return NextResponse.json({ ok: true, ...result });
+    const result = await claimLeads(claimFor, leadIds, Date.now());
+    return NextResponse.json({ ok: true, assignedTo: claimFor, ...result });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "claim_failed" },
