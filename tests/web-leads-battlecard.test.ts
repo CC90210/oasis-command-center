@@ -1718,7 +1718,7 @@ const MODEL_CODES = [
   // re-check, so an effect-cleanup cancel flag would discard the enqueue's
   // own answer and strand the section at "asking". Cancellation is scoped to
   // the LEAD. (Codex review, 2026-09-03.)
-  assert.match(card, /presenceLeadRef\.current !== askedFor/, "an in-flight presence enqueue must only be discarded on a lead change or unmount");
+  assert.match(card, /presenceGenRef.current !== askedFor/, "an in-flight presence enqueue must only be discarded on a lead change or unmount");
   assert.match(card, /\/presence`, \{ method: "POST" \}/, "the card must enqueue through the deduped route");
   assert.match(card, /<PresenceBlock presence=\{onlinePresence\} ask=\{presenceAsk\.status\} \/>/, "the presence section must render the block, carrying what the card knows about its own request");
 }

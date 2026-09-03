@@ -1164,13 +1164,19 @@ export function BattleCard({
   // queued (the server took it), failed (it did not).
   const [presenceAsk, setPresenceAsk] = useState<{ status: "idle" | "asking" | "queued" | "failed" }>({ status: "idle" });
   const [presencePolls, setPresencePolls] = useState(0);
-  // The lead a presence request belongs to. An in-flight POST checks this
-  // rather than an effect-cleanup flag, so only a LEAD CHANGE or unmount
-  // discards its answer -- never an unrelated payload refresh.
-  const presenceLeadRef = useRef(leadId);
+  // A MONOTONIC generation for presence requests. An in-flight POST captures
+  // the current value and its answer is accepted only if the generation has
+  // not moved -- so only a LEAD CHANGE or unmount discards it, never an
+  // unrelated payload refresh.
+  //
+  // Why a counter and not the lead id (Codex review, 2026-09-03): navigating
+  // A -> B -> A before the first A request settles makes an identity check
+  // pass again, letting a stale response overwrite the newer request's state
+  // and start polling from the wrong completion. A generation never repeats.
+  const presenceGenRef = useRef(0);
   useEffect(() => {
-    presenceLeadRef.current = leadId;
-    return () => { presenceLeadRef.current = ""; };
+    presenceGenRef.current += 1;
+    return () => { presenceGenRef.current += 1; };
   }, [leadId]);
 
   useEffect(() => {
@@ -1236,14 +1242,14 @@ export function BattleCard({
     // 2026-09-03): this effect depends on `state`, so a cleanup-based
     // `alive` flag is torn down by any unrelated payload refresh -- and the
     // card polls every 6s while a website re-check runs. That discarded the
-    // POST's own answer and stranded the section at "asking" forever.
-    // Comparing the lead captured at request time against the ref cancels on
-    // exactly the two events that should cancel: a lead change and unmount.
-    const askedFor = leadId;
+    // POST's own answer and stranded the section at "asking" forever. The
+    // generation captured here moves on exactly the two events that should
+    // cancel: a lead change and unmount.
+    const askedFor = presenceGenRef.current;
     setPresenceAsk({ status: "asking" });
     fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" })
       .then((r) => {
-        if (presenceLeadRef.current !== askedFor) return;
+        if (presenceGenRef.current !== askedFor) return;
         if (r.ok || r.status === 202) {
           setPresenceAsk({ status: "queued" });
           // The worker answers in ~a minute; poll a bounded number of times
@@ -1258,7 +1264,7 @@ export function BattleCard({
         setPresenceAsk({ status: "failed" });
       })
       .catch(() => {
-        if (presenceLeadRef.current === askedFor) setPresenceAsk({ status: "failed" });
+        if (presenceGenRef.current === askedFor) setPresenceAsk({ status: "failed" });
       });
   }, [state, leadId]);
 
