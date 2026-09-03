@@ -17,6 +17,9 @@ for (const route of [
   // id carries the identical gate stack as the reads: anyone who may read
   // the card may queue a re-check; nobody else may learn the id exists.
   "app/api/web-leads/[id]/recheck/route.ts",
+  // Added 2026-09-03 with the presence layer: same write-that-names-a-lead
+  // shape, same gate stack, same reasoning.
+  "app/api/web-leads/[id]/presence/route.ts",
 ]) {
   const src = read(route);
   assert.match(src, /resolveSessionContext/, `${route} must resolve the caller`);
@@ -216,6 +219,7 @@ for (const route of [
   "app/api/web-leads/facets/route.ts",
   "app/api/web-leads/[id]/route.ts",
   "app/api/web-leads/[id]/recheck/route.ts",
+  "app/api/web-leads/[id]/presence/route.ts",
 ]) {
   const src = read(route);
   const buildsViewerInline =
@@ -420,6 +424,15 @@ for (const view of [
   // fire against this file by planting `text-red-400` in a designation entry
   // once (2026-09-01): the assertion failed as intended and was reverted.
   "lib/web-leads/lead-profile.ts",
+  // Added 2026-09-03 with the presence layer. Three files, one temptation:
+  // a presence score sitting beside a star rating is the most red/green-
+  // hungry surface the feature has ever grown. Pass/fail renders as SHAPE
+  // (filled dot vs ring); the pillar hues are identity. Proved to fire by
+  // planting `text-red-400` in PresenceBlock once (2026-09-03): the
+  // assertion failed as intended and was reverted.
+  "lib/web-leads/presence.ts",
+  "lib/web-leads/presence-evidence.ts",
+  "components/web-leads/PresenceBlock.tsx",
   // Added 2026-08-24 with the objection panel. It renders no audit data at all,
   // which is exactly why it earns the ban rather than an exemption: a surface
   // that is "obviously safe" today is the one a future editor tints to make a

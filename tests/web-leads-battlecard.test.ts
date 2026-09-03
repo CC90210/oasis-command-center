@@ -33,6 +33,8 @@ import {
 } from "../lib/web-leads/competitors";
 import { ANGLES, OBJECTIONS, IF_THE_ANSWER_IS_CLEAN, selectAngle, recoverablePoints } from "../lib/web-leads/angles";
 import { evidenceFrom } from "../lib/web-leads/evidence";
+import { PRESENCE_EXPLAINED_CODES } from "../lib/web-leads/presence-evidence";
+import { DIM_HUES, PILLAR_HUES } from "../components/web-leads/battle-hud";
 import { designateLead, CRATER_DESIGNATIONS, SHAPE_DESIGNATIONS } from "../lib/web-leads/lead-profile";
 import { checkEvidenceFor, EXPLAINED_CODES } from "../lib/web-leads/check-evidence";
 import { assessTrust, isShellSuspect, STALE_AFTER_DAYS } from "../lib/web-leads/trust";
@@ -739,6 +741,7 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // so these stay one-line greppable.
   for (const [id, open] of [
     ["facts", false],
+    ["presence", true],
     ["lead-with", true],
     ["opening", true],
     ["brushoffs", false],
@@ -1630,6 +1633,74 @@ const MODEL_CODES = [
   assert.match(shell, /inert=\{!isOpen\}/, "closed content stays mounted but must be inert -- a hidden drawer must not swallow keyboard focus");
   assert.match(shell, /aria-hidden=\{!isOpen\}/, "closed content must be hidden from assistive tech");
   assert.match(shell, /openOne\(id\)/, "a tab must OPEN its section, not just scroll to a closed drawer");
+}
+
+
+// ---------------------------------------------------------------------------
+// 8k. THE PRESENCE LAYER ON THE CARD (phase 2). The pins are the honesty
+//     contract: the payload carries onlinePresence at ALL THREE route exits
+//     (presence is the whole pitch precisely for the leads with no scored
+//     website), null pillars render as "not measured" sentences and never as
+//     fabricated failures, every presence check has a hand-written measured
+//     sentence, the pillar hues are complete AND disjoint from the website
+//     dimension hues, and the card asks the worker at most once per lead per
+//     mount with the atomically-deduped route doing the real guarding.
+// ---------------------------------------------------------------------------
+
+{
+  const route = read("app/api/web-leads/[id]/battlecard/route.ts");
+  const exits = (route.match(/onlinePresence/g) || []).length;
+  assert.ok(exits >= 4, `the battlecard payload must carry onlinePresence at every exit (saw ${exits} references; 1 fetch + 3 exits)`);
+
+  const presenceLib = read("lib/web-leads/presence.ts");
+  assert.match(presenceLib, /export const PRESENCE_VERSION = 1/, "the oasis copy of PRESENCE_VERSION must be declared exactly once and match the JARVIS worker");
+  assert.equal((presenceLib.match(/PRESENCE_VERSION = /g) || []).length, 1);
+  assert.match(presenceLib, /state: "none"/, "malformed or missing blobs must collapse to the honest none state, never to findings");
+
+  // Every presence check code has a hand-written sentence, and nothing else.
+  const PRESENCE_CODES = [
+    "gbp_found", "gbp_operational", "gbp_rated", "gbp_reviews_10", "gbp_photos", "gbp_hours",
+    "nap_phone_match", "nap_locality", "nap_both_listed",
+    "mail_mx", "mail_spf", "mail_dmarc",
+    "social_resolve",
+  ];
+  assert.deepEqual([...PRESENCE_EXPLAINED_CODES].sort(), [...PRESENCE_CODES].sort(),
+    "presence-evidence must explain exactly the model's 13 presence checks -- an orphan sentence is copy about a check that does not exist");
+
+  // Copy house rules apply to presence exactly as to the website.
+  // Comments may use em dashes (the whole codebase's headers do); the ban is
+  // on RENDERED copy, so strip comments before checking the sentence strings.
+  const evid = stripComments(read("lib/web-leads/presence-evidence.ts"));
+  assert.ok(!evid.includes("—"), "no em dashes in anything a rep reads aloud");
+
+  // Pillar hues: complete for the four pillars, and DISJOINT from every
+  // website dimension hue -- one colour meaning two different things on one
+  // card is the identity system eating itself.
+  const hud = read("components/web-leads/battle-hud.ts");
+  for (const pk of ["gbp", "consistency", "email", "social"]) {
+    assert.match(hud, new RegExp(`PILLAR_HUES[\\s\\S]{0,600}?\\b${pk}:`), `battle-hud must carry an identity hue for pillar "${pk}"`);
+  }
+  const dimVals = new Set(Object.values(DIM_HUES).flatMap((h) => [h.from.toLowerCase(), h.to.toLowerCase()]));
+  for (const [pk, h] of Object.entries(PILLAR_HUES)) {
+    assert.ok(!dimVals.has(h.from.toLowerCase()) && !dimVals.has(h.to.toLowerCase()),
+      `pillar "${pk}" reuses a website dimension hue`);
+  }
+
+  // The block renders the honest states: not-measured copy, the social
+  // deferral sentence (we refuse to probe platforms against their robots),
+  // pass/fail as shape.
+  const block = read("components/web-leads/PresenceBlock.tsx");
+  assert.match(block, /Not measured yet/, "an unmeasured pillar must say so");
+  assert.match(block, /has not been measured yet/, "the none state must render the waiting sentence");
+  assert.match(block, /a method the platforms allow/, "the social deferral must be explained, not hidden");
+  assert.match(block, /separate from the website score/, "the two composites must never read as one");
+
+  // The card asks once per lead per mount; the section sits at the
+  // container level (in the map above) so unscored leads still get it.
+  const card = read("components/web-leads/BattleCard.tsx");
+  assert.match(card, /presenceAskedRef/, "the card must not re-enqueue on every silent refresh");
+  assert.match(card, /\/presence`, \{ method: "POST" \}/, "the card must enqueue through the deduped route");
+  assert.match(card, /<PresenceBlock presence=\{onlinePresence\} \/>/, "the presence section must render the block");
 }
 
 console.log("web-leads-battlecard ok");

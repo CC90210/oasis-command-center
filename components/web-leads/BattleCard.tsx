@@ -192,6 +192,8 @@ import { Radar3D } from "./Radar3D";
 import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
+import { PresenceBlock } from "./PresenceBlock";
+import type { OnlinePresence } from "@/lib/web-leads/presence";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
 /**
@@ -252,6 +254,7 @@ type Payload = {
   signals: Record<string, unknown> | null;
   urlVerification?: UrlVerification | null;
   recheck?: RecheckStatus | null;
+  onlinePresence?: OnlinePresence | null;
 };
 
 type Fetched =
@@ -1149,6 +1152,8 @@ export function BattleCard({
   const [recheckPost, setRecheckPost] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
+  // One presence enqueue per lead per mount -- see the effect below.
+  const presenceAskedRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -1184,7 +1189,24 @@ export function BattleCard({
     setState({ status: "loading" });
     setNonce(0);
     setRecheckPost({ busy: false, error: null });
+    presenceAskedRef.current = false;
   }, [leadId]);
+
+  // ON-DEMAND presence (phase 2): opening a card whose presence blob is
+  // absent or stale asks the worker for ONE measurement. Fire-and-forget on
+  // purpose -- the route dedupes atomically server-side, the worker is
+  // quota-capped, and this ref stops the card itself from re-asking on every
+  // silent refresh. Failure is swallowed: the section already says "not
+  // measured yet" honestly, and a rep mid-call has no use for an enqueue
+  // error.
+  useEffect(() => {
+    if (state.status !== "ready" || presenceAskedRef.current) return;
+    const p = state.payload.onlinePresence ?? null;
+    const wants = !p || p.state === "none" || (p.state === "measured" && p.stale);
+    if (!wants) return;
+    presenceAskedRef.current = true;
+    fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" }).catch(() => {});
+  }, [state, leadId]);
 
   // While a re-check is queued or running, poll: the worker writes a fresh
   // audit within ~a minute and the card refreshes itself with it.
@@ -1243,6 +1265,7 @@ export function BattleCard({
   // score we cannot stand behind is HIDDEN with the reason in plain words,
   // never shown wearing a warning label. lib/web-leads/trust.ts.
   const trust = assessTrust({ audit, signals, urlVerification });
+  const onlinePresence = state.payload.onlinePresence ?? null;
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
@@ -1280,6 +1303,23 @@ export function BattleCard({
             teaser="Address, phone, category and territory as the directory recorded them, unverified"
           >
             <BusinessFacts lead={lead} layout="grid" />
+          </BattleSection>
+
+          {/* BEYOND THE WEBSITE (phase 2): the presence evaluation lives at
+              the CONTAINER level, not inside ScoredBody, because a lead with
+              no website / an unreachable site / a hidden score is exactly
+              the lead whose presence IS the pitch -- and ScoredBody never
+              renders for those states. Auto-refresh: the card asks the
+              worker for a measurement when none exists or it has gone stale
+              (the effect below); the section renders the honest waiting
+              sentence in the meantime. */}
+          <BattleSection
+            id="presence"
+            defaultOpen={true}
+            title="Beyond the website"
+            sub="The business's presence where customers actually look first: Google, one consistent identity, email that lands. Measured, separate from the website score."
+          >
+            <PresenceBlock presence={onlinePresence} />
           </BattleSection>
 
           {trust.hide ? (
