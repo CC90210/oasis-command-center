@@ -1369,7 +1369,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   // timestamp in the same Turso record patch and normalize legacy OASIS rows
   // onto the program marker once they are actively worked.
   if (trackedAction) patch.last_contacted_at = occurredAt;
-  if (transitionNote) {
+  // A CALL note is a per-touch fact and belongs in the interaction ledger — it
+  // is appended to contentParts below and shows in "Activity and files".
+  // last_handoff_note is the FOUNDER handoff note: single-valued, rendered under
+  // the label "Founder handoff note", and used to pre-fill the handoff composer
+  // (page.tsx initialHandoffNote). Letting a disposition write it means a rep's
+  // "call back after the 15th" silently becomes the note the founder reads
+  // before the audit, overwriting whatever was there.
+  if (transitionNote && body.action !== "disposition") {
     patch.last_handoff_note = transitionNote;
     patch.last_handoff_note_at = occurredAt;
   }
