@@ -24,9 +24,13 @@
 
 import { useEffect, useState } from "react";
 import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
+import { LOCAL_BRIDGE_DEFAULT } from "@/lib/bridge-client-routing";
 
-const BRIDGE_BASE =
-  process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
+// This panel diagnoses the CLIs on the viewer's OWN machine, so it asks the
+// viewer's own loopback bridge — never NEXT_PUBLIC_BRIDGE_CHAT_BASE, which is
+// the hosted-VPS override and was inlined as a dev-server port in production.
+// See LOCAL_BRIDGE_DEFAULT for the incident (2026-09-03).
+const BRIDGE_BASE = LOCAL_BRIDGE_DEFAULT;
 const POLL_MS = 20_000;
 
 type CliStatus = {
