@@ -20,8 +20,12 @@
  * state resolve to nothing (`visible` flips false on 401/403), never real
  * territory or assignment data.
  *
- * Team roster reuses the existing GET /api/team/members route rather than
- * inventing a new members source, per the Build B brief.
+ * Team roster comes from GET /api/web-leads/assignable-reps -- the SAME roster
+ * function the assign route validates the target against. It used to read
+ * /api/team/members, which is every profile on the tenant, so this control
+ * offered founders and admins as destinations for a whole city+industry sheet.
+ * The route now refuses those (target_not_on_sales_roster), and this list can
+ * no longer produce one.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -36,11 +40,7 @@ type Territory = {
   assigned_to: string | null;
 };
 
-type Member = {
-  auth_user_id: string | null;
-  display_name: string | null;
-  full_name: string | null;
-};
+type Member = { id: string; name: string };
 
 const territoryLabel = (t: Territory) => `${t.locality}, ${t.region} - ${t.vertical}`;
 
@@ -74,10 +74,10 @@ export function TerritoryAssignment() {
         // Best-effort roster fetch — an assignment control that can't list
         // reps yet is still useful (search + unassign still work), so a
         // members-fetch failure doesn't block the whole control.
-        fetch("/api/team/members", { cache: "no-store" })
-          .then((r) => (r.ok ? r.json() : { members: [] }))
+        fetch("/api/web-leads/assignable-reps", { cache: "no-store" })
+          .then((r) => (r.ok ? r.json() : { reps: [] }))
           .then((m) => {
-            if (alive) setMembers(m.members || []);
+            if (alive) setMembers(Array.isArray(m.reps) ? m.reps : []);
           })
           .catch(() => undefined);
       })
@@ -113,8 +113,8 @@ export function TerritoryAssignment() {
   const selected = territories.find((t) => t.id === territoryId) || null;
   const ownerName = (id: string | null) => {
     if (!id) return "Unassigned";
-    const m = members.find((mm) => (mm.auth_user_id || "").toLowerCase() === id.toLowerCase());
-    return m ? m.display_name || m.full_name || id.slice(0, 8) : id.slice(0, 8);
+    const m = members.find((mm) => mm.id.toLowerCase() === id.toLowerCase());
+    return m ? m.name || id.slice(0, 8) : id.slice(0, 8);
   };
 
   async function save() {
@@ -185,13 +185,11 @@ export function TerritoryAssignment() {
             className="mt-1.5 block w-52 rounded-md border border-bg-border bg-bg-deep px-2.5 py-1.5 text-sm normal-case tracking-normal text-fg focus:border-accent focus:outline-none disabled:opacity-50"
           >
             <option value="">Unassigned</option>
-            {members
-              .filter((m) => m.auth_user_id)
-              .map((m) => (
-                <option key={m.auth_user_id} value={m.auth_user_id as string}>
-                  {m.display_name || m.full_name || m.auth_user_id}
-                </option>
-              ))}
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
           </select>
         </label>
         <button
