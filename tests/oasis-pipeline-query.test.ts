@@ -428,6 +428,61 @@ const conflicting = await listOasisPipelineWindow(
 );
 assert.equal(conflicting.total, 0, "conflicting assignee scopes fail closed");
 
+// ── The admin single-read must ask for the stages it will render ───────────
+//
+// It did not, and that made the ADMIN board the slow one — the opposite of how
+// the code reads. Measured on the live OASIS tenant: 1846 rows and 3.0 MB of
+// JSON in 1056 ms, of which 1678 were `researched`, a stage the page strips
+// out of `stages` before calling this. 91% of the payload was fetched to be
+// discarded by scopedWindowFromRows, whose first act is to drop any row whose
+// stage is not in stageKeys. With the predicate: 168 rows, 292 KB, 249 ms.
+//
+// A rep never reaches this branch (viewerUserId sends them to the per-stage
+// queries, capped at 40 rows each), so no rep-facing test would have caught it.
+{
+  const seen: Array<Record<string, unknown>> = [];
+  const adminList = async (input: Record<string, unknown>) => {
+    seen.push(input);
+    return {
+      total: 2,
+      rows: [
+        {
+          id: "a", tenant_id: "tenant-1", entity_type: "lead",
+          data: { stage: "assigned" },
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-08-24T00:00:00.000Z",
+        },
+        {
+          id: "b", tenant_id: "tenant-1", entity_type: "lead",
+          data: { stage: "connected" },
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+    };
+  };
+
+  const adminWindow = await listOasisPipelineWindow(
+    // No assignedTo and no viewerUserId — this is the admin/owner branch.
+    { tenantId: "tenant-1", stageKeys: ["assigned", "connected"] },
+    { list: adminList as never },
+  );
+
+  assert.equal(seen.length, 1, "the admin board is one read, not one per stage");
+  assert.deepEqual(
+    seen[0].whereIn,
+    { stage: ["assigned", "connected"] },
+    "the single read must be scoped to the stages that will be rendered",
+  );
+  assert.deepEqual(
+    adminWindow.rows.map((row) => row.id),
+    ["a", "b"],
+    "scoping the query must not change what the board shows",
+  );
+  assert.equal(adminWindow.stageCounts.assigned, 1);
+  assert.equal(adminWindow.stageCounts.connected, 1);
+}
+
 console.log("oasis-pipeline-query: ok");
 }
 
