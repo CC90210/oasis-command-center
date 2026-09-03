@@ -772,6 +772,16 @@ export function LeadLifecycleActions({
   // not, and the button says so rather than the save lying.
   const connectedFollowUpPartial =
     Boolean(connectedFollowUpDate) !== Boolean(connectedFollowUpTime);
+  // ...and half is not the only way to get nothing. founderMeetingIso returns
+  // null when the wall-clock time does not EXIST on that date in the founder
+  // timezone — the spring-forward gap — so both fields can be filled, the
+  // partial check passes, and the send still carries undefined. Same silent
+  // dropped promise by a different route. (Caught by CodeRabbit on #388; the
+  // premise was verified against founderMeetingIso's own verification block,
+  // which returns null when the round-trip does not reproduce the input.)
+  // The rule that covers both: blank, or a real instant. Nothing in between.
+  const connectedFollowUpUsable =
+    (!connectedFollowUpDate && !connectedFollowUpTime) || Boolean(connectedFollowUpAt);
   const callOutcomeReady =
     callAccepted &&
     Boolean(callOutcome) &&
@@ -780,7 +790,7 @@ export function LeadLifecycleActions({
       : callOutcome === "lost"
         ? Boolean(lossReason.trim())
         : callOutcome === "connected"
-          ? !connectedFollowUpPartial
+          ? connectedFollowUpUsable
           : true);
   const bookingStepReady = [
     founderContactValid && founderPhoneValid,
@@ -1070,7 +1080,9 @@ export function LeadLifecycleActions({
                     <p className="mt-1.5 text-[11px] text-fg-dim">
                       {connectedFollowUpPartial
                         ? "Set both the date and the time, or clear both — half a callback is not saved."
-                        : "Leave blank if nothing was promised. Setting it schedules the callback without moving the stage."}
+                        : !connectedFollowUpUsable
+                          ? "That time does not exist on that date where the clocks change. Pick another time."
+                          : "Leave blank if nothing was promised. Setting it schedules the callback without moving the stage."}
                     </p>
                   </div>
                 </div>

@@ -117,8 +117,19 @@ assert.match(
 );
 assert.match(
   lifecycle,
-  /callOutcome === "connected"\s*\?\s*!connectedFollowUpPartial/,
+  /callOutcome === "connected"\s*\?\s*connectedFollowUpUsable/,
   "the readiness gate must consult it — it used to be a hardcoded true",
+);
+
+// Half is not the only way to get nothing. founderMeetingIso returns null when
+// the wall-clock time does not EXIST on that date in the founder timezone (the
+// spring-forward gap), so both fields can be filled, the partial check passes,
+// and the send still carries undefined — the same dropped promise by another
+// route. The gate must demand a real instant, not merely two non-empty inputs.
+assert.match(
+  lifecycle,
+  /connectedFollowUpUsable\s*=\s*\(!connectedFollowUpDate && !connectedFollowUpTime\) \|\| Boolean\(connectedFollowUpAt\)/,
+  "blank or a real instant — nothing in between may reach Save",
 );
 
 // Its own state pair, NOT the shared nextActionDate: that one is pre-filled
