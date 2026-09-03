@@ -192,6 +192,8 @@ import { Radar3D } from "./Radar3D";
 import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
+import { PresenceBlock } from "./PresenceBlock";
+import type { OnlinePresence } from "@/lib/web-leads/presence";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
 /**
@@ -252,6 +254,7 @@ type Payload = {
   signals: Record<string, unknown> | null;
   urlVerification?: UrlVerification | null;
   recheck?: RecheckStatus | null;
+  onlinePresence?: OnlinePresence | null;
 };
 
 type Fetched =
@@ -735,6 +738,11 @@ function ParticleField({ reduced }: { reduced: boolean }) {
 // §3.2 — the seven-dimension radar
 // ───────────────────────────────────────────────────────────────────────────
 
+/** How many times a card re-polls for a queued presence measurement before
+ *  giving up. Six 8-second polls ≈ 48s, which covers the worker's ~30s poll
+ *  plus one lookup; past that a card left open all shift must stop asking. */
+const PRESENCE_POLL_LIMIT = 6;
+
 const RADAR = { w: 420, h: 340, cx: 210, cy: 168, r: 108, labelR: 130 };
 
 function radarPoint(index: number, total: number, value: number) {
@@ -1149,6 +1157,27 @@ export function BattleCard({
   const [recheckPost, setRecheckPost] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
   const reduced = useReducedMotion();
   const drawn = useDrawOnce(reduced);
+  // One presence enqueue per lead per mount -- see the effect below.
+  const presenceAskedRef = useRef(false);
+  // What the card actually knows about that enqueue, which is what the
+  // section is allowed to claim: idle (never asked / not needed), asking,
+  // queued (the server took it), failed (it did not).
+  const [presenceAsk, setPresenceAsk] = useState<{ status: "idle" | "asking" | "queued" | "failed" }>({ status: "idle" });
+  const [presencePolls, setPresencePolls] = useState(0);
+  // A MONOTONIC generation for presence requests. An in-flight POST captures
+  // the current value and its answer is accepted only if the generation has
+  // not moved -- so only a LEAD CHANGE or unmount discards it, never an
+  // unrelated payload refresh.
+  //
+  // Why a counter and not the lead id (Codex review, 2026-09-03): navigating
+  // A -> B -> A before the first A request settles makes an identity check
+  // pass again, letting a stale response overwrite the newer request's state
+  // and start polling from the wrong completion. A generation never repeats.
+  const presenceGenRef = useRef(0);
+  useEffect(() => {
+    presenceGenRef.current += 1;
+    return () => { presenceGenRef.current += 1; };
+  }, [leadId]);
 
   useEffect(() => {
     let alive = true;
@@ -1184,7 +1213,76 @@ export function BattleCard({
     setState({ status: "loading" });
     setNonce(0);
     setRecheckPost({ busy: false, error: null });
+    presenceAskedRef.current = false;
+    setPresenceAsk({ status: "idle" });
+    setPresencePolls(0);
   }, [leadId]);
+
+  // ON-DEMAND presence (phase 2): opening a card whose presence blob is
+  // absent or stale asks the worker for ONE measurement.
+  //
+  // NOT fire-and-forget (Codex review, 2026-09-03, three findings that
+  // compound): the empty state TELLS the rep a lookup was requested, so the
+  // card must actually know that it was. The outcome drives the copy, a
+  // bounded poll brings the answer back while they read, and the effect
+  // refuses to act on a payload belonging to a different lead.
+  useEffect(() => {
+    if (state.status !== "ready" || presenceAskedRef.current) return;
+    // THE LEAD-SWITCH RACE: a mounted card handed a new leadId clears the
+    // ref one render before the new payload arrives, so this effect can see
+    // the PREVIOUS lead's payload against the new id and spend a worker
+    // request on the wrong business. The payload names its own lead; only
+    // act when the two agree.
+    if (state.payload.lead?.id !== leadId) return;
+    const p = state.payload.onlinePresence ?? null;
+    const wants = !p || p.state === "none" || (p.state === "measured" && p.stale);
+    if (!wants) return;
+    presenceAskedRef.current = true;
+    // CANCELLATION IS SCOPED TO THE LEAD, NOT TO `state` (Codex review,
+    // 2026-09-03): this effect depends on `state`, so a cleanup-based
+    // `alive` flag is torn down by any unrelated payload refresh -- and the
+    // card polls every 6s while a website re-check runs. That discarded the
+    // POST's own answer and stranded the section at "asking" forever. The
+    // generation captured here moves on exactly the two events that should
+    // cancel: a lead change and unmount.
+    const askedFor = presenceGenRef.current;
+    setPresenceAsk({ status: "asking" });
+    fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" })
+      .then((r) => {
+        if (presenceGenRef.current !== askedFor) return;
+        if (r.ok || r.status === 202) {
+          setPresenceAsk({ status: "queued" });
+          // The worker answers in ~a minute; poll a bounded number of times
+          // so the section fills in while the rep is still on the page, and
+          // stops rather than polling a card left open all shift.
+          setPresencePolls(1);
+          return;
+        }
+        // 409 (no business behind this lead), 500, anything else: say so.
+        // A card that claims a request exists when none does is the exact
+        // dishonesty this feature was built to remove.
+        setPresenceAsk({ status: "failed" });
+      })
+      .catch(() => {
+        if (presenceGenRef.current === askedFor) setPresenceAsk({ status: "failed" });
+      });
+  }, [state, leadId]);
+
+  // The bounded presence poll: refresh the payload a few times after a
+  // successful enqueue, then stop. Ends early the moment a measured,
+  // non-stale blob arrives (the effect above will not re-ask for one).
+  useEffect(() => {
+    if (presencePolls === 0 || presencePolls > PRESENCE_POLL_LIMIT) return;
+    if (state.status === "ready") {
+      const p = state.payload.onlinePresence ?? null;
+      if (p && p.state === "measured" && !p.stale) return;
+    }
+    const t = window.setTimeout(() => {
+      setNonce((n) => n + 1);
+      setPresencePolls((c) => c + 1);
+    }, 8000);
+    return () => window.clearTimeout(t);
+  }, [presencePolls, state]);
 
   // While a re-check is queued or running, poll: the worker writes a fresh
   // audit within ~a minute and the card refreshes itself with it.
@@ -1243,6 +1341,7 @@ export function BattleCard({
   // score we cannot stand behind is HIDDEN with the reason in plain words,
   // never shown wearing a warning label. lib/web-leads/trust.ts.
   const trust = assessTrust({ audit, signals, urlVerification });
+  const onlinePresence = state.payload.onlinePresence ?? null;
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
@@ -1280,6 +1379,23 @@ export function BattleCard({
             teaser="Address, phone, category and territory as the directory recorded them, unverified"
           >
             <BusinessFacts lead={lead} layout="grid" />
+          </BattleSection>
+
+          {/* BEYOND THE WEBSITE (phase 2): the presence evaluation lives at
+              the CONTAINER level, not inside ScoredBody, because a lead with
+              no website / an unreachable site / a hidden score is exactly
+              the lead whose presence IS the pitch -- and ScoredBody never
+              renders for those states. Auto-refresh: the card asks the
+              worker for a measurement when none exists or it has gone stale
+              (the effect below); the section renders the honest waiting
+              sentence in the meantime. */}
+          <BattleSection
+            id="presence"
+            defaultOpen={true}
+            title="Beyond the website"
+            sub="The business's presence where customers actually look first: Google, one consistent identity, email that lands. Measured, separate from the website score."
+          >
+            <PresenceBlock presence={onlinePresence} ask={presenceAsk.status} />
           </BattleSection>
 
           {trust.hide ? (

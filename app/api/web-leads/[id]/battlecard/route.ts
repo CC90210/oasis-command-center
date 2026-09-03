@@ -53,6 +53,7 @@ import {
 } from "@/lib/web-leads/audit";
 import { fetchCompetitorContext } from "@/lib/web-leads/competitors";
 import { resolveWebLeadViewer } from "@/lib/web-leads/viewer";
+import { fetchOnlinePresence } from "@/lib/web-leads/presence";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -83,15 +84,20 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     // or show a queued re-check even when there is no score to show.
     const businessId = await businessIdForLead(id);
 
-    const [urlVerification, recheck] = await Promise.all([
+    // onlinePresence rides EVERY exit below (phase 2): presence is the whole
+    // pitch precisely for the no-website / unreachable / not-scored leads, so
+    // a field present only on the scored path would starve the leads that
+    // need it most.
+    const [urlVerification, recheck, onlinePresence] = await Promise.all([
       businessId
         ? fetchUrlVerification(businessId)
         : Promise.resolve({ verdict: "unknown" as const, verifiedAt: null }),
       fetchRecheckStatus(id),
+      fetchOnlinePresence(businessId),
     ]);
 
     if (audit.state !== "scored") {
-      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck });
+      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck, onlinePresence });
     }
 
     // A scored audit implies a business id -- fetchAudit cannot reach `scored`
@@ -99,7 +105,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     // fire is not a guard, and a 500 here would blank a card that has a
     // perfectly good score on it.
     if (!businessId) {
-      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck });
+      return NextResponse.json({ lead, audit, competitors: null, signals: null, urlVerification, recheck, onlinePresence });
     }
 
     const [competitors, signals] = await Promise.all([
@@ -114,7 +120,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       fetchAuditSignals(businessId),
     ]);
 
-    return NextResponse.json({ lead, audit, competitors, signals, urlVerification, recheck });
+    return NextResponse.json({ lead, audit, competitors, signals, urlVerification, recheck, onlinePresence });
   } catch (err) {
     return NextResponse.json(
       { ok: false, error: err instanceof Error ? err.message : "battlecard_failed" },

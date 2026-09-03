@@ -37,6 +37,22 @@ export const FALLBACK_HUE = { from: "#38bdf8", to: "#7dd3fc" };
 
 export const hueFor = (key: string) => DIM_HUES[key] || FALLBACK_HUE;
 
+/**
+ * The presence layer's pillar hues (phase 2) — same doctrine, same cool
+ * spectrum, deliberately DISTINCT from every DIM_HUES value so a presence
+ * pillar can never be mistaken for a website dimension on a card that shows
+ * both. Identity, never verdict: "Google Business Profile" wears its teal at
+ * a 5 and at a 95. Completeness pinned in web-leads-battlecard.test.ts §8k.
+ */
+export const PILLAR_HUES: Record<string, { from: string; to: string }> = {
+  gbp: { from: "#2dd4bf", to: "#99f6e4" },
+  consistency: { from: "#60a5fa", to: "#bfdbfe" },
+  email: { from: "#a78bfa", to: "#ddd6fe" },
+  social: { from: "#22ccee", to: "#a5f3fc" },
+};
+
+export const pillarHueFor = (key: string) => PILLAR_HUES[key] || FALLBACK_HUE;
+
 /** The benchmark competitor's mark, everywhere it appears: radar overlay,
  *  head-to-head ticks, the 3D wireframe. A fixed identity, worn at every
  *  score. */
