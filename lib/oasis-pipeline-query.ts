@@ -355,6 +355,20 @@ export async function listOasisPipelineWindow(
   // the bounded working set once and group it in memory; if a future tenant
   // grows past the generic ceiling, discard the partial window and fall back
   // to the exact per-stage queries below.
+  //
+  // The stage filter is the whole point of the read being "bounded"
+  // (2026-09-02). Without it this asked for every lead in the tenant and then
+  // threw most of them away in scopedWindowFromRows, which only groups rows
+  // whose stage is in stageKeys. Measured on the live OASIS tenant: 1846 rows
+  // and 3.0 MB of JSON crossing the wire in 1056 ms, of which 1678 rows were
+  // `researched` — a stage app/pipeline/page.tsx removes from `stages` before
+  // it ever gets here, so 91% of that payload was fetched to be discarded.
+  // With the predicate: 168 rows, 292 KB, 249 ms.
+  //
+  // It made the ADMIN board the slow one, which is the opposite of how it
+  // reads: a rep carries viewerUserId, skips this branch entirely, and gets
+  // the per-stage queries below — each capped at 40 rows and measured at
+  // 152 ms, 8 ms above the bare network round trip.
   if (input.assignedTo === undefined && !viewerUserId) {
     const where: Record<string, EqualityValue> = {};
     if (input.salesProgram) where.sales_program = input.salesProgram;
@@ -364,6 +378,10 @@ export async function listOasisPipelineWindow(
       entity: "lead",
       sort: "-updated_at",
       limit: 2_000,
+      // stageKeys is non-empty here — the empty case returns above — and
+      // whereIn rejects an empty list rather than silently dropping the
+      // filter, so a future refactor cannot quietly restore the full scan.
+      whereIn: { stage: stageKeys },
       ...(Object.keys(where).length ? { where } : {}),
       ...(search ? { search } : {}),
     });
