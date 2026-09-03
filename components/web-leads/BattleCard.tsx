@@ -1164,6 +1164,14 @@ export function BattleCard({
   // queued (the server took it), failed (it did not).
   const [presenceAsk, setPresenceAsk] = useState<{ status: "idle" | "asking" | "queued" | "failed" }>({ status: "idle" });
   const [presencePolls, setPresencePolls] = useState(0);
+  // The lead a presence request belongs to. An in-flight POST checks this
+  // rather than an effect-cleanup flag, so only a LEAD CHANGE or unmount
+  // discards its answer -- never an unrelated payload refresh.
+  const presenceLeadRef = useRef(leadId);
+  useEffect(() => {
+    presenceLeadRef.current = leadId;
+    return () => { presenceLeadRef.current = ""; };
+  }, [leadId]);
 
   useEffect(() => {
     let alive = true;
@@ -1224,11 +1232,18 @@ export function BattleCard({
     const wants = !p || p.state === "none" || (p.state === "measured" && p.stale);
     if (!wants) return;
     presenceAskedRef.current = true;
-    let alive = true;
+    // CANCELLATION IS SCOPED TO THE LEAD, NOT TO `state` (Codex review,
+    // 2026-09-03): this effect depends on `state`, so a cleanup-based
+    // `alive` flag is torn down by any unrelated payload refresh -- and the
+    // card polls every 6s while a website re-check runs. That discarded the
+    // POST's own answer and stranded the section at "asking" forever.
+    // Comparing the lead captured at request time against the ref cancels on
+    // exactly the two events that should cancel: a lead change and unmount.
+    const askedFor = leadId;
     setPresenceAsk({ status: "asking" });
     fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" })
-      .then(async (r) => {
-        if (!alive) return;
+      .then((r) => {
+        if (presenceLeadRef.current !== askedFor) return;
         if (r.ok || r.status === 202) {
           setPresenceAsk({ status: "queued" });
           // The worker answers in ~a minute; poll a bounded number of times
@@ -1242,8 +1257,9 @@ export function BattleCard({
         // dishonesty this feature was built to remove.
         setPresenceAsk({ status: "failed" });
       })
-      .catch(() => { if (alive) setPresenceAsk({ status: "failed" }); });
-    return () => { alive = false; };
+      .catch(() => {
+        if (presenceLeadRef.current === askedFor) setPresenceAsk({ status: "failed" });
+      });
   }, [state, leadId]);
 
   // The bounded presence poll: refresh the payload a few times after a

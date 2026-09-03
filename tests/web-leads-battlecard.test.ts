@@ -1713,6 +1713,12 @@ const MODEL_CODES = [
   // the poll must be bounded so a card left open all shift stops asking.
   assert.match(card, /PRESENCE_POLL_LIMIT/, "a queued presence measurement must be polled for");
   assert.match(card, /presencePolls > PRESENCE_POLL_LIMIT/, "the presence poll must be bounded");
+  // The in-flight POST must survive unrelated payload refreshes: the effect
+  // depends on `state`, and the card re-polls every 6s during a website
+  // re-check, so an effect-cleanup cancel flag would discard the enqueue's
+  // own answer and strand the section at "asking". Cancellation is scoped to
+  // the LEAD. (Codex review, 2026-09-03.)
+  assert.match(card, /presenceLeadRef\.current !== askedFor/, "an in-flight presence enqueue must only be discarded on a lead change or unmount");
   assert.match(card, /\/presence`, \{ method: "POST" \}/, "the card must enqueue through the deduped route");
   assert.match(card, /<PresenceBlock presence=\{onlinePresence\} ask=\{presenceAsk\.status\} \/>/, "the presence section must render the block, carrying what the card knows about its own request");
 }
