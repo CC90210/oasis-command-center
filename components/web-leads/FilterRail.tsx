@@ -138,6 +138,32 @@ function FilterTree({
 
   return (
     <div className="space-y-5">
+      {/* COUNTRY IS A SWITCH, NOT A CHECKBOX. A rep is always working one
+          market: Canada and the US run under different outbound law (CASL vs
+          TCPA/DNC), so "both at once" is not a view anybody should have. It
+          sits at the top because it changes what every filter below it means —
+          the province list is Canadian, the state list is not. */}
+      <div className="flex gap-1 rounded-lg border border-bg-border bg-bg-panel/40 p-1">
+        {([
+          { key: "ca" as const, label: "🇨🇦 Canada" },
+          { key: "us" as const, label: "🇺🇸 United States" },
+        ]).map((c) => (
+          <button
+            key={c.key}
+            type="button"
+            aria-pressed={filters.country === c.key}
+            onClick={() => set({ country: c.key, provinces: [], cities: [] })}
+            className={`min-h-11 flex-1 rounded-md px-2 text-xs font-semibold transition-colors xl:min-h-0 xl:py-1.5 ${
+              filters.country === c.key
+                ? "bg-accent text-bg-deep"
+                : "text-fg-muted hover:bg-bg-elev hover:text-fg"
+            }`}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+
       <label className={ROW}>
         <input
           type="checkbox"

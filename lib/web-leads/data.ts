@@ -29,6 +29,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
+import { countryOf } from "./filters";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { invalidate, memo, TTL } from "./cache";
@@ -633,6 +634,11 @@ export async function fetchLeads(
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
+    // Country is ALWAYS applied, never "all". The two markets run under
+    // different law (CASL vs TCPA/DNC), so a rep must be looking at one of them
+    // and know which — an "everything" view is how a US mobile gets dialled
+    // under Canadian assumptions. Derived from the region code, so no backfill.
+    .filter((l) => countryOf(l.province) === f.country)
     // OPEN NOW, in the BUSINESS's time zone, evaluated against this request's
     // clock rather than anything cached. `now` is already injected for the
     // claim-expiry rules, so the whole page still sees one instant.
