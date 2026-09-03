@@ -121,11 +121,42 @@ assert.match(
   "the readiness gate must consult it — it used to be a hardcoded true",
 );
 
-// Half is not the only way to get nothing. founderMeetingIso returns null when
-// the wall-clock time does not EXIST on that date in the founder timezone (the
-// spring-forward gap), so both fields can be filled, the partial check passes,
-// and the send still carries undefined — the same dropped promise by another
-// route. The gate must demand a real instant, not merely two non-empty inputs.
+// THE PREMISE, PROVEN. The claim above is that a wall-clock time can fail to
+// exist, which is the whole reason the gate cannot be "two non-empty inputs".
+// Asserting that in a comment is not evidence, so this reproduces
+// founderMeetingIso's verification step: converge on an instant, then check the
+// timezone renders back the exact date and time asked for. In the spring-forward
+// gap it cannot, which is where founderMeetingIso returns null.
+const FOUNDER_TZ = "America/Toronto";
+function wallClockExists(y: number, mo: number, d: number, h: number, mi: number): boolean {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: FOUNDER_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  const target = Date.UTC(y, mo - 1, d, h, mi);
+  let instant = target;
+  for (let i = 0; i < 3; i += 1) {
+    const p = Object.fromEntries(
+      fmt.formatToParts(new Date(instant)).map((x) => [x.type, x.value]),
+    );
+    instant += target - Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+  }
+  const v = Object.fromEntries(
+    fmt.formatToParts(new Date(instant)).map((x) => [x.type, x.value]),
+  );
+  return (
+    +v.year === y && +v.month === mo && +v.day === d && +v.hour === h && +v.minute === mi
+  );
+}
+assert.equal(
+  wallClockExists(2027, 3, 14, 2, 30),
+  false,
+  "02:30 on the spring-forward date does not exist — this is the case that makes a filled date+time still produce no instant",
+);
+assert.equal(wallClockExists(2027, 3, 14, 3, 30), true, "an ordinary time must still resolve");
+assert.equal(wallClockExists(2027, 6, 10, 14, 0), true, "an ordinary time must still resolve");
+
+// So the gate must demand a real instant, not merely two non-empty inputs.
 assert.match(
   lifecycle,
   /connectedFollowUpUsable\s*=\s*\(!connectedFollowUpDate && !connectedFollowUpTime\) \|\| Boolean\(connectedFollowUpAt\)/,
