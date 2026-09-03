@@ -76,4 +76,40 @@ assert.ok(
   "both the pairing and pairing-owner reads must remain tenant-scoped",
 );
 
+// ── Surfaces that control the viewer's OWN daemons must target loopback ────
+//
+// 2026-09-03: the worker Start/Stop/Restart buttons and the CLI diagnostics
+// panel each read NEXT_PUBLIC_BRIDGE_CHAT_BASE for the local bridge. That var
+// is the hosted-VPS override for SunBiz employees, and the deployed bundle had
+// it inlined as http://localhost:3000 — a dev-server port. Every Restart click
+// on the operator's own machine POSTed there and failed with
+// `Unexpected token '<', "<!DOCTYPE"`. The proxy is not a substitute (it fails
+// closed for a tenant with no bridge_url, and a Worker cannot reach a laptop),
+// so the ONLY correct target for a local daemon is the viewer's loopback.
+for (const rel of [
+  join("lib", "automations", "worker-control.ts"),
+  join("components", "BridgeCliPanel.tsx"),
+]) {
+  const src = readFileSync(join(ROOT, rel), "utf8");
+  // The READ is the defect, not the name: both files explain in a comment why
+  // they no longer read it, so this pins `process.env.` access specifically.
+  assert.ok(
+    !src.includes("process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE"),
+    `${rel} must not read the hosted-bridge override for a LOCAL daemon`,
+  );
+  assert.ok(
+    src.includes('import { LOCAL_BRIDGE_DEFAULT } from "@/lib/bridge-client-routing"'),
+    `${rel} must take the loopback bridge from the one routing module`,
+  );
+}
+const workerControl = readFileSync(join(ROOT, "lib", "automations", "worker-control.ts"), "utf8");
+assert.ok(
+  workerControl.includes("fetch(`${LOCAL_BRIDGE_DEFAULT}/exec-tool`"),
+  "the local worker-control path must POST to the loopback bridge's /exec-tool",
+);
+assert.ok(
+  workerControl.includes("is the local bridge running on this machine?"),
+  "a non-JSON answer must be named as 'no bridge here', not surfaced as a JSON parse error",
+);
+
 console.log("settings-bridge-consistency.test.ts: OK");

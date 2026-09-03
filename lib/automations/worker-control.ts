@@ -27,12 +27,22 @@
  *     the EPERM above is a Windows named-pipe fault, and the VPS is Linux,
  *     where pm2 is still the live supervisor for the SunBiz fleet.
  *
- * Client-side module: it uses `fetch` and a NEXT_PUBLIC_ env var, and is
- * imported only by client components.
+ * Client-side module: it uses `fetch` and is imported only by client
+ * components.
+ *
+ * The LOCAL path targets LOCAL_BRIDGE_DEFAULT — the viewer's own loopback —
+ * and deliberately NOT NEXT_PUBLIC_BRIDGE_CHAT_BASE (2026-09-03). That var is
+ * the hosted-VPS override for SunBiz employees, and in the deployed bundle it
+ * had been inlined as http://localhost:3000, a dev-server port, so every
+ * Restart on the operator's own daemons POSTed to a port nothing listens on
+ * and failed with `Unexpected token '<', "<!DOCTYPE"`. The server-side proxy
+ * is not an alternative here: resolveBridgeTarget fails closed for a tenant
+ * with no bridge_url (correctly — the SunBiz bearer must not be borrowed), and
+ * a Cloudflare Worker cannot reach an operator's laptop anyway. Loopback is the
+ * only address that is always that machine.
  */
 
-const BRIDGE_BASE =
-  process.env.NEXT_PUBLIC_BRIDGE_CHAT_BASE || "http://localhost:9100";
+import { LOCAL_BRIDGE_DEFAULT } from "@/lib/bridge-client-routing";
 
 /** Control actions exposed in the UI. */
 export type WorkerAction = "start" | "stop" | "restart";
@@ -62,7 +72,7 @@ export async function runWorkerAction(
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ service, action }),
         })
-      : await fetch(`${BRIDGE_BASE}/exec-tool`, {
+      : await fetch(`${LOCAL_BRIDGE_DEFAULT}/exec-tool`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -70,7 +80,21 @@ export async function runWorkerAction(
             input: { action, name },
           }),
         });
-    const data = (await res.json()) as { ok?: boolean; output?: string; is_error?: boolean; error?: string };
+    // A non-JSON body means we reached something that is not the bridge — a
+    // dev server, a login page, an HTML error. Name that, instead of letting
+    // JSON.parse report an unexpected '<'.
+    const text = await res.text();
+    let data: { ok?: boolean; output?: string; is_error?: boolean; error?: string };
+    try {
+      data = JSON.parse(text) as typeof data;
+    } catch {
+      return {
+        ok: false,
+        output: remoteControl
+          ? `bridge proxy returned non-JSON (HTTP ${res.status})`
+          : `no bridge answered at ${LOCAL_BRIDGE_DEFAULT} (HTTP ${res.status}, non-JSON) — is the local bridge running on this machine?`,
+      };
+    }
     if (!res.ok || data.ok === false || data.is_error === true) {
       return { ok: false, output: data.error || data.output || `http_${res.status}` };
     }
