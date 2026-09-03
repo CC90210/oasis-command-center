@@ -272,6 +272,15 @@ const TESTS = [
   // tenant mismatch, propagation to the right leads, and the rule that an
   // unassign must never strip a lead's own data.assigned_to.
   "tests/web-leads-territory-assign.test.ts",
+  // Per-lead assignment + the Assign tab (PRs #378-#382). NOT PREVIOUSLY IN
+  // THIS LIST -- five PRs' worth of regression guards were passing only because
+  // they were run by hand, and CI had never once executed them. The list is
+  // explicit by design (see the header), which is exactly why a new file has to
+  // be added here or it silently never runs.
+  "tests/web-leads-assign-to-rep.test.ts",
+  // The assignment-destination rule itself, exercised against real inputs
+  // rather than asserted against route source.
+  "tests/web-leads-assign-target.test.ts",
   // The battle card (2026-08-24). Guards the numbers a rep says out loud: the
   // percentile understates on a tie, the peer group is never quoted below
   // MIN_SLICE and never silently widened, the evidence never prints a
