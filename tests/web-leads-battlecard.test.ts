@@ -1692,6 +1692,12 @@ const MODEL_CODES = [
   const block = read("components/web-leads/PresenceBlock.tsx");
   assert.match(block, /Not measured yet/, "an unmeasured pillar must say so");
   assert.match(block, /has not been measured yet/, "the none state must render the waiting sentence");
+  // The empty state may only claim what the CARD actually knows: it says a
+  // lookup was requested ONLY on a successful enqueue, and says so honestly
+  // when the request itself failed. (Codex review, 2026-09-03.)
+  assert.match(block, /ask === "queued" \|\| ask === "asking"/, "the requested-copy must be gated on a real enqueue");
+  assert.match(block, /could not be requested just now/, "a refused enqueue must be stated, never papered over");
+  assert.match(block, /missing from ours/, "a measurement gap must be named as ours, not as their failing");
   assert.match(block, /a method the platforms allow/, "the social deferral must be explained, not hidden");
   assert.match(block, /separate from the website score/, "the two composites must never read as one");
 
@@ -1699,8 +1705,16 @@ const MODEL_CODES = [
   // container level (in the map above) so unscored leads still get it.
   const card = read("components/web-leads/BattleCard.tsx");
   assert.match(card, /presenceAskedRef/, "the card must not re-enqueue on every silent refresh");
+  // The lead-switch race: a mounted card handed a new leadId clears the ref
+  // one render before the new payload lands, so the effect must refuse to
+  // act on a payload belonging to another lead.
+  assert.match(card, /state\.payload\.lead\?\.id !== leadId/, "the enqueue must refuse a payload from a different lead");
+  // A queued measurement must actually come back while the rep watches, and
+  // the poll must be bounded so a card left open all shift stops asking.
+  assert.match(card, /PRESENCE_POLL_LIMIT/, "a queued presence measurement must be polled for");
+  assert.match(card, /presencePolls > PRESENCE_POLL_LIMIT/, "the presence poll must be bounded");
   assert.match(card, /\/presence`, \{ method: "POST" \}/, "the card must enqueue through the deduped route");
-  assert.match(card, /<PresenceBlock presence=\{onlinePresence\} \/>/, "the presence section must render the block");
+  assert.match(card, /<PresenceBlock presence=\{onlinePresence\} ask=\{presenceAsk\.status\} \/>/, "the presence section must render the block, carrying what the card knows about its own request");
 }
 
 console.log("web-leads-battlecard ok");

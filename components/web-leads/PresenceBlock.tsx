@@ -91,7 +91,19 @@ function PillarGroup({ pillar, blob }: { pillar: PresencePillar; blob: NonNullab
   );
 }
 
-export function PresenceBlock({ presence }: { presence: OnlinePresence | null | undefined }) {
+/** What the CARD knows about its own request for a measurement. The empty
+ *  state may only claim what this says — a card that reports "requested"
+ *  when the POST was refused is the dishonesty this feature exists to
+ *  remove. (Codex review, 2026-09-03.) */
+export type PresenceAsk = "idle" | "asking" | "queued" | "failed";
+
+export function PresenceBlock({
+  presence,
+  ask = "idle",
+}: {
+  presence: OnlinePresence | null | undefined;
+  ask?: PresenceAsk;
+}) {
   const measured = presence && presence.state === "measured" ? presence : null;
   const pillars = useMemo(() => measured?.blob.pillars ?? [], [measured]);
 
@@ -99,8 +111,11 @@ export function PresenceBlock({ presence }: { presence: OnlinePresence | null | 
     return (
       <div>
         <p className="max-w-3xl text-sm leading-relaxed text-fg-dim">
-          This business&apos;s presence beyond its website has not been measured yet. A lookup has been
-          requested; the numbers will appear here once it completes, usually within a minute.
+          {ask === "queued" || ask === "asking"
+            ? "This business's presence beyond its website has not been measured yet. A lookup has been requested; the numbers will appear here once it completes, usually within a minute."
+            : ask === "failed"
+              ? "This business's presence beyond its website has not been measured, and the lookup could not be requested just now. Nothing here is missing from their business; it is missing from ours."
+              : "This business's presence beyond its website has not been measured yet."}
         </p>
       </div>
     );

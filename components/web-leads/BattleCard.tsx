@@ -738,6 +738,11 @@ function ParticleField({ reduced }: { reduced: boolean }) {
 // §3.2 — the seven-dimension radar
 // ───────────────────────────────────────────────────────────────────────────
 
+/** How many times a card re-polls for a queued presence measurement before
+ *  giving up. Six 8-second polls ≈ 48s, which covers the worker's ~30s poll
+ *  plus one lookup; past that a card left open all shift must stop asking. */
+const PRESENCE_POLL_LIMIT = 6;
+
 const RADAR = { w: 420, h: 340, cx: 210, cy: 168, r: 108, labelR: 130 };
 
 function radarPoint(index: number, total: number, value: number) {
@@ -1154,6 +1159,11 @@ export function BattleCard({
   const drawn = useDrawOnce(reduced);
   // One presence enqueue per lead per mount -- see the effect below.
   const presenceAskedRef = useRef(false);
+  // What the card actually knows about that enqueue, which is what the
+  // section is allowed to claim: idle (never asked / not needed), asking,
+  // queued (the server took it), failed (it did not).
+  const [presenceAsk, setPresenceAsk] = useState<{ status: "idle" | "asking" | "queued" | "failed" }>({ status: "idle" });
+  const [presencePolls, setPresencePolls] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -1190,23 +1200,67 @@ export function BattleCard({
     setNonce(0);
     setRecheckPost({ busy: false, error: null });
     presenceAskedRef.current = false;
+    setPresenceAsk({ status: "idle" });
+    setPresencePolls(0);
   }, [leadId]);
 
   // ON-DEMAND presence (phase 2): opening a card whose presence blob is
-  // absent or stale asks the worker for ONE measurement. Fire-and-forget on
-  // purpose -- the route dedupes atomically server-side, the worker is
-  // quota-capped, and this ref stops the card itself from re-asking on every
-  // silent refresh. Failure is swallowed: the section already says "not
-  // measured yet" honestly, and a rep mid-call has no use for an enqueue
-  // error.
+  // absent or stale asks the worker for ONE measurement.
+  //
+  // NOT fire-and-forget (Codex review, 2026-09-03, three findings that
+  // compound): the empty state TELLS the rep a lookup was requested, so the
+  // card must actually know that it was. The outcome drives the copy, a
+  // bounded poll brings the answer back while they read, and the effect
+  // refuses to act on a payload belonging to a different lead.
   useEffect(() => {
     if (state.status !== "ready" || presenceAskedRef.current) return;
+    // THE LEAD-SWITCH RACE: a mounted card handed a new leadId clears the
+    // ref one render before the new payload arrives, so this effect can see
+    // the PREVIOUS lead's payload against the new id and spend a worker
+    // request on the wrong business. The payload names its own lead; only
+    // act when the two agree.
+    if (state.payload.lead?.id !== leadId) return;
     const p = state.payload.onlinePresence ?? null;
     const wants = !p || p.state === "none" || (p.state === "measured" && p.stale);
     if (!wants) return;
     presenceAskedRef.current = true;
-    fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" }).catch(() => {});
+    let alive = true;
+    setPresenceAsk({ status: "asking" });
+    fetch(`/api/web-leads/${encodeURIComponent(leadId)}/presence`, { method: "POST" })
+      .then(async (r) => {
+        if (!alive) return;
+        if (r.ok || r.status === 202) {
+          setPresenceAsk({ status: "queued" });
+          // The worker answers in ~a minute; poll a bounded number of times
+          // so the section fills in while the rep is still on the page, and
+          // stops rather than polling a card left open all shift.
+          setPresencePolls(1);
+          return;
+        }
+        // 409 (no business behind this lead), 500, anything else: say so.
+        // A card that claims a request exists when none does is the exact
+        // dishonesty this feature was built to remove.
+        setPresenceAsk({ status: "failed" });
+      })
+      .catch(() => { if (alive) setPresenceAsk({ status: "failed" }); });
+    return () => { alive = false; };
   }, [state, leadId]);
+
+  // The bounded presence poll: refresh the payload a few times after a
+  // successful enqueue, then stop. Ends early the moment a measured,
+  // non-stale blob arrives (the effect above will not re-ask for one).
+  useEffect(() => {
+    if (presencePolls === 0 || presencePolls > PRESENCE_POLL_LIMIT) return;
+    if (state.status === "ready") {
+      const p = state.payload.onlinePresence ?? null;
+      if (p && p.state === "measured" && !p.stale) return;
+    }
+    const t = window.setTimeout(() => {
+      setNonce((n) => n + 1);
+      setPresencePolls((c) => c + 1);
+    }, 8000);
+    return () => window.clearTimeout(t);
+  }, [presencePolls, state]);
 
   // While a re-check is queued or running, poll: the worker writes a fresh
   // audit within ~a minute and the card refreshes itself with it.
@@ -1319,7 +1373,7 @@ export function BattleCard({
             title="Beyond the website"
             sub="The business's presence where customers actually look first: Google, one consistent identity, email that lands. Measured, separate from the website score."
           >
-            <PresenceBlock presence={onlinePresence} />
+            <PresenceBlock presence={onlinePresence} ask={presenceAsk.status} />
           </BattleSection>
 
           {trust.hide ? (
