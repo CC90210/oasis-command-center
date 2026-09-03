@@ -263,6 +263,45 @@ describe('assigning a lead to another rep', () => {
     assert.match(route, /wrong_tenant/);
   });
 
+  it('validates the TARGET of a sheet assignment, not just the caller', () => {
+    // The bulk control sits on the same Assign tab as the per-lead picker and
+    // had the opposite posture: it gated who may assign (admin/manager) and
+    // then accepted ANY non-empty string as the destination. So a whole
+    // city+industry sheet could be parked on a founder -- whom the roster
+    // deliberately excludes -- or on an id belonging to no profile at all.
+    //
+    // The second one is the dangerous case: the write SUCCEEDS, the sheet's
+    // leads propagate to an owner who does not exist, and they are then out of
+    // the pool and invisible to every rep. Nothing reports an error, because
+    // nothing ever asked. Audited before the fix: 1 assigned territory, owner
+    // valid -- latent, not exploited.
+    const route = readFileSync('app/api/web-leads/territories/[id]/assign/route.ts', 'utf8');
+    assert.match(route, /getOasisSalesRepRoster/, 'the sheet route must check the roster');
+    assert.match(route, /target_not_on_sales_roster/);
+    // The check must sit BEFORE the write, or it is decoration.
+    assert.ok(
+      route.indexOf('target_not_on_sales_roster') < route.indexOf('assignTerritory({'),
+      'the roster check must precede assignTerritory',
+    );
+  });
+
+  it('feeds both assign controls from the same roster', () => {
+    // Per-lead and whole-sheet assignment are two doors to the same decision.
+    // Sourcing their pickers differently is how one of them ends up offering a
+    // destination the other would refuse.
+    for (const f of [
+      'components/web-leads/WebLeadsBrowser.tsx',
+      'components/web-leads/TerritoryAssignment.tsx',
+    ]) {
+      const src = readFileSync(f, 'utf8');
+      assert.match(src, /fetch\("\/api\/web-leads\/assignable-reps"/, `${f} must use the roster endpoint`);
+      assert.ok(
+        !/fetch\("\/api\/team\/members"/.test(src),
+        `${f} must not build an assign picker from the full member list`,
+      );
+    }
+  });
+
   it('keeps the batch ceiling and the de-duplication', () => {
     // Assignment goes through the same body parsing, so the id list is still
     // bounded and de-duplicated -- the same id twice would otherwise burn two

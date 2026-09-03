@@ -22,6 +22,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { assignTerritory } from "@/lib/web-leads/assign";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,6 +59,37 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ ok: false, error: "invalid_assigned_to" }, { status: 400 });
   }
   const assignedTo = typeof raw === "string" && raw.trim() ? raw : null;
+
+  // THE TARGET IS VALIDATED, not just the caller. Until now this route checked
+  // who may assign and then accepted any non-empty string as the destination,
+  // so a whole city+industry sheet could be parked on:
+  //
+  //   - a founder, whom getOasisSalesRepRoster deliberately excludes (their
+  //     assigned records are founder work, not a rep's book, and that exclusion
+  //     is what keeps a manager's cross-rep read boundary honest), or
+  //   - an id belonging to no profile at all. That is the bad one: the write
+  //     SUCCEEDS, the sheet's leads propagate to an owner who does not exist,
+  //     and they are then out of the pool and invisible to every rep. Nothing
+  //     reports an error, because nothing ever asked.
+  //
+  // The per-lead claim route has always checked roster membership. These two
+  // controls sit on the SAME tab and disagreed about whether the destination
+  // matters. Same function on both sides now, so they cannot drift.
+  //
+  // Audited before the change: 1 assigned territory, owner valid. The hole was
+  // latent, not exploited.
+  if (assignedTo) {
+    const roster = await getOasisSalesRepRoster(session.tenantId);
+    const onRoster = roster.some(
+      (m) => (m.auth_user_id || "").trim().toLowerCase() === assignedTo.trim().toLowerCase(),
+    );
+    if (!onRoster) {
+      return NextResponse.json(
+        { ok: false, error: "target_not_on_sales_roster" },
+        { status: 400 },
+      );
+    }
+  }
 
   try {
     const result = await assignTerritory({ territoryId: id, assignedTo });
