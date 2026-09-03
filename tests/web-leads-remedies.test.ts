@@ -4,8 +4,11 @@ import { REMEDIES, remedyFor } from "../lib/web-leads/remedies";
 const codes = Object.keys(REMEDIES);
 
 // A gap with no remedy is a complaint. The whole point of this copy is that a
-// rep reads a script rather than a defect list.
-assert.ok(codes.length >= 49, `expected at least 49 remedies, got ${codes.length}`);
+// rep reads a script rather than a defect list. Model v2 (2026-09-02) carries
+// exactly 44 checks; EXACT equality, because a surplus remedy is dead copy
+// about a check that no longer exists and a shortfall is a bare defect name
+// read aloud.
+assert.equal(codes.length, 44, `expected exactly 44 remedies (model v2), got ${codes.length}`);
 
 for (const c of codes) {
   assert.ok(REMEDIES[c].costs.length >= 25, `${c}: costs is a stub`);

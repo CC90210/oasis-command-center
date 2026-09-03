@@ -88,22 +88,13 @@ const LINES: Record<string, Line> = {
     const n = num(s, "ctaCount");
     return n === null ? null : `${fmtInt(n)} call-to-action ${plural(n, "phrase", "phrases")} found in the copy; one or more earns the point.`;
   },
-  cta_above_fold: (s) => {
-    const b = bool(s, "ctaAboveFold");
-    return b === null ? null : b ? "A call to action appears before any scrolling." : "Nothing asks for the business before the visitor has to scroll.";
-  },
   booking: (s) => {
     const b = bool(s, "hasBooking");
     return b === null ? null : b ? "Online booking or scheduling found." : "No online booking or scheduling anywhere on the page.";
   },
   email_route: (s) => {
     const mail = num(s, "mailtoLinks");
-    const forms = num(s, "formCount");
-    if (mail === null && forms === null) return null;
-    const parts: string[] = [];
-    if (mail !== null) parts.push(`${fmtInt(mail)} email ${plural(mail, "link", "links")}`);
-    if (forms !== null) parts.push(`${fmtInt(forms)} ${plural(forms, "form", "forms")}`);
-    return `${parts.join(" and ")} found; either route earns the point.`;
+    return mail === null ? null : `${fmtInt(mail)} visible email ${plural(mail, "link", "links")} on the page; one or more earns the point. A form is scored separately and no longer counts here.`;
   },
   chat: (s) => {
     const b = bool(s, "hasChat");
@@ -160,15 +151,17 @@ const LINES: Record<string, Line> = {
     const b = bool(s, "hasGuarantee");
     return b === null ? null : b ? "A guarantee or warranty is mentioned." : "No guarantee or warranty mentioned anywhere.";
   },
-  social_proof: (s) => {
-    const n = num(s, "socialLinks");
-    return n === null ? null : `${fmtInt(n)} ${plural(n, "link", "links")} to social profiles found; one or more earns the point.`;
-  },
-
   // ── design ─────────────────────────────────────────────────────────────
-  modern_layout: (s) => {
+  layout_quality: (s) => {
     const b = bool(s, "usesFlexOrGrid");
-    return b === null ? null : b ? "Built on a modern layout engine." : "No modern layout engine in the stylesheet; this is how sites were built over a decade ago.";
+    const tables = num(s, "layoutTables");
+    if (b === null) return null;
+    if (!b) return "No modern layout engine in the stylesheet; this is how sites were built over a decade ago.";
+    // The PASS claims two facts (engine present, zero layout tables); with
+    // the table count unrecorded, claiming the second would invent evidence.
+    if (tables === null) return null;
+    if (tables > 0) return `Modern layout engine present, but ${fmtInt(tables)} layout ${plural(tables, "table", "tables")} still ${plural(tables, "holds", "hold")} parts of the page together; a modern engine with zero layout tables earns the point.`;
+    return "Built on a modern layout engine with no table-built sections.";
   },
   web_fonts: (s) => {
     const b = bool(s, "hasWebFonts");
@@ -199,7 +192,7 @@ const LINES: Record<string, Line> = {
     if (logo !== null) parts.push(logo ? "a logo is present" : "no logo found");
     if (colors !== null) parts.push(`${fmtInt(colors)} distinct brand ${plural(colors, "colour", "colours")} detected`);
     const joined = parts.join(" and ");
-    return `${joined.charAt(0).toUpperCase()}${joined.slice(1)}; a logo plus two colours earns the point.`;
+    return `${joined.charAt(0).toUpperCase()}${joined.slice(1)}; a logo plus four or more colours earns the point.`;
   },
   favicon: (s) => {
     const b = bool(s, "hasFavicon");
@@ -231,12 +224,10 @@ const LINES: Record<string, Line> = {
     const nav = bool(s, "hasMobileNav");
     if (tel === null && nav === null) return null;
     const hasTel = tel !== null && tel > 0;
-    if (hasTel || nav) return "The phone number or menu is built to be tapped.";
+    if (hasTel && nav) return "Both the phone number and the menu are built to be tapped.";
+    if (hasTel) return "The phone number is tappable, but there is no mobile menu; both earn the point.";
+    if (nav) return "A mobile menu exists, but the phone number is not tappable; both earn the point.";
     return "Neither the phone number nor the menu is built for a fingertip.";
-  },
-  no_flash: (s) => {
-    const b = bool(s, "hasFlash");
-    return b === null ? null : b ? "Flash content found, which no modern phone can run at all." : "Nothing on the page that phones cannot run.";
   },
 
   // ── content ────────────────────────────────────────────────────────────
@@ -308,14 +299,6 @@ const LINES: Record<string, Line> = {
   h1: (s) => {
     const n = num(s, "h1Count");
     return n === null ? null : `${fmtInt(n)} main ${plural(n, "heading", "headings")} on the page; one or more earns the point.`;
-  },
-  analytics: (s) => {
-    const b = bool(s, "hasAnalytics");
-    return b === null ? null : b ? "Analytics is installed." : "No analytics installed, so nobody can measure whether the site works.";
-  },
-  sitemap: (s) => {
-    const b = bool(s, "hasSitemapRef");
-    return b === null ? null : b ? "A sitemap is referenced for search engines." : "No sitemap referenced for search engines.";
   },
 };
 

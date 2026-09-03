@@ -874,25 +874,30 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
 // The canonical code list, mirrored from quality-model.js CHECKS. If the
 // model gains a check, this list and check-evidence.ts must both learn it in
 // the same change -- an unexplained check renders as a bare verdict again.
+// Model v2 (2026-09-02): 44 codes. Retired: cta_above_fold (unmeasurable
+// without rendering), no_flash (dead tech), social_proof + analytics (moved
+// to the online-presence layer), sitemap (0.5% corpus pass -- a broken
+// measurement fails everyone and reads as our error). modern_layout renamed
+// layout_quality (modern engine AND not table-built).
 const MODEL_CODES = [
   // conversion
   "tel_link", "phone_in_header", "contact_form", "short_form", "cta_present",
-  "cta_above_fold", "booking", "email_route", "chat", "multi_route",
+  "booking", "email_route", "chat", "multi_route",
   // trust
   "testimonials", "review_platform", "credentials", "real_photos", "address",
-  "map", "years_trading", "guarantee", "social_proof",
+  "map", "years_trading", "guarantee",
   // design
-  "modern_layout", "web_fonts", "not_default_tpl", "image_rich",
+  "layout_quality", "web_fonts", "not_default_tpl", "image_rich",
   "no_dated_markup", "consistent_brand", "favicon", "no_builder_badge",
   // mobile
-  "viewport", "responsive_css", "no_fixed_width", "tap_targets", "no_flash",
+  "viewport", "responsive_css", "no_fixed_width", "tap_targets",
   // content
   "substantial", "service_detail", "headings", "service_area",
   "pricing_signal", "fresh",
   // performance
   "fast_ttfb", "lean_html", "few_blocking", "https",
   // discoverability
-  "title", "meta_desc", "local_schema", "og_tags", "h1", "analytics", "sitemap",
+  "title", "meta_desc", "local_schema", "og_tags", "h1",
 ];
 
 {
@@ -1092,8 +1097,12 @@ const MODEL_CODES = [
   assert.match(src, /scoreHidden=\{Boolean\(trust\.hide\)\}/, `${view} must hide the hero score too -- a hidden body under a big glowing number is not hidden`);
   assert.match(src, /<MeasurementHonesty/, `${view} must render the honesty strip on every card`);
   assert.match(src, /Re-check this site now/, `${view} must offer the one-lead re-check`);
-  assert.match(src, /UNMEASURABLE_CHECKS/, `${view} must name checks the model cannot measure for prospects`);
-  assert.match(src, /sitemap:/, `${view}: the sitemap check must be annotated as unmeasurable (integrity finding 4)`);
+  assert.match(src, /UNMEASURABLE_CHECKS/, `${view} must keep the unmeasurable-check machinery -- the next broken measurement needs it`);
+  // Model v2 retired the sitemap check outright (0.5% corpus pass -- the
+  // measurement, not the sites, was broken), which was the "coordinated
+  // MODEL_VERSION bump" the old annotation called for. The map must now be
+  // EMPTY: an entry for a check the model no longer scores is dead copy.
+  assert.match(src, /const UNMEASURABLE_CHECKS: Record<string, string> = \{\};/, `${view}: no unmeasurable entries should remain after the v2 sitemap retirement`);
   assert.match(src, /Not recorded:/, `${view}: a failed check with no recorded signal must say so, never stay silent`);
 
   const route = read("app/api/web-leads/[id]/battlecard/route.ts");

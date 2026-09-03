@@ -108,4 +108,9 @@ export function assertCompleteRead(label: string, rows: unknown[], count: number
  * scored under another. Keep in sync by hand if that constant ever bumps --
  * oasis and JARVIS are separate deployments with no shared module graph.
  */
-export const MODEL_VERSION = 1;
+// v2 (2026-09-02): the calibration-driven model revision — 44 checks (5
+// dropped, 4 redefined), rebalanced weights, honest labels. THIS FLIP ONLY
+// DEPLOYS after JARVIS's `rescore-v2.mjs --verify-only` reports the v2
+// corpus complete and internally consistent — an early flip computes
+// percentiles against a partial, non-random slice with no error anywhere.
+export const MODEL_VERSION = 2;
