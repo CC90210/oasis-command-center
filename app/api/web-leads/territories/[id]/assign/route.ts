@@ -23,6 +23,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { assignTerritory } from "@/lib/web-leads/assign";
 import { getOasisSalesRepRoster } from "@/lib/team";
+import { isAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -80,10 +81,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // latent, not exploited.
   if (assignedTo) {
     const roster = await getOasisSalesRepRoster(session.tenantId);
-    const onRoster = roster.some(
-      (m) => (m.auth_user_id || "").trim().toLowerCase() === assignedTo.trim().toLowerCase(),
-    );
-    if (!onRoster) {
+    if (!isAssignableTarget(roster, assignedTo)) {
       return NextResponse.json(
         { ok: false, error: "target_not_on_sales_roster" },
         { status: 400 },

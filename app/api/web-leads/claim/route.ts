@@ -23,6 +23,7 @@ import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { getOasisSalesRepRoster, tenantSlugFor } from "@/lib/team";
+import { isAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -103,10 +104,7 @@ export async function POST(req: NextRequest) {
     }
     if (target !== session.userId.trim().toLowerCase()) {
       const roster = await getOasisSalesRepRoster(session.tenantId);
-      const onRoster = roster.some(
-        (m) => (m.auth_user_id || "").trim().toLowerCase() === target,
-      );
-      if (!onRoster) {
+      if (!isAssignableTarget(roster, target)) {
         return NextResponse.json({ ok: false, error: "target_not_on_sales_roster" }, { status: 400 });
       }
     }
