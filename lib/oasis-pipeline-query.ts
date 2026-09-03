@@ -366,9 +366,13 @@ export async function listOasisPipelineWindow(
   // With the predicate: 168 rows, 292 KB, 249 ms.
   //
   // It made the ADMIN board the slow one, which is the opposite of how it
-  // reads: a rep carries viewerUserId, skips this branch entirely, and gets
-  // the per-stage queries below — each capped at 40 rows and measured at
-  // 152 ms, 8 ms above the bare network round trip.
+  // reads. Every other scope was already bounded: a rep whose viewerUserId is
+  // also the assignee takes the listForViewer branch above (two parallel
+  // reads), and anything else falls to the per-stage readStage calls below,
+  // capped at OASIS_PIPELINE_OVERVIEW_LIMIT (40) per stage on the overview and
+  // OASIS_PIPELINE_STAGE_PAGE_SIZE (100) on a selected stage. A 40-row stage
+  // read measures 152 ms — 8 ms above a bare network round trip. Only this
+  // branch was unbounded in the dimension that costs: bytes.
   if (input.assignedTo === undefined && !viewerUserId) {
     const where: Record<string, EqualityValue> = {};
     if (input.salesProgram) where.sales_program = input.salesProgram;
