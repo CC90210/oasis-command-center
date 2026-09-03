@@ -58,12 +58,42 @@ const VALID_BANDS: readonly ScoreBand[] = ["all", "under40", "mid", "sixty_plus"
  * them -- unscored leads are not "bad prospects", they are unknown, so they
  * sort last rather than being interleaved as if a missing score were a low one.
  */
+/**
+ * Canada is spelled by its province codes; anything else on a lead is the US.
+ * Derived rather than stored so a lead that already exists does not need a
+ * backfill to appear in the right place, and a typo cannot invent a country.
+ */
+export const CA_REGIONS: readonly string[] = [
+  "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+];
+
+export type LeadCountry = "ca" | "us";
+
+/** @param region the lead's province/state code */
+export function countryOf(region: string | null | undefined): LeadCountry {
+  return CA_REGIONS.includes(String(region || "").trim().toUpperCase()) ? "ca" : "us";
+}
+
 export type LeadSort = "opportunity" | "name" | "score_desc";
 const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc"];
 
 export type WebLeadFilters = {
   view: WebLeadView;
   provinces: string[];
+  /**
+   * Which country's board a rep is working.
+   *
+   * Oasis is entering the US (Adon 2026-09-02) and US leads live in the SAME
+   * table, distinguished only by their region code. Without this they would
+   * interleave with Canadian leads on one list, which is wrong twice over: a
+   * rep works one territory at a time, and the two markets have different
+   * compliance rules (CASL vs TCPA/DNC) — mixing them on screen is how someone
+   * dials a US mobile under Canadian assumptions.
+   *
+   * Defaults to "ca" so the existing board is unchanged for everyone until a
+   * rep deliberately switches.
+   */
+  country: LeadCountry;
   cities: string[];
   industries: string[];
   noSiteOnly: boolean;
@@ -111,6 +141,7 @@ const EMPTY_LIST = Object.freeze([]) as unknown as string[];
 
 export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   view: "leads",
+  country: "ca",
   provinces: EMPTY_LIST,
   cities: EMPTY_LIST,
   industries: EMPTY_LIST,
@@ -156,6 +187,7 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
   const sortRaw = sp.get("sort");
   return {
     view,
+    country: sp.get("country") === "us" ? "us" : "ca",
     provinces: list(sp, "prov"),
     cities: list(sp, "city"),
     industries: list(sp, "ind"),
@@ -185,6 +217,7 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   // Defaults stay out of the URL, same convention as view/page above.
   if (f.band !== "all") sp.set("band", f.band);
   if (f.sort !== "opportunity") sp.set("sort", f.sort);
+  if (f.country !== "ca") sp.set("country", f.country);
   put("prov", f.provinces);
   put("city", f.cities);
   put("ind", f.industries);

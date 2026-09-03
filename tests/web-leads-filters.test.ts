@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { parseFilters, filtersToParams, EMPTY_FILTERS } from "../lib/web-leads/filters";
+import { parseFilters, filtersToParams, EMPTY_FILTERS, countryOf } from "../lib/web-leads/filters";
 
 // Empty URL yields empty filters on page 1, never null fields.
 {
@@ -60,4 +60,31 @@ console.log("web-leads-filters ok");
   assert.equal(parseFilters(new URLSearchParams("")).ownerOnly, false, "off by default");
   assert.equal(parseFilters(new URLSearchParams("owner=maybe")).ownerOnly, false, "only '1' turns it on");
   assert.equal(EMPTY_FILTERS.ownerOnly, false);
+}
+
+// COUNTRY. Canada and the US run under different outbound law (CASL vs
+// TCPA/DNC), so the board is always ONE market and never "both". These pin
+// that: the default is Canada, so nobody's existing board changes, and the
+// country is DERIVED from the region code rather than stored, so a lead that
+// already exists lands in the right place without a backfill.
+{
+  assert.equal(EMPTY_FILTERS.country, "ca", "the board must default to Canada");
+  assert.equal(parseFilters(new URLSearchParams("")).country, "ca");
+  assert.equal(parseFilters(new URLSearchParams("country=us")).country, "us");
+  assert.equal(
+    parseFilters(new URLSearchParams("country=mx")).country, "ca",
+    "an unknown country falls back to Canada rather than inventing a third board",
+  );
+  const us = { ...EMPTY_FILTERS, country: "us" as const };
+  assert.deepEqual(parseFilters(filtersToParams(us)), us, "country must survive a URL round trip");
+
+  for (const p of ["ON", "QC", "bc", " AB "]) {
+    assert.equal(countryOf(p), "ca", p);
+  }
+  for (const s of ["TX", "FL", "CA-US-NOT-A-PROVINCE", "NY", ""]) {
+    assert.equal(countryOf(s), "us", s);
+  }
+  // "CA" is California in a US list and is NOT a Canadian province code, so it
+  // must not smuggle a US lead onto the Canadian board.
+  assert.equal(countryOf("CA"), "us", "CA is California, not Canada");
 }
