@@ -34,7 +34,29 @@ export type RosterMember = { auth_user_id?: string | null };
  * means a malformed request, not "unassign".
  */
 export function isAssignableTarget(roster: readonly RosterMember[], target: string): boolean {
+  return resolveAssignableTarget(roster, target) !== null;
+}
+
+/**
+ * The id to actually STORE, taken from the roster rather than from the request.
+ *
+ * Matching leniently and then persisting what the client sent is how a lenient
+ * comparison becomes a data-integrity bug: `" 8f3a-REP-ariel "` passes the
+ * check and is written verbatim, producing an owner id that matches the roster
+ * nowhere else -- a ghost owner, which is the exact failure the roster check
+ * was added to prevent. (CodeRabbit, PR #383. Its proposed fix was to trim;
+ * trimming alone still stores `8F3A-REP-ARIEL` in the wrong case.)
+ *
+ * Returning the roster's own value makes the stored id byte-identical to the
+ * identity it was validated against, so padding, case, and any future
+ * normalisation difference cannot survive the write.
+ */
+export function resolveAssignableTarget(
+  roster: readonly RosterMember[],
+  target: string,
+): string | null {
   const want = (target || "").trim().toLowerCase();
-  if (!want) return false;
-  return roster.some((m) => (m.auth_user_id || "").trim().toLowerCase() === want);
+  if (!want) return null;
+  const hit = roster.find((m) => (m.auth_user_id || "").trim().toLowerCase() === want);
+  return hit ? (hit.auth_user_id || "").trim() : null;
 }

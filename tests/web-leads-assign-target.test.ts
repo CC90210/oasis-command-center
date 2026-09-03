@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { isAssignableTarget } from "../lib/web-leads/assign-target";
+import { isAssignableTarget, resolveAssignableTarget } from "../lib/web-leads/assign-target";
 
 const ROSTER = [
   { auth_user_id: "8f3a-rep-ariel" },
@@ -80,6 +80,47 @@ test("assignment destination", async (t) => {
     assert.equal(isAssignableTarget([], "8f3a-rep-ariel"), false);
   });
 
+  await t.test("stores the ROSTER's id, never the one the client sent", () => {
+    // CodeRabbit, PR #383: matching leniently and persisting the raw value is
+    // how a lenient comparison becomes a data-integrity bug. " rep-id " passes
+    // the check and is written verbatim -- an owner that matches the roster
+    // nowhere else, which is the ghost owner the check exists to prevent.
+    const roster = [{ auth_user_id: "8f3a-rep-ariel" }];
+    assert.equal(resolveAssignableTarget(roster, "  8f3a-rep-ariel  "), "8f3a-rep-ariel");
+
+    // THE CASE A TRIM-ONLY FIX MISSES. CodeRabbit proposed `raw.trim()`, which
+    // still stores the wrong case. Taking the id from the roster does not.
+    assert.equal(resolveAssignableTarget(roster, "8F3A-REP-ARIEL"), "8f3a-rep-ariel");
+    assert.notEqual(resolveAssignableTarget(roster, "8F3A-REP-ARIEL"), "8F3A-REP-ARIEL");
+
+    // And a padded roster entry is stored trimmed, not with its own padding.
+    assert.equal(resolveAssignableTarget([{ auth_user_id: " 8f3a-rep-ariel " }], "8f3a-rep-ariel"), "8f3a-rep-ariel");
+  });
+
+  await t.test("resolves to null exactly when it refuses", () => {
+    // The two exports must never disagree, or a caller checking one and storing
+    // the other writes an owner it just rejected.
+    const roster = [{ auth_user_id: "8f3a-rep-ariel" }, { auth_user_id: null }];
+    for (const probe of ["8f3a-rep-ariel", "  8F3A-REP-ARIEL ", "nobody", "", "   ", "null"]) {
+      assert.equal(
+        isAssignableTarget(roster, probe),
+        resolveAssignableTarget(roster, probe) !== null,
+        `disagreement on ${JSON.stringify(probe)}`,
+      );
+    }
+  });
+
+  await t.test("both routes persist the resolved id, not the request value", () => {
+    for (const route of [
+      "app/api/web-leads/claim/route.ts",
+      "app/api/web-leads/territories/[id]/assign/route.ts",
+    ]) {
+      const src = readFileSync(route, "utf8");
+      assert.match(src, /resolveAssignableTarget\(roster,/, `${route} must resolve the target`);
+      assert.match(src, /=\s*resolved;/, `${route} must persist the RESOLVED id`);
+    }
+  });
+
   await t.test("both assignment routes go through this one predicate", () => {
     // Per-lead and whole-sheet assignment are two doors to the same decision.
     // They each had their own copy of these four lines; a copy is how they
@@ -90,7 +131,7 @@ test("assignment destination", async (t) => {
       "app/api/web-leads/territories/[id]/assign/route.ts",
     ]) {
       const src = readFileSync(route, "utf8");
-      assert.match(src, /isAssignableTarget\(roster,/, `${route} must use the shared predicate`);
+      assert.match(src, /(isAssignableTarget|resolveAssignableTarget)\(roster,/, `${route} must use the shared predicate`);
       assert.ok(
         !/roster\.some\(/.test(src),
         `${route} must not carry its own copy of the membership check`,

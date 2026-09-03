@@ -23,7 +23,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { assignTerritory } from "@/lib/web-leads/assign";
 import { getOasisSalesRepRoster } from "@/lib/team";
-import { isAssignableTarget } from "@/lib/web-leads/assign-target";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,7 +59,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (raw !== null && raw !== undefined && typeof raw !== "string") {
     return NextResponse.json({ ok: false, error: "invalid_assigned_to" }, { status: 400 });
   }
-  const assignedTo = typeof raw === "string" && raw.trim() ? raw : null;
+  let assignedTo = typeof raw === "string" && raw.trim() ? raw : null;
 
   // THE TARGET IS VALIDATED, not just the caller. Until now this route checked
   // who may assign and then accepted any non-empty string as the destination,
@@ -81,12 +81,19 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // latent, not exploited.
   if (assignedTo) {
     const roster = await getOasisSalesRepRoster(session.tenantId);
-    if (!isAssignableTarget(roster, assignedTo)) {
+    // Take the id FROM THE ROSTER, not from the request. Matching leniently and
+    // then persisting what the client sent is how a lenient comparison becomes
+    // a data-integrity bug: " 8f3a-REP-ariel " passes the check and is stored
+    // verbatim, producing an owner that matches the roster nowhere else -- the
+    // ghost owner this check exists to prevent. (CodeRabbit, PR #383.)
+    const resolved = resolveAssignableTarget(roster, assignedTo);
+    if (!resolved) {
       return NextResponse.json(
         { ok: false, error: "target_not_on_sales_roster" },
         { status: 400 },
       );
     }
+    assignedTo = resolved;
   }
 
   try {
