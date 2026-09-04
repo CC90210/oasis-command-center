@@ -22,6 +22,7 @@ const TESTS = [
   "tests/perf-instrumentation.test.ts",
   "tests/perf-p1.test.ts",
   "tests/perf-p2.test.ts",
+  "tests/perf-prefetch.test.ts",
   "tests/lead-source-attribution.test.ts",
   "tests/lead-source-rollup.test.ts",
   "tests/sunbiz-form-templates.test.ts",
