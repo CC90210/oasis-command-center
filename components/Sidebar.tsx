@@ -170,6 +170,14 @@ export function Sidebar({
   // payload is two booleans, no PII.
   useEffect(() => {
     if (!deferStatus) return;
+    // DROP THE PREVIOUS OPERATOR'S VALUES FIRST (Codex P1 follow-up,
+    // 2026-09-04). Scoping the storage key is not sufficient on its own: if
+    // this sidebar stays mounted across an identity change, React state still
+    // holds the old operator's dots, and a failed or slow lookup for the new
+    // one would leave them on screen indefinitely. Clearing here makes the
+    // dots fall back to the passed-in "off" state — the honest default —
+    // until the new, session-gated answer arrives.
+    setFetchedStatus(null);
     // KEYED PER OPERATOR (Codex P1, 2026-09-04). sessionStorage survives a
     // sign-out/sign-in inside the same tab, so a single global key would hand
     // the NEXT operator the previous one's tenant-specific agent/bridge status

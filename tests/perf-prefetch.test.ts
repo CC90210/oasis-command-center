@@ -82,6 +82,13 @@ assert.ok(
   /if \(!identity\)/.test(sidebar),
   "with no operator identity the cache must be skipped entirely (fail closed to a fresh session-gated read)",
 );
+// 7. Scoping the KEY is not enough — in-memory state must drop too, or a
+// sidebar that stays mounted across an identity change keeps showing the
+// previous operator's dots when the new lookup is slow or fails.
+assert.ok(
+  /setFetchedStatus\(null\)/.test(sidebar),
+  "status state must reset when the operator changes, not just the cache key",
+);
 assert.ok(
   /prefetchRememberedWebLeads\(\)/.test(sidebar),
   "the leads-list warm must still exist for operators who signal they are heading there",
