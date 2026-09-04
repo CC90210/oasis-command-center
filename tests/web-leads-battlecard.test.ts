@@ -665,10 +665,10 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // 2026-08-24.) The superlative must sit behind the rank check.
   assert.match(
     src,
-    /headToHead\.rankInSlice === 1[\s\S]{0,200}?The best-scoring/,
+    /headToHead\?\.rankInSlice === 1[\s\S]{0,260}?best-scoring of the/,
     `${view} must gate the "best-scoring" claim on the competitor actually being ranked first`,
   );
-  const superlatives = (src.match(/The best-scoring of the/g) || []).length;
+  const superlatives = (src.match(/best-scoring of the/g) || []).length;
   assert.equal(superlatives, 1, `${view} must not repeat the superlative outside the rank check`);
 
   // Hand-rolled SVG, on purpose. A chart library ships its own colour defaults
@@ -1605,8 +1605,14 @@ const MODEL_CODES = [
 
   const src = read("components/web-leads/BattleCard.tsx");
   assert.doesNotMatch(src, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
+  // RE-AIMED 2026-09-03, not loosened. This counted TWO scaleX draws: the
+  // Meter and the head-to-head TwoUpTrack. The track was deleted with the
+  // competitor rebuild (it was the third rendering of one fact), so the
+  // count is now one -- and the rule it protects, "animate transform, never
+  // a layout property", is asserted on the survivor plus the doesNotMatch
+  // above, which covers the whole file.
   const scaleXDraws = (src.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
-  assert.ok(scaleXDraws >= 2, "both the Meter and the head-to-head track must draw via scaleX");
+  assert.equal(scaleXDraws, 1, "the Meter must draw via scaleX (the head-to-head track was removed in the rival rebuild)");
 
   // Registry callbacks are identity-stable: recreated callbacks invalidate
   // every section's registration effect on every state change -- an
@@ -1721,6 +1727,81 @@ const MODEL_CODES = [
   assert.match(card, /presenceGenRef.current !== askedFor/, "an in-flight presence enqueue must only be discarded on a lead change or unmount");
   assert.match(card, /\/presence`, \{ method: "POST" \}/, "the card must enqueue through the deduped route");
   assert.match(card, /<PresenceBlock presence=\{onlinePresence\} ask=\{presenceAsk\.status\} \/>/, "the presence section must render the block, carrying what the card knows about its own request");
+}
+
+// ---------------------------------------------------------------------------
+// 8l. THE RIVAL COMPARISON (2026-09-03). Adon: "there's a redundant aspect
+//     where you added a secondary graph that's also showing all of the
+//     different aspects of that... you should be clicking into every single
+//     one of their competitors."
+//
+//     Two instruments and a flat list all drew the SAME seven dimensions
+//     against ONE competitor. They are replaced by one instrument that
+//     compares against EVERY readable competitor. What gets pinned is the
+//     property that made the old version wrong: the same fact must not be
+//     rendered in three places, every listed rival must be openable, and the
+//     honesty rules survive the rebuild.
+// ---------------------------------------------------------------------------
+
+{
+  const card = read("components/web-leads/BattleCard.tsx");
+  const rival = read("components/web-leads/RivalComparison.tsx");
+
+  // The redundancy is GONE and must not creep back: no second WebGL
+  // instrument redrawing the dimensions, and no third rendering of the
+  // head-to-head inside the shape section's detail panel.
+  assert.ok(!fs.existsSync(path.join(process.cwd(), "components/web-leads/CompetitorArena3D.tsx")),
+    "the second dimension instrument must stay deleted -- it redrew what the radar already draws");
+  assert.doesNotMatch(card, /TwoUpTrack/,
+    "the per-dimension two-up track was the third copy of the head-to-head and must not return");
+  assert.doesNotMatch(card, /leaderFor/,
+    "the shape section must not render competitor scores -- it answers 'what kind of bad', not 'against whom'");
+
+  // Every named competitor is a comparison a rep can open, not a name with a
+  // number. The data layer must build ALL of them, and the card must pass
+  // the whole list.
+  const comp = read("lib/web-leads/competitors.ts");
+  assert.match(comp, /async function buildRivals/, "competitors.ts must build a comparison per competitor");
+  assert.match(comp, /rivals: Rival\[\]/, "the context must carry every readable rival");
+  assert.match(comp, /rivals\[0\] \?\? null/,
+    "headToHead must be DERIVED from rivals -- two fetches could name two different 'best' competitors");
+  assert.match(card, /<RivalComparison[\s\S]{0,200}?rivals=\{rivals\}/, "the card must hand the instrument every rival");
+
+  // The instrument's own contract: a rival selector, an all-at-once view, and
+  // a per-area detail a rep can open.
+  assert.match(rival, /aria-pressed=\{on\}/, "each rival must be an accessible toggle");
+  assert.match(rival, /All \{rivals\.length\} at once/, "the field view must be reachable");
+  assert.match(rival, /aria-expanded=\{isOpen\}/, "each area must open to its detail");
+  assert.match(rival, /everyone measured/, "the detail must rank every competitor on that one area");
+
+  // A mounted card that switches leads keeps this component, so a selection
+  // made against five rivals can outlive them and index past a shorter list
+  // -- that CRASHED the card rather than mis-rendering it. (Codex P1.) The
+  // reset keys on the roster, not the array identity: the payload is
+  // re-fetched every few seconds while a re-check polls, and resetting on
+  // identity would throw away the rep's selection mid-call.
+  assert.match(rival, /const rosterKey = useMemo/, "the roster must be identified by its members, not its array identity");
+  assert.match(rival, /Math\.min\(rawIdx, rivals\.length - 1\)/, "the active index must be clamped for the render before the reset effect runs");
+
+  // In the field view the best score in an area can belong to ANY rival, so
+  // the far end of the gap bar must wear THAT rival's hue. Painting it gold
+  // would credit rank 1 for a score it did not post. (Codex P2.)
+  assert.match(rival, /againstIdx: activeIdx === null \? best\.idx : activeIdx/, "the gap endpoint must know whose score it is");
+  assert.match(rival, /rivalHue\(row\.againstIdx\)/, "the gap endpoint must wear the winning rival's own hue");
+
+  // Sorted worst-gap-first: the first row a rep reads must be the
+  // conversation, not the alphabet.
+  assert.match(rival, /\.sort\(\(a, b\) => a\.gap - b\.gap\)/, "areas must sort by deficit, biggest first");
+
+  // The honesty rules survive the rebuild: colour is WHOSE-mark only, and the
+  // rival palette carries no traffic-light hue that would read as a verdict.
+  const RIVAL_HUES = (rival.match(/const RIVAL_HUES = \[([^\]]+)\]/) || [])[1] || "";
+  assert.ok(RIVAL_HUES.length > 0, "the rival palette must be declared in one place");
+  for (const banned of ["#22c55e", "#16a34a", "#ef4444", "#dc2626", "#4ade80", "#f87171"]) {
+    assert.ok(!RIVAL_HUES.includes(banned), `rival palette must not contain the verdict colour ${banned}`);
+  }
+  assert.match(rival, /RIVAL_HUES = \["#fbbf24"/,
+    "rank 1 must keep GOLD -- the radar already outlines that same business in gold, and two colours for one business is a lie about identity");
 }
 
 console.log("web-leads-battlecard ok");

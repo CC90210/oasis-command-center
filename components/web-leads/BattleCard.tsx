@@ -189,10 +189,10 @@ import { ObjectionPanel } from "./ObjectionPanel";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
-import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
 import { designateLead } from "@/lib/web-leads/lead-profile";
 import { PresenceBlock } from "./PresenceBlock";
+import { RivalComparison } from "./RivalComparison";
 import type { OnlinePresence } from "@/lib/web-leads/presence";
 import { IndustryAutomationGuide } from "@/components/playbook/IndustryAutomationGuide";
 
@@ -2215,7 +2215,6 @@ function DimensionShape({
     () => headToHead?.dimensions.map((d) => ({ key: d.key, leader: d.leader })) || null,
     [headToHead],
   );
-  const leaderFor = dim ? headToHead?.dimensions.find((l) => l.key === dim.key) || null : null;
   const misses = dim ? dim.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points) : [];
   // The ONE truth for "is the 3D radar actually on screen". The SVG hides on
   // exactly this, not on `gl` alone: a rep who enables reduced motion after
@@ -2414,18 +2413,12 @@ function DimensionShape({
               <RemedyLines code={misses[0].code} />
             </div>
           )}
-          {leaderFor && headToHead && (
-            <div className="mt-3 border-t border-bg-border pt-3">
-              <p className="text-xs tabular-nums text-fg-dim">
-                <span className="font-semibold text-fg">{leaderFor.theirs}</span> vs {headToHead.competitor.name} at{" "}
-                {leaderFor.leader}
-                {/* A signed number, not a colour and not an arrow. The sign is
-                    a fact about two measurements; a red arrow is a verdict. */}
-                <span className="ml-2 text-fg-muted">({leaderFor.diff > 0 ? "+" : ""}{leaderFor.diff})</span>
-              </p>
-              <div className="mt-1.5"><TwoUpTrack theirs={leaderFor.theirs} leader={leaderFor.leader} drawn={drawn} reduced={reduced} /></div>
-            </div>
-          )}
+          {/* NO head-to-head line here any more (2026-09-03). Competitor
+              comparison lives in ONE place now -- the rival instrument in the
+              competitors section -- because this line was the third rendering
+              of the same fact, and Adon's note was precisely that the card
+              says the same thing more than once. This section answers "what
+              kind of bad is it"; that one answers "against whom". */}
           {misses.length > 0 && bus && (
             <button
               type="button"
@@ -2627,7 +2620,7 @@ function Competitors({
     );
   }
 
-  const { slice, top, headToHead } = competitors;
+  const { slice, top, rivals, headToHead } = competitors;
 
   return (
     <>
@@ -2674,95 +2667,34 @@ function Competitors({
         })}
       </ul>
 
-      {headToHead && (
+      {rivals.length > 0 && (
         <div className="mt-6 border-t border-bg-border pt-5">
           <p className="text-sm font-semibold text-fg">
-            {lead.name} against {headToHead.competitor.name}, area by area
+            {lead.name} against {rivals.length === 1 ? "them" : `all ${rivals.length}`}, area by area
           </p>
           {/* "The best-scoring" is only said when it IS the best-scoring.
-              buildHeadToHead falls through to the next candidate when the top
-              one has no readable profile, and calling that one the best is a
-              false claim about a named business made on a live call -- in
-              exactly the case the fallback exists to handle. (Codex review,
-              2026-08-24.) */}
+              buildRivals records each competitor's real rank in the slice, so
+              a fall-through (rank other than 1) can never be described as the
+              best -- a false claim about a named business, said aloud on a
+              call. (Codex review, 2026-08-24; preserved through the 2026-09-03
+              rebuild.) */}
           <p className="mt-1 text-xs text-fg-dim">
-            {headToHead.rankInSlice === 1
-              ? `The best-scoring of the ${fmt(slice.peerCount)} ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}.`
-              : `Among the top-scoring ${slice.label} we have measured, last checked ${formatDate(headToHead.measuredAt)}. We do not hold an area-by-area breakdown for the highest-scoring one, so this is the closest that we do.`}{" "}
-            It scores {headToHead.composite} where this one scores {audit.composite}.
+            {headToHead?.rankInSlice === 1
+              ? `Measured against the best-scoring of the ${fmt(slice.peerCount)} ${slice.label} we have measured, and the ones behind it.`
+              : `Measured against the top-scoring ${slice.label} we hold an area-by-area breakdown for.`}{" "}
+            This one scores {audit.composite}.
           </p>
-          <div className="mt-5">
-            <CompetitorArena3D
-              dimensions={headToHead.dimensions}
-              prospectName={lead.name}
-              competitorName={headToHead.competitor.name}
+          <div className="mt-4">
+            <RivalComparison
+              rivals={rivals}
+              dimensions={audit.dimensions}
+              leadName={lead.name}
               reduced={reduced}
             />
           </div>
-          <ul className="mt-4 space-y-3">
-            {headToHead.dimensions.map((d) => (
-              <li key={d.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5">
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hueFor(d.key).to, boxShadow: `0 0 6px ${hueFor(d.key).to}` }} />
-                  <span className="truncate">{d.label}</span>
-                </span>
-                <span className="text-xs tabular-nums text-fg-dim [font-family:var(--battle-data)]">
-                  <span className="font-semibold text-fg">{d.theirs}</span> vs {d.leader}
-                  {/* A signed number, not a colour and not an arrow. The sign is
-                      a fact about two measurements; a red arrow is a verdict. */}
-                  <span className="ml-2 text-fg-muted">({d.diff > 0 ? "+" : ""}{d.diff})</span>
-                </span>
-                <div className="col-span-2">
-                  <TwoUpTrack theirs={d.theirs} leader={d.leader} drawn={drawn} reduced={reduced} />
-                </div>
-              </li>
-            ))}
-          </ul>
         </div>
       )}
     </>
-  );
-}
-
-/**
- * One 0-100 track carrying both scores: a filled bar for this lead and a tick
- * for the competitor.
- *
- * Deliberately not two stacked bars. Two bars invite a rep to read the LENGTHS
- * against each other, which is a comparison of two absolute scores; one track
- * with a tick puts the eye on the distance between them, which is the thing
- * being sold. The colours are WHOSE-marks, fixed identities worn at every
- * score: the prospect's fill is always cyan, the benchmark's tick is always
- * gold -- the same pair the radar overlay wears (rule 1).
- */
-function TwoUpTrack({ theirs, leader, drawn, reduced }: { theirs: number; leader: number; drawn: boolean; reduced: boolean }) {
-  const t = Math.min(100, Math.max(0, theirs));
-  const l = Math.min(100, Math.max(0, leader));
-  return (
-    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
-      {/* Same compositor discipline as Meter: transform, never width. */}
-      <div
-        className="absolute inset-y-0 left-0 rounded-full"
-        style={{
-          width: `${t}%`,
-          transform: drawn ? "scaleX(1)" : "scaleX(0)",
-          transformOrigin: "left",
-          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
-          background: "linear-gradient(90deg, #22d3ee, #60a5fa)",
-          boxShadow: "0 0 8px rgba(34,211,238,0.35)",
-        }}
-      />
-      <div
-        className="absolute inset-y-0 w-0.5"
-        style={{
-          left: `calc(${l}% - 1px)`,
-          opacity: drawn ? 1 : 0,
-          transition: reduced ? "none" : "opacity 420ms ease-out 120ms",
-          background: GOLD,
-          boxShadow: `0 0 6px ${GOLD}`,
-        }}
-      />
-    </div>
   );
 }
 
