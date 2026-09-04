@@ -433,6 +433,15 @@ for (const view of [
   "lib/web-leads/presence.ts",
   "lib/web-leads/presence-evidence.ts",
   "components/web-leads/PresenceBlock.tsx",
+  // Added 2026-09-03 with the rival comparison. It puts one business's score
+  // directly beside a NAMED competitor's, which makes it the most
+  // red-behind/green-ahead-hungry surface the card has ever grown -- and the
+  // one place where tinting would render a verdict about a real third party
+  // a rep then repeats aloud. Direction is carried by a signed number and by
+  // which way the gap bar runs. Proved to fire by planting `text-red-400` on
+  // the gap figure once (2026-09-03): the assertion failed as intended and
+  // the class was reverted.
+  "components/web-leads/RivalComparison.tsx",
   // Added 2026-08-24 with the objection panel. It renders no audit data at all,
   // which is exactly why it earns the ban rather than an exemption: a surface
   // that is "obviously safe" today is the one a future editor tints to make a

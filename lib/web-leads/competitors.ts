@@ -84,7 +84,16 @@ export const MIN_SLICE = 8;
 /** How many named competitors a rep gets. Three fits on screen beside the rest
  *  of the card; a longer list is a list, and a rep mid-call reads the top of it
  *  anyway. */
-export const TOP_N = 3;
+/**
+ * How many competitors the card names and lets a rep compare against.
+ *
+ * Raised 3 -> 5 (2026-09-03) when every listed competitor became a full
+ * comparison rather than a name with a number: three was the right number of
+ * CARDS to skim, but a rep working a real objection wants a couple more to
+ * point at. Each one costs a single profile read, all issued in parallel and
+ * bounded by this constant, so the ceiling is deliberate and small.
+ */
+export const TOP_N = 5;
 
 export type SliceKind = "industry_city" | "industry_province" | "industry_national" | "national";
 
@@ -137,6 +146,16 @@ export type HeadToHead = {
   dimensions: { key: string; label: string; theirs: number; leader: number; diff: number }[];
 };
 
+/**
+ * One competitor a rep can actually walk into: the same shape as HeadToHead,
+ * but there is one per named competitor rather than one per card.
+ *
+ * `leader` inside `dimensions` means "this rival's score" — the field name is
+ * inherited from the single-benchmark era and kept so the comparison
+ * components read one shape, not two.
+ */
+export type Rival = HeadToHead;
+
 export type CompetitorContext = {
   slice: SliceSummary & { best: number; worst: number; median: number };
   /** Every narrower slice that was tried and rejected for being under
@@ -156,6 +175,17 @@ export type CompetitorContext = {
   /** Ten buckets of ten, counted over the chosen slice INCLUDING this lead
    *  (it is one of the measured sites), plus the bucket the lead falls in. */
   distribution: { buckets: number[]; leadBucket: number };
+  /**
+   * Every listed competitor whose profile we could read, best-first — each
+   * one a full area-by-area comparison a rep can open on the call.
+   */
+  rivals: Rival[];
+  /**
+   * The first readable rival, kept as its own field because the card's
+   * benchmark language ("the best-scoring…") and the radar's gold overlay
+   * both mean exactly one competitor. Derived from `rivals` rather than
+   * fetched separately, so the two can never disagree.
+   */
   headToHead: HeadToHead | null;
 };
 
@@ -411,43 +441,52 @@ async function fetchCompetitorProfile(
 }
 
 /**
- * Build the head-to-head against the highest-scoring peer whose profile we can
- * actually read.
+ * Build the area-by-area comparison for EVERY named competitor whose profile
+ * we can actually read -- not just the top one.
  *
- * Falls through candidates rather than failing: a competitor whose profile row
- * is missing or malformed is a gap in OUR data, and dropping the whole
- * head-to-head because the top name has a bad row would remove the most useful
- * panel on the card for a reason the rep cannot see or act on. Bounded to the
- * candidates already on screen so this can never fan out into a scan.
+ * WHY IT CHANGED (Adon, 2026-09-03): "you should be clicking into every
+ * single one of their competitors in comparison to them." The card fetched
+ * exactly one profile and drew one benchmark while listing several competitor
+ * names above it, so all but one were a name and a number a rep could not
+ * open. Now every listed competitor is a comparison a rep can walk into.
+ *
+ * A competitor whose profile row is missing or malformed is a gap in OUR
+ * data: it is dropped from the comparison rather than rendered as zeros, and
+ * `rankInSlice` records where it really sat so the UI can never call a
+ * fall-through "the best-scoring". Fetches run in parallel and are bounded to
+ * the candidate list already chosen for display, so this can never fan out
+ * into a scan.
  */
-async function buildHeadToHead(
+async function buildRivals(
   candidates: CorpusEntry[],
   leadDimensions: DimensionProfile[],
-): Promise<HeadToHead | null> {
-  for (let i = 0; i < candidates.length; i += 1) {
-    const c = candidates[i];
-    const profile = await fetchCompetitorProfile(c.businessId);
-    if (!profile) continue;
-    const leaderByKey = new Map(profile.dimensions.map((d) => [d.key, d.score]));
-    return {
-      competitor: { name: c.name, city: c.city, province: c.province, websiteUrl: c.websiteUrl, score: c.score },
-      // `candidates` is the slice ranked best-first, so the index IS the rank
-      // within the slice. Anything but 1 means we skipped a higher-scoring
-      // business whose profile we could not read, and the card must say so
-      // rather than call this one the best.
-      rankInSlice: i + 1,
-      composite: profile.composite,
-      measuredAt: profile.measuredAt,
-      // Driven off the LEAD's dimension list, not the competitor's, so the
-      // rows line up with the radar above them even if a future model version
-      // adds a dimension one of the two audits predates.
-      dimensions: leadDimensions.map((d) => {
-        const leader = leaderByKey.get(d.key) ?? 0;
-        return { key: d.key, label: d.label, theirs: d.score, leader, diff: d.score - leader };
-      }),
-    };
-  }
-  return null;
+): Promise<Rival[]> {
+  const settled = await Promise.all(
+    candidates.map(async (c, i) => {
+      // One unreadable profile must not fail the whole comparison.
+      const profile = await fetchCompetitorProfile(c.businessId).catch(() => null);
+      if (!profile) return null;
+      const byKey = new Map(profile.dimensions.map((d) => [d.key, d.score]));
+      const rival: Rival = {
+        competitor: { name: c.name, city: c.city, province: c.province, websiteUrl: c.websiteUrl, score: c.score },
+        // `candidates` is the slice ranked best-first, so the index IS the
+        // rank within the slice. Anything but 1 means a higher-scoring
+        // business was skipped because its profile could not be read.
+        rankInSlice: i + 1,
+        composite: profile.composite,
+        measuredAt: profile.measuredAt,
+        // Driven off the LEAD's dimension list, not the competitor's, so
+        // every rival's rows line up with each other and with the radar even
+        // if a future model version adds a dimension one audit predates.
+        dimensions: leadDimensions.map((d) => {
+          const leader = byKey.get(d.key) ?? 0;
+          return { key: d.key, label: d.label, theirs: d.score, leader, diff: d.score - leader };
+        }),
+      };
+      return rival;
+    }),
+  );
+  return settled.filter((r): r is Rival => r !== null);
 }
 
 /**
@@ -526,7 +565,13 @@ export async function fetchCompetitorContext(args: {
       score: c.score,
     })),
     distribution: distributionOf(peerScores, args.score),
-    headToHead: await buildHeadToHead(top, args.dimensions),
+    ...(await (async () => {
+      const rivals = await buildRivals(top, args.dimensions);
+      // headToHead is DERIVED, never fetched twice: the benchmark the radar
+      // outlines in gold and the first rival in the comparison must be the
+      // same business, or the card shows two different "best" competitors.
+      return { rivals, headToHead: rivals[0] ?? null };
+    })()),
   };
 }
 
