@@ -192,22 +192,35 @@ export function Sidebar({
     void prefetchRememberedWebLeads();
   }, [canPrefetchWebLeads]);
 
-  // Route prefetch only warms Next's page shell. The list itself is a client
-  // read, so warm that separately once the browser is idle. Hover/focus below
-  // invokes the same shared request cache for operators who get there first.
-  useEffect(() => {
-    if (!canPrefetchWebLeads) return;
-    const idleWindow = window as typeof window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (handle: number) => void;
-    };
-    if (idleWindow.requestIdleCallback) {
-      const handle = idleWindow.requestIdleCallback(prefetchWebLeads, { timeout: 1_500 });
-      return () => idleWindow.cancelIdleCallback?.(handle);
-    }
-    const handle = window.setTimeout(prefetchWebLeads, 750);
-    return () => window.clearTimeout(handle);
-  }, [canPrefetchWebLeads, prefetchWebLeads]);
+  // ═══ NO UNCONDITIONAL IDLE PREFETCH ═══════════════════════════════════════
+  //
+  // There used to be an idle-callback here that fired prefetchRememberedWebLeads()
+  // on EVERY page an operator opened. MEASURED IN A REAL LOGGED-IN BROWSER
+  // (manager on the web-dev tenant, production, 2026-09-03) while loading
+  // /pipeline — a page that has nothing to do with the leads list:
+  //
+  //   /api/web-leads          3,908 ms   <- this idle prefetch
+  //   /settings?_rsc=         1,389 ms
+  //   /api/shell/status       1,339 ms
+  //   /?_rsc=                   962 ms
+  //   /web-leads?_rsc=          916 ms
+  //   /playbook?_rsc=           328 ms
+  //
+  // Six concurrent background requests starting ~790 ms in, right after first
+  // contentful paint at 808 ms. The page painted fast and then the browser and
+  // the server were busy for four more seconds — so the NEXT click queued behind
+  // work the operator never asked for. Measured on its own, /api/web-leads costs
+  // 989-2,647 ms. That is the "everything feels slow" everyone was reporting,
+  // and it is self-inflicted.
+  //
+  // Prefetching on INTENT (hover/focus, wired via onIntent below) keeps the win
+  // this was reaching for without paying it on every page: an operator heading
+  // for Web Leads still warms the cache before the click lands, and an operator
+  // working in Pipeline is left alone.
+  //
+  // Pinned by tests/perf-prefetch.test.ts. If you reintroduce an idle prefetch,
+  // measure a real logged-in navigation first — this cost was invisible to
+  // query-level timing, which is why it survived three optimization phases.
 
   // Longest-prefix-wins active highlight. The naive
   //   pathname.startsWith(item.href)
@@ -468,9 +481,18 @@ function NavLink({
   const href = demoHref(item.href, { demoMode, landingPath: demoLandingPath });
   return (
     <li>
+      {/* prefetch is DELIBERATELY the Next default, and must not be forced on.
+          Forcing it on a dynamic authed route pulls the FULL RSC
+          payload for that route as soon as the link is in the viewport — and
+          every nav item is in the viewport, so opening any page fired a
+          payload fetch for the whole sidebar. Measured on a real /pipeline
+          load: /settings 1,389 ms, / 962 ms, /web-leads 916 ms, /playbook
+          328 ms, all concurrent with the page the operator actually wanted.
+          The default prefetches only as far as the loading boundary, which is
+          what the shared app/loading.tsx exists to serve, and hover/focus
+          below still warms the real thing on intent. */}
       <Link
         href={href}
-        prefetch={true}
         onMouseEnter={onIntent}
         onFocus={onIntent}
         className={`group flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all relative ${
