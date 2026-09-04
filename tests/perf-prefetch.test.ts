@@ -70,6 +70,18 @@ assert.ok(
   /sessionStorage/.test(sidebar) && /shell-status/.test(sidebar),
   "shell status must be session-cached — it cost 1.5-2.5 s per page load to render two dots",
 );
+// 6. And that cache MUST be scoped per operator. sessionStorage survives a
+// sign-out/sign-in in the same tab, so a global key would serve the next
+// operator the previous one's tenant-specific status without ever calling the
+// session-gated endpoint (Codex P1, 2026-09-04).
+assert.ok(
+  /shell-status-v1:\$\{/.test(sidebar),
+  "the shell-status cache key must include an operator identity — a global key leaks tenant status across a sign-out inside one tab",
+);
+assert.ok(
+  /if \(!identity\)/.test(sidebar),
+  "with no operator identity the cache must be skipped entirely (fail closed to a fresh session-gated read)",
+);
 assert.ok(
   /prefetchRememberedWebLeads\(\)/.test(sidebar),
   "the leads-list warm must still exist for operators who signal they are heading there",

@@ -170,7 +170,34 @@ export function Sidebar({
   // payload is two booleans, no PII.
   useEffect(() => {
     if (!deferStatus) return;
-    const KEY = "shell-status-v1";
+    // KEYED PER OPERATOR (Codex P1, 2026-09-04). sessionStorage survives a
+    // sign-out/sign-in inside the same tab, so a single global key would hand
+    // the NEXT operator the previous one's tenant-specific agent/bridge status
+    // for up to the TTL, without ever calling the session-gated endpoint —
+    // a cross-tenant signal leak wearing the clothes of a cache hit.
+    //
+    // The identity is folded into a short non-cryptographic hash rather than
+    // stored raw: it only has to DISTINGUISH operators, and an email address
+    // does not belong in a storage key. No operator identity => no caching at
+    // all (fail closed toward a fresh, session-gated read).
+    const identity = operatorEmail?.trim().toLowerCase();
+    if (!identity) {
+      let cancelled = false;
+      fetch("/api/shell/status")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (cancelled || !d) return;
+          setFetchedStatus({
+            primaryAgentLive: d.primaryAgentLive === true,
+            bridgeOnline: d.bridgeOnline === true,
+          });
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }
+    let h = 5381;
+    for (let i = 0; i < identity.length; i++) h = ((h << 5) + h + identity.charCodeAt(i)) >>> 0;
+    const KEY = `shell-status-v1:${h.toString(36)}`;
     const TTL_MS = 60_000;
     try {
       const raw = sessionStorage.getItem(KEY);
@@ -207,7 +234,7 @@ export function Sidebar({
     return () => {
       cancelled = true;
     };
-  }, [deferStatus]);
+  }, [deferStatus, operatorEmail]);
   const primaryAgentLive = deferStatus
     ? fetchedStatus?.primaryAgentLive ?? primaryAgentLiveProp
     : primaryAgentLiveProp;
