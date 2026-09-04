@@ -121,13 +121,30 @@ export function LeadCards({
                       {l.ownerTitle ? <span className="font-normal text-fg-dim"> · {l.ownerTitle}</span> : null}
                       {/* The label states what we KNOW. "Confirmed" is earned by an independent
                           match; everything else says so plainly rather than staying silent,
-                          because silence reads as confidence. */}
+                          because silence reads as confidence.
+
+                          Each of the five states gets its OWN label and its own visual weight.
+                          They used to share one else branch, so "conflict" -- the directory found
+                          a DIFFERENT owner or number than the lead claims, the one state a rep
+                          must not mistake for fine -- rendered the same reassuring "Their own
+                          word" as an ordinary unverified lead. An unrecognised value now falls to
+                          "Unverified", never to "Confirmed": fail closed, same as everywhere else
+                          in this feature. Conflict is the one badge that borrows the app's amber
+                          warning treatment -- text and border only, never a solid amber fill, so
+                          it still clears the score-colour guard this file is on in
+                          tests/web-leads-guards.test.ts. */}
                       {l.ownerVerification === "confirmed" ? (
                         <span className="ml-1 rounded bg-accent/20 px-1 py-0.5 text-[10px] font-bold uppercase text-accent">Confirmed</span>
+                      ) : l.ownerVerification === "self_reported" ? (
+                        <span className="ml-1 rounded bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Their own word</span>
+                      ) : l.ownerVerification === "conflict" ? (
+                        <span className="ml-1 rounded border border-amber-500/50 bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-amber-300">Mismatched</span>
+                      ) : l.ownerVerification === "unchecked" ? (
+                        <span className="ml-1 rounded border border-bg-border px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">No lookup yet</span>
                       ) : l.ownerVerification === "lookup_failed" ? (
                         <span className="ml-1 rounded bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Not checked</span>
                       ) : (
-                        <span className="ml-1 rounded bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Their own word</span>
+                        <span className="ml-1 rounded border border-bg-border px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Unverified</span>
                       )}
                     </span>
                   ) : null}
