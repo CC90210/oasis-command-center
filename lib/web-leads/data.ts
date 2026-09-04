@@ -152,6 +152,10 @@ export type WebLead = {
   /** A line the site labels as the owner's cell/direct, NOT the main number. */
   ownerPhone: string | null;
   ownerEvidenceUrl: string | null;
+  /** One of confirmed | self_reported | conflict | unchecked | lookup_failed. */
+  ownerVerification: string | null;
+  /** Plain-English sentence a rep can read aloud. Never a template guess. */
+  ownerEvidence: string | null;
   websiteCondition: string;
   auditFindings: string;
   territoryId: string | null;
@@ -275,6 +279,8 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     ownerTitle: str(d.owner_title),
     ownerPhone: str(d.owner_phone),
     ownerEvidenceUrl: str(d.owner_evidence_url),
+    ownerVerification: str(d.owner_verification_state),
+    ownerEvidence: str(d.owner_verification_evidence),
     // VERBATIM. Nothing in this pipeline has fetched these websites — OpenStreetMap
     // lacking a website tag means nobody mapped one, not that no site exists. A rep
     // reading a fabricated finding aloud on a live call is the worst outcome this
