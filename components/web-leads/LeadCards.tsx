@@ -119,7 +119,20 @@ export function LeadCards({
                     <span className="mt-1 block truncate text-xs font-medium text-fg-muted">
                       Ask for {l.ownerName}
                       {l.ownerTitle ? <span className="font-normal text-fg-dim"> · {l.ownerTitle}</span> : null}
+                      {/* The label states what we KNOW. "Confirmed" is earned by an independent
+                          match; everything else says so plainly rather than staying silent,
+                          because silence reads as confidence. */}
+                      {l.ownerVerification === "confirmed" ? (
+                        <span className="ml-1 rounded bg-accent/20 px-1 py-0.5 text-[10px] font-bold uppercase text-accent">Confirmed</span>
+                      ) : l.ownerVerification === "lookup_failed" ? (
+                        <span className="ml-1 rounded bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Not checked</span>
+                      ) : (
+                        <span className="ml-1 rounded bg-bg-elev px-1 py-0.5 text-[10px] font-bold uppercase text-fg-dim">Their own word</span>
+                      )}
                     </span>
+                  ) : null}
+                  {l.ownerEvidence ? (
+                    <span className="mt-1 block text-[11px] leading-snug text-fg-dim">{l.ownerEvidence}</span>
                   ) : null}
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-fg-dim" aria-hidden />

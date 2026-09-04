@@ -315,6 +315,10 @@ const TESTS = [
   // file that got edited. This is the same failure shape as
   // `.is("profile","not.null")` (lib/web-leads/scores.ts), which is exactly the
   // bug class the adapter tests exist to catch.
+  // Task 7 (2026-09-03 owner-verified-dialing plan): pins the "Confirmed"
+  // badge to the literal confirmed state and proves the evidence sentence
+  // renders -- see lib/web-leads/data.ts's owner_verification_state mapping.
+  "tests/web-leads-owner-verification.test.ts",
   "lib/__tests__/turso-postgrest.test.mjs",
 ];
 
