@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Activity,
@@ -160,23 +160,89 @@ export function Sidebar({
     primaryAgentLive: boolean;
     bridgeOnline: boolean;
   } | null>(null);
+  // Cached per browser session (60s). MEASURED on production 2026-09-04: this
+  // endpoint costs 1,540-2,475 ms and it fired on EVERY full page load, making
+  // it the single most expensive background request left after the idle-prefetch
+  // removal. It powers two decorative status dots — "is the agent ticking",
+  // "is the bridge up" — which nobody needs fresher than a minute, and which
+  // already render "off" without it. sessionStorage (not localStorage) so it
+  // dies with the tab and never becomes stale state on a shared machine; the
+  // payload is two booleans, no PII.
   useEffect(() => {
     if (!deferStatus) return;
+    // DROP THE PREVIOUS OPERATOR'S VALUES FIRST (Codex P1 follow-up,
+    // 2026-09-04). Scoping the storage key is not sufficient on its own: if
+    // this sidebar stays mounted across an identity change, React state still
+    // holds the old operator's dots, and a failed or slow lookup for the new
+    // one would leave them on screen indefinitely. Clearing here makes the
+    // dots fall back to the passed-in "off" state — the honest default —
+    // until the new, session-gated answer arrives.
+    setFetchedStatus(null);
+    // KEYED PER OPERATOR (Codex P1, 2026-09-04). sessionStorage survives a
+    // sign-out/sign-in inside the same tab, so a single global key would hand
+    // the NEXT operator the previous one's tenant-specific agent/bridge status
+    // for up to the TTL, without ever calling the session-gated endpoint —
+    // a cross-tenant signal leak wearing the clothes of a cache hit.
+    //
+    // The identity is folded into a short non-cryptographic hash rather than
+    // stored raw: it only has to DISTINGUISH operators, and an email address
+    // does not belong in a storage key. No operator identity => no caching at
+    // all (fail closed toward a fresh, session-gated read).
+    const identity = operatorEmail?.trim().toLowerCase();
+    if (!identity) {
+      let cancelled = false;
+      fetch("/api/shell/status")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (cancelled || !d) return;
+          setFetchedStatus({
+            primaryAgentLive: d.primaryAgentLive === true,
+            bridgeOnline: d.bridgeOnline === true,
+          });
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }
+    let h = 5381;
+    for (let i = 0; i < identity.length; i++) h = ((h << 5) + h + identity.charCodeAt(i)) >>> 0;
+    const KEY = `shell-status-v1:${h.toString(36)}`;
+    const TTL_MS = 60_000;
+    try {
+      const raw = sessionStorage.getItem(KEY);
+      if (raw) {
+        const cached = JSON.parse(raw) as { at: number; primaryAgentLive: boolean; bridgeOnline: boolean };
+        if (Date.now() - cached.at < TTL_MS) {
+          setFetchedStatus({
+            primaryAgentLive: cached.primaryAgentLive === true,
+            bridgeOnline: cached.bridgeOnline === true,
+          });
+          return;
+        }
+      }
+    } catch {
+      // A blocked or full sessionStorage must not cost the operator the dots.
+    }
     let cancelled = false;
     fetch("/api/shell/status")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
-        setFetchedStatus({
+        const next = {
           primaryAgentLive: d.primaryAgentLive === true,
           bridgeOnline: d.bridgeOnline === true,
-        });
+        };
+        setFetchedStatus(next);
+        try {
+          sessionStorage.setItem(KEY, JSON.stringify({ ...next, at: Date.now() }));
+        } catch {
+          // fail-open: caching is an optimisation, never a requirement
+        }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [deferStatus]);
+  }, [deferStatus, operatorEmail]);
   const primaryAgentLive = deferStatus
     ? fetchedStatus?.primaryAgentLive ?? primaryAgentLiveProp
     : primaryAgentLiveProp;
@@ -479,22 +545,40 @@ function NavLink({
   const active = isActive;
   const Icon = NAV_ICONS[item.icon] || LayoutDashboard;
   const href = demoHref(item.href, { demoMode, landingPath: demoLandingPath });
+  const router = useRouter();
+  // Warm the route only when the operator SHOWS INTENT. Hover/focus fires
+  // router.prefetch for this one destination, plus any data warm the parent
+  // wired through onIntent.
+  const warm = useCallback(() => {
+    try {
+      router.prefetch(href);
+    } catch {
+      // prefetch is best-effort; never let it break a click
+    }
+    onIntent?.();
+  }, [router, href, onIntent]);
   return (
     <li>
-      {/* prefetch is DELIBERATELY the Next default, and must not be forced on.
-          Forcing it on a dynamic authed route pulls the FULL RSC
-          payload for that route as soon as the link is in the viewport — and
-          every nav item is in the viewport, so opening any page fired a
-          payload fetch for the whole sidebar. Measured on a real /pipeline
-          load: /settings 1,389 ms, / 962 ms, /web-leads 916 ms, /playbook
-          328 ms, all concurrent with the page the operator actually wanted.
-          The default prefetches only as far as the loading boundary, which is
-          what the shared app/loading.tsx exists to serve, and hover/focus
-          below still warms the real thing on intent. */}
+      {/* ═══ PREFETCH IS OFF, AND THAT IS THE FIX ═══════════════════════════
+          Every nav item is in the viewport, so ANY viewport-triggered
+          prefetch fires once per link on every page load. Two rounds of
+          production measurement, logged in, on /pipeline:
+
+            forced prefetch:  /settings 1,389 ms, / 962 ms, /web-leads 916 ms,
+                              /playbook 328 ms
+            Next default:     /schedule 805 ms, /web-leads 790 ms,
+                              /settings 762 ms, /playbook 748 ms
+
+          The default was NOT meaningfully cheaper — routes without a loading
+          boundary still render server-side to satisfy it, so ~3.1 s of work
+          still fired for pages the operator never opened. Turning prefetch
+          off and warming on hover/focus instead is what actually removes it,
+          and a hover lands 150-300 ms before the click on a real pointer. */}
       <Link
         href={href}
-        onMouseEnter={onIntent}
-        onFocus={onIntent}
+        prefetch={false}
+        onMouseEnter={warm}
+        onFocus={warm}
         className={`group flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all relative ${
           active
             ? "bg-accent-soft text-accent shadow-[inset_0_0_0_1px_rgba(59,130,246,0.25)]"
