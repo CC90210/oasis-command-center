@@ -47,7 +47,7 @@
  * 4. `prefers-reduced-motion` settles everything instantly.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Rival } from "@/lib/web-leads/competitors";
 import type { DimensionProfile } from "@/lib/web-leads/audit";
 import { hueFor, CYAN } from "./battle-hud";
@@ -74,8 +74,31 @@ type Props = {
 
 export function RivalComparison({ rivals, dimensions, leadName, reduced }: Props) {
   // null = compare against ALL of them at once (the field view).
-  const [activeIdx, setActiveIdx] = useState<number | null>(0);
+  const [rawIdx, setRawIdx] = useState<number | null>(0);
   const [openArea, setOpenArea] = useState<string | null>(null);
+
+  /**
+   * WHICH SET of rivals is on screen. Keyed on the names, not on the array
+   * identity: the card re-fetches its payload while a re-check or a presence
+   * lookup polls, which hands this component a NEW array of the SAME rivals
+   * every few seconds. Resetting on identity would throw away the rep's
+   * selection mid-call; resetting on the actual set is what is meant.
+   */
+  const rosterKey = useMemo(() => rivals.map((r) => r.competitor.name).join("|"), [rivals]);
+
+  // A mounted card that switches leads keeps this component instance, so a
+  // selection made against five rivals can outlive them and point past the
+  // end of a shorter list -- which crashed the card, not just mis-rendered
+  // it. (Codex review P1, 2026-09-03.) Reset when the roster really changes.
+  useEffect(() => {
+    setRawIdx(rivals.length ? 0 : null);
+    setOpenArea(null);
+  }, [rosterKey, rivals.length]);
+
+  // Belt and braces for the render that happens BEFORE that effect runs:
+  // clamp rather than index blindly.
+  const activeIdx = rawIdx === null ? null : Math.min(rawIdx, rivals.length - 1);
+  const setActiveIdx = setRawIdx;
 
   const checksByKey = useMemo(
     () => new Map(dimensions.map((d) => [d.key, d.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points)])),
@@ -105,6 +128,12 @@ export function RivalComparison({ rivals, dimensions, leadName, reduced }: Props
           gap: d.theirs - against,
           perRival,
           bestName: best.name,
+          /** WHOSE mark the far end of the bar belongs to. In the field view
+           *  the best score in an area can belong to ANY rival, so painting
+           *  that endpoint gold would credit rank 1 for a score it did not
+           *  post -- the identity contract broken by the very component that
+           *  states it. (Codex review P2, 2026-09-03.) */
+          againstIdx: activeIdx === null ? best.idx : activeIdx,
         };
       })
       // Biggest deficit first: the first row a rep reads is the conversation.
@@ -216,8 +245,8 @@ export function RivalComparison({ rivals, dimensions, leadName, reduced }: Props
                       left: `${lo}%`,
                       width: `${Math.max(0.6, hi - lo)}%`,
                       background: behind
-                        ? `linear-gradient(90deg, ${CYAN}, ${activeIdx === null ? "#fbbf24" : rivalHue(activeIdx)})`
-                        : `linear-gradient(90deg, ${activeIdx === null ? "#fbbf24" : rivalHue(activeIdx)}, ${CYAN})`,
+                        ? `linear-gradient(90deg, ${CYAN}, ${rivalHue(row.againstIdx)})`
+                        : `linear-gradient(90deg, ${rivalHue(row.againstIdx)}, ${CYAN})`,
                       opacity: 0.55,
                       transition: reduced ? "none" : "left 380ms cubic-bezier(0.22,1,0.36,1), width 380ms cubic-bezier(0.22,1,0.36,1)",
                     }}

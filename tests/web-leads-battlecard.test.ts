@@ -1774,6 +1774,21 @@ const MODEL_CODES = [
   assert.match(rival, /aria-expanded=\{isOpen\}/, "each area must open to its detail");
   assert.match(rival, /everyone measured/, "the detail must rank every competitor on that one area");
 
+  // A mounted card that switches leads keeps this component, so a selection
+  // made against five rivals can outlive them and index past a shorter list
+  // -- that CRASHED the card rather than mis-rendering it. (Codex P1.) The
+  // reset keys on the roster, not the array identity: the payload is
+  // re-fetched every few seconds while a re-check polls, and resetting on
+  // identity would throw away the rep's selection mid-call.
+  assert.match(rival, /const rosterKey = useMemo/, "the roster must be identified by its members, not its array identity");
+  assert.match(rival, /Math\.min\(rawIdx, rivals\.length - 1\)/, "the active index must be clamped for the render before the reset effect runs");
+
+  // In the field view the best score in an area can belong to ANY rival, so
+  // the far end of the gap bar must wear THAT rival's hue. Painting it gold
+  // would credit rank 1 for a score it did not post. (Codex P2.)
+  assert.match(rival, /againstIdx: activeIdx === null \? best\.idx : activeIdx/, "the gap endpoint must know whose score it is");
+  assert.match(rival, /rivalHue\(row\.againstIdx\)/, "the gap endpoint must wear the winning rival's own hue");
+
   // Sorted worst-gap-first: the first row a rep reads must be the
   // conversation, not the alphabet.
   assert.match(rival, /\.sort\(\(a, b\) => a\.gap - b\.gap\)/, "areas must sort by deficit, biggest first");
