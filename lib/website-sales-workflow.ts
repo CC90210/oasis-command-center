@@ -240,7 +240,7 @@ export function dispositionPatch(
     : disposition === "lost"
       ? "lost"
       : "attempting_contact";
-  return {
+  const patch: Record<string, unknown> = {
     stage,
     last_disposition: disposition,
     last_contact_at: occurredAt,
@@ -251,7 +251,17 @@ export function dispositionPatch(
     // Claim expiry keys off the last real dial, not a generic record update.
     // Every disposition represents an attempted call, including a loss.
     last_call_at: occurredAt,
-    next_action_at: nextActionAt,
     ...(disposition === "lost" ? { loss_reason: cleanLossReason } : {}),
   };
+  // Connected is the ONLY outcome whose follow-up date is optional, so it is the
+  // only one that must not blank an existing one. The record store merges
+  // shallowly, so emitting next_action_at:null here ERASED a callback the rep
+  // had already scheduled — a lead with a promise and a lead with none then
+  // render identically. attempted and voicemail always carry a date (enforced
+  // at the top of this function), and `lost` clearing it is correct: a closed
+  // lead has no next action. Omitting the key is what preserves the value.
+  if (!(disposition === "connected" && !nextActionAt)) {
+    patch.next_action_at = nextActionAt ?? null;
+  }
+  return patch;
 }

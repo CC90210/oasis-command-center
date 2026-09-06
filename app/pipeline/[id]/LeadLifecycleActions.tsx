@@ -323,6 +323,13 @@ export function LeadLifecycleActions({
   const [transitionNote, setTransitionNote] = useState("");
   const [nextActionDate, setNextActionDate] = useState(() => founderDateChoice(0));
   const [nextActionTime, setNextActionTime] = useState("");
+  // Connected gets its OWN follow-up pair, both empty, and does not borrow the
+  // shared nextActionDate above. That one is pre-filled with today, so on a
+  // shared field "the rep did not ask for a callback" and "the rep left the
+  // default" are the same value — and a follow-up nobody asked for is as wrong
+  // as a promise silently dropped. Empty here means empty.
+  const [connectedFollowUpDate, setConnectedFollowUpDate] = useState("");
+  const [connectedFollowUpTime, setConnectedFollowUpTime] = useState("");
   const [lossReason, setLossReason] = useState("");
   const [callAccepted, setCallAccepted] = useState(false);
   const [callOutcome, setCallOutcome] = useState<"" | "attempted" | "voicemail" | "connected" | "lost">("");
@@ -717,28 +724,64 @@ export function LeadLifecycleActions({
 
   async function recordCallOutcome() {
     if (!callOutcome) return;
+    const connectedNote = transitionNote.trim();
     const result = await patch(
       {
         action: "disposition",
         disposition: callOutcome,
         nextActionAt:
-          callOutcome === "attempted" || callOutcome === "voicemail" ? nextActionAt : undefined,
+          callOutcome === "attempted" || callOutcome === "voicemail"
+            ? nextActionAt
+            : // Connected may carry one, and the server has always accepted it
+              // — only this client withheld it. "We connected but they asked us
+              // to call back Thursday" had nowhere to go.
+              callOutcome === "connected"
+              ? connectedFollowUpAt || undefined
+              : undefined,
         lossReason: callOutcome === "lost" ? lossReason.trim() : undefined,
+        // `note` is parsed for every action by the route and stored as
+        // last_handoff_note + into the interaction row. The composer existed
+        // here before #355 restructured this panel into numbered steps and
+        // dropped it; nothing on the server had to change to bring it back.
+        note: callOutcome === "connected" && connectedNote ? connectedNote : undefined,
       },
       callOutcome === "attempted"
         ? "No answer recorded and follow-up scheduled."
         : callOutcome === "voicemail"
           ? "Voicemail recorded and follow-up scheduled."
           : callOutcome === "connected"
-            ? "Connection recorded."
+            ? connectedFollowUpAt
+              ? "Connection recorded and the callback is scheduled."
+              : "Connection recorded."
             : "Lead closed as lost with the reason preserved.",
     );
     if (!result) return;
     setCallAccepted(false);
     setCallOutcome("");
     setLossReason("");
+    setConnectedFollowUpDate("");
+    setConnectedFollowUpTime("");
+    setTransitionNote("");
   }
 
+  const connectedFollowUpAt = founderMeetingIso(connectedFollowUpDate, connectedFollowUpTime);
+  // Half a callback is not a callback. founderMeetingIso needs BOTH a date and
+  // a time, so a rep who picks "Thursday" and no time would otherwise sail
+  // through Save having recorded nothing — the promise silently dropped, which
+  // is the failure this whole field exists to prevent. Blank is fine; half is
+  // not, and the button says so rather than the save lying.
+  const connectedFollowUpPartial =
+    Boolean(connectedFollowUpDate) !== Boolean(connectedFollowUpTime);
+  // ...and half is not the only way to get nothing. founderMeetingIso returns
+  // null when the wall-clock time does not EXIST on that date in the founder
+  // timezone — the spring-forward gap — so both fields can be filled, the
+  // partial check passes, and the send still carries undefined. Same silent
+  // dropped promise by a different route. (Caught by CodeRabbit on #388; the
+  // premise was verified against founderMeetingIso's own verification block,
+  // which returns null when the round-trip does not reproduce the input.)
+  // The rule that covers both: blank, or a real instant. Nothing in between.
+  const connectedFollowUpUsable =
+    (!connectedFollowUpDate && !connectedFollowUpTime) || Boolean(connectedFollowUpAt);
   const callOutcomeReady =
     callAccepted &&
     Boolean(callOutcome) &&
@@ -746,7 +789,9 @@ export function LeadLifecycleActions({
       ? Boolean(nextActionAt)
       : callOutcome === "lost"
         ? Boolean(lossReason.trim())
-        : true);
+        : callOutcome === "connected"
+          ? connectedFollowUpUsable
+          : true);
   const bookingStepReady = [
     founderContactValid && founderPhoneValid,
     Boolean(founderUserId && founderMeetingAt && founderMeetingIsFuture) && founderCanBook !== false,
@@ -1010,6 +1055,37 @@ export function LeadLifecycleActions({
               </div>
               {callOutcome === "attempted" || callOutcome === "voicemail" ? (
                 <LifecycleDateTimeFields label="Next follow-up" date={nextActionDate} time={nextActionTime} onDateChange={updateNextActionDate} onTimeChange={updateNextActionTime} />
+              ) : null}
+              {callOutcome === "connected" ? (
+                <div className="space-y-3 rounded-lg border border-bg-border bg-bg-elev/20 p-3">
+                  <label className="block text-xs text-fg-muted">
+                    What they said <span className="text-fg-dim">(optional)</span>
+                    <textarea
+                      value={transitionNote}
+                      onChange={(event) => setTransitionNote(event.target.value)}
+                      maxLength={2000}
+                      rows={3}
+                      placeholder="What the client said and any timing commitment, e.g. &quot;Interested, but asked us to call back after the 15th.&quot;"
+                      className={`${INPUT} mt-1.5 resize-y`}
+                    />
+                  </label>
+                  <div>
+                    <LifecycleDateTimeFields
+                      label="Call them back (optional)"
+                      date={connectedFollowUpDate}
+                      time={connectedFollowUpTime}
+                      onDateChange={setConnectedFollowUpDate}
+                      onTimeChange={setConnectedFollowUpTime}
+                    />
+                    <p className="mt-1.5 text-[11px] text-fg-dim">
+                      {connectedFollowUpPartial
+                        ? "Set both the date and the time, or clear both — half a callback is not saved."
+                        : !connectedFollowUpUsable
+                          ? "That time does not exist on that date where the clocks change. Pick another time."
+                          : "Leave blank if nothing was promised. Setting it schedules the callback without moving the stage."}
+                    </p>
+                  </div>
+                </div>
               ) : null}
               {callOutcome === "lost" ? (
                 <label className="block text-xs text-fg-muted">
