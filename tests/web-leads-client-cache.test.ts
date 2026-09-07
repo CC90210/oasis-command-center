@@ -109,9 +109,40 @@ assert.equal(
   2,
   "both claim entry points invalidate cached ownership state",
 );
-assert.match(sidebar, /requestIdleCallback\(prefetchWebLeads/);
-assert.match(sidebar, /onMouseEnter=\{onIntent\}/);
-assert.match(sidebar, /onFocus=\{onIntent\}/);
+// This used to assert the OPPOSITE — that the sidebar fires
+// requestIdleCallback(prefetchWebLeads) on every page. That eager prefetch was
+// deliberately removed: measured on its own /api/web-leads costs 989-2,647 ms,
+// it ran on every navigation whether or not anyone was heading for Web Leads,
+// and the next click queued behind work nobody asked for. Sidebar.tsx:263-288
+// carries the reasoning, and tests/perf-prefetch.test.ts pins the replacement.
+//
+// Nobody updated this line, so two tests in the same suite asserted
+// contradictory things and `main` went red on 2026-09-04 and stayed red,
+// blocking every open PR in the repo. Flipped to guard the fix instead of the
+// behaviour it replaced: re-introducing the idle prefetch now fails here too.
+assert.doesNotMatch(
+  sidebar,
+  /requestIdleCallback\(\s*prefetchWebLeads/,
+  "the sidebar must not prefetch Web Leads on every page — that was the 989-2,647 ms 'everything feels slow'",
+);
+// Hover AND focus must both reach the intent path — focus is how a keyboard
+// operator expresses the same intent, and dropping it would silently make the
+// prefetch mouse-only. Asserted through the handler the JSX actually binds
+// rather than a hardcoded name: the previous version demanded
+// `onMouseEnter={onIntent}` when the component binds a local callback that
+// calls onIntent?.(), so it failed on a rename while the behaviour was fine.
+const hover = /onMouseEnter=\{(\w+)\}/.exec(sidebar);
+assert(hover, "the nav item must prefetch on hover");
+assert.match(
+  sidebar,
+  new RegExp(`onFocus=\\{${hover[1]}\\}`),
+  "focus must reach the same handler as hover, or the prefetch is mouse-only",
+);
+assert.match(
+  sidebar,
+  new RegExp(`const ${hover[1]} = useCallback\\([\\s\\S]{0,400}?onIntent\\?\\.\\(\\)`),
+  "that handler must actually fire onIntent, not merely exist",
+);
 assert.match(sidebar, /prefetchRememberedWebLeads\(\)/);
 
 for (const [name, source] of [["list", listRoute], ["facets", facetsRoute]] as const) {
