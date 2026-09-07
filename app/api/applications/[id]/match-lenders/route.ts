@@ -234,6 +234,69 @@ export async function POST(
     const data = ((r as { data: Record<string, unknown> }).data || {}) as LenderData;
     const checks: CheckResult[] = [];
 
+    /*
+     * SOP §4 RESTRICTED STATE / INDUSTRY — RENDERED AS A CHECK, ON PURPOSE.
+     *
+     * These have to live in `checks`, not only in the MatchScore warnings the
+     * narrative layer consumes. ApplicationCardActions.tsx (the sole consumer of
+     * this route) types the response as { score, passes, checks } and renders
+     * `checks` plus a passes/total badge. A restriction expressed only as a
+     * warning is computed, returned, and then invisible to the operator, who
+     * still sees a clean row and an enabled Shop out button. Codex adversarial
+     * review 2026-09-07 caught exactly that after the first pass of this fix.
+     *
+     * Unlike every other check here these are REFUSALS, not preferences: the
+     * lender does not fund this state at all, so a failure must also drag the
+     * passes/total badge down rather than sit as a footnote.
+     */
+    const merchantState =
+      typeof applicationProfile.merchant_state === "string"
+        ? applicationProfile.merchant_state.trim().toUpperCase()
+        : null;
+    const restrictedStates = Array.isArray(data.restricted_states)
+      ? data.restricted_states
+          .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
+          .map((s) => s.toUpperCase())
+      : [];
+    if (restrictedStates.length > 0) {
+      checks.push({
+        key: "restricted_state",
+        label: "State",
+        requirement: `does not fund ${restrictedStates.join(", ")}`,
+        actual: merchantState ?? "unknown",
+        // Unknown fails: a lender with a restricted list and no merchant state
+        // on file is not something to wave through. Same posture as
+        // scoreLenderMatch's missing_merchant_state warning.
+        passed: merchantState ? !restrictedStates.includes(merchantState) : false,
+      });
+    }
+
+    // Legacy key `industry_restrictions` is still honoured by
+    // lib/lenders/shop-out.ts. Reading only the new name here would show a
+    // legacy lender as clean in the preview and then flag it high_risk on the
+    // live send -- the exact preview/send divergence this commit exists to end.
+    const merchantIndustry =
+      typeof applicationProfile.industry === "string"
+        ? applicationProfile.industry.trim().toLowerCase()
+        : null;
+    const restrictedIndustriesRaw = Array.isArray(data.restricted_industries)
+      ? data.restricted_industries
+      : Array.isArray((data as { industry_restrictions?: unknown }).industry_restrictions)
+        ? ((data as { industry_restrictions?: unknown[] }).industry_restrictions as unknown[])
+        : [];
+    const restrictedIndustries = restrictedIndustriesRaw
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      .map((s) => s.trim().toLowerCase());
+    if (restrictedIndustries.length > 0) {
+      checks.push({
+        key: "restricted_industry",
+        label: "Industry",
+        requirement: `does not fund ${restrictedIndustries.join(", ")}`,
+        actual: merchantIndustry ?? "unknown",
+        passed: merchantIndustry ? !restrictedIndustries.includes(merchantIndustry) : false,
+      });
+    }
+
     // Monthly revenue floor. If application doesn't have monthly
     // revenue, mark this check inconclusive (passed=false but with
     // 'unknown' actual) so the operator sees why the lender ranks low.
@@ -426,11 +489,19 @@ export async function POST(
             .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
             .map((s) => s.toUpperCase())
         : undefined,
-      restricted_industries: Array.isArray(raw?.restricted_industries)
-        ? raw.restricted_industries
-            .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
-            .map((s) => s.trim().toLowerCase())
-        : undefined,
+      // Legacy `industry_restrictions` honoured too, matching shop-out.ts.
+      restricted_industries: (() => {
+        const legacy = (raw as { industry_restrictions?: unknown } | undefined)?.industry_restrictions;
+        const list = Array.isArray(raw?.restricted_industries)
+          ? raw.restricted_industries
+          : Array.isArray(legacy)
+            ? (legacy as unknown[])
+            : null;
+        if (!list) return undefined;
+        return list
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim().toLowerCase());
+      })(),
     };
     return { matchScore: scoreLenderMatch(lenderProfile, applicationProfile), lenderProfile };
   });
