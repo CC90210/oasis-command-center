@@ -127,20 +127,43 @@ assert.equal(
 // would have reintroduced the whole 989-2,647 ms regression with the test still
 // green. (Caught by CodeRabbit on #394.) So: find every deferred scheduler call
 // in the file and assert none of them mentions a prefetch anywhere in its body.
-for (const scheduler of ["requestIdleCallback", "setTimeout", "setInterval"]) {
-  const calls = new RegExp(`${scheduler}\\s*\\(`, "g");
-  for (let m = calls.exec(sidebar); m; m = calls.exec(sidebar)) {
-    const body = sidebar.slice(m.index, m.index + 300);
-    // The FUNCTION names, not the word "prefetch": Next's <Link prefetch> prop
-    // is legitimate and common in this file, and a guard that fails on it would
-    // be a false alarm blocking CI — which is how the stale assertion above
-    // trained everyone to ignore this suite in the first place.
-    assert.doesNotMatch(
-      body,
-      /prefetch(WebLeads|RememberedWebLeads)\s*\(/,
-      `the sidebar must not prefetch Web Leads on a timer — that was the 989-2,647 ms "everything feels slow". Found near: ${body.slice(0, 90).replace(/\s+/g, " ")}`,
-    );
+// Two more holes, both caught by CodeRabbit on #395 and both real:
+//   * requiring `(` after the name missed `setTimeout(prefetchWebLeads, 0)` —
+//     a BARE function reference, which is the shortest way to write the bug.
+//   * a fixed 300-character window let a longer callback hide the call past
+//     the end of it.
+// So the argument list is extracted by balancing parentheses — the whole
+// callback, however long — and the names are matched as identifiers, called or
+// merely passed.
+function deferredCallBodies(src: string): string[] {
+  const out: string[] = [];
+  for (const scheduler of ["requestIdleCallback", "setTimeout", "setInterval"]) {
+    const calls = new RegExp(`\\b${scheduler}\\s*\\(`, "g");
+    for (let m = calls.exec(src); m; m = calls.exec(src)) {
+      let depth = 0;
+      let i = m.index + m[0].length - 1;         // sits on the opening paren
+      for (; i < src.length; i += 1) {
+        if (src[i] === "(") depth += 1;
+        else if (src[i] === ")") {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      out.push(src.slice(m.index, Math.min(i + 1, src.length)));
+    }
   }
+  return out;
+}
+for (const body of deferredCallBodies(sidebar)) {
+  // The FUNCTION names as identifiers, not the word "prefetch": Next's
+  // <Link prefetch> prop is legitimate and common in this file, and a guard
+  // that failed on it would be a false alarm blocking CI — which is how the
+  // stale assertion above trained everyone to ignore this suite.
+  assert.doesNotMatch(
+    body,
+    /\bprefetch(WebLeads|RememberedWebLeads)\b/,
+    `the sidebar must not prefetch Web Leads on a timer — that was the 989-2,647 ms "everything feels slow". Found in: ${body.slice(0, 110).replace(/\s+/g, " ")}`,
+  );
 }
 // Hover AND focus must both reach the intent path — focus is how a keyboard
 // operator expresses the same intent, and dropping it would silently make the
