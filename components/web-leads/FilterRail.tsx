@@ -62,6 +62,9 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronRight, ChevronDown, AlertCircle, X } from "lucide-react";
 import type { WebLeadFilters } from "@/lib/web-leads/filters";
 import type { Facets } from "@/lib/web-leads/queries";
+import {
+  ENRICHMENT_TIERS, ENRICHMENT_LABELS, ENRICHMENT_BLURBS, type EnrichmentFilter,
+} from "@/lib/web-leads/enrichment";
 
 const toggle = (list: string[], value: string): string[] =>
   list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
@@ -81,9 +84,24 @@ export function activeFilterCount(filters: WebLeadFilters): number {
     filters.cities.length +
     filters.industries.length +
     (filters.noSiteOnly ? 1 : 0) +
-    (filters.ownerOnly ? 1 : 0)
+    (filters.ownerOnly ? 1 : 0) +
+    (filters.enrichment !== "all" ? 1 : 0)
   );
 }
+
+/**
+ * The tiers a rep can pick, worst-to-best reversed so the strongest reads first.
+ * `hint` becomes the control's tooltip: the label alone does not say what the
+ * evidence actually is, and a rep about to trust a badge deserves the sentence.
+ */
+const ENRICHMENT_CHOICES: { key: EnrichmentFilter; label: string; hint: string }[] = [
+  { key: "all", label: "Everything", hint: "No filter on what we know." },
+  ...[...ENRICHMENT_TIERS].reverse().map((t) => ({
+    key: t as EnrichmentFilter,
+    label: `${ENRICHMENT_LABELS[t]} and better`,
+    hint: ENRICHMENT_BLURBS[t],
+  })),
+];
 
 /** Shared by the rail and the sheet, so the two can never drift into two
  *  different filter trees. */
@@ -186,6 +204,32 @@ function FilterTree({
         />
         <span>Owner identified by name</span>
       </label>
+
+      {/* How much we know before the dial. A radio group rather than checkboxes
+          because the tiers are cumulative: picking one means "this and better",
+          so more than one selection would be meaningless. Sits directly under
+          the owner-name toggle since a rep reads them as one question. */}
+      <div className="rounded-lg border border-bg-border bg-bg-panel/40 p-3">
+        <h3 className="mb-2 px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          What we know
+        </h3>
+        <ul className="space-y-0.5">
+          {ENRICHMENT_CHOICES.map((c) => (
+            <li key={c.key}>
+              <label className={ROW} title={c.hint}>
+                <input
+                  type="radio"
+                  name="enrichment"
+                  className={BOX}
+                  checked={filters.enrichment === c.key}
+                  onChange={() => set({ enrichment: c.key })}
+                />
+                <span>{c.label}</span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      </div>
 
       <div className="rounded-lg border border-bg-border bg-bg-panel/40 p-3">
         <h3 className="mb-2 px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Provinces</h3>

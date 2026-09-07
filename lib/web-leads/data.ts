@@ -30,6 +30,7 @@ import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import { countryOf } from "./filters";
+import { enrichmentRank, passesEnrichment } from "./enrichment";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { invalidate, memo, TTL } from "./cache";
@@ -640,6 +641,9 @@ export async function fetchLeads(
     .filter((l) => Boolean(l.phone))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
+    // How much we know before the dial. A chosen tier means that tier AND
+    // better, so asking for named owners never hides the verified ones.
+    .filter((l) => passesEnrichment(l, f.enrichment))
     // Country is ALWAYS applied, never "all". The two markets run under
     // different law (CASL vs TCPA/DNC), so a rep must be looking at one of them
     // and know which — an "everything" view is how a US mobile gets dialled
@@ -731,6 +735,20 @@ function matchesBand(l: WebLeadRow, band: ScoreBand): boolean {
 function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number {
   const byName = (a: WebLeadRow, b: WebLeadRow) => a.name.localeCompare(b.name);
   if (sort === "name") return byName;
+  if (sort === "enriched_desc") {
+    // Best-known first, then the existing opportunity order WITHIN a tier, so
+    // this reorders the queue rather than replacing its logic: among leads we
+    // know equally well, the worst website still comes first.
+    return (a, b) => {
+      const d = enrichmentRank(b) - enrichmentRank(a);
+      if (d !== 0) return d;
+      const aHas = a.score !== null;
+      const bHas = b.score !== null;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+      if (aHas && bHas && a.score !== b.score) return a.score! - b.score!;
+      return byName(a, b);
+    };
+  }
   return (a, b) => {
     const aHas = a.score !== null;
     const bHas = b.score !== null;

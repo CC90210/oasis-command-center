@@ -38,6 +38,7 @@
 
 import { Clock, Loader2, Phone, Search, SlidersHorizontal, UserPlus, X } from "lucide-react";
 import type { LeadSort, ScoreBand, WebLeadFilters } from "@/lib/web-leads/filters";
+import { ENRICHMENT_LABELS } from "@/lib/web-leads/enrichment";
 
 const BANDS: { key: ScoreBand; label: string; hint: string }[] = [
   { key: "all", label: "Any score", hint: "Every lead in the current filters" },
@@ -50,6 +51,9 @@ const BANDS: { key: ScoreBand; label: string; hint: string }[] = [
 const SORTS: { key: LeadSort; label: string }[] = [
   { key: "opportunity", label: "Lowest score first" },
   { key: "score_desc", label: "Highest score first" },
+  // Reorders the queue by how much we know before the dial, keeping the
+  // lowest-score-first order WITHIN each tier.
+  { key: "enriched_desc", label: "Best known first" },
   { key: "name", label: "Business name A to Z" },
 ];
 
@@ -103,12 +107,15 @@ export function LeadsToolbar({
     ...filters.industries.map((i) => ({ label: i, clear: () => set({ industries: filters.industries.filter((x) => x !== i) }) })),
     ...(filters.noSiteOnly ? [{ label: "No website found yet", clear: () => set({ noSiteOnly: false }) }] : []),
     ...(filters.ownerOnly ? [{ label: "Owner identified by name", clear: () => set({ ownerOnly: false }) }] : []),
+    ...(filters.enrichment !== "all"
+      ? [{ label: `${ENRICHMENT_LABELS[filters.enrichment]} and better`, clear: () => set({ enrichment: "all" as const }) }]
+      : []),
     ...(filters.openNow ? [{ label: "Open right now", clear: () => set({ openNow: false }) }] : []),
     ...(filters.query ? [{ label: `"${filters.query}"`, clear: () => { onQueryDraft(""); set({ query: "" }); } }] : []),
   ];
 
   const clearAll = () =>
-    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, ownerOnly: false, openNow: false, band: "all", query: "" });
+    set({ provinces: [], cities: [], industries: [], noSiteOnly: false, ownerOnly: false, enrichment: "all", openNow: false, band: "all", query: "" });
 
   return (
     <div className="space-y-3">

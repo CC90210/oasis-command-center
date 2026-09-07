@@ -39,6 +39,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ENRICHMENT_LABELS } from "@/lib/web-leads/enrichment";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/Card";
 import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
@@ -355,6 +356,9 @@ export function WebLeadsBrowser({
     else if (filters.provinces.length) parts.push(`in ${filters.provinces.join(" or ")}`);
     if (filters.noSiteOnly) parts.push("with no website found yet");
     if (filters.ownerOnly) parts.push("where we know the owner's name");
+    if (filters.enrichment !== "all") {
+      parts.push(`we know at least this much: ${ENRICHMENT_LABELS[filters.enrichment].toLowerCase()}`);
+    }
     // Named explicitly because this is the filter most likely to have emptied
     // the page for a reason that has nothing to do with the rep's targeting:
     // it is 7am where they are, or the directory holds no hours for any of them.
