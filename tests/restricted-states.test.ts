@@ -21,7 +21,7 @@
  * Synthetic fixtures on purpose: the live catalog is operator-maintained data
  * that changes, and a regression guard must not depend on today's rows.
  *
- *   node --experimental-strip-types tests/restricted-states.test.ts
+ *   node --conditions=react-server --import tsx tests/restricted-states.test.ts
  */
 
 import assert from "node:assert/strict";
@@ -31,7 +31,7 @@ import {
   complianceProfileInputs,
   type LenderProfile,
   type ApplicationProfile,
-} from "../lib/lenders/match-fitness.ts";
+} from "../lib/lenders/match-fitness";
 
 const merchant = (state: string): ApplicationProfile =>
   ({
