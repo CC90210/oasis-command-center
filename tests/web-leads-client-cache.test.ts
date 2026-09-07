@@ -120,11 +120,28 @@ assert.equal(
 // contradictory things and `main` went red on 2026-09-04 and stayed red,
 // blocking every open PR in the repo. Flipped to guard the fix instead of the
 // behaviour it replaced: re-introducing the idle prefetch now fails here too.
-assert.doesNotMatch(
-  sidebar,
-  /requestIdleCallback\(\s*prefetchWebLeads/,
-  "the sidebar must not prefetch Web Leads on every page — that was the 989-2,647 ms 'everything feels slow'",
-);
+// Matched on the SCHEDULER, not on one spelling of its argument. The first
+// version of this guard looked for `requestIdleCallback(prefetchWebLeads` —
+// which is a check on spelling, exactly the defect that let the stale assertion
+// above survive a refactor. `requestIdleCallback(() => prefetchWebLeads())`
+// would have reintroduced the whole 989-2,647 ms regression with the test still
+// green. (Caught by CodeRabbit on #394.) So: find every deferred scheduler call
+// in the file and assert none of them mentions a prefetch anywhere in its body.
+for (const scheduler of ["requestIdleCallback", "setTimeout", "setInterval"]) {
+  const calls = new RegExp(`${scheduler}\\s*\\(`, "g");
+  for (let m = calls.exec(sidebar); m; m = calls.exec(sidebar)) {
+    const body = sidebar.slice(m.index, m.index + 300);
+    // The FUNCTION names, not the word "prefetch": Next's <Link prefetch> prop
+    // is legitimate and common in this file, and a guard that fails on it would
+    // be a false alarm blocking CI — which is how the stale assertion above
+    // trained everyone to ignore this suite in the first place.
+    assert.doesNotMatch(
+      body,
+      /prefetch(WebLeads|RememberedWebLeads)\s*\(/,
+      `the sidebar must not prefetch Web Leads on a timer — that was the 989-2,647 ms "everything feels slow". Found near: ${body.slice(0, 90).replace(/\s+/g, " ")}`,
+    );
+  }
+}
 // Hover AND focus must both reach the intent path — focus is how a keyboard
 // operator expresses the same intent, and dropping it would silently make the
 // prefetch mouse-only. Asserted through the handler the JSX actually binds
