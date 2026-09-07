@@ -223,6 +223,7 @@ const TESTS = [
   // migration; until then the registration pointed at nothing.
   // APEX's Web Leads browser (PR #242).
   "tests/web-leads-filters.test.ts",
+  "tests/web-leads-enrichment.test.ts",
   "tests/web-leads-queries.test.ts",
   "tests/web-leads-data.test.ts",
   "tests/web-leads-counters.test.ts",

@@ -10,6 +10,7 @@
  * comma-join would silently split one industry into two filters that match
  * nothing.
  */
+import { type EnrichmentFilter, parseEnrichment } from "./enrichment";
 
 /**
  * The three in-page views the browser can show (2026-08-23 revamp). Pipeline
@@ -74,8 +75,8 @@ export function countryOf(region: string | null | undefined): LeadCountry {
   return CA_REGIONS.includes(String(region || "").trim().toUpperCase()) ? "ca" : "us";
 }
 
-export type LeadSort = "opportunity" | "name" | "score_desc";
-const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc"];
+export type LeadSort = "opportunity" | "name" | "score_desc" | "enriched_desc";
+const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc", "enriched_desc"];
 
 export type WebLeadFilters = {
   view: WebLeadView;
@@ -109,6 +110,18 @@ export type WebLeadFilters = {
    * lands on an empty-looking queue assumes the board is broken.
    */
   ownerOnly: boolean;
+  /**
+   * How much we know about a lead before the rep dials.
+   *
+   * Distinct from `ownerOnly`, which asks only "is there a name". This ranks
+   * the EVIDENCE: a name plus an independently published number is a different
+   * call from a name alone. Choosing a tier means that tier and better, so a
+   * rep never has to switch filters to see their strongest prospects.
+   *
+   * Defaults to "all" for the same reason ownerOnly defaults to off: a queue
+   * that looks empty reads as a broken board, not as a strict filter.
+   */
+  enrichment: EnrichmentFilter;
   /**
    * Only businesses OPEN RIGHT NOW, in their own time zone.
    *
@@ -147,6 +160,7 @@ export const EMPTY_FILTERS: WebLeadFilters = Object.freeze({
   industries: EMPTY_LIST,
   noSiteOnly: false,
   ownerOnly: false,
+  enrichment: "all",
   openNow: false,
   band: "all",
   sort: "opportunity",
@@ -193,6 +207,7 @@ export function parseFilters(sp: URLSearchParams): WebLeadFilters {
     industries: list(sp, "ind"),
     noSiteOnly: sp.get("nosite") === "1",
     ownerOnly: sp.get("owner") === "1",
+    enrichment: parseEnrichment(sp.get("enrich")),
     openNow: sp.get("open") === "1",
     // Unrecognised values fall back to the default rather than throwing: these
     // come from a URL a rep can hand-edit or a stale bookmark, and a filter
@@ -223,6 +238,7 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   put("ind", f.industries);
   if (f.noSiteOnly) sp.set("nosite", "1");
   if (f.ownerOnly) sp.set("owner", "1");
+  if (f.enrichment !== "all") sp.set("enrich", f.enrichment);
   if (f.openNow) sp.set("open", "1");
   if (f.query) sp.set("q", f.query);
   if (f.page > 1) sp.set("page", String(f.page));
