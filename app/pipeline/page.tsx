@@ -312,6 +312,25 @@ export default async function PipelinePage({
       ? memberNameMap
       : managerRepRoster;
 
+  // A manager who also carries a book had to spot their own name in a row of
+  // ten colleagues to see just their leads. Their chip is pinned first and
+  // marked "(you)" instead.
+  //
+  // Matched case-INSENSITIVELY on purpose: the two roster paths key
+  // differently. managerRepRoster lowercases auth_user_id; buildMemberNameMap
+  // (the admin path, lib/assigned-names.ts:34) stores it raw. A lookup on
+  // either spelling alone would render the chip for one audience and silently
+  // never render it for the other — and a control that is simply absent gives
+  // nobody anything to report. The roster's OWN key is what the chip then
+  // sends, so the filter it produces is byte-identical to the name chip it
+  // replaces.
+  const viewerId = session.ok ? String(session.userId || "").trim() : "";
+  const viewerRepEntry = viewerId
+    ? [...repRoster.entries()].find(
+        ([id]) => id.trim().toLowerCase() === viewerId.toLowerCase(),
+      )
+    : undefined;
+
   const hrefWith = (changes: { stage?: string | null; page?: number | null; rep?: string | null }) => {
     const params = new URLSearchParams();
     const nextStage = changes.stage === undefined ? pipelineWindow.activeStage : changes.stage;
@@ -359,7 +378,11 @@ export default async function PipelinePage({
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider text-fg-dim mr-1">Rep</span>
           {repChip("Everyone", null)}
-          {[...repRoster.entries()].map(([id, name]) => repChip(name, id))}
+          {viewerRepEntry && repChip(`${viewerRepEntry[1]} (you)`, viewerRepEntry[0])}
+          {[...repRoster.entries()]
+            // Not rendered twice: the pinned chip above IS this person's chip.
+            .filter(([id]) => id !== viewerRepEntry?.[0])
+            .map(([id, name]) => repChip(name, id))}
           {pipelineAdmin && repChip("Unassigned", "unassigned")}
         </div>
       )}
