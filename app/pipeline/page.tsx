@@ -188,6 +188,22 @@ export default async function PipelinePage({
       teamRole: session.teamRole,
       tenantSlug,
     });
+  // ═══ START THE INDEPENDENT READ BEFORE AWAITING THE ROSTER ═══════════════
+  //
+  // The roster read gates the pipeline query (it supplies the assignee
+  // allowlist), so it genuinely cannot be parallelised with it. resolveOwnedSlug
+  // does NOT depend on it and used to sit inside the Promise.all *after* it,
+  // which serialised two independent round trips behind one another.
+  //
+  // Measured on production, logged in as a manager (the role that actually
+  // takes this branch): /pipeline has a ~1.6 s floor even when the search
+  // matches nothing, so the fixed per-request work — not row volume — is what
+  // this page costs. Every round trip removed from that chain is ~125-300 ms.
+  //
+  // Kicked off WITHOUT await so it overlaps the roster read; awaited in the
+  // Promise.all below. Rejections stay attached to the promise and surface
+  // there, exactly as before.
+  const ownedSlugPromise = resolveOwnedSlug(tenantId);
   const managerRepRoster = managerTeamRead
     ? new Map(
         (await getOasisSalesRepRoster(tenantId))
@@ -257,7 +273,7 @@ export default async function PipelinePage({
         query,
       }),
       memberNameMapPromise,
-      resolveOwnedSlug(tenantId),
+      ownedSlugPromise,
     ]);
   } catch (error) {
     console.error("[pipeline.rows]", error);
