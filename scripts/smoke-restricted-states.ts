@@ -28,7 +28,7 @@ import {
   complianceProfileInputs,
   type LenderProfile,
   type ApplicationProfile,
-} from "../lib/lenders/match-fitness.ts";
+} from "../lib/lenders/match-fitness";
 
 const SUNBIZ_TENANT_ID = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 
