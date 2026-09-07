@@ -53,6 +53,25 @@ type LenderData = {
   defaults_policy?: "none" | "satisfied_only" | "accepts";
   max_negative_days?: number;
   reverses_only?: boolean;
+  /**
+   * SOP §1/§4 restricted lists. THESE WERE MISSING, AND THE GATE WAS DORMANT
+   * ON THIS PATH (measured 2026-09-07).
+   *
+   * scoreLenderMatch only raises `restricted_state` when
+   * `lender.restricted_states` is a non-empty array. This type did not declare
+   * the field, so the LenderProfile built below never carried it, so the check
+   * could not fire — while the comment on the applicationProfile above claimed
+   * the preview "reflects the restricted-lender gates". It did not.
+   *
+   * Consequence: an operator reading Match Lenders saw a lender presented as a
+   * clean match when that lender does not fund the merchant's state at all.
+   * 13 of the 47 live lenders carry a restricted-states list, covering
+   * TX (7 lenders), UT (5), CA (5), VA (4), NY (2), PR (1). The LIVE send path
+   * (shop-out.ts) always populated these, so real submissions were gated; it was
+   * the preview an operator makes decisions from that was blind.
+   */
+  restricted_states?: string[];
+  restricted_industries?: string[];
 };
 
 type CheckResult = {
@@ -399,6 +418,19 @@ export async function POST(
       defaults_policy: raw?.defaults_policy,
       max_negative_days: raw?.max_negative_days,
       reverses_only: raw?.reverses_only,
+      // Normalised the same way lib/lenders/shop-out.ts does, so the preview and
+      // the live send apply an IDENTICAL gate. Two paths deriving the compliance
+      // inputs differently is what left this one dormant.
+      restricted_states: Array.isArray(raw?.restricted_states)
+        ? raw.restricted_states
+            .filter((s): s is string => typeof s === "string" && s.trim().length === 2)
+            .map((s) => s.toUpperCase())
+        : undefined,
+      restricted_industries: Array.isArray(raw?.restricted_industries)
+        ? raw.restricted_industries
+            .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+            .map((s) => s.trim().toLowerCase())
+        : undefined,
     };
     return { matchScore: scoreLenderMatch(lenderProfile, applicationProfile), lenderProfile };
   });
