@@ -241,4 +241,31 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
   assert.match(file, /Couldn't confirm the send/, "missing the ambiguous-send wording");
   assert.match(file, /have been queued/, "missing the may-still-be-delivered warning");
   assert.match(file, /uncertain \? "Send again" : "Send"/, "the resend is not relabelled");
+
+  // THE REP MUST GET A COPY.
+  //
+  // Reported live 2026-09-08: a rep sent from this button and saw nothing, so
+  // she reported it as "never sent" and pressed it again, producing a duplicate
+  // row. The ledger says it went. She had no way to know: no rep on this tenant
+  // has a mailbox connected, so every send leaves from the BRAND mailbox — her
+  // Sent folder stays empty and her Inbox never sees it. A send a rep cannot
+  // observe is indistinguishable from a failure.
+  //
+  // The whole chain already supported CC and nobody had connected it:
+  // send_gateway.py takes --cc, bridge_tools._tool_send_email accepts `cc` and
+  // passes it through normalize_cc, and exec-tool forwards the payload verbatim.
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  assert.match(route, /const repCopyAddress =/, "the rep's copy address is not resolved");
+  assert.match(route, /cc: repCopyAddress/, "the send does not CC the rep");
+  assert.match(
+    route,
+    /\.\.\.\(args\.cc \? \{ cc: args\.cc \} : \{\}\)/,
+    "cc is not forwarded to the bridge tool",
+  );
+  // Never the same address in To and Cc.
+  assert.match(
+    route,
+    /sess\.email\.trim\(\)\.toLowerCase\(\) !== toEmail\.trim\(\)\.toLowerCase\(\)/,
+    "a rep emailing themselves would appear in both To and Cc",
+  );
 });
