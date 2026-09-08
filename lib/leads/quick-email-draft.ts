@@ -32,13 +32,40 @@ export const INTERNAL_PLACEHOLDERS = [
   "needs checking",
 ] as const;
 
+/**
+ * MATCHED ANYWHERE IN THE TEXT, not just as a prefix.
+ *
+ * The first version of this checked `startsWith`, which is wrong for the shape
+ * these strings actually take in production. A real lead on the board carries:
+ *
+ *   "Vaughan, Ontario | HVAC | site NOT audited (fetch failed at seed time;
+ *    site confirmed reachable 2026-08-26) | no website finding on file,
+ *    confirm on the call"
+ *
+ * Every placeholder in that sentence is mid-text, so a prefix check passes it
+ * and the whole thing goes to the business owner. Codex caught this on review
+ * and reproduced the leak.
+ *
+ * Whitespace is collapsed first so a line break or double space inside the
+ * stored value cannot walk a phrase past the match.
+ */
 function isInternalPlaceholder(value: string): boolean {
-  const v = value.trim().toLowerCase();
+  const v = value.trim().toLowerCase().replace(/\s+/g, " ");
   if (!v) return true;
-  return INTERNAL_PLACEHOLDERS.some((p) => v.startsWith(p) || v === p);
+  return INTERNAL_PLACEHOLDERS.some((p) => v.includes(p));
 }
 
-/** Keep only prospect-safe prose. Returns "" when nothing real survives. */
+/**
+ * Keep only prospect-safe prose. Returns "" when nothing real survives.
+ *
+ * A field containing a placeholder ANYWHERE is dropped WHOLE rather than having
+ * the offending clause spliced out. Two reasons: these values are single mixed
+ * sentences ("site NOT audited ... | no website finding on file") where the
+ * surviving fragment would be unreadable, and a partial strip invites exactly
+ * the confident-sounding half-sentence this guard exists to stop. Dropping too
+ * much costs a shorter email that the rep can see and add to before sending;
+ * leaking costs a fabricated finding in a stranger's inbox under our name.
+ */
 export function prospectSafe(value: string): string {
   const v = (value || "").trim();
   if (!v || isInternalPlaceholder(v)) return "";

@@ -60,6 +60,35 @@ run("every internal placeholder is stripped, not sent", () => {
   }
 });
 
+run("a placeholder MID-TEXT is caught, not just as a prefix", () => {
+  // Codex found this on review of the first version, which only checked
+  // startsWith(). It is not hypothetical: this is the notes value on a real
+  // lead on the board right now (the Vaughan HVAC record), and under a prefix
+  // check the whole sentence went to the business owner.
+  const realNote =
+    "Vaughan, Ontario | HVAC | site NOT audited (fetch failed at seed time; " +
+    "site confirmed reachable 2026-08-26) | no website finding on file, confirm on the call";
+  assert.equal(prospectSafe(realNote), "", "the live HVAC note leaked");
+
+  for (const mid of [
+    "Mobile is slow; not audited yet - confirm on the call",
+    "Owner keen. No website finding on file.",
+    "Spoke to Dave — site not audited, will revisit",
+    "Looks dated.  Not   audited   yet", // collapsed whitespace must not dodge it
+  ]) {
+    assert.equal(prospectSafe(mid), "", `leaked mid-text: ${mid}`);
+  }
+
+  // And through the full draft, on every template.
+  for (const t of TEMPLATES) {
+    const { body } = buildDraft(t.id, lead({ notes: realNote }), BOOKING);
+    assert.ok(
+      !/confirm on the call|not audited|no website finding/i.test(body),
+      `${t.id} leaked the live HVAC note`,
+    );
+  }
+});
+
 run("real findings survive untouched", () => {
   const real = "Your site takes 9 seconds to load on mobile and the contact form 404s.";
   assert.equal(prospectSafe(real), real);
@@ -165,4 +194,23 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
     !/stage\s*===\s*["']connected["']/.test(quick),
     "the quick email must not be restricted to one stage",
   );
+
+  // The recipient must FOLLOW the editor above while untouched. Seeding `to`
+  // from lead.email once meant a rep who corrected the Email field kept sending
+  // to the stale address, in the one component that claims to track the live
+  // form. Codex caught it; this pins the sync.
+  assert.match(
+    quick,
+    /if \(!touched && upstreamEmail !== seenUpstream\)/,
+    "recipient no longer follows the live editor state",
+  );
+
+  // A send whose response we lost is NOT a failed send: the route commits the
+  // queued interaction row before it finishes, so "Send failed" is what makes a
+  // rep press the button again and email the owner twice.
+  assert.ok(
+    !/setStatus\(\s*err instanceof Error \? err\.message : "Send failed\."/.test(quick),
+    "the error path claims the send failed when it may already be queued",
+  );
+  assert.match(quick, /may already be queued/, "the ambiguous-send warning is missing");
 });

@@ -523,7 +523,7 @@ export function fetchLeadProjection(
 /**
  * The FULL `data` blob for one page of leads, keyed by id.
  *
- * Phase two of the split above. Filtering and sorting need fifteen fields
+ * Phase two of the split above. Filtering and sorting need eighteen fields
  * across all 31,034 leads; RENDERING needs the whole blob for the ~100 that
  * actually reach the screen. Fetching the blob for all of them to show a
  * hundred is what made this page slow, and fetching it for a hundred costs
@@ -690,7 +690,7 @@ export async function fetchLeads(
   const start = (f.page - 1) * PAGE_SIZE;
   const page = all.slice(start, start + PAGE_SIZE);
 
-  // PHASE TWO. Everything above ran on the fifteen projected fields, which is
+  // PHASE TWO. Everything above ran on the eighteen projected fields, which is
   // all that filtering, sorting and counting need. The rows that survived now
   // get their full blob so the list can render city, industry and the verbatim
   // websiteCondition -- fetched for ~100 leads instead of 31,034.

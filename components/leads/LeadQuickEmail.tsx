@@ -76,6 +76,20 @@ export function LeadQuickEmail({
   const [template, setTemplate] = useState<TemplateId>("thanks_for_call");
   const [to, setTo] = useState(() => (lead.email || "").trim());
   const [touched, setTouched] = useState(false);
+
+  // FOLLOW THE LIVE EDITOR while the rep has not typed a recipient here.
+  //
+  // `to` is seeded once from lead.email. Without this, a rep who fixes the Email
+  // field in the panel ABOVE keeps the stale address down here and sends to it —
+  // in a component whose entire premise is that it reflects the unsaved form.
+  // Same "rep edits win" rule the draft follows: once they touch this field
+  // nothing overwrites it. Codex caught this on review.
+  const upstreamEmail = (lead.email || "").trim();
+  const [seenUpstream, setSeenUpstream] = useState(upstreamEmail);
+  if (!touched && upstreamEmail !== seenUpstream) {
+    setSeenUpstream(upstreamEmail);
+    setTo(upstreamEmail);
+  }
   const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
   const [scheduleNext, setScheduleNext] = useState(true);
   const [nextAt, setNextAt] = useState(defaultNextTouch);
@@ -161,7 +175,20 @@ export function LeadQuickEmail({
       setDraft(null);
       router.refresh();
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : "Send failed.");
+      // NOT "Send failed." The route durably inserts the queued interaction row
+      // BEFORE it finishes its own work, so a later throw — or a response lost
+      // on the way back — reaches us here having already committed a send that
+      // the VPS consumer will drain. Telling the rep it failed is what produces
+      // the duplicate: they press the button again and the owner gets two
+      // identical emails. Say what we actually know, and point at the record
+      // that settles it. Codex flagged this on review; a real fix is an
+      // idempotency key on the route, which is a change to a shared endpoint
+      // and belongs in its own PR.
+      const detail = err instanceof Error ? err.message : "unknown error";
+      setStatus(
+        `Couldn't confirm the send (${detail}). It may already be queued — ` +
+          "check the timeline below before sending again, or you'll email them twice.",
+      );
     } finally {
       setSending(false);
     }
