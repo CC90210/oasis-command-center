@@ -9,6 +9,7 @@ import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { LeadWebsiteAuditBand } from "@/components/leads/LeadWebsiteAuditBand";
 import { LeadContextEditor } from "@/components/leads/LeadContextEditor";
 import { BOOKING_URL } from "@/lib/marketing/routes";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 import { LeadNoteComposer } from "@/components/leads/LeadNoteComposer";
 import type { BuildBriefDraft } from "@/components/leads/LeadBuildBriefForm";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
@@ -271,7 +272,13 @@ export default async function PipelineLeadDetailPage({
       {canWorkLifecycle || managerCoachingView ? (
         <LeadLifecycleActions
           leadId={id}
-          leadName={nonEmptyString(activeRecord.data.name)}
+          // The PERSON to ask for, not the business. This seeds the founder
+          // meeting's "Contact name", which is saved with the handoff and used
+          // for the Google Calendar invite — so `data.name` put the COMPANY on
+          // an invite addressed to a human on 1,684 of 1,685 owner-named leads.
+          // Empty when we truly know nobody; the booking step still accepts the
+          // company alone (founderNameValid checks name OR company).
+          leadName={nonEmptyString(contactNameFor(activeRecord.data))}
           leadCompany={nonEmptyString(activeRecord.data.company)}
           leadEmail={nonEmptyString(activeRecord.data.email)}
           leadPhone={nonEmptyString(activeRecord.data.phone)}

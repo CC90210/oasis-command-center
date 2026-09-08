@@ -5,9 +5,19 @@ import { useRouter } from "next/navigation";
 import { ExternalLink, Save } from "lucide-react";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
 import { LeadQuickEmail } from "@/components/leads/LeadQuickEmail";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 type FormState = {
-  name: string;
+  /**
+   * The PERSON to ask for. Backed by `contact_name`, NOT `name`.
+   *
+   * It used to read and write `data.name`, which on the OASIS board is the
+   * business name — so the field showed "HVAC Mechanical Systems Inc" while
+   * owner_name held a real person, and a rep who corrected it would have
+   * overwritten the business identity every other surface reads. Now it seeds
+   * from contactNameFor() and saves to contact_name, leaving `name` alone.
+   */
+  contact_name: string;
   company: string;
   email: string;
   phone: string;
@@ -125,7 +135,11 @@ export function LeadContextEditor({
 
       <div className="space-y-6 p-5">
         <FieldGroup title="Contact">
-          <TextField label="Contact name" value={state.name} onChange={(value) => set("name", value)} />
+          <TextField
+            label="Contact name"
+            value={state.contact_name}
+            onChange={(value) => set("contact_name", value)}
+          />
           <TextField label="Company" value={state.company} onChange={(value) => set("company", value)} />
           <TextField label="Email" type="email" value={state.email} onChange={(value) => set("email", value)} />
           <TextField label="Phone" type="tel" value={state.phone} onChange={(value) => set("phone", value)} />
@@ -226,7 +240,10 @@ export function LeadContextEditor({
           bookingUrl={bookingUrl}
           hasBookedMeeting={hasBookedMeeting}
           lead={{
-            name: state.name,
+            // The PERSON, so the email greets "Hi Marc," rather than
+            // "Hi Coastline,". firstNameOf() still guards the company-name case
+            // for leads where we know nobody.
+            name: state.contact_name,
             company: state.company,
             email: state.email,
             industry: state.industry,
@@ -279,7 +296,9 @@ function TextField({
 
 function initialState(data: Record<string, unknown>): FormState {
   return {
-    name: stringValue(data.name),
+    // contactNameFor() falls back contact_name -> owner_name -> name-if-not-
+    // the-company, and returns "" rather than handing back a business name.
+    contact_name: contactNameFor(data),
     company: stringValue(data.company),
     email: stringValue(data.email),
     phone: stringValue(data.phone),

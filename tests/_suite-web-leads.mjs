@@ -60,6 +60,8 @@ const TESTS = [
   "tests/web-leads-outcome-idempotency.test.ts",
   // The rep-facing send path that hangs off a worked lead.
   "tests/lead-quick-email.test.ts",
+  // The field labelled "Contact name" must hold a person, not the business.
+  "tests/lead-contact-name.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
