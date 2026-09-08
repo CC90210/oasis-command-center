@@ -99,13 +99,69 @@ export function findAgentByEmail(email: string | null | undefined): AgentEntry |
  * final CC list (Adon spec 2.4). Operator-driven sends use THIS path:
  * who is the human who clicked send, regardless of CCs.
  */
+/**
+ * A person's first name out of their work address.
+ *
+ * Used only when an operator is not on the agent roster. `full_name` on
+ * user_profiles is NOT a better source here: on this workspace it is populated
+ * with the email itself ("ariel@oasisai.work"), so preferring it would sign the
+ * email with an address.
+ *
+ * Returns "" when nothing name-shaped survives, so the caller can decide rather
+ * than being handed a plausible-looking wrong name.
+ */
+function firstNameFromEmail(email: string | null | undefined): string {
+  const local = String(email || "").split("@")[0] || "";
+  // "conaugh.mckenna" / "conaugh_m" / "conaugh+leads" -> "conaugh"
+  const first = local.split(/[._+\-0-9]+/).filter(Boolean)[0] || "";
+  if (first.length < 2) return "";
+  return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+}
+
+/**
+ * Who signs an outbound email.
+ *
+ * THE BUG THIS FIXES (CC, 2026-09-08, with a screenshot). The fallback was a
+ * hardcoded "SunBiz Submissions", and it fired for ANY operator not on the
+ * SunBiz agent roster. conaugh@oasisai.work is not on that roster, so every
+ * OASIS lead email a rep sent signed off as another company. The footer said
+ * OASIS AI Solutions, Montreal, and the signature above it said SunBiz
+ * Submissions.
+ *
+ * `brand` makes the fallback follow the mail it is signing. An OASIS operator
+ * signs with their own first name, derived from their address; nothing about
+ * the other portal changes, and callers that pass no brand keep the exact
+ * behaviour they shipped with.
+ */
 export function resolveSignerForOperator(
   operatorEmail: string | null | undefined,
+  opts?: { brand?: string },
 ): { name: string; email: string; phone: string } {
   const agent = findAgentByEmail(operatorEmail);
   if (agent) {
     return { name: agent.name, email: agent.email, phone: agent.phone };
   }
+
+  const email = String(operatorEmail || "").trim();
+  // BRAND ONLY, never the sender's domain.
+  //
+  // Inferring "OASIS" from an @oasisai.work address was the obvious shortcut
+  // and it is wrong: the same operator runs the SunBiz application flows
+  // (shop-out, lender-thread retries), where signing as the shared SunBiz
+  // Submissions identity is correct and deliberate. A domain heuristic would
+  // have silently re-signed those, which is precisely the cross-portal bleed
+  // this change exists to stop. Callers that mean OASIS say so.
+  const isOasis = (opts?.brand || "").toLowerCase() === "oasis";
+  if (isOasis) {
+    return {
+      name: firstNameFromEmail(email) || "OASIS AI",
+      email,
+      // No phone on the roster for these operators. Empty rather than a shared
+      // number: a wrong direct line on a cold email is worse than none.
+      phone: "",
+    };
+  }
+
   return {
     name: "SunBiz Submissions",
     email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
