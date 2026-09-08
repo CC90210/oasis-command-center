@@ -132,44 +132,44 @@ export function buildDraft(
 
   const what =
     `We build and look after websites for ${industry ? `${industry} businesses` : "local businesses"}` +
-    `${city ? ` around ${city}` : ""} — the site itself, the Google listing, and the follow-up ` +
+    `${city ? ` around ${city}` : ""}. That means the site itself, the Google listing, and the follow-up ` +
     "that turns an enquiry into a booked job.";
 
   const parts: string[] = [`Hi ${first},`];
 
   if (template === "thanks_for_call") {
-    parts.push("Thanks for taking my call just now — here's the short version in writing, as promised.");
+    parts.push("Thanks for taking my call just now. Here's the short version in writing, as promised.");
     if (observed) parts.push(`What I noticed about your website:\n${observed}`);
     if (notes) parts.push(notes);
     parts.push(what);
     if (booking) parts.push(booking);
     parts.push("If now isn't the right time, just say so and I'll leave you be.");
     return {
-      subject: company ? `${company} — what we talked about` : "What we talked about",
+      subject: company ? `${company}: what we talked about` : "What we talked about",
       body: parts.join("\n\n"),
     };
   }
 
   if (template === "info_request") {
-    parts.push("You asked me to put this in an email, so here it is — short as I can make it.");
+    parts.push("You asked me to put this in an email, so here it is, short as I can make it.");
     if (observed) parts.push(`What I noticed about your website:\n${observed}`);
     parts.push(`${what} No long contract.`);
     if (notes) parts.push(notes);
     if (booking) parts.push(booking);
-    parts.push("Or just reply here with any questions — happy to answer by email.");
+    parts.push("Or just reply here with any questions. Happy to answer by email.");
     return {
-      subject: company ? `${company} — the details you asked for` : "The details you asked for",
+      subject: company ? `${company}: the details you asked for` : "The details you asked for",
       body: parts.join("\n\n"),
     };
   }
 
-  parts.push("Following up on my last note — I know how quickly this stuff gets buried.");
+  parts.push("Following up on my last note. I know how quickly this stuff gets buried.");
   if (observed) parts.push(`The thing I flagged about your website:\n${observed}`);
   if (notes) parts.push(notes);
   if (booking) parts.push(booking);
   parts.push("If it's not a priority right now, tell me and I'll stop chasing.");
   return {
-    subject: company ? `Following up — ${company}` : "Following up",
+    subject: company ? `Following up: ${company}` : "Following up",
     body: parts.join("\n\n"),
   };
 }

@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { appendSignatureAndFooter } from "../lib/config/email-signature";
 import {
   INTERNAL_PLACEHOLDERS,
   buildDraft,
@@ -87,6 +88,57 @@ run("a placeholder MID-TEXT is caught, not just as a prefix", () => {
       `${t.id} leaked the live HVAC note`,
     );
   }
+});
+
+run("no em dash reaches a prospect, in any template or the sign-off", () => {
+  // CC, 2026-09-08: "remove all the m dashes from the actual email templates."
+  // An em dash is one of the loudest machine-written tells in a cold email, and
+  // the sign-off carried one on EVERY message this system has ever sent.
+  //
+  // Asserted on the GENERATED OUTPUT rather than by grepping the source, so a
+  // future template that reintroduces one fails here even if it is written in a
+  // different file. Code COMMENTS are untouched by this rule — they are not
+  // sent to anyone.
+  const withEverything = lead({
+    audit_findings: "Contact form 404s and the mobile layout collapses.",
+    notes: "Wants pricing before the end of the month.",
+  });
+  for (const t of TEMPLATES) {
+    for (const l of [withEverything, lead(), lead({ company: "" })]) {
+      const { subject, body } = buildDraft(t.id, l, BOOKING);
+      assert.ok(!subject.includes("—"), `em dash in ${t.id} subject: ${subject}`);
+      assert.ok(!body.includes("—"), `em dash in ${t.id} body`);
+      // The en dash is the same tell wearing a narrower hat.
+      assert.ok(!subject.includes("–"), `en dash in ${t.id} subject`);
+      assert.ok(!body.includes("–"), `en dash in ${t.id} body`);
+    }
+  }
+
+  // The sign-off appended to every outbound email, whatever composed it.
+  const signed = appendSignatureAndFooter("Body text.", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+  });
+  assert.ok(!signed.includes("—"), "the sign-off still carries an em dash");
+  assert.match(signed, /\n\nAriel/, "the name should sign off on its own line");
+
+  // ...and it must still refuse to sign twice, in BOTH shapes — the legacy
+  // dashed one survives in bodies drafted before the change.
+  const legacy = appendSignatureAndFooter("Body text.\n\n— Ariel", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+  });
+  assert.equal(
+    (legacy.match(/Ariel/g) || []).length,
+    1,
+    "a body already signed the old way got signed a second time",
+  );
+  const fresh = appendSignatureAndFooter("Body text.\n\nAriel", {
+    signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+  });
+  assert.equal(
+    (fresh.match(/Ariel/g) || []).length,
+    1,
+    "a body already signed the new way got signed a second time",
+  );
 });
 
 run("real findings survive untouched", () => {
