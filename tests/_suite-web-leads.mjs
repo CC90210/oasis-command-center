@@ -64,6 +64,8 @@ const TESTS = [
   "tests/lead-contact-name.test.ts",
   // A rep may add a lead they sourced, and it lands in their own book.
   "tests/rep-creates-own-lead.test.ts",
+  // An OASIS email must name OASIS, in the signature as well as the footer.
+  "tests/oasis-email-branding.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

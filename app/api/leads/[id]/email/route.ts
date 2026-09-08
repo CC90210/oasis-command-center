@@ -336,7 +336,10 @@ export async function POST(
 
   // Resolve operator → signer (shared helper, same shape as shop-out
   // and lender-threads retry).
-  const signer = resolveSignerForOperator(sess.email);
+  // Brand passed explicitly: the signer fallback is otherwise a hardcoded
+  // SunBiz identity, which is what put "SunBiz Submissions" at the bottom of
+  // OASIS lead emails above an OASIS footer.
+  const signer = resolveSignerForOperator(sess.email, { brand });
 
   /**
    * The rep's own address, CC'd on every send so they can SEE what went out.
