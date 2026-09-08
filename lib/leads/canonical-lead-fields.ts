@@ -178,3 +178,55 @@ export function stageForWebsiteSalesLead(rawStage: string | null | undefined): s
     validStageKeys: OASIS_LEAD_STAGE_KEYS,
   });
 }
+
+/**
+ * The name of the PERSON to ask for on this lead — never the business.
+ *
+ * THE DEFECT THIS EXISTS TO FIX (measured live 2026-09-08). The pipeline's
+ * "Contact name" field, and the contact seeded into the founder-meeting
+ * Calendar invite, both read `data.name`. On the OASIS web-leads board
+ * `data.name` IS the business name: the OSM promoter writes
+ * name = company = business_name. So 1,684 of the 1,685 owner-named leads on
+ * the board displayed the COMPANY where we were holding a real person, while
+ * `contact_name` — the field the rest of this codebase already prefers
+ * (lib/agent-actions.ts, daily-plan, cold-leads) — sat empty on all 1,853 of
+ * them. Nothing was missing; it was never surfaced. A rep reading "HVAC
+ * Mechanical Systems Inc" in a field labelled Contact name reasonably concluded
+ * we had no owner, and asked to re-scrape data we already had.
+ *
+ * PRECEDENCE, and why `name` is last and conditional:
+ *   contact_name  a human corrected it here. Always wins.
+ *   owner_name    read off the company's own About/Team page, stored with the
+ *                 URL that proved it (owner_evidence_url).
+ *   name          ONLY when it differs from the company. On SunBiz leads
+ *                 `name` really is a person and must keep working; on OASIS
+ *                 leads it equals the company, and returning it is the bug.
+ *
+ * Returns "" rather than a business name when we genuinely know nobody. An
+ * empty contact field is honest and reads as "find out on the call"; a company
+ * name sitting in a person-shaped field is a sentence a rep says out loud.
+ */
+export function contactNameFor(data: Record<string, unknown>): string {
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const contact = str(data.contact_name);
+  if (contact) return contact;
+  const owner = str(data.owner_name);
+  if (owner) return owner;
+  const name = str(data.name);
+  if (!name) return "";
+  // Compared on alphanumerics only, so "Coastline Auto Detailing Ltd." and
+  // "coastline auto detailing" collide rather than slipping through on
+  // punctuation or a suffix.
+  const letters = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const company = str(data.company) || str(data.business_name);
+  if (company && letters(name) === letters(company)) return "";
+  return name;
+}
+
+/**
+ * True when this lead names a person a rep can ask for. Kept beside
+ * contactNameFor so no caller drifts into its own emptiness test.
+ */
+export function hasNamedContact(data: Record<string, unknown>): boolean {
+  return contactNameFor(data).length > 0;
+}
