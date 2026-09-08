@@ -212,5 +212,12 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
     !/setStatus\(\s*err instanceof Error \? err\.message : "Send failed\."/.test(quick),
     "the error path claims the send failed when it may already be queued",
   );
-  assert.match(quick, /may already be queued/, "the ambiguous-send warning is missing");
+  assert.match(quick, /may already have been queued/, "the ambiguous-send warning is missing");
+
+  // ...and the retry is BLOCKED, not merely discouraged. A warning sentence
+  // beside a live Send button is not a control: the rep presses it again and
+  // the owner gets two identical emails. Codex and CodeRabbit both landed here.
+  assert.match(quick, /setUnconfirmed\(true\)/, "an unconfirmed send must latch");
+  assert.match(quick, /unconfirmed \?/, "the Send button is not gated on the unconfirmed state");
+  assert.match(quick, /Send anyway/, "no deliberate second action to override");
 });

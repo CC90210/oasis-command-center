@@ -95,6 +95,23 @@ export function LeadQuickEmail({
   const [nextAt, setNextAt] = useState(defaultNextTouch);
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  /**
+   * A send whose outcome we could not confirm.
+   *
+   * The route commits the queued interaction row BEFORE it finishes its own
+   * work, and there is no idempotency key on it, so a thrown error or a lost
+   * response can leave a message that the VPS consumer still delivers. Clearing
+   * `sending` and re-enabling the button turns that into a second identical
+   * email to the business owner at one click.
+   *
+   * Both reviewers landed on this independently (Codex, then CodeRabbit rating
+   * it Major). The real fix is a route-enforced idempotency key — a change to a
+   * shared endpoint that other surfaces post to, so it belongs in its own PR.
+   * Until then the retry is BLOCKED rather than merely discouraged: the rep has
+   * to say out loud that they checked. A warning sentence beside a live button
+   * is not a control.
+   */
+  const [unconfirmed, setUnconfirmed] = useState(false);
 
   // Regenerate from the LIVE form state until the rep edits the draft; after
   // that their words win and nothing overwrites them.
@@ -185,9 +202,11 @@ export function LeadQuickEmail({
       // idempotency key on the route, which is a change to a shared endpoint
       // and belongs in its own PR.
       const detail = err instanceof Error ? err.message : "unknown error";
+      setUnconfirmed(true);
       setStatus(
-        `Couldn't confirm the send (${detail}). It may already be queued — ` +
-          "check the timeline below before sending again, or you'll email them twice.",
+        `Couldn't confirm the send (${detail}). It may already have been queued and ` +
+          "may still go out. Check the timeline below: if nothing was sent, use " +
+          "“Send anyway”.",
       );
     } finally {
       setSending(false);
@@ -317,15 +336,30 @@ export function LeadQuickEmail({
               />
             </label>
 
-            <button
-              type="button"
-              disabled={sending || !toValid || !subject.trim() || !body.trim()}
-              onClick={send}
-              className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-xs disabled:opacity-40"
-            >
-              <Send className="h-3.5 w-3.5" aria-hidden />
-              {sending ? "Sending…" : "Send email"}
-            </button>
+            {unconfirmed ? (
+              // The retry is a SECOND, deliberate action. See `unconfirmed`.
+              <button
+                type="button"
+                onClick={() => {
+                  setUnconfirmed(false);
+                  setStatus(null);
+                }}
+                className="btn-secondary inline-flex items-center gap-2 !px-4 !py-2 text-xs"
+              >
+                <Send className="h-3.5 w-3.5" aria-hidden />
+                Send anyway
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={sending || !toValid || !subject.trim() || !body.trim()}
+                onClick={send}
+                className="btn-primary inline-flex items-center gap-2 !px-4 !py-2 text-xs disabled:opacity-40"
+              >
+                <Send className="h-3.5 w-3.5" aria-hidden />
+                {sending ? "Sending…" : "Send email"}
+              </button>
+            )}
           </div>
 
           {status && <p className="text-xs text-fg-muted">{status}</p>}
