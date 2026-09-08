@@ -56,13 +56,24 @@ export function appendSignatureAndFooter(
   const signer = opts.signer ?? resolveSignerForOperator(opts.fromAddress);
   const name = (signer?.name || "").trim();
 
-  // Idempotency: an operator who typed "— Jordan" (or an already-signed
-  // re-send) must not get a second sign-off.
-  const alreadySigned = !!name && trimmed.includes(`— ${name}`);
+  // NO EM DASH. This sign-off is appended to EVERY outbound email, so the one
+  // character here was the most-sent em dash in the system. A name on its own
+  // line is how a person signs off; "— Jordan" reads as machine-written, which
+  // is the last impression a cold email should leave. (CC, 2026-09-08.)
+  //
+  // Idempotency has to cover BOTH shapes now. The legacy "— Jordan" still
+  // appears in bodies drafted before this change and in anything an operator
+  // typed by hand, and missing it would sign those twice. The new shape is
+  // matched only as the LAST line of the body: a bare `includes(name)` would
+  // false-positive on a body that merely mentions the rep by name mid-sentence
+  // and would then send it unsigned.
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
+  const alreadySigned =
+    !!name && (trimmed.includes(`— ${name}`) || lastLine === name);
 
   let signature = "";
   if (name && !alreadySigned) {
-    signature = `\n\n— ${name}`;
+    signature = `\n\n${name}`;
     const phone = (signer?.phone || "").trim();
     if (phone) signature += `\n${phone}`;
   }
