@@ -55,8 +55,9 @@ export type OasisSharedSendResult =
       error: string;
     };
 
-/** True when the shared OASIS mailbox is configured for this tenant. */
+/** True when the shared OASIS mailbox is configured, by env or by tenant row. */
 export async function oasisSharedMailboxConfigured(tenantId: string): Promise<boolean> {
+  if (process.env.OASIS_MAIL_FROM && process.env.OASIS_MAIL_APP_PASSWORD) return true;
   if (!tenantId) return false;
   const b = await getTenantIntegrationBundle(tenantId, OASIS_MAIL_SERVICE).catch(
     () => ({}) as Record<string, string>,
@@ -112,9 +113,28 @@ export async function sendOasisSharedGmail(args: {
     };
   }
 
-  const bundle = await getTenantIntegrationBundle(args.tenantId, OASIS_MAIL_SERVICE).catch(
-    () => ({}) as Record<string, string>,
-  );
+  // CREDENTIAL SOURCE: Vercel env FIRST, tenant row second.
+  //
+  // The repo's own security posture puts deployment secrets in Vercel env, and
+  // a review of the first cut of this feature flagged the alternative — a local
+  // file feeding a provisioning script — as the wrong path. Env also removes a
+  // sharp edge that has no upside here: a tenant row is encrypted at rest with
+  // BRAVO_FIELD_ENCRYPTION_KEY, so a row written under any other key stores
+  // successfully and is undecryptable in production, silently, with sends just
+  // falling back to the bridge and nobody learning why.
+  //
+  // The tenant row is kept as the second source because it is PER-TENANT, and
+  // env is not. Today OASIS is one workspace with one sending mailbox; the day
+  // a second one needs its own address, it sets a row and that row wins for it
+  // without disturbing this one.
+  const envFrom = (process.env.OASIS_MAIL_FROM || "").trim();
+  const envPassword = (process.env.OASIS_MAIL_APP_PASSWORD || "").trim();
+  const bundle =
+    envFrom && envPassword
+      ? ({ from_address: envFrom, app_password: envPassword } as Record<string, string>)
+      : await getTenantIntegrationBundle(args.tenantId, OASIS_MAIL_SERVICE).catch(
+          () => ({}) as Record<string, string>,
+        );
   const fromAddress = (bundle.from_address || "").trim();
   // Strip ALL whitespace, not just the ends. Google displays an app password as
   // four spaced groups, and a value pasted that way is 19 characters for a
