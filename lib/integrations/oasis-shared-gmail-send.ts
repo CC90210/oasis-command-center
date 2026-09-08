@@ -76,22 +76,39 @@ export async function sendOasisSharedGmail(args: {
 }): Promise<OasisSharedSendResult> {
   // OPT-OUT GATE FIRST, before any credential work or send. Fail closed: a
   // suppression lookup that errors must not be read as "not suppressed".
+  // checkEmailSuppressed CATCHES ITS OWN ERRORS and returns
+  // { suppressed: false, checkFailed: true } rather than throwing
+  // (lib/lead-interactions-queries.ts:144-147). So a try/catch around it is
+  // dead code, and reading only `.suppressed` treats a FAILED LOOKUP as
+  // "not suppressed" and emails someone who may have opted out. `checkFailed`
+  // is the whole point of the return shape and has to be read.
+  let supp: { suppressed: boolean; checkFailed: boolean };
   try {
-    const supp = await checkEmailSuppressed(args.tenantId, args.to);
-    if (supp.suppressed) {
-      return {
-        ok: false,
-        provider: "oasis_shared_gmail",
-        reason: "suppressed",
-        error: "recipient in email_suppressions",
-      };
-    }
+    supp = await checkEmailSuppressed(args.tenantId, args.to);
   } catch (e) {
+    // Belt and braces: it does not throw today, but a future rewrite that does
+    // must not silently become a fail-open.
     return {
       ok: false,
       provider: "oasis_shared_gmail",
       reason: "suppression_error",
       error: e instanceof Error ? e.message.slice(0, 200) : "suppression_check_failed",
+    };
+  }
+  if (supp.checkFailed) {
+    return {
+      ok: false,
+      provider: "oasis_shared_gmail",
+      reason: "suppression_error",
+      error: "suppression lookup failed; refusing to send rather than assume consent",
+    };
+  }
+  if (supp.suppressed) {
+    return {
+      ok: false,
+      provider: "oasis_shared_gmail",
+      reason: "suppressed",
+      error: "recipient in email_suppressions",
     };
   }
 
@@ -126,6 +143,17 @@ export async function sendOasisSharedGmail(args: {
       port: 587,
       secure: false,
       auth: { user: fromAddress, pass: appPassword },
+      // EXPLICIT TIMEOUTS, well inside the route's 60s maxDuration.
+      //
+      // Nodemailer defaults to a 120s connection timeout and a 600s socket
+      // timeout. This call runs BEFORE the bridge fallback, so on a hung SMTP
+      // the defaults would keep sendMail pending until Vercel terminated the
+      // whole request: the fallback never runs, the rep gets no answer, and the
+      // "immediate send, else bridge" contract is quietly lost. Failing fast
+      // here is what keeps the fallback reachable.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 20_000,
     });
     const info = await transporter.sendMail({
       from: fromAddress,

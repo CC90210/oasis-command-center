@@ -419,6 +419,18 @@ export async function POST(
         signer,
       });
       if (shared.ok) {
+        // RECORD THE RECEIPT. Two reasons, and the first one already cost us a
+        // day: Ariel's 2026-09-08 send stored from_email and provider as NULL,
+        // so there was no way to tell from the row WHICH path had sent it or
+        // from which mailbox, and the incident had to be traced through code
+        // instead of read off the ledger.
+        //
+        // The second is not cosmetic. The rep is CC'd, so the message also
+        // arrives in monitored work mail, and that ingest de-duplicates on
+        // metadata.gmail_message_id. A row without the id does not match, and
+        // the same message gets inserted a second time as if it were inbound.
+        gmailFrom = shared.from_address;
+        gmailMsgId = shared.gmail_message_id;
         return {
           status: "sent",
           agent_source: "oasis_shared_gmail",

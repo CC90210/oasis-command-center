@@ -74,16 +74,28 @@ console.log(`[provision-oasis-mailbox] service  ${OASIS_MAIL_SERVICE}`);
 console.log(`[provision-oasis-mailbox] from     ${FROM}`);
 console.log(`[provision-oasis-mailbox] password ${masked} (${APP_PASSWORD.length} chars)`);
 
+// CHECK THE WRITE. setTenantIntegrationValue returns { ok: false } for
+// encryption and database failures rather than throwing, so an unchecked loop
+// prints "wrote app_password" and exits 0 having stored nothing — and --verify
+// would then PASS, because it authenticates with the environment values rather
+// than the row. A green run over an empty tenant record is the worst outcome
+// this script could produce.
 for (const [field_key, value] of [
   ["from_address", FROM],
   ["app_password", APP_PASSWORD],
 ]) {
-  await setTenantIntegrationValue({
+  const result = await setTenantIntegrationValue({
     tenantId: TENANT_ID,
     service: OASIS_MAIL_SERVICE,
     fieldKey: field_key,
     value,
   });
+  if (!result?.ok) {
+    die(
+      `failed to store ${field_key}: ${result?.error || "unknown error"}. ` +
+        "Nothing usable was written; fix the cause and re-run.",
+    );
+  }
   console.log(`[provision-oasis-mailbox] wrote ${field_key}`);
 }
 

@@ -200,6 +200,7 @@ run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'
   // queued since 2026-08-20 for that reason.
   const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
   const sender = readFileSync("lib/integrations/oasis-shared-gmail-send.ts", "utf8");
+  const provision = readFileSync("scripts/provision-oasis-mailbox.mjs", "utf8");
 
   // Tried BEFORE the bridge, or it never runs.
   const sharedAt = route.indexOf("sendOasisSharedGmail(");
@@ -237,8 +238,29 @@ run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'
   // the credential exists.
   assert.match(sender, /reason: "not_configured"/, "an unconfigured mailbox does not degrade gracefully");
 
+  // THE OPT-OUT GATE MUST ACTUALLY FAIL CLOSED. checkEmailSuppressed catches
+  // its own errors and returns { suppressed: false, checkFailed: true } instead
+  // of throwing, so reading only `.suppressed` treats a FAILED LOOKUP as
+  // consent and emails someone who may have opted out. CodeRabbit caught this.
+  assert.match(sender, /supp\.checkFailed/, "a failed suppression lookup is read as 'not suppressed'");
+
+  // Explicit SMTP timeouts. This call runs BEFORE the bridge fallback and the
+  // route's maxDuration is 60s; nodemailer defaults to 120s connect / 600s
+  // socket, so a hung SMTP would burn the whole request and the fallback would
+  // never run.
+  assert.match(sender, /connectionTimeout: 10_000/, "no SMTP connection timeout");
+  assert.match(sender, /socketTimeout: 20_000/, "no SMTP socket timeout");
+
+  // The receipt is recorded, or the row cannot say which path sent it — the
+  // exact gap that made the 2026-09-08 incident hard to trace — and the CC'd
+  // copy arriving in monitored mail cannot be de-duplicated without the id.
+  assert.match(route, /gmailFrom = shared\.from_address/, "from_address is not persisted");
+  assert.match(route, /gmailMsgId = shared\.gmail_message_id/, "gmail_message_id is not persisted");
+
+  // The provisioning script must not report success on a failed write.
+  assert.match(provision, /if \(!result\?\.ok\)/, "an unchecked credential write reports success");
+
   // The provisioning script must never print the secret.
-  const provision = readFileSync("scripts/provision-oasis-mailbox.mjs", "utf8");
   assert.ok(
     !/console\.log\([^)]*APP_PASSWORD(?!\.length)/.test(provision.replace(/masked/g, "")),
     "the provisioning script logs the app password",
