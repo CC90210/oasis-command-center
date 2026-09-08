@@ -167,6 +167,32 @@ run("the AI email composer cannot reintroduce em dashes", () => {
   assert.deepEqual(offending, [], "the check-in fallback template still has a dash in its prose");
 });
 
+run("an OASIS email never carries SunBiz's legal footer", () => {
+  // appendSignatureAndFooter appended the SunBiz footer unconditionally: a
+  // Florida address, another company's name, and "you received this email
+  // because you submitted a funding inquiry" — false for a cold OASIS lead.
+  // It was harmless only because the paths that call it are inactive for
+  // OASIS today. Wiring a shared app-password mailbox (CC, 2026-09-08) turns
+  // them on, so this had to be brand-routed first.
+  const oasis = appendSignatureAndFooter("Body.", {
+    signer: { name: "Ariel" },
+    brand: "oasis",
+  });
+  assert.ok(!oasis.includes("SunBiz Funding LLC"), "SunBiz's name on an OASIS email");
+  assert.ok(!oasis.includes("Hallandale"), "SunBiz's address on an OASIS email");
+  assert.ok(
+    !oasis.includes("submitted a funding inquiry"),
+    "tells an OASIS prospect they applied for funding",
+  );
+  assert.match(oasis, /OASIS AI Solutions, Montreal, QC, Canada/, "no OASIS identification");
+  assert.match(oasis, /UNSUBSCRIBE/, "no opt-out instruction");
+  assert.ok(!oasis.includes("—"), "the OASIS footer carries an em dash");
+
+  // Existing callers pass no brand and must be untouched.
+  const legacy = appendSignatureAndFooter("Body.", { signer: { name: "Jordan" } });
+  assert.match(legacy, /SunBiz Funding LLC/, "the default footer changed for existing callers");
+});
+
 run("real findings survive untouched", () => {
   const real = "Your site takes 9 seconds to load on mobile and the contact form 404s.";
   assert.equal(prospectSafe(real), real);

@@ -48,9 +48,33 @@ export const SUNBIZ_LEGAL_FOOTER =
  * When omitted, self-resolves from `fromAddress` via the roster so callers
  * without a session (the scheduled-send cron) still sign correctly.
  */
+/**
+ * Brand-routed legal footers.
+ *
+ * This module's own header anticipated the moment we reached on 2026-09-08:
+ * "when a second tenant gets per-rep Gmail sends, brand-route this the way
+ * send_gateway.BRAND_IDENTITY does". CC asked for exactly that, OASIS sends
+ * leaving through a shared app-password mailbox instead of the bridge, and the
+ * SunBiz footer was about to be appended to OASIS prospect emails: a Florida
+ * address, another company's name, and the sentence "you received this email
+ * because you submitted a funding inquiry", which is simply false for a cold
+ * OASIS lead.
+ *
+ * The OASIS wording mirrors send_gateway.BRAND_IDENTITY["oasis"] so a message
+ * reads the same whichever path sends it. Two footers that disagree are worse
+ * than one that is merely wrong, because only one of them ever gets reviewed.
+ */
+const BRAND_FOOTERS: Record<string, string> = {
+  sunbiz: SUNBIZ_LEGAL_FOOTER,
+  oasis:
+    "\n\n---\nOASIS AI Solutions, Montreal, QC, Canada\n\n" +
+    "You received this email because we reached out about your business. " +
+    "To stop receiving emails, reply UNSUBSCRIBE.",
+};
+
 export function appendSignatureAndFooter(
   body: string,
-  opts: { signer?: EmailSigner | null; fromAddress?: string },
+  opts: { signer?: EmailSigner | null; fromAddress?: string; brand?: string },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
   const signer = opts.signer ?? resolveSignerForOperator(opts.fromAddress);
@@ -77,5 +101,9 @@ export function appendSignatureAndFooter(
     const phone = (signer?.phone || "").trim();
     if (phone) signature += `\n${phone}`;
   }
-  return trimmed + signature + SUNBIZ_LEGAL_FOOTER;
+  // Defaults to the SunBiz footer when no brand is passed, so every existing
+  // caller keeps exactly the behaviour it shipped with. A caller that knows its
+  // brand passes it and gets the right one.
+  const footer = BRAND_FOOTERS[(opts.brand || "sunbiz").toLowerCase()] ?? SUNBIZ_LEGAL_FOOTER;
+  return trimmed + signature + footer;
 }
