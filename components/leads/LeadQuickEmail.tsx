@@ -338,16 +338,22 @@ export function LeadQuickEmail({
 
             {unconfirmed ? (
               // The retry is a SECOND, deliberate action. See `unconfirmed`.
+              //
+              // It SENDS. The first version only cleared the latch, so a rep who
+              // pressed a button labelled "Send anyway" got nothing and had to
+              // find the Send button again — a control that does not do what it
+              // says is worse than no control. CodeRabbit caught the mismatch.
               <button
                 type="button"
+                disabled={sending || !toValid || !subject.trim() || !body.trim()}
                 onClick={() => {
                   setUnconfirmed(false);
-                  setStatus(null);
+                  void send();
                 }}
-                className="btn-secondary inline-flex items-center gap-2 !px-4 !py-2 text-xs"
+                className="btn-secondary inline-flex items-center gap-2 !px-4 !py-2 text-xs disabled:opacity-40"
               >
                 <Send className="h-3.5 w-3.5" aria-hidden />
-                Send anyway
+                {sending ? "Sending…" : "Send anyway"}
               </button>
             ) : (
               <button
@@ -362,7 +368,14 @@ export function LeadQuickEmail({
             )}
           </div>
 
-          {status && <p className="text-xs text-fg-muted">{status}</p>}
+          {/* Announced, not just painted. This line is the ONLY report of what
+              happened to a message that has already left — including the
+              "may already be queued" case, where a rep who misses it sends the
+              owner a duplicate. The region is always mounted so a screen reader
+              reads the change rather than a node appearing from nowhere. */}
+          <p role="status" aria-live="polite" className="text-xs text-fg-muted">
+            {status}
+          </p>
         </div>
       )}
     </section>

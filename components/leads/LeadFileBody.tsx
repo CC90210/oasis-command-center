@@ -2471,6 +2471,10 @@ function EmailComposer({
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  /** A send whose outcome we could not confirm — see the catch block below.
+   *  Relabels Send to "Send again" so a resend is a deliberate act rather than
+   *  a reflex against a message that may already be on its way. */
+  const [uncertain, setUncertain] = useState(false);
   // Mirrors EMAIL_RE in the route. Client-side it only gates the Send button —
   // the server re-validates, because a client check is a convenience, never a
   // boundary.
@@ -2639,14 +2643,27 @@ function EmailComposer({
                 setStatus(j.error || `Failed (${r.status})`);
               }
             } catch (e) {
-              setStatus(String((e as Error).message || e));
+              // NOT a plain failure message. This composer posts to the SAME
+              // /api/leads/[id]/email route as LeadQuickEmail, which commits the
+              // queued interaction row before it finishes its own work and
+              // carries no idempotency key — so a thrown error or a lost
+              // response can leave a message that still gets delivered. Saying
+              // "Failed" here is what makes an operator press Send again and
+              // mail the owner twice. Same wording and same latch as the
+              // pipeline composer; CodeRabbit flagged that only one of the two
+              // had the guard.
+              setUncertain(true);
+              setStatus(
+                `Couldn't confirm the send (${String((e as Error).message || e)}). It may already ` +
+                  "have been queued and may still go out. Check the timeline before resending.",
+              );
             } finally {
               setPending(false);
             }
           }}
           className="text-[12px] font-semibold px-3 py-1.5 rounded-md bg-accent text-bg-deep disabled:opacity-50"
         >
-          {pending ? "Sending…" : "Send"}
+          {pending ? "Sending…" : uncertain ? "Send again" : "Send"}
         </button>
       </div>
     </ComposerShell>

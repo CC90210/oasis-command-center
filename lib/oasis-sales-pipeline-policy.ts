@@ -356,6 +356,13 @@ export function canMutateOasisSalesRecord(row: PipelineRow, viewer: OasisViewer)
 export const REP_EDITABLE_LEAD_FIELDS = new Set<string>([
   // contact facts a rep corrects mid-call
   "name",
+  // The PERSON to ask for, distinct from `name` (which on the OASIS web-leads
+  // board is the business). Added 2026-09-08 with contactNameFor(): the
+  // pipeline's Contact name field now writes here instead of overwriting the
+  // business identity in `name`. Without it in this allowlist a rep's save is
+  // rejected wholesale — the field would render, accept typing, and 400 on
+  // save, which reads as the rep's mistake.
+  "contact_name",
   "company",
   "email",
   "phone",
