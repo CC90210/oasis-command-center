@@ -4,6 +4,7 @@ import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { ExternalLink, Save } from "lucide-react";
 import { safeExternalUrl } from "@/lib/web-leads/url-safety";
+import { LeadQuickEmail } from "@/components/leads/LeadQuickEmail";
 
 type FormState = {
   name: string;
@@ -24,12 +25,26 @@ type Props = {
   leadId: string;
   tenantSlug: string;
   initial: Record<string, unknown>;
+  /** Resolved server-side (full env fallback chain) and passed down — a client
+   *  read of BOOKING_URL only sees NEXT_PUBLIC_* and would silently fall back
+   *  to the hardcoded default whenever the link is configured under one of the
+   *  server-only names. */
+  bookingUrl: string;
+  /** True when a meeting is already on the calendar for this lead; the quick
+   *  email then omits the self-scheduling link. See LeadQuickEmail. */
+  hasBookedMeeting: boolean;
 };
 
 const INPUT =
   "w-full rounded-lg border border-bg-border bg-bg-deep px-3 py-2 text-sm text-fg outline-none transition placeholder:text-fg-faint focus:border-accent/70 focus:ring-1 focus:ring-accent/30";
 
-export function LeadContextEditor({ leadId, tenantSlug, initial }: Props) {
+export function LeadContextEditor({
+  leadId,
+  tenantSlug,
+  initial,
+  bookingUrl,
+  hasBookedMeeting,
+}: Props) {
   const router = useRouter();
   const [refreshPending, startTransition] = useTransition();
   const [state, setState] = useState<FormState>(() => initialState(initial));
@@ -198,6 +213,30 @@ export function LeadContextEditor({ leadId, tenantSlug, initial }: Props) {
             {message}
           </div>
         )}
+
+        {/*
+          The send path lives at the BOTTOM of this panel and is fed `state`,
+          not `initial` — a rep who has just typed the audit findings and the
+          call notes gets them in the email without saving first. Saving and
+          sending stay independent, and either order works.
+        */}
+        <LeadQuickEmail
+          leadId={leadId}
+          tenantSlug={tenantSlug}
+          bookingUrl={bookingUrl}
+          hasBookedMeeting={hasBookedMeeting}
+          lead={{
+            name: state.name,
+            company: state.company,
+            email: state.email,
+            industry: state.industry,
+            business_city: state.business_city,
+            website: state.website,
+            website_condition: state.website_condition,
+            audit_findings: state.audit_findings,
+            notes: state.notes,
+          }}
+        />
       </div>
     </section>
   );
