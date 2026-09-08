@@ -220,4 +220,25 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
   assert.match(quick, /setUnconfirmed\(true\)/, "an unconfirmed send must latch");
   assert.match(quick, /unconfirmed \?/, "the Send button is not gated on the unconfirmed state");
   assert.match(quick, /Send anyway/, "no deliberate second action to override");
+  // ...and that control must actually SEND. It first only cleared the latch, so
+  // a rep pressing a button labelled "Send anyway" got nothing.
+  assert.match(
+    quick,
+    /setUnconfirmed\(false\);\s*void send\(\)/,
+    '"Send anyway" does not send — it only clears the latch',
+  );
+  // The outcome of an already-sent message is announced, not just painted.
+  assert.match(quick, /role="status" aria-live="polite"/, "send result is not announced");
+
+  // The /leads composer posts to the SAME route and needs the SAME guard —
+  // fixing one of two callers leaves the duplicate-send open on the other.
+  const file = readFileSync("components/leads/LeadFileBody.tsx", "utf8");
+  assert.match(file, /setUncertain\(true\)/, "the /leads composer has no uncertain-send latch");
+  // Asserted as separate fragments: the sentence is split across a line break by
+  // string concatenation, and a regex spanning that join pins the FORMATTING
+  // rather than the behaviour — it would go red on a prettier reflow that
+  // changed nothing a rep sees.
+  assert.match(file, /Couldn't confirm the send/, "missing the ambiguous-send wording");
+  assert.match(file, /have been queued/, "missing the may-still-be-delivered warning");
+  assert.match(file, /uncertain \? "Send again" : "Send"/, "the resend is not relabelled");
 });
