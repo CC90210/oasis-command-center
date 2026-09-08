@@ -29,6 +29,7 @@ import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -246,8 +247,19 @@ export async function POST(req: NextRequest) {
       skippedNoPhone.push(id);
       continue;
     }
-    // First/last name from contact_name, falling back to business_name.
-    const nameSrc = str(data.contact_name) || str(data.business_name);
+    // The PERSON to ask for — never the business.
+    //
+    // This was `contact_name || business_name`, and contact_name is empty on
+    // every lead on this board, so the fallback always won: the BUSINESS name
+    // was split on whitespace and pushed to Kixie as the contact's first and
+    // last name. A rep's dialer showed "HVAC" as a first name, and that is what
+    // gets read off the screen on a live call.
+    //
+    // contactNameFor() adds owner_name (which 1,853 leads carry) and refuses to
+    // return a name that IS the company. An empty result is correct and safe:
+    // firstName/lastName are optional below, so Kixie simply shows the number
+    // rather than a company masquerading as a person.
+    const nameSrc = contactNameFor(data);
     const parts = nameSrc.split(/\s+/).filter(Boolean);
     const firstName = parts[0] || undefined;
     const lastName = parts.length > 1 ? parts.slice(1).join(" ") : undefined;
