@@ -75,6 +75,43 @@ run("the other portal's shared identity is untouched", () => {
   assert.equal(other.name, "SunBiz Submissions");
 });
 
+run("the brand reaches the signer through EVERY door, not just the reported one", () => {
+  // 1. appendSignatureAndFooter resolves a signer itself when the caller passes
+  //    none. Without the brand it returned the other portal's name and put it
+  //    above an OASIS footer - the same defect through the back door.
+  const noSigner = appendSignatureAndFooter("Body.", {
+    fromAddress: "ariel@oasisai.work",
+    brand: "oasis",
+  });
+  assert.ok(
+    !noSigner.includes("SunBiz Submissions"),
+    "an OASIS email with no explicit signer is still signed by the other company",
+  );
+  assert.match(noSigner, /\n\nAriel/, "the fallback signer did not resolve to the sender");
+
+  // ...and with no brand it must still behave exactly as it always did.
+  const legacy = appendSignatureAndFooter("Body.", { fromAddress: "someone@example.com" });
+  assert.match(legacy, /SunBiz Submissions/, "the unbranded default changed");
+
+  // 2. The template-send route resolves a brand and then has to USE it. It
+  //    computed one on the line above the signer call and passed it to the
+  //    gateway while signing without it.
+  const templates = readFileSync("app/api/templates/send/route.ts", "utf8");
+  assert.match(
+    templates,
+    /resolveSignerForOperator\(sess\.email, \{ brand \}\)/,
+    "the template-send route signs without the brand it already resolved",
+  );
+
+  // 3. The signature module itself.
+  const sig = readFileSync("lib/config/email-signature.ts", "utf8");
+  assert.match(
+    sig,
+    /resolveSignerForOperator\(opts\.fromAddress, \{ brand: opts\.brand \}\)/,
+    "the signature fallback drops the brand",
+  );
+});
+
 run("the lead-email route passes the brand, or the fallback returns", () => {
   // resolveSignerForOperator defaults to the other portal's identity. A caller
   // that forgets the brand gets it back silently, which is exactly how this

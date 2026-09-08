@@ -148,7 +148,10 @@ export async function POST(req: NextRequest) {
   const slug = (tenantRes.data as { slug: string } | null)?.slug || "";
   const brand = slug === "submissions" || slug === "sun" ? "sunbiz" : slug ? "oasis" : undefined;
 
-  const signer = resolveSignerForOperator(sess.email);
+  // Brand passed, same as the lead-email route. This route already resolves the
+  // brand on the line above and then signed without it, so an OASIS template
+  // went out under the other portal's shared name.
+  const signer = resolveSignerForOperator(sess.email, { brand });
 
   // Send through the proven bridge -> send_gateway path.
   try {
