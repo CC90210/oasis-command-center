@@ -43,7 +43,10 @@ import { getOasisSalesRepRoster } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
-import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
+import {
+  OASIS_WEBSITE_TENANT_SLUG,
+  mayWorkWebsiteSalesLifecycle,
+} from "@/lib/website-sales-workflow";
 import {
   OASIS_COLD_OUTBOUND_MOTION,
   isWebsiteSalesTenantSlug,
@@ -415,6 +418,12 @@ export default async function PipelinePage({
         basePath="/pipeline"
         variant="oasis"
         canManage={session.ok && session.isAdmin}
+        // Every sales role may ADD a lead they sourced; the lead is stamped to
+        // whoever created it, server-side. Administering other people's leads
+        // (bulk assign, new-from-application) stays on canManage above.
+        canCreateLead={
+          session.ok && (session.isAdmin || mayWorkWebsiteSalesLifecycle(session.teamRole))
+        }
         resultWindow={{
           exactStageCounts: pipelineWindow.stageCounts,
           exactTotal: pipelineWindow.total,

@@ -16,6 +16,7 @@ import { safe } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { redirect } from "next/navigation";
+import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +25,18 @@ export default async function PipelineNewLeadPage() {
   const profile = await safe("pipeline.new.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || null;
   const session = await resolveSessionContext();
-  if (!session.ok || !session.isAdmin) redirect("/pipeline");
+  // A REP MAY ADD A LEAD THEY FOUND THEMSELVES.
+  //
+  // This was admin-only, so a rep who sourced a business had nowhere to put it:
+  // the page bounced them to /pipeline before the form rendered, and the create
+  // API answered 403 behind it. Both gates had to open or the other half is
+  // just a form that fails on submit. CC, 2026-09-08.
+  //
+  // The lead is stamped to whoever created it, server-side, in the records
+  // route — a rep cannot assign one to somebody else.
+  const mayAddLead =
+    session.ok && (session.isAdmin || mayWorkWebsiteSalesLifecycle(session.teamRole));
+  if (!mayAddLead) redirect("/pipeline");
 
   if (!leadEntity) {
     return (
