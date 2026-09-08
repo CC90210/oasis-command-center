@@ -141,6 +141,32 @@ run("no em dash reaches a prospect, in any template or the sign-off", () => {
   );
 });
 
+run("the AI email composer cannot reintroduce em dashes", () => {
+  // Fixing the STATIC templates is only half of it. compose-checkin hands the
+  // writing to a model, and that model was being taught to use em dashes by the
+  // prompt's own example phrasings — "…what actually moves the needle —",
+  // "No pressure either way — curious…", "— FirstName / OASIS AI Solutions".
+  // Twelve of them. An instruction not to use a character, written in prose
+  // full of that character, loses to the examples every time.
+  const prompt = readFileSync("lib/prompts/oasis-checkin-compose.txt", "utf8");
+  assert.ok(!prompt.includes("—"), "the composer prompt still demonstrates em dashes");
+  assert.ok(!prompt.includes("–"), "the composer prompt still demonstrates en dashes");
+  assert.match(
+    prompt,
+    /NEVER use an em dash or an en dash/,
+    "the prompt does not forbid the character outright",
+  );
+
+  // ...and the fallback used when the model call fails, which is a real send
+  // path, not a placeholder.
+  const fallback = readFileSync("app/api/leads/[id]/compose-checkin/route.ts", "utf8");
+  const proseLines = fallback
+    .split("\n")
+    .filter((l) => !/^\s*(\*|\/\/)/.test(l)); // comments are not sent to anyone
+  const offending = proseLines.filter((l) => l.includes("—") || l.includes("–"));
+  assert.deepEqual(offending, [], "the check-in fallback template still has a dash in its prose");
+});
+
 run("real findings survive untouched", () => {
   const real = "Your site takes 9 seconds to load on mobile and the contact form 404s.";
   assert.equal(prospectSafe(real), real);

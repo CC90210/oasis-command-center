@@ -48,7 +48,7 @@ function fallbackTemplate(
       ? leadData.company.trim()
       : null;
   const subject = company
-    ? `Quick check-in — ${company}`
+    ? `Quick check-in: ${company}`
     : "Quick check-in";
   const contextLine =
     daysSinceLastTouch !== null && daysSinceLastTouch > 7
@@ -58,7 +58,7 @@ function fallbackTemplate(
 
 ${contextLine}
 
-If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure — just shoot back a thought if anything's on your mind.
+If 10-15 minutes works on your end this week, happy to find a time. Otherwise, no pressure. Just shoot back a thought if anything's on your mind.
 
 Either way, let me know.`;
   return { subject, body };
