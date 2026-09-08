@@ -46,6 +46,7 @@ import {
 } from "@/lib/website-sales-comp";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 type LeadData = Record<string, unknown>;
 
@@ -318,8 +319,14 @@ export async function RepToday({
                   const data = row.data as LeadData;
                   const stage = str(data, "stage");
                   const meta = stages.find((s) => s.key === stage);
+                  // The BUSINESS is the headline; the PERSON gets its own line
+                  // below. They used to share one ladder, so `name` — the
+                  // business name on this board — filled a slot a rep reads as
+                  // a contact, and the owner we hold on 1,853 leads never
+                  // appeared on the first screen of the day at all.
                   const who =
                     str(data, "company") || str(data, "name") || str(data, "email") || "unnamed lead";
+                  const askFor = contactNameFor(data as Record<string, unknown>);
                   const disposition = str(data, "last_disposition");
                   return (
                     <li key={row.id} className="py-3">
@@ -351,9 +358,12 @@ export async function RepToday({
                           {str(data, "phone") && (
                             <span className="font-mono text-fg-dim">{str(data, "phone")}</span>
                           )}
-                          {str(data, "name") && str(data, "company") && (
-                            <span>{truncate(str(data, "name"), 28)}</span>
-                          )}
+                          {/* Who to ask for, in the same words the pipeline row
+                              and the battle card use. Replaces a line that
+                              printed data.name whenever a company existed —
+                              which on this board is the company again, shown
+                              twice. */}
+                          {askFor && <span className="text-accent">Ask for {truncate(askFor, 24)}</span>}
                           {disposition && <span>last: {disposition.replace(/_/g, " ")}</span>}
                         </div>
                       </Link>

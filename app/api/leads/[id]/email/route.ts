@@ -65,6 +65,8 @@ async function triggerImmediateSend(
     leadId: string;
     brand?: string;
     signer: { name: string; email: string; phone: string };
+    /** The acting rep, CC'd so they get a copy in their own inbox. */
+    cc?: string;
   },
 ): Promise<
   | { status: "sent"; agent_source?: string }
@@ -84,6 +86,24 @@ async function triggerImmediateSend(
         lead_id: args.leadId,
         brand: args.brand,
         intent: "transactional",
+        // CC THE REP WHO SENT IT.
+        //
+        // This path sends from the BRAND mailbox, not the rep's, because no rep
+        // on this tenant has a mailbox connected (user_integration_credentials
+        // is empty for it), so the app-password and OAuth branches above are
+        // never taken. The rep therefore had no copy anywhere: not in their
+        // Sent, not in their Inbox. Ariel reported an email as "never sent"
+        // on 2026-09-08 that the ledger shows went out — she simply had no way
+        // to see it, and pressed the button a second time, producing a
+        // duplicate row.
+        //
+        // The whole chain already supported this and nobody had connected it:
+        // send_gateway.py takes --cc and writes the Cc header, and
+        // bridge_tools._tool_send_email accepts `cc` (added 2026-05-31 for
+        // SunBiz's shared-inbox model, with the note "the operator must be CC'd
+        // or they never see the reply"). exec-tool forwards the payload
+        // verbatim, so this reaches it unchanged.
+        ...(args.cc ? { cc: args.cc } : {}),
         // Per-operator signing — bridge tool sets BRAVO_FROM_*_SUNBIZ
         // env on the send_gateway subprocess so the signature renders
         // THIS operator's identity (Jordan / Alex / Matt) instead of
@@ -317,6 +337,26 @@ export async function POST(
   // and lender-threads retry).
   const signer = resolveSignerForOperator(sess.email);
 
+  /**
+   * The rep's own address, CC'd on every send so they can SEE what went out.
+   *
+   * Why this is not optional. On this tenant no rep has a mailbox connected
+   * (user_integration_credentials holds zero rows for it), so every send falls
+   * through to the bridge and leaves from the BRAND mailbox. The rep's Sent
+   * folder stays empty and their Inbox never sees it, so from where they sit a
+   * successful send and a total failure look identical — which is precisely
+   * what happened on 2026-09-08: a send the ledger records as delivered was
+   * reported as "never sent", and pressing the button again produced a
+   * duplicate.
+   *
+   * Empty when the rep is themselves the recipient, so the same address never
+   * lands in both To and Cc.
+   */
+  const repCopyAddress =
+    sess.email && sess.email.trim().toLowerCase() !== toEmail.trim().toLowerCase()
+      ? sess.email.trim()
+      : undefined;
+
   // Send. Preference order:
   //   1. The operator's OWN connected Gmail (immediate, from THEIR address) —
   //      the personal-send path the Phase-4 comment above anticipated.
@@ -365,6 +405,9 @@ export async function POST(
       leadId,
       brand,
       signer,
+      // The rep gets their own copy. Skipped if the rep IS the recipient, which
+      // would put the same address in To and Cc.
+      cc: repCopyAddress,
     });
   };
 

@@ -70,6 +70,7 @@ import { InlineStageControl } from "@/components/manifest/InlineStageControl";
 import { QuickAddLeadModal } from "@/components/manifest/QuickAddLeadModal";
 import { isAcceleratedEligible } from "@/lib/drips/accelerated-eligibility";
 import { isLeadListVisible } from "@/lib/lead-list-visibility";
+import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
 
 type Row = { id: string; data: Record<string, unknown>; updated_at?: string; created_at?: string };
 
@@ -1572,12 +1573,19 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   // "Lead <id-prefix>". Avoids the bare "Untitled" — anything we can show
   // beats a blank label.
   const emailLocal = (str(d.email) || "").split("@")[0] || "";
-  const name =
-    str(d.name) ||
-    str(d.contact_name) ||
-    company ||
-    emailLocal ||
-    `Lead ${row.id.slice(0, 6)}`;
+  // The BUSINESS, which is what the "Lead" column is. contact_name is no longer
+  // in this ladder: it now holds a PERSON (see contactNameFor), so leaving it
+  // here would print an owner's name in the business slot on any lead missing
+  // `name`. The person gets its own line below instead.
+  const name = str(d.name) || company || emailLocal || `Lead ${row.id.slice(0, 6)}`;
+  /**
+   * Who to ask for. This row model previously had NO person field at all —
+   * /pipeline forces variant="oasis" and early-returns here, so the ownerName
+   * line further down (in the SunBiz row model) was never reached on this
+   * board. 1,853 leads carry an owner_name and a rep scanning the pipeline
+   * could not see a single one of them.
+   */
+  const contactName = contactNameFor(d);
   const email = str(d.email) || "";
   const phone = formatPhone(str(d.phone) || "");
   const assignedRep = str(d.assigned_to_name) || (str(d.assigned_to) ? "Assigned agent" : "Unassigned");
@@ -1636,6 +1644,7 @@ function oasisRowModel(row: Row, cfg: VariantConfig, stage: StageMeta) {
   const businessLine = [place, industry].filter(Boolean).join(" · ");
   return {
     name,
+    contactName,
     company,
     email,
     phone,
@@ -1819,6 +1828,19 @@ function OasisDesktopRow({
                 {m.company}
               </span>
             )}
+            {/* WHO TO ASK FOR. The single most useful thing on the row for a
+                rep about to dial, and it was absent entirely — this board's row
+                model had no person field, so 1,853 known owners were invisible
+                here. Same "Ask for" wording as the leads-board card so a rep
+                reads one phrase across both screens. Rendered only when we
+                actually know somebody; contactNameFor returns "" rather than
+                the company, and an absent line is honest where a company name
+                in a person slot is not. */}
+            {m.contactName && (
+              <span className="block truncate text-[10px] font-medium text-accent" title={`Ask for ${m.contactName}`}>
+                Ask for {m.contactName}
+              </span>
+            )}
             {/* The business itself: where it is and what it does. A rep opening
                 a CRM row should not have to leave for the one fact that decides
                 how the call opens. */}
@@ -1888,6 +1910,12 @@ function OasisMobileRow({
                   on a phone this is the line that tells a rep whether to call
                   now, and it used to be absent entirely. */}
               <div className="truncate text-[11px] text-fg-muted">{m.businessLine || m.company || m.email || "-"}</div>
+              {/* Who to ask for — same line the desktop row and the leads-board
+                  card show. On a phone this is the fact a rep needs most before
+                  the number connects. */}
+              {m.contactName && (
+                <div className="truncate text-[11px] font-medium text-accent">Ask for {m.contactName}</div>
+              )}
               <div className="truncate text-[10px] text-accent/80">Assigned: {m.assignedRep}</div>
             </div>
             <StageChip stage={stage} />
