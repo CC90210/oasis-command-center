@@ -1546,6 +1546,25 @@ function Hero({
         <div className={`${embedded ? "" : "mt-4"} flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between`}>
           <div className="min-w-0">
             <h1 className="text-3xl font-bold leading-tight tracking-tight text-fg [font-family:var(--battle-display)] lg:text-4xl">{lead.name}</h1>
+            {/* WHO TO ASK FOR — the first thing a rep needs when the call
+                connects, and it was fetched, carried onto this card, and then
+                never rendered. The owner name reached `lead.ownerName` and
+                stopped there, so the one screen a rep reads WHILE the phone is
+                ringing showed only the business.
+
+                Placed directly under the business name because that is the
+                order the sentence comes out: "Hi, is Marc in?" — and the title
+                follows so a rep knows whether they are asking for the owner or
+                a named practitioner. Rendered only when somebody is actually
+                identified; there is deliberately no fallback to the business
+                name, which would put "Ask for HVAC Mechanical Systems Inc" in
+                the rep's mouth. */}
+            {lead.ownerName && (
+              <p className="mt-1.5 text-base font-semibold text-accent">
+                Ask for {lead.ownerName}
+                {lead.ownerTitle ? <span className="font-normal text-fg-muted"> · {lead.ownerTitle}</span> : null}
+              </p>
+            )}
             {/* The FULL address, street and postal code included -- not just
                 the city. A rep confirming a business by name needs the street
                 to be sure they have the right branch, and this line is the

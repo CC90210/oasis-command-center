@@ -102,6 +102,41 @@ run("a rep can actually SAVE the field the editor now writes", () => {
   );
 });
 
+run("every REP-FACING surface shows the person, not the business", () => {
+  // Found by auditing each surface end-to-end (2026-09-08). The owner name was
+  // reaching all three of these and dying at the last step, which no unit test
+  // on contactNameFor could ever have caught.
+
+  // 1. THE PIPELINE LIST — the screen a rep works from. /pipeline forces
+  //    variant="oasis" and early-returns to oasisRowModel, which had NO person
+  //    field at all; the ownerName line elsewhere in that file belongs to the
+  //    SunBiz row model and is never reached here.
+  const pipe = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
+  assert.match(pipe, /const contactName = contactNameFor\(d\)/, "oasisRowModel has no person field");
+  assert.match(pipe, /Ask for \{m\.contactName\}/, "the pipeline row does not show who to ask for");
+  // The business slot must not fall back to contact_name now that it holds a
+  // person — that would print an owner's name as the business.
+  assert.ok(
+    !/const name =\s*\n?\s*str\(d\.name\) \|\|\s*\n?\s*str\(d\.contact_name\)/.test(pipe),
+    "contact_name is still in the business-name ladder",
+  );
+
+  // 2. THE DIALER. This one leaves the building: the business name was split on
+  //    whitespace and pushed to Kixie as the contact's first and last name, so
+  //    a rep's dialer displayed "HVAC" as a first name.
+  const powerlist = readFileSync("app/api/leads/powerlist/route.ts", "utf8");
+  assert.match(powerlist, /const nameSrc = contactNameFor\(data\)/, "the dialer still names the business");
+  assert.ok(
+    !/str\(data\.contact_name\) \|\| str\(data\.business_name\)/.test(powerlist),
+    "the business-name fallback is still feeding Kixie",
+  );
+
+  // 3. THE BATTLE CARD — read WHILE the phone is ringing. The owner was
+  //    fetched, carried onto the card, and never rendered.
+  const battle = readFileSync("components/web-leads/BattleCard.tsx", "utf8");
+  assert.match(battle, /Ask for \{lead\.ownerName\}/, "the battle card does not show the owner");
+});
+
 run("the surfaces are wired to the helper, not to data.name", () => {
   const editor = readFileSync("components/leads/LeadContextEditor.tsx", "utf8");
   assert.match(editor, /contact_name: contactNameFor\(data\)/, "editor does not seed from the helper");
