@@ -77,7 +77,15 @@ export function appendSignatureAndFooter(
   opts: { signer?: EmailSigner | null; fromAddress?: string; brand?: string },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
-  const signer = opts.signer ?? resolveSignerForOperator(opts.fromAddress);
+  // THE BRAND HAS TO REACH THE FALLBACK TOO.
+  //
+  // This resolved the signer with no brand, so a caller that passed
+  // `brand: "oasis"` but no explicit signer got the OASIS footer with the other
+  // portal's shared name above it — the same two-companies-in-one-message
+  // defect, arriving through the back door. Threading opts.brand closes it for
+  // every present and future caller rather than for the one route that was
+  // reported.
+  const signer = opts.signer ?? resolveSignerForOperator(opts.fromAddress, { brand: opts.brand });
   const name = (signer?.name || "").trim();
 
   // NO EM DASH. This sign-off is appended to EVERY outbound email, so the one
