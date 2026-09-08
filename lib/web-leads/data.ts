@@ -374,11 +374,26 @@ export async function fetchSheets(): Promise<Sheet[]> {
  * every field keeps the same JS type it has today, on both backends, and
  * factsFrom needs no change. Nothing here widens or relaxes the dnc test.
  */
-const FILTER_KEYS = [
+/**
+ * Exported so tests can replay the exact narrowing this projection performs.
+ * A filter that reads a field missing from here sees `undefined` and fails
+ * SILENTLY — see tests/web-leads-projection-covers-filters.test.ts for the
+ * production incident that proved it.
+ */
+export const FILTER_KEYS = [
   "business_name", "name", "phone", "website", "webdev_territory_id",
   "webdev_source_business_id", "state",
   "webdev_opening_hours", "webdev_opening_hours_raw",
   "assigned_to", "claimed_at", "last_call_at", "stage", "lost_at", "dnc",
+  // OWNER EVIDENCE. Read by enrichmentTier() (the "what we know" filter and
+  // its sort) and by the older ownerOnly toggle, both of which run HERE, on
+  // the projected row — so leaving these out does not degrade them, it makes
+  // them answer "no" for every lead in the tenant. That is what happened:
+  // 1,668 leads carrying a real owner name and phone were unreachable through
+  // "Owner named" and "Verified owner" from 2026-08-25 until 2026-09-08, with
+  // no error raised anywhere. Three short text fields; the transfer cost this
+  // projection exists to control lives in the big blob fields it still omits.
+  "owner_name", "owner_phone", "owner_verification_state",
 ] as const;
 
 const FILTER_SELECT = `id,${FILTER_KEYS.map((k) => `data->${k}`).join(",")}`;
