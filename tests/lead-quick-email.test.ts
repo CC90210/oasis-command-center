@@ -193,6 +193,59 @@ run("an OASIS email never carries SunBiz's legal footer", () => {
   assert.match(legacy, /SunBiz Funding LLC/, "the default footer changed for existing callers");
 });
 
+run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'd", () => {
+  // CC, 2026-09-08: "use my app password, then just CC/forward the reps."
+  // One team mailbox, no per-rep Gmail setup. The bridge stays as the fallback
+  // because it only runs while a particular machine is on: five emails have sat
+  // queued since 2026-08-20 for that reason.
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  const sender = readFileSync("lib/integrations/oasis-shared-gmail-send.ts", "utf8");
+
+  // Tried BEFORE the bridge, or it never runs.
+  const sharedAt = route.indexOf("sendOasisSharedGmail(");
+  const bridgeAt = route.indexOf("return triggerImmediateSend(req, {");
+  assert.ok(sharedAt > 0, "the shared mailbox is not wired into the route");
+  assert.ok(
+    sharedAt < bridgeAt,
+    "the bridge is attempted before the shared mailbox, so the shared mailbox never runs",
+  );
+
+  // The rep is CC'd and replies come back to them, not into a shared inbox
+  // nobody watches.
+  assert.match(route, /cc: repCopyAddress/, "the rep is not CC'd on the shared-mailbox send");
+  assert.match(sender, /replyTo: ccFinal/, "replies would land in the shared mailbox, not with the rep");
+
+  // OASIS footer, never the default.
+  assert.match(sender, /brand: "oasis"/, "the shared send would append SunBiz's footer");
+
+  // Suppression is checked FIRST and fails closed, and a suppressed recipient
+  // must NOT fall through to the bridge for a second attempt.
+  // Measured inside the FUNCTION BODY, not across the whole file: both symbols
+  // also appear in the import block at the top, where their order is
+  // alphabetical accident rather than execution order. The first version of
+  // this assertion compared those imports and failed against correct code.
+  const bodyStart = sender.indexOf("export async function sendOasisSharedGmail");
+  assert.ok(bodyStart > 0, "sendOasisSharedGmail not found");
+  const body = sender.slice(bodyStart);
+  const suppAt = body.indexOf("checkEmailSuppressed");
+  const credAt = body.indexOf("getTenantIntegrationBundle");
+  assert.ok(suppAt > 0 && credAt > 0, "expected both a suppression check and a credential read");
+  assert.ok(suppAt < credAt, "suppression is not checked before the credential work and the send");
+  assert.match(route, /shared\.reason === "suppressed"/, "a suppressed recipient falls through to the bridge");
+
+  // Unconfigured must be a silent fall-through, so behaviour is unchanged until
+  // the credential exists.
+  assert.match(sender, /reason: "not_configured"/, "an unconfigured mailbox does not degrade gracefully");
+
+  // The provisioning script must never print the secret.
+  const provision = readFileSync("scripts/provision-oasis-mailbox.mjs", "utf8");
+  assert.ok(
+    !/console\.log\([^)]*APP_PASSWORD(?!\.length)/.test(provision.replace(/masked/g, "")),
+    "the provisioning script logs the app password",
+  );
+  assert.match(provision, /"\*"\.repeat/, "the provisioning script does not mask the value");
+});
+
 run("real findings survive untouched", () => {
   const real = "Your site takes 9 seconds to load on mobile and the contact form 404s.";
   assert.equal(prospectSafe(real), real);
