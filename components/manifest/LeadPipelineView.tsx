@@ -116,6 +116,16 @@ type Props = {
    */
   canManage?: boolean;
   /**
+   * May this viewer ADD a lead they found themselves?
+   *
+   * Separate from `canManage` on purpose. Creating a lead and administering
+   * other people's leads are different powers: every sales role (opener,
+   * closer, manager, builder, marketing) sources prospects and needs to enter
+   * them, while bulk-assigning a lead to a named rep stays with admins. Reusing
+   * canManage for both is what hid the button from every rep. CC, 2026-09-08.
+   */
+  canCreateLead?: boolean;
+  /**
    * Exact server-side totals + navigation for a bounded result window.
    * Omitted by legacy/SunBiz callers, which continue to render their complete
    * in-memory row set exactly as before.
@@ -236,6 +246,9 @@ export function LeadPipelineView({
   basePath,
   variant = "sunbiz",
   canManage = false,
+  // Defaults to canManage so any caller that has not been updated keeps its
+  // current behaviour rather than silently gaining a button.
+  canCreateLead,
   resultWindow,
 }: Props) {
   const router = useRouter();
@@ -569,7 +582,10 @@ export function LeadPipelineView({
               {selectMode ? "Done" : "Select"}
             </button>
           )}
-          {(variant !== "oasis" || canManage) && <Link
+          {/* Gated on canCreateLead, NOT canManage: every sales role sources
+              their own prospects and must be able to enter one. Bulk assign
+              above and "New from application" below stay admin-only. */}
+          {(variant !== "oasis" || (canCreateLead ?? canManage)) && <Link
             href={newHref}
             className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
           >

@@ -42,6 +42,7 @@ import {
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
+import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -199,7 +200,26 @@ export async function POST(
   const { slug, entity } = await ctx.params;
   const r = await resolveContext(user, slug.toLowerCase(), entity.toLowerCase());
   if (!r.ok) return NextResponse.json({ ok: false, error: r.error, message: r.message }, { status: r.status });
-  if (!r.is_admin) return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+
+  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
+  /**
+   * A SALES REP MAY CREATE THEIR OWN OASIS LEAD.
+   *
+   * Creation used to be admin-only everywhere, so a rep who found a business
+   * themselves had nowhere to put it: /pipeline/new redirected them away and
+   * this route answered 403. CC, 2026-09-08: reps have their own way of
+   * sourcing leads and need to enter them, assigned to whoever found them.
+   *
+   * Deliberately NARROW. It widens creation for OASIS leads only, and only for
+   * roles that already work this pipeline — every other entity and every other
+   * workspace still requires an admin, because this is the generic record
+   * endpoint and a blanket relaxation would let any member create any record
+   * type in any tenant.
+   */
+  const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
+  if (!r.is_admin && !repMayCreateOwnLead) {
+    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+  }
 
   let body: { data?: Record<string, unknown> };
   try {
@@ -210,7 +230,6 @@ export async function POST(
   if (!body.data || typeof body.data !== "object") {
     return NextResponse.json({ ok: false, error: "data_required" }, { status: 400 });
   }
-  const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
   if (isOasisSalesLead) {
     const requestedStage = body.data.stage;
     if (requestedStage !== "researched") {
@@ -238,11 +257,40 @@ export async function POST(
     }
   }
 
+  /**
+   * THE CREATOR OWNS THE LEAD THEY CREATED.
+   *
+   * Stamped SERVER-SIDE, never taken from the request: `assigned_to` is a
+   * protected lifecycle field and the guard above rejects a client that sends
+   * it, so this is the only place it can be set honestly. A rep cannot assign
+   * a lead they found to somebody else, and cannot forge ownership.
+   *
+   * `stage` moves to `assigned` at the same time, and that pairing is
+   * load-bearing rather than tidy: `researched` IS the shared prospect pool and
+   * REP_PIPELINE_STAGE_KEYS deliberately excludes it, so a lead stamped with an
+   * owner but left in `researched` would belong to the rep and be invisible on
+   * their pipeline - which is exactly the "I added it and nothing happened"
+   * they are reporting today. The route's create guard still requires the
+   * CLIENT to send `researched`; the server is what promotes it.
+   *
+   * Admin creates are untouched and still land in the shared pool, which is how
+   * seeding works.
+   */
+  const data = { ...body.data };
+  if (repMayCreateOwnLead && !r.is_admin) {
+    // Lowercased to match lead-scope.ts's comparison key, which is what every
+    // "is this in my book" check compares against.
+    data.assigned_to = user.id.toLowerCase();
+    data.assigned_at = new Date().toISOString();
+    data.stage = "assigned";
+    data.stage_entered_at = new Date().toISOString();
+  }
+
   try {
     const row = await createRecord({
       tenant_id: r.tenant_id,
       entity: entity.toLowerCase(),
-      data: body.data,
+      data,
     });
     return NextResponse.json({ ok: true, record: row });
   } catch (err) {
