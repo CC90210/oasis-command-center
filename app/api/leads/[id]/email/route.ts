@@ -31,6 +31,7 @@ import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/in
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
 import { appendSignatureAndFooter } from "@/lib/config/email-signature";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
@@ -398,6 +399,42 @@ export async function POST(
         };
       }
     }
+    // OASIS: the shared team mailbox, from Vercel, with the rep CC'd.
+    //
+    // Tried BEFORE the bridge because the bridge runs send_gateway on CC's own
+    // machine and is only alive while that machine is — five emails have sat
+    // queued since 2026-08-20 for exactly that reason. This path has no such
+    // dependency.
+    //
+    // Falls through silently when the mailbox is not configured yet, so the
+    // behaviour before the credential is stored is byte-for-byte what shipped
+    // today. Nothing to roll back if it is never set.
+    if (brand === "oasis") {
+      const shared = await sendOasisSharedGmail({
+        tenantId: sess.tenantId,
+        to: toEmail,
+        cc: repCopyAddress,
+        subject: truncatedSubject,
+        body: truncatedBody,
+        signer,
+      });
+      if (shared.ok) {
+        return {
+          status: "sent",
+          agent_source: "oasis_shared_gmail",
+          via: "oasis_shared_gmail",
+          from_address: shared.from_address,
+        };
+      }
+      // A SUPPRESSED recipient is a decision, not a transport failure. Falling
+      // through to the bridge here would re-attempt a send to someone who has
+      // opted out — the gateway would refuse it again, but only by luck of
+      // having its own gate. Stop here and say so.
+      if (shared.reason === "suppressed" || shared.reason === "suppression_error") {
+        return { status: "queued", reason: `oasis_shared_gmail: ${shared.error}`.slice(0, 240) };
+      }
+    }
+
     return triggerImmediateSend(req, {
       to: toEmail,
       subject: truncatedSubject,
