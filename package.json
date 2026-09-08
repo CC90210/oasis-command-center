@@ -2,7 +2,7 @@
   "name": "oasis-command-center",
   "version": "1.0.0",
   "private": true,
-  "description": "OASIS AI Agent Command Center — the operating system for AI agents. Multi-agent, profile-driven, real-time.",
+  "description": "OASIS AI Agent Command Center \u2014 the operating system for AI agents. Multi-agent, profile-driven, real-time.",
   "scripts": {
     "dev": "next dev --port 3100",
     "build": "next build",
@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test:sunbiz": "node tests/_suite.mjs",
+    "test:web-leads": "node tests/_suite-web-leads.mjs",
     "test:lead-advancements": "node --conditions=react-server --import tsx tests/lead-declined-transfer.test.ts && node --conditions=react-server --import tsx tests/lead-drawer-layout.test.ts",
     "test:chat-modes": "node --conditions=react-server --import tsx tests/chat-modes.test.ts",
     "test:event-bus": "node --conditions=react-server --import tsx tests/event-bus-display.test.ts",

@@ -8,6 +8,7 @@ import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { CollapsibleSection } from "@/components/leads/CollapsibleSection";
 import { LeadWebsiteAuditBand } from "@/components/leads/LeadWebsiteAuditBand";
 import { LeadContextEditor } from "@/components/leads/LeadContextEditor";
+import { BOOKING_URL } from "@/lib/marketing/routes";
 import { LeadNoteComposer } from "@/components/leads/LeadNoteComposer";
 import type { BuildBriefDraft } from "@/components/leads/LeadBuildBriefForm";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
@@ -385,7 +386,15 @@ export default async function PipelineLeadDetailPage({
           storageKey="oasis.pipeline.contextEditor.collapsed"
           defaultCollapsed
         >
-          <LeadContextEditor leadId={id} tenantSlug={ownedSlug} initial={activeRecord.data} />
+          <LeadContextEditor
+            leadId={id}
+            tenantSlug={ownedSlug}
+            initial={activeRecord.data}
+            bookingUrl={BOOKING_URL}
+            // A booked founder meeting suppresses the self-scheduling link in
+            // the quick email — see LeadQuickEmail's hasBookedMeeting note.
+            hasBookedMeeting={Boolean(nonEmptyString(activeRecord.data.founder_meeting_at))}
+          />
         </CollapsibleSection>
       ) : canMutateLead ? (
         <Card>
