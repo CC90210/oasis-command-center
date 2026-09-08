@@ -22,6 +22,8 @@ const FROM = (process.env.OASIS_MAIL_FROM || "").trim();
 // password. Strip all whitespace, exactly as the sender does.
 const PASS = (process.env.OASIS_MAIL_APP_PASSWORD || "").replace(/\s+/g, "");
 const SEND = process.argv.includes("--send");
+/** Optional: prove the CC and Reply-To headers actually land in a real inbox. */
+const CC_TO = (process.env.OASIS_TEST_CC || "").trim();
 
 if (!FROM || !PASS) {
   console.error("[verify] OASIS_MAIL_FROM / OASIS_MAIL_APP_PASSWORD not set in this environment");
@@ -60,6 +62,10 @@ try {
   const info = await transporter.sendMail({
     from: FROM,
     to: FROM,
+    // CC + Reply-To exercised for real. The whole point of this feature is that
+    // the rep gets a copy and the prospect's reply comes back to THEM, so a
+    // test that omits both proves only that SMTP works.
+    ...(CC_TO ? { cc: CC_TO, replyTo: CC_TO } : {}),
     subject: "OASIS shared mailbox: live connection test",
     text:
       "Automated test from verify-oasis-mailbox.\n\n" +
