@@ -78,12 +78,106 @@ type SubmitResponse = {
   lead_stage?: string | null;
   redirect_url?: string | null;
   error?: string;
+  /** Human sentence the route already wrote for this rejection. Preferred over
+   *  any copy on the client, because it can name the specific problem. */
+  message?: string;
+  /** Field the rejection belongs to, so it can be shown inline. */
+  field?: string;
   /** Set on the first anonymous-flow submit so subsequent steps re-use it. */
   minted_token?: string | null;
   /** Personalized "continue now" links — present on the interest form's
    *  completion only; the thank-you screen renders them as buttons. */
   next_forms?: Array<{ slug: string; label: string; url: string }> | null;
 };
+
+/**
+ * MERCHANT-FACING COPY FOR EVERY REJECTION `/api/forms/submit` CAN RETURN.
+ *
+ * WHY THIS EXISTS (2026-09-08). This map used to hold two entries,
+ * `rate_limited` and `server_error`, and the fallback chain was
+ * `friendly[code] || data.error || <generic sentence>`. That middle term is the
+ * bug: for the other eighteen codes the route can return, the merchant was
+ * shown the RAW CODE. A business owner who hit the size cap on their bank
+ * statements read the words `request_payload_too_large` on the screen, and one
+ * who reopened a half-finished application read `prior_step_incomplete`.
+ *
+ * Measured live on 2026-09-08 against production, all four merchant hosts: a
+ * step-0 submission with a street-only address returned
+ * `{error:"incomplete_address", field:"business_address", message:"Include the
+ * state and ZIP code..."}` and the merchant was shown the literal string
+ * "incomplete_address" while that perfectly good sentence was discarded.
+ *
+ * That is what "the link gives merchants an error code" was. It reads as random
+ * and geographic because which code you hit depends on how you typed an
+ * address, how big your statements are, and whether you finished in one sitting.
+ *
+ * THE RULE: a merchant must never see an identifier. Server `message` first
+ * (it can name the specific field), this map second, the generic sentence last.
+ * Adding a rejection to the route means adding its copy here — pinned by
+ * `tests/form-submit-error-copy.test.ts`, which reads the codes straight out of
+ * the route and fails on any that is unmapped.
+ */
+export const SUBMIT_ERROR_COPY: Record<string, string> = {
+  // Merchant can fix these by changing what they entered.
+  incomplete_address: "That address needs the street, state and ZIP code.",
+  missing_required_field: "Some required answers are still blank. Check the highlighted boxes.",
+  missing_required_file: "A required document is missing. Attach it and try again.",
+  too_many_files: "That is more files than this step accepts. Send fewer, or combine them into one PDF.",
+  request_payload_too_large:
+    "Those files are too large to send together. Try uploading them a few at a time.",
+  invalid_json: "Something went wrong sending your answers. Please try again.",
+
+  // Merchant can fix these by changing how they got here.
+  prior_step_incomplete:
+    "An earlier step is not finished yet. Go back and complete it, then continue.",
+  anonymous_init_requires_step_0:
+    "This form needs to be started from the beginning. Please reopen your link.",
+
+  /*
+   * THE LINK ITSELF IS BAD. `/api/forms/submit` builds these as
+   * `token_${sigResult.reason}` from lib/form-links.ts, so they are assembled at
+   * runtime and are easy to miss when reading the route for string literals —
+   * Codex caught exactly that (P2, 2026-09-08).
+   *
+   * These matter more than their obscurity suggests. `token_expired` is what a
+   * merchant gets when they come back to a rep's link a few days later, and
+   * before this change the word they saw on screen was "token_expired". That is
+   * indistinguishable, from the merchant's side, from "this company's software
+   * is broken" — and it is link-dependent, which is precisely the shape of the
+   * reports that started this investigation.
+   */
+  token_expired: "This link has expired. Ask your contact to send you a fresh one.",
+  token_invalid: "This link is not valid. Ask your contact to send you a fresh one.",
+  token_malformed:
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
+  token_missing_signature:
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
+  token_version_mismatch: "This link is out of date. Ask your contact to send you a fresh one.",
+  token_server_misconfigured:
+    "Something went wrong on our end. We have been notified, please try again shortly.",
+
+  no_auth_provided: "This link is missing its access code. Ask your contact to resend it.",
+  not_found: "This link is no longer valid. Ask your contact to send a fresh one.",
+  form_not_found: "This link is no longer valid. Ask your contact to send a fresh one.",
+  form_disabled: "This form is no longer accepting responses. Please contact us directly.",
+  rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
+
+  // Nothing the merchant did. Say so, and do not make them re-type anything.
+  server_error: "Something went wrong on our end. Please try submitting again.",
+  form_corrupt: "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  form_definition_corrupt:
+    "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  form_links_misconfigured:
+    "This form is temporarily unavailable. We have been notified, please try again shortly.",
+  tenant_mismatch: "This link does not match this form. Ask your contact to resend it.",
+  initialization_not_required: "Something went wrong starting this form. Please refresh and try again.",
+  invalid_step_index: "Something went wrong moving between steps. Please refresh and try again.",
+  step_index_out_of_range: "Something went wrong moving between steps. Please refresh and try again.",
+};
+
+/** Shown when the route returns a code this build has never heard of. */
+export const SUBMIT_ERROR_FALLBACK =
+  "We couldn't process that just now. Please try submitting again in a moment.";
 
 /** One key per form session. A retried submit is the SAME affirmative action and
  *  must resolve to the same evidence row, not a duplicate. */
@@ -555,15 +649,32 @@ export function FormPublicClient({
             built.payload,
           );
         }
-        const friendly: Record<string, string> = {
-          rate_limited: "Too many submissions too fast. Wait a few seconds and try again.",
-          server_error: "Something went wrong on our end. Please try submitting again.",
-        };
+        // An error code we have no copy for is itself a defect: it means the
+        // route grew a rejection nobody wrote a sentence for. The merchant
+        // still gets a plain sentence (below), but beacon it so it surfaces
+        // instead of being discovered by a merchant giving up.
+        if (data?.error && !(data.error in SUBMIT_ERROR_COPY)) {
+          reportSubmitFailure(`unmapped_submit_error:${data.error}`, built.payload);
+        }
+        // The route writes a specific sentence for the rejections that can
+        // name their own problem (which field, what is missing). Prefer it;
+        // fall back to our copy for the code; never show the bare code.
         setServerError(
-          (data?.error && friendly[data.error]) ||
-            data?.error ||
-            "We couldn't process that just now. Please try submitting again in a moment.",
+          data?.message ||
+            (data?.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
+            SUBMIT_ERROR_FALLBACK,
         );
+        // When the route names the offending field, put the message on the
+        // input too. A sentence at the bottom of a ten-field step does not
+        // tell a merchant WHICH box to fix.
+        if (data?.field) {
+          const fieldName = data.field;
+          const inlineCopy =
+            data.message ||
+            (data.error ? SUBMIT_ERROR_COPY[data.error] : undefined) ||
+            SUBMIT_ERROR_FALLBACK;
+          setErrors((prev) => ({ ...prev, [fieldName]: inlineCopy }));
+        }
         return;
       }
       // Capture the freshly-signed token from an anonymous step 0 so
