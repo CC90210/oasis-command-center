@@ -86,6 +86,7 @@ const TESTS = [
   "tests/local-cli-heartbeat-status.test.ts",
   "tests/intent-inquiry-lifecycle.test.ts",
   "tests/us-address.test.ts",
+  "tests/form-submit-error-copy.test.ts",
   "tests/application-disclosure.test.ts",
   "tests/application-pdf-rendered.test.ts",
   "tests/application-pdf.test.ts",
