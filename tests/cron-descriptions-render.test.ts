@@ -59,8 +59,13 @@ function run(name: string, fn: () => void) {
 console.log("cron-descriptions-render:");
 
 /**
- * SEED_JOBS job names, snapshotted 2026-09-08 from
+ * SEED_JOBS job names, snapshotted 2026-09-09 from
  * Business-Empire-Agent/scripts/core/cron_engine.py.
+ *
+ * "Carousel Media Retention" is in SEED_JOBS but deliberately NOT seeded to the
+ * live cron_jobs table pending CC's review, so it will not appear on the
+ * Automations tab yet. It belongs here regardless: this set answers "is a
+ * FRIENDLY_DESCRIPTIONS key a real job name", and it is one.
  */
 const SEEDED_JOB_NAMES = new Set<string>([
   "Booking Reminders",
@@ -70,6 +75,7 @@ const SEEDED_JOB_NAMES = new Set<string>([
   "Bravo — Review Harvest",
   "Bravo — Sleep Agent (Memory Consolidation)",
   "Break-Glass Drill (quarterly)",
+  "Carousel Media Retention",
   "Cross-Agent Self-Improvement Sweep",
   "Daily Automation Register",
   "Daily Bravo Brief",
