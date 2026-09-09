@@ -207,6 +207,17 @@ export function resolveSignerForOperator(
         email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
         phone: "",
       };
+    default:
+      // An UNRECOGNISED brand at runtime. TypeScript makes the switch above
+      // exhaustive, but it does not typecheck the test suite and cannot stop a
+      // JS caller passing { brand: "unknwon" }. Without this the switch fell
+      // through returning undefined, and the caller read `.name` off it — a
+      // TypeError far from the typo. Refuse instead, naming the value.
+      // (CodeRabbit, PR #423.)
+      throw new Error(
+        `resolveSignerForOperator: unknown brand ${JSON.stringify(opts.brand)}. ` +
+          "Refusing to sign as no company rather than guessing at one.",
+      );
   }
 }
 

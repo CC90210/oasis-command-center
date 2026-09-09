@@ -80,8 +80,13 @@ export const SUNBIZ_LEGAL_FOOTER =
  * claim, not a formatting choice.
  *
  * The identity lines are checked against lib/email/brands.ts by
- * tests/brand-footer-coherence.test.ts so the legal name and address here can
- * never drift from the registry that picks the sending credential.
+ * tests/brand-identity-coherence.test.ts, which asserts that each brand's
+ * footer names its OWN legal entity and no other brand's — so the name and
+ * address here cannot drift from the registry that picks the sending
+ * credential. (That file name was wrong in the first version of this comment:
+ * it cited tests/brand-footer-coherence.test.ts, which does not exist. Citing
+ * a guard that was never built is the same defect as skills/email-safety
+ * claiming --brand is required and validated, which it never was.)
  */
 const BRAND_FOOTERS: Record<BrandKey, string> = {
   sunbiz: SUNBIZ_LEGAL_FOOTER,

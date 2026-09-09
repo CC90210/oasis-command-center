@@ -157,6 +157,23 @@ assert.equal(
   "id and slug naming different companies must refuse",
 );
 
+// Inherited properties are not brands. A plain object answers "constructor"
+// and "toString" with functions — truthy values that would sail past a bare
+// lookup. Tenant slugs are named by anyone with workspace access.
+// (CodeRabbit, PR #423.)
+for (const hostile of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+  assert.equal(
+    brandForTenant({ tenantSlug: hostile }),
+    null,
+    `slug "${hostile}" resolved to something — inherited property leaked through`,
+  );
+  assert.equal(
+    brandForTenant({ tenantId: hostile }),
+    null,
+    `tenant id "${hostile}" resolved to something`,
+  );
+}
+
 // Disagreement between a supplied brand and the tenant's real one is reported.
 assert.ok(
   brandTenantConflict({ brand: "oasis", tenantSlug: "submissions" }),
@@ -262,6 +279,43 @@ assert.equal(
 
     compare("slug map", TENANT_SLUG_BRAND, pySlug);
     compare("tenant id map", TENANT_ID_BRAND, pyId);
+
+    // THE ADDRESS MUST MATCH ACROSS STACKS TOO.
+    //
+    // brands.ts previously CLAIMED this check existed ("compared byte-for-byte
+    // against the Python registry by the parity test") when the parity test
+    // compared brand keys only. Asserting a guard that was never built is the
+    // defect this whole change is about, so here is the guard.
+    //
+    // Containment, not equality: the two registries deliberately store
+    // different shapes — this stack keeps street-only because the legal name
+    // renders separately, while send_gateway.BRAND_IDENTITY stores the whole
+    // identification line. What must not drift is the STREET.
+    const pySendGateway = (() => {
+      const gw = found.replace(/tenant_brand\.py$/, "../integrations/send_gateway.py");
+      return existsSync(gw) ? readFileSync(gw, "utf8") : null;
+    })();
+    if (!pySendGateway) {
+      console.warn(
+        "brand-identity-coherence: SKIPPED the cross-stack ADDRESS check — " +
+          "send_gateway.py not found next to tenant_brand.py. The street can drift while this is skipped.",
+      );
+    } else {
+      const street = getBrand("oasis").postalAddress.split(",")[0].trim();
+      assert.ok(street.length > 0, "OASIS postalAddress has no street segment");
+      assert.ok(
+        pySendGateway.includes(street),
+        `OASIS street "${street}" is in the TypeScript registry but not in ` +
+          "send_gateway.BRAND_IDENTITY. The two stacks would identify the same " +
+          "company at different addresses on the same email.",
+      );
+      // And the client's address must NOT have followed it there.
+      const sunbizStreet = getBrand("sunbiz").postalAddress.split(",")[0].trim();
+      assert.ok(
+        !getBrand("oasis").postalAddress.includes(sunbizStreet),
+        "OASIS's address contains SunBiz's street",
+      );
+    }
   }
 }
 

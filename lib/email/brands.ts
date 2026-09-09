@@ -187,15 +187,26 @@ const REGISTRY: Record<BrandKey, () => Brand> = {
     // STREET ADDRESS ONLY, same shape as SunBiz above — the legal entity is
     // rendered separately, so repeating the name here would print it twice.
     //
-    // Supplied by CC 2026-09-09, closing the CASL s.6(2) gap this entry carried
-    // until then (it previously said only "Montreal, QC, Canada", with no
-    // street, which is an incomplete identification on every commercial email).
-    // Written unaccented and with the postal code so it is deliverable: the
-    // street is Boulevard Decarie in Cote-des-Neiges, and 6993 resolves to
-    // H3W 0B5. ASCII deliberately — this same string is compared byte-for-byte
-    // against the Python registry by the parity test, and an accent that
-    // survives one stack's encoding but not the other's would fail it for a
-    // reason that has nothing to do with identity.
+    // Street supplied by CC 2026-09-09 ("6993 Decary Boulevard"), closing the
+    // CASL s.6(2) gap this entry carried until then — it previously said only
+    // "Montreal, QC, Canada", a city rather than a mailing address.
+    //
+    // Two things CC did NOT supply, and where they came from:
+    //   - the spelling. CC wrote "Decary"; the street is Boulevard Decarie in
+    //     Cote-des-Neiges. Phonetic-to-correct is a normalisation, not an
+    //     invention, and Canada Post will not resolve "Decary".
+    //   - the postal code. Looked up, not guessed: 6993 Boul. Decarie is
+    //     H3W 0B5 (the Westbury), corroborated across realtor.ca, PadMapper
+    //     and Zumper listings for that building. If CC ever contradicts it,
+    //     his value wins — set OASIS_POSTAL_ADDRESS and this default is bypassed.
+    //
+    // Unaccented on purpose: the same street string has to appear in the Python
+    // registry too, and an accent that survives one stack's encoding but not the
+    // other's would look like an identity mismatch when it is only an encoding
+    // one. tests/brand-identity-coherence.test.ts asserts the street appears in
+    // BOTH stacks — containment, not equality, because the two registries store
+    // different shapes (this one is street-only; Python's includes the legal
+    // name, matching how each is rendered).
     postalAddress: env("OASIS_POSTAL_ADDRESS") || "6993 Decarie Blvd, Montreal, QC H3W 0B5",
     trackingOrigin: safeOrigin(env("OASIS_TRACKING_ORIGIN")),
     // Its own credential row — never "gws", which is SunBiz's. This is the

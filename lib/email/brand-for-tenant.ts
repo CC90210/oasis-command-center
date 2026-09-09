@@ -84,18 +84,27 @@ export function brandForTenant(args: {
   // have resolved to SunBiz. The id is the primary key — if we hold one and do
   // not recognise it, that is precisely the case where guessing is worst.
   // (Codex, adversarial review, 2026-09-09.)
+  // OWN PROPERTIES ONLY. A plain object inherits from Object.prototype, so
+  // TENANT_SLUG_BRAND["constructor"] and ["toString"] return functions —
+  // truthy values that are not brands. A tenant slug is attacker-adjacent
+  // input (it comes from a row anyone with workspace access can name), and
+  // "resolved to a truthy non-brand" is precisely the class of accident this
+  // module exists to make impossible. (CodeRabbit, PR #423.)
+  const ownId = Object.prototype.hasOwnProperty.call(TENANT_ID_BRAND, id)
+    ? TENANT_ID_BRAND[id]
+    : undefined;
+  const ownSlug = Object.prototype.hasOwnProperty.call(TENANT_SLUG_BRAND, slug)
+    ? TENANT_SLUG_BRAND[slug]
+    : undefined;
+
   if (id) {
-    const byId = TENANT_ID_BRAND[id];
-    if (!byId) return null;
+    if (!ownId) return null;
     // If a slug was ALSO supplied and disagrees, refuse rather than pick one.
-    if (slug) {
-      const bySlug = TENANT_SLUG_BRAND[slug];
-      if (bySlug && bySlug !== byId) return null;
-    }
-    return byId;
+    if (slug && ownSlug && ownSlug !== ownId) return null;
+    return ownId;
   }
 
-  if (slug) return TENANT_SLUG_BRAND[slug] ?? null;
+  if (slug) return ownSlug ?? null;
   return null;
 }
 
