@@ -34,6 +34,7 @@ import "server-only";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 
 /**
  * `tenant_integration_credentials.service` holding the shared OASIS mailbox.
@@ -57,21 +58,52 @@ export type OasisSharedSendResult =
 
 /** True when the shared OASIS mailbox is configured, by env or by tenant row. */
 export async function oasisSharedMailboxConfigured(tenantId: string): Promise<boolean> {
-  if (process.env.OASIS_MAIL_FROM && process.env.OASIS_MAIL_APP_PASSWORD) return true;
-  if (!tenantId) return false;
+  return !!(await resolveOasisMailboxFrom(tenantId));
+}
+
+/**
+ * The address OASIS mail leaves from, or null.
+ *
+ * Exported so CALLERS can exclude it from a Cc list. The shared sender already
+ * filters its own From, but the bridge fallback sends from the same mailbox
+ * without that knowledge — so a send that fell through to the bridge could
+ * still copy the sending address onto its own message, which is the exact
+ * duplication this work removes. Resolving it once in the route closes every
+ * transport at the same point.
+ */
+export async function resolveOasisMailboxFrom(tenantId: string): Promise<string | null> {
+  const envFrom = (process.env.OASIS_MAIL_FROM || "").trim();
+  if (envFrom && (process.env.OASIS_MAIL_APP_PASSWORD || "").trim()) return envFrom;
+  if (!tenantId) return null;
   const b = await getTenantIntegrationBundle(tenantId, OASIS_MAIL_SERVICE).catch(
     () => ({}) as Record<string, string>,
   );
-  return !!(b.from_address && b.app_password);
+  const from = (b.from_address || "").trim();
+  return from && (b.app_password || "").trim() ? from : null;
 }
 
 export async function sendOasisSharedGmail(args: {
   tenantId: string;
   to: string;
-  /** The acting rep, CC'd so they get a copy. Skipped when it equals `to`. */
-  cc?: string | null;
+  /**
+   * Who to copy: the lead's assigned rep first, then the sender. Accepts a
+   * single address for older callers. Anything equal to `to` or to this
+   * mailbox's own From address is dropped below — this is the only layer that
+   * knows the From address, and copying it produced the redundant
+   * From/Cc/Reply-To-all-one-address header CC reported on 2026-09-09.
+   */
+  cc?: string | string[] | null;
+  /** Where replies go. Defaults to the first copy recipient. */
+  replyTo?: string | null;
   subject: string;
   body: string;
+  /**
+   * Branded HTML alternative. `body` remains the plain-text part, so both are
+   * sent (multipart/alternative) and a client that refuses HTML still gets a
+   * readable message. Must already carry its own signature and footer:
+   * appendSignatureAndFooter is plain-text only and is applied to `body` alone.
+   */
+  html?: string | null;
   /** The acting rep, so the sign-off is theirs and not the mailbox owner's. */
   signer?: EmailSigner | null;
 }): Promise<OasisSharedSendResult> {
@@ -152,9 +184,23 @@ export async function sendOasisSharedGmail(args: {
     };
   }
 
-  // Never put the same address in To and Cc.
-  const cc = (args.cc || "").trim();
-  const ccFinal = cc && cc.toLowerCase() !== args.to.trim().toLowerCase() ? cc : undefined;
+  // Never copy the recipient, and never copy THIS MAILBOX. Sending from the
+  // shared address and Cc'ing it puts a duplicate of the message beside the
+  // copy already in its own Sent folder, which is what the header CC saw on
+  // 2026-09-09 was doing: From, Cc and Reply-To all conaugh@oasisai.work.
+  const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
+  const ccFinal = ccList.length ? ccList.join(", ") : undefined;
+  const excluded = new Set([args.to.trim().toLowerCase(), fromAddress.toLowerCase()]);
+
+  // Replies go to the person who OWNS the lead, not to the shared mailbox —
+  // otherwise the prospect answers into an inbox nobody watches, which is the
+  // same invisibility the Cc exists to fix, one step later in the conversation.
+  // Falls back to the first copy recipient, then to the mailbox itself.
+  const replyToCandidate = (args.replyTo || "").trim();
+  const replyTo =
+    replyToCandidate && !excluded.has(replyToCandidate.toLowerCase())
+      ? replyToCandidate
+      : ccList[0];
 
   try {
     const nodemailer = await import("nodemailer");
@@ -179,16 +225,27 @@ export async function sendOasisSharedGmail(args: {
       from: fromAddress,
       to: args.to,
       ...(ccFinal ? { cc: ccFinal } : {}),
-      // Replies go to the REP, not the shared mailbox. Without this the prospect
-      // answers into an inbox the rep does not watch, which is the same
-      // invisibility the CC exists to fix, one step later in the conversation.
-      ...(ccFinal ? { replyTo: ccFinal } : {}),
+      ...(replyTo ? { replyTo } : {}),
       subject: args.subject,
+      // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it
+      // as a header too lets a mail client offer its own one-click control and
+      // keeps filters from treating a branded HTML message as unattributed
+      // bulk. It points at the mailbox that is actually read, and matches the
+      // instruction in the footer rather than inventing a second mechanism.
+      headers: {
+        "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>`,
+      },
+      // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
+      // plain-text helper — it joins with "\n\n---\n" and detects an existing
+      // signature by comparing the last LINE — so it is applied here and never
+      // to the markup, which carries its own. Sending both parts means a client
+      // that refuses HTML still gets the whole message rather than a blank.
       text: appendSignatureAndFooter(args.body, {
         signer: args.signer,
         fromAddress,
         brand: "oasis",
       }),
+      ...(args.html ? { html: args.html } : {}),
     });
     return {
       ok: true,

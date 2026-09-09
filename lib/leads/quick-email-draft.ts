@@ -84,7 +84,74 @@ export function firstNameOf(contactName: string, company: string): string {
   const letters = (s: string) => s.replace(/[^a-z]/gi, "").toLowerCase();
   if (!name || (company && letters(name) === letters(company))) return "there";
   const first = name.split(/\s+/)[0];
-  return first && first.length > 1 ? first : "there";
+  return first && first.length > 1 ? titleCaseName(first) : "there";
+}
+
+/**
+ * Capitalise a scraped first name for the greeting.
+ *
+ * Scraped rows carry whatever the source page used, and 16 of the 1,983 named
+ * OASIS leads store an all-lowercase name — including the Broadway Locksmith
+ * row, which went out as "Hi simon,". To an owner that reads as a mail merge
+ * that did not even bother, which is the opposite of what a personal note from
+ * a rep is meant to signal.
+ *
+ * Only the ALL-lowercase case is touched. A name the source recorded with
+ * deliberate internal capitals — McCarthy, DeLuca, O'Brien, van Veen — is left
+ * exactly as written, because "Mccarthy" is a visible error where "mccarthy"
+ * was merely careless data. Hyphens and apostrophes each start a new part, so
+ * "mary-jane" and "o'brien" come back as "Mary-Jane" and "O'Brien".
+ */
+export function titleCaseName(raw: string): string {
+  const s = (raw || "").trim();
+  if (!s || s !== s.toLowerCase()) return s;
+  return s.replace(/[a-zà-ÿ]+/g, (w) => w.charAt(0).toUpperCase() + w.slice(1));
+}
+
+/**
+ * `website_condition` is a CLOSED VOCABULARY, so it gets an allowlist.
+ *
+ * WHY THIS EXISTS. prospectSafe() is a blocklist, and a blocklist fails OPEN:
+ * anything it has not been taught leaks. On 2026-09-09 it did exactly that. A
+ * real send to Broadway Locksmith went out reading
+ *
+ *     The thing I flagged about your website:
+ *     Has a site, not good
+ *
+ * because the list knew "has a site, not yet reviewed" and had never been shown
+ * "Has a site, not good". A stranger got a blunt internal verdict on his
+ * business presented as our considered finding.
+ *
+ * Counting the field across the whole tenant settles the design: FIVE distinct
+ * values exist in 1,973 rows. This is an enum wearing a text column, so the
+ * safe direction is an allowlist that maps the few sayable ones into prose and
+ * DROPS everything else. Unknown now fails closed — a new value added by a
+ * scraper next month says nothing to a prospect until somebody writes its line.
+ *
+ * The two omissions are deliberate, not oversights:
+ *   "Has a site, not yet reviewed" (1,893 rows) — nobody has looked. Claiming a
+ *       finding here would be inventing one.
+ *   "Has a site, not good"                      — a rep's private judgement.
+ *       True or not, it is not a thing you open a conversation with.
+ *
+ * Only observations the OWNER CAN CHECK HIMSELF survive: no site, or a site
+ * that will not load. Both are verifiable in ten seconds, which is what makes
+ * them fair to put in writing.
+ */
+export const CONDITION_PROSE: Record<string, string> = {
+  "no website": "From what I can see, you don't have a website yet.",
+  "does not have a site": "From what I can see, you don't have a website yet.",
+  "website does not load": "From what I can see, your website isn't loading at the moment.",
+};
+
+/** Prospect-safe sentence for a stored condition, or "" when there is none. */
+export function conditionProse(raw: string): string {
+  const key = (raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.!,;]+$/, "");
+  return CONDITION_PROSE[key] || "";
 }
 
 export type QuickEmailLead = {
@@ -115,20 +182,37 @@ export function buildDraft(
   const first = firstNameOf(lead.name, lead.company);
   const company = (lead.company || "").trim();
   const findings = prospectSafe(lead.audit_findings);
-  const condition = prospectSafe(lead.website_condition);
   const notes = prospectSafe(lead.notes);
   const industry = (lead.industry || "").trim().toLowerCase();
   const city = (lead.business_city || "").trim();
 
-  // Assembled only from things somebody actually recorded. Findings beat the
-  // one-line condition; if both are placeholders there is no paragraph at all.
-  const observed = findings || condition;
+  /**
+   * The one observation paragraph, or nothing at all.
+   *
+   * A real audit finding is free prose, so it keeps its label and is quoted as
+   * written. A stored condition is an enum, so it arrives as a finished
+   * sentence from CONDITION_PROSE and takes NO label — labelling it would
+   * produce "The thing I flagged about your website: From what I can see..."
+   *
+   * When neither survives the paragraph is dropped. An email that says less is
+   * recoverable; one that invents a finding about a stranger's business is not.
+   */
+  const observedBlock = (label: string): string =>
+    findings ? `${label}\n${findings}` : conditionProse(lead.website_condition);
 
   // Always name what the time is FOR. "Pick a time" with no subject reads
   // like a trap, and a 15-minute bound is the promise that gets it accepted.
+  //
+  // WITH NO LINK, ASK — do not go quiet. The booking URL was previously a
+  // hardcoded calendar address whose schedule had been deleted, so every one of
+  // these emails invited the owner to book and delivered him to an error page
+  // (CC, 2026-09-09). The link is now absent rather than wrong when nothing is
+  // configured, and an absent link must not silently remove the ask: a reply
+  // naming two times books just as well, and it is the sentence a person would
+  // write anyway.
   const booking = bookingUrl
     ? `If it's easier than phone tag, you can grab a 15-minute slot here and pick whatever time suits you:\n${bookingUrl}`
-    : "";
+    : "If it's easier than phone tag, reply with a couple of times that suit you this week and I'll send an invite. Fifteen minutes is plenty.";
 
   const what =
     `We build and look after websites for ${industry ? `${industry} businesses` : "local businesses"}` +
@@ -139,7 +223,8 @@ export function buildDraft(
 
   if (template === "thanks_for_call") {
     parts.push("Thanks for taking my call just now. Here's the short version in writing, as promised.");
-    if (observed) parts.push(`What I noticed about your website:\n${observed}`);
+    const observed = observedBlock("What I noticed about your website:");
+    if (observed) parts.push(observed);
     if (notes) parts.push(notes);
     parts.push(what);
     if (booking) parts.push(booking);
@@ -152,7 +237,8 @@ export function buildDraft(
 
   if (template === "info_request") {
     parts.push("You asked me to put this in an email, so here it is, short as I can make it.");
-    if (observed) parts.push(`What I noticed about your website:\n${observed}`);
+    const observed = observedBlock("What I noticed about your website:");
+    if (observed) parts.push(observed);
     parts.push(`${what} No long contract.`);
     if (notes) parts.push(notes);
     if (booking) parts.push(booking);
@@ -164,7 +250,8 @@ export function buildDraft(
   }
 
   parts.push("Following up on my last note. I know how quickly this stuff gets buried.");
-  if (observed) parts.push(`The thing I flagged about your website:\n${observed}`);
+  const observed = observedBlock("The thing I flagged about your website:");
+  if (observed) parts.push(observed);
   if (notes) parts.push(notes);
   if (booking) parts.push(booking);
   parts.push("If it's not a priority right now, tell me and I'll stop chasing.");

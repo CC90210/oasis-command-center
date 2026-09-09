@@ -31,10 +31,13 @@ import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/in
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
-import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send";
+import { sendOasisSharedGmail, resolveOasisMailboxFrom } from "@/lib/integrations/oasis-shared-gmail-send";
 import { appendSignatureAndFooter } from "@/lib/config/email-signature";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
+import { buildCopyList, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
+import { resolveAssigneeEmail } from "@/lib/leads/assignee-email";
+import { renderQuickEmailHtml } from "@/lib/leads/quick-email-html";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,8 +69,13 @@ async function triggerImmediateSend(
     leadId: string;
     brand?: string;
     signer: { name: string; email: string; phone: string };
-    /** The acting rep, CC'd so they get a copy in their own inbox. */
-    cc?: string;
+    /**
+     * Who to copy: the lead's assigned rep first, then the sender when that is
+     * someone else. A list, because a lead can be worked by a rep who did not
+     * press the button — bridge_tools._tool_send_email accepts either a list or
+     * a comma-separated string and normalises both through normalize_cc.
+     */
+    cc?: string[];
   },
 ): Promise<
   | { status: "sent"; agent_source?: string }
@@ -104,7 +112,10 @@ async function triggerImmediateSend(
         // SunBiz's shared-inbox model, with the note "the operator must be CC'd
         // or they never see the reply"). exec-tool forwards the payload
         // verbatim, so this reaches it unchanged.
-        ...(args.cc ? { cc: args.cc } : {}),
+        // Length-checked, not truthiness-checked: [] is truthy in JS, so a lead
+        // with nobody to copy would have sent `cc: []` and relied on the far
+        // side to discard it.
+        ...(args.cc && args.cc.length ? { cc: args.cc } : {}),
         // Per-operator signing — bridge tool sets BRAVO_FROM_*_SUNBIZ
         // env on the send_gateway subprocess so the signature renders
         // THIS operator's identity (Jordan / Alex / Matt) instead of
@@ -342,24 +353,66 @@ export async function POST(
   const signer = resolveSignerForOperator(sess.email, { brand });
 
   /**
-   * The rep's own address, CC'd on every send so they can SEE what went out.
+   * Who gets copied: the rep the lead BELONGS to, then the person who sent it.
    *
-   * Why this is not optional. On this tenant no rep has a mailbox connected
-   * (user_integration_credentials holds zero rows for it), so every send falls
-   * through to the bridge and leaves from the BRAND mailbox. The rep's Sent
-   * folder stays empty and their Inbox never sees it, so from where they sit a
-   * successful send and a total failure look identical — which is precisely
-   * what happened on 2026-09-08: a send the ledger records as delivered was
-   * reported as "never sent", and pressing the button again produced a
-   * duplicate.
+   * Why a copy is not optional. On this tenant no rep has a mailbox connected
+   * (user_integration_credentials holds zero rows for it), so every send leaves
+   * from a shared mailbox. The rep's Sent folder stays empty and their Inbox
+   * never sees it, so from where they sit a successful send and a total failure
+   * look identical — which is precisely what happened on 2026-09-08: a send the
+   * ledger records as delivered was reported as "never sent", and pressing the
+   * button again produced a duplicate.
    *
-   * Empty when the rep is themselves the recipient, so the same address never
-   * lands in both To and Cc.
+   * Why it is keyed on ASSIGNMENT rather than on who pressed the button
+   * (CC, 2026-09-09). The previous version copied `sess.email` alone, which got
+   * both halves wrong at once. The rep who owns the lead was never copied —
+   * Broadway Locksmith is schneur@oasisai.work's, and he saw nothing. And when
+   * the sender IS the shared mailbox, it copied that mailbox onto its own
+   * outgoing mail: From, Cc and Reply-To all one address, a duplicate of
+   * something already in its own Sent folder.
+   *
+   * The lead's assignee is now first in the list, so they are copied whoever
+   * sends, and they become the Reply-To — a prospect's answer should reach the
+   * person holding the relationship. The sending mailbox is excluded inside the
+   * sender, which is the only layer that knows its own From address.
    */
-  const repCopyAddress =
-    sess.email && sess.email.trim().toLowerCase() !== toEmail.trim().toLowerCase()
-      ? sess.email.trim()
-      : undefined;
+  // The route never loaded the lead before now. `assigned_to` was read in only
+  // one place — assertMayWorkLead's non-admin branch — and an admin skips that
+  // query entirely, which is why an admin's send could never have found the
+  // assignee even in principle. Soft-fails: a lookup error costs the rep copy,
+  // never the prospect's email.
+  const { data: leadRow, error: leadRowError } = await db
+    .from("tenant_records")
+    .select("data")
+    .eq("tenant_id", sess.tenantId)
+    .eq("entity_type", "lead")
+    .eq("id", leadId)
+    .maybeSingle();
+  if (leadRowError) trackingWarnings.push("assignee_lead_read_failed");
+  const leadData = (leadRow?.data || {}) as Record<string, unknown>;
+
+  const assignee = await resolveAssigneeEmail(
+    sess.tenantId,
+    typeof leadData.assigned_to === "string" ? leadData.assigned_to : null,
+  );
+  // An owner who should have been copied and was not is worth a warning. Without
+  // this, a failed roster read looks exactly like an unassigned lead and the
+  // send still reports success — the rep simply never hears about their lead.
+  if (assignee.status === "lookup_failed") trackingWarnings.push("assignee_lookup_failed");
+  if (assignee.status === "no_address") trackingWarnings.push("assignee_has_no_address");
+  const assignedRepEmail = assignee.status === "resolved" ? assignee.email : null;
+  // The sending mailbox is excluded HERE, not only inside the shared sender.
+  // The bridge fallback leaves from the same address and has no way to know it,
+  // so a send that fell through to the bridge could still copy the From address
+  // onto its own message. Excluding once, at the point the list is built, closes
+  // every transport at the same place.
+  const oasisMailboxFrom = brand === "oasis" ? await resolveOasisMailboxFrom(sess.tenantId) : null;
+  const copyList = buildCopyList({
+    assignedRepEmail,
+    senderEmail: sess.email,
+    toEmail,
+    excludeAddresses: [oasisMailboxFrom],
+  });
 
   // Send. Preference order:
   //   1. The operator's OWN connected Gmail (immediate, from THEIR address) —
@@ -416,9 +469,33 @@ export async function POST(
       const shared = await sendOasisSharedGmail({
         tenantId: sess.tenantId,
         to: toEmail,
-        cc: repCopyAddress,
+        cc: copyList,
+        replyTo: pickReplyTo(copyList),
         subject: truncatedSubject,
         body: truncatedBody,
+        // THE HTML IS A RENDERING OF `body`, NEVER A SECOND COMPOSITION.
+        //
+        // Same string, dressed. The rep edits plain text in the composer and
+        // that edit has to be what the prospect reads, so the markup is derived
+        // from the final text rather than assembled in parallel — two authored
+        // versions would drift the first time a rep changed a word, and only
+        // one of them gets reviewed.
+        //
+        // `body` also stays the plain-text alternative on the wire and the
+        // string stored in lead_interactions.content_preview, which the
+        // conversations thread renders as escaped text. Storing markup there
+        // would put tags in the rep's own timeline.
+        //
+        // Deliberately ONLY on this branch. The operator-Gmail senders hardcode
+        // Content-Type: text/plain, and send_gateway auto-promotes anything
+        // HTML-shaped into an html part while tag-stripping the text — so a
+        // body that carried markup would render differently on each transport,
+        // and correctly on none.
+        html: renderQuickEmailHtml(truncatedBody, {
+          signerName: signer?.name ?? null,
+          signerEmail: pickReplyTo(copyList),
+          preheader: truncatedSubject,
+        }),
         signer,
       });
       if (shared.ok) {
@@ -457,9 +534,10 @@ export async function POST(
       leadId,
       brand,
       signer,
-      // The rep gets their own copy. Skipped if the rep IS the recipient, which
-      // would put the same address in To and Cc.
-      cc: repCopyAddress,
+      // Assigned rep first, then the sender. bridge_tools._tool_send_email
+      // accepts a list and normalises it through send_gateway.normalize_cc,
+      // so all three call sites agree on the shape.
+      cc: copyList,
     });
   };
 
@@ -468,6 +546,12 @@ export async function POST(
       tenantId: sess.tenantId,
       userId: sess.userId,
       to: toEmail,
+      // The assignee is copied on EVERY transport, not only the shared mailbox.
+      // This branch runs when the SENDER has their own mailbox connected, which
+      // gives the sender a Sent copy and still leaves the rep who owns the lead
+      // with nothing — the half of the problem that has nothing to do with which
+      // transport carried the message. The sender filters out its own From.
+      cc: copyList,
       subject: truncatedSubject,
       body: truncatedBody,
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
@@ -488,6 +572,8 @@ export async function POST(
       tenantId: sess.tenantId,
       userId: sess.userId,
       to: toEmail,
+      // Same reason as the app-password branch above.
+      cc: copyList,
       subject: truncatedSubject,
       body: truncatedBody,
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly

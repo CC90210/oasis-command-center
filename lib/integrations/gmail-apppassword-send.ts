@@ -19,6 +19,7 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // CANSPAM_FOOTER, which had NO rep signature and a stale street address —
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 
 export type GmailAppPasswordSendResult =
   | { ok: true; provider: "gmail_apppassword"; gmail_message_id: string; from_address: string }
@@ -49,6 +50,8 @@ export async function sendGmailAppPasswordAsOperator(args: {
   tenantId: string;
   userId: string;
   to: string;
+  /** Who to copy — the lead's assigned rep first. See lead-copy-recipients.ts. */
+  cc?: string | string[] | null;
   subject: string;
   body: string;
   signer?: EmailSigner | null;
@@ -75,9 +78,16 @@ export async function sendGmailAppPasswordAsOperator(args: {
       host: "smtp.gmail.com", port: 587, secure: false, requireTLS: true,
       auth: { user: fromAddress, pass: appPassword },
     });
+    // The lead's assigned rep is copied here too, not only on the shared-mailbox
+    // path. This branch runs when the SENDER has their own mailbox connected —
+    // in which case the sender has a Sent copy but the rep who owns the lead
+    // still has nothing, which is the half of the problem that has nothing to do
+    // with which transport was used. Excludes this mailbox and the recipient.
+    const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
     const info = await transporter.sendMail({
       from: fromAddress,
       to: args.to,
+      ...(ccList.length ? { cc: ccList.join(", ") } : {}),
       subject: args.subject,
       text: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
     });
