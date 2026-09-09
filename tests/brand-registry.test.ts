@@ -13,7 +13,6 @@ import {
   getBrand,
   resolveBrandKey,
   resolveBrandKeyOrNull,
-  requireBrandKey,
   brandIsSendable,
   ALL_BRAND_KEYS,
 } from "../lib/email/brands";
@@ -65,10 +64,6 @@ assert.equal(resolveBrandKeyOrNull(""), null);
 assert.equal(resolveBrandKeyOrNull("nonsense"), null);
 assert.equal(resolveBrandKeyOrNull("oasis"), "oasis");
 
-// requireBrandKey names the call site so a failure says WHICH path lost it.
-assert.equal(requireBrandKey("sunbiz", "test"), "sunbiz");
-assert.throws(() => requireBrandKey(undefined, "some/send/path"), /some\/send\/path/);
-assert.throws(() => requireBrandKey("", "ctx"), /no usable brand/);
 
 // ---------------------------------------------------------------------------
 // Every brand is completely specified. A brand missing a postal address is a

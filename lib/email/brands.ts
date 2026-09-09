@@ -261,23 +261,6 @@ export function resolveBrandKeyOrNull(raw: unknown): BrandKey | null {
   return (ALL_BRAND_KEYS as readonly string[]).includes(s) ? (s as BrandKey) : null;
 }
 
-/**
- * The brand, or an exception. Use where a send is about to happen.
- *
- * `context` names the call site so the failure says which path lost the brand
- * rather than just that one did.
- */
-export function requireBrandKey(raw: unknown, context: string): BrandKey {
-  const key = resolveBrandKeyOrNull(raw);
-  if (!key) {
-    throw new Error(
-      `${context}: no usable brand (got ${JSON.stringify(raw)}). ` +
-        `Expected one of: ${ALL_BRAND_KEYS.join(", ")}. A commercial email must ` +
-        "state a real sender identity, so this refuses rather than defaulting.",
-    );
-  }
-  return key;
-}
 
 export function getBrand(key: BrandKey): Brand {
   return REGISTRY[resolveBrandKey(key)]();

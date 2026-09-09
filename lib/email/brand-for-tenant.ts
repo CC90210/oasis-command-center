@@ -100,25 +100,6 @@ export function brandForTenant(args: {
 }
 
 /**
- * The brand, or throw. For paths where a send is imminent and there is no
- * sensible way to continue without an identity.
- */
-export function requireBrandForTenant(
-  args: { tenantId?: string | null; tenantSlug?: string | null },
-  context: string,
-): BrandKey {
-  const brand = brandForTenant(args);
-  if (!brand) {
-    throw new Error(
-      `${context}: tenant ${args.tenantId || args.tenantSlug || "(none)"} has no sending brand. ` +
-        "Map it in lib/email/brand-for-tenant.ts (and scripts/lib/tenant_brand.py) " +
-        "before sending mail on its behalf.",
-    );
-  }
-  return brand;
-}
-
-/**
  * Does a caller-supplied brand agree with the tenant's real one?
  *
  * Returns null when there is nothing to contradict (unknown tenant, or no brand
