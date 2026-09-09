@@ -149,9 +149,9 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   token_expired: "This link has expired. Ask your contact to send you a fresh one.",
   token_invalid: "This link is not valid. Ask your contact to send you a fresh one.",
   token_malformed:
-    "This link looks incomplete — it may have been cut off in a text or email. Ask your contact to resend it.",
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
   token_missing_signature:
-    "This link looks incomplete — it may have been cut off in a text or email. Ask your contact to resend it.",
+    "This link looks incomplete. It may have been cut off in a text or email, so ask your contact to resend it.",
   token_version_mismatch: "This link is out of date. Ask your contact to send you a fresh one.",
   token_server_misconfigured:
     "Something went wrong on our end. We have been notified, please try again shortly.",
