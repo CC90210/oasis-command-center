@@ -117,6 +117,7 @@ run("no em dash reaches a prospect, in any template or the sign-off", () => {
   // The sign-off appended to every outbound email, whatever composed it.
   const signed = appendSignatureAndFooter("Body text.", {
     signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
   });
   assert.ok(!signed.includes("—"), "the sign-off still carries an em dash");
   assert.match(signed, /\n\nAriel/, "the name should sign off on its own line");
@@ -125,6 +126,7 @@ run("no em dash reaches a prospect, in any template or the sign-off", () => {
   // dashed one survives in bodies drafted before the change.
   const legacy = appendSignatureAndFooter("Body text.\n\n— Ariel", {
     signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
   });
   assert.equal(
     (legacy.match(/Ariel/g) || []).length,
@@ -133,6 +135,7 @@ run("no em dash reaches a prospect, in any template or the sign-off", () => {
   );
   const fresh = appendSignatureAndFooter("Body text.\n\nAriel", {
     signer: { name: "Ariel", email: "ariel@oasisai.work", phone: "" },
+    brand: "oasis",
   });
   assert.equal(
     (fresh.match(/Ariel/g) || []).length,
@@ -192,9 +195,20 @@ run("an OASIS email never carries SunBiz's legal footer", () => {
   assert.match(oasis, /UNSUBSCRIBE/, "no opt-out instruction");
   assert.ok(!oasis.includes("—"), "the OASIS footer carries an em dash");
 
-  // Existing callers pass no brand and must be untouched.
-  const legacy = appendSignatureAndFooter("Body.", { signer: { name: "Jordan" } });
-  assert.match(legacy, /SunBiz Funding LLC/, "the default footer changed for existing callers");
+  // A SunBiz caller states SunBiz. This previously read "existing callers pass
+  // no brand and must be untouched" and asserted the unbranded default still
+  // produced SunBiz's footer -- pinning the fail-open that put the client's
+  // legal identity on OASIS mail. Omitting the brand now refuses.
+  const sunbiz = appendSignatureAndFooter("Body.", {
+    signer: { name: "Jordan" },
+    brand: "sunbiz",
+  });
+  assert.match(sunbiz, /SunBiz Funding LLC/, "a SunBiz email lost SunBiz's footer");
+  assert.throws(
+    () => appendSignatureAndFooter("Body.", { signer: { name: "Jordan" } } as never),
+    /brand is required|no footer for brand/,
+    "an unbranded caller must refuse, not inherit another company's identity",
+  );
 });
 
 run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'd", () => {

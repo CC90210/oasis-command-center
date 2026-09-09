@@ -69,8 +69,15 @@ run("the other portal's shared identity is untouched", () => {
   // flows. A domain-based heuristic would have silently re-signed them, which
   // is the cross-portal bleed this change exists to stop — so the fallback is
   // driven by an explicit brand, never by the sender's address.
-  const noBrand = resolveSignerForOperator("conaugh@oasisai.work");
-  assert.equal(noBrand.name, "SunBiz Submissions", "an unbranded caller's behaviour changed");
+  // REWRITTEN 2026-09-09. This asserted that an unbranded caller still got
+  // "SunBiz Submissions" -- i.e. it pinned the fail-open as correct. That
+  // default is exactly what signed OASIS cold email as the client. An
+  // unbranded caller now REFUSES rather than picking a company.
+  assert.throws(
+    () => resolveSignerForOperator("conaugh@oasisai.work", undefined as never),
+    /brand is required/,
+    "an unbranded caller must refuse, not fall back to the other company",
+  );
 
   const other = resolveSignerForOperator("someone@example.com", { brand: "sunbiz" });
   assert.equal(other.name, "SunBiz Submissions");
@@ -90,9 +97,14 @@ run("the brand reaches the signer through EVERY door, not just the reported one"
   );
   assert.match(noSigner, /\n\nAriel/, "the fallback signer did not resolve to the sender");
 
-  // ...and with no brand it must still behave exactly as it always did.
-  const legacy = appendSignatureAndFooter("Body.", { fromAddress: "someone@example.com" });
-  assert.match(legacy, /SunBiz Submissions/, "the unbranded default changed");
+  // ...and with no brand it must REFUSE. This previously asserted the footer
+  // helper still returned SunBiz's identity for an unbranded caller, which is
+  // the same fail-open one layer down.
+  assert.throws(
+    () => appendSignatureAndFooter("Body.", { fromAddress: "someone@example.com" } as never),
+    /brand is required|no footer for brand/,
+    "an unbranded footer must refuse, not default to another company",
+  );
 
   // 2. The template-send route resolves a brand and then has to USE it. It
   //    computed one on the line above the signer call and passed it to the

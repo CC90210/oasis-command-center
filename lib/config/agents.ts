@@ -146,6 +146,19 @@ export function resolveSignerForOperator(
    */
   opts: { brand: BrandKey },
 ): { name: string; email: string; phone: string } {
+  // `brand` is required at the type level, but TypeScript does not typecheck the
+  // test suite and nothing stops a JS caller. Without this, omitting it threw
+  // "Cannot read properties of undefined (reading 'brand')" from deep inside the
+  // roster lookup — a stack trace that says nothing about the actual mistake.
+  // Say what is wrong instead, and refuse rather than picking a company.
+  if (!opts || !opts.brand) {
+    throw new Error(
+      "resolveSignerForOperator: brand is required. It used to default to " +
+        '"SunBiz Submissions", which signed OASIS cold email as the client. ' +
+        "Pass the sending brand explicitly.",
+    );
+  }
+
   // ROSTER FIRST — BUT IT IS SUNBIZ'S ROSTER.
   //
   // agents.config.json holds only @sunbizfunding.com addresses and is read for
