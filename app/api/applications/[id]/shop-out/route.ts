@@ -84,7 +84,10 @@ export async function POST(
   // use for BRAVO_FROM_DISPLAY when spawning send_gateway. Shared with
   // /api/leads/[id]/email + lender-threads/[threadId]/retry — see
   // lib/config/agents.ts:resolveSignerForOperator.
-  const signer = resolveSignerForOperator(sess.email);
+  // Lender shop-out is always SunBiz — funders receive SunBiz paper only, the
+  // same hard rule outbound-routing.ts encodes. Stated explicitly now that the
+  // signer no longer defaults to a company.
+  const signer = resolveSignerForOperator(sess.email, { brand: "sunbiz" });
 
   let body: {
     lender_ids?: string[];

@@ -198,7 +198,8 @@ export async function POST(
   // Send in-process, the same path the initial shop-out now uses. Retry must
   // never take a different route to the lender than Send did: when they differ,
   // "Retry worked" stops being evidence that Send is fixed.
-  const signer = resolveSignerForOperator(sess.email);
+  // Lender correspondence is SunBiz-only (see shop-out route).
+  const signer = resolveSignerForOperator(sess.email, { brand: "sunbiz" });
   let physicalSend: {
     status: "sent" | "partial" | "error" | "skipped";
     sent_count?: number;

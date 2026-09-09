@@ -33,6 +33,7 @@ import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { sendOasisSharedGmail, resolveOasisMailboxFrom } from "@/lib/integrations/oasis-shared-gmail-send";
 import { appendSignatureAndFooter } from "@/lib/config/email-signature";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { buildCopyList, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
@@ -231,6 +232,42 @@ export async function POST(
   const truncatedBody = text.slice(0, MAX_BODY);
   const truncatedSubject = subject.slice(0, MAX_SUBJECT);
 
+  // ---- RESOLVE THE SENDING IDENTITY BEFORE QUEUEING ANYTHING ------------
+  //
+  // This block used to sit AFTER the insert below, and CodeRabbit was right to
+  // call that critical: the row is queued and an agent_event is published
+  // before the check ran, so returning 409 refused the CALLER while leaving a
+  // queued row that dashboard_email_consumer would then drain and send — under
+  // its own _DEFAULT_BRAND, which is the exact default this work removes. A
+  // guard that returns an error while the message still goes out is worse than
+  // no guard, because the operator is told it was stopped.
+  //
+  // Resolved from an explicit, fail-closed map (lib/email/brand-for-tenant.ts).
+  // It was: `tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined`
+  // — the lookup only WARNS on error, so a transient failure made brand
+  // `undefined`, which every downstream helper read as SunBiz; and the middle
+  // branch branded EVERY non-SunBiz tenant OASIS, across 49 live tenants of
+  // which 47 are self-signup accounts including real third parties.
+  const tenantRes = await db
+    .from("tenants")
+    .select("slug")
+    .eq("id", sess.tenantId)
+    .maybeSingle();
+  const tenantSlug = (tenantRes.data as { slug: string } | null)?.slug || "";
+  const brand = brandForTenant({ tenantId: sess.tenantId, tenantSlug });
+  if (!brand) {
+    // Nothing has been queued yet, so this refusal actually refuses.
+    return NextResponse.json(
+      {
+        error: "no_sending_brand",
+        detail:
+          `This workspace (${tenantSlug || sess.tenantId}) has no sending identity configured, ` +
+          "so nothing was queued or sent. Map it in lib/email/brand-for-tenant.ts.",
+      },
+      { status: 409 },
+    );
+  }
+
   // Insert the queued interaction. send_gateway.py polls
   // lead_interactions WHERE status='queued' AND channel='email' and
   // performs the actual send + status update.
@@ -329,21 +366,12 @@ export async function POST(
     console.error("[leads.email] stage dispatch failed", err);
   }
 
-  // Resolve tenant slug → brand for the auto-trigger. send_gateway
-  // defaults to OASIS brand if unset, which would ship a SunBiz lead
-  // email under the wrong identity. One extra lookup; cheap.
-  const tenantRes = await db
-    .from("tenants")
-    .select("slug")
-    .eq("id", sess.tenantId)
-    .maybeSingle();
+  // brand + tenantSlug were resolved BEFORE the queue insert above, so a
+  // tenant with no sending identity never gets a queued row at all.
   if (tenantRes.error) {
     trackingWarnings.push("tenant_brand_lookup_failed");
     console.error("[leads.email] tenant brand lookup failed", tenantRes.error);
   }
-  const tenantSlug = (tenantRes.data as { slug: string } | null)?.slug || "";
-  const brand =
-    tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined;
 
   // Resolve operator → signer (shared helper, same shape as shop-out
   // and lender-threads retry).
@@ -437,6 +465,9 @@ export async function POST(
       const signedBody = appendSignatureAndFooter(truncatedBody, {
         signer,
         fromAddress: "submissions@sunbizfunding.com",
+        // Inside `if (brand === "sunbiz")`, so this is SunBiz by construction —
+        // stated rather than inherited from a default that no longer exists.
+        brand: "sunbiz",
       });
       const shared = await sendGmail({
         tenantId: sess.tenantId,
@@ -557,6 +588,10 @@ export async function POST(
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
       // like the queue path does (parity fix 2026-07-10).
       signer,
+      // The rep's own mailbox carries the message, but the FOOTER is the
+      // company's. Without this the helper defaulted to SunBiz, so a rep on an
+      // OASIS lead sent a prospect the client's legal identity.
+      brand,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_apppassword", via: "gmail_apppassword", from_address: g.from_address };
@@ -579,6 +614,9 @@ export async function POST(
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
       // like the queue path does (parity fix 2026-07-10).
       signer,
+      // Same reason as the app-password branch: the mailbox is the rep's, the
+      // legal footer is the company's.
+      brand,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_oauth", via: "gmail_oauth", from_address: g.from_address };

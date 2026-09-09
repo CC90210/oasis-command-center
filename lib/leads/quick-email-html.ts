@@ -28,7 +28,7 @@
 export const OASIS_EMAIL_BRAND = {
   name: "OASIS AI Solutions",
   /** CASL/CAN-SPAM identification line. A real address mail is received at. */
-  postalAddress: "Montreal, QC, Canada",
+  postalAddress: "6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada",
   logoUrl: "https://oasisai.work/oasis-logo.jpg",
   /** Matches the portal's accent so an email and the dashboard look related. */
   accent: "#2FB6A8",

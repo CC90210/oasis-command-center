@@ -260,8 +260,28 @@ assert.equal(unsubscribeMailto("bluerise"),
   "mailto:submissions@bluerisebusinesscapital.com?subject=unsubscribe",
   "the unsubscribe mailto must reach the mailbox that actually sent");
 
-// An unknown brand falls back to SunBiz rather than erroring or going blank.
-assert.equal(fromAddress("nonsense" as never), "submissions@sunbizfunding.com");
+// An unknown brand REFUSES rather than falling back.
+//
+// This asserted `fromAddress("nonsense") === "submissions@sunbizfunding.com"`
+// until 2026-09-09 — a second test, in a second file, locking in the same
+// fail-open as tests/brand-registry.test.ts. Between them they made the client's
+// From address the answer to every question the system could not parse, and
+// reported that as correct on every CI run.
+assert.throws(
+  () => fromAddress("nonsense" as never),
+  /unknown brand/,
+  "an unparseable brand must not resolve to a real company's mailbox",
+);
+
+// OASIS resolves to OASIS. Before it was a registry entry this returned
+// submissions@sunbizfunding.com — the client's mailbox, for our own mail.
+assert.equal(fromAddress("oasis"), "conaugh@oasisai.work");
+assert.equal(fromDomain("oasis"), "oasisai.work");
+assert.equal(
+  messageIdDomain("oasis"),
+  "oasisai.work",
+  "Message-Id must follow the sending domain, not the client's",
+);
 
 // ---------------------------------------------------------------------------
 // The click allowlist must cover EVERY brand at once, not just the caller's.

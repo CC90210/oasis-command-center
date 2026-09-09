@@ -155,6 +155,10 @@ const TESTS = [
   "tests/email-sending-identity.test.ts",
   "tests/brand-registry.test.ts",
   "tests/shopout-brand-lock.test.ts",
+  // One message names exactly one company. Registered here deliberately: this
+  // list is explicit, not globbed, so a coherence guard that is not on it is a
+  // file that never runs.
+  "tests/brand-identity-coherence.test.ts",
   "tests/brand-routing.test.ts",
   "tests/drip-deal-state.test.ts",
   "tests/drip-board-parity.test.ts",

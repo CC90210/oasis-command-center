@@ -43,7 +43,7 @@ import { checkTcpaWindow, nextTcpaWindowStart } from "@/lib/tcpa-window";
 import { renderTemplate } from "@/lib/drips/templates";
 import { parseDripSteps, type DripStep } from "@/lib/drips/types";
 import { sendDripSms, sendDripEmail } from "@/lib/drips/send";
-import { brandIsSendable, type BrandKey } from "@/lib/email/brands";
+import { brandIsSendable, toDripBrand, type BrandKey } from "@/lib/email/brands";
 import { brandFooter } from "@/lib/email/brand-shell";
 import { isWithinSendWindow } from "@/lib/sms/compliance";
 import { contactabilityOf, resolveChannel, onProviderGap } from "@/lib/drips/channel-fallback";
@@ -1538,6 +1538,13 @@ async function processEmailStep(
     stage: data.stage,
     stampedBrand: run.brandByLead.get(row.lead_id),
   });
+  // The send budget and the SMS lane are two-brand concepts (drip-rules-core's
+  // BudgetBrand). OASIS became a real BrandKey on 2026-09-09 so that an OASIS
+  // email stops resolving to the client's identity — but it has no drip
+  // sequences, no per-domain send budget and no SMS provider, so it must not
+  // silently borrow SunBiz's. Narrowed once here rather than at each budget
+  // call site, and loudly: see toDripBrand for why this throws.
+  const budgetBrand = toDripBrand(brand, "drips/executor: send budget");
 
   // Resolve the copy first so the app-link pre-flight can inspect it.
   // Drawn from the APPROVED pool for this brand+stage+role when one exists;
@@ -1641,7 +1648,7 @@ async function processEmailStep(
     // Tenant + sequence, so an operator's own per-sequence daily cap is honoured
     // and the hold reason names THEIR setting rather than a system rule.
     const seqRef = { tenantId: row.tenant_id, id: row.sequence_id, name: row.sequence_name };
-    const gated = emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef);
+    const gated = emailGateReason(run.emailBudget, row.lead_id, budgetBrand, gateStage, seqRef);
     if (gated) {
       return markRescheduled(
         db,
@@ -1740,7 +1747,7 @@ async function processEmailStep(
     // same run see the decremented remainder without re-querying. A failed send
     // deliberately does not consume: nothing reached the recipient.
     if (run.emailBudget) {
-      consumeEmail(run.emailBudget, row.lead_id, brand, {
+      consumeEmail(run.emailBudget, row.lead_id, budgetBrand, {
         tenantId: row.tenant_id,
         id: row.sequence_id,
         name: row.sequence_name,

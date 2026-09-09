@@ -8,6 +8,7 @@ import { isDryRun } from "@/lib/integrations/send-mode";
 import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twilio";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -370,6 +371,19 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
         await mark(db, row, "failed", { error: "approved_sender_missing", incrementAttempt: true });
         return "failed";
       }
+      // Derived from the row's tenant, fail-closed. Founder meetings are an
+      // OASIS product, but the brand is resolved rather than assumed so this
+      // stays correct if the surface is ever offered to another tenant — and
+      // so a mapping gap surfaces as a failed row rather than as a reminder
+      // signed by the wrong company.
+      const reminderBrand = brandForTenant({ tenantId: row.tenant_id });
+      if (!reminderBrand) {
+        await mark(db, row, "failed", {
+          error: "no_sending_brand_for_tenant",
+          incrementAttempt: true,
+        });
+        return "failed";
+      }
       const sent = await sendGmailAsOperator({
         tenantId: row.tenant_id,
         userId: row.sender_user_id,
@@ -378,6 +392,7 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
         body: deliveryRow.body,
         expectedFromAddress: appointment.organizer_email_snapshot,
         idempotencyKey: row.attempt_token,
+        brand: reminderBrand,
       });
       if (!sent.ok) {
         if (sent.reason === "sender_mismatch" || sent.reason === "delivery_unknown") {

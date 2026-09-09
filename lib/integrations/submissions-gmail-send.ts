@@ -25,6 +25,7 @@ import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
 import { domainOfAddress, messageIdDomain } from "@/lib/email/sending-identity";
 import type { BrandKey } from "@/lib/email/brands";
+import { brandTenantConflict } from "@/lib/email/brand-for-tenant";
 
 export type SendPayload = {
   to: string;
@@ -203,6 +204,27 @@ async function sendOnce(
  * fires through Gmail SMTP. Returns the persistable IDs.
  */
 export async function sendGmail(payload: SendPayload): Promise<SendResult> {
+  // A CALLER-SUPPLIED BRAND MUST AGREE WITH THE TENANT IT IS SENDING FOR.
+  //
+  // `brand` stays OPTIONAL here on purpose — omitting it means SunBiz, which is
+  // what lender shop-out relies on and what tests/shopout-brand-lock.test.ts
+  // holds. But an EXPLICIT brand was never checked against `tenantId`, so any
+  // caller could hand this the wrong company and the credential lookup below
+  // would faithfully authenticate as that company's mailbox. That is the same
+  // hole the Python chokepoint closes with brand_matches_tenant, and Codex
+  // flagged its absence on this side (adversarial review, 2026-09-09).
+  //
+  // Only a genuine disagreement refuses. An omitted brand, or a tenant not in
+  // the map, returns null here and behaviour is unchanged.
+  const conflict = brandTenantConflict({ brand: payload.brand, tenantId: payload.tenantId });
+  if (conflict) {
+    return {
+      ok: false,
+      error:
+        `refusing to send: ${conflict}. A commercial email may not claim another ` +
+        "company's identity; pass the tenant's own brand, or omit it.",
+    };
+  }
   // Resolve the tenant's real sender FIRST so the Message-Id domain matches the
   // From header the recipient sees. sendOnce resolves the same value for the
   // actual send; a failure here is non-fatal because the Message-Id is only a

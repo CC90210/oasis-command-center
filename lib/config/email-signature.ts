@@ -33,6 +33,7 @@
  */
 
 import { resolveSignerForOperator } from "@/lib/config/agents";
+import type { BrandKey } from "@/lib/email/brands";
 
 export type EmailSigner = { name: string; email?: string; phone?: string };
 
@@ -64,17 +65,60 @@ export const SUNBIZ_LEGAL_FOOTER =
  * reads the same whichever path sends it. Two footers that disagree are worse
  * than one that is merely wrong, because only one of them ever gets reviewed.
  */
-const BRAND_FOOTERS: Record<string, string> = {
+/**
+ * EXHAUSTIVE over BrandKey, deliberately.
+ *
+ * This was `Record<string, string>` with two entries and a `?? SUNBIZ_LEGAL_FOOTER`
+ * tail, which meant a brand with no entry silently borrowed SunBiz's legal
+ * identity. Bluerise was in exactly that state: every Bluerise send through
+ * this helper appended "SunBiz Funding LLC ... you submitted a funding inquiry".
+ *
+ * `Record<BrandKey, string>` makes the compiler refuse a new brand until
+ * somebody decides what it says. The consent sentence is per-brand rather than
+ * derived, because it states WHY this recipient is being contacted — a cold
+ * OASIS prospect did not submit a funding inquiry — and that is a factual
+ * claim, not a formatting choice.
+ *
+ * The identity lines are checked against lib/email/brands.ts by
+ * tests/brand-identity-coherence.test.ts, which asserts that each brand's
+ * footer names its OWN legal entity and no other brand's — so the name and
+ * address here cannot drift from the registry that picks the sending
+ * credential. (That file name was wrong in the first version of this comment:
+ * it cited tests/brand-footer-coherence.test.ts, which does not exist. Citing
+ * a guard that was never built is the same defect as skills/email-safety
+ * claiming --brand is required and validated, which it never was.)
+ */
+const BRAND_FOOTERS: Record<BrandKey, string> = {
   sunbiz: SUNBIZ_LEGAL_FOOTER,
+  // Street address supplied by CC 2026-09-09. Until then this said only
+  // "OASIS AI Solutions, Montreal, QC, Canada" — no street, which is an
+  // incomplete CASL s.6(2) identification on every commercial email OASIS
+  // sends. Laid out name / street / city-postal to match the SunBiz footer
+  // above, so the two read as the same kind of document.
   oasis:
-    "\n\n---\nOASIS AI Solutions, Montreal, QC, Canada\n\n" +
+    "\n\n---\nOASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada\n\n" +
     "You received this email because we reached out about your business. " +
+    "To stop receiving emails, reply UNSUBSCRIBE.",
+  bluerise:
+    "\n\n---\nBluerise Business Capital LLC\n221 W Hallandale Beach Blvd, Suite 518\n" +
+    "Hallandale, FL 33009\n\n" +
+    "You received this email because you submitted a funding inquiry. " +
     "To stop receiving emails, reply UNSUBSCRIBE.",
 };
 
 export function appendSignatureAndFooter(
   body: string,
-  opts: { signer?: EmailSigner | null; fromAddress?: string; brand?: string },
+  /**
+   * `brand` is REQUIRED as of 2026-09-09. It was optional, and the resolution
+   * line below was `BRAND_FOOTERS[(opts.brand || "sunbiz")...] ?? SUNBIZ_LEGAL_FOOTER`
+   * — two independent fail-opens in one expression, so a caller that simply
+   * forgot the argument stamped SunBiz Funding LLC's name, Florida address and
+   * "you submitted a funding inquiry" onto an OASIS cold email. Two live
+   * callers were in exactly that state (gmail-apppassword-send, gmail-oauth-send).
+   *
+   * Making it required means the compiler, not a reviewer, finds the next one.
+   */
+  opts: { signer?: EmailSigner | null; fromAddress?: string; brand: BrandKey },
 ): string {
   const trimmed = body.replace(/\s+$/, "");
   // THE BRAND HAS TO REACH THE FALLBACK TOO.
@@ -109,9 +153,17 @@ export function appendSignatureAndFooter(
     const phone = (signer?.phone || "").trim();
     if (phone) signature += `\n${phone}`;
   }
-  // Defaults to the SunBiz footer when no brand is passed, so every existing
-  // caller keeps exactly the behaviour it shipped with. A caller that knows its
-  // brand passes it and gets the right one.
-  const footer = BRAND_FOOTERS[(opts.brand || "sunbiz").toLowerCase()] ?? SUNBIZ_LEGAL_FOOTER;
+  // No fallback. `brand` is required and `BRAND_FOOTERS` is exhaustive over
+  // BrandKey, so there is no path here that can reach for another company's
+  // legal identity. An invalid value at runtime (untyped JS caller, bad JSON)
+  // throws rather than defaulting — a commercial email must not go out
+  // attributed to whoever happens to be first in the table.
+  const footer = BRAND_FOOTERS[opts.brand];
+  if (!footer) {
+    throw new Error(
+      `appendSignatureAndFooter: no footer for brand ${JSON.stringify(opts.brand)}. ` +
+        "Refusing to substitute another company's legal identity.",
+    );
+  }
   return trimmed + signature + footer;
 }
