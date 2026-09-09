@@ -34,6 +34,7 @@ import {
   RETIRED_BOOKING_URLS,
 } from "../lib/booking-link";
 import { buildGmailRawMessage } from "../lib/integrations/gmail-oauth-send";
+import { composeOasisMessage } from "../lib/integrations/oasis-shared-gmail-send";
 
 function run(name: string, fn: () => void) {
   fn();
@@ -264,6 +265,81 @@ run("the sign-off is the rep, above the OASIS identification block", () => {
   });
   assert.ok(html.indexOf("Conaugh") < html.indexOf("Montreal"), "signature sits above the footer");
   assert.match(html, /mailto:schneur@oasisai\.work/, "the reader can see who to answer");
+});
+
+// ── THE ACTUAL MESSAGE, composed by the real code ──────────────────────────
+//
+// This is the assertion that was missing. Everything CC reported wrong lives in
+// these headers, and every previous test of this feature compared SOURCE TEXT,
+// which is how From/Cc/Reply-To all being one address passed review twice.
+
+run("the header CC reported is gone, on the real composed message", () => {
+  const msg = composeOasisMessage({
+    to: PROSPECT,
+    // Exactly the route's inputs when CC sends from his own seat: the mailbox
+    // owner is the sender, and the lead belongs to someone else.
+    cc: buildCopyList({ assignedRepEmail: REP, senderEmail: MAILBOX, toEmail: PROSPECT }),
+    replyTo: REP,
+    subject: "Following up: Broadway Locksmith",
+    body: "Hi Simon,\n\nShort note.",
+    html: renderQuickEmailHtml("Hi Simon,\n\nShort note."),
+    signer: { name: "Conaugh", email: MAILBOX, phone: "" },
+    fromAddress: MAILBOX,
+  });
+
+  assert.equal(msg.from, MAILBOX);
+  assert.equal(msg.to, PROSPECT);
+  // The whole complaint, in one line: it used to read cc === from.
+  assert.equal(msg.cc, REP, "the mailbox was copying itself instead of the lead's rep");
+  assert.notEqual(msg.cc, msg.from, "From and Cc must never be the same address");
+  assert.equal(msg.replyTo, REP, "a reply must reach the rep, not the shared inbox");
+  assert.notEqual(msg.replyTo, msg.from);
+});
+
+run("both parts are on the wire, and only the text part is signed", () => {
+  const body = "Hi Simon,\n\nShort note.";
+  const msg = composeOasisMessage({
+    to: PROSPECT,
+    subject: "S",
+    body,
+    html: renderQuickEmailHtml(body, { signerName: "Conaugh" }),
+    signer: { name: "Conaugh", email: MAILBOX, phone: "" },
+    fromAddress: MAILBOX,
+  });
+
+  assert.ok(msg.text && msg.html, "multipart: a client refusing HTML must still read it");
+  // appendSignatureAndFooter is plain-text only. Applied to the markup it would
+  // put the sign-off and the legal footer AFTER </body>.
+  assert.match(msg.text, /\n---\n/, "the text part carries the plain-text footer");
+  assert.ok(!msg.html!.includes("\n---\n"), "the plain-text footer leaked into the markup");
+  // The legally-meaningful bit is the identification line — sender plus a real
+  // address — and it must appear exactly once. The NAME alone appears several
+  // times legitimately (title, logo alt, wordmark, sign-off), so counting that
+  // would assert nothing.
+  assert.equal(
+    (msg.html!.match(/OASIS AI Solutions, Montreal, QC, Canada/g) || []).length,
+    1,
+    "the identification block must appear exactly once",
+  );
+  // The other business on this codebase must never appear on an OASIS message.
+  assert.ok(!/sunbiz|Hallandale|Funding LLC/i.test(msg.text));
+  assert.ok(!/sunbiz|Hallandale|Funding LLC/i.test(msg.html!));
+});
+
+run("an opt-out is declared as a header, not only as prose", () => {
+  const msg = composeOasisMessage({
+    to: PROSPECT, subject: "S", body: "Hi.", fromAddress: MAILBOX,
+  });
+  assert.equal(msg.headers["List-Unsubscribe"], `<mailto:${MAILBOX}?subject=UNSUBSCRIBE>`);
+  assert.match(msg.text, /reply UNSUBSCRIBE/, "the header and the prose must agree");
+});
+
+run("no copy recipients means no Cc and no Reply-To headers at all", () => {
+  const msg = composeOasisMessage({
+    to: PROSPECT, cc: [], subject: "S", body: "Hi.", fromAddress: MAILBOX,
+  });
+  assert.equal(msg.cc, undefined, "an empty Cc header is malformed, not harmless");
+  assert.equal(msg.replyTo, undefined, "replies then land on From, which is correct");
 });
 
 // ── Every transport, not just the one in use today ─────────────────────────

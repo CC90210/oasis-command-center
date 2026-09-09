@@ -82,6 +82,81 @@ export async function resolveOasisMailboxFrom(tenantId: string): Promise<string 
   return from && (b.app_password || "").trim() ? from : null;
 }
 
+/**
+ * The exact message object handed to nodemailer.
+ *
+ * SEPARATED SO IT CAN BE PROVEN. Everything CC reported was wrong lives in these
+ * headers, and every previous test of this feature asserted on source text
+ * rather than on a composed message — which is how From/Cc/Reply-To all being
+ * one address survived review. The send path needs a database (suppression) and
+ * a credential, so nothing downstream of it could ever be exercised in a unit
+ * test; this can, with no stubbing at all.
+ *
+ * PURE. Same inputs, same message, no I/O.
+ */
+export function composeOasisMessage(args: {
+  to: string;
+  cc?: string | string[] | null;
+  replyTo?: string | null;
+  subject: string;
+  body: string;
+  html?: string | null;
+  signer?: EmailSigner | null;
+  fromAddress: string;
+}): {
+  from: string;
+  to: string;
+  cc?: string;
+  replyTo?: string;
+  subject: string;
+  headers: Record<string, string>;
+  text: string;
+  html?: string;
+} {
+  const { fromAddress } = args;
+
+  // Never copy the recipient, and never copy THIS MAILBOX. Sending from the
+  // shared address and Cc'ing it puts a duplicate beside the copy already in its
+  // own Sent folder — the header CC saw on 2026-09-09 read From, Cc and Reply-To
+  // all conaugh@oasisai.work.
+  const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
+  const excluded = new Set([args.to.trim().toLowerCase(), fromAddress.toLowerCase()]);
+
+  // Replies go to the person who OWNS the lead, not to the shared mailbox —
+  // otherwise the prospect answers into an inbox nobody watches, which is the
+  // same invisibility the Cc exists to fix, one step later in the conversation.
+  const replyToCandidate = (args.replyTo || "").trim();
+  const replyTo =
+    replyToCandidate && !excluded.has(replyToCandidate.toLowerCase())
+      ? replyToCandidate
+      : ccList[0];
+
+  return {
+    from: fromAddress,
+    to: args.to,
+    ...(ccList.length ? { cc: ccList.join(", ") } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    subject: args.subject,
+    // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it as
+    // a header too lets a mail client offer its own one-click control and keeps
+    // filters from treating a branded HTML message as unattributed bulk. It
+    // points at the mailbox that is actually read, and matches the instruction
+    // in the footer rather than inventing a second mechanism.
+    headers: { "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>` },
+    // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
+    // plain-text helper — it joins with "\n\n---\n" and detects an existing
+    // signature by comparing the last LINE — so it is applied here and never to
+    // the markup, which carries its own. Sending both parts means a client that
+    // refuses HTML still gets the whole message rather than a blank.
+    text: appendSignatureAndFooter(args.body, {
+      signer: args.signer,
+      fromAddress,
+      brand: "oasis",
+    }),
+    ...(args.html ? { html: args.html } : {}),
+  };
+}
+
 export async function sendOasisSharedGmail(args: {
   tenantId: string;
   to: string;
@@ -184,23 +259,7 @@ export async function sendOasisSharedGmail(args: {
     };
   }
 
-  // Never copy the recipient, and never copy THIS MAILBOX. Sending from the
-  // shared address and Cc'ing it puts a duplicate of the message beside the
-  // copy already in its own Sent folder, which is what the header CC saw on
-  // 2026-09-09 was doing: From, Cc and Reply-To all conaugh@oasisai.work.
-  const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
-  const ccFinal = ccList.length ? ccList.join(", ") : undefined;
-  const excluded = new Set([args.to.trim().toLowerCase(), fromAddress.toLowerCase()]);
-
-  // Replies go to the person who OWNS the lead, not to the shared mailbox —
-  // otherwise the prospect answers into an inbox nobody watches, which is the
-  // same invisibility the Cc exists to fix, one step later in the conversation.
-  // Falls back to the first copy recipient, then to the mailbox itself.
-  const replyToCandidate = (args.replyTo || "").trim();
-  const replyTo =
-    replyToCandidate && !excluded.has(replyToCandidate.toLowerCase())
-      ? replyToCandidate
-      : ccList[0];
+  const message = composeOasisMessage({ ...args, fromAddress });
 
   try {
     const nodemailer = await import("nodemailer");
@@ -221,32 +280,7 @@ export async function sendOasisSharedGmail(args: {
       greetingTimeout: 10_000,
       socketTimeout: 20_000,
     });
-    const info = await transporter.sendMail({
-      from: fromAddress,
-      to: args.to,
-      ...(ccFinal ? { cc: ccFinal } : {}),
-      ...(replyTo ? { replyTo } : {}),
-      subject: args.subject,
-      // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it
-      // as a header too lets a mail client offer its own one-click control and
-      // keeps filters from treating a branded HTML message as unattributed
-      // bulk. It points at the mailbox that is actually read, and matches the
-      // instruction in the footer rather than inventing a second mechanism.
-      headers: {
-        "List-Unsubscribe": `<mailto:${fromAddress}?subject=UNSUBSCRIBE>`,
-      },
-      // PLAIN TEXT STAYS THE SOURCE OF TRUTH. appendSignatureAndFooter is a
-      // plain-text helper — it joins with "\n\n---\n" and detects an existing
-      // signature by comparing the last LINE — so it is applied here and never
-      // to the markup, which carries its own. Sending both parts means a client
-      // that refuses HTML still gets the whole message rather than a blank.
-      text: appendSignatureAndFooter(args.body, {
-        signer: args.signer,
-        fromAddress,
-        brand: "oasis",
-      }),
-      ...(args.html ? { html: args.html } : {}),
-    });
+    const info = await transporter.sendMail(message);
     return {
       ok: true,
       provider: "oasis_shared_gmail",
