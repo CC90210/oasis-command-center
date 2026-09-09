@@ -27,73 +27,50 @@
  */
 export const FRIENDLY_DESCRIPTIONS: Record<string, string> = {
   // Daily 06:00 — narrated morning briefing pushed to CC's phone.
+  // No revenue line, and no hardcoded MRR target. Bravo does not report
+  // revenue — Atlas owns it — and this copy named a $5K goal that was passed in
+  // June, so the tab was quoting a stale number as the thing to beat. A target
+  // written into UI copy is a target that goes stale silently; the brief itself
+  // reads the live one.
   "Daily Bravo Brief":
-    "Sends you a Telegram every morning with last night's revenue, today's pipeline, the follow-ups that need a reply, and what's blocking $5K MRR. Read it before you open the dashboard.",
+    "Sends you a Telegram every morning with today's pipeline, the follow-ups that need a reply, and what's blocking the current goal. Read it before you open the dashboard.",
 
   // 05:45 — every unscored OASIS lead gets a numeric score so the
   // pipeline view sorts the hot ones to the top.
   "OASIS Auto-Score Leads":
     "Looks at every lead in your pipeline that hasn't been scored yet and assigns it a number out of 100 (higher = closer to closing). Runs early so the pipeline view sorts the hot leads to the top when you open it.",
 
-  // 08:00 — short voice note from Aura.
-  "Aura Morning Pow Wow":
-    "Aura sends a short voice note to your Telegram every morning — about 120 words, a motivational kick to start the day. Costs about 2¢ per day in TTS.",
-
   // Booking reminder.
-  "Booking Reminder":
+  "Booking Reminders":
     "Reminds you (and the prospect) about tomorrow's calls so nobody no-shows. Runs the evening before.",
 
-  // Hourly Stripe sync.
-  "Stripe Events Sync":
-    "Pulls fresh payment events from Stripe so your MRR number stays current. Runs every hour in the background — you don't have to think about it.",
-
   // 06:30 — MRR + snapshot row.
-  "Sync MRR":
+  "Daily MRR Auto-Sync":
     "Calculates your current MRR from active Stripe subscriptions and saves a snapshot for the day. Powers the MRR tile on Today and the trend on Analytics.",
 
-  // Weekly Mon 06:00.
-  "Weekly MRR Snapshot":
-    "Logs your week-over-week MRR change every Monday morning so Analytics can chart growth (or decline).",
-
-  // 12h.
-  "Score All Leads":
-    "Re-scores your entire pipeline twice a day. Catches new hot leads even if their score was stale.",
-
   // Hourly.
-  "Process Nurture Sequences":
+  "Nurture Sequence Check":
     "Sends the next scheduled drip email/SMS for any lead currently in a nurture sequence. Runs every hour so steps fire close to their scheduled time.",
 
-  // Monthly.
-  "Log Monthly Metrics":
-    "On the 1st of each month, writes last month's MRR + lead totals to a permanent log. Powers year-over-year reporting later.",
-
   // Funnel poll.
-  "Funnel Fast Poll":
+  "Funnel Fast-Poll":
     "Watches your CC Funnel form for new submissions every 2 minutes. The moment someone fills out the lead form on Instagram/social, you get a high-priority Telegram ping — usually within 60 seconds.",
 
   // Briefing snapshot.
   "Daily Briefing Snapshot":
     "Pre-computes tomorrow's briefing in the background so when Bravo writes your morning brief he's reading a single ready-made file instead of running four live queries (3-5x faster).",
 
-  // Weekly leads snapshot.
-  "Weekly Qualified-Leads Snapshot":
-    "Every Saturday night, ranks the top qualified leads by potential MRR. Revenue-Hunter agent reads this list when prioritizing the week's outreach.",
-
   // Daily client alerts.
   "Daily Client Alerts Snapshot":
     "Every morning at 7am, scans your active clients for risk signals (low engagement, missed payments, support tickets) and flags the ones marked RED or ORANGE so Chief-of-Staff can address them early.",
 
   // State backup.
-  "Nightly State DB Backup":
+  "Daily State DB Backup":
     "Backs up your local state database every night at 2am. Keeps the last 7 nights. Catches corruption early — checks integrity after every backup.",
 
   // Memory consolidation.
-  "Nightly Memory Consolidation":
+  "Bravo — Sleep Agent (Memory Consolidation)":
     "Reads your past 24 hours of activity, identifies new lessons (what worked, what didn't, decisions made), and appends them to your agent's permanent memory. The agent gets smarter over time without manual training.",
-
-  // Cron watchdog.
-  "Cron Watchdog":
-    "Checks every other automation once a night for failures. If one of your daily jobs errored, you get a Telegram with the job name and the error — so silent breakage doesn't sit dead for days.",
 
   // ── SunBiz Funding scheduled jobs ─────────────────────────────────────
   // Operator-facing copy for the SunBiz tenant. These run on the VPS (polled
@@ -118,8 +95,6 @@ export const FRIENDLY_DESCRIPTIONS: Record<string, string> = {
     "Every 15 minutes, works through your active cold-outreach campaigns and sends the next due touch (call/SMS) to each prospect — capped per day and screened against opt-outs and the do-not-contact list. Turn it off to pause cold outreach.",
   "SunBiz Health Check":
     "Every 30 minutes, runs a read-only self-check of the whole SunBiz system — are the scheduled jobs firing on time, are any queues backed up or erroring, is the data clean. If it finds a serious problem it raises an alert in the dashboard. It never sends or changes anything.",
-  "VERIFY 3 — full gate dry-run (one-shot)":
-    "A nightly safety drill, not a business job: it runs one fake send through every outbound guardrail (kill-switch, cooldown, daily cap, send-window, CASL suppression, dedup) WITHOUT sending anything, to prove the guardrails still work. You don't need to act on it.",
 };
 
 /**

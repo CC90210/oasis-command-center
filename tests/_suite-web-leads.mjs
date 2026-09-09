@@ -66,6 +66,8 @@ const TESTS = [
   "tests/rep-creates-own-lead.test.ts",
   // An OASIS email must name OASIS, in the signature as well as the footer.
   "tests/oasis-email-branding.test.ts",
+  // Operator copy on the Automations tab must match a real job name.
+  "tests/cron-descriptions-render.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
