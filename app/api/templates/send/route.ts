@@ -24,6 +24,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveSignerForOperator } from "@/lib/config/agents";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { COLD_OUTREACH_TEMPLATES } from "@/lib/cold-outreach/templates.generated";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -143,14 +144,25 @@ export async function POST(req: NextRequest) {
     leadId = ins.data.id as string;
   }
 
-  // Tenant slug -> brand (SunBiz submissions/sun -> sunbiz).
+  // Tenant -> brand, from the shared fail-closed map.
+  //
+  // This was the same ternary as the lead-email route — every non-SunBiz tenant
+  // became OASIS, and a failed lookup became `undefined`, which the signer then
+  // read as SunBiz. 49 tenants exist; 47 are self-signup accounts that would
+  // have sent templates claiming to be OASIS AI Solutions.
   const tenantRes = await db.from("tenants").select("slug").eq("id", sess.tenantId).maybeSingle();
   const slug = (tenantRes.data as { slug: string } | null)?.slug || "";
-  const brand = slug === "submissions" || slug === "sun" ? "sunbiz" : slug ? "oasis" : undefined;
+  const brand = brandForTenant({ tenantId: sess.tenantId, tenantSlug: slug });
+  if (!brand) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `This workspace (${slug || sess.tenantId}) has no sending identity configured.`,
+      },
+      { status: 409 },
+    );
+  }
 
-  // Brand passed, same as the lead-email route. This route already resolves the
-  // brand on the line above and then signed without it, so an OASIS template
-  // went out under the other portal's shared name.
   const signer = resolveSignerForOperator(sess.email, { brand });
 
   // Send through the proven bridge -> send_gateway path.

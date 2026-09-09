@@ -25,6 +25,7 @@ import {
   type OpenerAttendee,
 } from "@/lib/website-sales-founder-meeting";
 import { clampSmsBody, withSmsFooter } from "@/lib/website-sales-meeting";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 
 export type SmsAgentAutonomy = "off" | "propose" | "execute";
 
@@ -1084,6 +1085,13 @@ async function notifyRep(input: {
     input.job.body.slice(0, 2_000),
     "---",
   ].filter((line): line is string => line !== null).join("\n");
+  // Internal: this goes to the rep about their own appointment, not to a
+  // client. It still carries a legal footer, so it still needs a brand —
+  // derived from the tenant rather than defaulted, which is how every caller of
+  // this helper used to end up appending SunBiz's. An unmapped tenant reports
+  // the same failure as any other undeliverable alert.
+  const alertBrand = brandForTenant({ tenantId: input.job.tenant_id });
+  if (!alertBrand) return "rep_email_failed";
   const emailed = await sendGmailAsOperator({
     tenantId: input.job.tenant_id,
     userId: input.appointment.assigned_to,
@@ -1092,6 +1100,7 @@ async function notifyRep(input: {
     subject: input.title,
     body,
     idempotencyKey: `sms-agent:${input.job.id}:${input.alertType}`,
+    brand: alertBrand,
   });
   return emailed.ok ? null : "rep_email_failed";
 }

@@ -273,7 +273,8 @@ export async function POST(
   // mirroring the main /shop-out route's behavior. The bridge tool loops
   // over every pending thread on this application, so retrying ONE row
   // also catches any other pending rows that drifted.
-  const signer = resolveSignerForOperator(sess.email);
+  // Lender correspondence is SunBiz-only (see shop-out route).
+  const signer = resolveSignerForOperator(sess.email, { brand: "sunbiz" });
 
   let physicalSend: {
     status: "sent" | "partial" | "error" | "skipped";

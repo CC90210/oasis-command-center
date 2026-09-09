@@ -60,7 +60,12 @@ assert.ok(!governor.includes('.eq("metadata->>dry_run", "false")'),
 assert.ok(governor.includes('String(md.dry_run) === "true"'),
   "only an EXPLICIT dry run may be excluded from the count");
 assert.ok(governor.includes("countDripEmailByBrand"), "counts must be per-brand");
-assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage"),
+// `budgetBrand`, not `brand`, since 2026-09-09. OASIS became a BrandKey so its
+// mail would stop resolving to the client's identity, but it has no drip
+// sequences and no per-domain send budget — so the executor narrows to the
+// two-brand drip lane before touching the budget. Same gate, same arguments,
+// a name that says which of the two brand concepts is in play.
+assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, budgetBrand, gateStage"),
   "the volume gate must be evaluated per-brand AND per-stage — a flat cap either " +
   "starves the hot stages or over-mails the cold ones");
 
@@ -68,9 +73,9 @@ assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand
 // An operator can type a number into the Drips > Volume tab. If the gate is not
 // passed the sequence, that number is decoration: the UI would report a cap the
 // engine never reads, which is worse than having no cap at all.
-assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, brand, gateStage, seqRef)"),
+assert.ok(executor.includes("emailGateReason(run.emailBudget, row.lead_id, budgetBrand, gateStage, seqRef)"),
   "the gate must receive the sequence, or a per-sequence cap set in the UI does nothing");
-assert.ok(/consumeEmail\(run\.emailBudget, row\.lead_id, brand, \{/.test(executor),
+assert.ok(/consumeEmail\(run\.emailBudget, row\.lead_id, budgetBrand, \{/.test(executor),
   "a real send must SPEND the sequence's allowance, or the cap only bites on the next run");
 assert.ok(executor.includes("loadEmailBudget(db, emailLeadIds, Array.from(leadIdsByTenant.keys()))"),
   "per-sequence caps must load for EVERY tenant in the batch — claimed[0].tenant_id is the " +

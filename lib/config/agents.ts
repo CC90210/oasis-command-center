@@ -23,6 +23,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { deriveSignerName } from "@/lib/lenders/derive-signer-label";
+import type { BrandKey } from "@/lib/email/brands";
 
 export type AgentEntry = {
   /** Stable lowercase identifier — used as agents[].key in the config. */
@@ -135,9 +136,23 @@ function firstNameFromEmail(email: string | null | undefined): string {
  */
 export function resolveSignerForOperator(
   operatorEmail: string | null | undefined,
-  opts?: { brand?: string },
+  /**
+   * REQUIRED as of 2026-09-09. This was optional with a SunBiz fallback, so a
+   * caller that omitted it signed the email "SunBiz Submissions" — which is how
+   * OASIS cold emails went out signed as the client, reported by CC on
+   * 2026-09-08. Adding an optional parameter fixed the one route that was
+   * reported and left every other caller on the old behaviour; requiring it
+   * makes the compiler find them instead.
+   */
+  opts: { brand: BrandKey },
 ): { name: string; email: string; phone: string } {
-  const agent = findAgentByEmail(operatorEmail);
+  // ROSTER FIRST — BUT IT IS SUNBIZ'S ROSTER.
+  //
+  // agents.config.json holds only @sunbizfunding.com addresses and is read for
+  // every tenant. Matching it on a non-SunBiz send would sign that company's
+  // mail with a SunBiz rep's name and reply address, so the lookup is now
+  // scoped to the brand that actually owns the roster.
+  const agent = opts.brand === "sunbiz" ? findAgentByEmail(operatorEmail) : null;
   if (agent) {
     return { name: agent.name, email: agent.email, phone: agent.phone };
   }
@@ -151,22 +166,35 @@ export function resolveSignerForOperator(
   // Submissions identity is correct and deliberate. A domain heuristic would
   // have silently re-signed those, which is precisely the cross-portal bleed
   // this change exists to stop. Callers that mean OASIS say so.
-  const isOasis = (opts?.brand || "").toLowerCase() === "oasis";
-  if (isOasis) {
-    return {
-      name: firstNameFromEmail(email) || "OASIS AI",
-      email,
-      // No phone on the roster for these operators. Empty rather than a shared
-      // number: a wrong direct line on a cold email is worse than none.
-      phone: "",
-    };
+  // Exhaustive on the brand. No fallback branch, because the fallback WAS the
+  // bug: anything that was not explicitly OASIS became "SunBiz Submissions".
+  switch (opts.brand) {
+    case "oasis":
+      return {
+        name: firstNameFromEmail(email) || "OASIS AI",
+        email,
+        // No phone on the roster for these operators. Empty rather than a shared
+        // number: a wrong direct line on a cold email is worse than none.
+        phone: "",
+      };
+    case "bluerise":
+      // Its own shared identity. Previously fell through to SunBiz's, which put
+      // the wrong company's name and reply address on Bluerise mail — the same
+      // defect as the OASIS one, one brand over.
+      return {
+        name: "Bluerise Business Capital",
+        email:
+          process.env.BLUERISE_SUBMISSIONS_EMAIL ||
+          "submissions@bluerisebusinesscapital.com",
+        phone: "",
+      };
+    case "sunbiz":
+      return {
+        name: "SunBiz Submissions",
+        email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
+        phone: "",
+      };
   }
-
-  return {
-    name: "SunBiz Submissions",
-    email: process.env.SUNBIZ_SUBMISSIONS_EMAIL || "Submissions@sunbizfunding.com",
-    phone: "",
-  };
 }
 
 /**

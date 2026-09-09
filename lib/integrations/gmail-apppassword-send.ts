@@ -19,6 +19,7 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // CANSPAM_FOOTER, which had NO rep signature and a stale street address —
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import type { BrandKey } from "@/lib/email/brands";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 
 export type GmailAppPasswordSendResult =
@@ -55,6 +56,14 @@ export async function sendGmailAppPasswordAsOperator(args: {
   subject: string;
   body: string;
   signer?: EmailSigner | null;
+  /**
+   * Which company this message is from. REQUIRED — this path appended the
+   * SunBiz legal footer to every message it sent, including OASIS prospect
+   * mail, because it called appendSignatureAndFooter without a brand and that
+   * helper defaulted to SunBiz. The rep's own mailbox sends it, so nothing
+   * downstream could have noticed the mismatch.
+   */
+  brand: BrandKey;
 }): Promise<GmailAppPasswordSendResult> {
   // Opt-out gate FIRST — before any credential work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -89,7 +98,11 @@ export async function sendGmailAppPasswordAsOperator(args: {
       to: args.to,
       ...(ccList.length ? { cc: ccList.join(", ") } : {}),
       subject: args.subject,
-      text: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
+      text: appendSignatureAndFooter(args.body, {
+        signer: args.signer,
+        fromAddress,
+        brand: args.brand,
+      }),
     });
     return { ok: true, provider: "gmail_apppassword", gmail_message_id: info.messageId || "", from_address: fromAddress };
   } catch (e) {

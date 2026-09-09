@@ -25,6 +25,7 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
+import type { BrandKey } from "@/lib/email/brands";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -176,6 +177,10 @@ export async function sendGmailAsOperator(args: {
   subject: string;
   body: string;
   signer?: EmailSigner | null;
+  /** Which company this message is from. REQUIRED — see the sibling
+   *  app-password sender: this omitted it too, so every message it sent
+   *  carried SunBiz's legal footer regardless of which company it was for. */
+  brand: BrandKey;
   expectedFromAddress?: string | null;
   idempotencyKey?: string;
 }): Promise<GmailOAuthSendResult> {
@@ -221,7 +226,11 @@ export async function sendGmailAsOperator(args: {
     to: args.to,
     ...(ccList.length ? { cc: ccList.join(", ") } : {}),
     subject: args.subject,
-    body: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
+    body: appendSignatureAndFooter(args.body, {
+      signer: args.signer,
+      fromAddress,
+      brand: args.brand,
+    }),
     messageId: args.idempotencyKey
       ? gmailMessageIdForIdempotencyKey(args.idempotencyKey)
       : undefined,

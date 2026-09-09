@@ -33,6 +33,7 @@ import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { sendOasisSharedGmail, resolveOasisMailboxFrom } from "@/lib/integrations/oasis-shared-gmail-send";
 import { appendSignatureAndFooter } from "@/lib/config/email-signature";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { buildCopyList, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
@@ -342,8 +343,29 @@ export async function POST(
     console.error("[leads.email] tenant brand lookup failed", tenantRes.error);
   }
   const tenantSlug = (tenantRes.data as { slug: string } | null)?.slug || "";
-  const brand =
-    tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined;
+  // Resolved from an explicit, fail-closed map (lib/email/brand-for-tenant.ts).
+  //
+  // This was: `tenantSlug === "submissions" ? "sunbiz" : tenantSlug ? "oasis" : undefined`.
+  // Two defects in one expression. The lookup above only WARNS on error, so a
+  // transient failure made tenantSlug "" and brand `undefined` — which every
+  // downstream helper then read as SunBiz, putting the client's legal footer on
+  // an OASIS prospect's email. And the middle branch branded EVERY non-SunBiz
+  // tenant as OASIS: the live table has 49 tenants, 47 of them self-signup
+  // accounts including real third parties.
+  const brand = brandForTenant({ tenantId: sess.tenantId, tenantSlug });
+  if (!brand) {
+    // Refuse rather than guess. A commercial email states a legal sender
+    // identity; there is no honest default for a tenant nobody has mapped.
+    return NextResponse.json(
+      {
+        error: "no_sending_brand",
+        detail:
+          `This workspace (${tenantSlug || sess.tenantId}) has no sending identity configured, ` +
+          "so the email was not sent. Map it in lib/email/brand-for-tenant.ts.",
+      },
+      { status: 409 },
+    );
+  }
 
   // Resolve operator → signer (shared helper, same shape as shop-out
   // and lender-threads retry).
@@ -437,6 +459,9 @@ export async function POST(
       const signedBody = appendSignatureAndFooter(truncatedBody, {
         signer,
         fromAddress: "submissions@sunbizfunding.com",
+        // Inside `if (brand === "sunbiz")`, so this is SunBiz by construction —
+        // stated rather than inherited from a default that no longer exists.
+        brand: "sunbiz",
       });
       const shared = await sendGmail({
         tenantId: sess.tenantId,
@@ -557,6 +582,10 @@ export async function POST(
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
       // like the queue path does (parity fix 2026-07-10).
       signer,
+      // The rep's own mailbox carries the message, but the FOOTER is the
+      // company's. Without this the helper defaulted to SunBiz, so a rep on an
+      // OASIS lead sent a prospect the client's legal identity.
+      brand,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_apppassword", via: "gmail_apppassword", from_address: g.from_address };
@@ -579,6 +608,9 @@ export async function POST(
       // Session-resolved rep — the direct path signs "— Jordan" etc. exactly
       // like the queue path does (parity fix 2026-07-10).
       signer,
+      // Same reason as the app-password branch: the mailbox is the rep's, the
+      // legal footer is the company's.
+      brand,
     });
     if (g.ok) {
       sendResult = { status: "sent", agent_source: "gmail_oauth", via: "gmail_oauth", from_address: g.from_address };

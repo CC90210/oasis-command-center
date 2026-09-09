@@ -17,9 +17,47 @@
  * is what makes each task in this series safe to deploy on its own.
  */
 
-export type BrandKey = "sunbiz" | "bluerise";
+export type BrandKey = "sunbiz" | "bluerise" | "oasis";
 
-export const ALL_BRAND_KEYS: readonly BrandKey[] = ["sunbiz", "bluerise"] as const;
+export const ALL_BRAND_KEYS: readonly BrandKey[] = ["sunbiz", "bluerise", "oasis"] as const;
+
+/**
+ * Brands that take part in the SunBiz drip A/B split.
+ *
+ * OASIS is deliberately NOT here. The drip system rotates a merchant between
+ * two funding brands at one premises; OASIS is a different company selling a
+ * different thing, and a lead must never rotate INTO it. Anything that pairs
+ * or alternates brands iterates this, not ALL_BRAND_KEYS.
+ */
+export const DRIP_BRAND_KEYS: readonly DripBrandKey[] = ["sunbiz", "bluerise"] as const;
+
+/** The brands the drip engine, its send budget and the SMS lane understand. */
+export type DripBrandKey = Extract<BrandKey, "sunbiz" | "bluerise">;
+
+export function isDripBrand(key: BrandKey): key is DripBrandKey {
+  return key === "sunbiz" || key === "bluerise";
+}
+
+/**
+ * Narrow a brand to the drip lane, or throw.
+ *
+ * Throwing is correct here and not merely defensive. The drip engine sends
+ * funding-sequence mail on behalf of SunBiz and Bluerise; there is no OASIS
+ * drip, no OASIS send budget and no OASIS SMS provider. A drip row carrying
+ * brand "oasis" is a data fault, and the alternatives to throwing are to send
+ * it as SunBiz — the exact misattribution this file's 2026-09-09 change exists
+ * to stop — or to silently skip it, which loses a merchant's follow-up with no
+ * signal. Unreachable today: brandForSend only ever returns a drip brand.
+ */
+export function toDripBrand(key: BrandKey, context: string): DripBrandKey {
+  if (!isDripBrand(key)) {
+    throw new Error(
+      `${context}: brand "${key}" is not part of the drip lane ` +
+        `(${DRIP_BRAND_KEYS.join(", ")}). Refusing to reassign it to a funding brand.`,
+    );
+  }
+  return key;
+}
 
 export type Brand = {
   key: BrandKey;
@@ -120,18 +158,125 @@ const REGISTRY: Record<BrandKey, () => Brand> = {
     accent: "#2E6BE6",
     logoUrl: env("BLUERISE_LOGO_URL") || null,
   }),
+
+  /**
+   * OASIS AI Solutions — CC's own company, and the reason this registry gained
+   * a third entry on 2026-09-09.
+   *
+   * OASIS was missing here while `resolveBrandKey` coerced every unknown value
+   * to "sunbiz". So `resolveBrandKey("oasis")` returned "sunbiz": an OASIS send
+   * that reached this layer acquired the CLIENT's from-address, credential row,
+   * postal address and legal name. A SunBiz contact reported the visible half
+   * of that on 2026-09-09, and the ledger holds the inverse too (tenant
+   * oasis-ai-cc sending as sunbiz, 2026-07-10).
+   *
+   * Values mirror send_gateway.BRAND_IDENTITY["oasis"] and
+   * email_template.BRAND_CONFIG["oasis"] in Business-Empire-Agent, which the
+   * headers of this file and email-signature.ts already name as the source of
+   * truth. Change those first, then this.
+   */
+  oasis: () => ({
+    key: "oasis",
+    displayName: env("OASIS_FROM_NAME") || "OASIS AI",
+    legalName: "OASIS AI Solutions",
+    // The shared team mailbox (lib/integrations/oasis-shared-gmail-send.ts).
+    // OASIS_MAIL_FROM is the name that path already reads, so one variable
+    // moves the address everywhere rather than two that can disagree.
+    fromAddress: env("OASIS_MAIL_FROM") || "conaugh@oasisai.work",
+    sendingDomain: "oasisai.work",
+    // NOT A STREET ADDRESS, and knowingly so.
+    //
+    // Every OASIS email already ships exactly this line, and inventing a street
+    // to satisfy the shape would be worse than the gap: this file's own rule is
+    // that a borrowed or invented address is "affirmatively misleading rather
+    // than merely incomplete". CASL s.6(2) wants a real mailing address, so
+    // this is a real compliance gap — flagged for CC, not papered over. Set
+    // OASIS_POSTAL_ADDRESS once there is a street address that receives mail.
+    postalAddress: env("OASIS_POSTAL_ADDRESS") || "Montreal, QC, Canada",
+    trackingOrigin: safeOrigin(env("OASIS_TRACKING_ORIGIN")),
+    // Its own credential row — never "gws", which is SunBiz's. This is the
+    // link that made the brand decide which mailbox authenticates, and so the
+    // link that turned a missing brand into a send from the client's mailbox.
+    credentialService: "oasis_gmail",
+    accent: "#00d4ff",
+    logoUrl: env("OASIS_LOGO_URL") || "https://oasisai.work/oasis-logo.jpg",
+  }),
 };
 
 /**
- * Resolve any stored or user-supplied value to a brand key.
+ * Resolve a stored brand value to a brand key.
  *
- * Unknown resolves to `sunbiz` on purpose. That is the pre-existing behaviour
- * and the brand every lead currently in the CRM already knows, so a typo or a
- * missing field can never quietly move a merchant onto the newer domain.
+ * ABSENT (undefined / null / blank) resolves to `sunbiz`, and that is
+ * deliberate: every drip lead in the CRM predates the `sending_brand` column
+ * and is a SunBiz lead, so an empty column genuinely means SunBiz. Lender
+ * shop-out relies on the same rule (tests/shopout-brand-lock.test.ts).
+ *
+ * UNRECOGNISED throws. It used to resolve to `sunbiz` too, which meant a typo,
+ * a tenant slug passed where a brand was wanted, or the string "oasis" — not a
+ * BrandKey until 2026-09-09 — all silently became the client. That is how OASIS
+ * mail acquired SunBiz Funding LLC's from-address, credential row and legal
+ * footer, and it read as correct on every CI run because two tests asserted it.
+ *
+ * Use `resolveBrandKeyOrNull` where absent must NOT become a company.
  */
 export function resolveBrandKey(raw: unknown): BrandKey {
   const s = String(raw ?? "").trim().toLowerCase();
-  return (ALL_BRAND_KEYS as readonly string[]).includes(s) ? (s as BrandKey) : "sunbiz";
+  if ((ALL_BRAND_KEYS as readonly string[]).includes(s)) return s as BrandKey;
+
+  // ABSENT is still SunBiz, and only absent.
+  //
+  // Every drip lead in the CRM predates `sending_brand` and is a SunBiz lead;
+  // reading an empty column as SunBiz is what keeps those rows on the brand
+  // they have always been on. That is the one case the old blanket fallback
+  // got right, and it stays.
+  if (!s) return "sunbiz";
+
+  // A NON-EMPTY value we do not recognise is a bug, not a default.
+  //
+  // Until 2026-09-09 this returned "sunbiz" for anything at all — a typo, a
+  // tenant slug used where a brand was wanted, or the string "oasis", which was
+  // not a brand in this file. That last one is how an OASIS send acquired the
+  // client's from-address, credential row and legal identity. Failing loudly
+  // turns a silent misattribution into a stack trace with the offending value
+  // in it.
+  throw new Error(
+    `unknown brand ${JSON.stringify(raw)} — known: ${ALL_BRAND_KEYS.join(", ")}. ` +
+      "Refusing to fall back: guessing a brand picks a company's legal identity.",
+  );
+}
+
+/**
+ * The brand, or nothing — for callers where "nobody said" must not become a
+ * company.
+ *
+ * `resolveBrandKey` still answers "sunbiz" for an absent value because a drip
+ * lead with an empty column genuinely is a SunBiz lead. That is wrong
+ * everywhere else: on the identity, footer, signer and credential paths an
+ * absent brand means the caller lost it, and turning that into a legal sender
+ * identity is the defect this whole change exists to remove. Those callers use
+ * this and refuse on null.
+ */
+export function resolveBrandKeyOrNull(raw: unknown): BrandKey | null {
+  const s = String(raw ?? "").trim().toLowerCase();
+  return (ALL_BRAND_KEYS as readonly string[]).includes(s) ? (s as BrandKey) : null;
+}
+
+/**
+ * The brand, or an exception. Use where a send is about to happen.
+ *
+ * `context` names the call site so the failure says which path lost the brand
+ * rather than just that one did.
+ */
+export function requireBrandKey(raw: unknown, context: string): BrandKey {
+  const key = resolveBrandKeyOrNull(raw);
+  if (!key) {
+    throw new Error(
+      `${context}: no usable brand (got ${JSON.stringify(raw)}). ` +
+        `Expected one of: ${ALL_BRAND_KEYS.join(", ")}. A commercial email must ` +
+        "state a real sender identity, so this refuses rather than defaulting.",
+    );
+  }
+  return key;
 }
 
 export function getBrand(key: BrandKey): Brand {

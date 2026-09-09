@@ -52,6 +52,7 @@ import {
 import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/integrations/gmail-apppassword-send";
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -226,6 +227,16 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
 
   const subject = row.subject || "";
 
+  // Which company is this scheduled send from? Derived from the row's tenant,
+  // fail-closed. Both senders below appended the SunBiz legal footer to
+  // everything before 2026-09-09, because they called the footer helper without
+  // a brand and it defaulted. A cron has no operator watching it, so a
+  // mis-signed scheduled send is the least likely of all to be noticed.
+  const brand = brandForTenant({ tenantId: row.tenant_id });
+  if (!brand) {
+    return markPermanentFail(db, row, "no_sending_brand_for_tenant");
+  }
+
   // Same preference ladder as app/api/leads/[id]/email/route.ts minus the
   // submissions@ queue fallback — a cron has no session to drive the bridge
   // exec-tool, so a scheduled email send is per-rep Gmail only. Re-resolves
@@ -242,6 +253,7 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
       to: row.to_email,
       subject,
       body: row.body,
+      brand,
     });
     sendResult = g.ok
       ? { ok: true, provider: "gmail_apppassword", from_address: g.from_address, message_id: g.gmail_message_id }
@@ -253,6 +265,7 @@ async function processEmail(db: Db, row: ClaimedRow): Promise<void> {
       to: row.to_email,
       subject,
       body: row.body,
+      brand,
     });
     sendResult = g.ok
       ? { ok: true, provider: "gmail_oauth", from_address: g.from_address, message_id: g.gmail_message_id }

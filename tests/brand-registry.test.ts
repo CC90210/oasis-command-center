@@ -12,26 +12,63 @@ import assert from "node:assert/strict";
 import {
   getBrand,
   resolveBrandKey,
+  resolveBrandKeyOrNull,
+  requireBrandKey,
   brandIsSendable,
   ALL_BRAND_KEYS,
 } from "../lib/email/brands";
 
 // ---------------------------------------------------------------------------
-// Resolution defaults to SunBiz, which is the pre-existing behaviour and the
-// brand every lead currently in the CRM already knows. An unknown value must
-// never resolve onto the newer domain.
+// ABSENT resolves to SunBiz. UNRECOGNISED does not resolve at all.
+//
+// REWRITTEN 2026-09-09. This block used to read:
+//
+//     assert.equal(resolveBrandKey("nonsense"), "sunbiz");
+//     assert.equal(resolveBrandKey(42),         "sunbiz");
+//
+// i.e. it asserted the fail-open as CORRECT. That is the behaviour that put
+// SunBiz Funding LLC's name, Florida address and "you submitted a funding
+// inquiry" on OASIS prospect mail — "oasis" was not a BrandKey, so it was
+// "unrecognised", so it silently became the client. A green suite of 243 files
+// reported no problem, because these lines told it not to.
+//
+// The distinction that survives: an EMPTY column on a drip lead genuinely means
+// SunBiz (every such row predates `sending_brand`). A non-empty value nobody
+// recognises is a bug, and is now loud.
 // ---------------------------------------------------------------------------
-assert.equal(resolveBrandKey(undefined), "sunbiz");
+assert.equal(resolveBrandKey(undefined), "sunbiz", "absent = the legacy drip default");
 assert.equal(resolveBrandKey(null), "sunbiz");
 assert.equal(resolveBrandKey(""), "sunbiz");
 assert.equal(resolveBrandKey("   "), "sunbiz");
-assert.equal(resolveBrandKey("nonsense"), "sunbiz");
-assert.equal(resolveBrandKey(42), "sunbiz");
-assert.equal(resolveBrandKey({}), "sunbiz");
 assert.equal(resolveBrandKey("sunbiz"), "sunbiz");
 assert.equal(resolveBrandKey("bluerise"), "bluerise");
 assert.equal(resolveBrandKey("BLUERISE"), "bluerise");
 assert.equal(resolveBrandKey("  Bluerise  "), "bluerise");
+
+// OASIS is a real brand now. This single assertion is the regression test for
+// the whole incident: before, it returned "sunbiz".
+assert.equal(resolveBrandKey("oasis"), "oasis", "OASIS must not resolve to the client");
+assert.equal(resolveBrandKey("  OASIS  "), "oasis");
+
+// An unrecognised non-empty value throws instead of picking a company.
+for (const bad of ["nonsense", 42, {}, "sunbizfunding", "oasis-ai-cc"]) {
+  assert.throws(
+    () => resolveBrandKey(bad),
+    /unknown brand/,
+    `resolveBrandKey(${JSON.stringify(bad)}) must refuse, not fall back`,
+  );
+}
+
+// The nullable form, for callers where "nobody said" must not become a company.
+assert.equal(resolveBrandKeyOrNull(undefined), null);
+assert.equal(resolveBrandKeyOrNull(""), null);
+assert.equal(resolveBrandKeyOrNull("nonsense"), null);
+assert.equal(resolveBrandKeyOrNull("oasis"), "oasis");
+
+// requireBrandKey names the call site so a failure says WHICH path lost it.
+assert.equal(requireBrandKey("sunbiz", "test"), "sunbiz");
+assert.throws(() => requireBrandKey(undefined, "some/send/path"), /some\/send\/path/);
+assert.throws(() => requireBrandKey("", "ctx"), /no usable brand/);
 
 // ---------------------------------------------------------------------------
 // Every brand is completely specified. A brand missing a postal address is a
@@ -54,16 +91,43 @@ for (const key of ALL_BRAND_KEYS) {
 }
 
 // ---------------------------------------------------------------------------
-// The two brands must not collide on any identity axis. Sharing a credential
-// service would mean both brands authenticate as the same mailbox, which is
-// exactly the From/DKIM mismatch this whole design exists to prevent.
+// NO TWO BRANDS may collide on any identity axis — checked over every PAIR, not
+// just the original two.
+//
+// Sharing a credentialService is the sharpest one: it means two companies
+// authenticate as the same mailbox, so one company's mail physically leaves
+// from the other's Google Workspace account. That is the mechanism behind the
+// 2026-09-09 incident — OASIS had no brand entry, resolved to "sunbiz", and
+// therefore inherited credentialService "gws", the client's credential.
+//
+// Generalised so adding a fourth brand cannot reintroduce it unnoticed.
 // ---------------------------------------------------------------------------
+for (const a of ALL_BRAND_KEYS) {
+  for (const b of ALL_BRAND_KEYS) {
+    if (a >= b) continue;
+    const x = getBrand(a);
+    const y = getBrand(b);
+    assert.notEqual(x.sendingDomain, y.sendingDomain, `${a}/${b} share a sending domain`);
+    assert.notEqual(x.fromAddress, y.fromAddress, `${a}/${b} share a From address`);
+    assert.notEqual(
+      x.credentialService,
+      y.credentialService,
+      `${a}/${b} share a credential — one company would send from the other's mailbox`,
+    );
+    assert.notEqual(x.legalName, y.legalName, `${a}/${b} share a legal name`);
+  }
+}
+
 const sb = getBrand("sunbiz");
 const br = getBrand("bluerise");
-assert.notEqual(sb.sendingDomain, br.sendingDomain);
-assert.notEqual(sb.fromAddress, br.fromAddress);
-assert.notEqual(sb.credentialService, br.credentialService);
-assert.notEqual(sb.legalName, br.legalName);
+
+// OASIS's identity, pinned. Each of these was wrong-by-absence before today:
+// with no entry, every one of them resolved to SunBiz's value.
+const oa = getBrand("oasis");
+assert.equal(oa.legalName, "OASIS AI Solutions");
+assert.equal(oa.sendingDomain, "oasisai.work");
+assert.equal(oa.credentialService, "oasis_gmail", "must NOT be 'gws' — that is SunBiz's");
+assert.match(oa.postalAddress, /Montreal/, "Montreal, not Collingwood (CC, 2026-09-09)");
 
 // SunBiz values are the previously-hardcoded ones. An unconfigured environment
 // must send byte-identically to what it sent before this registry existed.
