@@ -22,14 +22,26 @@ export const metadata: Metadata = {
 };
 
 const ALTERNATES = [
-  {
-    icon: Calendar,
-    label: "Book a call",
-    body: "Thirty minutes. We map what to automate first. No pitch deck.",
-    href: BOOKING_URL,
-    action: "Pick a time",
-    external: true,
-  },
+  // The booking card appears ONLY when there is a link to point it at.
+  //
+  // It used to render unconditionally against a hardcoded calendar URL whose
+  // schedule had been deleted, so "Pick a time" took every visitor to
+  // "Appointment not found". A CTA that cannot be honoured costs more than the
+  // missing CTA does: the visitor came ready to book and leaves thinking the
+  // company is broken. With no link they get the email card below, which is
+  // monitored and works.
+  ...(BOOKING_URL
+    ? [
+        {
+          icon: Calendar,
+          label: "Book a call",
+          body: "Thirty minutes. We map what to automate first. No pitch deck.",
+          href: BOOKING_URL,
+          action: "Pick a time",
+          external: true,
+        },
+      ]
+    : []),
   {
     icon: Mail,
     label: "Just email",

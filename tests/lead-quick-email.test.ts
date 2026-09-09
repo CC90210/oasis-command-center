@@ -212,9 +212,13 @@ run("OASIS sends through the shared mailbox, before the bridge, with the rep CC'
   );
 
   // The rep is CC'd and replies come back to them, not into a shared inbox
-  // nobody watches.
-  assert.match(route, /cc: repCopyAddress/, "the rep is not CC'd on the shared-mailbox send");
-  assert.match(sender, /replyTo: ccFinal/, "replies would land in the shared mailbox, not with the rep");
+  // nobody watches. `copyList` replaced `repCopyAddress` on 2026-09-09: the old
+  // one copied whoever pressed send, so the rep the lead is ASSIGNED to was
+  // never copied and the shared mailbox copied itself. The behaviour is now
+  // asserted by execution in tests/lead-quick-email-delivery.test.ts; these two
+  // only pin that the route still threads a copy list at all.
+  assert.match(route, /cc: copyList/, "the rep is not CC'd on the shared-mailbox send");
+  assert.match(sender, /replyTo \? \{ replyTo \}/, "replies would land in the shared mailbox, not with the rep");
 
   // OASIS footer, never the default.
   assert.match(sender, /brand: "oasis"/, "the shared send would append SunBiz's footer");
@@ -433,18 +437,20 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
   // The whole chain already supported CC and nobody had connected it:
   // send_gateway.py takes --cc, bridge_tools._tool_send_email accepts `cc` and
   // passes it through normalize_cc, and exec-tool forwards the payload verbatim.
+  //
+  // 2026-09-09: the copy is now keyed on ASSIGNMENT, not on who pressed the
+  // button. These greps only prove the wiring exists; what the header actually
+  // contains is asserted by running the real functions in
+  // tests/lead-quick-email-delivery.test.ts. That distinction matters — the
+  // regex below used to pin `sess.email !== toEmail`, which stayed green while
+  // the rep who owned the lead was never copied at all.
   const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
-  assert.match(route, /const repCopyAddress =/, "the rep's copy address is not resolved");
-  assert.match(route, /cc: repCopyAddress/, "the send does not CC the rep");
+  assert.match(route, /const copyList = buildCopyList\(/, "the copy list is not resolved");
+  assert.match(route, /resolveAssigneeEmail\(/, "the lead's assigned rep is not looked up");
+  assert.match(route, /cc: copyList/, "the send does not CC the rep");
   assert.match(
     route,
-    /\.\.\.\(args\.cc \? \{ cc: args\.cc \} : \{\}\)/,
+    /\.\.\.\(args\.cc && args\.cc\.length \? \{ cc: args\.cc \} : \{\}\)/,
     "cc is not forwarded to the bridge tool",
-  );
-  // Never the same address in To and Cc.
-  assert.match(
-    route,
-    /sess\.email\.trim\(\)\.toLowerCase\(\) !== toEmail\.trim\(\)\.toLowerCase\(\)/,
-    "a rep emailing themselves would appear in both To and Cc",
   );
 });

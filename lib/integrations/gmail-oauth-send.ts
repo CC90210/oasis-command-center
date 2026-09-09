@@ -24,6 +24,7 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // CANSPAM_FOOTER, which had NO rep signature and a stale street address —
 // direct sends now match the submissions@ queue path's identity rules.
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
+import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -111,14 +112,20 @@ export function gmailFailureReason(status: number): "send_failed" | "delivery_un
 export function buildGmailRawMessage(args: {
   from: string;
   to: string;
+  /** Already filtered — see finalizeCopyList. Omitted when empty. */
+  cc?: string;
   subject: string;
   body: string;
   messageId?: string;
 }): string {
   const bodyB64 = Buffer.from(args.body, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n");
+  const cc = (args.cc || "").trim();
   const headers = [
     `From: ${args.from}`,
     `To: ${args.to}`,
+    // The lead's assigned rep. Without it a send from a rep's OWN mailbox
+    // leaves the rep who actually owns the lead with no copy anywhere.
+    ...(cc ? [`Cc: ${cc}`] : []),
     `Subject: ${encodeHeader(args.subject)}`,
     ...(args.messageId ? [`Message-ID: ${args.messageId}`] : []),
     "MIME-Version: 1.0",
@@ -164,6 +171,8 @@ export async function sendGmailAsOperator(args: {
   tenantId: string;
   userId: string;
   to: string;
+  /** Who to copy — the lead's assigned rep first. See lead-copy-recipients.ts. */
+  cc?: string | string[] | null;
   subject: string;
   body: string;
   signer?: EmailSigner | null;
@@ -206,9 +215,11 @@ export async function sendGmailAsOperator(args: {
     accessToken = ref.accessToken;
   }
 
+  const ccList = finalizeCopyList(args.cc, { to: args.to, fromAddress });
   const raw = buildGmailRawMessage({
     from: fromAddress,
     to: args.to,
+    ...(ccList.length ? { cc: ccList.join(", ") } : {}),
     subject: args.subject,
     body: appendSignatureAndFooter(args.body, { signer: args.signer, fromAddress }),
     messageId: args.idempotencyKey

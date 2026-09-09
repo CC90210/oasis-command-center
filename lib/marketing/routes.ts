@@ -18,6 +18,8 @@
  * "/"; the layout and the auth gate both see "/home".
  */
 
+import { resolveBookingUrl } from "@/lib/booking-link";
+
 /** Where an anonymous "/" is rewritten to. Never redirect — a redirect
  *  would move the brand apex to /home in the address bar and in search. */
 /**
@@ -45,6 +47,7 @@
  *
  * Pinned by tests/shell-boundary.test.ts.
  */
+
 export const SHELL_AMBIGUOUS_PATHS: readonly string[] = ["/"];
 
 export const MARKETING_HOME_PATH = "/home";
@@ -75,14 +78,20 @@ export const ALL_MARKETING_PATHS: readonly string[] = [
 /** Canonical origin, used for metadata/sitemap/OG absolute URLs. */
 export const SITE_ORIGIN = "https://oasisai.work";
 
-/** CC's booking link — the one CTA that leaves the site. */
-export const BOOKING_URL = (
-  process.env.NEXT_PUBLIC_BOOKING_URL ||
-  process.env.NEXT_PUBLIC_FOUNDER_BOOKING_URL ||
-  process.env.OASIS_FOUNDER_BOOKING_URL ||
-  process.env.BOOKING_LINK ||
-  "https://calendar.app.google/tpfvJYBGircnGu8G8"
-).trim();
+/**
+ * CC's booking link — the one CTA that leaves the site. MAY BE EMPTY.
+ *
+ * It used to fall back to a hardcoded calendar.app.google URL. That schedule
+ * was deleted at some point and the site kept serving it, so "Book a call" on
+ * /contact and /work sent every visitor to "Appointment not found" — verified
+ * live on 2026-09-09. A default cannot promise that a resource owned outside
+ * this repo still exists, so there is no default any more: callers render the
+ * CTA only when there is a link, and offer email when there is not.
+ *
+ * Resolution lives in lib/booking-link.ts so the site, the quick email and the
+ * qualified-lead email cannot drift onto different values again.
+ */
+export const BOOKING_URL = resolveBookingUrl();
 
 /**
  * The address a prospect should actually write to.

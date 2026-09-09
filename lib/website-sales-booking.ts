@@ -54,6 +54,7 @@ import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 import { OASIS_WEBSITE_SALES_PROGRAM } from "@/lib/oasis-sales-pipeline-policy";
+import { resolveBookingUrl } from "@/lib/booking-link";
 
 const TAG = "[website-sales.booking]";
 
@@ -75,8 +76,11 @@ const BOOKING_EMAIL_SOURCE = "website_sales_booking_link";
  *  (tenant_id, metadata->>'request_id') where agent_source='website_sales_pipeline'. */
 const PIPELINE_SOURCE = "website_sales_pipeline";
 
-/** Existing OASIS founder booking page — env-overridable, never absent. */
-const DEFAULT_BOOKING_URL = "https://calendar.app.google/tpfvJYBGircnGu8G8";
+// The hardcoded DEFAULT_BOOKING_URL that stood here is gone. It promised the
+// link was "never absent", which no code can promise about a Google Calendar
+// schedule someone can delete in one click — and it had been deleted.
+// lib/booking-link.ts now owns resolution, and refuses that exact URL by name
+// so it cannot be pasted back in.
 
 /** Marker source for a failed founder alert. MUST NOT collide with any
  *  idempotency-checked source (see recordAlertFailure's contract). */
@@ -113,15 +117,15 @@ export function isWebsiteSalesLead(data: Record<string, unknown>): boolean {
   return data.sales_program === OASIS_WEBSITE_SALES_PROGRAM;
 }
 
+/**
+ * The booking link, or "" — see lib/booking-link.ts.
+ *
+ * DEFAULT_BOOKING_URL used to backstop this. That address had been deleted, so
+ * every qualified lead was automatically emailed "Pick a time that works here"
+ * pointing at "Appointment not found" (CC, 2026-09-09).
+ */
 export function bookingUrl(): string {
-  const fromEnv = (
-    process.env.NEXT_PUBLIC_BOOKING_URL ||
-    process.env.NEXT_PUBLIC_FOUNDER_BOOKING_URL ||
-    process.env.OASIS_FOUNDER_BOOKING_URL ||
-    process.env.BOOKING_LINK ||
-    ""
-  ).trim();
-  return fromEnv || DEFAULT_BOOKING_URL;
+  return resolveBookingUrl();
 }
 
 /**
@@ -138,14 +142,22 @@ export function buildBookingEmail(input: {
   bookingUrl: string;
 }): { subject: string; body: string } {
   const { firstName, company, bookingUrl } = input;
+  // NO EM DASHES in outbound copy (CC, 2026-09-08), and the sign-off carries no
+  // dash either — the shared transport appends the sender's own name.
+  const ask = bookingUrl
+    ? `Pick a time that works here:\n${bookingUrl}`
+    : `Reply with a couple of times that suit you this week and I'll send the invite.`;
   return {
-    subject: "Your website game plan call — pick a time",
+    subject: bookingUrl
+      ? "Your website game plan call: pick a time"
+      : "Your website game plan call: when suits you?",
     body:
       `Hey ${firstName},\n\n` +
       `You just spoke with our team, and ${company} is exactly the kind of business we do our best work for. ` +
-      `The next step is a short Google Meet call with one of our founders — we'll walk through exactly what we'd build for ${company} and what it would change for you.\n\n` +
-      `Pick a time that works here:\n${bookingUrl}\n\n` +
-      `Talk soon,\n— CC`,
+      `The next step is a short Google Meet call with one of our founders. ` +
+      `We'll walk through exactly what we'd build for ${company} and what it would change for you.\n\n` +
+      `${ask}\n\n` +
+      `Talk soon,`,
   };
 }
 
