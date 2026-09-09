@@ -130,6 +130,32 @@ export const SUBMIT_ERROR_COPY: Record<string, string> = {
   // Merchant can fix these by changing how they got here.
   prior_step_incomplete:
     "An earlier step is not finished yet. Go back and complete it, then continue.",
+  anonymous_init_requires_step_0:
+    "This form needs to be started from the beginning. Please reopen your link.",
+
+  /*
+   * THE LINK ITSELF IS BAD. `/api/forms/submit` builds these as
+   * `token_${sigResult.reason}` from lib/form-links.ts, so they are assembled at
+   * runtime and are easy to miss when reading the route for string literals —
+   * Codex caught exactly that (P2, 2026-09-08).
+   *
+   * These matter more than their obscurity suggests. `token_expired` is what a
+   * merchant gets when they come back to a rep's link a few days later, and
+   * before this change the word they saw on screen was "token_expired". That is
+   * indistinguishable, from the merchant's side, from "this company's software
+   * is broken" — and it is link-dependent, which is precisely the shape of the
+   * reports that started this investigation.
+   */
+  token_expired: "This link has expired. Ask your contact to send you a fresh one.",
+  token_invalid: "This link is not valid. Ask your contact to send you a fresh one.",
+  token_malformed:
+    "This link looks incomplete — it may have been cut off in a text or email. Ask your contact to resend it.",
+  token_missing_signature:
+    "This link looks incomplete — it may have been cut off in a text or email. Ask your contact to resend it.",
+  token_version_mismatch: "This link is out of date. Ask your contact to send you a fresh one.",
+  token_server_misconfigured:
+    "Something went wrong on our end. We have been notified, please try again shortly.",
+
   no_auth_provided: "This link is missing its access code. Ask your contact to resend it.",
   not_found: "This link is no longer valid. Ask your contact to send a fresh one.",
   form_not_found: "This link is no longer valid. Ask your contact to send a fresh one.",

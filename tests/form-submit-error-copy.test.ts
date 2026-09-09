@@ -26,13 +26,51 @@ import { SUBMIT_ERROR_COPY, SUBMIT_ERROR_FALLBACK } from "../components/forms/Fo
 
 const ROUTE = resolve(__dirname, "../app/api/forms/submit/route.ts");
 
-/** Every `error: "..."` literal the route can send back to a browser. */
+/**
+ * Every `error: "..."` literal the route can send back to a browser.
+ *
+ * 🚨 `[a-z0-9_]`, NOT `[a-z_]` (Codex P2, 2026-09-08). The first version of this
+ * regex omitted digits and therefore silently skipped
+ * `anonymous_init_requires_step_0` — a guard that reported "all mapped" while
+ * missing a real reachable code. That is worse than no guard, because it
+ * converts an unknown into a false assurance.
+ */
 function errorCodesInRoute(): string[] {
   const src = readFileSync(ROUTE, "utf8");
   const found = new Set<string>();
-  for (const m of src.matchAll(/\berror:\s*"([a-z_]+)"/g)) found.add(m[1]);
+  for (const m of src.matchAll(/\berror:\s*"([a-z0-9_]+)"/g)) found.add(m[1]);
   return [...found].sort();
 }
+
+/**
+ * Codes the route ASSEMBLES rather than writes, which no literal scan can see.
+ *
+ * Two families, and they are not equivalent:
+ *
+ *   token_*  — built as `token_${sigResult.reason}` from the reasons in
+ *              lib/form-links.ts. A merchant hits these with a stale or
+ *              truncated link, so they need REAL COPY, not a shrug. Enumerated
+ *              here and asserted mapped below.
+ *
+ *   raw text — `insertRes.error.message` (a database error) and
+ *              `lead_create_failed: ${detail}`. These are internal strings that
+ *              must NEVER reach a merchant verbatim; the requirement is the
+ *              opposite one, that they resolve to the generic sentence.
+ */
+const DYNAMIC_TOKEN_CODES = [
+  "token_expired",
+  "token_invalid",
+  "token_malformed",
+  "token_missing_signature",
+  "token_version_mismatch",
+  "token_server_misconfigured",
+];
+
+/** Internal strings the route can put in `error`. Must degrade, never display. */
+const RAW_INTERNAL_ERRORS = [
+  'duplicate key value violates unique constraint "form_submissions_pkey"',
+  "lead_create_failed: RecordsError: tenant not found",
+];
 
 /** The resolution order shipped in FormPublicClient.submit(). */
 function whatMerchantSees(data: { error?: string; message?: string } | null): string {
@@ -71,6 +109,36 @@ function run() {
     assert.ok(shown.trim().length > 20, `copy for "${code}" is too terse to help: "${shown}"`);
   }
 
+  /* 3b. The `token_*` family is assembled at runtime, so case 1's scan cannot
+   *     see it. A merchant reaches these with a stale or truncated link, which
+   *     is the single most likely way to hit this route badly — they get real
+   *     copy, not the generic shrug. */
+  const routeSrc = readFileSync(ROUTE, "utf8");
+  assert.ok(
+    routeSrc.includes("`token_${"),
+    "the route no longer builds token_${reason}; update DYNAMIC_TOKEN_CODES to match reality",
+  );
+  for (const code of DYNAMIC_TOKEN_CODES) {
+    assert.ok(code in SUBMIT_ERROR_COPY, `dynamic code "${code}" has no merchant copy`);
+    assert.notStrictEqual(
+      whatMerchantSees({ error: code }),
+      SUBMIT_ERROR_FALLBACK,
+      `"${code}" deserves specific copy — a bad link is actionable, "try again" is not`,
+    );
+  }
+
+  /* 3c. The route can also put INTERNAL text in `error` (a database message,
+   *     `lead_create_failed: <detail>`). The requirement there is the inverse:
+   *     never show it, degrade to the sentence. */
+  for (const raw of RAW_INTERNAL_ERRORS) {
+    const shown = whatMerchantSees({ error: raw });
+    assert.strictEqual(
+      shown,
+      SUBMIT_ERROR_FALLBACK,
+      `internal text leaked to a merchant: "${shown}"`,
+    );
+  }
+
   /* 4. An unknown code degrades to the sentence, never to itself. */
   const invented = "some_code_that_does_not_exist";
   assert.strictEqual(whatMerchantSees({ error: invented }), SUBMIT_ERROR_FALLBACK);
@@ -86,7 +154,10 @@ function run() {
     "Include the state and ZIP code. For example: 911 Magnolia Dr, Algonquin, IL 60102",
   );
 
-  console.log(`form-submit-error-copy: OK (${codes.length} rejections, all mapped)`);
+  console.log(
+    `form-submit-error-copy: OK (${codes.length} literal + ${DYNAMIC_TOKEN_CODES.length} dynamic rejections mapped, ` +
+      `${RAW_INTERNAL_ERRORS.length} internal-text cases degrade to the generic sentence)`,
+  );
 }
 
 run();
