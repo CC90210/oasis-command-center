@@ -23,10 +23,14 @@
  * "oasis", TypeScript defaulted unknown to "sunbiz" — so a brand that went
  * missing landed on a different company depending on which side of the stack
  * noticed. Both now refuse instead. Keep the maps identical; the parity is
- * asserted by tests/brand-tenant-parity.test.ts.
+ * asserted by tests/brand-identity-coherence.test.ts, which parses the Python
+ * source and compares both maps in BOTH directions. (This comment previously
+ * cited tests/brand-tenant-parity.test.ts, which does not exist — the third
+ * such phantom citation found in this change. A comment naming a guard is
+ * worthless unless the guard is real; that is the whole lesson here.)
  */
 
-import { resolveBrandKeyOrNull, type BrandKey } from "./brands";
+import { getBrand, resolveBrandKeyOrNull, type BrandKey } from "./brands";
 
 /**
  * tenant_id (UUID) -> brand. Verified against the live `tenants` table
@@ -106,6 +110,43 @@ export function brandForTenant(args: {
 
   if (slug) return ownSlug ?? null;
   return null;
+}
+
+/**
+ * May this mailbox send as this brand?
+ *
+ * Returns null when they agree (or when there is nothing to check), and an
+ * explanation when they do not. Mirrors `mailbox_matches_brand` in
+ * scripts/lib/tenant_brand.py — the Python chokepoint got this guard first and
+ * this side went without it, which left the exact incident reachable here:
+ * sendOasisSharedGmail authenticates as OASIS_MAIL_FROM and hardcodes
+ * `brand: "oasis"` in the footer, with nothing asserting the two are the same
+ * company. Point that env var at the client's mailbox and OASIS-branded mail
+ * leaves from it, silently.
+ *
+ * The sending domain comes from the brand registry rather than a second map,
+ * so there is no new vocabulary to drift — `brands.ts` already has to know it
+ * for `brandIsSendable`.
+ *
+ * A subdomain of the sending domain is legitimate (mail.oasisai.work). A
+ * lookalike that merely ends with the same text (notoasisai.work) is not.
+ */
+export function mailboxBrandConflict(brand: BrandKey, mailbox: string | null | undefined): string | null {
+  const expected = getBrand(brand).sendingDomain.trim().toLowerCase();
+  if (!expected) return null;
+
+  let addr = String(mailbox ?? "").trim().toLowerCase();
+  if (addr.includes("<") && addr.includes(">")) {
+    addr = addr.slice(addr.lastIndexOf("<") + 1, addr.lastIndexOf(">")).trim();
+  }
+  if (!addr.includes("@")) return null; // nothing to check; the caller handles a missing mailbox
+
+  const got = addr.slice(addr.lastIndexOf("@") + 1).trim();
+  if (got === expected || got.endsWith("." + expected)) return null;
+  return (
+    `brand "${brand}" must send from ${expected}, but the authenticating mailbox ` +
+    `is ${addr} (domain ${got})`
+  );
 }
 
 /**
