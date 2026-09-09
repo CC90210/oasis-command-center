@@ -85,8 +85,13 @@ export const SUNBIZ_LEGAL_FOOTER =
  */
 const BRAND_FOOTERS: Record<BrandKey, string> = {
   sunbiz: SUNBIZ_LEGAL_FOOTER,
+  // Street address supplied by CC 2026-09-09. Until then this said only
+  // "OASIS AI Solutions, Montreal, QC, Canada" — no street, which is an
+  // incomplete CASL s.6(2) identification on every commercial email OASIS
+  // sends. Laid out name / street / city-postal to match the SunBiz footer
+  // above, so the two read as the same kind of document.
   oasis:
-    "\n\n---\nOASIS AI Solutions, Montreal, QC, Canada\n\n" +
+    "\n\n---\nOASIS AI Solutions\n6993 Decarie Blvd\nMontreal, QC H3W 0B5, Canada\n\n" +
     "You received this email because we reached out about your business. " +
     "To stop receiving emails, reply UNSUBSCRIBE.",
   bluerise:

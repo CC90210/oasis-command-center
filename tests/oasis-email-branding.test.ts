@@ -58,7 +58,8 @@ run("a whole OASIS message names OASIS and nobody else", () => {
   }
 
   assert.match(body, /\n\nAriel/, "the rep does not sign it");
-  assert.match(body, /OASIS AI Solutions, Montreal, QC, Canada/, "no OASIS identification");
+  assert.match(body, /OASIS AI Solutions/, "no OASIS identification");
+  assert.match(body, /6993 Decarie Blvd/, "OASIS identification has no street address");
   assert.match(body, /UNSUBSCRIBE/, "no opt-out instruction");
   assert.ok(!body.includes("—"), "an em dash reached the prospect");
 });

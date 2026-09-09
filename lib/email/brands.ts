@@ -184,15 +184,19 @@ const REGISTRY: Record<BrandKey, () => Brand> = {
     // moves the address everywhere rather than two that can disagree.
     fromAddress: env("OASIS_MAIL_FROM") || "conaugh@oasisai.work",
     sendingDomain: "oasisai.work",
-    // NOT A STREET ADDRESS, and knowingly so.
+    // STREET ADDRESS ONLY, same shape as SunBiz above — the legal entity is
+    // rendered separately, so repeating the name here would print it twice.
     //
-    // Every OASIS email already ships exactly this line, and inventing a street
-    // to satisfy the shape would be worse than the gap: this file's own rule is
-    // that a borrowed or invented address is "affirmatively misleading rather
-    // than merely incomplete". CASL s.6(2) wants a real mailing address, so
-    // this is a real compliance gap — flagged for CC, not papered over. Set
-    // OASIS_POSTAL_ADDRESS once there is a street address that receives mail.
-    postalAddress: env("OASIS_POSTAL_ADDRESS") || "Montreal, QC, Canada",
+    // Supplied by CC 2026-09-09, closing the CASL s.6(2) gap this entry carried
+    // until then (it previously said only "Montreal, QC, Canada", with no
+    // street, which is an incomplete identification on every commercial email).
+    // Written unaccented and with the postal code so it is deliverable: the
+    // street is Boulevard Decarie in Cote-des-Neiges, and 6993 resolves to
+    // H3W 0B5. ASCII deliberately — this same string is compared byte-for-byte
+    // against the Python registry by the parity test, and an accent that
+    // survives one stack's encoding but not the other's would fail it for a
+    // reason that has nothing to do with identity.
+    postalAddress: env("OASIS_POSTAL_ADDRESS") || "6993 Decarie Blvd, Montreal, QC H3W 0B5",
     trackingOrigin: safeOrigin(env("OASIS_TRACKING_ORIGIN")),
     // Its own credential row — never "gws", which is SunBiz's. This is the
     // link that made the brand decide which mailbox authenticates, and so the

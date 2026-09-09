@@ -83,7 +83,7 @@ export default async function UnsubscribePage({
                 Collingwood, so the opt-out page a recipient lands on disagreed
                 with the message that sent them there — on the one page whose
                 whole job is a legally-required identification. */}
-            OASIS AI Solutions · Montreal, QC, Canada<br />
+            OASIS AI Solutions · 6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada<br />
             Questions? <a href="mailto:conaugh@oasisai.work" className="text-[#00d4ff] underline">conaugh@oasisai.work</a>
           </p>
         </div>
