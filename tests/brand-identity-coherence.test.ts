@@ -28,7 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ALL_BRAND_KEYS, getBrand, type BrandKey } from "../lib/email/brands";
 import { appendSignatureAndFooter } from "../lib/config/email-signature";
-import { TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict } from "../lib/email/brand-for-tenant";
+import { TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict, mailboxBrandConflict } from "../lib/email/brand-for-tenant";
 
 // ---------------------------------------------------------------------------
 // 1. A brand's footer names ITS OWN legal entity, and no other brand's.
@@ -171,6 +171,59 @@ for (const hostile of ["constructor", "toString", "__proto__", "hasOwnProperty",
     brandForTenant({ tenantId: hostile }),
     null,
     `tenant id "${hostile}" resolved to something`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A MAILBOX MAY NOT ASSERT A BRAND IT IS NOT ENTITLED TO.
+//
+// This is the incident reduced to one assertion, on the TypeScript side. The
+// Python chokepoint got this guard first and this stack went without it, which
+// left it reachable here: sendOasisSharedGmail authenticates as OASIS_MAIL_FROM
+// and stamps brand "oasis" into the footer as a literal.
+// ---------------------------------------------------------------------------
+assert.ok(
+  mailboxBrandConflict("oasis", "submissions@sunbizfunding.com"),
+  "OASIS must not send from the client's mailbox",
+);
+assert.ok(
+  mailboxBrandConflict("sunbiz", "conaugh@oasisai.work"),
+  "SunBiz must not send from the OASIS mailbox",
+);
+// Correct pairings, and a real sender from the ledger.
+assert.equal(mailboxBrandConflict("oasis", "conaugh@oasisai.work"), null);
+assert.equal(mailboxBrandConflict("sunbiz", "submissions@sunbizfunding.com"), null);
+assert.equal(mailboxBrandConflict("sunbiz", "Alex@sunbizfunding.com"), null);
+assert.equal(
+  mailboxBrandConflict("bluerise", "submissions@bluerisebusinesscapital.com"),
+  null,
+);
+// Display-name wrapping and case must not launder a mismatch.
+assert.equal(mailboxBrandConflict("oasis", "OASIS AI <Conaugh@OasisAI.Work>"), null);
+assert.ok(
+  mailboxBrandConflict("oasis", "OASIS AI <submissions@SunBizFunding.com>"),
+  "a display name must not launder a mismatch",
+);
+// A subdomain is legitimate; a suffix lookalike is not.
+assert.equal(mailboxBrandConflict("oasis", "bot@mail.oasisai.work"), null);
+assert.ok(
+  mailboxBrandConflict("oasis", "attacker@notoasisai.work"),
+  "a lookalike domain must be refused",
+);
+// Nothing to check is not a conflict — the caller handles a missing mailbox.
+assert.equal(mailboxBrandConflict("oasis", ""), null);
+assert.equal(mailboxBrandConflict("oasis", null), null);
+
+// The guard must agree with the Python one, brand for brand. Two stacks with
+// different opinions about which domain a company sends from is the same class
+// of defect as two stacks with different brand defaults.
+for (const key of ALL_BRAND_KEYS) {
+  const dom = getBrand(key).sendingDomain;
+  assert.ok(dom && dom.includes("."), `${key}: sendingDomain is not a domain`);
+  assert.equal(
+    mailboxBrandConflict(key, `anyone@${dom}`),
+    null,
+    `${key} cannot send from its own sending domain`,
   );
 }
 

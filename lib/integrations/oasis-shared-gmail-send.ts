@@ -35,6 +35,7 @@ import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
+import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
 
 /**
  * `tenant_integration_credentials.service` holding the shared OASIS mailbox.
@@ -256,6 +257,25 @@ export async function sendOasisSharedGmail(args: {
       provider: "oasis_shared_gmail",
       reason: "not_configured",
       error: `no ${OASIS_MAIL_SERVICE} from_address/app_password for this tenant`,
+    };
+  }
+
+  // THE MAILBOX MUST BE ENTITLED TO THE BRAND.
+  //
+  // composeOasisMessage stamps `brand: "oasis"` into the footer as a literal,
+  // and the transport below authenticates as `fromAddress` — which comes from
+  // an env var. Nothing connected the two. Point OASIS_MAIL_FROM at
+  // submissions@sunbizfunding.com and this function would have sent
+  // OASIS-branded mail authenticated as the client's mailbox, landing in a Sent
+  // folder they read. That is the 2026-09-09 incident exactly, and the Python
+  // chokepoint got a guard for it while this path went without one.
+  const mismatch = mailboxBrandConflict("oasis", fromAddress);
+  if (mismatch) {
+    return {
+      ok: false,
+      provider: "oasis_shared_gmail",
+      reason: "send_failed",
+      error: `refusing to send: ${mismatch}. A mailbox may not assert another company's identity.`,
     };
   }
 

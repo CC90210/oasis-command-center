@@ -24,8 +24,8 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { getSubmissionsCreds, getSubmissionsFrom } from "./submissions-gmail";
 import { domainOfAddress, messageIdDomain } from "@/lib/email/sending-identity";
-import type { BrandKey } from "@/lib/email/brands";
-import { brandTenantConflict } from "@/lib/email/brand-for-tenant";
+import { resolveBrandKey, type BrandKey } from "@/lib/email/brands";
+import { brandTenantConflict, mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
 
 export type SendPayload = {
   to: string;
@@ -149,6 +149,30 @@ async function sendOnce(
     // and the DKIM signature agree. Absent brand = SunBiz = today's behaviour,
     // and lender shop-out mail deliberately never passes one.
     const creds = await getSubmissionsCreds(payload.tenantId, payload.brand);
+
+    // ...and the credential it selected must actually BE that brand's mailbox.
+    //
+    // The brand picks the credential row, but the row's from_address is a value
+    // an operator typed into a settings form. Nothing asserted the two agree,
+    // so a mistyped or mis-scoped row would authenticate one company's mail as
+    // another's — the same failure as the 2026-09-09 incident, arriving through
+    // configuration rather than through code. `resolveBrandKey(undefined)` is
+    // sunbiz, which is the documented default lender mail relies on.
+    const mailboxMismatch = mailboxBrandConflict(
+      resolveBrandKey(payload.brand),
+      creds.fromAddress,
+    );
+    if (mailboxMismatch) {
+      // NOT transient. Retrying a misconfigured credential row just sends the
+      // wrong company's mail sixty seconds later.
+      return {
+        ok: false,
+        transient: false,
+        error:
+          `refusing to send: ${mailboxMismatch}. The credential configured for this ` +
+          "brand is another company's mailbox; fix the integration row rather than sending.",
+      };
+    }
     // The display name in front of the address. getSubmissionsFrom() supplies a
     // shared default ("SunBiz Submissions") used by lender shop-out mail as well,
     // so a caller that needs to rebrand ONLY its own mail passes `fromName` and
