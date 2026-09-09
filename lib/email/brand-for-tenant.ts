@@ -73,9 +73,29 @@ export function brandForTenant(args: {
   tenantSlug?: string | null;
 }): BrandKey | null {
   const id = String(args.tenantId ?? "").trim().toLowerCase();
-  if (id && TENANT_ID_BRAND[id]) return TENANT_ID_BRAND[id];
   const slug = String(args.tenantSlug ?? "").trim().toLowerCase();
-  if (slug && TENANT_SLUG_BRAND[slug]) return TENANT_SLUG_BRAND[slug];
+
+  // AN ID THAT IS SUPPLIED BUT UNMAPPED RETURNS NULL. It does not fall through
+  // to the slug.
+  //
+  // The first version of this fell through, which contradicted its own comment
+  // that the id "wins" and reopened the hole one layer down: a caller passing
+  // { tenantId: <some stranger's workspace>, tenantSlug: "submissions" } would
+  // have resolved to SunBiz. The id is the primary key — if we hold one and do
+  // not recognise it, that is precisely the case where guessing is worst.
+  // (Codex, adversarial review, 2026-09-09.)
+  if (id) {
+    const byId = TENANT_ID_BRAND[id];
+    if (!byId) return null;
+    // If a slug was ALSO supplied and disagrees, refuse rather than pick one.
+    if (slug) {
+      const bySlug = TENANT_SLUG_BRAND[slug];
+      if (bySlug && bySlug !== byId) return null;
+    }
+    return byId;
+  }
+
+  if (slug) return TENANT_SLUG_BRAND[slug] ?? null;
   return null;
 }
 

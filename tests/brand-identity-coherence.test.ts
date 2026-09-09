@@ -24,7 +24,8 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ALL_BRAND_KEYS, getBrand, type BrandKey } from "../lib/email/brands";
 import { appendSignatureAndFooter } from "../lib/config/email-signature";
 import { TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict } from "../lib/email/brand-for-tenant";
@@ -130,6 +131,32 @@ assert.equal(
   "prefix collision must not resolve — that is a different company",
 );
 
+// A SUPPLIED but unmapped tenant id must NOT fall through to the slug.
+//
+// The first version of brandForTenant did exactly that, so
+// { tenantId: <a stranger's workspace>, tenantSlug: "submissions" } resolved to
+// SunBiz — reopening the hole one layer down, and contradicting the comment
+// saying the id wins. (Codex, adversarial review, 2026-09-09.)
+assert.equal(
+  brandForTenant({
+    tenantId: "481c4d9b-c3b1-47e1-adef-c16dcd0e111f", // Yoga Tantric LLC
+    tenantSlug: "submissions",
+  }),
+  null,
+  "an unmapped tenant id must refuse, not borrow the slug's brand",
+);
+
+// And a supplied id that DISAGREES with a supplied slug refuses rather than
+// silently preferring one of them.
+assert.equal(
+  brandForTenant({
+    tenantId: "ef8d389e-3f15-43f2-ae00-3660f69a1452", // OASIS
+    tenantSlug: "submissions", // SunBiz
+  }),
+  null,
+  "id and slug naming different companies must refuse",
+);
+
 // Disagreement between a supplied brand and the tenant's real one is reported.
 assert.ok(
   brandTenantConflict({ brand: "oasis", tenantSlug: "submissions" }),
@@ -155,24 +182,86 @@ assert.equal(
 // it — and mail crosses that boundary in both directions every day.
 // ---------------------------------------------------------------------------
 {
-  const py = readFileSync(
-    "C:/Users/User/Business-Empire-Agent/scripts/lib/tenant_brand.py",
-    "utf8",
-  );
+  // PORTABLE, AND LOUD WHEN IT CANNOT RUN.
+  //
+  // The first version hardcoded an absolute Windows path, which passes on this
+  // machine and reds (or worse, is quietly deleted) anywhere else. The agent
+  // repo is a sibling checkout that CI for THIS repo may not have, so a missing
+  // sibling is announced as a skip rather than failed — a parity check that
+  // cannot see the other side must say so, not report success.
+  // (Codex, adversarial review, 2026-09-09.)
+  const candidates = [
+    process.env.BRAVO_AGENT_REPO && `${process.env.BRAVO_AGENT_REPO}/scripts/lib/tenant_brand.py`,
+    resolve(process.cwd(), "../../Business-Empire-Agent/scripts/lib/tenant_brand.py"),
+    resolve(process.cwd(), "../Business-Empire-Agent/scripts/lib/tenant_brand.py"),
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
 
-  for (const [slug, brand] of Object.entries(TENANT_SLUG_BRAND)) {
-    const re = new RegExp(`["']${slug}["']\\s*:\\s*["']${brand}["']`);
-    assert.match(
-      py,
-      re,
-      `slug "${slug}" -> "${brand}" is missing or different in scripts/lib/tenant_brand.py. ` +
-        "The two stacks must not disagree about which company a tenant is.",
+  const found = candidates.find((p) => existsSync(p));
+  if (!found) {
+    console.warn(
+      "brand-identity-coherence: SKIPPED the TypeScript<->Python parity check — " +
+        "scripts/lib/tenant_brand.py not found. Looked in:\n  " +
+        candidates.join("\n  ") +
+        "\nSet BRAVO_AGENT_REPO to the Business-Empire-Agent checkout to enable it. " +
+        "The two stacks can drift silently while this is skipped.",
     );
-  }
+  } else {
+    const py = readFileSync(found, "utf8");
 
-  for (const [id, brand] of Object.entries(TENANT_ID_BRAND)) {
-    const re = new RegExp(`["']${id}["']\\s*:\\s*["']${brand}["']`);
-    assert.match(py, re, `tenant ${id} -> "${brand}" differs between TypeScript and Python`);
+    /** Pull one `NAME: dict[str, str] = { "k": "v", ... }` body out of the
+     *  Python source and return it as a map. Parsed rather than substring-
+     *  matched so the comparison can run in BOTH directions: checking only
+     *  that every TS entry appears somewhere in the Python text would miss an
+     *  EXTRA Python mapping, which is drift just as much as a missing one. */
+    function pyDict(name: string): Record<string, string> {
+      // Anchored to the start of a line so a MENTION of the name in a comment
+      // ("see SLUG_BRAND below") cannot be mistaken for the declaration — which
+      // is exactly what happened on the first run of this parser, and it
+      // reported the maps as disagreeing when they did not. A parity check that
+      // cries wolf gets disabled, so the parse has to be exact.
+      const block = new RegExp(
+        `^${name}\\s*:[^=\\n]*=\\s*\\{([\\s\\S]*?)^\\}`,
+        "m",
+      ).exec(py);
+      assert.ok(block, `could not find the ${name} declaration in tenant_brand.py — parity unverifiable`);
+      const out: Record<string, string> = {};
+      for (const m of block![1].matchAll(/["']([^"']+)["']\s*:\s*["']([^"']+)["']/g)) {
+        assert.equal(out[m[1]], undefined, `${name} defines "${m[1]}" twice in Python`);
+        out[m[1]] = m[2];
+      }
+      return out;
+    }
+
+    const pySlug = pyDict("SLUG_BRAND");
+    const pyId = pyDict("TENANT_BRAND");
+
+    const compare = (
+      label: string,
+      ts: Readonly<Record<string, string>>,
+      pyMap: Record<string, string>,
+    ) => {
+      for (const [k, v] of Object.entries(ts)) {
+        assert.equal(
+          pyMap[k],
+          v,
+          `${label}: "${k}" -> "${v}" in TypeScript but ${JSON.stringify(pyMap[k])} in Python. ` +
+            "The two stacks must not disagree about which company a tenant is.",
+        );
+      }
+      // The reverse direction. An entry Python has and TypeScript does not means
+      // the Python send path will brand a tenant that the TypeScript path
+      // refuses — the stacks disagreeing again, just quietly.
+      for (const [k, v] of Object.entries(pyMap)) {
+        assert.equal(
+          ts[k],
+          v,
+          `${label}: "${k}" -> "${v}" exists in Python but not (or differently) in TypeScript.`,
+        );
+      }
+    };
+
+    compare("slug map", TENANT_SLUG_BRAND, pySlug);
+    compare("tenant id map", TENANT_ID_BRAND, pyId);
   }
 }
 

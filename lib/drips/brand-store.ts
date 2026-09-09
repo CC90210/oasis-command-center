@@ -19,7 +19,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { resolveBrandKey, type BrandKey } from "@/lib/email/brands";
+import { resolveBrandKeyOrNull, type BrandKey } from "@/lib/email/brands";
 import {
   classifyLeadSource,
   resolveInitialBrand,
@@ -70,7 +70,28 @@ export async function loadBrandsForLeads(
       return out;
     }
     for (const row of (r.data || []) as Array<{ id: string; data: Record<string, unknown> }>) {
-      out.set(row.id, resolveBrandKey(row.data?.sending_brand));
+      // PER-ROW, and never throwing.
+      //
+      // This called resolveBrandKey, which now throws on an unrecognised value.
+      // Inside this loop that was a new fail-open: one corrupt `sending_brand`
+      // would escape to the catch below, and EVERY row — including the ones
+      // already read correctly — would fall to the "sunbiz" default at the end.
+      // A single bad record would have changed other leads' sending identity.
+      // (Codex, adversarial review, 2026-09-09.)
+      //
+      // Absent stays SunBiz (those rows predate the column). Unrecognised is
+      // reported and left unset, so it takes the same default as a missing row
+      // rather than corrupting its neighbours — and is visible in the log.
+      const raw = row.data?.sending_brand;
+      const key = resolveBrandKeyOrNull(raw);
+      if (key) {
+        out.set(row.id, key);
+      } else if (raw !== undefined && raw !== null && String(raw).trim() !== "") {
+        console.error(
+          `[drips.brand-store] lead ${row.id} has unrecognised sending_brand ` +
+            `${JSON.stringify(raw)} — defaulting this row only`,
+        );
+      }
     }
   } catch {
     /* fall through to the safe default below */
@@ -170,7 +191,11 @@ export async function applyBrandSwitchIfDue(
   },
   args: { lastInboundAtMs: number | null; suppressed: boolean; optedOut: boolean; nowMs: number },
 ): Promise<{ brand: BrandKey; switched: boolean; reason?: string }> {
-  const current = resolveBrandKey(lead.data.sending_brand);
+  // Same reasoning as loadBrandByLead: this reads stored per-lead metadata, so
+  // an unrecognised value must not throw out of a per-row decision. Absent is
+  // SunBiz (pre-`sending_brand` leads); unrecognised is treated as absent for
+  // this row rather than taking the caller down.
+  const current = resolveBrandKeyOrNull(lead.data.sending_brand) ?? "sunbiz";
   const assignedRaw = lead.data.brand_assigned_at;
   const assignedMs =
     typeof assignedRaw === "string" ? Date.parse(assignedRaw) : NaN;
