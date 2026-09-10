@@ -13,6 +13,10 @@
  * TENANT PINNING IS THE AUTHORIZATION BOUNDARY. Every read and write pins
  * WEBDEV_TENANT_ID, including the PATCH, so an event id guessed from another
  * tenant cannot be resolved or edited.
+ *
+ * AND THE LEAD IS A BOUNDARY TOO, not just the tenant. The routes authorize
+ * with `accessMode: "owned_oasis_sales"`, which is per-LEAD ownership, so the
+ * PATCH pins lead_record_id alongside tenant_id -- see patchObjectionEvent.
  */
 
 import { randomUUID } from "node:crypto";
@@ -139,16 +143,43 @@ export async function logObjectionEvent(args: {
 
 /**
  * Attaches the answer a rep actually used, or the outcome of the exchange, to
- * an event already logged. Both fields are optional and independent: a rep may
- * tap the objection and never resolve it, which is normal and must stay cheap.
+ * an event already logged. All three fields are optional and independent: a
+ * rep may tap the objection and never resolve it, which is normal and must
+ * stay cheap.
+ *
+ * `leadRecordId` IS NOT OPTIONAL, and it is not decoration. The PATCH route
+ * proves the caller may work the lead in its own URL
+ * (`assertMayWorkLead(..., accessMode: "owned_oasis_sales")`), which is a
+ * PER-LEAD ownership boundary, not a tenant one. Pinning only tenant_id and id
+ * here left nothing tying the event to that lead, so a rep who owns lead A
+ * could attach a resolution or a response to an event belonging to lead B,
+ * owned by another rep, by putting lead A's id in the path. Not remotely
+ * exploitable today (event ids are only ever exposed through the owning
+ * lead's own GET), but a URL that does not mean what it says is a trap for
+ * the next caller. Final whole-branch review, BLOCKING 5.
+ *
+ * lead_record_id is the right column for it rather than business_id:
+ * logObjectionEvent writes `resolveEventKeys().leadRecordId`, which is always
+ * the lead's own tenant_records.id, whereas business_id is the leadgen pointer
+ * when one exists and the lead id only as a fallback.
  */
 export async function patchObjectionEvent(args: {
   eventId: string;
+  leadRecordId: string;
   responseId?: string | null;
   usedVariant?: boolean;
   resolution?: ObjectionResolution;
 }): Promise<ObjectionEventRecord> {
   const db = getServiceSupabase();
+
+  // Charset-allowlisted before it reaches the PostgREST filter, same treatment
+  // as fetchLeadEvents below and the sibling fetchRecentOutcomes in
+  // lib/web-leads/outcome.ts. Fails CLOSED: an id that cannot be safely
+  // filtered is a not-found, never an unscoped update.
+  const leadRecordId = safeFilterValue(args.leadRecordId || "");
+  if (!leadRecordId) {
+    throw new ObjectionEventError("not_found", "no such event for this tenant");
+  }
 
   const patch: Record<string, unknown> = {};
   if (args.responseId !== undefined) patch.response_id = args.responseId;
@@ -168,17 +199,69 @@ export async function patchObjectionEvent(args: {
     // that happens before the write is a check a concurrent request can slip
     // past; this one is part of the same statement.
     .eq("tenant_id", WEBDEV_TENANT_ID)
+    // The lead scope rides on the same statement, for the same reason the
+    // tenant pin does: an event that belongs to another lead must be
+    // untouchable, not merely un-fetched by a prior read.
+    .eq("lead_record_id", leadRecordId)
     .eq("id", args.eventId)
     .select(EVENT_COLUMNS)
     .maybeSingle();
 
   if (error) throw new ObjectionEventError("objection_event_patch_failed", error.message);
-  if (!data) throw new ObjectionEventError("not_found", "no such event for this tenant");
+  // Deliberately the same message whether the event does not exist, belongs to
+  // another tenant, or belongs to another lead: the route answers 404 either
+  // way, so an event id stays unprobeable.
+  if (!data) throw new ObjectionEventError("not_found", "no such event for this lead");
   return toRecord(data as never);
 }
 
-/** This lead's objection history, most recent first, so the console can show
- *  which cards were already tapped on this call. */
+/**
+ * How far back an objection_event still counts as "this call".
+ *
+ * WHY THERE IS A WINDOW AT ALL. This read used to fetch the lead's last 50
+ * events with no bound, and ObjectionCard sets `logged = Boolean(existingEvent)`
+ * and disables the tap when logged. So from the second call onward, every
+ * objection the rep had ever tapped on that lead showed "Logged" behind a dead
+ * control, and the same objection coming up again could not be recorded. That
+ * systematically under-counts precisely the RECURRING objections the Phase 3
+ * scoreboard exists to rank, and log rate is this feature's whole premise.
+ * (Final whole-branch review, BLOCKING 3.)
+ *
+ * WHY A WINDOW AND NOT objection_event.call_outcome_id. That column exists in
+ * migration 171 for exactly this and is still not written, for a reason worth
+ * stating rather than leaving as an apparent oversight: a call outcome is
+ * logged at the END of a call (CallOutcomeLog), and an objection is tapped
+ * DURING it, so at insert time the id does not exist yet. Writing it properly
+ * means back-stamping every objection event when the outcome lands, which is a
+ * second write on the outcome path and Phase 2 work. A time window needs no
+ * new plumbing on the hot path and is correct for the thing the console
+ * actually uses this for.
+ *
+ * WHY 90 MINUTES. It has to be longer than a call plus any reload inside it
+ * (a rep who refreshes mid-call must not be handed a fresh card and log the
+ * same objection twice -- the requestId is minted per card MOUNT, so a reload
+ * does not dedupe), and shorter than the gap to a genuinely later call, which
+ * on this desk is days: "call me back in a few months" is a seeded objection.
+ * 90 minutes is comfortably inside that gap. The cost of the remaining error
+ * is asymmetric in the right direction: a redial inside 90 minutes shows a
+ * stale "Logged" (an under-count of one, on a rare path), where a window too
+ * short double-counts one objection in one call and quietly inflates the
+ * scoreboard.
+ */
+export const SAME_CALL_WINDOW_MINUTES = 90;
+
+/**
+ * This lead's objection events from the CURRENT call only, most recent first,
+ * so the console can show which cards were already tapped on this call and
+ * leave every other card tappable.
+ *
+ * "Current call" means the last SAME_CALL_WINDOW_MINUTES -- see that constant
+ * for why. THE CONSEQUENCE, stated so nothing downstream assumes otherwise:
+ * this is NOT the lead's objection history and must never be used as one. A
+ * manager opening the battle card a day later sees no "Logged" marks and no
+ * resolutions, which is correct for a live-call surface; lead-lifetime
+ * history is the Phase 3 scoreboard's job, reading objection_event directly.
+ */
 export async function fetchLeadEvents(lead: {
   id: string;
   businessId: string | null | undefined;
@@ -194,11 +277,18 @@ export async function fetchLeadEvents(lead: {
     .map((value) => safeFilterValue(value || ""))
     .filter((value): value is string => Boolean(value))));
 
+  // occurred_at is written as `new Date().toISOString()` on every insert, so
+  // every stored value is a fixed-width UTC ISO-8601 string and a lexical >=
+  // is a chronological >=. Computing the cutoff the same way keeps the two
+  // sides in the same representation.
+  const since = new Date(Date.now() - SAME_CALL_WINDOW_MINUTES * 60_000).toISOString();
+
   const { data, error } = await db
     .from("objection_event")
     .select(EVENT_COLUMNS)
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .in("business_id", ids)
+    .gte("occurred_at", since)
     .order("occurred_at", { ascending: false })
     .limit(50);
 

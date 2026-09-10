@@ -9,7 +9,10 @@
  * THE TENANT PIN LIVES ON THE UPDATE STATEMENT inside patchObjectionEvent, not
  * on a read here. A check performed before a separate write is a check a
  * concurrent request can slip past, so this route deliberately does NOT
- * read-then-write.
+ * read-then-write. THE LEAD PIN RIDES ON THE SAME STATEMENT, for the same
+ * reason: `accessMode: "owned_oasis_sales"` is a per-lead ownership boundary,
+ * so `eventId` must be proved to belong to the `id` in this URL, not merely to
+ * this tenant.
  *
  * `authorize`, `leadMutationAccess` and `AuthorizedSession` below are repeated
  * verbatim from the sibling collection route (app/api/web-leads/[id]/objections/
@@ -87,7 +90,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
 
-  const patch: Parameters<typeof patchObjectionEvent>[0] = { eventId };
+  // `id` is the lead in this route's own URL, and it is what patchObjectionEvent
+  // scopes the UPDATE to. authorize()/leadMutationAccess above prove the caller
+  // may work THAT lead; without this the event was pinned only by tenant, so
+  // lead A's owner could patch lead B's event by naming lead A in the path.
+  const patch: Parameters<typeof patchObjectionEvent>[0] = { eventId, leadRecordId: id };
   if (body.responseId !== undefined) {
     if (typeof body.responseId !== "string" || !body.responseId.trim()) {
       return NextResponse.json({ ok: false, error: "invalid_response_id" }, { status: 400 });
