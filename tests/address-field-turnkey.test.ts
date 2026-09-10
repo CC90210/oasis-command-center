@@ -419,6 +419,30 @@ assert.deepEqual(
   { line1: "123 Biscayne Blvd", city: "Miami", state: "FL", zip: "33101" },
 );
 
+/** Mirrors AddressAutocompleteField.stripTrailingCity. */
+function stripTrailingCity(line1: string, city: string): string {
+  const c = city.trim();
+  if (!c) return line1;
+  const escaped = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stripped = line1.replace(new RegExp(`[,\\s]+${escaped}\\s*$`, "i"), "").trim();
+  return stripped ? stripped : line1;
+}
+
+/**
+ * THE ROW MUST NOT ASK FOR A CITY AND THEN DUPLICATE IT. "123 Main Street Miami
+ * Florida 33101" has no comma, so the parser correctly refuses to guess where
+ * the street ends and leaves "Miami" inside line1 while reporting no city. The
+ * merchant types the city they already gave, and without this the address
+ * becomes "…Main Street Miami, Miami, FL 33101".
+ */
+assert.equal(stripTrailingCity("123 Main Street Miami", "Miami"), "123 Main Street");
+assert.equal(stripTrailingCity("123 Main Street Miami", "miami"), "123 Main Street", "case-insensitive");
+assert.equal(stripTrailingCity("123 Main St, Miami", "Miami"), "123 Main St", "comma form too");
+// Never strips a city that is not actually the tail, and never empties the line.
+assert.equal(stripTrailingCity("123 Miami Street", "Miami"), "123 Miami Street", "only a TRAILING match");
+assert.equal(stripTrailingCity("Miami", "Miami"), "Miami", "refuses to leave an empty street line");
+assert.equal(stripTrailingCity("123 Main Street", ""), "123 Main Street", "no city, no change");
+
 function makeCompletionRow(typed: string, fallbackState?: string) {
   const seed = seedCompletion(typed);
   let line1 = seed.line1;
@@ -441,7 +465,7 @@ function makeCompletionRow(typed: string, fallbackState?: string) {
   const patch = (next: Partial<typeof draft>) => {
     Object.assign(draft, next);
     composed = composeUsAddress({
-      line1,
+      line1: stripTrailingCity(line1, draft.city),
       city: draft.city,
       // Deliberately NOT the fallback dropdown state — see the assertion below.
       state: draft.state,

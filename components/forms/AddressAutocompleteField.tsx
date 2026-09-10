@@ -118,11 +118,6 @@ export function AddressAutocompleteField({
   const selectGen = useRef(0);
 
   const text = typeof value === "string" ? value : "";
-  const gate = useMemo(
-    () => (text.trim() ? isAcceptableCaptureAddress(text, fallbackState) : { ok: false, message: "" }),
-    [text, fallbackState],
-  );
-
   // Force the row open as soon as the form has rejected the field, so the
   // merchant is handed the boxes that fix it rather than only an error message.
   useEffect(() => {
@@ -391,7 +386,14 @@ export function AddressAutocompleteField({
         </ul>
       )}
 
-      {completionOpen && !gate.ok && (
+      {/* Sticky once opened — deliberately NOT `&& !gate.ok`. The capture gate
+          does not require a city (it cannot be parsed reliably from a
+          comma-free line), so a merchant who filled ZIP before city saw the row
+          vanish mid-task, right after it had told them the city was needed. The
+          address then went to a lender as "123 Main St, IL 60102", which is the
+          incomplete-address complaint this feature exists to answer.
+          (Codex P2, 2026-09-10.) */}
+      {completionOpen && (
         <AddressCompletion
           value={text}
           // Through the same supersession as the main input: a City/ZIP the
@@ -423,6 +425,21 @@ export function AddressAutocompleteField({
  * three. (lib/address/us-address.ts is the single implementation of both the
  * split and the gate, so this row can never disagree with the server.)
  */
+/**
+ * Drop `city` from the end of a street line when it is already there.
+ *
+ * Only ever removes a word the merchant has just typed into the City box, so it
+ * cannot invent a boundary the way a parser guessing at commas would. Refuses to
+ * empty the line entirely — "Miami" alone as the street stays put.
+ */
+function stripTrailingCity(line1: string, city: string): string {
+  const c = city.trim();
+  if (!c) return line1;
+  const escaped = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stripped = line1.replace(new RegExp(`[,\\s]+${escaped}\\s*$`, "i"), "").trim();
+  return stripped ? stripped : line1;
+}
+
 /** Unit designators — a trailing "Apt 4" is not a city. */
 const UNIT_WORDS = /^(apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr|#)\b/i;
 
@@ -530,7 +547,15 @@ function AddressCompletion({
     const merged = { ...draft, ...next };
     setDraft(merged);
     const composed = composeUsAddress({
-      line1: baseLine1.current,
+      // Strip the city if it is already sitting at the end of the street line.
+      // "123 Main Street Miami Florida 33101" has no comma, so the parser
+      // (correctly, since it must never guess) leaves "Miami" inside line1 and
+      // reports no city — the box comes up empty, the merchant types the city
+      // they already gave, and the address becomes "…Main Street Miami, Miami,
+      // FL 33101". Removing a duplicated tail is safe in a way that GUESSING a
+      // city boundary is not: it only fires when the merchant has named that
+      // exact trailing word themselves.
+      line1: stripTrailingCity(baseLine1.current, merged.city),
       city: merged.city,
       // DELIBERATELY NOT the business_state dropdown value, even though the
       // picker below is hidden when that dropdown exists.
@@ -556,8 +581,7 @@ function AddressCompletion({
   return (
     <div className="mt-2 rounded-md border border-bg-border bg-bg-elev/60 p-2.5 space-y-2">
       <p className="text-[11px] text-fg-muted">
-        Finish the address below. We need the city, state and ZIP code so your
-        application can be matched to a lender.
+        Finish the address below so your application can be matched to a lender.
       </p>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_auto_auto]">
         <label className="block">
