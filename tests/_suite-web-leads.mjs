@@ -75,6 +75,10 @@ const TESTS = [
   "tests/objection-catalog.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
+  // The auth gate and the tenant pins on both objection routes and both data
+  // modules, to the same convention as web-leads-outcome-guards above. Source
+  // reads only; no credentials.
+  "tests/objection-guards.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
