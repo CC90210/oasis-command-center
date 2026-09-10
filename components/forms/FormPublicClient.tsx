@@ -117,6 +117,22 @@ type SubmitResponse = {
  * `tests/form-submit-error-copy.test.ts`, which reads the codes straight out of
  * the route and fails on any that is unmapped.
  */
+/**
+ * How long Continue may wait for a selected address to finish resolving.
+ *
+ * It has to cover the WORST case, not the typical one, or the safety valve
+ * becomes the bug: /api/forms/address-autocomplete aborts an upstream call at
+ * 4s (UPSTREAM_TIMEOUT_MS) and AddressAutocompleteField makes up to TWO
+ * attempts, so a first-attempt timeout followed by a retry can legitimately run
+ * past 8s. A 5s bound gave up mid-retry and validated the ZIP-less label —
+ * showing the merchant exactly the missing-ZIP rejection this change exists to
+ * remove. (Codex P2, 2026-09-10.)
+ *
+ * If it does expire, the merchant is not stranded: validation fails, which
+ * forces the City/State/ZIP completion row open and lets them finish by hand.
+ */
+const ADDRESS_RESOLVE_WAIT_MS = 10_000;
+
 export const SUBMIT_ERROR_COPY: Record<string, string> = {
   // Merchant can fix these by changing what they entered.
   incomplete_address: "That address needs the street, state and ZIP code.",
@@ -567,7 +583,7 @@ export function FormPublicClient({
       setSubmitting(true);
       try {
         const waitStarted = Date.now();
-        while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < 5000) {
+        while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < ADDRESS_RESOLVE_WAIT_MS) {
           await new Promise((r) => setTimeout(r, 100));
         }
       } finally {

@@ -176,16 +176,27 @@ export function AddressAutocompleteField({
     }, DEBOUNCE_MS);
   };
 
-  const handleInput = (v: string) => {
-    // TYPING SUPERSEDES A SELECTION, exactly as picking another suggestion does.
-    // Without this, a merchant who selects a Google suggestion and then corrects
-    // the box by hand still has that lookup in flight; it considers itself
-    // current, lands a moment later, and overwrites the address they
-    // deliberately replaced — which then gets submitted. Bump the generation so
-    // the old lookup discards itself, and release the form's hold, since nothing
-    // is being resolved for what they are now typing. (Codex P1, 2026-09-10.)
+  /**
+   * ANY MANUAL EDIT SUPERSEDES AN IN-FLIGHT SELECTION.
+   *
+   * A merchant who picks a Google suggestion and then corrects the address by
+   * hand — in the main box OR in the City/State/ZIP completion row — still has
+   * that Place Details lookup running. It considers itself current, lands a
+   * moment later, and overwrites what they deliberately typed, which is then
+   * what gets submitted. Bumping the generation makes the old lookup discard
+   * itself, and releasing the hold stops the form waiting on an answer we have
+   * already decided not to use.
+   *
+   * Every path that writes a value the merchant typed must go through here.
+   * (Codex P1 ×2, 2026-09-10.)
+   */
+  const supersedePendingResolution = () => {
     selectGen.current++;
     onResolvingChange?.(false);
+  };
+
+  const handleInput = (v: string) => {
+    supersedePendingResolution();
     onChange(v);
     runSearch(v);
   };
@@ -357,7 +368,13 @@ export function AddressAutocompleteField({
       {completionOpen && !gate.ok && (
         <AddressCompletion
           value={text}
-          onChange={onChange}
+          // Through the same supersession as the main input: a City/ZIP the
+          // merchant types must not be overwritten by a Place Details response
+          // for a suggestion they picked moments earlier.
+          onChange={(v) => {
+            supersedePendingResolution();
+            onChange(v);
+          }}
           fallbackState={fallbackState}
           inputId={inputId}
         />
