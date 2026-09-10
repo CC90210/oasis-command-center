@@ -146,6 +146,23 @@ export async function fetchObjectionFrequency(): Promise<Record<string, number>>
     .from("objection_event")
     .select("objection_id")
     .eq("tenant_id", WEBDEV_TENANT_ID)
+    // ORDER BEFORE LIMIT. Past 5000 events an unordered limit returns a
+    // NONDETERMINISTIC subset, so the rollup, and therefore the ranking that
+    // reads it, would differ between two reloads of the same lead -- directly
+    // contradicting ranking.ts's "two renders of the same lead never
+    // disagree" (final review, M4).
+    //
+    // Newest first, so the truncation keeps the 5000 MOST RECENT events. That
+    // is the defensible slice to keep as well as a defined one: this rollup
+    // exists to say which objections reps are hearing, and a frequency count
+    // frozen on the oldest 5000 rows would stop moving the day the table
+    // passed the cap. `id` (the primary key) is the tie-break, so this is a
+    // total order and not merely a sort.
+    //
+    // tests/paged-reads-ordered.test.ts does NOT cover this: it only matches
+    // `.range()`, and this is a `.limit()`.
+    .order("occurred_at", { ascending: false })
+    .order("id", { ascending: true })
     .limit(5000);
 
   if (error) {

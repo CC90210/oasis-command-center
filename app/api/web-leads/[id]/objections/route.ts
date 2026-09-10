@@ -14,11 +14,18 @@
  * NOTHING HERE CALLS A MODEL. GET runs the real audit read (fetchAudit,
  * ~3-4 indexed round trips per the reviewer's measurement) because ranking
  * without it collapses to two orderings total -- see factsInputFor below.
- * That cost is paid ONCE, when a rep opens the battle card, not per tap: the
- * POST path below is untouched and stays a single write. Tens of
- * milliseconds on a page the rep is already waiting for buys a ranking that
- * actually ranks. A thrown audit read fails this route closed (500), same as
- * every other read failure here -- never a silently empty/unranked catalog.
+ * That cost is paid ONCE, when a rep opens the battle card, not per tap.
+ * Tens of milliseconds on a page the rep is already waiting for buys a ranking
+ * that actually ranks. A thrown audit read fails this route closed (500), same
+ * as every other read failure here -- never a silently empty/unranked catalog.
+ *
+ * WHAT THE POST PATH ACTUALLY COSTS, stated accurately because an earlier
+ * version of this comment claimed it "stays a single write" and it does not
+ * (final review, M6): a tap is fetchApprovedCatalog() (two reads, to prove the
+ * objection and any response id are approved -- without it a caller could log
+ * events against a draft or retired id and poison every Phase 3 aggregate),
+ * plus businessIdForLead() (one indexed read), plus the insert. Four round
+ * trips, none of them the audit read, and the approval check is not optional.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -79,8 +86,9 @@ function leadBusinessId(lead: LoadedLead): Promise<string | null> {
  * on them dead code: every lead collapsed into one of two orderings, which
  * contradicts this route's own "ranked for THIS lead" claim. The reviewer's
  * ruling: this GET fires once per battle-card open, not per tap, so the
- * ~3-4 extra indexed round trips fetchAudit costs are the right trade; the
- * POST tap path is untouched and stays a single write.
+ * ~3-4 extra indexed round trips fetchAudit costs are the right trade, and
+ * the POST tap path does not pay them at all (see this file's header for what
+ * a tap actually costs -- it is not a single write, and never was).
  *
  * AuditResult is a closed union (lib/web-leads/audit.ts) and is read as one,
  * never assumed to be the "scored" branch: `no_website`, `not_scored`,
@@ -191,11 +199,15 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     // FAIL CLOSED and loudly. Returning an empty catalog here would render a
     // calm "no objections yet" over a broken database, and a rep would believe
     // it mid-call.
+    //
+    // The CLIENT gets an opaque code, never `err.message`. This used to return
+    // the raw message, which hands a database error string (table and column
+    // names, driver internals) to the browser; the POST path below already
+    // returns an opaque code and this now matches it. The real message is on
+    // the line above, in the server log, where it is useful and not exposed.
+    // (Final review, M5.)
     console.error("[web-leads.objections] read failed", { leadId: id, error: err instanceof Error ? err.message : String(err) });
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : "objection_read_failed" },
-      { status: 500 },
-    );
+    return NextResponse.json({ ok: false, error: "objection_read_failed" }, { status: 500 });
   }
 }
 

@@ -2015,8 +2015,8 @@ function ScoredBody({
       <BattleSection
         id="brushoffs"
         defaultOpen={true}
-        title="The brush-offs, and what to do with them"
-        teaser="The eight standing brush-offs, what each one usually means, and the counter for it"
+        title="What they will push back with, and what to say"
+        teaser="The objections this business is most likely to raise, ranked, with the counter for each and a one-tap log"
       >
         <ObjectionConsole leadId={lead.id} bare />
       </BattleSection>

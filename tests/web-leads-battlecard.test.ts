@@ -1188,13 +1188,45 @@ const MODEL_CODES = [
 
 {
   const card = read("components/web-leads/ObjectionCard.tsx");
-  // The objection's own fields, plus the active answer's spoken line. The
-  // shape changed from ObjectionPanel's flat `o.response` -- answers now live
-  // on `objection.answers`, so this asserts the real property paths the
-  // component reads, not the old ones.
-  for (const field of ["objection.says", "objection.meaning", "objection.prevent", "objection.source", "activeAnswer.body"]) {
+  // The objection's own fields. The shape changed from ObjectionPanel's flat
+  // `o.response` -- answers now live on `objection.answers`, so this asserts
+  // the real property paths the component reads, not the old ones.
+  for (const field of ["objection.says", "objection.meaning", "objection.prevent", "objection.source"]) {
     assert.ok(card.includes(field), `ObjectionCard must render ${field}`);
   }
+
+  // THE SPOKEN LINE. This block used to assert `activeAnswer.body`, and a
+  // fix-round-3 review proved that wrong the same way the truncation block
+  // below was proved wrong: `activeAnswer.body` appears only in the
+  // COMPUTATION of `displayedBody`, so replacing the render with `{null}`
+  // left the string in the file and the whole suite passed. Aim at what is
+  // actually rendered instead: the JSX node itself, and the computation that
+  // feeds it, asserted separately so deleting either one fails.
+  // (Final review, M8.)
+  assert.match(
+    card,
+    /<p className="text-sm leading-relaxed text-fg">\{displayedBody\}<\/p>/,
+    "ObjectionCard must RENDER the spoken line, not merely compute it -- `{null}` in this node passed the old assertion",
+  );
+  assert.match(
+    card,
+    /const displayedBody = activeAnswer[\s\S]{0,200}?activeAnswer\.body/,
+    "ObjectionCard's rendered line must resolve to the ACTIVE answer's body, not a constant",
+  );
+
+  // LIMITATION, SAME ONE AS THE TRUNCATION BLOCK BELOW, restated here because
+  // this block was written under exactly the misapprehension that comment
+  // exists to name: these are source-text tripwires, not behavioural tests.
+  // The two assertions above are strictly stronger than `card.includes(
+  // "activeAnswer.body")` -- the render node and its computation must BOTH
+  // survive, so neither a dead-comment decoy nor a hollowed-out render passes
+  // on its own. They still cannot prove the matched node is the one React
+  // mounts, and a rewrite that keeps the same vocabulary elsewhere (renaming
+  // the variable, moving the paragraph into a child component, changing the
+  // className) passes or fails on TEXT rather than on behaviour. Proving the
+  // rendered output needs a rendering harness this repo's test convention
+  // does not use; do not add one to strengthen this further without that
+  // conversation happening first.
 }
 
 {
