@@ -1205,10 +1205,47 @@ const MODEL_CODES = [
   // to reach the rest -- a fixed subset with no path to the remainder is
   // exactly the kind of drop the deleted OBJECTIONS.map assertion existed to
   // catch, restated for a component that is allowed to paginate on purpose.
+  //
+  // LIMITATION, STATED PLAINLY (task-10 fix round 2): these are source-text
+  // tripwires, like every other assertion in this file. They catch an
+  // outright deletion of the pattern. They CANNOT prove the matched text is
+  // the code actually feeding the render rather than a dead comment or an
+  // unreachable branch, and they cannot catch a behavioural change that
+  // keeps the same vocabulary elsewhere. A fix-round-2 review proved the
+  // first version of this block wrong on exactly that gap: it left the
+  // ternary regex's own text as a dead comment, changed the real `visible`
+  // computation to a hardcoded `state.objections.slice(0, 3)`, and every
+  // assertion below still passed. The two checks after the ternary match
+  // close THAT specific hole (a decoy plus a second real slice can no longer
+  // both satisfy "exactly one `.slice(` in the file" and "no literal-numeric
+  // slice bound anywhere in it") -- they do not make this a behavioural test.
+  // Proving the render is actually unsliced needs a rendering harness this
+  // repo's test convention does not use; do not add one to strengthen this
+  // further without that conversation happening first.
   assert.match(
     console_,
     /expanded\s*\?\s*state\.objections\s*:\s*state\.objections\.slice\(/,
     "ObjectionConsole must fall back to the FULL ranked list once expanded, not a fixed subset",
+  );
+  // Exactly one `.slice(` call in the whole file. The legitimate console has
+  // exactly one (inside the ternary just asserted above); a second one --
+  // whether it replaces the real computation while the first survives as a
+  // dead comment, or sits anywhere else -- is a competing truncation this
+  // file has no business containing.
+  const sliceCallCount = (console_.match(/\.slice\(/g) || []).length;
+  assert.equal(
+    sliceCallCount,
+    1,
+    `ObjectionConsole.tsx must contain exactly one .slice( call, found ${sliceCallCount} -- a second one is a competing (and possibly live) truncation`,
+  );
+  // No slice bounded by a literal number anywhere in the file. The only
+  // legitimate bound is `state.openCount`, a value the server computed --
+  // never a number typed into the component, which is what a silent
+  // permanent truncation (`.slice(0, 3)`) looks like in source.
+  assert.doesNotMatch(
+    console_,
+    /\.slice\(\s*0\s*,\s*\d+\s*\)/,
+    "ObjectionConsole.tsx must never slice to a literal numeric bound -- the open count comes from the server (state.openCount), not a number typed into the component",
   );
   assert.match(
     console_,
