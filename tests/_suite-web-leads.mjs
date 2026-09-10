@@ -74,6 +74,7 @@ const TESTS = [
   "tests/objection-ranking.test.ts",
   "tests/objection-catalog.test.ts",
   "tests/objection-events.test.ts",
+  "tests/objection-facts.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
