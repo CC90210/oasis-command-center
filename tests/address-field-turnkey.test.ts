@@ -94,10 +94,9 @@ const LIVE_PHOTON_FEATURES: Array<{ properties?: PhotonProperties }> = [
   { properties: { countrycode: "US", housenumber: "7930", street: "Hidden View Drive", city: "Holland", county: "Lucas", state: "Ohio", postcode: "43528" } },
 ];
 
+// Structure alone: the five street/POI features that dropped the merchant's
+// house number are gone, and only the three well-formed addresses remain.
 const filtered = photonFeaturesToSuggestions(LIVE_PHOTON_FEATURES);
-
-// Exactly the three real addresses survive. The five street/POI features that
-// dropped the merchant's house number are gone.
 assert.deepEqual(
   filtered.map((s) => s.value),
   [
@@ -107,6 +106,67 @@ assert.deepEqual(
   ],
   "only genuine housenumber+street+postcode+city features may be offered",
 );
+
+/**
+ * STRUCTURE IS NOT ENOUGH. Those three survivors are well-formed and they are
+ * all the WRONG STREET — the merchant asked for Snow View Drive and would be
+ * offered Prairie View, Eagle View and Hidden View. Picking one sends a lender
+ * an address the merchant does not occupy: the same silent substitution as the
+ * dropped house number, only harder to notice. With the query supplied, as the
+ * route supplies it, none may be offered. (Codex P1, 2026-09-10.)
+ */
+assert.deepEqual(
+  photonFeaturesToSuggestions(LIVE_PHOTON_FEATURES, 8, "7930 Snow View Drive").map((s) => s.value),
+  [],
+  "a well-formed answer to a DIFFERENT question must not be offered",
+);
+
+// Relevance must not be so strict that it refuses the right answer. Real
+// abbreviation and suffix differences ("Dr" vs "Drive"), a trailing city in the
+// query, and directional prefixes all have to survive.
+{
+  const magnolia = [
+    { properties: { countrycode: "US", housenumber: "911", street: "Magnolia Drive", city: "Algonquin", state: "Illinois", postcode: "60102" } },
+    { properties: { countrycode: "US", housenumber: "911", street: "Algonquin Drive", city: "Dallas", state: "Texas", postcode: "75217" } },
+  ];
+  assert.deepEqual(
+    photonFeaturesToSuggestions(magnolia, 8, "911 Magnolia Dr Algonquin").map((s) => s.value),
+    ["911 Magnolia Drive, Algonquin, Illinois, 60102"],
+    '"Dr" must match "Drive", and a different street with the city\'s name must not',
+  );
+
+  const fifth = [
+    { properties: { countrycode: "US", housenumber: "350", street: "5th Avenue", city: "New York", state: "New York", postcode: "10118" } },
+    { properties: { countrycode: "US", housenumber: "350", street: "South 5th Avenue", city: "Mount Vernon", state: "New York", postcode: "10550" } },
+  ];
+  assert.equal(
+    photonFeaturesToSuggestions(fifth, 8, "350 5th Ave New York").length,
+    2,
+    "genuinely similar streets at the same number remain legitimate alternatives",
+  );
+
+  // A different house number on the right street is still the wrong building.
+  assert.deepEqual(
+    photonFeaturesToSuggestions(
+      [{ properties: { countrycode: "US", housenumber: "1000", street: "Main Street", city: "Houston", state: "Texas", postcode: "77002" } }],
+      8,
+      "100 Main St Houston TX",
+    ).map((s) => s.value),
+    [],
+    "1000 Main is not 100 Main",
+  );
+
+  // A query with no distinctive token at all must not filter everything away.
+  assert.equal(
+    photonFeaturesToSuggestions(
+      [{ properties: { countrycode: "US", housenumber: "8", street: "The Green", city: "Dover", state: "Delaware", postcode: "19901" } }],
+      8,
+      "8 The Green Dover",
+    ).length,
+    1,
+    '"the" is a stopword; "green" is the token that must match',
+  );
+}
 
 // No county may ever appear where a city belongs.
 for (const county of ["Summit", "Kent", "Riverside", "Missoula", "Marion County", "Calvert", "Lucas"]) {

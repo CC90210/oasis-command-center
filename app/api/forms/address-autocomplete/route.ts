@@ -136,8 +136,9 @@ async function photon(q: string, signal: AbortSignal): Promise<AddressSuggestion
   const r = await fetch(url, { signal });
   const d = (await r.json()) as { features?: Array<{ properties?: PhotonProperties }> };
   // The filter itself lives in lib/forms/address-suggestions.ts so the test
-  // suite pins the real implementation instead of a copy of it.
-  return photonFeaturesToSuggestions(d.features, LIMIT);
+  // suite pins the real implementation instead of a copy of it. `q` is passed
+  // so the filter can refuse a well-formed answer to a DIFFERENT question.
+  return photonFeaturesToSuggestions(d.features, LIMIT, q);
 }
 
 export async function GET(req: NextRequest) {
