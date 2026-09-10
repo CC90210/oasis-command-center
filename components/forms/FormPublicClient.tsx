@@ -457,6 +457,9 @@ export function FormPublicClient({
   /** Claimed before the first await in `submit()` so a second click cannot
    *  start a second submission while the first is waiting. */
   const submitGuard = useRef(false);
+  /** The step on screen right now, readable after an await. */
+  const currentStepRef = useRef(currentStep);
+  currentStepRef.current = currentStep;
 
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -573,6 +576,14 @@ export function FormPublicClient({
     // postal code, and the complete address only arrives on a second Place
     // Details round trip. Bounded so a hung provider costs a short pause and
     // then falls through to normal validation — never an unclickable button.
+    // Which step this submit is FOR. The Back button stays live while the wait
+    // below runs, and going back unmounts the address field, which clears the
+    // resolving set and lets this old call proceed — with validateRef and
+    // buildSubmitPayloadRef now pointing at the newly displayed step while
+    // `currentStep` in the request body is still the one captured here. That
+    // posts one step's answers under another step's index. Abort instead.
+    // (Codex P1, 2026-09-10.)
+    const stepAtStart = currentStep;
     if (addressResolvingRef.current.size > 0) {
       // Claim the submit BEFORE the first await. Without this the button stays
       // enabled for the whole wait, and a merchant who clicks again because
@@ -591,6 +602,9 @@ export function FormPublicClient({
         setSubmitting(false);
       }
     }
+    // The merchant navigated away from the step this submit belongs to. Sending
+    // now would mismatch payload and step_index.
+    if (currentStepRef.current !== stepAtStart) return;
     // Validate through a REF, not the `validate` captured by this render. After
     // the await above, execution resumes in the old closure, where `values`
     // still holds Google's ZIP-less label — so calling the captured `validate`

@@ -402,6 +402,37 @@ export function AddressAutocompleteField({
  * three. (lib/address/us-address.ts is the single implementation of both the
  * split and the gate, so this row can never disagree with the server.)
  */
+/** Unit designators — a trailing "Apt 4" is not a city. */
+const UNIT_WORDS = /^(apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr|#)\b/i;
+
+/**
+ * Split a partial address into the completion row's starting values.
+ *
+ * `splitUsAddress` is deliberately conservative: with no state or ZIP to anchor
+ * it, a comma is more likely a unit suffix ("123 Main St, Apt 4") than a city
+ * boundary, so it keeps the whole string in line1 and reports NO city. That is
+ * the right call for a parser that must never invent a part — but it is the
+ * wrong starting point for this row, which then shows an EMPTY City box for
+ * "123 Main St, Miami". The merchant does as asked and types "Miami", and the
+ * result is "123 Main St, Miami, Miami, FL 33101". (Codex P2, 2026-09-10.)
+ *
+ * Here the trade is different from the parser's, because the answer is shown to
+ * the merchant in an editable box rather than stored silently: guessing "Miami"
+ * into a visible City field is corrected in one keystroke if wrong, while
+ * duplicating it is not visible at all. Unit designators are still excluded, so
+ * the common "…, Apt 4" false positive never arises.
+ */
+function seedCompletion(value: string): { line1: string; city: string; state: string; zip: string } {
+  const p = splitUsAddress(value);
+  if (p.city) return { line1: p.line1, city: p.city, state: p.state, zip: p.zip };
+  const segments = (p.line1 || value).split(",").map((s) => s.trim()).filter(Boolean);
+  const tail = segments[segments.length - 1] || "";
+  if (segments.length >= 2 && !UNIT_WORDS.test(tail) && !/^\d/.test(tail)) {
+    return { line1: segments.slice(0, -1).join(", "), city: tail, state: p.state, zip: p.zip };
+  }
+  return { line1: p.line1 || value.trim(), city: "", state: p.state, zip: p.zip };
+}
+
 function AddressCompletion({
   value,
   onChange,
@@ -434,8 +465,8 @@ function AddressCompletion({
    * type freely and push the composition outward. `line1` stays anchored to the
    * address as it was when the row opened, so recomposing cannot eat it.
    */
-  const seed = useMemo(() => splitUsAddress(value), []); // eslint-disable-line react-hooks/exhaustive-deps
-  const baseLine1 = useRef(seed.line1 || value.trim());
+  const seed = useMemo(() => seedCompletion(value), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const baseLine1 = useRef(seed.line1);
   const [draft, setDraft] = useState({ city: seed.city, state: seed.state, zip: seed.zip });
 
   /**
@@ -453,8 +484,8 @@ function AddressCompletion({
   const lastComposed = useRef<string | null>(null);
   useEffect(() => {
     if (lastComposed.current === value) return;
-    const s = splitUsAddress(value);
-    baseLine1.current = s.line1 || value.trim();
+    const s = seedCompletion(value);
+    baseLine1.current = s.line1;
     setDraft({ city: s.city, state: s.state, zip: s.zip });
   }, [value]);
 

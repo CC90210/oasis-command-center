@@ -384,9 +384,44 @@ async function overlappingSelections() {
  * and the merchant's keystroke disappears from the box. `typeCityCharByChar`
  * below is the regression test for that. (Codex P1, 2026-09-10.)
  */
+/** Mirrors AddressAutocompleteField.seedCompletion. */
+const UNIT_WORDS = /^(apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr|#)\b/i;
+function seedCompletion(value: string) {
+  const p = splitUsAddress(value);
+  if (p.city) return { line1: p.line1, city: p.city, state: p.state, zip: p.zip };
+  const segments = (p.line1 || value).split(",").map((s) => s.trim()).filter(Boolean);
+  const tail = segments[segments.length - 1] || "";
+  if (segments.length >= 2 && !UNIT_WORDS.test(tail) && !/^\d/.test(tail)) {
+    return { line1: segments.slice(0, -1).join(", "), city: tail, state: p.state, zip: p.zip };
+  }
+  return { line1: p.line1 || value.trim(), city: "", state: p.state, zip: p.zip };
+}
+
+/**
+ * A CITY ALREADY TYPED MUST NOT BE ASKED FOR AGAIN. splitUsAddress reports no
+ * city for "123 Main St, Miami" (with no state or ZIP a comma is more likely
+ * "…, Apt 4"), so an empty City box invited the merchant to type "Miami" — and
+ * the row stored "123 Main St, Miami, Miami, FL 33101". (Codex P2, 2026-09-10.)
+ */
+assert.deepEqual(
+  seedCompletion("123 Main St, Miami"),
+  { line1: "123 Main St", city: "Miami", state: "", zip: "" },
+  "a trailing comma segment is offered as the city, not left blank",
+);
+// …but a unit designator is not a city, and must stay in the street line.
+for (const unit of ["123 Main St, Apt 4", "123 Main St, Suite 200", "123 Main St, Unit B"]) {
+  assert.equal(seedCompletion(unit).city, "", `"${unit}" has no city to offer`);
+  assert.equal(seedCompletion(unit).line1, unit, "the unit stays in the street line");
+}
+// A complete address still seeds exactly as the parser reads it.
+assert.deepEqual(
+  seedCompletion("123 Biscayne Blvd, Miami, FL 33101"),
+  { line1: "123 Biscayne Blvd", city: "Miami", state: "FL", zip: "33101" },
+);
+
 function makeCompletionRow(typed: string, fallbackState?: string) {
-  const seed = splitUsAddress(typed);
-  let line1 = seed.line1 || typed.trim();
+  const seed = seedCompletion(typed);
+  let line1 = seed.line1;
   const draft = { city: seed.city, state: seed.state, zip: seed.zip };
   const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
   let composed = typed;
@@ -396,8 +431,8 @@ function makeCompletionRow(typed: string, fallbackState?: string) {
   const externalChange = (next: string) => {
     composed = next;
     if (lastComposed === next) return;
-    const s = splitUsAddress(next);
-    line1 = s.line1 || next.trim();
+    const s = seedCompletion(next);
+    line1 = s.line1;
     draft.city = s.city;
     draft.state = s.state;
     draft.zip = s.zip;
