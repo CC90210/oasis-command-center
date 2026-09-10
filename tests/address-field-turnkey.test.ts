@@ -518,22 +518,40 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
  * state. (Codex P1, 2026-09-10.)
  */
 {
-  const showsOwnStatePicker = (fieldName: string, businessStateAnswer: string) => {
-    // Mirrors FormRenderer + AddressAutocompleteField: the flag depends only on
-    // WHICH field this is, never on the dropdown's current value.
-    void businessStateAnswer;
-    return fieldName !== "business_address";
+  // Mirrors FormRenderer: derived from the SCHEMA, never from the dropdown's
+  // current value, and never from the address field's name alone.
+  const showsOwnStatePicker = (fieldName: string, allFieldNames: string[], answer: string) => {
+    void answer;
+    const hasExternal = fieldName === "business_address" && allFieldNames.includes("business_state");
+    return !hasExternal;
   };
+  const SUNBIZ = ["business_address", "business_state", "owner_home_address", "partner_home_address"];
+
+  // The real template: never a second state control, at any point in the form's
+  // life, answered or not.
   for (const answer of ["", "IL", "WI"]) {
     assert.equal(
-      showsOwnStatePicker("business_address", answer),
+      showsOwnStatePicker("business_address", SUNBIZ, answer),
       false,
       `business_address must never offer a second state control (dropdown = "${answer}")`,
     );
   }
   for (const home of ["owner_home_address", "partner_home_address"]) {
-    assert.equal(showsOwnStatePicker(home, ""), true, `${home} has no dropdown and must keep its picker`);
+    assert.equal(showsOwnStatePicker(home, SUNBIZ, ""), true, `${home} has no dropdown and must keep its picker`);
   }
+
+  /**
+   * A CUSTOM FORM with an address called `business_address` and NO
+   * `business_state` field anywhere. Inferring the dropdown from the name alone
+   * hid the picker, while the gate still demanded a state — leaving the
+   * merchant with no way to supply one. A new dead end inside the fix for the
+   * old one. (Codex P2, 2026-09-10.)
+   */
+  assert.equal(
+    showsOwnStatePicker("business_address", ["business_address", "email"], ""),
+    true,
+    "with no business_state field in the schema, the picker is the only way to give a state",
+  );
 }
 
 {

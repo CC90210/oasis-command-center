@@ -52,6 +52,10 @@ type Props = {
    *  cleared, so a merchant cannot be rejected for a ZIP that is still in
    *  flight — the select→Continue race that PR #426 named but did not close. */
   onAddressResolvingChange?: (fieldName: string, resolving: boolean) => void;
+  /** Every field name in the WHOLE form, across all steps. Lets an address
+   *  field know whether a dedicated `business_state` control exists anywhere in
+   *  this schema, instead of inferring one from the address field's name. */
+  allFieldNames?: string[];
 };
 
 export function FormRenderer({
@@ -69,8 +73,24 @@ export function FormRenderer({
   uploadToken,
   ensureUploadToken,
   onAddressResolvingChange,
+  allFieldNames,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
+
+  /**
+   * Does THIS FORM carry a dedicated `business_state` field?
+   *
+   * `allFieldNames` is the whole schema when the host supplies it (the public
+   * form does). Without it, fall back to this step's own fields plus an
+   * already-answered value, which covers a state field on an earlier step. The
+   * fallback errs toward SHOWING the completion row's state picker: an extra
+   * control is a cosmetic redundancy, while a hidden one on a form with no
+   * state field anywhere is a merchant who cannot finish.
+   */
+  const hasBusinessStateField = allFieldNames
+    ? allFieldNames.includes("business_state")
+    : step.fields.some((f) => f.name === "business_state") ||
+      (typeof values.business_state === "string" && values.business_state.trim() !== "");
   const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
 
   return (
@@ -111,6 +131,16 @@ export function FormRenderer({
                     ? values.business_state
                     : undefined
                   : undefined
+              }
+              // Derived from the SCHEMA, not from the field's name alone. Forms
+              // are author-editable: a custom form can name an address
+              // `business_address` and include no `business_state` field at all,
+              // and hiding the completion row's state picker there would leave
+              // the merchant with a gate that demands a state and no way to
+              // supply one — a new dead end inside the fix for the old one.
+              // (Codex P2, 2026-09-10.)
+              hasExternalStateField={
+                field.name === "business_address" && hasBusinessStateField
               }
               onResolvingChange={
                 field.type === "address"
@@ -174,6 +204,7 @@ function FieldRow({
   uploadToken,
   ensureUploadToken,
   fallbackState,
+  hasExternalStateField,
   onResolvingChange,
 }: {
   field: FormField;
@@ -183,6 +214,7 @@ function FieldRow({
   uploadToken?: string | null;
   ensureUploadToken?: () => Promise<string | null>;
   fallbackState?: string;
+  hasExternalStateField?: boolean;
   onResolvingChange?: (resolving: boolean) => void;
 }) {
   const inputId = useId();
@@ -210,6 +242,7 @@ function FieldRow({
         error,
         fallbackState,
         onResolvingChange,
+        hasExternalStateField,
       )}
 
       {field.help && <p className="text-[11px] text-fg-dim">{field.help}</p>}
@@ -230,6 +263,7 @@ function renderInput(
   error?: string,
   fallbackState?: string,
   onResolvingChange?: (resolving: boolean) => void,
+  hasExternalStateField?: boolean,
 ): React.ReactNode {
   const base =
     "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
@@ -268,11 +302,7 @@ function renderInput(
           onChange={(v) => onChange(v)}
           placeholder={field.placeholder}
           fallbackState={fallbackState}
-          // Structural, not "is it answered yet": business_address always has
-          // its own required state dropdown on this step, so the completion row
-          // must never offer a second state control for it — at any point,
-          // including before that dropdown is filled in.
-          hasExternalStateField={field.name === "business_address"}
+          hasExternalStateField={Boolean(hasExternalStateField)}
           invalid={Boolean(error)}
           onResolvingChange={onResolvingChange}
         />
