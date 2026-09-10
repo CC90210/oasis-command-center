@@ -148,7 +148,14 @@ export function ObjectionCard({
           objectionId: objection.id,
           requestId: requestIdRef.current,
           responseId: activeAnswer?.id ?? null,
-          usedVariant: Boolean(activeAnswer?.libraryBody),
+          // Whether the rep is actually READING the tailored variant right
+          // now, not merely whether one exists on the answer: a variant that
+          // exists but is toggled OFF (showStandard true, the approved
+          // libraryBody is what's displayed) must not report as "used". This
+          // field feeds objection_lead_variant, which is what Phase 2 reads
+          // to compare tailored wording against the reviewed standard — get
+          // it wrong here and that comparison is corrupted from row one.
+          usedVariant: Boolean(activeAnswer?.libraryBody) && !showStandard,
         }),
       });
       const body = await r.json();
@@ -240,45 +247,63 @@ export function ObjectionCard({
         {objection.source && <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted/70">Source: {objection.source}</p>}
       </div>
 
-      {canMutate && (
+      {/* Controls live only behind canMutate; STATE does not. A read-only
+          viewer (a manager, a rep without this lead) still sees whatever was
+          already tapped and resolved -- existingEvent was already fetched on
+          their behalf, so hiding it would be a read/write asymmetry, not a
+          permission boundary. Same split CallOutcomeLog uses: its four
+          outcome buttons are gated, its "Recent calls" history is not. */}
+      {(canMutate || eventId) && (
         <div className="mt-3 border-t border-bg-border pt-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={logged && !failed}
-              aria-pressed={logged && !failed}
-              onClick={logTap}
-              className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs font-semibold text-fg transition-[color,border-color,box-shadow] hover:border-accent/70 hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none"
-            >
-              {logged && !failed ? "Logged" : "They said this"}
-            </button>
-            {failed && (
+          {canMutate ? (
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                disabled={logged && !failed}
+                aria-pressed={logged && !failed}
                 onClick={logTap}
-                className="text-[11px] font-medium text-fg-dim underline decoration-dotted underline-offset-2 hover:text-fg"
+                className="rounded-lg border border-accent/40 px-3 py-1.5 text-xs font-semibold text-fg transition-[color,border-color,box-shadow] hover:border-accent/70 hover:shadow-glow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none"
               >
-                Not logged. Tap to retry.
+                {logged && !failed ? "Logged" : "They said this"}
               </button>
-            )}
-          </div>
-
-          {eventId && (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">How it went</span>
-              {OBJECTION_RESOLUTIONS.map((r) => (
+              {failed && (
                 <button
-                  key={r}
                   type="button"
-                  disabled={resolutionPending !== null}
-                  aria-pressed={resolution === r}
-                  onClick={() => setResolutionTap(r)}
-                  className={`${PILL} ${resolution === r ? PILL_ON : PILL_OFF}`}
+                  onClick={logTap}
+                  className="text-[11px] font-medium text-fg-dim underline decoration-dotted underline-offset-2 hover:text-fg"
                 >
-                  {resolutionPending === r ? "…" : RESOLUTION_LABEL[r]}
+                  Not logged. Tap to retry.
                 </button>
-              ))}
+              )}
             </div>
+          ) : (
+            logged && <p className="text-xs font-medium text-fg-dim">Logged</p>
+          )}
+
+          {canMutate ? (
+            eventId && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">How it went</span>
+                {OBJECTION_RESOLUTIONS.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    disabled={resolutionPending !== null}
+                    aria-pressed={resolution === r}
+                    onClick={() => setResolutionTap(r)}
+                    className={`${PILL} ${resolution === r ? PILL_ON : PILL_OFF}`}
+                  >
+                    {resolutionPending === r ? "…" : RESOLUTION_LABEL[r]}
+                  </button>
+                ))}
+              </div>
+            )
+          ) : (
+            resolution && (
+              <p className="mt-2 text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">
+                How it went <span className="normal-case tracking-normal text-fg-dim">{RESOLUTION_LABEL[resolution]}</span>
+              </p>
+            )
           )}
         </div>
       )}
