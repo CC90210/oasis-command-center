@@ -67,8 +67,13 @@ type Props = {
    *  public form vs the dashboard record editor). Defaults to the form styling. */
   className?: string;
   /** The business address holds its state in a separate dropdown; pass it so
-   *  the completion row does not ask for a state the merchant already gave. */
+   *  the gate here judges the address exactly as the server does. */
   fallbackState?: string;
+  /** True when a dedicated state field for this address exists elsewhere on the
+   *  form, WHETHER OR NOT it is answered yet. Suppresses the completion row's
+   *  own state picker, so the row can never embed a state that later
+   *  contradicts that field. */
+  hasExternalStateField?: boolean;
   /** True once the form's validator has rejected this field — forces the
    *  completion row open so the merchant is shown HOW to fix it, not just told. */
   invalid?: boolean;
@@ -92,6 +97,7 @@ export function AddressAutocompleteField({
   inputId,
   className,
   fallbackState,
+  hasExternalStateField = false,
   invalid,
   onResolvingChange,
 }: Props) {
@@ -380,7 +386,7 @@ export function AddressAutocompleteField({
             supersedePendingResolution();
             onChange(v);
           }}
-          fallbackState={fallbackState}
+          hasExternalStateField={hasExternalStateField}
           inputId={inputId}
         />
       )}
@@ -436,17 +442,33 @@ function seedCompletion(value: string): { line1: string; city: string; state: st
 function AddressCompletion({
   value,
   onChange,
-  fallbackState,
+  hasExternalStateField,
   inputId,
 }: {
   value: string;
   onChange: (v: string) => void;
-  fallbackState?: string;
+  /** True when a dedicated state field for this address exists elsewhere on the
+   *  form. Structural — never "is it filled in yet". */
+  hasExternalStateField: boolean;
   inputId?: string;
 }) {
-  // The business address takes its state from its own dropdown; asking twice
-  // invites the merchant to enter two different states.
-  const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
+  /**
+   * Whether this address HAS a dedicated state field elsewhere on the form —
+   * a structural fact, not "is that field filled in right now".
+   *
+   * Deriving it from the current fallback value was subtly wrong. A merchant
+   * who opened this row BEFORE answering business_state got the picker, chose
+   * a state here, and then chose a different one in the real dropdown: the
+   * picker merely disappeared, while the first state stayed embedded in the
+   * address — and `mergeStateIntoAddress` trusts an embedded state over the
+   * dropdown by design. The application would be routed on the wrong state.
+   *
+   * business_address always has that dropdown (required, same step), so the
+   * picker must never be offered for it at any point in the form's life.
+   * Owner and partner home addresses have no such field and keep it always.
+   * (Codex P1, 2026-09-10.)
+   */
+  const stateHandledElsewhere = hasExternalStateField;
 
   /**
    * THE DRAFT IS OWNED HERE, NOT RE-DERIVED FROM THE COMPOSED STRING.

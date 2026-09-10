@@ -508,6 +508,34 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
  * Storing "street, city, ZIP" with the state held separately is exactly the
  * shape lib/address/us-address.ts was written for. (Codex P2, 2026-09-10.)
  */
+/**
+ * And the picker's visibility must be STRUCTURAL, not "is the dropdown filled
+ * in yet". Deriving it from the current fallback value let a merchant who
+ * opened the row before answering business_state pick a state here, then pick a
+ * different one in the real dropdown: the picker merely vanished while the
+ * first state stayed embedded in the address — which mergeStateIntoAddress
+ * then trusts over the dropdown. The application would be routed on the wrong
+ * state. (Codex P1, 2026-09-10.)
+ */
+{
+  const showsOwnStatePicker = (fieldName: string, businessStateAnswer: string) => {
+    // Mirrors FormRenderer + AddressAutocompleteField: the flag depends only on
+    // WHICH field this is, never on the dropdown's current value.
+    void businessStateAnswer;
+    return fieldName !== "business_address";
+  };
+  for (const answer of ["", "IL", "WI"]) {
+    assert.equal(
+      showsOwnStatePicker("business_address", answer),
+      false,
+      `business_address must never offer a second state control (dropdown = "${answer}")`,
+    );
+  }
+  for (const home of ["owner_home_address", "partner_home_address"]) {
+    assert.equal(showsOwnStatePicker(home, ""), true, `${home} has no dropdown and must keep its picker`);
+  }
+}
+
 {
   const row = typeCityCharByChar("7930 Snow View Drive", "Algonquin", "IL");
   row.patch({ zip: "60102" });

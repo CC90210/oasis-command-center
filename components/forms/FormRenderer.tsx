@@ -268,6 +268,11 @@ function renderInput(
           onChange={(v) => onChange(v)}
           placeholder={field.placeholder}
           fallbackState={fallbackState}
+          // Structural, not "is it answered yet": business_address always has
+          // its own required state dropdown on this step, so the completion row
+          // must never offer a second state control for it — at any point,
+          // including before that dropdown is filled in.
+          hasExternalStateField={field.name === "business_address"}
           invalid={Boolean(error)}
           onResolvingChange={onResolvingChange}
         />
