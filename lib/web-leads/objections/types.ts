@@ -112,9 +112,19 @@ export function isObjectionResolution(v: unknown): v is ObjectionResolution {
 }
 
 /**
- * Same shape and same reasoning as isCallOutcomeRequestId in
- * lib/web-leads/outcome.ts: a client-stable UUID is what makes a retry from a
- * rep's flaky phone tether idempotent instead of a second logged objection.
+ * Same reasoning as isCallOutcomeRequestId in lib/web-leads/outcome.ts: a
+ * client-stable UUID is what makes a retry from a rep's flaky phone tether
+ * idempotent instead of a second logged objection.
+ *
+ * NOT the same shape, and this is a real divergence worth knowing before
+ * copying either one as a template: this regex accepts UUID version nibbles
+ * [1-8] (outcome.ts's CALL_OUTCOME_REQUEST_ID restricts to [1-5]) and this
+ * function does not trim the input before testing (outcome.ts calls
+ * `.trim()` first). A `crypto.randomUUID()` v4 value satisfies both, so
+ * nothing breaks today, but the two validators silently disagree on padded
+ * input and on which UUID versions count. Neither is being changed by this
+ * comment -- a route already validates before this is reached, so tightening
+ * validation behaviour here is out of scope.
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 

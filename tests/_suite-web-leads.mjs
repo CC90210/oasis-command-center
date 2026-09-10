@@ -73,6 +73,7 @@ const TESTS = [
   // credentials either -- they exercise validation and projection only.
   "tests/objection-ranking.test.ts",
   "tests/objection-catalog.test.ts",
+  "tests/objection-events.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
