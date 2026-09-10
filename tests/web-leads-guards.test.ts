@@ -433,12 +433,11 @@ for (const view of [
   "lib/web-leads/presence.ts",
   "lib/web-leads/presence-evidence.ts",
   "components/web-leads/PresenceBlock.tsx",
-  // Added 2026-08-24 with the objection panel. It renders no audit data at all,
-  // which is exactly why it earns the ban rather than an exemption: a surface
-  // that is "obviously safe" today is the one a future editor tints to make a
-  // brush-off card look like a warning, and a rep reading a red card about
-  // "no budget" hears a verdict about the prospect that nothing measured.
-  "components/web-leads/ObjectionPanel.tsx",
+  // Added 2026-09-10 with the objection console. This is now the most tempting
+  // place in the feature to reach for red: a "lost" resolution button. Colour
+  // there would teach reps not to press it, and the log rate is the feature.
+  "components/web-leads/ObjectionConsole.tsx",
+  "components/web-leads/ObjectionCard.tsx",
   // Added 2026-08-24 with the shared identity block. It is the file that now
   // renders BOTH verbatim directory sentences on BOTH surfaces, which makes it
   // the single most tempting place to "helpfully" tint a bad website status

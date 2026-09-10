@@ -704,9 +704,17 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     `${view} must render a proof's source alongside the figure`,
   );
   // The standing brush-offs are on the card, not in a rep's memory. `bare`
-  // because BattleSection provides the shell and heading -- the panel's copy
-  // is unchanged, and its own file is asserted on below either way.
-  assert.match(src, /<ObjectionPanel bare \/>/, `${view} must render the objection panel`);
+  // because BattleSection provides the shell and heading -- the console's own
+  // markup is asserted separately by its own guard-list entry in
+  // web-leads-guards.test.ts. Swapped 2026-09-10: ObjectionPanel (a fixed
+  // eight-card table, identical on every lead) is replaced by ObjectionConsole
+  // (ranked per lead, and the surface that logs a tap to the database).
+  //
+  // Keyed on `lead.id`, not the top-level `leadId` prop: this section renders
+  // inside ScoredBody, a sibling component scope that only has `leadId` via
+  // its own `lead` prop (the already-fetched WebLead for this exact render) --
+  // the same object CallOutcomeLog's race guard checks elsewhere in this file.
+  assert.match(src, /<ObjectionConsole leadId=\{lead\.id\} bare \/>/, `${view} must render the objection console`);
 
   // The clean-answer instruction sits WITH the question, before the teach. A
   // rep reads down this card in real time, so the order on screen is the order
@@ -739,12 +747,17 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
 
   // The map itself. Prop order (id, then defaultOpen) is part of the contract
   // so these stay one-line greppable.
+  //
+  // The objections section defaults OPEN as of 2026-09-10 (see BattleCard.tsx).
+  // The opening-script assertion below is untouched on purpose: this file exists
+  // so an edit cannot silently collapse it, and an edit amending a neighbouring
+  // default is exactly the shape of edit that would.
   for (const [id, open] of [
     ["facts", false],
     ["presence", true],
     ["lead-with", true],
     ["opening", true],
-    ["brushoffs", false],
+    ["brushoffs", true],
     ["shape", true],
     ["fixes", true],
     ["competitors", true],
@@ -1161,17 +1174,13 @@ const MODEL_CODES = [
   // without a JARVIS checkout.
 }
 
-// The panel itself renders every field of every objection. Asserting the data
-// is complete (above) proves nothing if the component drops half of it.
-{
-  const panel = read("components/web-leads/ObjectionPanel.tsx");
-  for (const field of ["o.says", "o.meaning", "o.response", "o.prevent", "o.source"]) {
-    assert.ok(panel.includes(field), `ObjectionPanel must render ${field}`);
-  }
-  assert.match(panel, /OBJECTIONS\.map/, "ObjectionPanel must render every objection, not a hand-picked subset");
-  // Same rule as the rest of the feature: nothing on this surface is generated.
-  assert.doesNotMatch(panel, /claudeMessages|anthropic|openai|generateText/i, "ObjectionPanel must never generate copy");
-}
+// ObjectionPanel.tsx (a fixed eight-card table read off a hardcoded array) was
+// deleted 2026-09-10 -- Task 9's ObjectionConsole/ObjectionCard render the
+// approved catalog ranked per lead instead, and own this file's own
+// field-completeness and no-generated-copy rules in their own docblocks (see
+// ObjectionCard.tsx's "THREE RULES CARRIED FORWARD FROM ObjectionPanel.tsx").
+// No replacement block here: this suite pins BattleCard.tsx's own behaviour,
+// and neither new component is under this file's `read(view)` loop above.
 
 // ---------------------------------------------------------------------------
 // 9. It is actually reachable. A page nobody can navigate to is not shipped.

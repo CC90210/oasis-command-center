@@ -185,7 +185,7 @@ import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { checkEvidenceFor } from "@/lib/web-leads/check-evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
-import { ObjectionPanel } from "./ObjectionPanel";
+import { ObjectionConsole } from "./ObjectionConsole";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Radar3D } from "./Radar3D";
@@ -1999,19 +1999,26 @@ function ScoredBody({
         </BattleSection>
       )}
 
-      {/* ── The objections that arrive whatever the site looks like ────────
-          Closed by default (Adon, 2026-08-31): the eight cards are identical
-          on every lead, so a rep who has read them once carries them, and the
-          teaser names the panic button for the rep who has not. `bare` hands
-          the panel's own shell to BattleSection so the section header is the
-          disclosure control -- the copy inside is byte-identical. */}
+      {/*
+        DEFAULT OPEN, reversing the 2026-08-31 progressive-disclosure decision for
+        this one section. That decision was right for a static poster: the eight
+        cards were identical on every lead, so a rep who had read them once carried
+        them and the teaser named what was behind the click.
+
+        That argument does not survive the console. The cards are ranked for the
+        business on the phone, so they are no longer carried, and the tap that fills
+        the entire objection database lives inside the section. A section a rep has
+        to open first is a section a rep does not open mid-sentence. Approved by
+        Adon, 2026-09-10. Every other section keeps its current default, and
+        "Expand all" plus the per-rep localStorage persistence are untouched.
+      */}
       <BattleSection
         id="brushoffs"
-        defaultOpen={false}
+        defaultOpen={true}
         title="The brush-offs, and what to do with them"
         teaser="The eight standing brush-offs, what each one usually means, and the counter for it"
       >
-        <ObjectionPanel bare />
+        <ObjectionConsole leadId={lead.id} bare />
       </BattleSection>
 
       {/* ── §3.2 the shape + §3.3 points on the table ────────────────────── */}
