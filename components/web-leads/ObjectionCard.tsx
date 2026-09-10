@@ -51,6 +51,17 @@
  * because a rep mid-sentence needs the card to acknowledge instantly and
  * settle behind them — it must never open a dialog, block, or steal focus.
  *
+ * "LOGGED" MEANS "ON THIS CALL", NOT "EVER". `existingEvent` comes from
+ * fetchLeadEvents, which returns only events inside its SAME_CALL_WINDOW_MINUTES
+ * window (lib/web-leads/objections/events.ts). That is what makes the disabled
+ * tap correct: before the window existed, this read the lead's whole history,
+ * so from the second call onward every previously-tapped objection showed
+ * "Logged" behind a dead control and the same objection coming up again could
+ * not be recorded at all -- which under-counted exactly the recurring
+ * objections the scoreboard exists to rank. The scoping lives on the server
+ * read rather than here on purpose: a client-side filter would still have the
+ * card render "Logged" for a moment on data the server considers historical.
+ *
  * `aliveRef` guards against a response landing after this instance stopped
  * being the right place to apply it. The brief's own sketch of this pattern
  * returned a cleanup function from inside the tap handler, which is a defect:
@@ -177,6 +188,47 @@ export function ObjectionCard({
     }
   }
 
+  /**
+   * The rep changed which answer is on screen AFTER the tap was logged, so the
+   * event has to follow. Without this, `response_id` always recorded whichever
+   * answer happened to be active at tap time -- which is always the default,
+   * because the rep's real flow is hear-objection, tap, THEN read. Phase 3's
+   * "recovery by posture" (spec 4.2, the reason four postures exist at all)
+   * would have measured the default posture and nothing else, from row one.
+   * Same class as the usedVariant bug already fixed on this branch, and unlike
+   * that one it is an explicit spec requirement. (Final review, BLOCKING 4.)
+   *
+   * Latent today: every seeded objection has exactly one approved answer, so
+   * the posture row never renders. Fixed anyway -- a one-line data bug is
+   * cheaper now than in Phase 2 analytics.
+   *
+   * `usedVariant` is sent WITH it, never separately: the two describe the same
+   * displayed sentence, and a response_id that disagrees with the variant flag
+   * beside it is worse than either being stale on its own.
+   *
+   * DELIBERATELY DOES NOT REVERT THE UI ON FAILURE, unlike setResolutionTap
+   * below. A resolution is a claim about what happened, so a failed write must
+   * not leave a false one on screen. This is a reading preference, and yanking
+   * the script out from under a rep mid-sentence to report a background write
+   * failure is a worse outcome than one event carrying the previous answer id.
+   * The next posture tap re-sends.
+   */
+  function syncAnswerToEvent(answer: ObjectionAnswer | null, standard: boolean) {
+    if (!canMutate || !eventId || !answer) return;
+    void fetch(`/api/web-leads/${encodeURIComponent(leadId)}/objections/${encodeURIComponent(eventId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        responseId: answer.id,
+        // Same rule as the POST above: whether the rep is READING the tailored
+        // variant right now, not whether one exists.
+        usedVariant: Boolean(answer.libraryBody) && !standard,
+      }),
+    }).catch(() => {
+      /* see the docblock: a failed sync must not disturb what the rep is reading */
+    });
+  }
+
   async function setResolutionTap(next: ObjectionResolution) {
     if (!canMutate || !eventId || resolutionPending) return;
     const prev = resolution;
@@ -206,6 +258,10 @@ export function ObjectionCard({
 
       {answers.length > 0 && (
         <div className="mt-3">
+          {/* Each button carries the answer's OWN label, falling back to the
+              posture label. `label` is seeded, selected and typed, and Phase 2
+              writes a custom one; rendering only POSTURE_LABEL would make that
+              silently not appear. (Final review, M3.) */}
           {answers.length > 1 && (
             <div className="flex flex-wrap gap-1.5" role="group" aria-label="Answer posture">
               {answers.map((a) => (
@@ -216,10 +272,14 @@ export function ObjectionCard({
                   onClick={() => {
                     setActiveAnswerId(a.id);
                     setShowStandard(false);
+                    // Selecting a posture is the whole point of the four-posture
+                    // model; if the event does not learn which one was used, the
+                    // Phase 3 comparison has nothing to compare.
+                    syncAnswerToEvent(a, false);
                   }}
                   className={`${PILL} ${a.id === activeAnswerId ? PILL_ON : PILL_OFF}`}
                 >
-                  {POSTURE_LABEL[a.posture]}
+                  {a.label || POSTURE_LABEL[a.posture]}
                 </button>
               ))}
             </div>
@@ -230,7 +290,14 @@ export function ObjectionCard({
               {activeAnswer.libraryBody && (
                 <button
                   type="button"
-                  onClick={() => setShowStandard((s) => !s)}
+                  onClick={() => {
+                    const next = !showStandard;
+                    setShowStandard(next);
+                    // usedVariant must stay consistent with what is on screen,
+                    // for the same reason the posture buttons re-sync: the flag
+                    // describes the sentence the rep is actually reading.
+                    syncAnswerToEvent(activeAnswer, next);
+                  }}
                   className="mt-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-fg-dim underline decoration-dotted underline-offset-2 hover:text-fg"
                 >
                   {showStandard ? "Show tailored wording" : "Show standard wording"}
