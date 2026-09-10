@@ -72,6 +72,7 @@ const TESTS = [
   // The objection engine (2026-09-10). ranking is pure; the other two need no
   // credentials either -- they exercise validation and projection only.
   "tests/objection-ranking.test.ts",
+  "tests/objection-catalog.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
