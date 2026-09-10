@@ -11,10 +11,14 @@
  * has no row-level security, so this route is the boundary. 401 unresolved,
  * 403 wrong tenant, 404 out of the viewer's scope, all BEFORE any read.
  *
- * NOTHING HERE CALLS A MODEL. A rep taps this mid-sentence. The ranking is a
- * pure function and the wording is pre-generated (Phase 2), so the only cost is
- * two indexed reads (the catalog and the frequency map) plus the lead read
- * `authorize()` already had to do for the 404 check.
+ * NOTHING HERE CALLS A MODEL. GET runs the real audit read (fetchAudit,
+ * ~3-4 indexed round trips per the reviewer's measurement) because ranking
+ * without it collapses to two orderings total -- see factsInputFor below.
+ * That cost is paid ONCE, when a rep opens the battle card, not per tap: the
+ * POST path below is untouched and stays a single write. Tens of
+ * milliseconds on a page the rep is already waiting for buys a ranking that
+ * actually ranks. A thrown audit read fails this route closed (500), same as
+ * every other read failure here -- never a silently empty/unranked catalog.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -25,6 +29,7 @@ import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { fetchApprovedCatalog, fetchObjectionFrequency } from "@/lib/web-leads/objections/catalog";
 import { rankObjections, CONSOLE_OPEN_COUNT } from "@/lib/web-leads/objections/ranking";
 import { buildObjectionFacts } from "@/lib/web-leads/objections/facts";
+import { fetchAudit, businessIdForLead } from "@/lib/web-leads/audit";
 import { logObjectionEvent, fetchLeadEvents, ObjectionEventError } from "@/lib/web-leads/objections/events";
 import { isRequestId } from "@/lib/web-leads/objections/types";
 
@@ -37,46 +42,69 @@ type LoadedLead = NonNullable<Awaited<ReturnType<typeof fetchLead>>>;
 /**
  * The leadgen_businesses pointer, when the lead carries one. Corresponds to
  * `data.webdev_source_business_id` (see lib/web-leads/outcome.ts and
- * lib/web-leads/audit.ts's header). CONFIRMED against lib/web-leads/data.ts's
- * toWebLead(): that function maps 20 named fields off the raw row and this
- * pointer is not one of them -- WebLead deliberately does not surface it (it
- * is research plumbing, not a rep-facing fact; audit.ts reads it directly off
- * the raw row for the same reason). So there is no in-type property to read
- * here, and this always returns null -- which is fine by design:
- * resolveEventKeys (lib/web-leads/objections/events.ts) applies its documented
- * tenant_records.id fallback exactly as lib/web-leads/outcome.ts does for the
- * identical situation. Never throws, because a missing pointer must not make
- * a real objection unloggable.
+ * lib/web-leads/audit.ts's header) -- NOT surfaced on `WebLead` itself
+ * (confirmed against lib/web-leads/data.ts's toWebLead(), which maps 20 named
+ * fields and this is not one of them; it is research plumbing, not a
+ * rep-facing fact). It IS obtainable, though: `businessIdForLead(id)`
+ * (lib/web-leads/audit.ts:193) is a plain one-column read of the same
+ * tenant_records row `authorize()` already established is visible to this
+ * viewer -- the identical pattern lib/web-leads/outcome.ts's
+ * `leadRoutingInfo` uses on every call-outcome POST. (Fix round 1, finding
+ * F1: this previously always returned null, which meant every objection
+ * event this route ever wrote fell back to resolveEventKeys's `lead.id`
+ * substitute and could never join to leadgen_businesses -- not the rare case
+ * that fallback exists for.)
+ *
+ * Still returns null, never throws, when the lead genuinely carries no
+ * pointer (not promoted through the leadgen pipeline): resolveEventKeys
+ * (lib/web-leads/objections/events.ts) applies its documented
+ * tenant_records.id fallback for that real case, same as outcome.ts. A read
+ * failure here is a thrown Error, which the caller's try/catch turns into a
+ * 500 -- never a silently-null business id standing in for a genuine DB
+ * failure.
  */
-function leadBusinessId(_lead: LoadedLead): string | null {
-  return null;
+function leadBusinessId(lead: LoadedLead): Promise<string | null> {
+  return businessIdForLead(lead.id);
 }
 
 /**
- * The audit facts the ranker needs, pulled off the lead. EVERY field degrades
- * to null or 0 rather than throwing: a lead with no audit at all still gets a
- * ranked console, just one ranked on family base rates alone. A rep mid-call
- * never loses the section because an enrichment field was missing.
+ * The audit facts the ranker needs. EVERY field degrades to a safe value
+ * rather than throwing: a lead with no audit at all still gets a ranked
+ * console, just one ranked on family base rates alone. A rep mid-call never
+ * loses the section because an enrichment field was missing.
  *
- * None of overallScore/dimensions/platform/competitorGap/priorNoAnswerCalls
- * are available on `WebLead` -- lib/web-leads/objections/facts.ts's own header
- * table confirms each one lives on AuditResult, CompetitorContext or the call
- * log, all separate fetches (fetchAudit, competitor lookup, outcome count).
- * Calling any of them here would add a database round trip this route does
- * not have: the GET path is documented above as two indexed reads plus the
- * lead read authorize() already did, and a rep taps this mid-sentence. So per
- * this route's own degrade-to-safe contract, those five are passed safe.
- * hasWebsite is the one exception: audit.ts's own state machine (comment atop
- * that file) computes AuditResult's "no_website" state from nothing more than
- * "no website_url on the lead", so `Boolean(lead.websiteUrl)` is that same
- * test, not a guess, and costs nothing extra because websiteUrl is already on
- * the WebLead this route already fetched.
+ * hasWebsite/overallScore/dimensions now come from a REAL fetchAudit(id, lead)
+ * call (lib/web-leads/audit.ts:392) -- fix round 1, finding F2. Passing all
+ * six as safe values (the original Task 8 instruction) made every rule keyed
+ * on them dead code: every lead collapsed into one of two orderings, which
+ * contradicts this route's own "ranked for THIS lead" claim. The reviewer's
+ * ruling: this GET fires once per battle-card open, not per tap, so the
+ * ~3-4 extra indexed round trips fetchAudit costs are the right trade; the
+ * POST tap path is untouched and stays a single write.
+ *
+ * AuditResult is a closed union (lib/web-leads/audit.ts) and is read as one,
+ * never assumed to be the "scored" branch: `no_website`, `not_scored`,
+ * `unreachable` and `parked` all degrade to the same safe values a missing
+ * audit would, so an audit read that resolves but isn't a finished score
+ * still renders a valid, ranked console rather than throwing or guessing.
  */
-function factsInputFor(lead: LoadedLead): Parameters<typeof buildObjectionFacts>[0] {
+async function factsInputFor(id: string, lead: LoadedLead): Promise<Parameters<typeof buildObjectionFacts>[0]> {
+  const audit = await fetchAudit(id, lead);
+  // AuditResult's own state machine (audit.ts's header, rule 1) derives
+  // `no_website` from nothing more than "no website_url on the lead", so
+  // this agrees with the same source the rest of these facts now come from
+  // instead of re-deriving it from `lead.websiteUrl` separately.
+  const hasWebsite = audit.state !== "no_website";
+  // Only the "scored" branch carries `composite`/`dimensions` -- the field
+  // is named `composite`, NOT `overall` (audit.ts's own docblock: an earlier
+  // plan draft used `overall` and every downstream reference rendered
+  // undefined).
+  const scored = audit.state === "scored" ? audit : null;
+
   return {
-    hasWebsite: Boolean(lead.websiteUrl),
-    overallScore: null,
-    dimensions: [],
+    hasWebsite,
+    overallScore: scored ? scored.composite : null,
+    dimensions: scored ? scored.dimensions : [],
     // No stored field anywhere in this codebase identifies a DIY site
     // builder (Wix/Squarespace/etc) by name -- facts.ts's own header says so
     // explicitly. The nearest available signal is
@@ -85,7 +113,18 @@ function factsInputFor(lead: LoadedLead): Parameters<typeof buildObjectionFacts>
     // cannot fill this string field. Wiring real platform detection is
     // Phase 2 work.
     platform: null,
+    // Deliberately NOT derived (reviewer's ruling, fix round 1 F2): this is
+    // `headToHead.composite - audit.composite` from a separate competitor
+    // lookup (lib/web-leads/competitors.ts) -- a whole extra fetch beyond
+    // the audit read this route now already pays for. Passing null here
+    // only keeps ranking.ts's +10 "competitor ahead -> already_handled"
+    // bump dormant; every other rule (including the +40 selected-angle bump
+    // this audit read now revives) is unaffected.
     competitorGap: null,
+    // Deliberately NOT derived (same ruling): a count of this lead's
+    // call-log rows with outcome `no_answer` (lib/web-leads/outcome.ts),
+    // which is its own query the audit read does not provide. Passing 0
+    // only keeps ranking.ts's +25 "3+ no-answers -> brush_off" bump dormant.
     priorNoAnswerCalls: 0,
   };
 }
@@ -124,16 +163,21 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
   if (!auth.ok) return auth.res;
 
   try {
-    const [catalog, frequency, events, mutationAccess] = await Promise.all([
+    // businessId is resolved once and reused for the events read below; it
+    // is NOT passed into factsInputFor -- fetchAudit resolves its own
+    // business id internally (audit.ts:392 calls businessIdForLead itself),
+    // so this is a second, independent lookup of the same pointer rather
+    // than a shared one. Both are cheap indexed reads on the same row.
+    const [catalog, frequency, events, mutationAccess, facts] = await Promise.all([
       fetchApprovedCatalog(),
       fetchObjectionFrequency(),
-      fetchLeadEvents({ id, businessId: leadBusinessId(auth.lead) }),
+      leadBusinessId(auth.lead).then((businessId) => fetchLeadEvents({ id, businessId })),
       mayWorkWebsiteSalesLifecycle(auth.session.teamRole, auth.session.isAdmin)
         ? leadMutationAccess(auth.session, id)
         : Promise.resolve({ ok: false as const }),
+      factsInputFor(id, auth.lead).then(buildObjectionFacts),
     ]);
 
-    const facts = buildObjectionFacts(factsInputFor(auth.lead));
     const objections = rankObjections(catalog, facts, frequency);
 
     return NextResponse.json({
@@ -200,7 +244,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }
 
     const { event, idempotent } = await logObjectionEvent({
-      lead: { id, businessId: leadBusinessId(auth.lead) },
+      lead: { id, businessId: await leadBusinessId(auth.lead) },
       objectionId: body.objectionId,
       responseId,
       usedVariant: body.usedVariant === true,
