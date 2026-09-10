@@ -1176,11 +1176,55 @@ const MODEL_CODES = [
 
 // ObjectionPanel.tsx (a fixed eight-card table read off a hardcoded array) was
 // deleted 2026-09-10 -- Task 9's ObjectionConsole/ObjectionCard render the
-// approved catalog ranked per lead instead, and own this file's own
-// field-completeness and no-generated-copy rules in their own docblocks (see
-// ObjectionCard.tsx's "THREE RULES CARRIED FORWARD FROM ObjectionPanel.tsx").
-// No replacement block here: this suite pins BattleCard.tsx's own behaviour,
-// and neither new component is under this file's `read(view)` loop above.
+// approved catalog ranked per lead instead. The deleted block above (git show
+// 7c220f07:tests/web-leads-battlecard.test.ts:1164-1174) pinned three things
+// against ObjectionPanel.tsx and nothing replaced them (task-10 fix round 1,
+// flagged then fixed): every field renders, every objection renders rather
+// than a hand-picked subset, and the surface never generates copy. That third
+// rule is the one that matters most -- this feature's whole promise is that
+// no unapproved wording reaches a rep, and an approval gate enforced only by
+// a person reading the component correctly, forever, is not a gate. Restated
+// here against the two components that took ObjectionPanel's place.
+
+{
+  const card = read("components/web-leads/ObjectionCard.tsx");
+  // The objection's own fields, plus the active answer's spoken line. The
+  // shape changed from ObjectionPanel's flat `o.response` -- answers now live
+  // on `objection.answers`, so this asserts the real property paths the
+  // component reads, not the old ones.
+  for (const field of ["objection.says", "objection.meaning", "objection.prevent", "objection.source", "activeAnswer.body"]) {
+    assert.ok(card.includes(field), `ObjectionCard must render ${field}`);
+  }
+}
+
+{
+  const console_ = read("components/web-leads/ObjectionConsole.tsx");
+  // No silent truncation. The console is allowed to open on a short slice
+  // (mid-call, a rep should not have to scroll past a wall of cards to reach
+  // the ones ranked highest) but there must be an explicit, user-facing way
+  // to reach the rest -- a fixed subset with no path to the remainder is
+  // exactly the kind of drop the deleted OBJECTIONS.map assertion existed to
+  // catch, restated for a component that is allowed to paginate on purpose.
+  assert.match(
+    console_,
+    /expanded\s*\?\s*state\.objections\s*:\s*state\.objections\.slice\(/,
+    "ObjectionConsole must fall back to the FULL ranked list once expanded, not a fixed subset",
+  );
+  assert.match(
+    console_,
+    /onClick=\{\(\)\s*=>\s*setExpanded\(true\)\}/,
+    "ObjectionConsole must offer an explicit control that reaches the rest of the list",
+  );
+  assert.match(console_, /Show all \{state\.objections\.length\}/, "ObjectionConsole's expand control must name the true count, not a guess");
+}
+
+// Same rule as the rest of the feature: nothing on either surface is
+// generated. AI drafts a catalog row, a human approves it, and only approved
+// rows ever render -- neither component may itself call a model.
+for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-leads/ObjectionConsole.tsx"]) {
+  const src = read(view);
+  assert.doesNotMatch(src, /claudeMessages|anthropic|openai|generateText/i, `${view} must never generate copy`);
+}
 
 // ---------------------------------------------------------------------------
 // 9. It is actually reachable. A page nobody can navigate to is not shipped.
