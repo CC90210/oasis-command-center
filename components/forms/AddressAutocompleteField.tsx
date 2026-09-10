@@ -8,12 +8,55 @@
  * formatted address STRING (so the stored value is identical to a text field —
  * downstream PDF/lead-record paths are unaffected).
  *
+ * ---------------------------------------------------------------------------
+ * THE GUARANTEE THIS COMPONENT NOW MAKES (2026-09-10)
+ *
+ * A merchant must ALWAYS be able to submit a correct address, whatever the
+ * geocoding provider does. Before this rewrite there were three ways to reach a
+ * dead end, all of them live in production and all of them blocking real
+ * funding applications:
+ *
+ *   1. NO EXIT. A suggestion carrying no ZIP could be selected from our own
+ *      dropdown and then refused by our own capture gate ("Include the ZIP
+ *      code"). Re-opening the dropdown offered the identical entry again. The
+ *      field is a free-text input, so a merchant who KNEW to append ", IL 60102"
+ *      could escape — but nothing on screen ever told them that, and the gate
+ *      only speaks after they have already been rejected.
+ *
+ *   2. THE SELECT→CONTINUE RACE. Google's autocomplete label has no postal code
+ *      ("911 Magnolia Dr, Algonquin, IL, USA"); the ZIP arrives only from a
+ *      SECOND Place Details round trip. `loading` was local state, so the form
+ *      had no idea a resolution was in flight. Selecting a suggestion and
+ *      clicking Continue inside that window was rejected for a missing ZIP that
+ *      was already on its way. PR #426 named this defect in its title and did
+ *      not actually close it — the signal never reached the validator.
+ *
+ *   3. A FAILED DETAILS CALL STUCK THE MERCHANT. One 429 or one timeout on the
+ *      Place Details hop left the ZIP-less label in the box, which the gate then
+ *      refused, which returned them to (1).
+ *
+ * The fixes, in order of what a merchant hits first:
+ *   - `onResolvingChange` tells the form a ZIP is in flight, so Continue WAITS
+ *     instead of rejecting. Closes (2).
+ *   - The Place Details call retries once before giving up. Reduces (3).
+ *   - `AddressCompletion` — an always-available structured City / State / ZIP
+ *     row, revealed the moment the typed line cannot satisfy the gate. It is
+ *     composed back into the SAME single string, so nothing downstream changes.
+ *     This is the actual guarantee: it does not depend on any provider being up,
+ *     correct, or configured, and it closes (1) and (3) outright.
+ *
  * Graceful degradation: if the API errors or returns nothing, the field behaves
- * as a normal text input the merchant can fill manually.
+ * as a normal text input, now with the completion row to finish it off.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { normalizeAddressSuggestions, type AddressSuggestion } from "@/lib/forms/address-suggestions";
+import {
+  isAcceptableCaptureAddress,
+  splitUsAddress,
+  composeUsAddress,
+  US_STATE_CODES,
+} from "@/lib/address/us-address";
 
 type Props = {
   value: string;
@@ -23,30 +66,89 @@ type Props = {
   /** Override the input styling so the field matches its host surface (the
    *  public form vs the dashboard record editor). Defaults to the form styling. */
   className?: string;
+  /** The business address holds its state in a separate dropdown; pass it so
+   *  the gate here judges the address exactly as the server does. */
+  fallbackState?: string;
+  /** True when a dedicated state field for this address exists elsewhere on the
+   *  form, WHETHER OR NOT it is answered yet. Suppresses the completion row's
+   *  own state picker, so the row can never embed a state that later
+   *  contradicts that field. */
+  hasExternalStateField?: boolean;
+  /** True once the form's validator has rejected this field — forces the
+   *  completion row open so the merchant is shown HOW to fix it, not just told. */
+  invalid?: boolean;
+  /** Raised while a selected suggestion's full address (its ZIP) is still being
+   *  fetched. The form must not validate or submit this field until it clears. */
+  onResolvingChange?: (resolving: boolean) => void;
 };
 
 const BASE_INPUT =
   "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
+const SMALL_INPUT =
+  "w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
 
 const MIN_CHARS = 3;
 const DEBOUNCE_MS = 300;
 
-export function AddressAutocompleteField({ value, onChange, placeholder, inputId, className }: Props) {
+export function AddressAutocompleteField({
+  value,
+  onChange,
+  placeholder,
+  inputId,
+  className,
+  fallbackState,
+  hasExternalStateField = false,
+  invalid,
+  onResolvingChange,
+}: Props) {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // Sticky: once the merchant has been shown the completion row, it stays put.
+  // Toggling it off the instant the gate passes would make it flicker away
+  // mid-keystroke, which is worse than a row that simply stays available.
+  const [completionOpen, setCompletionOpen] = useState(false);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blurRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** Bumped on every selection so an older, still-in-flight Place Details
+   *  lookup can neither paint a stale address nor release the form's hold. */
+  const selectGen = useRef(0);
+
+  const text = typeof value === "string" ? value : "";
+  // Force the row open as soon as the form has rejected the field, so the
+  // merchant is handed the boxes that fix it rather than only an error message.
+  useEffect(() => {
+    if (invalid) setCompletionOpen(true);
+  }, [invalid]);
 
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (blurRef.current) clearTimeout(blurRef.current);
       abortRef.current?.abort();
+      // Invalidate any Place Details call still in flight. The parent's hold is
+      // keyed by FIELD NAME, so without this an old request can outlive its
+      // component: go Back mid-lookup, return to the step, start a new lookup,
+      // and the old one's `finally` still matches its own generation — it calls
+      // onResolvingChange(false) and releases the NEW instance's hold, letting
+      // Continue validate while the newer ZIP is still coming. Bumping the
+      // generation makes the orphan discard itself silently.
+      // (Codex P2, 2026-09-10.)
+      //
+      // exhaustive-deps warns that this ref will have changed since the effect
+      // was set up. That is precisely the point: we must invalidate whatever
+      // generation is current AT TEARDOWN, not a snapshot from mount, or a
+      // lookup started after mount would survive. This is not a DOM ref.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      selectGen.current++;
+      // Never strand the parent's "resolving" flag on unmount — a stuck flag
+      // would disable Continue permanently. Fail OPEN on teardown.
+      onResolvingChange?.(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runSearch = (q: string) => {
@@ -90,28 +192,113 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
     }, DEBOUNCE_MS);
   };
 
+  /**
+   * ANY MANUAL EDIT SUPERSEDES AN IN-FLIGHT SELECTION.
+   *
+   * A merchant who picks a Google suggestion and then corrects the address by
+   * hand — in the main box OR in the City/State/ZIP completion row — still has
+   * that Place Details lookup running. It considers itself current, lands a
+   * moment later, and overwrites what they deliberately typed, which is then
+   * what gets submitted. Bumping the generation makes the old lookup discard
+   * itself, and releasing the hold stops the form waiting on an answer we have
+   * already decided not to use.
+   *
+   * Every path that writes a value the merchant typed must go through here.
+   * (Codex P1 ×2, 2026-09-10.)
+   */
+  const supersedePendingResolution = () => {
+    selectGen.current++;
+    onResolvingChange?.(false);
+    // The superseded lookup's `finally` deliberately skips setLoading(false) —
+    // it no longer owns the spinner. If nobody clears it here the field shows a
+    // permanent "…" that never goes away, on a request whose answer we have
+    // already discarded. (Codex P2, 2026-09-10.)
+    setLoading(false);
+  };
+
   const handleInput = (v: string) => {
+    supersedePendingResolution();
     onChange(v);
     runSearch(v);
   };
 
+  /** One Place Details attempt. Returns "" when it could not resolve. */
+  const fetchResolved = async (placeId: string): Promise<string> => {
+    const res = await fetch(`/api/forms/address-autocomplete?place_id=${encodeURIComponent(placeId)}`);
+    const data = (await res.json()) as { ok?: boolean; address?: unknown };
+    return data.ok && typeof data.address === "string" ? data.address.trim() : "";
+  };
+
   const select = async (s: AddressSuggestion) => {
+    /**
+     * Every selection gets a generation. A merchant who picks one suggestion,
+     * types again and picks another before the first Place Details call returns
+     * has TWO lookups in flight for one field. Without this counter the first
+     * to finish would call onResolvingChange(false) — telling the form the field
+     * had settled while the other was still running — and either response could
+     * then paint over the newer selection. Only the newest generation may paint
+     * a value or release the form's hold. (Codex P1, 2026-09-10.)
+     */
+    const gen = ++selectGen.current;
+
     // Google autocomplete labels frequently omit postal codes. Paint the choice
     // immediately, then replace it with the complete Place Details address.
     onChange(s.value);
     setSuggestions([]);
     setOpen(false);
     setActiveIndex(-1);
-    if (!s.placeId) return;
+
+    // A provider that returns no place_id (Photon) has already given us its
+    // best string. If that string cannot pass the gate, open the completion row
+    // rather than leaving the merchant to guess what is wrong.
+    if (!s.placeId) {
+      // This selection needs no resolution, so release any hold a superseded
+      // lookup is still holding — otherwise Continue waits on a request whose
+      // answer we have already decided to discard.
+      onResolvingChange?.(false);
+      if (!isAcceptableCaptureAddress(s.value, fallbackState).ok) setCompletionOpen(true);
+      return;
+    }
+
     setLoading(true);
+    // Hold the form: the ZIP is genuinely in flight and validating now would
+    // reject an address that is about to be correct.
+    onResolvingChange?.(true);
     try {
-      const res = await fetch(`/api/forms/address-autocomplete?place_id=${encodeURIComponent(s.placeId)}`);
-      const data = (await res.json()) as { ok?: boolean; address?: unknown };
-      if (data.ok && typeof data.address === "string" && data.address.trim()) onChange(data.address.trim());
-    } catch {
-      // Keep the editable label. Inline validation names any missing postal part.
+      let resolved = "";
+      try {
+        resolved = await fetchResolved(s.placeId);
+      } catch {
+        resolved = "";
+      }
+      if (!resolved && gen === selectGen.current) {
+        // One retry. The common failures here are a transient 429 from the
+        // shared global rate-limit bucket and a cold-start timeout, both of
+        // which clear immediately. Giving up on the first miss is what left
+        // merchants holding a ZIP-less label. Skipped once superseded — there
+        // is no point retrying a lookup whose answer we will discard.
+        try {
+          resolved = await fetchResolved(s.placeId);
+        } catch {
+          resolved = "";
+        }
+      }
+      // Superseded by a newer selection: never paint, never touch the hold.
+      if (gen !== selectGen.current) return;
+      if (resolved) {
+        onChange(resolved);
+        if (!isAcceptableCaptureAddress(resolved, fallbackState).ok) setCompletionOpen(true);
+      } else {
+        // Keep the editable label and hand the merchant the boxes that finish
+        // it. Never a dead end.
+        setCompletionOpen(true);
+      }
     } finally {
-      setLoading(false);
+      // Only the newest selection owns the spinner and the form's hold.
+      if (gen === selectGen.current) {
+        setLoading(false);
+        onResolvingChange?.(false);
+      }
     }
   };
 
@@ -142,7 +329,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
         id={inputId}
         type="text"
         autoComplete="off"
-        value={typeof value === "string" ? value : ""}
+        value={text}
         onChange={(e) => handleInput(e.target.value)}
         onKeyDown={onKeyDown}
         onFocus={() => {
@@ -151,6 +338,11 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
         onBlur={() => {
           // Delay close so a mousedown on a suggestion registers first.
           blurRef.current = setTimeout(() => setOpen(false), 150);
+          // Offer the completion row only once they have finished typing and
+          // the line still cannot pass — not on every keystroke of "1", "12".
+          if (text.trim() && !isAcceptableCaptureAddress(text, fallbackState).ok) {
+            setCompletionOpen(true);
+          }
         }}
         placeholder={placeholder || "Start typing your address…"}
         className={className || BASE_INPUT}
@@ -193,6 +385,291 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
           ))}
         </ul>
       )}
+
+      {/* Sticky once opened — deliberately NOT `&& !gate.ok`. The capture gate
+          does not require a city (it cannot be parsed reliably from a
+          comma-free line), so a merchant who filled ZIP before city saw the row
+          vanish mid-task, right after it had told them the city was needed. The
+          address then went to a lender as "123 Main St, IL 60102", which is the
+          incomplete-address complaint this feature exists to answer.
+          (Codex P2, 2026-09-10.) */}
+      {completionOpen && (
+        <AddressCompletion
+          value={text}
+          // Through the same supersession as the main input: a City/ZIP the
+          // merchant types must not be overwritten by a Place Details response
+          // for a suggestion they picked moments earlier.
+          onChange={(v) => {
+            supersedePendingResolution();
+            onChange(v);
+          }}
+          hasExternalStateField={hasExternalStateField}
+          inputId={inputId}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The escape hatch, and the only part of this feature that depends on nothing
+ * external. Whatever the provider returned — a street with no building number,
+ * an entry with no ZIP, or nothing at all — these boxes let the merchant finish
+ * the address by hand.
+ *
+ * It edits the SAME single string the field already stores. Each box is seeded
+ * from whatever `splitUsAddress` could already identify, and every edit
+ * recomposes "line1, city, ST ZIP". Storing one string is load-bearing: the PDF
+ * renderer, the lead record and the application upsert all read one address
+ * value, and introducing per-part payload keys here would silently bypass all
+ * three. (lib/address/us-address.ts is the single implementation of both the
+ * split and the gate, so this row can never disagree with the server.)
+ */
+/**
+ * Drop `city` from the end of a street line when it is already there.
+ *
+ * Only ever removes a word the merchant has just typed into the City box, so it
+ * cannot invent a boundary the way a parser guessing at commas would. Refuses to
+ * empty the line entirely — "Miami" alone as the street stays put.
+ */
+function stripTrailingCity(line1: string, city: string): string {
+  const c = city.trim();
+  if (!c) return line1;
+  const escaped = c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const stripped = line1.replace(new RegExp(`[,\\s]+${escaped}\\s*$`, "i"), "").trim();
+  return stripped ? stripped : line1;
+}
+
+/**
+ * Unit designators — a trailing "Apt 4" is not a city.
+ *
+ * "#" is matched on its own, NOT via the alternation with `\b` after it: `\b`
+ * needs a word/non-word transition, and both "#" and the space following it in
+ * "123 Main St, # 4" are non-word characters, so that alternative could never
+ * fire. The most common unit notation of all was seeding "# 4" as the city.
+ * (Codex P2, 2026-09-10.)
+ */
+const UNIT_WORDS = /^(?:#|(?:apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr)\b)/i;
+
+/**
+ * Split a partial address into the completion row's starting values.
+ *
+ * `splitUsAddress` is deliberately conservative: with no state or ZIP to anchor
+ * it, a comma is more likely a unit suffix ("123 Main St, Apt 4") than a city
+ * boundary, so it keeps the whole string in line1 and reports NO city. That is
+ * the right call for a parser that must never invent a part — but it is the
+ * wrong starting point for this row, which then shows an EMPTY City box for
+ * "123 Main St, Miami". The merchant does as asked and types "Miami", and the
+ * result is "123 Main St, Miami, Miami, FL 33101". (Codex P2, 2026-09-10.)
+ *
+ * Here the trade is different from the parser's, because the answer is shown to
+ * the merchant in an editable box rather than stored silently: guessing "Miami"
+ * into a visible City field is corrected in one keystroke if wrong, while
+ * duplicating it is not visible at all. Unit designators are still excluded, so
+ * the common "…, Apt 4" false positive never arises.
+ */
+function seedCompletion(value: string): { line1: string; city: string; state: string; zip: string } {
+  const p = splitUsAddress(value);
+  if (p.city) return { line1: p.line1, city: p.city, state: p.state, zip: p.zip };
+  const segments = (p.line1 || value).split(",").map((s) => s.trim()).filter(Boolean);
+  const tail = segments[segments.length - 1] || "";
+  if (segments.length >= 2 && !UNIT_WORDS.test(tail) && !/^\d/.test(tail)) {
+    return { line1: segments.slice(0, -1).join(", "), city: tail, state: p.state, zip: p.zip };
+  }
+  return { line1: p.line1 || value.trim(), city: "", state: p.state, zip: p.zip };
+}
+
+function AddressCompletion({
+  value,
+  onChange,
+  hasExternalStateField,
+  inputId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  /** True when a dedicated state field for this address exists elsewhere on the
+   *  form. Structural — never "is it filled in yet". */
+  hasExternalStateField: boolean;
+  inputId?: string;
+}) {
+  /**
+   * Whether this address HAS a dedicated state field elsewhere on the form —
+   * a structural fact, not "is that field filled in right now".
+   *
+   * Deriving it from the current fallback value was subtly wrong. A merchant
+   * who opened this row BEFORE answering business_state got the picker, chose
+   * a state here, and then chose a different one in the real dropdown: the
+   * picker merely disappeared, while the first state stayed embedded in the
+   * address — and `mergeStateIntoAddress` trusts an embedded state over the
+   * dropdown by design. The application would be routed on the wrong state.
+   *
+   * business_address always has that dropdown (required, same step), so the
+   * picker must never be offered for it at any point in the form's life.
+   * Owner and partner home addresses have no such field and keep it always.
+   * (Codex P1, 2026-09-10.)
+   */
+  const stateHandledElsewhere = hasExternalStateField;
+
+  /**
+   * THE DRAFT IS OWNED HERE, NOT RE-DERIVED FROM THE COMPOSED STRING.
+   *
+   * Deriving each box from `splitUsAddress(value)` on every render looks
+   * tidier and is completely unusable, because the parser deliberately refuses
+   * to guess: with no state and no ZIP to anchor it, a comma is more likely a
+   * unit suffix ("123 Main St, Apt 4") than a city boundary, so the whole
+   * string stays in line1. Typing the first letter of a city therefore composed
+   * "7930 Snow View Drive, A", which parsed back with city:"" — and the letter
+   * vanished from the box on the very next render. The ZIP box behaved the same
+   * way until a fifth digit arrived. The escape hatch could not be typed into
+   * at all. (Codex P1, 2026-09-10 — caught before this ever shipped.)
+   *
+   * So: seed once from whatever the parser CAN identify, then let the merchant
+   * type freely and push the composition outward. `line1` stays anchored to the
+   * address as it was when the row opened, so recomposing cannot eat it.
+   */
+  const seed = useMemo(() => seedCompletion(value), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const baseLine1 = useRef(seed.line1);
+  const [draft, setDraft] = useState({ city: seed.city, state: seed.state, zip: seed.zip });
+
+  /**
+   * Anchoring `line1` once is what makes the boxes typeable; anchoring it
+   * FOREVER is a silent-corruption bug of its own. If the merchant goes back to
+   * the main input and types a different street, or picks another suggestion,
+   * a frozen `baseLine1` means their next City/ZIP keystroke recomposes the
+   * address they just replaced — and submits it. Exactly the class of failure
+   * this whole change exists to remove. (Codex P1, re-review 2026-09-10.)
+   *
+   * So: re-seed whenever `value` changes from OUTSIDE this row. `lastComposed`
+   * distinguishes our own write (ignore — the draft is already right) from an
+   * edit made anywhere else (re-anchor to it).
+   */
+  const lastComposed = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastComposed.current === value) {
+      // Our own write, acknowledged — the draft already matches it. CONSUME the
+      // marker rather than leaving it standing: a marker that outlives its write
+      // misreads a later RESTORATION of the same string as ours. Compose A here,
+      // edit the main input to B, then undo back to A, and a stale marker would
+      // leave baseLine1/draft seeded from B — so the next City or ZIP keystroke
+      // silently recomposes B and submits an address the merchant had replaced.
+      // (Codex P2, 2026-09-10.)
+      lastComposed.current = null;
+      return;
+    }
+    const s = seedCompletion(value);
+    baseLine1.current = s.line1;
+    setDraft({ city: s.city, state: s.state, zip: s.zip });
+  }, [value]);
+
+  const patch = (next: Partial<{ city: string; state: string; zip: string }>) => {
+    const merged = { ...draft, ...next };
+    setDraft(merged);
+    const composed = composeUsAddress({
+      // Strip the city if it is already sitting at the end of the street line.
+      // "123 Main Street Miami Florida 33101" has no comma, so the parser
+      // (correctly, since it must never guess) leaves "Miami" inside line1 and
+      // reports no city — the box comes up empty, the merchant types the city
+      // they already gave, and the address becomes "…Main Street Miami, Miami,
+      // FL 33101". Removing a duplicated tail is safe in a way that GUESSING a
+      // city boundary is not: it only fires when the merchant has named that
+      // exact trailing word themselves.
+      line1: stripTrailingCity(baseLine1.current, merged.city),
+      city: merged.city,
+      // Whatever state the ADDRESS ITSELF already carried, preserved — and
+      // DELIBERATELY NOT the business_state dropdown value, even though the
+      // picker below is hidden when that dropdown exists.
+      //
+      // The distinction is the whole rule, and it cuts both ways:
+      //
+      //   INJECTING the dropdown's code manufactures a contradiction out of
+      //   nothing, and is the bug that was removed above.
+      //
+      //   BLANKING a state the address already had would be the same mistake
+      //   pointing the other way. When a merchant's address reads "…, Algonquin,
+      //   IL" and the dropdown says NY, dropping the IL lets mergeStateIntoAddress
+      //   fill NY and print "Algonquin, NY 60102" — an address that does not
+      //   exist. us-address.ts settled this on production evidence: 28 records
+      //   had a dropdown contradicting the address, and the DROPDOWN was the
+      //   wrong one. "The address the merchant actually typed is the better
+      //   evidence of where they are, so it wins; the dropdown only ever FILLS
+      //   a gap, never overrides."
+      //
+      // `draft.state` can only ever come from parsing `value`, because the
+      // picker that would set it is hidden in exactly this case. So this line
+      // preserves; it cannot introduce. (Codex raised blanking it as a P1 on
+      // 2026-09-10; declined, and pinned by a test, because the remedy would
+      // print addresses that do not exist.)
+      //
+      // Copying it in here looks harmless and creates contradictory data: the
+      // merchant changes the dropdown afterwards, the stale code stays baked
+      // into the address string, and `mergeStateIntoAddress` then trusts the
+      // ADDRESS over the dropdown by design ("the address the merchant actually
+      // typed is the better evidence of where they are"). The application would
+      // go out with business_address and business_state disagreeing.
+      //
+      // Leaving it out is not a gap: storing "street, city, ZIP" with the state
+      // held separately is exactly the shape lib/address/us-address.ts was
+      // written for. The gate merges it to validate, and the PDF merges it to
+      // print. One source of truth. (Codex P2, 2026-09-10.)
+      state: merged.state,
+      zip: merged.zip,
+    });
+    lastComposed.current = composed;
+    onChange(composed);
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-bg-border bg-bg-elev/60 p-2.5 space-y-2">
+      <p className="text-[11px] text-fg-muted">
+        Finish the address below so your application can be matched to a lender.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_auto_auto]">
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">City</span>
+          <input
+            id={inputId ? `${inputId}-city` : undefined}
+            type="text"
+            autoComplete="address-level2"
+            value={draft.city}
+            onChange={(e) => patch({ city: e.target.value })}
+            placeholder="Algonquin"
+            className={SMALL_INPUT}
+          />
+        </label>
+        {!stateHandledElsewhere && (
+          <label className="block">
+            <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">State</span>
+            <select
+              id={inputId ? `${inputId}-state` : undefined}
+              value={draft.state}
+              onChange={(e) => patch({ state: e.target.value })}
+              className={SMALL_INPUT}
+            >
+              <option value="">--</option>
+              {US_STATE_CODES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">ZIP</span>
+          <input
+            id={inputId ? `${inputId}-zip` : undefined}
+            type="text"
+            inputMode="numeric"
+            autoComplete="postal-code"
+            value={draft.zip}
+            // Digits and a single hyphen only, capped at ZIP+4 — a merchant
+            // pasting "60102, USA" must not push junk into the stored line.
+            onChange={(e) => patch({ zip: e.target.value.replace(/[^\d-]/g, "").slice(0, 10) })}
+            placeholder="60102"
+            className={SMALL_INPUT}
+          />
+        </label>
+      </div>
     </div>
   );
 }

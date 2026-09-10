@@ -117,6 +117,22 @@ type SubmitResponse = {
  * `tests/form-submit-error-copy.test.ts`, which reads the codes straight out of
  * the route and fails on any that is unmapped.
  */
+/**
+ * How long Continue may wait for a selected address to finish resolving.
+ *
+ * It has to cover the WORST case, not the typical one, or the safety valve
+ * becomes the bug: /api/forms/address-autocomplete aborts an upstream call at
+ * 4s (UPSTREAM_TIMEOUT_MS) and AddressAutocompleteField makes up to TWO
+ * attempts, so a first-attempt timeout followed by a retry can legitimately run
+ * past 8s. A 5s bound gave up mid-retry and validated the ZIP-less label —
+ * showing the merchant exactly the missing-ZIP rejection this change exists to
+ * remove. (Codex P2, 2026-09-10.)
+ *
+ * If it does expire, the merchant is not stranded: validation fails, which
+ * forces the City/State/ZIP completion row open and lets them finish by hand.
+ */
+const ADDRESS_RESOLVE_WAIT_MS = 10_000;
+
 export const SUBMIT_ERROR_COPY: Record<string, string> = {
   // Merchant can fix these by changing what they entered.
   incomplete_address: "That address needs the street, state and ZIP code.",
@@ -245,6 +261,22 @@ export function FormPublicClient({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [currentStep, setCurrentStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // Address fields whose selected suggestion is still being resolved to a full
+  // address (the ZIP arrives on a second round trip). Validating one of these
+  // NOW would reject an address that is about to be correct — the
+  // select-then-Continue race. Holding for the resolution is the fix; the
+  // component clears its flag in a `finally` and on unmount, so a hung network
+  // request cannot strand Continue disabled.
+  // A ref, not state: nothing RENDERS from this, and `submit()` reads it from
+  // inside an async wait loop where a state value captured by the closure would
+  // be permanently stale and the loop would never see the resolution land.
+  // (Holding it in state and mutating the ref inside the updater would also put
+  // a side effect somewhere React's StrictMode deliberately runs twice.)
+  const addressResolvingRef = useRef<Set<string>>(new Set());
+  const setAddressResolving = useCallback((fieldName: string, resolving: boolean) => {
+    if (resolving) addressResolvingRef.current.add(fieldName);
+    else addressResolvingRef.current.delete(fieldName);
+  }, []);
   const [done, setDone] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
@@ -408,6 +440,27 @@ export function FormPublicClient({
     return Object.keys(next).length === 0;
   }, [step.fields, values, mergedValues]);
 
+  /**
+   * `submit()` can await an in-flight address resolution before it validates.
+   * Execution then resumes inside the closure of the render that STARTED the
+   * submit, where `values` still holds the pre-resolution address — so calling
+   * the captured `validate`/`buildSubmitPayload` would judge and send stale
+   * answers and reject the address the wait just repaired.
+   *
+   * These refs are re-pointed on every render, so anything read AFTER an await
+   * sees the current render's data. (Codex P1, 2026-09-10.)
+   */
+  const validateRef = useRef(validate);
+  validateRef.current = validate;
+  const buildSubmitPayloadRef = useRef<typeof buildSubmitPayload>(buildSubmitPayload);
+  buildSubmitPayloadRef.current = buildSubmitPayload;
+  /** Claimed before the first await in `submit()` so a second click cannot
+   *  start a second submission while the first is waiting. */
+  const submitGuard = useRef(false);
+  /** The step on screen right now, readable after an await. */
+  const currentStepRef = useRef(currentStep);
+  currentStepRef.current = currentStep;
+
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -517,11 +570,52 @@ export function FormPublicClient({
   }
 
   async function submit() {
-    if (!validate()) return;
+    // HOLD FOR AN ADDRESS STILL RESOLVING. A merchant who picks a Google
+    // suggestion and clicks Continue immediately would otherwise be rejected
+    // for a ZIP that is mid-flight: Google's autocomplete label carries no
+    // postal code, and the complete address only arrives on a second Place
+    // Details round trip. Bounded so a hung provider costs a short pause and
+    // then falls through to normal validation — never an unclickable button.
+    // Which step this submit is FOR. The Back button stays live while the wait
+    // below runs, and going back unmounts the address field, which clears the
+    // resolving set and lets this old call proceed — with validateRef and
+    // buildSubmitPayloadRef now pointing at the newly displayed step while
+    // `currentStep` in the request body is still the one captured here. That
+    // posts one step's answers under another step's index. Abort instead.
+    // (Codex P1, 2026-09-10.)
+    const stepAtStart = currentStep;
+    if (addressResolvingRef.current.size > 0) {
+      // Claim the submit BEFORE the first await. Without this the button stays
+      // enabled for the whole wait, and a merchant who clicks again because
+      // nothing visibly happened starts a second wait loop — two independent
+      // submissions of the same step once the resolution lands. (Codex P1.)
+      if (submitGuard.current) return;
+      submitGuard.current = true;
+      setSubmitting(true);
+      try {
+        const waitStarted = Date.now();
+        while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < ADDRESS_RESOLVE_WAIT_MS) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      } finally {
+        submitGuard.current = false;
+        setSubmitting(false);
+      }
+    }
+    // The merchant navigated away from the step this submit belongs to. Sending
+    // now would mismatch payload and step_index.
+    if (currentStepRef.current !== stepAtStart) return;
+    // Validate through a REF, not the `validate` captured by this render. After
+    // the await above, execution resumes in the old closure, where `values`
+    // still holds Google's ZIP-less label — so calling the captured `validate`
+    // would reject the very address the wait just finished resolving, leaving
+    // the race exactly as open as before. (Codex P1.)
+    if (!validateRef.current()) return;
     setSubmitting(true);
     setServerError(null);
     try {
-      const built = await buildSubmitPayload();
+      // Through the ref, for the same stale-closure reason as validateRef.
+      const built = await buildSubmitPayloadRef.current();
       if ("error" in built) {
         setServerError(built.error);
         return;
@@ -910,6 +1004,7 @@ export function FormPublicClient({
                 }
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
+                onAddressResolvingChange={setAddressResolving}
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,
