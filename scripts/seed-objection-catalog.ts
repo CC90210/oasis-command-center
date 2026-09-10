@@ -77,6 +77,7 @@ loadEnv();
 // env is loaded.
 import { OBJECTIONS, ANGLES } from "@/lib/web-leads/angles";
 import type { ObjectionFamily, ObjectionPosture } from "@/lib/web-leads/objections/types";
+import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
 
 const DRY = process.argv.includes("--dry-run");
 const SEEDED_BY = "seed:angles.ts";
@@ -196,12 +197,21 @@ function universalRows(): SeedRow[] {
  * find and improve them in Phase 2's library.
  *
  * Family follows the same "already have X elsewhere" vs "there's no real
- * problem" split as the universal set: conversion/trust/content/
- * discoverability cite an existing asset (call volume, off-site reviews,
- * local reputation, a Google listing) that supposedly already covers the
- * gap, so already_handled; design/mobile/performance deny the underlying
- * problem exists at all ("customers don't care", "looks fine", "loads
- * fine"), so no_need.
+ * problem" split as the universal set: trust/content/discoverability cite an
+ * existing asset (off-site reviews, local reputation, a Google listing) that
+ * supposedly already covers the gap, so already_handled; design/mobile/
+ * performance/conversion deny the underlying problem exists at all
+ * ("customers don't care", "looks fine", "loads fine", "we get plenty of
+ * calls"), so no_need.
+ *
+ * conversion was reclassified already_handled -> no_need in task-7 fix round
+ * 1 (finding F2): "we get plenty of calls" is not citing a stand-in asset
+ * that already does this job, it is "my own experience says nothing is
+ * broken" -- structurally identical to mobile-looks-fine and
+ * performance-loads-fine-for-me, and it is almost exactly what
+ * ranking.ts's overallScore >= 75 rule describes ("a site that already
+ * scores well earns its owner the right to say the phone rings fine, which
+ * is the hardest version of no_need to answer").
  *
  * Posture follows the same read-the-response rule: conversion, trust,
  * design, content and discoverability each open by conceding the claim and
@@ -213,7 +223,7 @@ function universalRows(): SeedRow[] {
 const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; posture: ObjectionPosture; label: string; meaning: string; prevent: string }> = {
   conversion: {
     slug: "conversion-plenty-of-calls",
-    family: "already_handled",
+    family: "no_need",
     posture: "agree_and_redirect",
     label: "Agree, then redirect",
     meaning:
@@ -305,6 +315,28 @@ async function main() {
   const slugs = rows.map((r) => r.slug);
   const dupes = slugs.filter((s, i) => slugs.indexOf(s) !== i);
   if (dupes.length) throw new Error(`duplicate slugs in seed: ${dupes.join(", ")}`);
+
+  // Drift guard, the other direction of task-7 fix round 1's finding F1:
+  // lib/web-leads/objections/seed-slugs.ts's SEEDED_SLUGS is the list
+  // ranking.ts's slug constant(s) are checked against. If UNIVERSAL_META or
+  // ANGLE_META above is edited to rename a slug without updating that file
+  // too, the two lists disagree and THIS throws, rather than the rename
+  // silently shipping and only ranking.ts's guard test catching it later (or
+  // not, if nobody happens to run it). Order-independent: same set, either
+  // direction.
+  const seededSet = new Set<string>(SEEDED_SLUGS);
+  const rowSet = new Set(slugs);
+  const missingFromSeedSlugs = slugs.filter((s) => !seededSet.has(s));
+  const missingFromRows = SEEDED_SLUGS.filter((s) => !rowSet.has(s));
+  if (missingFromSeedSlugs.length || missingFromRows.length) {
+    throw new Error(
+      `seed slugs disagree with lib/web-leads/objections/seed-slugs.ts's SEEDED_SLUGS. ` +
+        `In rows but not SEEDED_SLUGS: ${JSON.stringify(missingFromSeedSlugs)}. ` +
+        `In SEEDED_SLUGS but not rows: ${JSON.stringify(missingFromRows)}. ` +
+        `Update both together -- this is exactly the drift that made ranking.ts's ` +
+        `builder/no-website rules silent no-ops (task-7 fix round 1, finding F1).`,
+    );
+  }
 
   console.log(`[seed] ${rows.length} objections (${OBJECTIONS.length} universal + ${Object.keys(ANGLES).length} angle)`);
   if (DRY) {

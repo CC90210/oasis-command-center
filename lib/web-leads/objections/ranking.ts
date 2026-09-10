@@ -23,6 +23,29 @@ import type { CatalogObjection, ObjectionFacts, ObjectionFamily } from "./types"
 export const CONSOLE_OPEN_COUNT = 5;
 
 /**
+ * The one objection in the real catalog that claims an INCUMBENT WEBSITE
+ * (scripts/seed-objection-catalog.ts's "We already have a website. My
+ * nephew built it." row). Every other already_handled objection in the real
+ * seed -- word of mouth, a Facebook page, off-site reviews, being on a map
+ * listing, local reputation -- is website-INDEPENDENT, which is why this is
+ * carried as one specific slug rather than a property of the whole
+ * already_handled family (see the no-website rule in objectionScore below,
+ * and task-7 fix round 1, finding F3).
+ *
+ * Hoisted into a single exported constant, used by both the builder-platform
+ * bonus and the no-website penalty, so a rename of the seeded slug has
+ * exactly one place in this file to update. tests/objection-ranking.test.ts
+ * asserts this value against lib/web-leads/objections/seed-slugs.ts's
+ * SEEDED_SLUGS -- the list scripts/seed-objection-catalog.ts actually
+ * writes -- so a drift between the two fails the test loudly instead of
+ * silently turning both rules into no-ops (task-7 fix round 1, finding F1:
+ * this constant used to be the literal "nephew-built-it", which matched
+ * neither the real seeded slug nor anything the test's own fixture used,
+ * so the rule never fired against real data and the test never noticed).
+ */
+export const NEPHEW_BUILT_WEBSITE_SLUG = "nephew-built-website";
+
+/**
  * The resting order when we know nothing. Roughly how often each family shows
  * up on a cold B2B call, and it is only a starting point: once the event table
  * has rows, the `frequency` argument moves entries off these defaults.
@@ -39,10 +62,18 @@ const FAMILY_BASE: Readonly<Record<ObjectionFamily, number>> = {
 function familyScore(family: ObjectionFamily, facts: ObjectionFacts): number {
   let score = FAMILY_BASE[family];
 
-  // No site at all: there is no incumbent to defend, so "we have someone" is
-  // close to impossible, and "nothing is broken" is the whole conversation.
+  // No site at all: "nothing is broken" is the whole conversation, family-wide.
+  // This used to ALSO drop the whole already_handled family by 35 on the
+  // premise that already_handled means an incumbent website specifically --
+  // wrong for 5 of the real catalog's 6 already_handled rows (word of mouth,
+  // a Facebook page, off-site reviews, a directory listing, local reputation
+  // are all website-INDEPENDENT, and are if anything MORE likely from a
+  // no-website lead, not less: they are precisely the reasons that lead gives
+  // for never having built a site). That half moved to objectionScore below,
+  // scoped to the one objection that actually claims an incumbent website
+  // (NEPHEW_BUILT_WEBSITE_SLUG), instead of punishing the whole family.
+  // (task-7 fix round 1, finding F3.)
   if (!facts.hasWebsite) {
-    if (family === "already_handled") score -= 35;
     if (family === "no_need") score += 30;
   }
 
@@ -78,6 +109,15 @@ function objectionScore(
 ): number {
   let score = familyScore(o.family, facts);
 
+  // No site at all: there is no incumbent WEBSITE to defend, so the one
+  // objection that actually claims one (NEPHEW_BUILT_WEBSITE_SLUG) is close
+  // to impossible. Deliberately scoped to that single slug, not the whole
+  // already_handled family -- see familyScore's comment and
+  // NEPHEW_BUILT_WEBSITE_SLUG's docblock. (task-7 fix round 1, finding F3.)
+  if (!facts.hasWebsite && o.slug === NEPHEW_BUILT_WEBSITE_SLUG) {
+    score -= 35;
+  }
+
   // The objection belonging to the angle the rep is actually opening with is
   // the push-back that opener invites, so it leads its family.
   if (o.dimension && facts.selectedAngleKey && o.dimension === facts.selectedAngleKey) {
@@ -87,7 +127,7 @@ function objectionScore(
   // A DIY builder on the crawl means a person built it, and often a relative.
   // That objection is answered differently from every other already_handled
   // entry, so it must not sit behind them.
-  if (facts.builderPlatform && o.slug === "nephew-built-it") {
+  if (facts.builderPlatform && o.slug === NEPHEW_BUILT_WEBSITE_SLUG) {
     score += 45;
   }
 
