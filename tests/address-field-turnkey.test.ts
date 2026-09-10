@@ -542,14 +542,19 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
  * state. (Codex P1, 2026-09-10.)
  */
 {
-  // Mirrors FormRenderer: derived from the SCHEMA, never from the dropdown's
-  // current value, and never from the address field's name alone.
-  const showsOwnStatePicker = (fieldName: string, allFieldNames: string[], answer: string) => {
-    void answer;
-    const hasExternal = fieldName === "business_address" && allFieldNames.includes("business_state");
-    return !hasExternal;
+  // Mirrors FormRenderer.hasBusinessStateField: REACHABILITY, not the schema at
+  // large and not the address field's name. A business_state on a later step or
+  // hidden by show_if cannot satisfy the gate that runs on THIS step.
+  const showsOwnStatePicker = (
+    fieldName: string,
+    thisStepFields: string[],
+    answer: string,
+  ) => {
+    const reachable =
+      thisStepFields.includes("business_state") || /^[A-Za-z]{2}$/.test(answer.trim());
+    return !(fieldName === "business_address" && reachable);
   };
-  const SUNBIZ = ["business_address", "business_state", "owner_home_address", "partner_home_address"];
+  const SUNBIZ = ["business_address", "business_state", "industry"];
 
   // The real template: never a second state control, at any point in the form's
   // life, answered or not.
@@ -575,6 +580,25 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
     showsOwnStatePicker("business_address", ["business_address", "email"], ""),
     true,
     "with no business_state field in the schema, the picker is the only way to give a state",
+  );
+
+  /**
+   * And a `business_state` that exists but is NOT REACHABLE from this step — on
+   * a later step, or hidden by a show_if — cannot satisfy the gate that runs
+   * here. Checking the whole schema hid the picker for it and stranded the
+   * merchant with a rule they had no way to meet: the same dead end, one step
+   * removed. (Codex P2, 2026-09-10.)
+   */
+  assert.equal(
+    showsOwnStatePicker("business_address", ["business_address"], ""),
+    true,
+    "a state field on a LATER step cannot help; the picker must stay",
+  );
+  // …but once it has actually been answered on an earlier step, it can.
+  assert.equal(
+    showsOwnStatePicker("business_address", ["business_address"], "IL"),
+    false,
+    "an answered state from an earlier step does satisfy the gate",
   );
 }
 

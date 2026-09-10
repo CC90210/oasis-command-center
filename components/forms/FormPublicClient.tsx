@@ -461,14 +461,6 @@ export function FormPublicClient({
   const currentStepRef = useRef(currentStep);
   currentStepRef.current = currentStep;
 
-  /** Every field name in the whole form. The address field uses it to tell
-   *  whether this schema really has a dedicated `business_state` control —
-   *  forms are author-editable, so the field's NAME is not proof of it. */
-  const allFieldNames = useMemo(
-    () => steps.flatMap((s) => s.fields.map((f) => f.name)),
-    [steps],
-  );
-
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -1013,7 +1005,6 @@ export function FormPublicClient({
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
                 onAddressResolvingChange={setAddressResolving}
-                allFieldNames={allFieldNames}
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,

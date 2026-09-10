@@ -52,10 +52,6 @@ type Props = {
    *  cleared, so a merchant cannot be rejected for a ZIP that is still in
    *  flight — the select→Continue race that PR #426 named but did not close. */
   onAddressResolvingChange?: (fieldName: string, resolving: boolean) => void;
-  /** Every field name in the WHOLE form, across all steps. Lets an address
-   *  field know whether a dedicated `business_state` control exists anywhere in
-   *  this schema, instead of inferring one from the address field's name. */
-  allFieldNames?: string[];
 };
 
 export function FormRenderer({
@@ -73,24 +69,30 @@ export function FormRenderer({
   uploadToken,
   ensureUploadToken,
   onAddressResolvingChange,
-  allFieldNames,
 }: Props) {
   const primary = branding?.primary_color || DEFAULT_PRIMARY_COLOR;
 
   /**
-   * Does THIS FORM carry a dedicated `business_state` field?
+   * Can the merchant satisfy `business_address`'s state requirement RIGHT NOW,
+   * from a dedicated field, without the completion row's own picker?
    *
-   * `allFieldNames` is the whole schema when the host supplies it (the public
-   * form does). Without it, fall back to this step's own fields plus an
-   * already-answered value, which covers a state field on an earlier step. The
-   * fallback errs toward SHOWING the completion row's state picker: an extra
-   * control is a cosmetic redundancy, while a hidden one on a form with no
-   * state field anywhere is a merchant who cannot finish.
+   * Two ways in, and both are about reachability rather than the schema at
+   * large. Asking "does the form contain a business_state field anywhere" is
+   * the wrong question: one that lives on a LATER step, or is hidden by a
+   * `show_if`, cannot help with the gate that runs on THIS step — hiding the
+   * picker for it strands the merchant with a rule they have no way to meet.
+   *
+   *   1. The field is on this step and visible. True from the FIRST render,
+   *      before it is answered, which is what stops the row from injecting a
+   *      state that later contradicts the dropdown. This is the SunBiz layout.
+   *   2. It already holds a usable code — it was answered on an earlier step.
+   *
+   * Otherwise the picker stays. An extra control is a cosmetic redundancy; a
+   * missing one is a merchant who cannot finish. (Codex P1/P2 ×3, 2026-09-10.)
    */
-  const hasBusinessStateField = allFieldNames
-    ? allFieldNames.includes("business_state")
-    : step.fields.some((f) => f.name === "business_state") ||
-      (typeof values.business_state === "string" && values.business_state.trim() !== "");
+  const hasBusinessStateField =
+    step.fields.some((f) => f.name === "business_state" && isFieldVisible(f, values)) ||
+    (typeof values.business_state === "string" && /^[A-Za-z]{2}$/.test(values.business_state.trim()));
   const accent = branding?.accent_color || DEFAULT_ACCENT_COLOR;
 
   return (
@@ -132,13 +134,9 @@ export function FormRenderer({
                     : undefined
                   : undefined
               }
-              // Derived from the SCHEMA, not from the field's name alone. Forms
-              // are author-editable: a custom form can name an address
-              // `business_address` and include no `business_state` field at all,
-              // and hiding the completion row's state picker there would leave
-              // the merchant with a gate that demands a state and no way to
-              // supply one — a new dead end inside the fix for the old one.
-              // (Codex P2, 2026-09-10.)
+              // Never inferred from the field's NAME alone. Forms are
+              // author-editable, so a `business_address` is not proof that a
+              // reachable `business_state` exists — see hasBusinessStateField.
               hasExternalStateField={
                 field.name === "business_address" && hasBusinessStateField
               }
