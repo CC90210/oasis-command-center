@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { normalizeAddressSuggestions, type AddressSuggestion } from "@/lib/forms/address-suggestions";
 
 type Props = {
   value: string;
@@ -31,7 +32,7 @@ const MIN_CHARS = 3;
 const DEBOUNCE_MS = 300;
 
 export function AddressAutocompleteField({ value, onChange, placeholder, inputId, className }: Props) {
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -69,11 +70,12 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
           `/api/forms/address-autocomplete?q=${encodeURIComponent(q.trim())}`,
           { signal: ac.signal },
         );
-        const data = (await res.json()) as { ok?: boolean; suggestions?: string[] };
+        const data = (await res.json()) as { ok?: boolean; suggestions?: unknown };
         // A late resolve from a superseded request must not paint stale data.
         if (ac.signal.aborted) return;
-        if (data.ok && Array.isArray(data.suggestions) && data.suggestions.length > 0) {
-          setSuggestions(data.suggestions);
+        const next = data.ok ? normalizeAddressSuggestions(data.suggestions) : [];
+        if (next.length > 0) {
+          setSuggestions(next);
           setActiveIndex(-1);
           setOpen(true);
         } else {
@@ -93,11 +95,24 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
     runSearch(v);
   };
 
-  const select = (s: string) => {
-    onChange(s);
+  const select = async (s: AddressSuggestion) => {
+    // Google autocomplete labels frequently omit postal codes. Paint the choice
+    // immediately, then replace it with the complete Place Details address.
+    onChange(s.value);
     setSuggestions([]);
     setOpen(false);
     setActiveIndex(-1);
+    if (!s.placeId) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/forms/address-autocomplete?place_id=${encodeURIComponent(s.placeId)}`);
+      const data = (await res.json()) as { ok?: boolean; address?: unknown };
+      if (data.ok && typeof data.address === "string" && data.address.trim()) onChange(data.address.trim());
+    } catch {
+      // Keep the editable label. Inline validation names any missing postal part.
+    } finally {
+      setLoading(false);
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -114,7 +129,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
       // suggestion if there is one; otherwise just hold focus. (review 2026-06-17 [high].)
       e.preventDefault();
       if (activeIndex >= 0 && activeIndex < suggestions.length) {
-        select(suggestions[activeIndex]);
+        void select(suggestions[activeIndex]);
       }
     } else if (e.key === "Escape") {
       setOpen(false);
@@ -156,7 +171,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
           role="listbox"
         >
           {suggestions.map((s, i) => (
-            <li key={`${s}-${i}`} role="option" aria-selected={i === activeIndex}>
+            <li key={`${s.label}-${i}`} role="option" aria-selected={i === activeIndex}>
               <button
                 type="button"
                 // onPointerDown (not onClick) so selection fires before the
@@ -164,7 +179,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
                 // plain onMouseDown misses taps on mobile. (review 2026-06-17.)
                 onPointerDown={(e) => {
                   e.preventDefault();
-                  select(s);
+                  void select(s);
                 }}
                 className={`block w-full px-3 py-2 text-left text-sm transition-colors ${
                   i === activeIndex
@@ -172,7 +187,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
                     : "text-fg-muted hover:bg-bg-hover hover:text-fg"
                 }`}
               >
-                {s}
+                {s.label}
               </button>
             </li>
           ))}

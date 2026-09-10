@@ -30,6 +30,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getClientIp } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { googleAutocompleteSuggestions, type AddressSuggestion } from "@/lib/forms/address-suggestions";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +40,7 @@ const MAX_Q = 200;
 const LIMIT = 8;
 const UPSTREAM_TIMEOUT_MS = 4000;
 
-async function googlePlaces(q: string, key: string, signal: AbortSignal): Promise<string[]> {
+async function googlePlaces(q: string, key: string, signal: AbortSignal): Promise<AddressSuggestion[]> {
   const url = new URL("https://maps.googleapis.com/maps/api/place/autocomplete/json");
   url.searchParams.set("input", q);
   url.searchParams.set("types", "address");
@@ -47,7 +48,7 @@ async function googlePlaces(q: string, key: string, signal: AbortSignal): Promis
   url.searchParams.set("key", key);
   const r = await fetch(url, { signal });
   const d = (await r.json()) as {
-    predictions?: Array<{ description?: string }>;
+    predictions?: Array<{ description?: string; place_id?: string }>;
     status?: string;
     error_message?: string;
   };
@@ -55,12 +56,24 @@ async function googlePlaces(q: string, key: string, signal: AbortSignal): Promis
   // / INVALID_REQUEST). Surface it server-side so a dead/unbilled key is
   // diagnosable instead of degrading to a silently-empty dropdown forever.
   if (d.status && d.status !== "OK" && d.status !== "ZERO_RESULTS") {
-    console.warn("[address-autocomplete] google status", d.status, d.error_message || "");
+    throw new Error(`google_${d.status.toLowerCase()}`);
   }
-  return (d.predictions || []).map((p) => (p.description || "").trim()).filter(Boolean).slice(0, LIMIT);
+  return googleAutocompleteSuggestions(d, LIMIT);
 }
 
-async function mapbox(q: string, token: string, signal: AbortSignal): Promise<string[]> {
+async function googlePlaceDetails(placeId: string, key: string, signal: AbortSignal): Promise<string> {
+  const url = new URL("https://maps.googleapis.com/maps/api/place/details/json");
+  url.searchParams.set("place_id", placeId);
+  url.searchParams.set("fields", "formatted_address");
+  url.searchParams.set("key", key);
+  const r = await fetch(url, { signal });
+  if (!r.ok) throw new Error(`google_details_http_${r.status}`);
+  const d = (await r.json()) as { result?: { formatted_address?: string }; status?: string };
+  if (d.status !== "OK") throw new Error(`google_details_${(d.status || "unknown").toLowerCase()}`);
+  return (d.result?.formatted_address || "").trim();
+}
+
+async function mapbox(q: string, token: string, signal: AbortSignal): Promise<AddressSuggestion[]> {
   const url = new URL(
     `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(q)}.json`,
   );
@@ -72,10 +85,11 @@ async function mapbox(q: string, token: string, signal: AbortSignal): Promise<st
   const r = await fetch(url, { signal });
   if (!r.ok) console.warn("[address-autocomplete] mapbox http", r.status);
   const d = (await r.json()) as { features?: Array<{ place_name?: string }> };
-  return (d.features || []).map((f) => (f.place_name || "").trim()).filter(Boolean).slice(0, LIMIT);
+  return (d.features || []).map((f) => (f.place_name || "").trim()).filter(Boolean)
+    .slice(0, LIMIT).map((value) => ({ label: value, value }));
 }
 
-async function photon(q: string, signal: AbortSignal): Promise<string[]> {
+async function photon(q: string, signal: AbortSignal): Promise<AddressSuggestion[]> {
   const url = new URL("https://photon.komoot.io/api/");
   url.searchParams.set("q", q);
   // Over-request: the US-only filter below drops non-US features, so ask for
@@ -116,12 +130,14 @@ async function photon(q: string, signal: AbortSignal): Promise<string[]> {
       out.push(label);
     }
   }
-  return out.slice(0, LIMIT);
+  return out.slice(0, LIMIT).map((value) => ({ label: value, value }));
 }
 
 export async function GET(req: NextRequest) {
   const q = (req.nextUrl.searchParams.get("q") || "").trim();
-  if (q.length < MIN_Q || q.length > MAX_Q) {
+  const placeId = (req.nextUrl.searchParams.get("place_id") || "").trim();
+  if ((!placeId && (q.length < MIN_Q || q.length > MAX_Q)) ||
+      (placeId && !/^[A-Za-z0-9_-]{10,300}$/.test(placeId))) {
     return NextResponse.json({ ok: false, error: "invalid_query" }, { status: 400 });
   }
 
@@ -159,14 +175,26 @@ export async function GET(req: NextRequest) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    let suggestions: string[] = [];
-    if (googleKey) {
-      suggestions = await googlePlaces(q, googleKey, ac.signal);
-    } else if (mapboxToken) {
-      suggestions = await mapbox(q, mapboxToken, ac.signal);
-    } else {
-      suggestions = await photon(q, ac.signal);
+    if (placeId) {
+      if (!googleKey) return NextResponse.json({ ok: false, error: "provider_unavailable" }, { status: 503 });
+      const address = await googlePlaceDetails(placeId, googleKey, ac.signal);
+      if (!address) throw new Error("google_details_empty");
+      return NextResponse.json({ ok: true, address });
     }
+
+    let suggestions: AddressSuggestion[] = [];
+    // A provider can fail with HTTP 200 (bad key/quota) or return no useful
+    // results. Continue down the ladder so one stale deployment secret cannot
+    // disable the merchant's address control.
+    if (googleKey) {
+      try { suggestions = await googlePlaces(q, googleKey, ac.signal); }
+      catch (err) { console.warn("[address-autocomplete] google unavailable", err instanceof Error ? err.message : err); }
+    }
+    if (!suggestions.length && mapboxToken) {
+      try { suggestions = await mapbox(q, mapboxToken, ac.signal); }
+      catch (err) { console.warn("[address-autocomplete] mapbox unavailable", err instanceof Error ? err.message : err); }
+    }
+    if (!suggestions.length) suggestions = await photon(q, ac.signal);
     return NextResponse.json(
       { ok: true, suggestions },
       { headers: { "cache-control": "public, max-age=60, s-maxage=60" } },
