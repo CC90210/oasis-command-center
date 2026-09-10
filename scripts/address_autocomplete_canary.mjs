@@ -75,12 +75,26 @@ for (const host of HOSTS) {
         continue;
       }
 
-      // 1. Did the intended provider contribute? Photon is the last resort, not
-      //    the product. Seeing it here means Google is missing or dead.
-      if (data.provider === "photon") {
+      // 1. Did the INTENDED provider contribute? Not "did something answer" —
+      //    something answered perfectly for months while merchants were served
+      //    OSM guesses. Anything other than an explicit "google" is a blocked
+      //    verdict, including a MISSING provider field.
+      //
+      //    That last case matters most: a deployment predating the provider
+      //    signal is exactly the deployment that has the bug, so treating an
+      //    absent field as "probably fine" would let this canary pass on the
+      //    very configuration it was written to catch. A check that cannot fail
+      //    on the original defect is not a check. (Codex P1, 2026-09-10.)
+      if (data.provider !== "google") {
         row.verdict = "BLOCKED";
         row.detail =
-          "served by the keyless OSM fallback — GOOGLE_PLACES_API_KEY is unset or rejected on this deployment";
+          data.provider === "photon"
+            ? "served by the keyless OSM fallback — GOOGLE_PLACES_API_KEY is unset or rejected on this deployment"
+            : data.provider === "mapbox"
+              ? "served by Mapbox — Google is configured-but-failing, or its key was never set"
+              : data.provider
+                ? `served by an unexpected provider "${data.provider}"`
+                : "response carries no `provider` field — this deployment predates the provider signal, which is the build that has the defect. Redeploy.";
         results.push(row);
         continue;
       }
