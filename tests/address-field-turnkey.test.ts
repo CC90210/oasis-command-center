@@ -233,6 +233,46 @@ assert.deepEqual(
     'a merchant who typed "South" means South',
   );
 
+  /**
+   * A STREET NAME THAT BEGINS WITH A STREET TYPE. "123 Avenue A, New York" is
+   * real. Treating that leading "Avenue" as terminal left NO match tokens,
+   * which switched relevance filtering off entirely and let Photon offer any US
+   * address sharing house number 123 — the silent substitution, reintroduced.
+   * (Codex P2, 2026-09-10.)
+   */
+  for (const q of ["123 Avenue A, New York", "123 Avenue A New York"]) {
+    assert.deepEqual(
+      photonFeaturesToSuggestions(
+        [
+          { properties: { countrycode: "US", housenumber: "123", street: "Avenue A", city: "New York", state: "New York", postcode: "10009" } },
+          { properties: { countrycode: "US", housenumber: "123", street: "Main Street", city: "New York", state: "New York", postcode: "10009" } },
+        ],
+        8,
+        q,
+      ).map((s) => s.value),
+      ["123 Avenue A, New York, New York, 10009"],
+      `"${q}" must resolve to Avenue A and not to any address sharing the number`,
+    );
+  }
+
+  /**
+   * Abbreviations must compare equal on BOTH sides, or requiring every word of
+   * the street name would reject the one right answer: a merchant types
+   * "N Main St", OSM stores "North Main Street".
+   */
+  assert.deepEqual(
+    photonFeaturesToSuggestions(
+      [
+        { properties: { countrycode: "US", housenumber: "500", street: "North Main Street", city: "Akron", state: "Ohio", postcode: "44310" } },
+        { properties: { countrycode: "US", housenumber: "500", street: "South Main Street", city: "Akron", state: "Ohio", postcode: "44311" } },
+      ],
+      8,
+      "500 N Main St Akron",
+    ).map((s) => s.value),
+    ["500 North Main Street, Akron, Ohio, 44310"],
+    '"N" must match "North" — and must NOT match "South"',
+  );
+
   // A query with no distinctive token at all must not filter everything away.
   assert.equal(
     photonFeaturesToSuggestions(
@@ -385,7 +425,7 @@ async function overlappingSelections() {
  * below is the regression test for that. (Codex P1, 2026-09-10.)
  */
 /** Mirrors AddressAutocompleteField.seedCompletion. */
-const UNIT_WORDS = /^(apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr|#)\b/i;
+const UNIT_WORDS = /^(?:#|(?:apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr)\b)/i;
 function seedCompletion(value: string) {
   const p = splitUsAddress(value);
   if (p.city) return { line1: p.line1, city: p.city, state: p.state, zip: p.zip };
@@ -409,7 +449,17 @@ assert.deepEqual(
   "a trailing comma segment is offered as the city, not left blank",
 );
 // …but a unit designator is not a city, and must stay in the street line.
-for (const unit of ["123 Main St, Apt 4", "123 Main St, Suite 200", "123 Main St, Unit B"]) {
+// "#" is included deliberately: written as `#\b` in the alternation it could
+// never match, because both "#" and the space after it in "123 Main St, # 4"
+// are non-word characters — so the most common unit notation of all was being
+// seeded as the city. (Codex P2, 2026-09-10.)
+for (const unit of [
+  "123 Main St, Apt 4",
+  "123 Main St, Suite 200",
+  "123 Main St, Unit B",
+  "123 Main St, # 4",
+  "123 Main St, #4",
+]) {
   assert.equal(seedCompletion(unit).city, "", `"${unit}" has no city to offer`);
   assert.equal(seedCompletion(unit).line1, unit, "the unit stays in the street line");
 }

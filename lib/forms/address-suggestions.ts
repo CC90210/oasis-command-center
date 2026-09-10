@@ -84,14 +84,6 @@ const STREET_SUFFIXES = new Set([
   "pkwy", "parkway", "hwy", "highway", "trl", "trail", "loop", "sq", "square", "run",
 ]);
 
-/** Directionals and articles — inside the street name, but never distinctive
- *  enough on their own to identify WHICH street the merchant meant. */
-const NON_DISTINCTIVE_WORDS = new Set([
-  "n", "s", "e", "w", "ne", "nw", "se", "sw",
-  "north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest",
-  "the", "of", "and", "po", "box",
-]);
-
 /**
  * The WHOLE leading house-number token, not just its digits.
  *
@@ -108,8 +100,26 @@ function leadingHouseNumber(query: string): { value: string; endIndex: number } 
   return m ? { value: m[1], endIndex: m.index + m[0].length } : { value: "", endIndex: 0 };
 }
 
+/**
+ * Abbreviations that must compare equal on both sides. A merchant types "N Main
+ * St"; OSM stores "North Main Street". Without this, requiring every word of the
+ * street name would reject the one correct answer.
+ */
+const CANONICAL_WORD: Record<string, string> = {
+  n: "north", s: "south", e: "east", w: "west",
+  ne: "northeast", nw: "northwest", se: "southeast", sw: "southwest",
+  st: "street", ave: "avenue", av: "avenue", dr: "drive", rd: "road",
+  blvd: "boulevard", ln: "lane", ct: "court", pl: "place", ter: "terrace",
+  cir: "circle", pkwy: "parkway", hwy: "highway", trl: "trail", sq: "square",
+};
+
 function words(s: string): string[] {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => CANONICAL_WORD[w] || w);
 }
 
 /**
@@ -137,23 +147,34 @@ function words(s: string): string[] {
  */
 function streetMatchTokens(query: string, houseNumberEndIndex = 0): string[] {
   // Skip the house number outright; it is matched separately and exactly.
-  const tokens = words(query.slice(houseNumberEndIndex));
+  const rest = query.slice(houseNumberEndIndex);
+
+  // 1. A COMMA is the most reliable street/locality boundary the merchant can
+  //    give us. "123 Avenue A, New York" — take everything before it.
+  const comma = rest.indexOf(",");
+  if (comma >= 0) {
+    const w = words(rest.slice(0, comma));
+    if (w.length) return w;
+  }
+
+  const tokens = words(rest);
+
+  // 2. A street TYPE ends the name — but only once a name has actually started.
+  //    "123 Avenue A" begins with one, and treating that as terminal left no
+  //    tokens at all, which switched relevance filtering OFF and let Photon
+  //    offer any US address sharing the house number. (Codex P2, 2026-09-10.)
   const beforeSuffix: string[] = [];
-  let sawSuffix = false;
   for (const t of tokens) {
-    if (STREET_SUFFIXES.has(t)) {
-      sawSuffix = true;
-      break;
-    }
+    if (STREET_SUFFIXES.has(t) && beforeSuffix.length) return beforeSuffix;
     beforeSuffix.push(t);
   }
-  if (sawSuffix) return beforeSuffix;
-  for (const t of beforeSuffix) {
-    if (t.length < 2) continue;
-    if (NON_DISTINCTIVE_WORDS.has(t)) continue;
-    return [t];
-  }
-  return [];
+
+  // 3. Nothing marked the end of the street name, so the name and the city run
+  //    together. Require the FIRST word: it is part of the street in every
+  //    layout ("The Green", "Avenue A", "Snow View"), and requiring it is the
+  //    safe direction — over-filtering costs an empty dropdown the merchant can
+  //    type past, while under-filtering offers them the wrong address.
+  return tokens.length ? [tokens[0]] : [];
 }
 
 export function photonFeaturesToSuggestions(

@@ -440,8 +440,16 @@ function stripTrailingCity(line1: string, city: string): string {
   return stripped ? stripped : line1;
 }
 
-/** Unit designators — a trailing "Apt 4" is not a city. */
-const UNIT_WORDS = /^(apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr|#)\b/i;
+/**
+ * Unit designators — a trailing "Apt 4" is not a city.
+ *
+ * "#" is matched on its own, NOT via the alternation with `\b` after it: `\b`
+ * needs a word/non-word transition, and both "#" and the space following it in
+ * "123 Main St, # 4" are non-word characters, so that alternative could never
+ * fire. The most common unit notation of all was seeding "# 4" as the city.
+ * (Codex P2, 2026-09-10.)
+ */
+const UNIT_WORDS = /^(?:#|(?:apt|apartment|ste|suite|unit|fl|floor|rm|room|bldg|building|lot|trlr)\b)/i;
 
 /**
  * Split a partial address into the completion row's starting values.
