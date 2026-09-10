@@ -53,4 +53,22 @@ for (const bad of ["", "not-a-uuid", "3f2504e0-4f89-41d3-9a0c", null, 42]) {
   assert.equal(isRequestId(bad), false, `rejected: ${String(bad)}`);
 }
 
+// The version nibble (the first character of the third group) is the one
+// documented divergence from isCallOutcomeRequestId ([1-8] here vs [1-5]
+// there). Both fixtures below are well-formed in every other respect --
+// correct length, hex charset, hyphen positions, and a valid [89ab] variant
+// nibble -- so the version nibble is the only thing that can make either
+// one fail. Without these, a regex loosened to accept any version nibble
+// still passes this test.
+assert.equal(
+  isRequestId("3f2504e0-4f89-01d3-9a0c-0305e82c3301"),
+  false,
+  "version nibble 0 must be rejected",
+);
+assert.equal(
+  isRequestId("3f2504e0-4f89-91d3-9a0c-0305e82c3301"),
+  false,
+  "version nibble 9 must be rejected",
+);
+
 console.log("objection-events: OK");

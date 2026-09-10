@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
+import { safeFilterValue } from "@/lib/web-leads/audit";
 import {
   type ObjectionEventRecord,
   type ObjectionResolution,
@@ -187,7 +188,11 @@ export async function fetchLeadEvents(lead: {
   // Both keys, because a lead promoted after some calls has rows under the
   // fallback id AND rows under the real business id. Querying one loses half
   // the history and the console would offer a card the rep already tapped.
-  const ids = Array.from(new Set([keys.businessId, keys.leadRecordId]));
+  // Charset-allowlisted before reaching the PostgREST filter, same treatment
+  // as the sibling fetchRecentOutcomes in lib/web-leads/outcome.ts.
+  const ids = Array.from(new Set([keys.businessId, keys.leadRecordId]
+    .map((value) => safeFilterValue(value || ""))
+    .filter((value): value is string => Boolean(value))));
 
   const { data, error } = await db
     .from("objection_event")
