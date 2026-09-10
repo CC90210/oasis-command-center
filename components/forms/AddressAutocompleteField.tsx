@@ -358,19 +358,45 @@ function AddressCompletion({
   fallbackState?: string;
   inputId?: string;
 }) {
-  const parts = useMemo(() => splitUsAddress(value), [value]);
   // The business address takes its state from its own dropdown; asking twice
   // invites the merchant to enter two different states.
   const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
 
+  /**
+   * THE DRAFT IS OWNED HERE, NOT RE-DERIVED FROM THE COMPOSED STRING.
+   *
+   * Deriving each box from `splitUsAddress(value)` on every render looks
+   * tidier and is completely unusable, because the parser deliberately refuses
+   * to guess: with no state and no ZIP to anchor it, a comma is more likely a
+   * unit suffix ("123 Main St, Apt 4") than a city boundary, so the whole
+   * string stays in line1. Typing the first letter of a city therefore composed
+   * "7930 Snow View Drive, A", which parsed back with city:"" — and the letter
+   * vanished from the box on the very next render. The ZIP box behaved the same
+   * way until a fifth digit arrived. The escape hatch could not be typed into
+   * at all. (Codex P1, 2026-09-10 — caught before this ever shipped.)
+   *
+   * So: seed once from whatever the parser CAN identify, then let the merchant
+   * type freely and push the composition outward. `line1` stays anchored to the
+   * address as it was when the row opened, so recomposing cannot eat it.
+   */
+  const seed = useMemo(() => splitUsAddress(value), []); // eslint-disable-line react-hooks/exhaustive-deps
+  const baseLine1 = useRef(seed.line1 || value.trim());
+  const [draft, setDraft] = useState({ city: seed.city, state: seed.state, zip: seed.zip });
+
   const patch = (next: Partial<{ city: string; state: string; zip: string }>) => {
-    const merged = {
-      line1: parts.line1 || value.trim(),
-      city: next.city !== undefined ? next.city : parts.city,
-      state: next.state !== undefined ? next.state : parts.state,
-      zip: next.zip !== undefined ? next.zip : parts.zip,
-    };
-    onChange(composeUsAddress(merged));
+    const merged = { ...draft, ...next };
+    setDraft(merged);
+    onChange(
+      composeUsAddress({
+        line1: baseLine1.current,
+        city: merged.city,
+        // For the business address the state lives in its own dropdown and the
+        // picker here is hidden, so fold that value in — otherwise the composed
+        // line carries no state and only the gate's own merge saves it.
+        state: merged.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
+        zip: merged.zip,
+      }),
+    );
   };
 
   return (
@@ -386,7 +412,7 @@ function AddressCompletion({
             id={inputId ? `${inputId}-city` : undefined}
             type="text"
             autoComplete="address-level2"
-            value={parts.city}
+            value={draft.city}
             onChange={(e) => patch({ city: e.target.value })}
             placeholder="Algonquin"
             className={SMALL_INPUT}
@@ -397,7 +423,7 @@ function AddressCompletion({
             <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">State</span>
             <select
               id={inputId ? `${inputId}-state` : undefined}
-              value={parts.state}
+              value={draft.state}
               onChange={(e) => patch({ state: e.target.value })}
               className={SMALL_INPUT}
             >
@@ -417,7 +443,7 @@ function AddressCompletion({
             type="text"
             inputMode="numeric"
             autoComplete="postal-code"
-            value={parts.zip}
+            value={draft.zip}
             // Digits and a single hyphen only, capped at ZIP+4 — a merchant
             // pasting "60102, USA" must not push junk into the stored line.
             onChange={(e) => patch({ zip: e.target.value.replace(/[^\d-]/g, "").slice(0, 10) })}

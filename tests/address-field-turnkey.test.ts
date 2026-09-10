@@ -193,14 +193,87 @@ assert.equal(photonShape[0].placeId, undefined, "Photon suggestions carry no pla
  * completion row must end up with an address the gate accepts. This mirrors
  * exactly what `AddressCompletion.patch` does.
  */
+/**
+ * Models AddressCompletion exactly: `line1` is anchored ONCE when the row
+ * opens, the city/state/zip draft is owned by the row, and every keystroke
+ * recomposes outward.
+ *
+ * The anchoring is the whole point. Re-deriving each box from
+ * `splitUsAddress(composedValue)` on every render — the obvious implementation,
+ * and the one this file first shipped — is unusable: `splitUsAddress`
+ * deliberately refuses to guess a city boundary with no state or ZIP to anchor
+ * it, so composing "7930 Snow View Drive, A" parses straight back with city:""
+ * and the merchant's keystroke disappears from the box. `typeCityCharByChar`
+ * below is the regression test for that. (Codex P1, 2026-09-10.)
+ */
+function makeCompletionRow(typed: string, fallbackState?: string) {
+  const seed = splitUsAddress(typed);
+  const line1 = seed.line1 || typed.trim();
+  const draft = { city: seed.city, state: seed.state, zip: seed.zip };
+  const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
+  let composed = typed;
+  const patch = (next: Partial<typeof draft>) => {
+    Object.assign(draft, next);
+    composed = composeUsAddress({
+      line1,
+      city: draft.city,
+      state: draft.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
+      zip: draft.zip,
+    });
+    return composed;
+  };
+  return { patch, draft, get value() { return composed; } };
+}
+
 function completeByHand(typed: string, city: string, state: string, zip: string): string {
-  const parts = splitUsAddress(typed);
-  return composeUsAddress({
-    line1: parts.line1 || typed.trim(),
-    city: city || parts.city,
-    state: state || parts.state,
-    zip: zip || parts.zip,
-  });
+  const row = makeCompletionRow(typed);
+  row.patch({ city });
+  row.patch({ state });
+  row.patch({ zip });
+  return row.value;
+}
+
+/**
+ * THE REGRESSION TEST FOR THE UNTYPEABLE BOX. Type a city one character at a
+ * time, exactly as a merchant does, and assert the box still holds every
+ * character. Against the first implementation this failed on keystroke one.
+ */
+function typeCityCharByChar(typed: string, city: string, fallbackState?: string) {
+  const row = makeCompletionRow(typed, fallbackState);
+  let acc = "";
+  for (const ch of city) {
+    acc += ch;
+    row.patch({ city: acc });
+    assert.equal(
+      row.draft.city,
+      acc,
+      `city box lost the merchant's typing at "${acc}" (composed: "${row.value}")`,
+    );
+    assert.ok(
+      row.value.startsWith(splitUsAddress(typed).line1 || typed.trim()),
+      `the street line must survive recomposition, got "${row.value}"`,
+    );
+  }
+  return row;
+}
+
+// A bare street line — the exact case that started this — must be typeable.
+{
+  const row = typeCityCharByChar("7930 Snow View Drive", "Algonquin");
+  row.patch({ state: "IL" });
+  row.patch({ zip: "60102" });
+  assert.equal(row.value, "7930 Snow View Drive, Algonquin, IL 60102");
+  assert.equal(isAcceptableCaptureAddress(row.value).ok, true);
+}
+
+// And with the state supplied by the business_state dropdown (picker hidden),
+// the composed line must still carry a state rather than relying on the gate's
+// own merge to rescue it.
+{
+  const row = typeCityCharByChar("7930 Snow View Drive", "Algonquin", "IL");
+  row.patch({ zip: "60102" });
+  assert.match(row.value, /\bIL\b/, "the dropdown state must be folded into the composed line");
+  assert.equal(isAcceptableCaptureAddress(row.value, "IL").ok, true);
 }
 
 for (const typed of [

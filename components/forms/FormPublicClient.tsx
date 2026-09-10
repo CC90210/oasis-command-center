@@ -424,6 +424,24 @@ export function FormPublicClient({
     return Object.keys(next).length === 0;
   }, [step.fields, values, mergedValues]);
 
+  /**
+   * `submit()` can await an in-flight address resolution before it validates.
+   * Execution then resumes inside the closure of the render that STARTED the
+   * submit, where `values` still holds the pre-resolution address — so calling
+   * the captured `validate`/`buildSubmitPayload` would judge and send stale
+   * answers and reject the address the wait just repaired.
+   *
+   * These refs are re-pointed on every render, so anything read AFTER an await
+   * sees the current render's data. (Codex P1, 2026-09-10.)
+   */
+  const validateRef = useRef(validate);
+  validateRef.current = validate;
+  const buildSubmitPayloadRef = useRef<typeof buildSubmitPayload>(buildSubmitPayload);
+  buildSubmitPayloadRef.current = buildSubmitPayload;
+  /** Claimed before the first await in `submit()` so a second click cannot
+   *  start a second submission while the first is waiting. */
+  const submitGuard = useRef(false);
+
   async function fileToBase64(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -539,15 +557,35 @@ export function FormPublicClient({
     // postal code, and the complete address only arrives on a second Place
     // Details round trip. Bounded so a hung provider costs a short pause and
     // then falls through to normal validation — never an unclickable button.
-    const waitStarted = Date.now();
-    while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < 5000) {
-      await new Promise((r) => setTimeout(r, 100));
+    if (addressResolvingRef.current.size > 0) {
+      // Claim the submit BEFORE the first await. Without this the button stays
+      // enabled for the whole wait, and a merchant who clicks again because
+      // nothing visibly happened starts a second wait loop — two independent
+      // submissions of the same step once the resolution lands. (Codex P1.)
+      if (submitGuard.current) return;
+      submitGuard.current = true;
+      setSubmitting(true);
+      try {
+        const waitStarted = Date.now();
+        while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < 5000) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      } finally {
+        submitGuard.current = false;
+        setSubmitting(false);
+      }
     }
-    if (!validate()) return;
+    // Validate through a REF, not the `validate` captured by this render. After
+    // the await above, execution resumes in the old closure, where `values`
+    // still holds Google's ZIP-less label — so calling the captured `validate`
+    // would reject the very address the wait just finished resolving, leaving
+    // the race exactly as open as before. (Codex P1.)
+    if (!validateRef.current()) return;
     setSubmitting(true);
     setServerError(null);
     try {
-      const built = await buildSubmitPayload();
+      // Through the ref, for the same stale-closure reason as validateRef.
+      const built = await buildSubmitPayloadRef.current();
       if ("error" in built) {
         setServerError(built.error);
         return;
