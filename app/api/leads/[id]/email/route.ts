@@ -442,6 +442,39 @@ export async function POST(
     excludeAddresses: [oasisMailboxFrom],
   });
 
+  // ---- WHO SIGNS THE MESSAGE ---------------------------------------------
+  //
+  // ONE person signs it, and on a SHARED mailbox that person is whoever gets
+  // the reply — not whoever pressed the button.
+  //
+  // The sign-off used to take its NAME from the acting operator and its
+  // ADDRESS from the lead's owner. CC pressed send on a lead of Ariel's and
+  // the prospect received "Conaugh" printed above "ariel@oasisai.work"
+  // (CC, 2026-09-09: "signing off as my name, and under that, it's the rep's
+  // email, which is just a bit confusing"). Whoever is NAMED must be whoever
+  // is REACHABLE, or the signature is a promise the message cannot keep.
+  //
+  // Resolved HERE rather than inside one transport branch, because two
+  // transports send from the shared mailbox — the direct Vercel sender and the
+  // bridge fallback — and fixing only the one that happened to be reported
+  // would leave the other signing the operator's name the next time the first
+  // was unavailable.
+  //
+  // OASIS ONLY, deliberately. SunBiz mail signs with its shared roster
+  // identity resolved from the ACTING operator, which is correct there and is
+  // what lender and merchant correspondence relies on; re-anchoring it to the
+  // assignee would change a client's live behaviour to fix a problem it does
+  // not have.
+  //
+  // The operator-Gmail branches below are untouched for the same reason: they
+  // send from the operator's OWN address, so the operator's own name above it
+  // is already coherent.
+  const replyToAddress = pickReplyTo(copyList);
+  const messageSigner =
+    brand === "oasis" && replyToAddress
+      ? resolveSignerForOperator(replyToAddress, { brand })
+      : signer;
+
   // Send. Preference order:
   //   1. The operator's OWN connected Gmail (immediate, from THEIR address) —
   //      the personal-send path the Phase-4 comment above anticipated.
@@ -497,27 +530,6 @@ export async function POST(
     // behaviour before the credential is stored is byte-for-byte what shipped
     // today. Nothing to roll back if it is never set.
     if (brand === "oasis") {
-      // ONE PERSON SIGNS THE MESSAGE, AND IT IS WHOEVER GETS THE REPLY.
-      //
-      // The sign-off used to take its NAME from whoever pressed the button and
-      // its ADDRESS from the lead's owner — two different people. CC pressed
-      // send on a lead of Ariel's and the prospect received "Conaugh" printed
-      // above "ariel@oasisai.work" (CC, 2026-09-09: "signing off as my name,
-      // and under that, it's the rep's email, which is just a bit confusing").
-      //
-      // The reply-to address is the right anchor for both. It is the person
-      // who owns the relationship and who the prospect will actually reach, so
-      // naming anyone else above it is a promise the message cannot keep. It
-      // also keeps CC's personal name off mail he merely dispatched: the
-      // shared mailbox carries it, the rep signs it.
-      //
-      // Falls back to the acting operator only when there is no reply-to at
-      // all — an unassigned lead — because a signature is still better than an
-      // anonymous one.
-      const replyToAddress = pickReplyTo(copyList);
-      const messageSigner = replyToAddress
-        ? resolveSignerForOperator(replyToAddress, { brand })
-        : signer;
 
       const shared = await sendOasisSharedGmail({
         tenantId: sess.tenantId,
@@ -589,7 +601,11 @@ export async function POST(
       body: truncatedBody,
       leadId,
       brand,
-      signer,
+      // Same signer as the direct shared-mailbox path above. This branch also
+      // sends from the shared mailbox, so it had the identical defect: it
+      // signed with the acting operator's name while the reply went to the
+      // lead's owner.
+      signer: messageSigner,
       // Assigned rep first, then the sender. bridge_tools._tool_send_email
       // accepts a list and normalises it through send_gateway.normalize_cc,
       // so all three call sites agree on the shape.

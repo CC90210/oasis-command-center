@@ -154,8 +154,36 @@ run("the sign-off names the person whose address is printed under it", () => {
   );
   assert.match(
     route,
-    /const messageSigner = replyToAddress\s*\n?\s*\? resolveSignerForOperator\(replyToAddress, \{ brand \}\)/,
+    /brand === "oasis" && replyToAddress\s*\r?\n?\s*\? resolveSignerForOperator\(replyToAddress, \{ brand \}\)/,
     "the signer must be derived from the reply-to address, not from the acting operator",
+  );
+
+  // BOTH shared-mailbox transports, not just the one that was reported.
+  // The direct Vercel sender and the bridge fallback both send from the shared
+  // mailbox, so fixing only the first would leave the second signing the
+  // operator's name the next time the first was unavailable.
+  assert.equal(
+    (route.match(/signer: messageSigner,/g) || []).length,
+    2,
+    "both shared-mailbox transports must sign with messageSigner",
+  );
+
+  // ...and the operator-Gmail branches must NOT be re-anchored: those send from
+  // the operator's OWN address, where their own name above it is coherent.
+  assert.match(
+    route,
+    /sendGmailAsOperator\(\{[\s\S]{0,700}?\n      signer,/,
+    "the OAuth branch should keep the acting operator as signer",
+  );
+
+  // SunBiz is deliberately untouched. Its shared roster identity resolves from
+  // the ACTING operator and lender/merchant correspondence relies on that;
+  // re-anchoring it would change a client's live behaviour to fix a problem it
+  // does not have.
+  assert.match(
+    route,
+    /if \(brand === "sunbiz"\) \{[\s\S]{0,400}?signer,/,
+    "SunBiz signing must not have been re-anchored to the assignee",
   );
   assert.match(
     route,
