@@ -92,8 +92,11 @@ function objectionScore(
   }
 
   // Observed reality outranks the hand-written guesses above once there is
-  // enough of it. Scaled so it breaks ties and shifts near-ties without
-  // flattening the situational rules into a global popularity chart.
+  // enough of it. Capped at +20, which is enough on its own to override the
+  // +10 competitorGap bump and the +12 poor-score (overallScore < 40) bump --
+  // but not the +25 no-answer bump, the +30 overallScore no_need bumps, the
+  // +40 selected-angle bump, or the +45 builder-platform bump. Frequency can
+  // win a small situational signal; it cannot flatten the strong ones.
   const seen = frequency[o.id];
   if (typeof seen === "number" && seen > 0) {
     score += Math.min(20, Math.log10(seen + 1) * 10);

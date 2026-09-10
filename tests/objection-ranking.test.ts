@@ -64,11 +64,39 @@ assert.deepEqual(order({}), order({}));
 
 // A lead with NO website cannot have "we already have someone doing it" as a
 // top objection, and "nothing is broken" becomes the likely wall.
+//
+// already_handled (base 40) already trails no_need (base 45) even with the
+// !hasWebsite rule deleted, so comparing those two directly proves nothing.
+// Instead pick, for each half of the rule, a family the rule does NOT touch
+// but that outranks the touched family at baseline -- so the touched family
+// can only get ahead of it once its half of the rule actually fires.
 {
-  const ranked = order({ hasWebsite: false });
-  const noNeed = ranked.indexOf("plenty-of-calls");
-  const handled = ranked.indexOf("already-have-a-guy");
-  assert.ok(noNeed < handled, `no_need must outrank already_handled with no site, got ${ranked.join(",")}`);
+  const withSite = order({ hasWebsite: true, overallScore: 55 });
+  const noSite = order({ hasWebsite: false, overallScore: 55 });
+
+  // already_handled (already-have-a-guy, 40) starts ahead of no_money
+  // (no-budget, 35, untouched by hasWebsite) with a site, and falls behind
+  // it once the -35 half of the rule fires.
+  assert.ok(
+    withSite.indexOf("already-have-a-guy") < withSite.indexOf("no-budget"),
+    `baseline: already_handled should lead no_money with a site, got ${withSite.join(",")}`,
+  );
+  assert.ok(
+    noSite.indexOf("no-budget") < noSite.indexOf("already-have-a-guy"),
+    `no site: no_money should overtake already_handled once the -35 half fires, got ${noSite.join(",")}`,
+  );
+
+  // brush_off (send-me-an-email, 50, untouched by hasWebsite) starts ahead
+  // of no_need (plenty-of-calls, 45) with a site, and falls behind it once
+  // the +30 half of the rule fires.
+  assert.ok(
+    withSite.indexOf("send-me-an-email") < withSite.indexOf("plenty-of-calls"),
+    `baseline: brush_off should lead no_need with a site, got ${withSite.join(",")}`,
+  );
+  assert.ok(
+    noSite.indexOf("plenty-of-calls") < noSite.indexOf("send-me-an-email"),
+    `no site: no_need should overtake brush_off once the +30 half fires, got ${noSite.join(",")}`,
+  );
 }
 
 // A DIY builder detected on the crawl makes the nephew objection likely.
@@ -78,16 +106,76 @@ assert.deepEqual(order({}), order({}));
 }
 
 // A high-scoring site with one narrow fault gets "we get plenty of calls".
+//
+// plenty-of-calls is already top-2 at baseline, so a top-2 check survives
+// deleting the rule. Compare it directly against the family that leads at
+// baseline instead, and require the rule to flip that specific pair.
 {
-  const ranked = order({ overallScore: 88 });
-  assert.ok(ranked.indexOf("plenty-of-calls") < 2, `plenty-of-calls must be top-2 at score 88, got ${ranked.join(",")}`);
+  const midScore = order({ overallScore: 55 });
+  const highScore = order({ overallScore: 88 });
+  assert.ok(
+    midScore.indexOf("send-me-an-email") < midScore.indexOf("plenty-of-calls"),
+    `baseline: brush_off should lead no_need at score 55, got ${midScore.join(",")}`,
+  );
+  assert.ok(
+    highScore.indexOf("plenty-of-calls") < highScore.indexOf("send-me-an-email"),
+    `no_need must overtake brush_off once overallScore >= 75 fires, got ${highScore.join(",")}`,
+  );
+}
+
+// A visibly poor site pushes the argument off "is it broken" (no_need) and
+// onto money (no_money). No coverage existed at all before this: prove the
+// same flip both ways.
+{
+  const midScore = order({ overallScore: 55 });
+  const poorScore = order({ overallScore: 30 });
+  assert.ok(
+    midScore.indexOf("plenty-of-calls") < midScore.indexOf("no-budget"),
+    `baseline: no_need should lead no_money at score 55, got ${midScore.join(",")}`,
+  );
+  assert.ok(
+    poorScore.indexOf("no-budget") < poorScore.indexOf("plenty-of-calls"),
+    `no_money must overtake no_need once overallScore < 40 fires, got ${poorScore.join(",")}`,
+  );
 }
 
 // Repeated no-answers mean the rep finally caught someone who wants off the
 // phone. Brush-offs rise.
+//
+// brush_off already has the highest family base (50), so nothing can start
+// ahead of it without help. Lean on the frequency mechanism (covered and
+// proven separately below) purely as a fixture tool: push a no_money
+// objection to 55 via its own capped +20 bonus, a value that sits strictly
+// between brush_off's base (50) and what brush_off becomes once this rule
+// fires (50 + 25 = 75). Only the no-answer rule can close that specific gap.
 {
-  const ranked = order({ priorNoAnswerCalls: 4 });
-  assert.ok(ranked.indexOf("send-me-an-email") < 3, `brush_off must rise after 4 no-answers, got ${ranked.join(",")}`);
+  const freq = { "id-no-budget": 999 };
+  const rested = rankObjections(CATALOG, { ...BASE, priorNoAnswerCalls: 0 }, freq).map((o) => o.slug);
+  const chased = rankObjections(CATALOG, { ...BASE, priorNoAnswerCalls: 4 }, freq).map((o) => o.slug);
+  assert.ok(
+    rested.indexOf("no-budget") < rested.indexOf("send-me-an-email"),
+    `baseline: the boosted no_money objection should lead brush_off before 4 no-answers, got ${rested.join(",")}`,
+  );
+  assert.ok(
+    chased.indexOf("send-me-an-email") < chased.indexOf("no-budget"),
+    `brush_off must overtake the boosted no_money objection once priorNoAnswerCalls >= 3 fires, got ${chased.join(",")}`,
+  );
+}
+
+// A competitor measurably ahead makes "we already have someone" the reflex.
+// No coverage existed at all before this: already_handled (40) trails
+// no_need (45) at baseline, and the +10 bump is exactly enough to flip it.
+{
+  const noGap = order({ competitorGap: null });
+  const bigGap = order({ competitorGap: 20 });
+  assert.ok(
+    noGap.indexOf("plenty-of-calls") < noGap.indexOf("already-have-a-guy"),
+    `baseline: no_need should lead already_handled with no competitor gap, got ${noGap.join(",")}`,
+  );
+  assert.ok(
+    bigGap.indexOf("already-have-a-guy") < bigGap.indexOf("plenty-of-calls"),
+    `already_handled must overtake no_need once competitorGap >= 15 fires, got ${bigGap.join(",")}`,
+  );
 }
 
 // The objection belonging to the SELECTED angle outranks the same family's
