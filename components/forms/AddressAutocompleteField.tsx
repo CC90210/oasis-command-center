@@ -383,20 +383,40 @@ function AddressCompletion({
   const baseLine1 = useRef(seed.line1 || value.trim());
   const [draft, setDraft] = useState({ city: seed.city, state: seed.state, zip: seed.zip });
 
+  /**
+   * Anchoring `line1` once is what makes the boxes typeable; anchoring it
+   * FOREVER is a silent-corruption bug of its own. If the merchant goes back to
+   * the main input and types a different street, or picks another suggestion,
+   * a frozen `baseLine1` means their next City/ZIP keystroke recomposes the
+   * address they just replaced — and submits it. Exactly the class of failure
+   * this whole change exists to remove. (Codex P1, re-review 2026-09-10.)
+   *
+   * So: re-seed whenever `value` changes from OUTSIDE this row. `lastComposed`
+   * distinguishes our own write (ignore — the draft is already right) from an
+   * edit made anywhere else (re-anchor to it).
+   */
+  const lastComposed = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastComposed.current === value) return;
+    const s = splitUsAddress(value);
+    baseLine1.current = s.line1 || value.trim();
+    setDraft({ city: s.city, state: s.state, zip: s.zip });
+  }, [value]);
+
   const patch = (next: Partial<{ city: string; state: string; zip: string }>) => {
     const merged = { ...draft, ...next };
     setDraft(merged);
-    onChange(
-      composeUsAddress({
-        line1: baseLine1.current,
-        city: merged.city,
-        // For the business address the state lives in its own dropdown and the
-        // picker here is hidden, so fold that value in — otherwise the composed
-        // line carries no state and only the gate's own merge saves it.
-        state: merged.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
-        zip: merged.zip,
-      }),
-    );
+    const composed = composeUsAddress({
+      line1: baseLine1.current,
+      city: merged.city,
+      // For the business address the state lives in its own dropdown and the
+      // picker here is hidden, so fold that value in — otherwise the composed
+      // line carries no state and only the gate's own merge saves it.
+      state: merged.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
+      zip: merged.zip,
+    });
+    lastComposed.current = composed;
+    onChange(composed);
   };
 
   return (

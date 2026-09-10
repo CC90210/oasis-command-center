@@ -208,10 +208,23 @@ assert.equal(photonShape[0].placeId, undefined, "Photon suggestions carry no pla
  */
 function makeCompletionRow(typed: string, fallbackState?: string) {
   const seed = splitUsAddress(typed);
-  const line1 = seed.line1 || typed.trim();
+  let line1 = seed.line1 || typed.trim();
   const draft = { city: seed.city, state: seed.state, zip: seed.zip };
   const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
   let composed = typed;
+  let lastComposed: string | null = null;
+
+  /** The row's re-seed effect: an edit from ANYWHERE ELSE re-anchors it. */
+  const externalChange = (next: string) => {
+    composed = next;
+    if (lastComposed === next) return;
+    const s = splitUsAddress(next);
+    line1 = s.line1 || next.trim();
+    draft.city = s.city;
+    draft.state = s.state;
+    draft.zip = s.zip;
+  };
+
   const patch = (next: Partial<typeof draft>) => {
     Object.assign(draft, next);
     composed = composeUsAddress({
@@ -220,9 +233,10 @@ function makeCompletionRow(typed: string, fallbackState?: string) {
       state: draft.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
       zip: draft.zip,
     });
+    lastComposed = composed;
     return composed;
   };
-  return { patch, draft, get value() { return composed; } };
+  return { patch, externalChange, draft, get value() { return composed; } };
 }
 
 function completeByHand(typed: string, city: string, state: string, zip: string): string {
@@ -274,6 +288,45 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
   row.patch({ zip: "60102" });
   assert.match(row.value, /\bIL\b/, "the dropdown state must be folded into the composed line");
   assert.equal(isAcceptableCaptureAddress(row.value, "IL").ok, true);
+}
+
+/**
+ * THE ROW MUST NEVER RESTORE AN ADDRESS THE MERCHANT REPLACED.
+ *
+ * Anchoring line1 once is what makes the boxes typeable. Anchoring it forever
+ * is silent corruption: open the row on one street, go back to the main input
+ * and type a different one, and the next City keystroke would recompose the
+ * OLD street and submit it. That is the same class of defect as the OSM
+ * suggestions that dropped the merchant's house number — this file exists to
+ * stop exactly that. (Codex P1, re-review 2026-09-10.)
+ */
+{
+  const row = makeCompletionRow("7930 Snow View Drive");
+  row.patch({ city: "Algonquin" });
+  // The merchant changes their mind and retypes the street in the main input.
+  row.externalChange("911 Magnolia Dr");
+  row.patch({ city: "Algonquin" });
+  row.patch({ state: "IL" });
+  row.patch({ zip: "60102" });
+  assert.equal(
+    row.value,
+    "911 Magnolia Dr, Algonquin, IL 60102",
+    "the row must re-anchor to the address the merchant actually typed last",
+  );
+  assert.ok(
+    !row.value.includes("Snow View"),
+    "the replaced street must not come back from the row's frozen state",
+  );
+}
+
+// The same, via a suggestion selected after the row opened.
+{
+  const row = makeCompletionRow("7930 Snow View Drive");
+  row.patch({ city: "Summit" });
+  row.externalChange("350 5th Avenue, New York, New York, 10118");
+  row.patch({ zip: "10118" });
+  assert.ok(row.value.startsWith("350 5th Avenue"), `re-anchored, got "${row.value}"`);
+  assert.ok(!row.value.includes("Snow View"), "no resurrection of the prior street");
 }
 
 for (const typed of [
