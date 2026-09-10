@@ -193,12 +193,44 @@ assert.deepEqual(
    */
   assert.deepEqual(
     photonFeaturesToSuggestions(
-      [{ properties: { countrycode: "US", housenumber: "1", street: "E Street", city: "Washington", state: "District of Columbia", postcode: "20001" } }],
+      [
+        { properties: { countrycode: "US", housenumber: "1", street: "E Street", city: "Washington", state: "District of Columbia", postcode: "20001" } },
+        // Same house number, COMPLETELY different street. Skipping the street
+        // test whenever no "distinctive" word exists would let this through and
+        // reintroduce the silent substitution. It must not.
+        { properties: { countrycode: "US", housenumber: "1", street: "Main Street", city: "Washington", state: "District of Columbia", postcode: "20001" } },
+      ],
       8,
       "1 E St Washington DC",
     ).map((s) => s.value),
     ["1 E Street, Washington, District of Columbia, 20001"],
-    "a street named only with stopwords must still resolve",
+    "a street named only with stopwords must resolve, and ONLY to itself",
+  );
+
+  // Whole-word matching: "e" must not match the "e" inside "Street".
+  assert.deepEqual(
+    photonFeaturesToSuggestions(
+      [{ properties: { countrycode: "US", housenumber: "1", street: "Peachtree Street", city: "Atlanta", state: "Georgia", postcode: "30303" } }],
+      8,
+      "1 E St Atlanta",
+    ).map((s) => s.value),
+    [],
+    "substring matching would wave this through; whole-word matching must not",
+  );
+
+  // With a suffix present, EVERY word of the street name is required — this is
+  // what rejects "Prairie View Drive" for a merchant who typed "Snow View".
+  assert.deepEqual(
+    photonFeaturesToSuggestions(
+      [
+        { properties: { countrycode: "US", housenumber: "350", street: "5th Avenue", city: "New York", state: "New York", postcode: "10118" } },
+        { properties: { countrycode: "US", housenumber: "350", street: "South 5th Avenue", city: "Mount Vernon", state: "New York", postcode: "10550" } },
+      ],
+      8,
+      "350 South 5th Ave Mount Vernon",
+    ).map((s) => s.value),
+    ["350 South 5th Avenue, Mount Vernon, New York, 10550"],
+    'a merchant who typed "South" means South',
   );
 
   // A query with no distinctive token at all must not filter everything away.

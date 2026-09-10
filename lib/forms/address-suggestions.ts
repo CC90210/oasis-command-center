@@ -108,30 +108,52 @@ function leadingHouseNumber(query: string): { value: string; endIndex: number } 
   return m ? { value: m[1], endIndex: m.index + m[0].length } : { value: "", endIndex: 0 };
 }
 
+function words(s: string): string[] {
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+}
+
 /**
- * The most distinctive word of the street the merchant typed — "snow" from
- * "7930 Snow View Drive", "magnolia" from "911 Magnolia Dr Algonquin". Returns
- * "" when the query carries nothing distinctive enough to match on, in which
- * case the caller simply does not apply the street test.
+ * The words of the street the merchant typed that a candidate's street must
+ * contain. Empty means "nothing reliable to match on" — do not apply the test.
+ *
+ * Two cases, because where the street name ENDS is only knowable when the
+ * merchant typed a street type:
+ *
+ *   - Suffix present ("7930 Snow View DRIVE", "1 E ST Washington DC"): the
+ *     street name is exactly the words before it, so require ALL of them.
+ *     That is both stricter where it can be — "Prairie View Drive" is rejected
+ *     for "Snow View Drive" because "snow" is absent — and correct for a street
+ *     named entirely with stopwords, where requiring the literal "e" of "E St"
+ *     is the only thing standing between the merchant and a different street
+ *     that merely shares their house number.
+ *
+ *   - No suffix ("8 The Green Dover DE"): the street name and the city run
+ *     together with nothing to separate them, so fall back to the single most
+ *     distinctive word ("green") rather than demanding the city appear in the
+ *     street.
+ *
+ * Matching is by WHOLE WORD, never substring: "e" must not match the "e" inside
+ * "Street". (Codex P2 ×2, 2026-09-10.)
  */
-function primaryStreetToken(query: string, houseNumberEndIndex = 0): string {
-  const tokens = query
-    // Skip the house number outright; it is matched separately and exactly.
-    .slice(houseNumberEndIndex)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean);
+function streetMatchTokens(query: string, houseNumberEndIndex = 0): string[] {
+  // Skip the house number outright; it is matched separately and exactly.
+  const tokens = words(query.slice(houseNumberEndIndex));
+  const beforeSuffix: string[] = [];
+  let sawSuffix = false;
   for (const t of tokens) {
-    // Past the street type we are into the city/state; nothing here belongs in
-    // a street-name test. Give up rather than demand a locality word appear in
-    // the street — "1 E St Washington DC" must not require "washington".
-    if (STREET_SUFFIXES.has(t)) return "";
+    if (STREET_SUFFIXES.has(t)) {
+      sawSuffix = true;
+      break;
+    }
+    beforeSuffix.push(t);
+  }
+  if (sawSuffix) return beforeSuffix;
+  for (const t of beforeSuffix) {
     if (t.length < 2) continue;
     if (NON_DISTINCTIVE_WORDS.has(t)) continue;
-    return t;
+    return [t];
   }
-  return "";
+  return [];
 }
 
 export function photonFeaturesToSuggestions(
@@ -143,7 +165,7 @@ export function photonFeaturesToSuggestions(
   // The house number the merchant actually typed, if they typed one.
   const house = leadingHouseNumber(q);
   const wantedNumber = house.value.toLowerCase();
-  const wantedToken = q ? primaryStreetToken(q, house.endIndex) : "";
+  const wantedStreetWords = q ? streetMatchTokens(q, house.endIndex) : [];
 
   const seen = new Set<string>();
   const out: AddressSuggestion[] = [];
@@ -165,7 +187,12 @@ export function photonFeaturesToSuggestions(
     // just harder to spot, so it is refused the same way. (Codex P1, 2026-09-10.)
     // Case-insensitive: a merchant types "12a", OSM stores "12A".
     if (wantedNumber && housenumber.toLowerCase() !== wantedNumber) continue;
-    if (wantedToken && !street.toLowerCase().includes(wantedToken)) continue;
+    if (wantedStreetWords.length) {
+      // Whole-word containment, so "e" (from "1 E St") cannot match the "e"
+      // buried inside "Street" and wave through a completely different road.
+      const streetWords = new Set(words(street));
+      if (!wantedStreetWords.every((w) => streetWords.has(w))) continue;
+    }
     const postcode = (p.postcode || "").trim();
     if (!/^\d{5}(?:-\d{4})?$/.test(postcode)) continue;
     // `city` ONLY — promoting `county` is what printed "Summit"/"Kent"/
