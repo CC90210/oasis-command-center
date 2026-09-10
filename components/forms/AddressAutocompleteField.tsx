@@ -134,6 +134,21 @@ export function AddressAutocompleteField({
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (blurRef.current) clearTimeout(blurRef.current);
       abortRef.current?.abort();
+      // Invalidate any Place Details call still in flight. The parent's hold is
+      // keyed by FIELD NAME, so without this an old request can outlive its
+      // component: go Back mid-lookup, return to the step, start a new lookup,
+      // and the old one's `finally` still matches its own generation — it calls
+      // onResolvingChange(false) and releases the NEW instance's hold, letting
+      // Continue validate while the newer ZIP is still coming. Bumping the
+      // generation makes the orphan discard itself silently.
+      // (Codex P2, 2026-09-10.)
+      //
+      // exhaustive-deps warns that this ref will have changed since the effect
+      // was set up. That is precisely the point: we must invalidate whatever
+      // generation is current AT TEARDOWN, not a snapshot from mount, or a
+      // lookup started after mount would survive. This is not a DOM ref.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      selectGen.current++;
       // Never strand the parent's "resolving" flag on unmount — a stuck flag
       // would disable Continue permanently. Fail OPEN on teardown.
       onResolvingChange?.(false);
