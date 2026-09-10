@@ -1,0 +1,35 @@
+-- 172_objection_website_premise.turso.sql
+--
+-- Adds objection_catalog.website_premise: what each objection assumes about
+-- the lead's website, carried on the row rather than inferred by the ranker.
+--
+-- WHY A COLUMN AND NOT A RULE IN CODE. The final whole-branch review found the
+-- no-website ranking rule ordering a no-website lead's console by objections
+-- that lead cannot raise: every no_need row in the real seed is a denial about
+-- an EXISTING site ("It loads fine for me.", "It looks fine on my phone."), so
+-- a +30 no_need boost put four of them in the open five while "We get all our
+-- work by word of mouth." sat at #12, behind a click. The premise is a
+-- property of the WORDING, decided by whoever writes the row, so it belongs
+-- next to the wording in the database -- not in a slug list in ranking.ts,
+-- which is the shape of the earlier defect in this same branch (a rule keyed
+-- on a slug that did not exist, silently a no-op forever).
+--
+-- THE THREE VALUES, and nothing else is written by the seed:
+--   'requires_site'  the objection asserts something about a website that
+--                    already exists (its condition, or its existence). A lead
+--                    with no site cannot raise it.
+--   'substitute'     the objection names the channel the owner believes
+--                    replaces a website. It is MORE likely, not less, from a
+--                    lead with no site: it is the reason there is no site.
+--   NULL / anything  premise-neutral. Ranked on family base alone. NULL is the
+--     else          default so a row written before this column existed, or by
+--                    a future author who did not classify it, degrades to
+--                    "no opinion" instead of to a wrong opinion.
+--
+-- No index: this column is never a query predicate. It is projected with the
+-- row and read by the pure ranker (lib/web-leads/objections/ranking.ts).
+--
+-- ADDITIVE ONLY. No backfill here; scripts/seed-objection-catalog.ts owns the
+-- values, the same way it owns every other piece of copy on these rows.
+
+ALTER TABLE objection_catalog ADD COLUMN website_premise text;

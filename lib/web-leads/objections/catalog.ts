@@ -15,6 +15,7 @@ import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import {
   isObjectionFamily,
   isObjectionPosture,
+  isWebsitePremise,
   type CatalogObjection,
   type ObjectionAnswer,
 } from "./types";
@@ -29,6 +30,7 @@ export class CatalogReadError extends Error {
 type ObjectionRow = {
   id: string; slug: string; says: string; meaning: string; prevent: string;
   family: string; source: string | null; dimension: string | null; status: string;
+  website_premise?: string | null;
 };
 
 type ResponseRow = {
@@ -36,7 +38,8 @@ type ResponseRow = {
   posture: string; is_default: number | boolean; status: string;
 };
 
-const OBJECTION_COLUMNS = "id, slug, says, meaning, prevent, family, source, dimension, status";
+const OBJECTION_COLUMNS =
+  "id, slug, says, meaning, prevent, family, source, dimension, status, website_premise";
 const RESPONSE_COLUMNS = "id, objection_id, label, body, posture, is_default, status";
 
 /**
@@ -91,6 +94,14 @@ export function assembleCatalog(objections: ObjectionRow[], responses: ResponseR
       family: o.family,
       source: o.source,
       dimension: o.dimension,
+      // UNLIKE family and posture, an unrecognised premise does NOT drop the
+      // row: family and posture decide whether a card can be RENDERED at all,
+      // where the premise only nudges its rank. Denying a rep a whole
+      // objection because someone typed a bad enum would be a worse failure
+      // than ranking it on family base alone, so a value outside
+      // WEBSITE_PREMISES degrades to null (premise-neutral), the same place an
+      // unclassified row lands.
+      websitePremise: isWebsitePremise(o.website_premise) ? o.website_premise : null,
       answers,
     });
   }

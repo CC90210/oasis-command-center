@@ -44,6 +44,32 @@ export const POSTURE_LABEL: Readonly<Record<ObjectionPosture, string>> = {
 export const OBJECTION_RESOLUTIONS = ["recovered", "stalled", "lost"] as const;
 export type ObjectionResolution = (typeof OBJECTION_RESOLUTIONS)[number];
 
+/**
+ * What an objection assumes about the lead's website. Carried on the catalog
+ * ROW (objection_catalog.website_premise, database/turso/172), not decided by
+ * the ranker, because it is a property of the WORDING and whoever writes the
+ * wording is the only one who knows it.
+ *
+ *   requires_site  asserts something about a website that already exists --
+ *                  its condition ("It loads fine for me.") or its existence
+ *                  ("We already have a website."). A lead with no site cannot
+ *                  raise it.
+ *   substitute     names the channel the owner believes replaces a website
+ *                  ("We get all our work by word of mouth."). MORE likely from
+ *                  a lead with no site: it is the reason there is no site.
+ *
+ * Anything else, including the absent/NULL default, is premise-NEUTRAL and
+ * ranks on family base alone. The default is deliberately the neutral one: a
+ * row whose author did not classify it must degrade to "no opinion", never to
+ * a wrong opinion.
+ */
+export const WEBSITE_PREMISES = ["requires_site", "substitute"] as const;
+export type WebsitePremise = (typeof WEBSITE_PREMISES)[number];
+
+export function isWebsitePremise(v: unknown): v is WebsitePremise {
+  return typeof v === "string" && (WEBSITE_PREMISES as readonly string[]).includes(v);
+}
+
 /** One answer. `body` is spoken verbatim; nothing else on it ever is. */
 export type ObjectionAnswer = {
   id: string;
@@ -68,6 +94,9 @@ export type CatalogObjection = {
   /** Set only for the seven angle objections, naming the audit dimension they
    *  belong to, so ranking can favour the one matching the selected angle. */
   dimension: string | null;
+  /** What this objection assumes about the lead's website. `null` means
+   *  premise-neutral -- see WebsitePremise above. */
+  websitePremise: WebsitePremise | null;
   answers: ObjectionAnswer[];
 };
 

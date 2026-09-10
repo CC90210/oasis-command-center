@@ -76,7 +76,7 @@ loadEnv();
 // above runs. Both are imported dynamically inside main() instead, after the
 // env is loaded.
 import { OBJECTIONS, ANGLES } from "@/lib/web-leads/angles";
-import type { ObjectionFamily, ObjectionPosture } from "@/lib/web-leads/objections/types";
+import type { ObjectionFamily, ObjectionPosture, WebsitePremise } from "@/lib/web-leads/objections/types";
 import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
 
 const DRY = process.argv.includes("--dry-run");
@@ -102,14 +102,24 @@ const SEEDED_BY = "seed:angles.ts";
  * that is question_back. The price question gets a real number scoped to
  * their situation -- reframe_the_cost. "Not interested" is answered by
  * literally offering to leave ("...or should I leave it?") -- take_it_away.
+ *
+ * `premise` (added by the final whole-branch review, 2026-09-10) is what the
+ * WORDING assumes about the lead's website, and it is written here, beside
+ * the wording, because that is the only place anyone knows it. It is omitted
+ * wherever the objection does not care -- an omission means premise-neutral,
+ * never "unclassified, guess". See WebsitePremise in
+ * lib/web-leads/objections/types.ts and the no-website block in
+ * lib/web-leads/objections/ranking.ts.
  */
-const UNIVERSAL_META: { says: string; slug: string; family: ObjectionFamily; posture: ObjectionPosture; label: string }[] = [
+const UNIVERSAL_META: { says: string; slug: string; family: ObjectionFamily; posture: ObjectionPosture; label: string; premise?: WebsitePremise }[] = [
   {
     says: "We already have a website. My nephew built it.",
     slug: "nephew-built-website",
     family: "already_handled",
     posture: "agree_and_redirect",
     label: "Agree, then redirect",
+    // Names an incumbent website outright. A lead with no site cannot say it.
+    premise: "requires_site",
   },
   {
     says: "We have no budget for that right now.",
@@ -152,6 +162,9 @@ const UNIVERSAL_META: { says: string; slug: string; family: ObjectionFamily; pos
     family: "already_handled",
     posture: "agree_and_redirect",
     label: "Agree, then redirect",
+    // The channel the owner believes replaces a website, and the single most
+    // likely first objection from a business that never built one.
+    premise: "substitute",
   },
   {
     says: "We have a Facebook page, that does the job.",
@@ -159,12 +172,16 @@ const UNIVERSAL_META: { says: string; slug: string; family: ObjectionFamily; pos
     family: "already_handled",
     posture: "agree_and_redirect",
     label: "Agree, then redirect",
+    // Same shape as word-of-mouth: a named stand-in FOR a website, so it is
+    // more likely from a lead with no site, not less.
+    premise: "substitute",
   },
 ];
 
 type SeedRow = {
   slug: string; says: string; meaning: string; prevent: string;
   family: ObjectionFamily; source: string | null; dimension: string | null;
+  websitePremise: WebsitePremise | null;
   answer: { label: string; body: string; posture: ObjectionPosture };
 };
 
@@ -185,6 +202,7 @@ function universalRows(): SeedRow[] {
       family: meta.family,
       source: o.source ?? null,
       dimension: null,
+      websitePremise: meta.premise ?? null,
       answer: { label: meta.label, body: o.response, posture: meta.posture },
     };
   });
@@ -219,8 +237,26 @@ function universalRows(): SeedRow[] {
  * agree_and_redirect. mobile and performance don't concede anything; they
  * hand the test back to the prospect to run themselves ("try the menu",
  * "try it on your phone, on data") -- question_back.
+ *
+ * `premise` reasoning (final whole-branch review, 2026-09-10). Four of these
+ * seven deny a fault in a site that EXISTS -- design ("what IT looks like"),
+ * mobile ("IT looks fine on my phone"), performance ("IT loads fine for me")
+ * and conversion. Conversion's `says` reads website-neutral on its own, but
+ * its authored answer, meaning and prevent are entirely about what a phone
+ * visitor does ON THE PAGE and the caller who gave up before dialing; handed
+ * to a lead with no page, the card asks the rep to read a line about a page
+ * that does not exist. All four are `requires_site`.
+ *
+ * The other three (trust, content, discoverability) are NOT marked
+ * `substitute`, deliberately, even though each cites an off-site asset.
+ * `substitute` means "this is why I never built a site", and these three are
+ * dimension-scoped deflections authored as the push-back to a specific audit
+ * angle -- "we are already on Google" answers "your site is not findable".
+ * A no-website lead CAN say them, so they are not `requires_site` either.
+ * Premise-neutral is the honest classification, and it leaves them ranked on
+ * family base: immediately behind the open five, not buried.
  */
-const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; posture: ObjectionPosture; label: string; meaning: string; prevent: string }> = {
+const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; posture: ObjectionPosture; label: string; meaning: string; prevent: string; premise?: WebsitePremise }> = {
   conversion: {
     slug: "conversion-plenty-of-calls",
     family: "no_need",
@@ -230,6 +266,7 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
       "Call volume proves the page works for the people willing to fight for it. It says nothing about the ones who gave up before dialing, and that group never shows up as a complaint.",
     prevent:
       "Walk them through what a phone visitor actually does on the page during the diagnostic, before pitching, so the invisible non-caller is already on the table when this objection would otherwise land.",
+    premise: "requires_site",
   },
   trust: {
     slug: "trust-reviews-on-google",
@@ -250,6 +287,7 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
       "Correct about existing customers, and a case of survivorship bias: people who already trust the business were never going to be lost over a dated page in the first place.",
     prevent:
       "Anchor the diagnostic on a stranger's first second, not the owner's own experience of the site, so 'my customers don't care' has nothing left to attach to.",
+    premise: "requires_site",
   },
   mobile: {
     slug: "mobile-looks-fine",
@@ -260,6 +298,7 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
       "Almost always tested on a saved, logged-in, familiar path rather than the cold path a first-time visitor takes, so 'fine' describes the tester's experience, not a stranger's.",
     prevent:
       "Have them attempt the task live on their own phone during the diagnostic, so they find the friction themselves before objecting to a claim about it.",
+    premise: "requires_site",
   },
   content: {
     slug: "content-everyone-knows-us",
@@ -269,7 +308,12 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
     meaning:
       "Locally true and irrelevant to anyone who hasn't moved in yet or hasn't met them yet. It mistakes the audience that already trusts them for the audience the site exists to reach.",
     prevent:
-      "Anchor the diagnostic on someone new to the area or the business, so the objection's premise -- that everyone already knows -- is pre-empted before it's said.",
+      // NO `--` IN SEEDED COPY. Every string on these rows renders verbatim on
+      // the card (ObjectionCard.tsx holds no copy of its own), so a `--` typed
+      // as a dash substitute reaches a rep as two literal hyphens. The project
+      // rule bans em dashes; `--` is not the workaround for it. Commas and
+      // full stops are.
+      "Anchor the diagnostic on someone new to the area or the business, so the objection's premise, that everyone already knows, is pre-empted before it's said.",
   },
   performance: {
     slug: "performance-loads-fine-for-me",
@@ -280,6 +324,7 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
       "The owner's own browser has the site cached from the last visit, so their lived experience of speed is structurally unlike a first-time visitor's on a cold connection.",
     prevent:
       "Ask them to load it fresh on mobile data during the call rather than asserting a load time, so the diagnostic itself defeats this objection before it can be raised.",
+    premise: "requires_site",
   },
   discoverability: {
     slug: "discoverability-already-on-google",
@@ -305,6 +350,7 @@ function angleRows(): SeedRow[] {
       family: meta.family,
       source: null,
       dimension: key,
+      websitePremise: meta.premise ?? null,
       answer: { label: meta.label, body: angle.objection.response, posture: meta.posture },
     };
   });
@@ -340,7 +386,11 @@ async function main() {
 
   console.log(`[seed] ${rows.length} objections (${OBJECTIONS.length} universal + ${Object.keys(ANGLES).length} angle)`);
   if (DRY) {
-    for (const r of rows) console.log(`  ${r.slug.padEnd(28)} ${r.family.padEnd(16)} ${r.says.slice(0, 60)}`);
+    for (const r of rows) {
+      console.log(
+        `  ${r.slug.padEnd(34)} ${r.family.padEnd(16)} ${(r.websitePremise ?? "neutral").padEnd(14)} ${r.says.slice(0, 50)}`,
+      );
+    }
     return;
   }
 
@@ -368,6 +418,10 @@ async function main() {
       family: r.family,
       source: r.source,
       dimension: r.dimension,
+      // Written on every row on every run, including as an explicit null, so a
+      // re-classification (substitute -> neutral, say) actually CLEARS the old
+      // value instead of leaving a stale one behind on an idempotent re-seed.
+      website_premise: r.websitePremise,
       status: "approved",
       origin: "seed",
       created_by: SEEDED_BY,

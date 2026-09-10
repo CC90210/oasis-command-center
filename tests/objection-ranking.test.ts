@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import { rankObjections, CONSOLE_OPEN_COUNT, NEPHEW_BUILT_WEBSITE_SLUG } from "../lib/web-leads/objections/ranking";
 import { SEEDED_SLUGS } from "../lib/web-leads/objections/seed-slugs";
-import type { CatalogObjection, ObjectionFacts } from "../lib/web-leads/objections/types";
+import type { CatalogObjection, ObjectionFacts, WebsitePremise } from "../lib/web-leads/objections/types";
 
 // ---------------------------------------------------------------------------
 // The ranker is the only thing standing between a rep and a list of twenty-five
@@ -30,7 +30,12 @@ assert.ok(
     `apart again. Fix the slug in one of the two places, never rename it in a third.`,
 );
 
-function obj(slug: string, family: CatalogObjection["family"], dimension: string | null = null): CatalogObjection {
+function obj(
+  slug: string,
+  family: CatalogObjection["family"],
+  dimension: string | null = null,
+  websitePremise: WebsitePremise | null = null,
+): CatalogObjection {
   return {
     id: `id-${slug}`,
     slug,
@@ -40,26 +45,47 @@ function obj(slug: string, family: CatalogObjection["family"], dimension: string
     family,
     source: null,
     dimension,
+    websitePremise,
     answers: [
       { id: `a-${slug}`, label: "L", body: "b", posture: "agree_and_redirect", isDefault: true },
     ],
   };
 }
 
-// Real slugs, real families (per scripts/seed-objection-catalog.ts's
-// UNIVERSAL_META / ANGLE_META, including the F2 reclassification of
-// conversion-plenty-of-calls to no_need). No no_trust or no_authority slug
-// exists in the real 15-row seed, so those two families have no fixture
-// member here -- the frequency tie-break test below doesn't need one.
+// Real slugs, real families, real premises (per
+// scripts/seed-objection-catalog.ts's UNIVERSAL_META / ANGLE_META, including
+// the F2 reclassification of conversion-plenty-of-calls to no_need). No
+// no_trust or no_authority slug exists in the real 15-row seed, so those two
+// families have no fixture member here -- the frequency tie-break test below
+// doesn't need one.
+//
+// word-of-mouth is in this fixture where it previously was not: the
+// no-website block below cannot state the rule that replaced the old +30
+// no_need boost without a second `substitute` row to prove the rule is keyed
+// on the PREMISE and not on one slug.
 const CATALOG: CatalogObjection[] = [
-  obj("nephew-built-website", "already_handled"),
-  obj("facebook-page-is-enough", "already_handled"),
+  obj("nephew-built-website", "already_handled", null, "requires_site"),
+  obj("facebook-page-is-enough", "already_handled", null, "substitute"),
+  obj("word-of-mouth", "already_handled", null, "substitute"),
+  obj("trust-reviews-on-google", "already_handled", "trust", null),
   obj("no-budget", "no_money"),
   obj("just-send-email", "brush_off"),
-  obj("conversion-plenty-of-calls", "no_need", "conversion"),
+  obj("conversion-plenty-of-calls", "no_need", "conversion", "requires_site"),
   obj("call-back-later", "brush_off"),
   obj("how-much-is-it", "no_money"),
 ];
+
+// Every fixture slug must be one the seed actually writes, not just the one
+// ranking.ts names. The F1 defect was a THREE-way disagreement (ranker,
+// seed, fixture), and the guard above only closes two sides of it: a fixture
+// slug invented here would still make every ordering assertion below a test
+// of a catalog that does not exist.
+for (const o of CATALOG) {
+  assert.ok(
+    (SEEDED_SLUGS as readonly string[]).includes(o.slug),
+    `fixture slug ${JSON.stringify(o.slug)} is not in SEEDED_SLUGS -- this fixture is ranking a catalog the seed never writes`,
+  );
+}
 
 const BASE: ObjectionFacts = {
   hasWebsite: true,
@@ -87,54 +113,117 @@ assert.equal(rankObjections(CATALOG, BASE).length, CATALOG.length);
 // input produce the same sequence, so a rep's muscle memory survives a reload.
 assert.deepEqual(order({}), order({}));
 
-// The no-website rule (task-7 fix round 1, finding F3). It used to drop the
-// WHOLE already_handled family by 35 whenever a lead had no website, on the
-// premise that already_handled means an incumbent website. That was wrong
-// for 5 of the real catalog's 6 already_handled rows: only
-// nephew-built-website actually claims a website. The other already_handled
-// objections (word of mouth, a Facebook page, off-site reviews, a directory
-// listing, local reputation) are website-INDEPENDENT and are, if anything,
-// MORE likely from a no-website lead -- they are precisely the reasons that
-// lead gives for never having built a site. The rule now applies only to
-// NEPHEW_BUILT_WEBSITE_SLUG; the +30 no_need half is unchanged.
+// ---------------------------------------------------------------------------
+// THE NO-WEBSITE RULE. Rewritten by the final whole-branch review, 2026-09-10,
+// because the block that used to stand here PINNED THE DEFECT.
+//
+// History, both halves, because this rule has now been wrong twice for the
+// same reason and the third author needs to see the pattern:
+//
+//   * It once dropped the WHOLE already_handled family by 35, on the premise
+//     that already_handled means an incumbent website. Wrong for 5 of the
+//     real catalog's 6 already_handled rows (task-7 fix round 1, finding F3).
+//   * It then still raised the WHOLE no_need family by 30, on the premise
+//     that no_need means "nothing is broken" generically. Wrong for ALL FOUR
+//     real no_need rows: every one is a denial about an EXISTING site ("It
+//     loads fine for me.", "It looks fine on my phone.", "Our customers do
+//     not care what it looks like.", "We get plenty of calls."). Against the
+//     real 15-row catalog that boost put four of them in the open five for a
+//     lead with no website at all, while "We get all our work by word of
+//     mouth." sat at #12 and "We have a Facebook page, that does the job."
+//     at #10 -- both behind the "Show all 15" click, and both exactly what
+//     such a business says. THIS BLOCK ASSERTED THAT ORDERING AS CORRECT.
+//
+// FAMILY IS THE WRONG CARRIER, in either direction. Whether an objection
+// survives the absence of a website is a property of its wording, and it cuts
+// across families. It is now a column on the catalog row
+// (objection_catalog.website_premise, database/turso/172), written beside the
+// copy in scripts/seed-objection-catalog.ts, and the ranker reads only that.
+// Deliberately NOT a slug list in ranking.ts: finding F1 in this same branch
+// was a ranking rule keyed on a slug literal that did not exist, silently a
+// no-op forever.
+//
+// What the rule must now produce, stated as an outcome rather than an
+// arithmetic: for a lead with no website, the OPEN cards must be objections
+// that lead could actually raise.
+// ---------------------------------------------------------------------------
 {
   const withSite = order({ hasWebsite: true, overallScore: 55 });
   const noSite = order({ hasWebsite: false, overallScore: 55 });
 
-  // The incumbent-website objection (already_handled, base 40) leads
-  // no_money (35, untouched by hasWebsite) with a site, and falls behind it
-  // once its website-specific -35 penalty fires.
+  // 1. THE OUTCOME. Both substitute-channel objections -- the reasons a
+  //    business gives for never having built a site -- must be reachable
+  //    without a click. This is the finding in one assertion.
+  for (const slug of ["word-of-mouth", "facebook-page-is-enough"]) {
+    assert.ok(
+      noSite.indexOf(slug) < CONSOLE_OPEN_COUNT,
+      `no site: ${slug} must be among the ${CONSOLE_OPEN_COUNT} OPEN cards, not behind the expand control, got ${noSite.join(",")}`,
+    );
+  }
+
+  // 2. And the website-condition denials must not lead. A rep cold-calling a
+  //    business with no website must not be handed a card asking whether "it"
+  //    loads fine.
+  for (const slug of ["conversion-plenty-of-calls", "nephew-built-website"]) {
+    assert.ok(
+      noSite.indexOf(slug) >= CONSOLE_OPEN_COUNT,
+      `no site: ${slug} presupposes a website and must not be an open card, got ${noSite.join(",")}`,
+    );
+  }
+
+  // 3. requires_site is not a family rule. It moves an already_handled row
+  //    (nephew) and a no_need row (conversion) the same way, and both fall
+  //    behind premise-neutral no_money, which hasWebsite never touches.
+  for (const slug of ["nephew-built-website", "conversion-plenty-of-calls"]) {
+    assert.ok(
+      withSite.indexOf(slug) < withSite.indexOf("no-budget"),
+      `baseline: ${slug} should lead no_money with a site, got ${withSite.join(",")}`,
+    );
+    assert.ok(
+      noSite.indexOf("no-budget") < noSite.indexOf(slug),
+      `no site: no_money must overtake ${slug} once the requires_site penalty fires, got ${noSite.join(",")}`,
+    );
+  }
+
+  // 4. substitute is not a family rule either, and this is the assertion that
+  //    would have caught the ORIGINAL family-wide version: two of the three
+  //    already_handled rows rise past brush_off (base 50, untouched), and the
+  //    premise-NEUTRAL third (trust-reviews-on-google) does not move at all.
+  //    A no-website lead can say "our reviews are all on Google", so it is
+  //    neither penalised nor promoted -- it ranks on family base, immediately
+  //    behind the open five.
+  for (const slug of ["word-of-mouth", "facebook-page-is-enough"]) {
+    assert.ok(
+      withSite.indexOf("just-send-email") < withSite.indexOf(slug),
+      `baseline: brush_off should lead ${slug} with a site, got ${withSite.join(",")}`,
+    );
+    assert.ok(
+      noSite.indexOf(slug) < noSite.indexOf("just-send-email"),
+      `no site: ${slug} must overtake brush_off once the substitute bonus fires, got ${noSite.join(",")}`,
+    );
+  }
   assert.ok(
-    withSite.indexOf("nephew-built-website") < withSite.indexOf("no-budget"),
-    `baseline: the incumbent-website objection should lead no_money with a site, got ${withSite.join(",")}`,
+    noSite.indexOf("just-send-email") < noSite.indexOf("trust-reviews-on-google"),
+    `no site: a premise-NEUTRAL already_handled row must not be promoted with its family, got ${noSite.join(",")}`,
   );
   assert.ok(
-    noSite.indexOf("no-budget") < noSite.indexOf("nephew-built-website"),
-    `no site: no_money should overtake the incumbent-website objection once its penalty fires, got ${noSite.join(",")}`,
+    noSite.indexOf("trust-reviews-on-google") < noSite.indexOf("no-budget"),
+    `no site: a premise-NEUTRAL already_handled row must not be penalised with its family either, got ${noSite.join(",")}`,
   );
 
-  // A website-INDEPENDENT already_handled objection must NOT take that
-  // penalty: it leads no_money with a site, and must still lead no_money
-  // with no site, because the family-wide version of the rule is gone.
-  assert.ok(
-    withSite.indexOf("facebook-page-is-enough") < withSite.indexOf("no-budget"),
-    `baseline: a website-independent already_handled objection should lead no_money with a site, got ${withSite.join(",")}`,
-  );
-  assert.ok(
-    noSite.indexOf("facebook-page-is-enough") < noSite.indexOf("no-budget"),
-    `no site: a website-independent already_handled objection must still lead no_money -- the penalty must not apply family-wide, got ${noSite.join(",")}`,
-  );
-
-  // The +30 no_need half is unchanged: brush_off (50, untouched) leads
-  // no_need (45) with a site, and falls behind it once the whole-family +30
-  // fires.
-  assert.ok(
-    withSite.indexOf("just-send-email") < withSite.indexOf("conversion-plenty-of-calls"),
-    `baseline: brush_off should lead no_need with a site, got ${withSite.join(",")}`,
-  );
-  assert.ok(
-    noSite.indexOf("conversion-plenty-of-calls") < noSite.indexOf("just-send-email"),
-    `no site: no_need should overtake brush_off once the +30 half fires, got ${noSite.join(",")}`,
+  // 5. THE DEFAULT, stated as an invariant rather than a flip (it holds
+  //    whether or not the rule exists, on purpose -- it is the safe-default
+  //    property, not the rule): a catalog of nothing but unclassified rows
+  //    ranks IDENTICALLY with and without a website. A Phase 2 author who
+  //    adds a row and forgets website_premise gets "no opinion", never a
+  //    wrong opinion, which is the failure mode both previous versions of
+  //    this rule had.
+  const neutralOnly = CATALOG.filter((o) => o.websitePremise === null);
+  assert.ok(neutralOnly.length >= 3, "the neutral-default check needs premise-neutral fixture rows");
+  assert.deepEqual(
+    rankObjections(neutralOnly, { ...BASE, hasWebsite: false }).map((o) => o.slug),
+    rankObjections(neutralOnly, { ...BASE, hasWebsite: true }).map((o) => o.slug),
+    "an unclassified row must be untouched by hasWebsite, in either direction",
   );
 }
 
