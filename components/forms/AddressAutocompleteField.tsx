@@ -495,10 +495,21 @@ function AddressCompletion({
     const composed = composeUsAddress({
       line1: baseLine1.current,
       city: merged.city,
-      // For the business address the state lives in its own dropdown and the
-      // picker here is hidden, so fold that value in — otherwise the composed
-      // line carries no state and only the gate's own merge saves it.
-      state: merged.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
+      // DELIBERATELY NOT the business_state dropdown value, even though the
+      // picker below is hidden when that dropdown exists.
+      //
+      // Copying it in here looks harmless and creates contradictory data: the
+      // merchant changes the dropdown afterwards, the stale code stays baked
+      // into the address string, and `mergeStateIntoAddress` then trusts the
+      // ADDRESS over the dropdown by design ("the address the merchant actually
+      // typed is the better evidence of where they are"). The application would
+      // go out with business_address and business_state disagreeing.
+      //
+      // Leaving it out is not a gap: storing "street, city, ZIP" with the state
+      // held separately is exactly the shape lib/address/us-address.ts was
+      // written for. The gate merges it to validate, and the PDF merges it to
+      // print. One source of truth. (Codex P2, 2026-09-10.)
+      state: merged.state,
       zip: merged.zip,
     });
     lastComposed.current = composed;

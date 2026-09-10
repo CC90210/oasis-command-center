@@ -443,7 +443,8 @@ function makeCompletionRow(typed: string, fallbackState?: string) {
     composed = composeUsAddress({
       line1,
       city: draft.city,
-      state: draft.state || (stateHandledElsewhere ? (fallbackState || "").trim().toUpperCase() : ""),
+      // Deliberately NOT the fallback dropdown state — see the assertion below.
+      state: draft.state,
       zip: draft.zip,
     });
     lastComposed = composed;
@@ -493,14 +494,34 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
   assert.equal(isAcceptableCaptureAddress(row.value).ok, true);
 }
 
-// And with the state supplied by the business_state dropdown (picker hidden),
-// the composed line must still carry a state rather than relying on the gate's
-// own merge to rescue it.
+/**
+ * With business_state supplying the state, the row hides its own picker and
+ * must NOT bake that code into the address string.
+ *
+ * Copying it in looks harmless and produces contradictory data: the merchant
+ * later changes the dropdown, the stale code stays inside the address, and
+ * `mergeStateIntoAddress` then trusts the ADDRESS over the dropdown by design
+ * ("the address the merchant actually typed is the better evidence of where
+ * they are"). The application would go out with business_address and
+ * business_state disagreeing.
+ *
+ * Storing "street, city, ZIP" with the state held separately is exactly the
+ * shape lib/address/us-address.ts was written for. (Codex P2, 2026-09-10.)
+ */
 {
   const row = typeCityCharByChar("7930 Snow View Drive", "Algonquin", "IL");
   row.patch({ zip: "60102" });
-  assert.match(row.value, /\bIL\b/, "the dropdown state must be folded into the composed line");
+  assert.equal(row.value, "7930 Snow View Drive, Algonquin, 60102");
+  assert.ok(
+    !/\bIL\b/.test(row.value),
+    "the dropdown's state must not be baked into the address string",
+  );
+  // It still passes, because the gate merges the dropdown state to judge it…
   assert.equal(isAcceptableCaptureAddress(row.value, "IL").ok, true);
+  // …and the merchant may still change the dropdown without the address
+  // contradicting them.
+  assert.equal(isAcceptableCaptureAddress(row.value, "WI").ok, true);
+  assert.equal(splitUsAddress(row.value).state, "", "the address carries no state of its own");
 }
 
 /**
