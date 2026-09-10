@@ -8,12 +8,55 @@
  * formatted address STRING (so the stored value is identical to a text field —
  * downstream PDF/lead-record paths are unaffected).
  *
+ * ---------------------------------------------------------------------------
+ * THE GUARANTEE THIS COMPONENT NOW MAKES (2026-09-10)
+ *
+ * A merchant must ALWAYS be able to submit a correct address, whatever the
+ * geocoding provider does. Before this rewrite there were three ways to reach a
+ * dead end, all of them live in production and all of them blocking real
+ * funding applications:
+ *
+ *   1. NO EXIT. A suggestion carrying no ZIP could be selected from our own
+ *      dropdown and then refused by our own capture gate ("Include the ZIP
+ *      code"). Re-opening the dropdown offered the identical entry again. The
+ *      field is a free-text input, so a merchant who KNEW to append ", IL 60102"
+ *      could escape — but nothing on screen ever told them that, and the gate
+ *      only speaks after they have already been rejected.
+ *
+ *   2. THE SELECT→CONTINUE RACE. Google's autocomplete label has no postal code
+ *      ("911 Magnolia Dr, Algonquin, IL, USA"); the ZIP arrives only from a
+ *      SECOND Place Details round trip. `loading` was local state, so the form
+ *      had no idea a resolution was in flight. Selecting a suggestion and
+ *      clicking Continue inside that window was rejected for a missing ZIP that
+ *      was already on its way. PR #426 named this defect in its title and did
+ *      not actually close it — the signal never reached the validator.
+ *
+ *   3. A FAILED DETAILS CALL STUCK THE MERCHANT. One 429 or one timeout on the
+ *      Place Details hop left the ZIP-less label in the box, which the gate then
+ *      refused, which returned them to (1).
+ *
+ * The fixes, in order of what a merchant hits first:
+ *   - `onResolvingChange` tells the form a ZIP is in flight, so Continue WAITS
+ *     instead of rejecting. Closes (2).
+ *   - The Place Details call retries once before giving up. Reduces (3).
+ *   - `AddressCompletion` — an always-available structured City / State / ZIP
+ *     row, revealed the moment the typed line cannot satisfy the gate. It is
+ *     composed back into the SAME single string, so nothing downstream changes.
+ *     This is the actual guarantee: it does not depend on any provider being up,
+ *     correct, or configured, and it closes (1) and (3) outright.
+ *
  * Graceful degradation: if the API errors or returns nothing, the field behaves
- * as a normal text input the merchant can fill manually.
+ * as a normal text input, now with the completion row to finish it off.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { normalizeAddressSuggestions, type AddressSuggestion } from "@/lib/forms/address-suggestions";
+import {
+  isAcceptableCaptureAddress,
+  splitUsAddress,
+  composeUsAddress,
+  US_STATE_CODES,
+} from "@/lib/address/us-address";
 
 type Props = {
   value: string;
@@ -23,30 +66,70 @@ type Props = {
   /** Override the input styling so the field matches its host surface (the
    *  public form vs the dashboard record editor). Defaults to the form styling. */
   className?: string;
+  /** The business address holds its state in a separate dropdown; pass it so
+   *  the completion row does not ask for a state the merchant already gave. */
+  fallbackState?: string;
+  /** True once the form's validator has rejected this field — forces the
+   *  completion row open so the merchant is shown HOW to fix it, not just told. */
+  invalid?: boolean;
+  /** Raised while a selected suggestion's full address (its ZIP) is still being
+   *  fetched. The form must not validate or submit this field until it clears. */
+  onResolvingChange?: (resolving: boolean) => void;
 };
 
 const BASE_INPUT =
   "w-full rounded-md border border-bg-border bg-bg-elev px-3 py-2 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
+const SMALL_INPUT =
+  "w-full rounded-md border border-bg-border bg-bg-elev px-2 py-1.5 text-sm text-fg focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors placeholder-fg-dim";
 
 const MIN_CHARS = 3;
 const DEBOUNCE_MS = 300;
 
-export function AddressAutocompleteField({ value, onChange, placeholder, inputId, className }: Props) {
+export function AddressAutocompleteField({
+  value,
+  onChange,
+  placeholder,
+  inputId,
+  className,
+  fallbackState,
+  invalid,
+  onResolvingChange,
+}: Props) {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // Sticky: once the merchant has been shown the completion row, it stays put.
+  // Toggling it off the instant the gate passes would make it flicker away
+  // mid-keystroke, which is worse than a row that simply stays available.
+  const [completionOpen, setCompletionOpen] = useState(false);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blurRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  const text = typeof value === "string" ? value : "";
+  const gate = useMemo(
+    () => (text.trim() ? isAcceptableCaptureAddress(text, fallbackState) : { ok: false, message: "" }),
+    [text, fallbackState],
+  );
+
+  // Force the row open as soon as the form has rejected the field, so the
+  // merchant is handed the boxes that fix it rather than only an error message.
+  useEffect(() => {
+    if (invalid) setCompletionOpen(true);
+  }, [invalid]);
 
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       if (blurRef.current) clearTimeout(blurRef.current);
       abortRef.current?.abort();
+      // Never strand the parent's "resolving" flag on unmount — a stuck flag
+      // would disable Continue permanently. Fail OPEN on teardown.
+      onResolvingChange?.(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const runSearch = (q: string) => {
@@ -95,6 +178,13 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
     runSearch(v);
   };
 
+  /** One Place Details attempt. Returns "" when it could not resolve. */
+  const fetchResolved = async (placeId: string): Promise<string> => {
+    const res = await fetch(`/api/forms/address-autocomplete?place_id=${encodeURIComponent(placeId)}`);
+    const data = (await res.json()) as { ok?: boolean; address?: unknown };
+    return data.ok && typeof data.address === "string" ? data.address.trim() : "";
+  };
+
   const select = async (s: AddressSuggestion) => {
     // Google autocomplete labels frequently omit postal codes. Paint the choice
     // immediately, then replace it with the complete Place Details address.
@@ -102,16 +192,48 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
     setSuggestions([]);
     setOpen(false);
     setActiveIndex(-1);
-    if (!s.placeId) return;
+
+    // A provider that returns no place_id (Photon) has already given us its
+    // best string. If that string cannot pass the gate, open the completion row
+    // rather than leaving the merchant to guess what is wrong.
+    if (!s.placeId) {
+      if (!isAcceptableCaptureAddress(s.value, fallbackState).ok) setCompletionOpen(true);
+      return;
+    }
+
     setLoading(true);
+    // Hold the form: the ZIP is genuinely in flight and validating now would
+    // reject an address that is about to be correct.
+    onResolvingChange?.(true);
     try {
-      const res = await fetch(`/api/forms/address-autocomplete?place_id=${encodeURIComponent(s.placeId)}`);
-      const data = (await res.json()) as { ok?: boolean; address?: unknown };
-      if (data.ok && typeof data.address === "string" && data.address.trim()) onChange(data.address.trim());
-    } catch {
-      // Keep the editable label. Inline validation names any missing postal part.
+      let resolved = "";
+      try {
+        resolved = await fetchResolved(s.placeId);
+      } catch {
+        resolved = "";
+      }
+      if (!resolved) {
+        // One retry. The common failures here are a transient 429 from the
+        // shared global rate-limit bucket and a cold-start timeout, both of
+        // which clear immediately. Giving up on the first miss is what left
+        // merchants holding a ZIP-less label.
+        try {
+          resolved = await fetchResolved(s.placeId);
+        } catch {
+          resolved = "";
+        }
+      }
+      if (resolved) {
+        onChange(resolved);
+        if (!isAcceptableCaptureAddress(resolved, fallbackState).ok) setCompletionOpen(true);
+      } else {
+        // Keep the editable label and hand the merchant the boxes that finish
+        // it. Never a dead end.
+        setCompletionOpen(true);
+      }
     } finally {
       setLoading(false);
+      onResolvingChange?.(false);
     }
   };
 
@@ -142,7 +264,7 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
         id={inputId}
         type="text"
         autoComplete="off"
-        value={typeof value === "string" ? value : ""}
+        value={text}
         onChange={(e) => handleInput(e.target.value)}
         onKeyDown={onKeyDown}
         onFocus={() => {
@@ -151,6 +273,11 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
         onBlur={() => {
           // Delay close so a mousedown on a suggestion registers first.
           blurRef.current = setTimeout(() => setOpen(false), 150);
+          // Offer the completion row only once they have finished typing and
+          // the line still cannot pass — not on every keystroke of "1", "12".
+          if (text.trim() && !isAcceptableCaptureAddress(text, fallbackState).ok) {
+            setCompletionOpen(true);
+          }
         }}
         placeholder={placeholder || "Start typing your address…"}
         className={className || BASE_INPUT}
@@ -193,6 +320,112 @@ export function AddressAutocompleteField({ value, onChange, placeholder, inputId
           ))}
         </ul>
       )}
+
+      {completionOpen && !gate.ok && (
+        <AddressCompletion
+          value={text}
+          onChange={onChange}
+          fallbackState={fallbackState}
+          inputId={inputId}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The escape hatch, and the only part of this feature that depends on nothing
+ * external. Whatever the provider returned — a street with no building number,
+ * an entry with no ZIP, or nothing at all — these boxes let the merchant finish
+ * the address by hand.
+ *
+ * It edits the SAME single string the field already stores. Each box is seeded
+ * from whatever `splitUsAddress` could already identify, and every edit
+ * recomposes "line1, city, ST ZIP". Storing one string is load-bearing: the PDF
+ * renderer, the lead record and the application upsert all read one address
+ * value, and introducing per-part payload keys here would silently bypass all
+ * three. (lib/address/us-address.ts is the single implementation of both the
+ * split and the gate, so this row can never disagree with the server.)
+ */
+function AddressCompletion({
+  value,
+  onChange,
+  fallbackState,
+  inputId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  fallbackState?: string;
+  inputId?: string;
+}) {
+  const parts = useMemo(() => splitUsAddress(value), [value]);
+  // The business address takes its state from its own dropdown; asking twice
+  // invites the merchant to enter two different states.
+  const stateHandledElsewhere = /^[A-Za-z]{2}$/.test((fallbackState || "").trim());
+
+  const patch = (next: Partial<{ city: string; state: string; zip: string }>) => {
+    const merged = {
+      line1: parts.line1 || value.trim(),
+      city: next.city !== undefined ? next.city : parts.city,
+      state: next.state !== undefined ? next.state : parts.state,
+      zip: next.zip !== undefined ? next.zip : parts.zip,
+    };
+    onChange(composeUsAddress(merged));
+  };
+
+  return (
+    <div className="mt-2 rounded-md border border-bg-border bg-bg-elev/60 p-2.5 space-y-2">
+      <p className="text-[11px] text-fg-muted">
+        Finish the address below. We need the city, state and ZIP code so your
+        application can be matched to a lender.
+      </p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_auto_auto]">
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">City</span>
+          <input
+            id={inputId ? `${inputId}-city` : undefined}
+            type="text"
+            autoComplete="address-level2"
+            value={parts.city}
+            onChange={(e) => patch({ city: e.target.value })}
+            placeholder="Algonquin"
+            className={SMALL_INPUT}
+          />
+        </label>
+        {!stateHandledElsewhere && (
+          <label className="block">
+            <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">State</span>
+            <select
+              id={inputId ? `${inputId}-state` : undefined}
+              value={parts.state}
+              onChange={(e) => patch({ state: e.target.value })}
+              className={SMALL_INPUT}
+            >
+              <option value="">--</option>
+              {US_STATE_CODES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="block">
+          <span className="mb-1 block text-[10px] uppercase tracking-wide text-fg-dim">ZIP</span>
+          <input
+            id={inputId ? `${inputId}-zip` : undefined}
+            type="text"
+            inputMode="numeric"
+            autoComplete="postal-code"
+            value={parts.zip}
+            // Digits and a single hyphen only, capped at ZIP+4 — a merchant
+            // pasting "60102, USA" must not push junk into the stored line.
+            onChange={(e) => patch({ zip: e.target.value.replace(/[^\d-]/g, "").slice(0, 10) })}
+            placeholder="60102"
+            className={SMALL_INPUT}
+          />
+        </label>
+      </div>
     </div>
   );
 }

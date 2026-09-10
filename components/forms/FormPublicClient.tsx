@@ -245,6 +245,22 @@ export function FormPublicClient({
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [currentStep, setCurrentStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
+  // Address fields whose selected suggestion is still being resolved to a full
+  // address (the ZIP arrives on a second round trip). Validating one of these
+  // NOW would reject an address that is about to be correct — the
+  // select-then-Continue race. Holding for the resolution is the fix; the
+  // component clears its flag in a `finally` and on unmount, so a hung network
+  // request cannot strand Continue disabled.
+  // A ref, not state: nothing RENDERS from this, and `submit()` reads it from
+  // inside an async wait loop where a state value captured by the closure would
+  // be permanently stale and the loop would never see the resolution land.
+  // (Holding it in state and mutating the ref inside the updater would also put
+  // a side effect somewhere React's StrictMode deliberately runs twice.)
+  const addressResolvingRef = useRef<Set<string>>(new Set());
+  const setAddressResolving = useCallback((fieldName: string, resolving: boolean) => {
+    if (resolving) addressResolvingRef.current.add(fieldName);
+    else addressResolvingRef.current.delete(fieldName);
+  }, []);
   const [done, setDone] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   // Personalized links to the next forms (interest-form completion only),
@@ -517,6 +533,16 @@ export function FormPublicClient({
   }
 
   async function submit() {
+    // HOLD FOR AN ADDRESS STILL RESOLVING. A merchant who picks a Google
+    // suggestion and clicks Continue immediately would otherwise be rejected
+    // for a ZIP that is mid-flight: Google's autocomplete label carries no
+    // postal code, and the complete address only arrives on a second Place
+    // Details round trip. Bounded so a hung provider costs a short pause and
+    // then falls through to normal validation — never an unclickable button.
+    const waitStarted = Date.now();
+    while (addressResolvingRef.current.size > 0 && Date.now() - waitStarted < 5000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
     if (!validate()) return;
     setSubmitting(true);
     setServerError(null);
@@ -910,6 +936,7 @@ export function FormPublicClient({
                 }
                 uploadToken={token}
                 ensureUploadToken={ensureUploadToken}
+                onAddressResolvingChange={setAddressResolving}
               />
               {/* THE DISCLOSURE THE EVIDENCE ATTESTS TO.
                   Rendered on the final step, immediately by the submit control,

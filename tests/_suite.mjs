@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 
 const TESTS = [
   "tests/address-autocomplete-contract.test.ts",
+  "tests/address-field-turnkey.test.ts",
   "tests/alert-decay.test.ts",
   "tests/connected-outcome.test.ts",
   "tests/pipeline-own-book-chip.test.ts",

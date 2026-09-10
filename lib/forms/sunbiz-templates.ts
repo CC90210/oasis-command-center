@@ -160,6 +160,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: true,
             placeholder: "Start typing your business address…",
+            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
           {
             name: "tax_id_ein",
@@ -283,6 +284,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: true,
             placeholder: "Start typing your home address…",
+            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
         ],
       },
@@ -319,6 +321,7 @@ export const SUNBIZ_FORM_TEMPLATES: Record<SunBizStep, SunBizFormTemplate> = {
             type: "address",
             required: false,
             placeholder: "Start typing your home address…",
+            help: "Street, city, state and ZIP — for example 911 Magnolia Dr, Algonquin, IL 60102.",
           },
         ],
       },
