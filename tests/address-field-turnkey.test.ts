@@ -243,6 +243,47 @@ const photonShape = normalizeAddressSuggestions([
 ]);
 assert.equal(photonShape[0].placeId, undefined, "Photon suggestions carry no placeId");
 
+/**
+ * OVERLAPPING SELECTIONS. A merchant who picks one suggestion, types again and
+ * picks another before the first Place Details call returns has TWO lookups in
+ * flight for one field. Without a generation counter the first to finish tells
+ * the form the field has settled while the other is still running, and either
+ * response can paint over the newer selection.
+ *
+ * This models `select()`'s generation semantics exactly. (Codex P1, 2026-09-10.)
+ */
+async function overlappingSelections() {
+  const painted: string[] = [];
+  let holds = 0;
+  let gen = 0;
+  const select = async (label: string, resolved: string, delayMs: number) => {
+    const mine = ++gen;
+    painted.push(label);
+    holds++;
+    await new Promise((r) => setTimeout(r, delayMs));
+    if (mine !== gen) return; // superseded: never paint, never release
+    painted.push(resolved);
+    holds--;
+  };
+
+  // The FIRST selection resolves slowly; the second is picked while it is in
+  // flight and resolves fast.
+  const slow = select("911 Magnolia Dr, Algonquin, IL, USA", "911 Magnolia Dr, Algonquin, IL 60102, USA", 40);
+  const fast = select("350 5th Ave, New York, NY, USA", "350 5th Ave, New York, NY 10118, USA", 5);
+  await Promise.all([slow, fast]);
+
+  assert.equal(
+    painted[painted.length - 1],
+    "350 5th Ave, New York, NY 10118, USA",
+    "the newest selection must win; a slow earlier lookup must never paint over it",
+  );
+  assert.ok(
+    !painted.includes("911 Magnolia Dr, Algonquin, IL 60102, USA"),
+    "a superseded lookup must not paint at all",
+  );
+  assert.equal(holds, 1, "the superseded lookup must not release the form's hold — only the newest may");
+}
+
 // ---------------------------------------------------------------------------
 // 3. The escape hatch: City/State/ZIP always composes to something acceptable.
 // ---------------------------------------------------------------------------
@@ -434,4 +475,10 @@ assert.equal(
   "an owner/partner home address has no dropdown and must carry its own state",
 );
 
-console.log("address-field-turnkey.test.ts: OK");
+overlappingSelections().then(
+  () => console.log("address-field-turnkey.test.ts: OK"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);

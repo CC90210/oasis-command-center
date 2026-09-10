@@ -107,6 +107,9 @@ export function AddressAutocompleteField({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blurRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** Bumped on every selection so an older, still-in-flight Place Details
+   *  lookup can neither paint a stale address nor release the form's hold. */
+  const selectGen = useRef(0);
 
   const text = typeof value === "string" ? value : "";
   const gate = useMemo(
@@ -186,6 +189,17 @@ export function AddressAutocompleteField({
   };
 
   const select = async (s: AddressSuggestion) => {
+    /**
+     * Every selection gets a generation. A merchant who picks one suggestion,
+     * types again and picks another before the first Place Details call returns
+     * has TWO lookups in flight for one field. Without this counter the first
+     * to finish would call onResolvingChange(false) — telling the form the field
+     * had settled while the other was still running — and either response could
+     * then paint over the newer selection. Only the newest generation may paint
+     * a value or release the form's hold. (Codex P1, 2026-09-10.)
+     */
+    const gen = ++selectGen.current;
+
     // Google autocomplete labels frequently omit postal codes. Paint the choice
     // immediately, then replace it with the complete Place Details address.
     onChange(s.value);
@@ -197,6 +211,10 @@ export function AddressAutocompleteField({
     // best string. If that string cannot pass the gate, open the completion row
     // rather than leaving the merchant to guess what is wrong.
     if (!s.placeId) {
+      // This selection needs no resolution, so release any hold a superseded
+      // lookup is still holding — otherwise Continue waits on a request whose
+      // answer we have already decided to discard.
+      onResolvingChange?.(false);
       if (!isAcceptableCaptureAddress(s.value, fallbackState).ok) setCompletionOpen(true);
       return;
     }
@@ -212,17 +230,20 @@ export function AddressAutocompleteField({
       } catch {
         resolved = "";
       }
-      if (!resolved) {
+      if (!resolved && gen === selectGen.current) {
         // One retry. The common failures here are a transient 429 from the
         // shared global rate-limit bucket and a cold-start timeout, both of
         // which clear immediately. Giving up on the first miss is what left
-        // merchants holding a ZIP-less label.
+        // merchants holding a ZIP-less label. Skipped once superseded — there
+        // is no point retrying a lookup whose answer we will discard.
         try {
           resolved = await fetchResolved(s.placeId);
         } catch {
           resolved = "";
         }
       }
+      // Superseded by a newer selection: never paint, never touch the hold.
+      if (gen !== selectGen.current) return;
       if (resolved) {
         onChange(resolved);
         if (!isAcceptableCaptureAddress(resolved, fallbackState).ok) setCompletionOpen(true);
@@ -232,8 +253,11 @@ export function AddressAutocompleteField({
         setCompletionOpen(true);
       }
     } finally {
-      setLoading(false);
-      onResolvingChange?.(false);
+      // Only the newest selection owns the spinner and the form's hold.
+      if (gen === selectGen.current) {
+        setLoading(false);
+        onResolvingChange?.(false);
+      }
     }
   };
 
