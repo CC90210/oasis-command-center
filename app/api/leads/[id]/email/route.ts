@@ -497,11 +497,33 @@ export async function POST(
     // behaviour before the credential is stored is byte-for-byte what shipped
     // today. Nothing to roll back if it is never set.
     if (brand === "oasis") {
+      // ONE PERSON SIGNS THE MESSAGE, AND IT IS WHOEVER GETS THE REPLY.
+      //
+      // The sign-off used to take its NAME from whoever pressed the button and
+      // its ADDRESS from the lead's owner — two different people. CC pressed
+      // send on a lead of Ariel's and the prospect received "Conaugh" printed
+      // above "ariel@oasisai.work" (CC, 2026-09-09: "signing off as my name,
+      // and under that, it's the rep's email, which is just a bit confusing").
+      //
+      // The reply-to address is the right anchor for both. It is the person
+      // who owns the relationship and who the prospect will actually reach, so
+      // naming anyone else above it is a promise the message cannot keep. It
+      // also keeps CC's personal name off mail he merely dispatched: the
+      // shared mailbox carries it, the rep signs it.
+      //
+      // Falls back to the acting operator only when there is no reply-to at
+      // all — an unassigned lead — because a signature is still better than an
+      // anonymous one.
+      const replyToAddress = pickReplyTo(copyList);
+      const messageSigner = replyToAddress
+        ? resolveSignerForOperator(replyToAddress, { brand })
+        : signer;
+
       const shared = await sendOasisSharedGmail({
         tenantId: sess.tenantId,
         to: toEmail,
         cc: copyList,
-        replyTo: pickReplyTo(copyList),
+        replyTo: replyToAddress,
         subject: truncatedSubject,
         body: truncatedBody,
         // THE HTML IS A RENDERING OF `body`, NEVER A SECOND COMPOSITION.
@@ -523,11 +545,14 @@ export async function POST(
         // body that carried markup would render differently on each transport,
         // and correctly on none.
         html: renderQuickEmailHtml(truncatedBody, {
-          signerName: signer?.name ?? null,
-          signerEmail: pickReplyTo(copyList),
+          // Both halves from the SAME person — see messageSigner above.
+          signerName: messageSigner?.name ?? null,
+          signerEmail: replyToAddress,
           preheader: truncatedSubject,
         }),
-        signer,
+        // ...and the plain-text alternative signs identically. A prospect whose
+        // client blocks HTML must not see a different name from one who does.
+        signer: messageSigner,
       });
       if (shared.ok) {
         // RECORD THE RECEIPT. Two reasons, and the first one already cost us a
