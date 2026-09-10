@@ -193,6 +193,11 @@ export function AddressAutocompleteField({
   const supersedePendingResolution = () => {
     selectGen.current++;
     onResolvingChange?.(false);
+    // The superseded lookup's `finally` deliberately skips setLoading(false) —
+    // it no longer owns the spinner. If nobody clears it here the field shows a
+    // permanent "…" that never goes away, on a request whose answer we have
+    // already discarded. (Codex P2, 2026-09-10.)
+    setLoading(false);
   };
 
   const handleInput = (v: string) => {

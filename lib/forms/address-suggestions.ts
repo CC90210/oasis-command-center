@@ -67,14 +67,28 @@ export type PhotonProperties = {
  * Lives here, not in the route, so the test suite pins the real implementation
  * rather than a copy of it.
  */
-/** Street-type words, directionals and articles — never distinctive enough to
- *  identify WHICH street the merchant meant. */
-const GENERIC_STREET_WORDS = new Set([
-  "n", "s", "e", "w", "ne", "nw", "se", "sw",
-  "north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest",
+/**
+ * Street-TYPE words. These END the street name: everything after one is
+ * locality ("… St Washington DC"), not part of the street.
+ *
+ * The distinction matters. Treating them as merely "skippable" let token
+ * extraction run past the street and into the city, so "1 E St Washington DC"
+ * chose "washington" as the word that must appear in the street — and then
+ * discarded Photon's exact answer, whose street is "E Street". Streets whose
+ * name is entirely stopwords ("E St", "The Green") are common enough that this
+ * has to be right. (Codex P2, 2026-09-10.)
+ */
+const STREET_SUFFIXES = new Set([
   "st", "street", "ave", "avenue", "dr", "drive", "rd", "road", "blvd", "boulevard",
   "ln", "lane", "ct", "court", "pl", "place", "way", "ter", "terrace", "cir", "circle",
   "pkwy", "parkway", "hwy", "highway", "trl", "trail", "loop", "sq", "square", "run",
+]);
+
+/** Directionals and articles — inside the street name, but never distinctive
+ *  enough on their own to identify WHICH street the merchant meant. */
+const NON_DISTINCTIVE_WORDS = new Set([
+  "n", "s", "e", "w", "ne", "nw", "se", "sw",
+  "north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest",
   "the", "of", "and", "po", "box",
 ]);
 
@@ -109,8 +123,12 @@ function primaryStreetToken(query: string, houseNumberEndIndex = 0): string {
     .split(/\s+/)
     .filter(Boolean);
   for (const t of tokens) {
+    // Past the street type we are into the city/state; nothing here belongs in
+    // a street-name test. Give up rather than demand a locality word appear in
+    // the street — "1 E St Washington DC" must not require "washington".
+    if (STREET_SUFFIXES.has(t)) return "";
     if (t.length < 2) continue;
-    if (GENERIC_STREET_WORDS.has(t)) continue;
+    if (NON_DISTINCTIVE_WORDS.has(t)) continue;
     return t;
   }
   return "";

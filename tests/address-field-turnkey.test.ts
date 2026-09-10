@@ -184,6 +184,23 @@ assert.deepEqual(
     );
   }
 
+  /**
+   * A STREET WHOSE NAME IS ENTIRELY STOPWORDS. "1 E St Washington DC" is a real
+   * address. Token extraction must stop at the street TYPE ("St") rather than
+   * running on into the city and then demanding "washington" appear in a street
+   * called "E Street" — which discarded the one exact answer Photon had.
+   * (Codex P2, 2026-09-10.)
+   */
+  assert.deepEqual(
+    photonFeaturesToSuggestions(
+      [{ properties: { countrycode: "US", housenumber: "1", street: "E Street", city: "Washington", state: "District of Columbia", postcode: "20001" } }],
+      8,
+      "1 E St Washington DC",
+    ).map((s) => s.value),
+    ["1 E Street, Washington, District of Columbia, 20001"],
+    "a street named only with stopwords must still resolve",
+  );
+
   // A query with no distinctive token at all must not filter everything away.
   assert.equal(
     photonFeaturesToSuggestions(
