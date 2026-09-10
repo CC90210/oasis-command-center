@@ -565,8 +565,30 @@ function AddressCompletion({
       // exact trailing word themselves.
       line1: stripTrailingCity(baseLine1.current, merged.city),
       city: merged.city,
+      // Whatever state the ADDRESS ITSELF already carried, preserved — and
       // DELIBERATELY NOT the business_state dropdown value, even though the
       // picker below is hidden when that dropdown exists.
+      //
+      // The distinction is the whole rule, and it cuts both ways:
+      //
+      //   INJECTING the dropdown's code manufactures a contradiction out of
+      //   nothing, and is the bug that was removed above.
+      //
+      //   BLANKING a state the address already had would be the same mistake
+      //   pointing the other way. When a merchant's address reads "…, Algonquin,
+      //   IL" and the dropdown says NY, dropping the IL lets mergeStateIntoAddress
+      //   fill NY and print "Algonquin, NY 60102" — an address that does not
+      //   exist. us-address.ts settled this on production evidence: 28 records
+      //   had a dropdown contradicting the address, and the DROPDOWN was the
+      //   wrong one. "The address the merchant actually typed is the better
+      //   evidence of where they are, so it wins; the dropdown only ever FILLS
+      //   a gap, never overrides."
+      //
+      // `draft.state` can only ever come from parsing `value`, because the
+      // picker that would set it is hidden in exactly this case. So this line
+      // preserves; it cannot introduce. (Codex raised blanking it as a P1 on
+      // 2026-09-10; declined, and pinned by a test, because the remedy would
+      // print addresses that do not exist.)
       //
       // Copying it in here looks harmless and creates contradictory data: the
       // merchant changes the dropdown afterwards, the stale code stays baked

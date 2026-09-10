@@ -669,6 +669,41 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
 }
 
 /**
+ * THE OTHER HALF OF THAT RULE, and a deliberate DISAGREEMENT with the reviewer.
+ *
+ * Codex raised it as a P1 (2026-09-10) that when the picker is hidden and the
+ * address already contains a state, the row recomposes that state — so a
+ * "…, Algonquin, IL" address can persist against a business_state of NY. The
+ * proposed remedy was to blank the state whenever the external field owns it.
+ *
+ * Declined, because that is the same mistake pointing the other way. Blanking
+ * lets mergeStateIntoAddress fill NY and print "Algonquin, NY 60102" — an
+ * address that does not exist. lib/address/us-address.ts settled this on
+ * production evidence: of the records where the dropdown contradicted the
+ * address, the DROPDOWN was the wrong one, so "the address the merchant
+ * actually typed is the better evidence of where they are… the dropdown only
+ * ever FILLS a gap, never overrides."
+ *
+ * The line that matters is INJECT vs PRESERVE. Injecting the dropdown's code
+ * manufactures a contradiction from nothing and was removed. Preserving what
+ * the address already said cannot introduce one: `draft.state` can only come
+ * from parsing the value, because the picker that would set it is hidden in
+ * exactly this case.
+ */
+{
+  const row = makeCompletionRow("911 Magnolia Dr, Algonquin, IL", "NY");
+  row.patch({ zip: "60102" });
+  assert.match(row.value, /\bIL\b/, "a state the ADDRESS carried must survive being completed");
+  assert.ok(!/\bNY\b/.test(row.value), "the dropdown must not overwrite it");
+  // And the merged, printed address keeps IL rather than inventing Algonquin, NY.
+  assert.match(
+    composeUsAddress(splitUsAddress(row.value)),
+    /Algonquin, IL 60102/,
+    "blanking the state here would print an address that does not exist",
+  );
+}
+
+/**
  * THE ROW MUST NEVER RESTORE AN ADDRESS THE MERCHANT REPLACED.
  *
  * Anchoring line1 once is what makes the boxes typeable. Anchoring it forever
