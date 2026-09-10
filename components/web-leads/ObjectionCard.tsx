@@ -136,6 +136,13 @@ export function ObjectionCard({
     };
   }, []);
 
+  // The answer-sync machinery, declared here because logTap below reads it.
+  // Refs and not state on purpose, and what each one is for, is explained at
+  // drainAnswerSync / syncAnswerToEvent further down.
+  const eventIdRef = useRef<string | null>(existingEvent?.id ?? null);
+  const desiredAnswerRef = useRef<{ answerId: string; standard: boolean } | null>(null);
+  const syncingRef = useRef(false);
+
   const activeAnswer = answers.find((a) => a.id === activeAnswerId) ?? null;
   const displayedBody = activeAnswer
     ? showStandard && activeAnswer.libraryBody
@@ -151,6 +158,12 @@ export function ObjectionCard({
     if (!canMutate || (logged && !failed)) return;
     setLogged(true);
     setFailed(false);
+    // This POST carries the CURRENT selection in its own body, so any intent
+    // recorded before now is satisfied by the insert and must not also be
+    // PATCHed afterwards. Anything the rep selects from here on re-populates
+    // the ref while the request is in flight, and the drain below sends it --
+    // that window is the P2 race.
+    desiredAnswerRef.current = null;
     try {
       const r = await fetch(`/api/web-leads/${encodeURIComponent(leadId)}/objections`, {
         method: "POST",
@@ -180,7 +193,14 @@ export function ObjectionCard({
         return;
       }
       setEventId(body.event.id as string);
+      // The ref, not the state, is what drainAnswerSync reads: setEventId is
+      // asynchronous and the drain happens on this line.
+      eventIdRef.current = body.event.id as string;
       if (body.event?.resolution) setResolution(body.event.resolution as ObjectionResolution);
+      // P2: if the rep changed posture while this POST was in flight, the event
+      // now exists and that selection has to land. No-ops when nothing changed,
+      // because logTap cleared the ref before sending.
+      void drainAnswerSync();
     } catch {
       if (!aliveRef.current) return;
       setLogged(false);
@@ -211,22 +231,85 @@ export function ObjectionCard({
    * not leave a false one on screen. This is a reading preference, and yanking
    * the script out from under a rep mid-sentence to report a background write
    * failure is a worse outcome than one event carrying the previous answer id.
-   * The next posture tap re-sends.
+   * The next posture tap re-sends. It DOES log, though: a systematically
+   * failing sync had no signal anywhere before (Codex audit).
+   *
+   * ═══ IT SURVIVES THE POST RACE, AND IT IS ORDERED ══════════════════════════
+   *
+   * Codex audit, P2. The first version gave up when `eventId` was still null,
+   * which is precisely the window where this matters: a rep taps "They said
+   * this" and scans for a better line while the POST is in flight, so the
+   * selection they actually read was dropped and the row stayed attributed to
+   * the default answer. That is the bug BLOCKING 4 existed to fix, surviving
+   * inside its most likely case.
+   *
+   * So the INTENT is recorded in a ref instead of fired directly, and drained
+   * whenever an event id exists -- including once logTap receives one. Two
+   * properties fall out of the drain loop, both load-bearing:
+   *
+   *   * LAST WRITE WINS. `desiredAnswerRef` holds one value, the newest. A
+   *     selection made while a PATCH is in flight replaces any older pending
+   *     one rather than queueing behind it, so a burst of posture taps costs
+   *     one or two requests and the final state is the rep's final choice.
+   *   * PATCHES ARE SEQUENCED. `syncingRef` means only one of these requests
+   *     is ever outstanding; the next is sent after the previous resolves. The
+   *     re-review noted concurrent PATCHes here were unsequenced, which on a
+   *     flaky tether could land an older selection last and record the wrong
+   *     posture -- exactly the corruption this whole function exists to
+   *     prevent.
+   *
+   * Refs, not state, on purpose: this has to be correct inside an async
+   * handler's closure, and a re-render is neither needed nor wanted for it.
    */
+  async function drainAnswerSync() {
+    if (syncingRef.current) return; // the in-flight drain picks up the newest value
+    const id = eventIdRef.current;
+    if (!canMutate || !id) return; // no event yet: logTap re-drains once there is one
+    syncingRef.current = true;
+    try {
+      while (desiredAnswerRef.current) {
+        const next = desiredAnswerRef.current;
+        desiredAnswerRef.current = null;
+        const answer = answers.find((a) => a.id === next.answerId);
+        if (!answer) continue;
+        try {
+          const r = await fetch(
+            `/api/web-leads/${encodeURIComponent(leadId)}/objections/${encodeURIComponent(id)}`,
+            {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                responseId: answer.id,
+                // Same rule as the POST above: whether the rep is READING the
+                // tailored variant right now, not whether one exists.
+                usedVariant: Boolean(answer.libraryBody) && !next.standard,
+              }),
+            },
+          );
+          if (!r.ok) {
+            console.error("[objections] answer sync rejected", { leadId, eventId: id, status: r.status });
+          }
+        } catch (err) {
+          // Logged, never surfaced: see the docblock on why a failed sync must
+          // not disturb what the rep is reading. Without this line a
+          // systematically failing sync was invisible everywhere.
+          console.error("[objections] answer sync failed", {
+            leadId,
+            eventId: id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } finally {
+      syncingRef.current = false;
+    }
+  }
+
+  /** Record what the rep is now reading, and send it when there is an event. */
   function syncAnswerToEvent(answer: ObjectionAnswer | null, standard: boolean) {
-    if (!canMutate || !eventId || !answer) return;
-    void fetch(`/api/web-leads/${encodeURIComponent(leadId)}/objections/${encodeURIComponent(eventId)}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        responseId: answer.id,
-        // Same rule as the POST above: whether the rep is READING the tailored
-        // variant right now, not whether one exists.
-        usedVariant: Boolean(answer.libraryBody) && !standard,
-      }),
-    }).catch(() => {
-      /* see the docblock: a failed sync must not disturb what the rep is reading */
-    });
+    if (!canMutate || !answer) return;
+    desiredAnswerRef.current = { answerId: answer.id, standard };
+    void drainAnswerSync();
   }
 
   async function setResolutionTap(next: ObjectionResolution) {

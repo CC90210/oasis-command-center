@@ -193,6 +193,97 @@ assert.match(
     /\{ eventId, leadRecordId: id \}/,
     `${EVENT_ROUTE} must pass the lead from its OWN url as the patch scope`,
   );
+
+  // CODEX AUDIT P1. The PATCH wrote `response_id` with no check that the
+  // response is approved or that it belongs to the event's OWN objection --
+  // the validation the sibling POST does and that was never carried across
+  // when BLOCKING 5 made this branch reachable from a client. response_id is
+  // the column Phase 3 reads to answer "which way of answering recovers the
+  // deal", so a wrong pairing is a silently wrong answer to the question the
+  // feature exists for.
+  assert.match(
+    patchCode,
+    /\.from\("objection_response"\)[\s\S]{0,400}?\.eq\("status", "approved"\)/,
+    `${EVENTS} patch must prove the response is APPROVED before recording it as the one a rep used`,
+  );
+  assert.match(
+    patchCode,
+    /\.eq\("objection_id", responseObjectionId\)/,
+    `${EVENTS} patch must constrain the UPDATE to the response's OWN objection -- otherwise a stale client can attach another objection's response to this event`,
+  );
+  // On the write statement, not a read-then-write: the pairing filter must sit
+  // after `.update(patch)` and before the statement is awaited, i.e. on the
+  // same chain as the tenant and lead pins. (Written against the stripped
+  // source, so this cannot be satisfied by a comment, and with both operands
+  // asserted present first -- a pair of indexOf calls where one side is -1
+  // compares fine and proves nothing.)
+  const updateAt = patchCode.indexOf(".update(patch)");
+  const pairingAt = patchCode.indexOf('.eq("objection_id", responseObjectionId)');
+  const awaitAt = patchCode.indexOf("await q.select(EVENT_COLUMNS)");
+  assert.ok(updateAt > 0 && pairingAt > 0 && awaitAt > 0, `${EVENTS} patch must still build one UPDATE chain that is then awaited`);
+  assert.ok(
+    updateAt < pairingAt && pairingAt < awaitAt,
+    `${EVENTS} patch's pairing constraint must ride on the UPDATE chain, not a prior read`,
+  );
+  assert.match(
+    eventRoute,
+    /err\.code === "unknown_response"[\s\S]{0,40}?400/,
+    `${EVENT_ROUTE} must answer 400 for an unapproved response id, the same as the sibling POST`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. CODEX AUDIT P2. The client's answer sync must survive the POST race and
+// must be ordered. Recording the intent in a ref and draining it is what makes
+// a posture selected WHILE the tap is in flight still land -- the first
+// version gave up when eventId was null, which is exactly the window where a
+// rep taps then scans for a better line.
+// ---------------------------------------------------------------------------
+{
+  const card = stripComments(read(CARD));
+  assert.match(
+    card,
+    /desiredAnswerRef\.current = \{ answerId: answer\.id, standard \}/,
+    `${CARD} must RECORD the rep's selection rather than firing it directly, or it is lost whenever eventId is not ready`,
+  );
+  assert.match(
+    card,
+    /eventIdRef\.current = body\.event\.id as string/,
+    `${CARD} must capture the new event id in a ref -- setEventId is asynchronous and the drain happens immediately`,
+  );
+  assert.match(
+    card,
+    /if \(body\.event\?\.resolution\)[\s\S]{0,200}?void drainAnswerSync\(\)/,
+    `${CARD} must drain the pending selection once the POST returns an event id -- this is the P2 race`,
+  );
+  assert.match(
+    card,
+    /desiredAnswerRef\.current = null;\s*\n\s*try \{/,
+    `${CARD}'s logTap must clear the pending intent it is about to send in its own body, so the drain afterwards is a no-op when nothing changed`,
+  );
+  // Sequenced, so a flaky tether cannot land an older selection last.
+  assert.match(
+    card,
+    /if \(syncingRef\.current\) return;/,
+    `${CARD} must keep at most one answer PATCH outstanding -- unsequenced PATCHes can record the wrong posture`,
+  );
+  assert.match(
+    card,
+    /while \(desiredAnswerRef\.current\) \{/,
+    `${CARD} must drain in a loop so the newest selection wins rather than queueing behind older ones`,
+  );
+  // A systematically failing sync had no signal anywhere.
+  assert.match(
+    card,
+    /console\.error\("\[objections\] answer sync/,
+    `${CARD} must log a failed answer sync -- a bare catch makes a systematically broken sync invisible`,
+  );
+  // But it still must not disturb what the rep is reading.
+  assert.doesNotMatch(
+    card,
+    /setActiveAnswerId\(prev|setShowStandard\(prev/,
+    `${CARD} must NOT revert the rep's on-screen answer when a sync fails -- that reasoning is deliberate`,
+  );
 }
 
 // ---------------------------------------------------------------------------

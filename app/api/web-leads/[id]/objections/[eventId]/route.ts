@@ -99,6 +99,12 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     if (typeof body.responseId !== "string" || !body.responseId.trim()) {
       return NextResponse.json({ ok: false, error: "invalid_response_id" }, { status: 400 });
     }
+    // SHAPE ONLY. Whether this response is APPROVED and whether it belongs to
+    // this event's own objection is proved inside patchObjectionEvent, on the
+    // same statement as the write -- see its docblock. A check here would be a
+    // check a concurrent request can slip past, and this route has no cheap way
+    // to know the event's objection_id without the read-then-write it
+    // deliberately avoids.
     patch.responseId = body.responseId.trim();
   }
   if (body.usedVariant !== undefined) patch.usedVariant = body.usedVariant === true;
@@ -118,7 +124,16 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ ok: true, event });
   } catch (err) {
     if (err instanceof ObjectionEventError) {
-      const status = err.code === "not_found" ? 404 : err.code === "empty_patch" ? 400 : 500;
+      // `unknown_response` is a 400, the same answer the sibling route's POST
+      // gives for the same condition: the caller named a response that is not
+      // an approved answer. A wrong response/objection PAIRING is not this
+      // case -- it falls out of the UPDATE as not_found (404), so a response id
+      // belonging to another objection cannot be distinguished from one that
+      // does not exist. (Codex audit, P1.)
+      const status =
+        err.code === "not_found" ? 404
+          : err.code === "empty_patch" || err.code === "unknown_response" ? 400
+            : 500;
       return NextResponse.json({ ok: false, error: err.code }, { status });
     }
     console.error("[web-leads.objections] patch failed", {

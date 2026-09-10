@@ -192,7 +192,59 @@ export async function patchObjectionEvent(args: {
     throw new ObjectionEventError("empty_patch", "nothing to update");
   }
 
-  const { data, error } = await db
+  /**
+   * THE RESPONSE MUST BE APPROVED AND MUST BELONG TO THIS EVENT'S OBJECTION.
+   *
+   * Codex audit, P1. The POST path in app/api/web-leads/[id]/objections/route.ts
+   * resolves the objection from the approved catalog and confirms the supplied
+   * responseId is one of THAT objection's answers before writing. That check was
+   * never carried across to here, and the BLOCKING-5 fix made this branch
+   * reachable from a client for the first time -- so a stale or malformed client
+   * could attach another objection's response, or a draft response, to an event.
+   * response_id is the column the four-posture model exists to populate and the
+   * one Phase 3 reads to answer "which way of answering recovers the deal", so a
+   * wrong pairing there is not a cosmetic defect: it is a silently wrong answer
+   * to the question the feature was built for.
+   *
+   * ENFORCED ON THE WRITE STATEMENT, not by a read-then-write. One read resolves
+   * which objection the response belongs to and proves it is approved; that
+   * objection id then becomes a filter on the UPDATE itself, so an event whose
+   * objection_id differs simply matches NO ROW and falls out as the existing
+   * not_found. Same reason the tenant and lead pins live on the statement: a
+   * pairing checked before a separate write is a pairing a concurrent request
+   * can slip past.
+   *
+   * Only when a response id is actually being SET. `null` clears the column and
+   * has no pairing to verify.
+   */
+  let responseObjectionId: string | null = null;
+  if (typeof args.responseId === "string" && args.responseId.trim()) {
+    const responseId = safeFilterValue(args.responseId.trim());
+    if (!responseId) {
+      throw new ObjectionEventError("unknown_response", "response id is not a usable identifier");
+    }
+    const resp = await db
+      .from("objection_response")
+      .select("objection_id")
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("id", responseId)
+      // A DRAFT or RETIRED answer must never be recorded as the one a rep used.
+      // Same approval rule the console read enforces, applied to the write.
+      .eq("status", "approved")
+      .maybeSingle();
+    if (resp.error) {
+      throw new ObjectionEventError("objection_response_read_failed", resp.error.message);
+    }
+    if (!resp.data) {
+      throw new ObjectionEventError("unknown_response", "no such approved response for this tenant");
+    }
+    responseObjectionId = safeFilterValue(String((resp.data as { objection_id: string }).objection_id));
+    if (!responseObjectionId) {
+      throw new ObjectionEventError("unknown_response", "response is not attached to a usable objection");
+    }
+  }
+
+  let q = db
     .from("objection_event")
     .update(patch)
     // The tenant pin is on the UPDATE itself, not on a prior read. A check
@@ -203,14 +255,19 @@ export async function patchObjectionEvent(args: {
     // tenant pin does: an event that belongs to another lead must be
     // untouchable, not merely un-fetched by a prior read.
     .eq("lead_record_id", leadRecordId)
-    .eq("id", args.eventId)
-    .select(EVENT_COLUMNS)
-    .maybeSingle();
+    .eq("id", args.eventId);
+
+  // The pairing constraint, on the same statement as the write (see above).
+  if (responseObjectionId !== null) q = q.eq("objection_id", responseObjectionId);
+
+  const { data, error } = await q.select(EVENT_COLUMNS).maybeSingle();
 
   if (error) throw new ObjectionEventError("objection_event_patch_failed", error.message);
   // Deliberately the same message whether the event does not exist, belongs to
-  // another tenant, or belongs to another lead: the route answers 404 either
-  // way, so an event id stays unprobeable.
+  // another tenant, belongs to another lead, or belongs to a DIFFERENT
+  // OBJECTION than the response being attached: the route answers 404 for all
+  // four, so neither an event id nor a response id is probeable through this
+  // endpoint.
   if (!data) throw new ObjectionEventError("not_found", "no such event for this lead");
   return toRecord(data as never);
 }
