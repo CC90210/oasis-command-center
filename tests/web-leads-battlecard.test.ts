@@ -1219,6 +1219,12 @@ const MODEL_CODES = [
   // close THAT specific hole (a decoy plus a second real slice can no longer
   // both satisfy "exactly one `.slice(` in the file" and "no literal-numeric
   // slice bound anywhere in it") -- they do not make this a behavioural test.
+  // Nor do they constrain truncation in general: all three checks above match
+  // only on the literal text `.slice(`, so a fixed-length cutoff written with
+  // a different mechanism -- `.filter((_, i) => i < 3)`, `.splice(0, 3)`, a
+  // manual for-loop with a break, `Array.from({length: 3})`, and so on --
+  // passes every one of them untouched. This file only ever pins `.slice(`;
+  // it does not and cannot pin truncation as a class.
   // Proving the render is actually unsliced needs a rendering harness this
   // repo's test convention does not use; do not add one to strengthen this
   // further without that conversation happening first.
