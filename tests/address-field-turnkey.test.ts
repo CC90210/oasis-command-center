@@ -156,6 +156,34 @@ assert.deepEqual(
     "1000 Main is not 100 Main",
   );
 
+  /**
+   * COMPOUND HOUSE NUMBERS. "12A Main St" and the Queens-style "123-45 Main St"
+   * are both real and common. A bare \d+ reads "12A" as having no house number
+   * (no word boundary between "2" and "A") and truncates "123-45" to "123",
+   * after which the exact comparison rejects the CORRECT feature and the
+   * leftover "45" is mistaken for the distinctive street word — leaving the
+   * merchant with an empty dropdown for an address we can actually resolve.
+   * (Codex P2, 2026-09-10.)
+   */
+  for (const [q, hn] of [
+    ["12A Main St Brooklyn", "12A"],
+    ["123-45 Main St Flushing", "123-45"],
+    ["12a Main St Brooklyn", "12A"], // merchant lowercases; OSM stores uppercase
+  ] as const) {
+    assert.deepEqual(
+      photonFeaturesToSuggestions(
+        [
+          { properties: { countrycode: "US", housenumber: hn, street: "Main Street", city: "New York", state: "New York", postcode: "11354" } },
+          { properties: { countrycode: "US", housenumber: "45", street: "Main Street", city: "New York", state: "New York", postcode: "11354" } },
+        ],
+        8,
+        q,
+      ).map((s) => s.value),
+      [`${hn} Main Street, New York, New York, 11354`],
+      `"${q}" must resolve to house number ${hn}, and not to a different building`,
+    );
+  }
+
   // A query with no distinctive token at all must not filter everything away.
   assert.equal(
     photonFeaturesToSuggestions(

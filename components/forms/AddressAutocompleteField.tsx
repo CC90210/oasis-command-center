@@ -177,6 +177,15 @@ export function AddressAutocompleteField({
   };
 
   const handleInput = (v: string) => {
+    // TYPING SUPERSEDES A SELECTION, exactly as picking another suggestion does.
+    // Without this, a merchant who selects a Google suggestion and then corrects
+    // the box by hand still has that lookup in flight; it considers itself
+    // current, lands a moment later, and overwrites the address they
+    // deliberately replaced — which then gets submitted. Bump the generation so
+    // the old lookup discards itself, and release the form's hold, since nothing
+    // is being resolved for what they are now typing. (Codex P1, 2026-09-10.)
+    selectGen.current++;
+    onResolvingChange?.(false);
     onChange(v);
     runSearch(v);
   };

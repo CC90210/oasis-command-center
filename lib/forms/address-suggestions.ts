@@ -79,20 +79,36 @@ const GENERIC_STREET_WORDS = new Set([
 ]);
 
 /**
+ * The WHOLE leading house-number token, not just its digits.
+ *
+ * US house numbers are not always plain integers: "12A Main St" and the
+ * Queens-style hyphenated "123-45 Main St" are both real and both common. A
+ * bare `\d+` reads "12A" as no house number at all (there is no word boundary
+ * between "2" and "A") and reduces "123-45" to "123" — after which the exact
+ * comparison below rejects Photon's correct feature, and the leftover "45" gets
+ * treated as the distinctive street word. The fallback then returns nothing for
+ * an address it can actually resolve. (Codex P2, 2026-09-10.)
+ */
+function leadingHouseNumber(query: string): { value: string; endIndex: number } {
+  const m = /^\s*([0-9][0-9A-Za-z]*(?:[-/][0-9A-Za-z]+)*)(?=\s|$)/.exec(query);
+  return m ? { value: m[1], endIndex: m.index + m[0].length } : { value: "", endIndex: 0 };
+}
+
+/**
  * The most distinctive word of the street the merchant typed — "snow" from
  * "7930 Snow View Drive", "magnolia" from "911 Magnolia Dr Algonquin". Returns
- * "" when the query carries nothing distinctive enough to match on.
+ * "" when the query carries nothing distinctive enough to match on, in which
+ * case the caller simply does not apply the street test.
  */
-function primaryStreetToken(query: string): string {
+function primaryStreetToken(query: string, houseNumberEndIndex = 0): string {
   const tokens = query
+    // Skip the house number outright; it is matched separately and exactly.
+    .slice(houseNumberEndIndex)
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter(Boolean);
-  // Drop a leading house number; it is matched separately and exactly.
-  const start = tokens.length && /^\d+$/.test(tokens[0]) ? 1 : 0;
-  for (let i = start; i < tokens.length; i++) {
-    const t = tokens[i];
+  for (const t of tokens) {
     if (t.length < 2) continue;
     if (GENERIC_STREET_WORDS.has(t)) continue;
     return t;
@@ -107,8 +123,9 @@ export function photonFeaturesToSuggestions(
 ): AddressSuggestion[] {
   const q = (query || "").trim();
   // The house number the merchant actually typed, if they typed one.
-  const wantedNumber = q.match(/^\s*(\d+)\b/)?.[1] || "";
-  const wantedToken = q ? primaryStreetToken(q) : "";
+  const house = leadingHouseNumber(q);
+  const wantedNumber = house.value.toLowerCase();
+  const wantedToken = q ? primaryStreetToken(q, house.endIndex) : "";
 
   const seen = new Set<string>();
   const out: AddressSuggestion[] = [];
@@ -128,7 +145,8 @@ export function photonFeaturesToSuggestions(
     // scanning the list picks one and a lender receives an address they do not
     // occupy. That is the same silent substitution as the dropped house number,
     // just harder to spot, so it is refused the same way. (Codex P1, 2026-09-10.)
-    if (wantedNumber && housenumber !== wantedNumber) continue;
+    // Case-insensitive: a merchant types "12a", OSM stores "12A".
+    if (wantedNumber && housenumber.toLowerCase() !== wantedNumber) continue;
     if (wantedToken && !street.toLowerCase().includes(wantedToken)) continue;
     const postcode = (p.postcode || "").trim();
     if (!/^\d{5}(?:-\d{4})?$/.test(postcode)) continue;
