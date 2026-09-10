@@ -504,7 +504,12 @@ function makeCompletionRow(typed: string, fallbackState?: string) {
   /** The row's re-seed effect: an edit from ANYWHERE ELSE re-anchors it. */
   const externalChange = (next: string) => {
     composed = next;
-    if (lastComposed === next) return;
+    // Consume the self-write marker, never leave it standing — see the
+    // restoration test below.
+    if (lastComposed === next) {
+      lastComposed = null;
+      return;
+    }
     const s = seedCompletion(next);
     line1 = s.line1;
     draft.city = s.city;
@@ -730,6 +735,30 @@ function typeCityCharByChar(typed: string, city: string, fallbackState?: string)
     !row.value.includes("Snow View"),
     "the replaced street must not come back from the row's frozen state",
   );
+}
+
+/**
+ * RESTORING AN EARLIER ADDRESS MUST RE-SEED THE ROW.
+ *
+ * The self-write marker exists so the row ignores its own composition. Left
+ * standing after it is consumed, it misreads a later RESTORATION of that same
+ * string as ours: compose A, edit the main box to B, undo back to A — and the
+ * row is still seeded from B, so the next City or ZIP keystroke silently
+ * recomposes B and submits an address the merchant had replaced. Silent
+ * substitution again, three moves deep. (Codex P2, 2026-09-10.)
+ */
+{
+  const row = makeCompletionRow("911 Magnolia Dr");
+  const composedA = row.patch({ city: "Algonquin" }); // our own write: "911 Magnolia Dr, Algonquin"
+  row.externalChange(composedA); // the form echoes it back — ours, ignore
+  row.externalChange("7930 Snow View Drive"); // merchant retypes: address B
+  row.externalChange(composedA); // …then restores A
+  row.patch({ zip: "60102" });
+  assert.ok(
+    row.value.startsWith("911 Magnolia Dr"),
+    `a restored address must be re-seeded, not silently replaced by the previous one (got "${row.value}")`,
+  );
+  assert.ok(!row.value.includes("Snow View"), "address B must not come back");
 }
 
 // The same, via a suggestion selected after the row opened.

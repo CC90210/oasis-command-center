@@ -545,7 +545,17 @@ function AddressCompletion({
    */
   const lastComposed = useRef<string | null>(null);
   useEffect(() => {
-    if (lastComposed.current === value) return;
+    if (lastComposed.current === value) {
+      // Our own write, acknowledged — the draft already matches it. CONSUME the
+      // marker rather than leaving it standing: a marker that outlives its write
+      // misreads a later RESTORATION of the same string as ours. Compose A here,
+      // edit the main input to B, then undo back to A, and a stale marker would
+      // leave baseLine1/draft seeded from B — so the next City or ZIP keystroke
+      // silently recomposes B and submits an address the merchant had replaced.
+      // (Codex P2, 2026-09-10.)
+      lastComposed.current = null;
+      return;
+    }
     const s = seedCompletion(value);
     baseLine1.current = s.line1;
     setDraft({ city: s.city, state: s.state, zip: s.zip });
