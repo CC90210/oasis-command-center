@@ -339,6 +339,14 @@ const TESTS = [
   // badge to the literal confirmed state and proves the evidence sentence
   // renders -- see lib/web-leads/data.ts's owner_verification_state mapping.
   "tests/web-leads-owner-verification.test.ts",
+  // The boundary between OASIS and SunBiz (2026-09-11): SunBiz's TextTorrent
+  // bridge credential is pinned to SunBiz rows, row-less slugs belong to their
+  // owners, a declared cron executor cannot be paired into another tenant,
+  // and the Kixie scan reads and alerts per tenant.
+  "tests/pg-bridge-tenant-pin.test.ts",
+  "tests/manifest-slug-claim-guard.test.ts",
+  "tests/bridge-executor-pairing.test.ts",
+  "tests/kixie-compliance-tenant-lanes.test.ts",
   "lib/__tests__/turso-postgrest.test.mjs",
 ];
 
