@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { isExpectedExecutor } from "@/lib/automations/expected-executor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,28 +44,11 @@ function checkPollRateLimit(req: NextRequest): NextResponse | null {
   return null;
 }
 
-// One EXPECTED EXECUTOR per tenant. Cron jobs are machine-affine — the scripts
-// live in repos that exist on exactly one machine — but ANY paired machine
-// could pull the list and, worse, REPORT results. Three incidents in one week
-// came through that gap: a stale-code Mac stamped "unresolvable root" over
-// healthy Atlas rows, and the VPS spent 11 days paired to the wrong tenant.
-// Revocation cannot close it: the Mac holds an operator session and re-pairs
-// itself within the hour (three times on 2026-08-22, same machine
-// fingerprint). So the gate lives here, on the job pipe itself: an unexpected
-// executor receives an EMPTY job list and its result reports are refused.
-// Pairing stays open for ping/health; the cron pipe is exclusive.
-// Mirrors cron_health_check.EXPECTED_PAIRINGS in the harness — change both.
-const EXPECTED_EXECUTOR_BY_TENANT_PREFIX: Record<string, string> = {
-  ef8d389e: "CCPC (Windows)", // OASIS — CC's PC
-  aa04fa1f: "srv1723601 (Linux)", // SunBiz — the VPS
-};
-
-function isExpectedExecutor(tenantId: string, label: string): boolean {
-  const expected = EXPECTED_EXECUTOR_BY_TENANT_PREFIX[tenantId.slice(0, 8)];
-  // Tenants without a declared executor keep the old open behavior — this
-  // gate hardens the governed tenants without bricking future ones.
-  return expected === undefined || expected === label;
-}
+// One EXPECTED EXECUTOR per tenant, gated here on the job pipe itself: an
+// unexpected executor receives an EMPTY job list and its result reports are
+// refused. Pairing stays open for ping/health; the cron pipe is exclusive. The
+// map and the incidents behind it live in lib/automations/expected-executor.ts,
+// shared with SunBiz's health check so both read the same answer.
 
 async function resolveBridge(
   req: NextRequest,

@@ -25,6 +25,7 @@ import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
+import { TENANT_CRON_CHECKS } from "./tenant-cron-checks";
 
 import { computeCoverage, coverageGapMessages } from "./coverage";
 
@@ -37,7 +38,10 @@ import { computeCoverage, coverageGapMessages } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS];
+  return [
+    ...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS,
+    ...TENANT_CRON_CHECKS,
+  ];
 }
 
 
