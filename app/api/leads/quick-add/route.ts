@@ -4,7 +4,8 @@
  * OUTSIDE the software (TextTorrent / email) so the merchant lands in the funnel
  * at "Sent Application". Manual for now; automated later once TT is integrated.
  *
- * Body: { business_name (required), phone?, email?, stage? }.
+ * Body: { business_name (required), phone?, email?, stage?, state? }. On an
+ * OASIS workspace `state` (a province or US state) is required for a new lead.
  *
  * Create-or-advance, deduped: if a lead already exists for this tenant (matched
  * by email/phone/business via findExistingLead) it is ADVANCED to the stage
@@ -28,7 +29,11 @@ import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { isWebsiteSalesTenantSlug, OASIS_INTAKE_STAGE } from "@/lib/leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
-import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  creatableOasisStages,
+  oasisForbiddenRoleRefusal,
+  planOasisLeadCreate,
+} from "@/lib/oasis-lead-create";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -58,7 +63,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { business_name?: unknown; contact_name?: unknown; phone?: unknown; email?: unknown; stage?: unknown };
+  let body: {
+    business_name?: unknown;
+    contact_name?: unknown;
+    phone?: unknown;
+    email?: unknown;
+    stage?: unknown;
+    state?: unknown;
+  };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -70,13 +82,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "business_name_required" }, { status: 400 });
   }
   const contactName = typeof body.contact_name === "string" ? body.contact_name.trim().slice(0, 200) : "";
+  const state = typeof body.state === "string" ? body.state.trim().slice(0, 40) : "";
   // The default is SunBiz's own ("sent_application"), which is not a stage on
   // the OASIS board — so the fallback has to follow the tenant too, or an
   // OASIS quick-add with no explicit stage would fail its own validation.
   const quickAddSlug = await resolveOwnedSlug(sess.tenantId);
   const isWebsiteSalesWorkspace = isWebsiteSalesTenantSlug(quickAddSlug);
+  // An OASIS role that may add no lead may use neither branch below: not to
+  // create one, and not to touch one that already exists. The create planner
+  // gives the same refusal, from the same place.
+  if (
+    isWebsiteSalesWorkspace &&
+    creatableOasisStages({ isAdmin: sess.isAdmin, teamRole: sess.teamRole }).length === 0
+  ) {
+    const refusal = oasisForbiddenRoleRefusal();
+    return NextResponse.json(
+      { ok: false, error: refusal.error, message: refusal.message },
+      { status: refusal.status },
+    );
+  }
   const defaultStage = isWebsiteSalesWorkspace ? OASIS_INTAKE_STAGE : DEFAULT_STAGE;
-  const stage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : defaultStage;
+  const requestedStage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : null;
+  const stage = requestedStage ?? defaultStage;
   // The vocabulary this tenant speaks. An OASIS operator quick-adding a lead
   // at a real OASIS stage was rejected as invalid_stage because only SunBiz
   // keys were listed; accepting both everywhere would instead let a SunBiz
@@ -102,6 +129,9 @@ export async function POST(req: NextRequest) {
   let existing = false;
   let advanced = false;
   let fromStage: string | null = null;
+  // The stage the lead is actually in afterwards. Equal to `stage` on every
+  // path except an OASIS create, where the planner may choose the default.
+  let resultStage = stage;
   try {
     // Create-or-advance, deduped on STRONG identity only (email/phone). We
     // deliberately DON'T match on business name here: two different merchants can
@@ -127,7 +157,28 @@ export async function POST(req: NextRequest) {
       leadId = found.id;
       fromStage = typeof found.data.stage === "string" ? found.data.stage : null;
       const patch: Record<string, unknown> = {};
-      if (fromStage !== stage) {
+      if (isWebsiteSalesWorkspace) {
+        // Adding an OASIS lead that already exists never moves it. Its stage
+        // moves only through the lead's lifecycle actions, which stamp
+        // stage_entered_at, lost_at and the audit trail; this write would skip
+        // all three. So no stage keeps it where it is (the old default pushed
+        // a worked lead back into the unclaimed pool), and a different stage
+        // is refused with a pointer to the lead. (Codex + verifiers, 2026-09-10.)
+        resultStage = fromStage ?? stage;
+        if (requestedStage && requestedStage !== fromStage) {
+          const at = OASIS_LEAD_STAGES.find((s) => s.key === fromStage)?.label ?? "its current stage";
+          return NextResponse.json(
+            {
+              ok: false,
+              error: "lead_exists",
+              id: found.id,
+              stage: fromStage,
+              message: `This lead is already on the pipeline, in ${at}. Open it to move it along; adding it again can't change its stage.`,
+            },
+            { status: 409 },
+          );
+        }
+      } else if (fromStage !== stage) {
         patch.stage = stage;
         advanced = true;
       }
@@ -137,6 +188,45 @@ export async function POST(req: NextRequest) {
       if (Object.keys(patch).length > 0) {
         await updateRecord({ tenant_id: tenantId, entity: "lead", id: leadId, patch });
       }
+    } else if (isWebsiteSalesWorkspace) {
+      // A NEW OASIS LEAD goes through the same planner and stamp as
+      // /pipeline/new (lib/oasis-lead-create.ts): the creator may only start it
+      // in a stage their role may create in, and it is stamped with its owner,
+      // motion and program -- or the board and /web-leads never show it.
+      //
+      // Only a stage the caller actually asked for is passed: the OASIS default
+      // above (researched) is the prospect pool, which nobody may create into,
+      // so an unspecified create takes the planner's default (Assigned).
+      const plan = planOasisLeadCreate({
+        viewer: { isAdmin: sess.isAdmin, teamRole: sess.teamRole },
+        creatorUserId: sess.userId,
+        data: {
+          business_name: businessName,
+          ...(contactName ? { contact_name: contactName } : {}),
+          ...(phone ? { phone } : {}),
+          ...(email ? { email } : {}),
+          ...(requestedStage ? { stage: requestedStage } : {}),
+          ...(state ? { state } : {}),
+        },
+        now: new Date(),
+        // Same rule as /pipeline/new: the region picks the Canada or the US
+        // board, and the two run under different calling laws.
+        requireRegion: true,
+      });
+      if (!plan.ok) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: plan.error,
+            message: plan.message,
+            ...(plan.allowedStages ? { allowed_stages: plan.allowedStages } : {}),
+          },
+          { status: plan.status },
+        );
+      }
+      const created = await createRecord({ tenant_id: tenantId, entity: "lead", data: plan.data });
+      leadId = created.id;
+      resultStage = plan.stage;
     } else {
       const created = await createRecord({
         tenant_id: tenantId,
@@ -146,11 +236,6 @@ export async function POST(req: NextRequest) {
           ...(contactName ? { contact_name: contactName } : {}),
           ...(phone ? { phone } : {}),
           ...(email ? { email } : {}),
-          ...(isWebsiteSalesWorkspace &&
-          !sess.isAdmin &&
-          roleMayOperateOasisSalesLead(sess.teamRole)
-            ? { assigned_to: sess.userId }
-            : {}),
           stage,
         },
       });
@@ -167,8 +252,8 @@ export async function POST(req: NextRequest) {
     const note = existing
       ? advanced
         ? `Manually added — existing lead moved ${fromStage || "—"} → ${stage}`
-        : `Manually added — lead already at ${stage}`
-      : `Manually added lead at ${stage}`;
+        : `Manually added — lead already at ${resultStage}`
+      : `Manually added lead at ${resultStage}`;
     await db.from("lead_interactions").insert({
       tenant_id: tenantId,
       lead_id: leadId,
@@ -180,7 +265,7 @@ export async function POST(req: NextRequest) {
       content: note,
       content_preview: note,
       metadata: {
-        stage,
+        stage: resultStage,
         from: fromStage,
         existing,
         advanced,
@@ -194,5 +279,5 @@ export async function POST(req: NextRequest) {
     /* best-effort audit */
   }
 
-  return NextResponse.json({ ok: true, id: leadId, stage, existing, advanced });
+  return NextResponse.json({ ok: true, id: leadId, stage: resultStage, existing, advanced });
 }

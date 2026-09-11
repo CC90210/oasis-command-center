@@ -1,85 +1,123 @@
 /**
- * /pipeline/new — create a new OASIS lead.
+ * /pipeline/new — add an OASIS lead at any stage this person may start one in.
  *
- * Reuses ManifestRecordForm against OASIS_SEED.lead. The "+ New lead"
- * CTA on the /pipeline kanban deep-links here. On submit the form
- * redirects back to /pipeline.
+ * The form, the server and the board read ONE rule (lib/oasis-lead-create.ts):
+ * an admin may start a lead in any stage the board draws, a sales rep in
+ * Assigned. The stage picker is built from that rule, so it offers exactly
+ * what the records route will accept — before 2026-09-10 it offered all 14
+ * stages while the server accepted only `researched`, which the board no
+ * longer drew (CC: "It only allows me to add a lead to the research section,
+ * which isn't even a section").
+ *
+ * `?stage=<key>` preselects a stage — each board column's "+" links here with
+ * its own key. On save the form lands on /pipeline?stage=<saved stage>, the
+ * column the lead is now in.
  */
 
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
+import { redirect } from "next/navigation";
 import { PageHeader, Card } from "@/components/Card";
 import { ManifestRecordForm } from "@/components/manifest/ManifestRecordForm";
 import { OASIS_SEED } from "@/lib/manifest/seeds";
-import { getActiveProfile } from "@/lib/queries";
+import { getActiveProfile, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
-import { redirect } from "next/navigation";
-import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import {
+  creatableOasisStages,
+  oasisLeadCreateForm,
+  preselectOasisCreateStage,
+} from "@/lib/oasis-lead-create";
 
 export const dynamic = "force-dynamic";
 
-export default async function PipelineNewLeadPage() {
-  const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
+function Unavailable({ subtitle, detail }: { subtitle: string; detail?: string }) {
+  return (
+    <div className="space-y-4 animate-fade-in">
+      <PageHeader title="New lead" subtitle={subtitle} />
+      {detail && (
+        <Card>
+          <div className="text-sm text-fg-muted">{detail}</div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+export default async function PipelineNewLeadPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ stage?: string }>;
+}) {
   const profile = await safe("pipeline.new.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || null;
   const session = await resolveSessionContext();
-  // A REP MAY ADD A LEAD THEY FOUND THEMSELVES.
-  //
-  // This was admin-only, so a rep who sourced a business had nowhere to put it:
-  // the page bounced them to /pipeline before the form rendered, and the create
-  // API answered 403 behind it. Both gates had to open or the other half is
-  // just a form that fails on submit. CC, 2026-09-08.
-  //
-  // The lead is stamped to whoever created it, server-side, in the records
-  // route — a rep cannot assign one to somebody else.
-  const mayAddLead =
-    session.ok && (session.isAdmin || mayWorkWebsiteSalesLifecycle(session.teamRole));
-  if (!mayAddLead) redirect("/pipeline");
+  if (!session.ok || !tenantId) {
+    return <Unavailable subtitle="Sign in to add a lead." />;
+  }
 
-  if (!leadEntity) {
+  // NON-OASIS WORKSPACES LEAVE, mirroring app/pipeline/page.tsx. This form
+  // writes OASIS leads; a SunBiz operator who lands here belongs on their own
+  // tenant's leads board. A failed lookup renders no form rather than guessing.
+  const tenant = await getTenant(tenantId).catch(() => null);
+  const tenantSlug = tenant?.slug || null;
+  if (!tenantSlug) {
     return (
-      <div className="space-y-4 animate-fade-in">
-        <PageHeader title="New lead" subtitle="Lead entity not defined" />
-        <Card>
-          <div className="text-sm text-fg-muted">
-            OASIS_SEED has no `lead` entity. Edit lib/manifest/seeds.ts.
-          </div>
-        </Card>
-      </div>
+      <Unavailable
+        subtitle="We couldn't verify this workspace."
+        detail="Refresh to try again. No form was shown, so nothing can be saved to the wrong workspace."
+      />
     );
   }
-  if (!tenantId) {
+  if (!isWebsiteSalesTenantSlug(tenantSlug)) redirect(`/t/${tenantSlug}/leads`);
+
+  // A REP MAY ADD A LEAD THEY FOUND THEMSELVES (CC, 2026-09-08), and an admin
+  // may add one at any stage the board draws (CC, 2026-09-10). The same list
+  // gates the page, fills the picker, and is enforced by the records route.
+  // An empty list means this role does no sales work.
+  const viewer = { isAdmin: session.isAdmin, teamRole: session.teamRole };
+  const creatable = creatableOasisStages(viewer);
+  if (creatable.length === 0) redirect("/pipeline");
+
+  const leadEntity = OASIS_SEED.data_model?.find((e) => e.name === "lead");
+  if (!leadEntity) {
     return (
-      <div className="space-y-4 animate-fade-in">
-        <PageHeader title="New lead" subtitle="Sign in to add a lead." />
-      </div>
+      <Unavailable
+        subtitle="Lead entity not defined"
+        detail="OASIS_SEED has no `lead` entity. Edit lib/manifest/seeds.ts."
+      />
     );
   }
 
   // The slug this operator owns — not the literal "oasis", which no OASIS
-  // workspace is slugged and which 403'd every create with slug_not_owned.
+  // workspace is slugged and which 403'd every create with slug_not_owned. It
+  // must also be an OASIS slug: the records route only plans and stamps a lead
+  // on one, and a lead written anywhere else would carry no stamp.
   const ownedSlug = await resolveOwnedSlug(tenantId);
-  if (!ownedSlug) {
+  if (!ownedSlug || !isWebsiteSalesTenantSlug(ownedSlug)) {
     return (
-      <div className="space-y-4 animate-fade-in">
-        <PageHeader title="New lead" subtitle="No workspace namespace for this account." />
-        <Card>
-          <div className="text-sm text-fg-muted">
-            This account has no resolvable tenant slug, so a lead can&apos;t be
-            created here. Ask an admin to finish tenant setup.
-          </div>
-        </Card>
-      </div>
+      <Unavailable
+        subtitle="No workspace namespace for this account."
+        detail="This account has no resolvable OASIS workspace, so a lead can't be created here. Ask an admin to finish tenant setup."
+      />
     );
   }
+
+  const form = oasisLeadCreateForm(leadEntity, viewer);
+  const sp = (await searchParams) || {};
+  const initialStage = preselectOasisCreateStage(sp.stage, form.stages);
 
   return (
     <div className="space-y-4 animate-fade-in">
       <PageHeader
         title="New lead"
-        subtitle="Add a researched website-sales lead. Imported scraper leads use the same queue."
+        subtitle={
+          form.stages.length > 1
+            ? "Add a lead at any stage on the board. It's assigned to you."
+            : "Add a lead you sourced. It starts in Assigned, in your book."
+        }
         action={
           <Link
             href="/pipeline"
@@ -92,10 +130,12 @@ export default async function PipelineNewLeadPage() {
       />
       <ManifestRecordForm
         tenantSlug={ownedSlug}
-        entity={leadEntity}
+        entity={form.entity}
+        optionLabels={form.optionLabels}
         backPath="pipeline"
         backHref="/pipeline"
-        initial={{ sales_program: "website_sales_v1", stage: "researched" }}
+        landOnStagePath="/pipeline"
+        initial={initialStage ? { stage: initialStage } : {}}
       />
     </div>
   );

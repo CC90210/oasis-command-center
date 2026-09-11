@@ -29,7 +29,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
 import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
-import { countryOf } from "./filters";
+import { countryOf, type LeadCountry } from "./filters";
 import { enrichmentRank, passesEnrichment } from "./enrichment";
 import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
@@ -481,28 +481,51 @@ async function allTenantLeads(fresh = false): Promise<ProjectedLeadRow[]> {
  * OASIS roster at implementation time), while preserving the same projected
  * row shape and completeness guard as the pool path.
  */
+//
+// NOT MEMOISED (2026-09-10). A book is read live: CC added a lead, opened My
+// leads, and the 90-second memo on this read is one of the reasons it was not
+// there. The read is bounded by the assignee list, so there is nothing for a
+// memo to save that is worth a lead going missing from its owner's own page.
 async function tenantLeadsAssignedTo(
   assigneeIds: readonly string[],
-  fresh = false,
 ): Promise<ProjectedLeadRow[]> {
   const normalized = [...new Set(assigneeIds.map((id) => id.trim().toLowerCase()).filter(Boolean))]
     .sort();
   if (normalized.length === 0) return [];
-  const key = `web-leads:leads:assigned:${normalized.join(",")}`;
-  if (fresh) invalidate(key);
-  return memo(key, TTL.LEADS, async () => {
-    const db = getServiceSupabase();
-    const { data, error, count } = await db
-      .from("tenant_records")
-      .select(FILTER_SELECT, { count: "exact" })
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("entity_type", "lead")
-      .in("data->>assigned_to", normalized)
-      .limit(LEAD_READ_CAP);
-    if (error) throw new Error(`assigned_leads_read_failed: ${error.message}`);
-    assertCompleteRead("assigned_leads_read", data || [], count);
-    return nestProjectedLeadRows(data);
-  });
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .in("data->>assigned_to", normalized)
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`assigned_leads_read_failed: ${error.message}`);
+  assertCompleteRead("assigned_leads_read", data || [], count);
+  return nestProjectedLeadRows(data);
+}
+
+/**
+ * Every lead somebody holds -- an admin's Team leads book. Read live, like the
+ * assigned read above. A lead nobody holds is the pool, not anyone's book, so
+ * it is excluded here rather than left to a filter downstream: without the
+ * territory filter (which now shapes the pool only) it would otherwise flood
+ * the Team tab with the whole prospect directory.
+ */
+async function tenantLeadsHeldBySomeone(): Promise<ProjectedLeadRow[]> {
+  const db = getServiceSupabase();
+  const { data, error, count } = await db
+    .from("tenant_records")
+    .select(FILTER_SELECT, { count: "exact" })
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("entity_type", "lead")
+    .not("data->>assigned_to", "is", null)
+    .limit(LEAD_READ_CAP);
+  if (error) throw new Error(`held_leads_read_failed: ${error.message}`);
+  assertCompleteRead("held_leads_read", data || [], count);
+  return nestProjectedLeadRows(data).filter(
+    (row) => typeof row.data.assigned_to === "string" && row.data.assigned_to.trim() !== "",
+  );
 }
 
 /** Start the scope-appropriate projected read before sheets/scores resolve. */
@@ -512,10 +535,15 @@ export function fetchLeadProjection(
   fresh = false,
 ): Promise<ProjectedLeadRow[]> {
   if (scope === "mine") {
-    return tenantLeadsAssignedTo(
-      [viewer.userId, ...(viewer.readableAssigneeIds || [])],
-      fresh,
-    );
+    return tenantLeadsAssignedTo([viewer.userId, ...(viewer.readableAssigneeIds || [])]);
+  }
+  if (scope === "team") {
+    // A book, never the pool. An admin's team is every held lead; anyone else's
+    // is their own plus the server-resolved roster (only a manager has one),
+    // and canViewerRead in fetchLeads still decides row by row.
+    return viewer.isAdmin
+      ? tenantLeadsHeldBySomeone()
+      : tenantLeadsAssignedTo([viewer.userId, ...(viewer.readableAssigneeIds || [])]);
   }
   return allTenantLeads(fresh);
 }
@@ -573,15 +601,15 @@ export async function fetchLeads(
     fresh?: boolean;
     projectedRows?: ProjectedLeadRow[];
   },
-): Promise<{ leads: WebLeadRow[]; total: number }> {
+): Promise<{ leads: WebLeadRow[]; total: number; boards: Record<LeadCountry, number> | null }> {
   // A rep's own book is not confined to the sheets the filters selected, so an
   // empty sheet selection means "no leads" only for the shared pool.
-  if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0 };
+  if (sheetIds.length === 0 && scope === "pool") return { leads: [], total: 0, boards: null };
   const data = projectedRows ?? await fetchLeadProjection(viewer, scope, fresh);
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
-  const all = (data || [])
+  const matching = (data || [])
     // Scope BEFORE mapping to WebLead: assigned_to lives on the raw row and
     // is deliberately not surfaced on WebLead (see the Viewer doc comment on
     // isScopedContractor -- a scoped viewer must never receive rows outside
@@ -648,22 +676,19 @@ export async function fetchLeads(
         lastCallAt: facts.lastCallAt,
       };
     })
-    // Sheet narrowing applies to the shared pool only. A rep's own book must
-    // show every lead they hold, including any whose territory sits outside
-    // the filters currently set on the Leads tab -- otherwise a rep changes a
-    // filter and leads they own disappear from their own page.
-    .filter((l) => (scope === "mine" ? true : l.territoryId && wanted.has(l.territoryId)))
-    .filter((l) => Boolean(l.phone))
+    // Sheet narrowing and the phone requirement shape the POOL, which is a
+    // call queue. My leads and Team leads are BOOKS: a lead someone holds must
+    // show whatever its territory and whether or not we have a number yet.
+    // Applied to "team" too, these emptied the Team tab for everyone (sheets
+    // are loaded for the pool only), and a lead added by hand -- no territory,
+    // often no phone -- never reached anyone's book at all (2026-09-10).
+    .filter((l) => (scope === "pool" ? Boolean(l.territoryId && wanted.has(l.territoryId)) : true))
+    .filter((l) => (scope === "pool" ? Boolean(l.phone) : true))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
     // How much we know before the dial. A chosen tier means that tier AND
     // better, so asking for named owners never hides the verified ones.
     .filter((l) => passesEnrichment(l, f.enrichment))
-    // Country is ALWAYS applied, never "all". The two markets run under
-    // different law (CASL vs TCPA/DNC), so a rep must be looking at one of them
-    // and know which — an "everything" view is how a US mobile gets dialled
-    // under Canadian assumptions. Derived from the region code, so no backfill.
-    .filter((l) => countryOf(l.province) === f.country)
     // OPEN NOW, in the BUSINESS's time zone, evaluated against this request's
     // clock rather than anything cached. `now` is already injected for the
     // claim-expiry rules, so the whole page still sees one instant.
@@ -684,8 +709,28 @@ export async function fetchLeads(
         : true,
     )
     .filter((l) => matchesBand(l, f.band))
-    .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true))
+    .filter((l) => (q ? l.name.toLowerCase().includes(q) || (l.phone || "").includes(q) : true));
+
+  // Country is ALWAYS applied, never "all". The two markets run under
+  // different law (CASL vs TCPA/DNC), so a rep must be looking at one of them
+  // and know which — an "everything" view is how a US mobile gets dialled
+  // under Canadian assumptions. Derived from the region code, so no backfill.
+  // Applied last -- every filter above is a pure predicate, so the order does
+  // not change the result -- because the book count below needs the rows that
+  // pass everything else.
+  const all = matching
+    .filter((l) => countryOf(l.province) === f.country)
     .sort(comparatorFor(f.sort));
+
+  // A BOOK SAYS WHERE ITS OTHER LEADS ARE (2026-09-10). My leads and Team leads
+  // show one board at a time, like the pool, and a lead on the other board was
+  // on no screen its owner could reach: CC added a Florida lead and his book
+  // opened on Canada. The switch on those tabs reads these counts, so the other
+  // board's leads show before anyone clicks. Same filters as the list, so a
+  // count never disagrees with what the switch then shows. The pool's rail has
+  // its own facet counts, so it gets none.
+  const boards: Record<LeadCountry, number> | null = scope === "pool" ? null : { ca: 0, us: 0 };
+  if (boards) for (const l of matching) boards[countryOf(l.province)] += 1;
 
   const start = (f.page - 1) * PAGE_SIZE;
   const page = all.slice(start, start + PAGE_SIZE);
@@ -719,7 +764,7 @@ export async function fetchLeads(
     };
   });
 
-  return { leads, total: all.length };
+  return { leads, total: all.length, boards };
 }
 
 /**

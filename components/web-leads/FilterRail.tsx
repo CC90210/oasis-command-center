@@ -60,7 +60,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ChevronRight, ChevronDown, AlertCircle, X } from "lucide-react";
-import type { WebLeadFilters } from "@/lib/web-leads/filters";
+import { LEAD_COUNTRY_NAMES, switchCountry, type LeadCountry, type WebLeadFilters } from "@/lib/web-leads/filters";
 import type { Facets } from "@/lib/web-leads/queries";
 import {
   ENRICHMENT_TIERS, ENRICHMENT_LABELS, ENRICHMENT_BLURBS, type EnrichmentFilter,
@@ -144,6 +144,55 @@ function RailError({ error }: { error: string }) {
   );
 }
 
+/** The two boards, in the order a rep reads them. */
+const COUNTRY_CHOICES: { key: LeadCountry; flag: string }[] = [
+  { key: "ca", flag: "🇨🇦" },
+  { key: "us", flag: "🇺🇸" },
+];
+
+/**
+ * COUNTRY IS A SWITCH, NOT A CHECKBOX. A rep is always working one market:
+ * Canada and the US run under different outbound law (CASL vs TCPA/DNC), so
+ * "both at once" is not a view anybody should have.
+ *
+ * ONE CONTROL, TWO PLACES. The rail puts it over the pool's filters; My leads
+ * and Team leads put it over the book (WebLeadsBrowser.tsx). The server applies
+ * the country to every tab, and until 2026-09-10 the book tabs had no switch:
+ * a lead CC added in Florida sat on the US board of his own book with no way
+ * to reach it from the page. `counts`, when the server sends them, say how
+ * many of the leads in view sit on each board, so the other board's leads show
+ * before anyone clicks.
+ */
+export function CountrySwitch({
+  filters, onChange, counts = null, className = "",
+}: {
+  filters: WebLeadFilters;
+  onChange: (f: WebLeadFilters) => void;
+  counts?: Readonly<Record<LeadCountry, number>> | null;
+  className?: string;
+}) {
+  return (
+    <div role="group" aria-label="Country board" className={`flex gap-1 rounded-lg border border-bg-border bg-bg-panel/40 p-1 ${className}`}>
+      {COUNTRY_CHOICES.map((c) => (
+        <button
+          key={c.key}
+          type="button"
+          aria-pressed={filters.country === c.key}
+          onClick={() => onChange(switchCountry(filters, c.key))}
+          className={`min-h-11 flex-1 rounded-md px-2 text-xs font-semibold transition-colors xl:min-h-0 xl:py-1.5 ${
+            filters.country === c.key
+              ? "bg-accent text-bg-deep"
+              : "text-fg-muted hover:bg-bg-elev hover:text-fg"
+          }`}
+        >
+          {c.flag} {LEAD_COUNTRY_NAMES[c.key]}
+          {counts && <span className="ml-1.5 tabular-nums opacity-80">{counts[c.key].toLocaleString()}</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function FilterTree({
   facets, filters, onChange,
 }: {
@@ -156,31 +205,9 @@ function FilterTree({
 
   return (
     <div className="space-y-5">
-      {/* COUNTRY IS A SWITCH, NOT A CHECKBOX. A rep is always working one
-          market: Canada and the US run under different outbound law (CASL vs
-          TCPA/DNC), so "both at once" is not a view anybody should have. It
-          sits at the top because it changes what every filter below it means —
-          the province list is Canadian, the state list is not. */}
-      <div className="flex gap-1 rounded-lg border border-bg-border bg-bg-panel/40 p-1">
-        {([
-          { key: "ca" as const, label: "🇨🇦 Canada" },
-          { key: "us" as const, label: "🇺🇸 United States" },
-        ]).map((c) => (
-          <button
-            key={c.key}
-            type="button"
-            aria-pressed={filters.country === c.key}
-            onClick={() => set({ country: c.key, provinces: [], cities: [] })}
-            className={`min-h-11 flex-1 rounded-md px-2 text-xs font-semibold transition-colors xl:min-h-0 xl:py-1.5 ${
-              filters.country === c.key
-                ? "bg-accent text-bg-deep"
-                : "text-fg-muted hover:bg-bg-elev hover:text-fg"
-            }`}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
+      {/* Country sits at the top because it changes what every filter below
+          it means: the province list is Canadian, the state list is not. */}
+      <CountrySwitch filters={filters} onChange={onChange} />
 
       <label className={ROW}>
         <input

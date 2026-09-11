@@ -646,9 +646,20 @@ assert.ok(
     "filtering a tenant-wide result in memory still leaks every client into the server payload",
 );
 
-/* The board must not render the raw prospect pool as pipeline work. */
+/* The board must not render the raw prospect pool as pipeline work.
+ *
+ * RE-AIMED 2026-09-10, NOT RELAXED. The filter moved out of the page into
+ * oasisBoardStages (lib/oasis-lead-create.ts), so the stages a lead may be
+ * CREATED in are carved out of exactly the stages the board draws — the drift
+ * between those two lists is what stranded CC's hand-added leads. The page must
+ * take its columns from oasisBoardStages, and oasisBoardStages must drop the
+ * pool. The same property is asserted behaviourally, per role, in
+ * tests/oasis-create-stage-contract.test.ts. */
+const boardStagesCode = stripComments(read("lib/oasis-lead-create.ts"));
 assert.ok(
-  /\.filter\(\(stage\) => stage\.key !== "researched"\)/.test(pipelineCode) &&
+  /const stages = session\.ok\s*\?\s*oasisBoardStages\(/.test(pipelineCode) &&
+    /export const OASIS_POOL_STAGE = OASIS_INTAKE_STAGE;/.test(boardStagesCode) &&
+    /\.filter\(\(stage\) => stage\.key !== OASIS_POOL_STAGE\)/.test(boardStagesCode) &&
     /stageKeys: assigneeScope\.allowed \? stages\.map/.test(pipelineCode),
   "the pipeline must exclude the researched stage — those are un-worked directory rows, " +
     "not deals, and /web-leads reads the very same rows so they must be HIDDEN, never deleted",

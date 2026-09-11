@@ -37,12 +37,10 @@ import {
   roleMayOperateOasisSalesLead,
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
-import {
-  OASIS_WEBSITE_SALES_PROGRAM,
-  isWebsiteSalesTenantSlug,
-} from "@/lib/leads/canonical-lead-fields";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
+import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -218,7 +216,16 @@ export async function POST(
    */
   const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
   if (!r.is_admin && !repMayCreateOwnLead) {
-    return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "forbidden",
+        message: isOasisSalesLead
+          ? "Your role can't add leads to the OASIS pipeline. Ask an admin to add it, or to give you a sales role."
+          : "Your role can't add these records. Ask an admin to add it.",
+      },
+      { status: 403 },
+    );
   }
 
   let body: { data?: Record<string, unknown> };
@@ -230,60 +237,46 @@ export async function POST(
   if (!body.data || typeof body.data !== "object") {
     return NextResponse.json({ ok: false, error: "data_required" }, { status: 400 });
   }
+
+  /**
+   * AN OASIS LEAD IS PLANNED, STAMPED AND OWNED SERVER-SIDE.
+   *
+   * planOasisLeadCreate (lib/oasis-lead-create.ts) is the one rule both create
+   * doors share -- this route and /api/leads/quick-add. It decides which stages
+   * this caller may start a lead in (an admin: every stage the board draws; a
+   * sales rep: Assigned), refuses lifecycle fields a create may not carry, and
+   * stamps the fields the board and /web-leads read: the creator as owner, the
+   * cold_outbound motion, the website-sales program.
+   *
+   * Before 2026-09-10 this route accepted only `researched` -- a stage the board
+   * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
+   * were saved and appeared on no screen. Nothing here is taken from the request
+   * for ownership: a rep cannot assign a lead they found to somebody else.
+   *
+   * Every other entity and workspace keeps the plain copy, exactly as before.
+   */
+  let data: Record<string, unknown> = { ...body.data };
   if (isOasisSalesLead) {
-    const requestedStage = body.data.stage;
-    if (requestedStage !== "researched") {
+    const plan = planOasisLeadCreate({
+      viewer: { isAdmin: r.is_admin, teamRole: r.team_role },
+      creatorUserId: user.id,
+      data: body.data,
+      now: new Date(),
+      requireRegion: true,
+    });
+    if (!plan.ok) {
       return NextResponse.json(
         {
           ok: false,
-          error: "use_website_sales_workflow",
-          message: "Create new OASIS leads in Researched, then move them through the guided lifecycle.",
+          error: plan.error,
+          message: plan.message,
+          ...(plan.fields ? { fields: plan.fields } : {}),
+          ...(plan.allowedStages ? { allowed_stages: plan.allowedStages } : {}),
         },
-        { status: 409 },
+        { status: plan.status },
       );
     }
-    const protectedKeys = rejectedOasisGenericPatchKeys(body.data).filter(
-      (key) => key !== "stage" && key !== "sales_program",
-    );
-    if (
-      protectedKeys.length > 0 ||
-      (body.data.sales_program !== undefined &&
-        body.data.sales_program !== OASIS_WEBSITE_SALES_PROGRAM)
-    ) {
-      return NextResponse.json(
-        { ok: false, error: "protected_lifecycle_fields", fields: protectedKeys },
-        { status: 409 },
-      );
-    }
-  }
-
-  /**
-   * THE CREATOR OWNS THE LEAD THEY CREATED.
-   *
-   * Stamped SERVER-SIDE, never taken from the request: `assigned_to` is a
-   * protected lifecycle field and the guard above rejects a client that sends
-   * it, so this is the only place it can be set honestly. A rep cannot assign
-   * a lead they found to somebody else, and cannot forge ownership.
-   *
-   * `stage` moves to `assigned` at the same time, and that pairing is
-   * load-bearing rather than tidy: `researched` IS the shared prospect pool and
-   * REP_PIPELINE_STAGE_KEYS deliberately excludes it, so a lead stamped with an
-   * owner but left in `researched` would belong to the rep and be invisible on
-   * their pipeline - which is exactly the "I added it and nothing happened"
-   * they are reporting today. The route's create guard still requires the
-   * CLIENT to send `researched`; the server is what promotes it.
-   *
-   * Admin creates are untouched and still land in the shared pool, which is how
-   * seeding works.
-   */
-  const data = { ...body.data };
-  if (repMayCreateOwnLead && !r.is_admin) {
-    // Lowercased to match lead-scope.ts's comparison key, which is what every
-    // "is this in my book" check compares against.
-    data.assigned_to = user.id.toLowerCase();
-    data.assigned_at = new Date().toISOString();
-    data.stage = "assigned";
-    data.stage_entered_at = new Date().toISOString();
+    data = plan.data;
   }
 
   try {

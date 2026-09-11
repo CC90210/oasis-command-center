@@ -128,10 +128,21 @@ assert(
     workflowRoute.includes("not_cold_outbound_lead"),
   "the workflow is restricted to the canonical OASIS cold-outbound motion and cannot absorb warm form submissions",
 );
+// RE-AIMED 2026-09-10, NOT RELAXED. The board's cold-outbound predicate moved
+// out of app/pipeline/page.tsx into oasisBoardProgramFilter
+// (lib/oasis-lead-create.ts), beside the create stamp that has to satisfy it.
+// The page still hands that predicate to the query; the constant now lives
+// where the filter is defined. The behaviour itself -- a created lead passes
+// the filter on every OASIS slug -- is proven in
+// tests/oasis-create-stage-contract.test.ts.
+const boardFilterModule = readFileSync("lib/oasis-lead-create.ts", "utf8");
 assert(
   claimOps.includes("claimPatch") &&
-    pipelinePage.includes("OASIS_COLD_OUTBOUND_MOTION") &&
-    pipelinePage.includes("salesMotion") &&
+    pipelinePage.includes("oasisBoardProgramFilter(tenantSlug)") &&
+    pipelinePage.includes("salesMotion: boardFilter.salesMotion") &&
+    /salesMotion: isWebsiteSalesTenantSlug\(tenantSlug\) \? OASIS_COLD_OUTBOUND_MOTION : null/.test(
+      boardFilterModule,
+    ) &&
     formSubmit.includes("OASIS_INBOUND_WARM_MOTION"),
   "cold claimed prospects and warm form submissions are separate sales motions on Turso",
 );

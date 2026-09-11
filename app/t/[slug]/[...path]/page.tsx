@@ -73,6 +73,7 @@ import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { oasisLeadCreateRedirect } from "@/lib/oasis-lead-create";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -166,6 +167,19 @@ export default async function TenantCatchAllPage({
   if (!pageDef) {
     return <UnknownPath slug={normalised} subPath={subPath} />;
   }
+
+  // An OASIS lead create URL opens the one OASIS create form, /pipeline/new,
+  // whatever the caller's role -- see oasisLeadCreateRedirect. The create
+  // branch below would otherwise render the seed lead entity (the prospect
+  // pool, a free-text State, a lifecycle field), which the records route
+  // refuses, to every profile the role redirect further down does not name.
+  const oasisCreateTarget = oasisLeadCreateRedirect({
+    tenantSlug: normalised,
+    entity: pageDef.entity,
+    isNewForm,
+    stage: stageFilter,
+  });
+  if (oasisCreateTarget) redirect(oasisCreateTarget);
 
   const user = await getSessionUser();
   const service = getServiceSupabase();
