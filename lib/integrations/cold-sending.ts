@@ -24,6 +24,7 @@ import { encryptField, decryptField } from "@/lib/field-encryption";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { buildTrackedHtml, unsubscribeApiUrl } from "@/lib/email/tracked-html";
+import { unsubscribeBrandForTenant } from "@/lib/email/brand-for-tenant";
 
 export type SendClass = "cold" | "warm";
 
@@ -125,6 +126,18 @@ export async function sendColdEmail(args: {
   /** Campaign label → agent_source 'cold:<campaign>' so the Metrics tab buckets it. */
   campaign?: string;
 }): Promise<ColdSendResult> {
+  // Whose opt-out list the one-click unsubscribe files into: this tenant's.
+  // SunBiz's is "SunBiz", as every cold link has carried. An unknown tenant is
+  // refused rather than filed under SunBiz, where its own suppression check
+  // would never look.
+  const unsubBrand = unsubscribeBrandForTenant(args.tenantId);
+  if (!unsubBrand) {
+    return {
+      ok: false,
+      reason: "not_supported",
+      error: "tenant has no unsubscribe identity in lib/email/brand-for-tenant.ts — cold send blocked",
+    };
+  }
   const mb = await pickColdMailbox(args.tenantId);
   if (!mb) {
     return { ok: false, reason: "no_cold_infra", error: "no ready cold mailbox — cold send blocked (never falls back to the primary domain)" };
@@ -152,7 +165,7 @@ export async function sendColdEmail(args: {
   // COLD_FOOTER already carries the CAN-SPAM postal address + reply-based opt-out,
   // so the tracked HTML doesn't add a second (link) footer (unsub:'none'); the
   // one-click List-Unsubscribe header below is the link-based opt-out.
-  const html = buildTrackedHtml(textBody, { sendId, email: args.to, brand: "SunBiz", unsub: "none" });
+  const html = buildTrackedHtml(textBody, { sendId, email: args.to, brand: unsubBrand, unsub: "none" });
 
   try {
     const nodemailer = await import("nodemailer");
@@ -169,7 +182,7 @@ export async function sendColdEmail(args: {
       headers: {
         // RFC 8058 one-click (HTTPS) + a cold-domain mailto fallback (keeps
         // reputation isolation — no sunbizfunding.com reference in a cold send).
-        "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, "SunBiz")}>, <mailto:unsubscribe@${mb.domain}?subject=unsubscribe>`,
+        "List-Unsubscribe": `<${unsubscribeApiUrl(args.to, unsubBrand)}>, <mailto:unsubscribe@${mb.domain}?subject=unsubscribe>`,
         "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
       },
     });

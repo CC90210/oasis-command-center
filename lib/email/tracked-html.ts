@@ -32,10 +32,12 @@ import { unsubscribeMailto } from "./sending-identity";
 import { brandFooter } from "./brand-shell";
 import type { BrandKey } from "./brands";
 
-// The brand string MUST resolve to the SunBiz tenant in /api/unsubscribe's
-// resolveTenantId (matches tenants.name ILIKE 'SunBiz') or the recorded
-// suppression carries tenant_id=NULL and checkEmailSuppressed (tenant-scoped)
-// never honors it. Verified: tenants.name='SunBiz'.
+// SunBiz's suppression brand. The brand string MUST resolve to the sending
+// tenant in /api/unsubscribe's resolveTenantId or the recorded suppression
+// carries tenant_id=NULL and checkEmailSuppressed (tenant-scoped) never honors
+// it. Verified: tenants.name='SunBiz'. It is SunBiz's value only — every other
+// tenant's links carry its own name, from unsubscribeBrandForTenant
+// (lib/email/brand-for-tenant.ts) — so nothing below defaults to it.
 export const SUNBIZ_BRAND = "SunBiz";
 
 /**
@@ -194,7 +196,7 @@ function unsubQuery(email: string, brand: string): string {
  *  in-body footer link on commercial mail. */
 export function unsubscribeUrl(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: string,
   base: string = platformTrackingBase(),
 ): string {
   return `${base}/unsubscribe?${unsubQuery(email, brand)}`;
@@ -205,7 +207,7 @@ export function unsubscribeUrl(
  *  mail client's one-click actually suppresses instead of 405-ing on the page. */
 export function unsubscribeApiUrl(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: string,
   base: string = platformTrackingBase(),
 ): string {
   return `${base}/api/unsubscribe?${unsubQuery(email, brand)}`;
@@ -214,7 +216,7 @@ export function unsubscribeApiUrl(
 /** RFC 8058 List-Unsubscribe header value (one-click HTTPS URL + mailto fallback). */
 export function listUnsubscribeHeader(
   email: string,
-  brand: string = SUNBIZ_BRAND,
+  brand: string,
   base: string = platformTrackingBase(),
 ): string {
   // The mailto is derived from the configured From address, never hardcoded: a
@@ -236,8 +238,10 @@ export function buildTrackedHtml(
   opts: {
     sendId: string;
     email: string;
-    /** SUPPRESSION brand — resolves a tenant on the opt-out WRITE path. */
-    brand?: string;
+    /** SUPPRESSION brand — resolves a tenant on the opt-out WRITE path. The
+     *  sending tenant's, from unsubscribeBrandForTenant. No default: a default
+     *  is one company's opt-out list. */
+    brand: string;
     /**
      * SENDING brand — whose legal entity and postal address appear in the
      * footer. A DIFFERENT axis from `brand` above: both brands share one tenant
@@ -250,7 +254,7 @@ export function buildTrackedHtml(
   },
 ): string {
   const { sendId, email } = opts;
-  const brand = opts.brand || SUNBIZ_BRAND;
+  const brand = opts.brand;
   const unsub: UnsubMode = opts.unsub || "footer";
   const trackingBase = opts.trackingBase || platformTrackingBase();
 
@@ -286,6 +290,6 @@ export function buildTrackedHtml(
 }
 
 /** Back-compat alias for the drip executor's original call shape. */
-export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand?: string; sendingBrand?: BrandKey; unsub?: UnsubMode; trackingBase?: string }): string {
+export function buildDripHtml(plain: string, opts: { sendId: string; email: string; brand: string; sendingBrand?: BrandKey; unsub?: UnsubMode; trackingBase?: string }): string {
   return buildTrackedHtml(plain, opts);
 }

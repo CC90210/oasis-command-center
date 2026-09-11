@@ -1,6 +1,7 @@
 import "server-only";
 import { dbError } from "@/lib/db-error";
-import { buildDripHtml } from "@/lib/email/tracked-html";
+import { SUNBIZ_BRAND, buildDripHtml } from "@/lib/email/tracked-html";
+import { unsubscribeBrandForTenant } from "@/lib/email/brand-for-tenant";
 
 type Db = ReturnType<typeof import("@/lib/supabase-server").getServiceSupabase>;
 
@@ -112,6 +113,11 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
         payload_html: buildDripHtml(text, {
           sendId: row.id,
           email: recipient,
+          // The suppression brand the send used: its tenant's. Before 2026-09-11
+          // every drip link carried SunBiz's, and since then a tenant with no
+          // mapped identity cannot send at all, so SunBiz's is the exact
+          // historical value for any row the map cannot name.
+          brand: unsubscribeBrandForTenant(row.tenant_id) ?? SUNBIZ_BRAND,
           unsub: sequenceClasses.get(sequenceId) === "transactional" ? "none" : "footer",
           // Rebuild on the origin the SEND recorded, never today's config. This
           // reconciler scans historical interactions, so resolving the domain now

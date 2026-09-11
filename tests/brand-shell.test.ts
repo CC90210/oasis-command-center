@@ -97,9 +97,19 @@ assert.ok(
 // The two axes must stay distinct: `brand` resolves the tenant on the opt-out
 // write path, `sendingBrand` picks the footer identity. Conflating them would
 // file opt-outs against a tenant that may not exist.
+//
+// The suppression brand used to have its own default: SunBiz's name. That
+// default is what filed every tenant's opt-outs under SunBiz, so it is now
+// REQUIRED and supplied per tenant by the caller — and still never read from
+// sendingBrand.
+assert.ok(/const brand = opts\.brand;/.test(tracked), "the suppression brand comes from its own field");
 assert.ok(
-  /opts\.brand \|\| SUNBIZ_BRAND/.test(tracked),
-  "the suppression brand must keep its own independent default",
+  !/opts\.sendingBrand \|\|/.test(tracked) && !/brand = opts\.sendingBrand/.test(tracked),
+  "and is never derived from the sending brand",
+);
+assert.ok(
+  !/opts\.brand \|\| SUNBIZ_BRAND/.test(tracked) && !/brand: string = SUNBIZ_BRAND/.test(tracked),
+  "no helper silently defaults to SunBiz's opt-out list",
 );
 
 console.log("brand-shell.test.ts — all assertions passed ✓");

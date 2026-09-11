@@ -65,7 +65,8 @@ import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
-import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
+import { unsubscribeBrandForTenant } from "@/lib/email/brand-for-tenant";
 import { resolveDripSmsIdentity, staticRegistryNumbers, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
@@ -1714,12 +1715,25 @@ async function processEmailStep(
       return markRetryOrFail(db, row, `brand_not_sendable: ${sendable.reason}`);
     }
 
+    // WHOSE opt-out list an unsubscribe from this message lands in: the
+    // sending tenant's, not a hardcoded SunBiz. SunBiz's resolves to "SunBiz",
+    // so its links are byte-identical to before. A tenant with no known
+    // identity is HELD like an unsendable brand: sending with SunBiz's value
+    // would file its recipients' opt-outs under SunBiz, where this tenant's own
+    // suppression check never looks.
+    const unsubBrand = unsubscribeBrandForTenant(row.tenant_id);
+    if (!unsubBrand) {
+      return markRetryOrFail(
+        db, row, `unsubscribe_brand_unknown: tenant ${row.tenant_id} is not mapped in lib/email/brand-for-tenant.ts`,
+      );
+    }
+
     // Custom-HTML templates get the SAME brand footer as the plain path, or a
     // templated drip would ship with no postal address while a plain one carries
     // it. Transactional drops only the unsubscribe line, never the address.
     const customFooter = brandFooter(
       brand,
-      emailClass === "transactional" ? null : unsubscribeUrl(email, SUNBIZ_BRAND, trackingBase),
+      emailClass === "transactional" ? null : unsubscribeUrl(email, unsubBrand, trackingBase),
     );
     const customTracking = `<img src="${pixelUrl(sendId, trackingBase)}" width="1" height="1" alt="" style="display:none;max-height:0;overflow:hidden" />`;
     const instrumentedCustomHtml = renderedCustomHtml
@@ -1727,17 +1741,17 @@ async function processEmailStep(
       : "";
     const html =
       instrumentedCustomHtml ||
-      buildDripHtml(cleanBody, { sendId, email, unsub, trackingBase, sendingBrand: brand });
+      buildDripHtml(cleanBody, { sendId, email, brand: unsubBrand, unsub, trackingBase, sendingBrand: brand });
     htmlPayload = html;
     sentTrackingBase = trackingBase;
     sentBrand = brand;
     const result = await sendDripEmail(row.tenant_id, email, subject, cleanBody, {
       html,
-      // SUNBIZ_BRAND here is the SUPPRESSION brand (the tenant resolver on the
-      // opt-out write path), NOT the sending brand. It deliberately does not
-      // follow `brand`: both brands share one tenant so a single opt-out stops
+      // unsubBrand is the SUPPRESSION brand (the tenant resolver on the opt-out
+      // write path), NOT the sending brand. It deliberately does not follow
+      // `brand`: SunBiz and Bluerise share one tenant so a single opt-out stops
       // both, and a value matching no tenant would land tenant_id = NULL.
-      listUnsubscribe: listUnsubscribeHeader(email, SUNBIZ_BRAND, trackingBase),
+      listUnsubscribe: listUnsubscribeHeader(email, unsubBrand, trackingBase),
       brand,
     });
     if (!result.ok) return markRetryOrFail(db, row, result.error);

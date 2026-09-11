@@ -31,6 +31,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp } from "@/lib/api-helpers";
 import { isRateLimited, recordPairAttempt } from "@/lib/pair-rate-limit";
+import { tenantIdForUnsubscribeBrand } from "@/lib/email/brand-for-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -69,6 +70,12 @@ function verifyToken(email: string, brand: string, token: string): boolean {
  */
 async function resolveTenantId(brand: string): Promise<string | null> {
   if (!brand) return null;
+  // Our own tenants resolve by exact name, without the fuzzy lookup below.
+  // Each tenant's links carry its own name (unsubscribeBrandForTenant), so an
+  // OASIS opt-out lands on OASIS and "SunBiz" lands on SunBiz, even if another
+  // workspace is ever given a name the ILIKE would also match.
+  const known = tenantIdForUnsubscribeBrand(brand);
+  if (known) return known;
   const db = getServiceSupabase();
   // Use Supabase's PostgREST ilike for case-insensitive matching.
   const { data, error } = await db

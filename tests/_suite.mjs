@@ -188,6 +188,7 @@ const TESTS = [
   "tests/health-coverage.test.ts",
   "tests/health-lanes-per-company.test.ts",
   "tests/sunbiz-tenant-cron-health.test.ts",
+  "tests/unsubscribe-brand-per-tenant.test.ts",
   "tests/sms-sender-sync.test.ts",
   "tests/sms-carrier-status.test.ts",
   "tests/outbound-routing.test.ts",
