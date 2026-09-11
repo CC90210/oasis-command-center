@@ -186,6 +186,7 @@ const TESTS = [
   "tests/sms-consent.test.ts",
   "tests/health-checks.test.ts",
   "tests/health-coverage.test.ts",
+  "tests/health-lanes-per-company.test.ts",
   "tests/sms-sender-sync.test.ts",
   "tests/sms-carrier-status.test.ts",
   "tests/outbound-routing.test.ts",

@@ -23,16 +23,20 @@ export type DripCheck = {
   severity: "critical" | "high" | "medium";
   rule: CheckRule;
   /**
-   * Who gets paged. Omitted means `sunbiz-ops`, which is where every check in
-   * this file belongs and where all of them went before this field existed.
+   * Who gets paged. REQUIRED, the same way sendTelegram requires it.
    *
    * It exists because the runner hardcoded that lane, and the estate stopped
    * being only SunBiz: an OASIS check added in #334 would have announced an
    * OASIS booking outage into the SunBiz ops channel — the client's lane, for a
    * product they do not operate. Wrong-audience alerts are ignored alerts, and
    * an ignored alert is the same as no alert.
+   *
+   * It used to be optional with a `sunbiz-ops` default. That kept the old checks
+   * where they were, but it meant the NEXT OASIS check written without a lane
+   * would page SunBiz's operators. A default lane is a guess about which company
+   * a check belongs to, so there is none: every check says whose it is.
    */
-  lane?: TelegramLane;
+  lane: TelegramLane;
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;
@@ -93,6 +97,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // that is impossible to fake: a row claiming it sent, with no provider id
     // and a recorded delivery failure.
     id: "sms.sent_without_proof",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -111,6 +116,7 @@ export const DRIP_CHECKS: DripCheck[] = [
   },
   {
     id: "sms.delivered_24h",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "baseline_drop", failingBelowPct: 0.25, degradedBelowPct: 0.6 },
     observe: (db, tenantId, endMs) =>
@@ -123,6 +129,7 @@ export const DRIP_CHECKS: DripCheck[] = [
   },
   {
     id: "email.sent_24h",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "baseline_drop", failingBelowPct: 0.25, degradedBelowPct: 0.6 },
     observe: (db, tenantId, endMs) =>
@@ -140,6 +147,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // must_be_zero on FAILURES rather than a rate, so a low-volume day cannot
     // dilute a dead route into looking merely quiet.
     id: "sms.carrier_failures_24h",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -157,6 +165,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // is broken and every other SMS check silently reads clean — the precise
     // shape of failure this whole subsystem exists to prevent.
     id: "sms.receipt_coverage",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: async (db, tenantId, endMs) => {
@@ -238,6 +247,7 @@ export const DRIP_CHECKS: DripCheck[] = [
      * working day.
      */
     id: "sms.receipts_unresolved",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -274,6 +284,7 @@ export const DRIP_CHECKS: DripCheck[] = [
      * drips.enrolments_24h and sms.delivered_24h already speak to.
      */
     id: "sms.carrier_verdict_rate",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_reach", target: 95, failingBelow: 80 },
     observe: async (db, tenantId, endMs) => {
@@ -325,6 +336,7 @@ export const DRIP_CHECKS: DripCheck[] = [
      * that is the whole ask.
      */
     id: "sms.sent_vs_target",
+    lane: "sunbiz-ops",
     severity: "high",
     // Placeholder; the live threshold comes from resolveRule below.
     rule: { kind: "must_reach", target: 40, failingBelow: 13 },
@@ -371,6 +383,7 @@ export const DRIP_CHECKS: DripCheck[] = [
      * minutes.
      */
     id: "leads.phone_lookup_stalled",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_below", ceiling: 24 },
     observe: async (db, tenantId, endMs) => {
@@ -397,6 +410,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // A backlog that stops draining is the shape of a stalled dispatcher, and
     // it is visible before output drops to zero.
     id: "drips.overdue_backlog",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_above", floor: -1 }, // never fails on its own; the digest reports it
     observe: (db, tenantId, endMs) =>
@@ -442,6 +456,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // its CURRENT state, which is the thing being measured. On a first send the
     // two are equal, so nothing is lost. (Codex review, 2026-08-11.)
     id: "shopout.threads_stuck_pending",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -487,6 +502,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // threads_stuck_pending two entries up: a row's age is not the age of the
     // state it is in. (Codex review, 2026-08-11.)
     id: "shopout.sent_without_proof",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -525,6 +541,7 @@ export const DRIP_CHECKS: DripCheck[] = [
     // run-heartbeat on the classifier itself, which does not exist yet and is
     // tracked as follow-up. A late true signal beats a prompt false one.
     id: "shopout.sla_sweep_stalled",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
