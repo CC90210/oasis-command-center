@@ -21,7 +21,9 @@ const SKIP = new Set(["node_modules", ".next", "tmp", "__tests__"]);
 // `data->>stage.eq.${LEADS_BOARD_EXEMPT_STAGE}` interpolates the constant
 // "uw_sheet", never a caller's value.
 const ALLOW = new Set(["lib/leads/board-visibility.ts"]);
-const VALUE_INTO_JSON_PATH = /->>[\w$]+\.(?:not\.)?(?:eq|neq|gt|gte|lt|lte)\.\$\{/;
+// `\s*` and a whole-file scan: a template literal can break a line, or put a
+// space, between `.eq.` and `${`, and it is the same splice. (CodeRabbit, #430.)
+const VALUE_INTO_JSON_PATH = /->>[\w$]+\.(?:not\.)?(?:eq|neq|gt|gte|lt|lte)\.\s*\$\{/g;
 
 const hits: string[] = [];
 function walk(dir: string) {
@@ -35,11 +37,12 @@ function walk(dir: string) {
     if (!/\.(ts|tsx|mjs|js)$/.test(name)) continue;
     const rel = p.replace(/\\/g, "/");
     if (ALLOW.has(rel)) continue;
-    readFileSync(p, "utf8")
-      .split("\n")
-      .forEach((line, i) => {
-        if (VALUE_INTO_JSON_PATH.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
-      });
+    const src = readFileSync(p, "utf8");
+    const lines = src.split("\n");
+    for (const m of src.matchAll(VALUE_INTO_JSON_PATH)) {
+      const i = src.slice(0, m.index).split("\n").length - 1;
+      hits.push(`${rel}:${i + 1}: ${lines[i].trim()}`);
+    }
   }
 }
 for (const root of ROOTS) walk(root);
