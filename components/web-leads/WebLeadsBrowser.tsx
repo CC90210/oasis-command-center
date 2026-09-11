@@ -42,7 +42,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ENRICHMENT_LABELS } from "@/lib/web-leads/enrichment";
 import { useRouter, useSearchParams } from "next/navigation";
 import { PageHeader } from "@/components/Card";
-import { parseFilters, filtersToParams, type WebLeadFilters, type WebLeadView } from "@/lib/web-leads/filters";
+import {
+  parseFilters, filtersToParams, LEAD_COUNTRY_NAMES, type LeadCountry, type WebLeadFilters, type WebLeadView,
+} from "@/lib/web-leads/filters";
 import { hasNoFilters, readRememberedFilters, rememberFilters } from "@/lib/web-leads/filter-memory";
 import {
   fetchCachedWebLeadsJson,
@@ -57,7 +59,7 @@ import type { Facets } from "@/lib/web-leads/queries";
 // read from the /api/web-leads response body instead, which is the same source
 // of truth without crossing the server/client line.
 import type { WebLeadRow } from "@/lib/web-leads/data";
-import { activeFilterCount, FilterRail, FilterSheet } from "./FilterRail";
+import { activeFilterCount, CountrySwitch, FilterRail, FilterSheet } from "./FilterRail";
 
 import { LeadsTable } from "./LeadsTable";
 import { LeadsToolbar } from "./LeadsToolbar";
@@ -144,6 +146,13 @@ export function WebLeadsBrowser({
   const [pageSize, setPageSize] = useState<number>(Number.POSITIVE_INFINITY);
   const [listError, setListError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  /**
+   * How many of the book's leads sit on each country board, from the same
+   * response as `leads`. My leads and Team leads only (null on the pool): the
+   * switch on those tabs shows them, so a lead on the other board is never out
+   * of sight.
+   */
+  const [boards, setBoards] = useState<Record<LeadCountry, number> | null>(null);
 
   /**
    * Call Mode is LOCAL state, not a URL param, on purpose. A `?calling=1` link
@@ -323,6 +332,7 @@ export function WebLeadsBrowser({
       page: number;
       pageSize: number;
       facets: Facets | null;
+      boards?: Record<LeadCountry, number> | null;
     }>(url)
       .then((body) => {
         if (!alive) return;
@@ -334,6 +344,7 @@ export function WebLeadsBrowser({
         setTotal(body.total);
         setPageSize(body.pageSize);
         setFacets(body.facets);
+        setBoards(body.boards ?? null);
         setFacetError(null);
         setListError(null);
       })
@@ -342,6 +353,7 @@ export function WebLeadsBrowser({
         const message = e instanceof Error ? e.message : "failed";
         setListError(message);
         setFacets(null);
+        setBoards(null);
         setFacetError(message);
       })
       .finally(() => { if (alive) setLoading(false); });
@@ -400,6 +412,17 @@ export function WebLeadsBrowser({
   const mine = view === "mine";
   const team = view === "team";
   const canOperateCurrentView = canMutate && !team;
+
+  // A book shows one board at a time. When this board is empty and the other
+  // is not, say so -- "nothing in your book" would be false.
+  const otherCountry: LeadCountry = filters.country === "ca" ? "us" : "ca";
+  const onOtherBoard = boards?.[otherCountry] ?? 0;
+  const bookEmptyHint =
+    onOtherBoard > 0
+      ? `None on the ${LEAD_COUNTRY_NAMES[filters.country]} board. ${onOtherBoard.toLocaleString()} ${onOtherBoard === 1 ? "is" : "are"} on the ${LEAD_COUNTRY_NAMES[otherCountry]} board: switch boards above.`
+      : team
+        ? "No roster-assigned team leads yet."
+        : "Nothing in your book yet. Go to Leads, tick the ones you want and claim them.";
 
   /**
    * Claim the ticked leads into my book, or (in My Leads) release them back to
@@ -557,8 +580,10 @@ export function WebLeadsBrowser({
     // `overflow-hidden` wrapper, which is happening in production today.
     <div className="2xl:flex 2xl:gap-7">
       {/* The rail narrows the shared pool. A rep's own book is small enough to
-          scan and is not filtered by geography -- filtering your own 100 leads
-          by province is a question nobody has. */}
+          scan and is not narrowed by province, city or industry -- filtering
+          your own 100 leads by province is a question nobody has. It IS shown
+          one country board at a time (the server applies the country to every
+          tab), so the book tabs carry the country switch below. */}
       {!mine && !team && (
         <>
           <FilterRail facets={facets} filters={filters} onChange={push} loading={!facets && !facetError} error={facetError} />
@@ -576,6 +601,16 @@ export function WebLeadsBrowser({
       )}
 
       <div className="min-w-0 flex-1 space-y-4">
+        {/* THE BOOK'S COUNTRY SWITCH (2026-09-10). Without it a lead on the
+            other board -- CC's Florida lead, in a book that opened on Canada --
+            could not be reached from this page. The rail's own control, with
+            the server's per-board counts. */}
+        {(mine || team) && (
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="px-1 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Board</span>
+            <CountrySwitch filters={filters} onChange={push} counts={boards} className="w-full sm:w-80" />
+          </div>
+        )}
         <LeadsToolbar
           filters={filters}
           onChange={push}
@@ -610,7 +645,7 @@ export function WebLeadsBrowser({
           onPage={(n) => push({ ...filters, page: n })}
           onOpen={openLead}
           loading={loading} error={listError}
-          emptyHint={team ? "No roster-assigned team leads yet." : mine ? "Nothing in your book yet. Go to Leads, tick the ones you want and claim them." : emptyHint}
+          emptyHint={mine || team ? bookEmptyHint : emptyHint}
           selected={selected} onToggle={toggle} onToggleAll={toggleAll}
           showStage={mine || team}
           canSelect={canOperateCurrentView}

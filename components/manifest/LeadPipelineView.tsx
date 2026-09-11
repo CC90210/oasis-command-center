@@ -126,6 +126,13 @@ type Props = {
    */
   canCreateLead?: boolean;
   /**
+   * OASIS stage keys this viewer may add a lead to. Each matching column gets
+   * a "+" that opens the new-lead form with that stage preselected. Computed
+   * server-side by lib/oasis-lead-create.ts — the same rule the create route
+   * enforces — so a "+" never opens a form the server will refuse.
+   */
+  creatableStageKeys?: readonly string[];
+  /**
    * Exact server-side totals + navigation for a bounded result window.
    * Omitted by legacy/SunBiz callers, which continue to render their complete
    * in-memory row set exactly as before.
@@ -249,6 +256,7 @@ export function LeadPipelineView({
   // Defaults to canManage so any caller that has not been updated keeps its
   // current behaviour rather than silently gaining a button.
   canCreateLead,
+  creatableStageKeys,
   resultWindow,
 }: Props) {
   const router = useRouter();
@@ -594,7 +602,11 @@ export function LeadPipelineView({
           </Link>}
           {/* Drop-in autofill — drop a merchant's existing application (any
               company's PDF) to create a NEW SunBiz lead + application from it. */}
-          {isLeads && (variant !== "oasis" || canManage) && (
+          {/* SunBiz only. "New from application" files a lead at a SunBiz
+              underwriting stage with no OASIS stamp, so on the OASIS board it
+              made a lead the board can never draw: the "I added it and it isn't
+              there" defect, by a third door. (Verifier, 2026-09-10.) */}
+          {isLeads && variant !== "oasis" && (
             <AutofillDropzone mode="new" tenantSlug={slug} label="New from application" />
           )}
         </div>
@@ -811,6 +823,11 @@ export function LeadPipelineView({
             selected={selected}
             onToggleSelect={toggleSelect}
             onAddLead={() => setAddLeadOpen(true)}
+            addLeadHref={
+              variant === "oasis" && creatableStageKeys?.includes(stage.key)
+                ? `${newHref}?stage=${encodeURIComponent(stage.key)}`
+                : null
+            }
           />
         );
       })}
@@ -1133,6 +1150,7 @@ function StageSection({
   selected,
   onToggleSelect,
   onAddLead,
+  addLeadHref = null,
 }: {
   slug: string;
   entityName: "lead" | "application";
@@ -1152,6 +1170,9 @@ function StageSection({
   /** When set (only the sent_application section passes it), renders a "+ Add
    *  lead" button in the section header that opens the manual quick-add modal. */
   onAddLead?: () => void;
+  /** OASIS: the new-lead form with this column's stage preselected. Set only
+   *  for columns the viewer may create in; absent, no "+" renders. */
+  addLeadHref?: string | null;
 }) {
   const targetLabel = stageTargetLabelVariant(cfg, stage.key);
   return (
@@ -1188,6 +1209,16 @@ function StageSection({
             className="mr-3 shrink-0 rounded-md border border-bg-border bg-bg-deep/50 px-2 py-1 text-[10px] font-semibold text-accent hover:border-accent/50"
           >
             View all {totalCount}
+          </Link>
+        )}
+        {addLeadHref && (
+          <Link
+            href={addLeadHref}
+            title={`Add a lead to ${stage.label}`}
+            aria-label={`Add a lead to ${stage.label}`}
+            className="mr-3 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-bg-border bg-bg-deep/50 text-accent hover:border-accent/50"
+          >
+            <Plus className="h-3.5 w-3.5" />
           </Link>
         )}
         {onAddLead && stage.key === "sent_application" && (

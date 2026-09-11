@@ -40,6 +40,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const PRIVATE_BROWSER_CACHE = "private, max-age=15, stale-while-revalidate=30";
+// My leads and Team leads are BOOKS: a lead someone just added or claimed must
+// be there on the next read. Only the shared pool is briefly reusable.
+const BOOK_NO_STORE = "private, no-store";
 
 export async function GET(req: NextRequest) {
   const session = await resolveSessionContext();
@@ -104,7 +107,7 @@ export async function GET(req: NextRequest) {
     // the expiry rules cannot see time move mid-read" -- and passing the facets
     // their own default broke it. (CodeRabbit, PR #377.)
     const availabilityNow = Date.now();
-    const { leads, total } = await fetchLeads(filters, ids, viewer, scoreIndex, {
+    const { leads, total, boards } = await fetchLeads(filters, ids, viewer, scoreIndex, {
       scope,
       now: availabilityNow,
       fresh,
@@ -146,6 +149,9 @@ export async function GET(req: NextRequest) {
         page: filters.page,
         pageSize: PAGE_SIZE,
         facets,
+        // My leads / Team leads: how many of the rows in view sit on each
+        // country board, for the switch on those tabs. Null for the pool.
+        boards,
       },
       {
         headers: {
@@ -153,7 +159,7 @@ export async function GET(req: NextRequest) {
           // only for the same session cookie. `private` keeps CDNs/shared
           // proxies out; Vary prevents one signed-in identity reusing another's
           // response in a shared browser cache.
-          "Cache-Control": PRIVATE_BROWSER_CACHE,
+          "Cache-Control": scope === "pool" ? PRIVATE_BROWSER_CACHE : BOOK_NO_STORE,
           "Vary": "Cookie",
           // Both legs plus the total, so a slow page can be attributed without
           // reproducing it locally. Cache state is what separates a cold

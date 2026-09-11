@@ -71,7 +71,10 @@ includesAll("app/api/leads/powerlist/route.ts", [
 includesAll("app/api/leads/quick-add/route.ts", [
   "canMutateGenericLeadForTenant",
   "lead_not_found",
-  "assigned_to: sess.userId",
+  // An OASIS create is owned by its creator through the shared planner's stamp
+  // (lib/oasis-lead-create.ts), no longer an inline `assigned_to` literal.
+  // Proven behaviourally in tests/oasis-create-stage-contract.test.ts.
+  "planOasisLeadCreate",
 ]);
 includesAll("app/api/applications/[id]/edit/route.ts", ["canMutateGenericLeadForTenant"]);
 includesAll("app/api/leads/[id]/collaborators/route.ts", [

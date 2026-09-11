@@ -75,6 +75,12 @@ export function countryOf(region: string | null | undefined): LeadCountry {
   return CA_REGIONS.includes(String(region || "").trim().toUpperCase()) ? "ca" : "us";
 }
 
+/** The board names a person reads: the country switch and the book tabs' hints. */
+export const LEAD_COUNTRY_NAMES: Readonly<Record<LeadCountry, string>> = Object.freeze({
+  ca: "Canada",
+  us: "United States",
+});
+
 export type LeadSort = "opportunity" | "name" | "score_desc" | "enriched_desc";
 const VALID_SORTS: readonly LeadSort[] = ["opportunity", "name", "score_desc", "enriched_desc"];
 
@@ -244,4 +250,15 @@ export function filtersToParams(f: WebLeadFilters): URLSearchParams {
   if (f.page > 1) sp.set("page", String(f.page));
   if (f.leadId) sp.set("lead", f.leadId);
   return sp;
+}
+
+/**
+ * Move to the other country's board. One function for both switches -- the
+ * rail's and the one on My leads / Team leads -- so they cannot behave
+ * differently. Provinces and cities are cleared because each list belongs to
+ * one country: Ontario still selected on the US board would empty the pool for
+ * a reason nothing on screen names. Page 1, like every targeting change.
+ */
+export function switchCountry(f: WebLeadFilters, country: LeadCountry): WebLeadFilters {
+  return { ...f, country, provinces: [], cities: [], page: 1 };
 }

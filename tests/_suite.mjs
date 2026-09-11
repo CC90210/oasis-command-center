@@ -53,6 +53,16 @@ const TESTS = [
   "tests/atomic-pipeline-lifecycle.test.ts",
   "tests/oasis-pipeline-query.test.ts",
   "tests/oasis-sales-pipeline-policy.test.ts",
+  // Adding a lead (CC, 2026-09-10): the create form, both create routes and the
+  // board must agree on which stages a lead may start in, and every OASIS create
+  // is stamped so /pipeline and /web-leads actually show it. Drives the real
+  // records and quick-add route handlers against a local libSQL database.
+  "tests/oasis-create-stage-contract.test.ts",
+  // These three pinned the create path and the two stage lists but ran in no
+  // suite, so a drift they catch could still ship. (Verifier, 2026-09-10.)
+  "tests/turnkey-access-boundaries.test.ts",
+  "tests/website-sales-contract.test.ts",
+  "tests/website-sales-surface.test.ts",
   "tests/manifest-data-in-filter.test.ts",
   "tests/oasis-sales-motion-split.test.ts",
   "tests/oasis-claim-touch-cutover.test.ts",

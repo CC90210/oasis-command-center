@@ -33,24 +33,18 @@ import { LeadPipelineView } from "@/components/manifest/LeadPipelineView";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getTenant } from "@/lib/queries";
-import {
-  OASIS_WEBSITE_SALES_PROGRAM,
-  isOasisPipelineAdmin,
-  stagesForOasisRole,
-} from "@/lib/oasis-sales-pipeline-policy";
+import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
 import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
 import { getOasisSalesRepRoster } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { OASIS_WEBSITE_TENANT_SLUG } from "@/lib/website-sales-workflow";
 import {
-  OASIS_WEBSITE_TENANT_SLUG,
-  mayWorkWebsiteSalesLifecycle,
-} from "@/lib/website-sales-workflow";
-import {
-  OASIS_COLD_OUTBOUND_MOTION,
-  isWebsiteSalesTenantSlug,
-} from "@/lib/leads/canonical-lead-fields";
+  creatableOasisStages,
+  oasisBoardProgramFilter,
+  oasisBoardStages,
+} from "@/lib/oasis-lead-create";
 import {
   listOasisPipelineWindow,
   resolveOasisPipelineAssigneeScope,
@@ -151,7 +145,9 @@ export default async function PipelinePage({
   // Only oasis-webdev consistently carries the legacy sales_program marker.
   // sales_motion is now the cross-tenant boundary between cold Pipeline work
   // and warm Form submissions.
-  const isWebsiteSalesTenant = tenantSlug === OASIS_WEBSITE_TENANT_SLUG;
+  // The predicate lives in lib/oasis-lead-create.ts beside the create stamp,
+  // because the stamp must satisfy it or a lead someone adds is invisible here.
+  const boardFilter = oasisBoardProgramFilter(tenantSlug);
 
   // Optional ?q= filter — match across the operator-relevant fields.
   // Search is applied by the database before each bounded stage window.
@@ -177,10 +173,27 @@ export default async function PipelinePage({
   // board — which reads as "we have no prospects" when the truth is the
   // opposite: 30,847 of them, deliberately parked in /web-leads until a rep
   // picks one up. An empty column is a worse lie than no column.
-  const stages = (session.ok
-    ? stagesForOasisRole(session.teamRole, session.isTrueAdmin, session.adminAccess)
-    : []
-  ).filter((stage) => stage.key !== "researched");
+  //
+  // oasisBoardStages is that filtered list, defined once in
+  // lib/oasis-lead-create.ts so the stages a lead may be CREATED in are carved
+  // out of exactly the stages this board draws.
+  const stages = session.ok
+    ? oasisBoardStages({
+        teamRole: session.teamRole,
+        isOwner: session.isTrueAdmin,
+        adminAccess: session.adminAccess,
+      })
+    : [];
+  // The columns this viewer may add a lead to. Each gets a "+" (D9); the create
+  // route enforces the same list, so a "+" never opens a form it would refuse.
+  // Intersected with the drawn columns, so a "+" can never exist without its
+  // column, even if this page ever narrows `stages` further.
+  const drawnStageKeys = new Set(stages.map((stage) => stage.key));
+  const creatableStageKeys = session.ok
+    ? creatableOasisStages({ isAdmin: session.isAdmin, teamRole: session.teamRole })
+        .map((stage) => stage.key)
+        .filter((key) => drawnStageKeys.has(key))
+    : [];
 
   const pipelineAdmin = session.ok
     ? isOasisPipelineAdmin(session.teamRole, session.isTrueAdmin, session.adminAccess)
@@ -259,8 +272,8 @@ export default async function PipelinePage({
         stageKeys: assigneeScope.allowed ? stages.map((stage) => stage.key) : [],
         requestedStage: stageFilter,
         requestedPage,
-        salesProgram: isWebsiteSalesTenant ? OASIS_WEBSITE_SALES_PROGRAM : null,
-        salesMotion: isWebsiteSalesTenantSlug(tenantSlug) ? OASIS_COLD_OUTBOUND_MOTION : null,
+        salesProgram: boardFilter.salesProgram,
+        salesMotion: boardFilter.salesMotion,
         assignedTo: assigneeScope.allowed ? directAssignee : undefined,
         assignedToAny: assigneeScope.allowed ? teamAssigneeUnion : undefined,
         viewerUserId:
@@ -421,9 +434,8 @@ export default async function PipelinePage({
         // Every sales role may ADD a lead they sourced; the lead is stamped to
         // whoever created it, server-side. Administering other people's leads
         // (bulk assign, new-from-application) stays on canManage above.
-        canCreateLead={
-          session.ok && (session.isAdmin || mayWorkWebsiteSalesLifecycle(session.teamRole))
-        }
+        canCreateLead={creatableStageKeys.length > 0}
+        creatableStageKeys={creatableStageKeys}
         resultWindow={{
           exactStageCounts: pipelineWindow.stageCounts,
           exactTotal: pipelineWindow.total,
