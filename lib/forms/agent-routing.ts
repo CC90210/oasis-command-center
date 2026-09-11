@@ -58,49 +58,94 @@ export async function resolveRepAssignment(
   return null;
 }
 
+/** More leads than this on one phone is not an identity key; see findExistingLead. */
+const STRONG_KEY_SCAN = 25;
+
+/** The company a lead names, lowercased: SunBiz stores `business_name`, OASIS `company`. */
+function leadBusinessName(data: Record<string, unknown> | null): string {
+  for (const key of ["business_name", "company"] as const) {
+    const v = data?.[key];
+    if (typeof v === "string" && v.trim()) return v.trim().toLowerCase();
+  }
+  return "";
+}
+
 /**
  * Smart matching: find an existing lead for this tenant by email or phone, so a
  * returning merchant who opens a fresh form link + re-enters their details
  * routes into their EXISTING file instead of spawning a duplicate lead. Email
  * is matched lowercased (new leads are stored lowercased); phone exact. Returns
  * the most-recent match, or null when nothing matches (caller creates fresh).
+ *
+ * `business`, when given, does two jobs: it refuses a PHONE match on a lead
+ * that names a different business, and (unless `matchOnBusinessName: false`)
+ * it is the step-2 fallback key. Quick-add and the Live Subs approval pass
+ * `false`: they must never merge on a name alone.
  */
 export async function findExistingLead(
   tenantId: string,
   match: { email?: string | null; phone?: string | null; business?: string | null },
+  opts: { matchOnBusinessName?: boolean } = {},
 ): Promise<{ id: string; data: Record<string, unknown> } | null> {
   const db = getServiceSupabase();
 
   // 1. Strong identity keys — email (lowercased) OR phone (exact). These
   //    uniquely identify a returning merchant no matter which of the three
   //    forms they filled, in any order (interest, full app, bank statements).
+  //
+  //    Each key is BOUND with .eq(), never spliced into an .or() string. The
+  //    .or() string is a grammar and the Turso adapter types its literals: an
+  //    all-digit phone became the INTEGER 4165550199, which never equals the
+  //    TEXT a lead stores, so from the Turso move until this change a phone
+  //    matched nothing unless it happened to contain punctuation. A comma in
+  //    a typed phone ("..., ext 2") also split the grammar and threw. A bound
+  //    value is compared as the text it is, on Turso and on PostgREST alike.
+  //    Both lookups run and the globally newest wins: the same "most recent
+  //    match" rule the single OR query had, and the one step 2 uses below.
+  //
+  //    A PHONE match is refused when the caller names a business and the lead
+  //    names a different one. An owner's cell is shared by every business they
+  //    own, and merging a second business's submission into the first one's
+  //    lead overwrites its name and contact and moves its deal. Refusing
+  //    leaves the pre-fix outcome (no phone match), never a worse one.
   const email = (match.email || "").trim().toLowerCase();
   const phone = (match.phone || "").trim();
-  const ors: string[] = [];
-  if (email) ors.push(`data->>email.eq.${email}`);
-  if (phone) ors.push(`data->>phone.eq.${phone}`);
-  if (ors.length > 0) {
+  const business = (match.business || "").trim();
+  const strong: Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }> = [];
+  for (const [field, value] of [["email", email], ["phone", phone]] as const) {
+    if (!value) continue;
+    // Newest first, and more than one row: when the newest lead on a phone is
+    // a DIFFERENT business, an older lead on the same phone may still be this
+    // one. Bounded: the most leads on one phone in production is 12
+    // (oasis-webdev) and 3 (SunBiz), measured 2026-09-11.
     const q = await db
       .from("tenant_records")
       .select("id, data, created_at")
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lead")
-      .or(ors.join(","))
+      .eq(`data->>${field}`, value)
       .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (!q.error && q.data) {
-      const row = q.data as { id: string; data: Record<string, unknown> | null };
-      return { id: row.id, data: row.data || {} };
-    }
+      .limit(STRONG_KEY_SCAN);
+    if (q.error || !Array.isArray(q.data)) continue;
+    const rows = q.data as Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }>;
+    const row = rows.find((r) => {
+      if (field !== "phone" || !business) return true;
+      const theirs = leadBusinessName(r.data);
+      return !theirs || theirs === business.toLowerCase();
+    });
+    if (row) strong.push(row);
+  }
+  if (strong.length > 0) {
+    strong.sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+    return { id: strong[0].id, data: strong[0].data || {} };
   }
 
   // 2. Secondary key — company name (case-insensitive exact). Catches a
   //    returning merchant who used a different contact email/number on a
   //    later form. LIKE wildcards in the name are escaped so it stays an
-  //    exact match, never a broad one.
-  const business = (match.business || "").trim();
-  if (business) {
+  //    exact match, never a broad one. Skipped when the caller asked for
+  //    strong keys only.
+  if (business && opts.matchOnBusinessName !== false) {
     const safe = business.replace(/[%_\\]/g, "\\$&");
     // BOTH SPELLINGS, because the estate genuinely contains both. SunBiz leads
     // store the company under `business_name`; OASIS leads store it under
