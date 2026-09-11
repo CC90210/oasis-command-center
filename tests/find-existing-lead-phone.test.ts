@@ -134,6 +134,7 @@ async function main() {
       lead("m-phone-new", SUN, { business_name: "Twin Co", phone: "3055550103", stage: "follow_up" }),
       lead("m-owner-biz1", SUN, { business_name: "Owner First LLC", phone: "3055550104", stage: "signed_application" }),
       lead("m-noname", SUN, { phone: "3055550105", stage: "follow_up" }),
+      lead("m-formatted", SUN, { business_name: "Format Co", phone: "(305) 555-0120", stage: "follow_up" }),
       lead("q-theirs", SUN, { business_name: "Theirs Co", phone: "3055550110", stage: "follow_up", assigned_to: OTHER_REP }),
       lead("q-follow", SUN, { business_name: "Follow Co", phone: "3055550111", stage: "follow_up", assigned_to: SUN_AGENT }),
       lead("q-signed", SUN, { business_name: "Signed Co", phone: "3055550112", stage: "signed_application", assigned_to: SUN_AGENT }),
@@ -168,6 +169,19 @@ async function main() {
   });
   await check("same business, different case: still a match", async () => {
     assert.equal((await findExistingLead(SUN, { phone: "3055550104", business: "owner first llc" }))?.id, "m-owner-biz1");
+  });
+  await check("a formatted phone finds the lead that stores bare digits", async () => {
+    assert.equal((await findExistingLead(SUN, { phone: "(305) 555-0100" }))?.id, "m-digits");
+    assert.equal((await findExistingLead(SUN, { phone: "+1 305-555-0100" }))?.id, "m-digits", "a leading US 1 is dropped");
+  });
+  await check("a formatted phone still finds the lead that stores it formatted", async () => {
+    assert.equal((await findExistingLead(SUN, { phone: "(305) 555-0120" }))?.id, "m-formatted");
+  });
+  await check("the digits form never crosses a different business either", async () => {
+    assert.equal(
+      await findExistingLead(SUN, { phone: "(305) 555-0104", business: "Owner Second LLC" }, { matchOnBusinessName: false }),
+      null,
+    );
   });
   await check("a lead with no business name still matches on phone", async () => {
     assert.equal((await findExistingLead(SUN, { phone: "3055550105", business: "Anything" }))?.id, "m-noname");

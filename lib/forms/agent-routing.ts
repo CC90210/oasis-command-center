@@ -61,6 +61,20 @@ export async function resolveRepAssignment(
 /** More leads than this on one phone is not an identity key; see findExistingLead. */
 const STRONG_KEY_SCAN = 25;
 
+/**
+ * The phone as typed, then its bare digits (a leading US 1 dropped, the rule
+ * quick-add already applies). Leads store both shapes: SunBiz mostly bare
+ * digits, OASIS mostly formatted. Exact text first, so "(305) 555-0100" still
+ * finds a lead that stores it that way, and now also one that stores
+ * "3055550100".
+ */
+function phoneCandidates(raw: string): string[] {
+  if (!raw) return [];
+  const digits = raw.replace(/\D+/g, "");
+  const bare = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  return bare && bare !== raw ? [raw, bare] : [raw];
+}
+
 /** The company a lead names, lowercased: SunBiz stores `business_name`, OASIS `company`. */
 function leadBusinessName(data: Record<string, unknown> | null): string {
   for (const key of ["business_name", "company"] as const) {
@@ -112,8 +126,10 @@ export async function findExistingLead(
   const phone = (match.phone || "").trim();
   const business = (match.business || "").trim();
   const strong: Array<{ id: string; data: Record<string, unknown> | null; created_at: string | null }> = [];
-  for (const [field, value] of [["email", email], ["phone", phone]] as const) {
-    if (!value) continue;
+  const lookups: Array<readonly ["email" | "phone", string]> = [];
+  if (email) lookups.push(["email", email] as const);
+  for (const candidate of phoneCandidates(phone)) lookups.push(["phone", candidate] as const);
+  for (const [field, value] of lookups) {
     // Newest first, and more than one row: when the newest lead on a phone is
     // a DIFFERENT business, an older lead on the same phone may still be this
     // one. Bounded: the most leads on one phone in production is 12
