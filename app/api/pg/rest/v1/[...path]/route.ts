@@ -141,20 +141,28 @@ const FORBIDDEN_TABLES = new Set([
  * revocable credential breaks nobody and lets each fleet be cut off on its own.
  *
  * Both are compared; the check still fails closed when neither is configured.
+ *
+ * Returns WHICH credential matched, not just whether one did (2026-09-11). The
+ * two tokens belong to different operators: TT is SunBiz's TextTorrent runtime
+ * on the VPS, APEX is Adon's fleet. A boolean left the route unable to tell
+ * them apart, so SunBiz's runtime could read and write every tenant's rows,
+ * OASIS's included. The TT caller is now pinned to SunBiz below.
  */
-function authorised(req: NextRequest): boolean {
-  const accepted = [
-    process.env.TT_PG_BRIDGE_TOKEN || "",
-    process.env.APEX_PG_BRIDGE_TOKEN || "",
-  ].filter(Boolean);
-  if (!accepted.length) return false; // fail closed when unconfigured
+type BridgeCaller = "tt" | "apex";
+
+function authorised(req: NextRequest): BridgeCaller | null {
+  const accepted = ([
+    ["tt", process.env.TT_PG_BRIDGE_TOKEN || ""],
+    ["apex", process.env.APEX_PG_BRIDGE_TOKEN || ""],
+  ] as Array<[BridgeCaller, string]>).filter(([, value]) => Boolean(value));
+  if (!accepted.length) return null; // fail closed when unconfigured
 
   const header = req.headers.get("authorization") || "";
   const apikey = req.headers.get("apikey") || "";
   const presented = header.toLowerCase().startsWith("bearer ")
     ? header.slice(7).trim()
     : apikey.trim();
-  if (!presented) return false;
+  if (!presented) return null;
 
   // Hash both sides so timingSafeEqual gets equal-length buffers regardless of
   // the presented value's length (it throws on a length mismatch, which would
@@ -162,14 +170,111 @@ function authorised(req: NextRequest): boolean {
   //
   // Every candidate is compared even after a match, so the work done does not
   // depend on WHICH credential was presented — a short-circuit would leak, by
-  // timing, which fleet a caller belongs to.
+  // timing, which fleet a caller belongs to. The first match wins, so if the
+  // two were ever set to the same value the caller gets the pinned identity.
   const a = createHash("sha256").update(presented).digest();
-  let ok = false;
-  for (const candidate of accepted) {
+  let who: BridgeCaller | null = null;
+  for (const [name, candidate] of accepted) {
     const b = createHash("sha256").update(candidate).digest();
-    if (timingSafeEqual(a, b)) ok = true;
+    if (timingSafeEqual(a, b) && who === null) who = name;
   }
-  return ok;
+  return who;
+}
+
+/**
+ * THE TT CREDENTIAL IS SUNBIZ'S, SO IT SEES SUNBIZ'S ROWS (2026-09-11).
+ *
+ * Every table with a tenant_id column is pinned to the SunBiz tenant for this
+ * caller: the predicate is forced onto every GET and PATCH, and a POST row or
+ * PATCH body naming any other tenant is refused. There is no DELETE handler
+ * (Next answers 405), so there is nothing to pin there.
+ *
+ * The APEX credential is NOT pinned. Its callers have not all been listed yet,
+ * and pinning one of them blind would break a running service.
+ */
+const TT_TENANT_ID = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110"; // SunBiz, slug "submissions"
+
+/**
+ * Rows the TT runtime writes WITHOUT a tenant_id, and how to recognise them.
+ *
+ * Read from the running container on 2026-09-11: services/texttorrent-runtime/
+ * inference.js inserts its inference_jobs with the tenant inside `metadata`,
+ * not in tenant_id, and hosted-inference.js reads them back by `source`. A
+ * strict tenant_id pin would hide every job the runtime just queued and stop
+ * SMS drafting. Unowned rows are therefore visible ONLY when they also carry
+ * the runtime's own marker; another company's unowned rows stay hidden.
+ */
+const TT_UNOWNED_OWN_ROWS: Record<string, string> = {
+  inference_jobs: "source.eq.sunbiz_texttorrent_runtime",
+};
+
+/**
+ * Which tables are tenant-scoped: every table with a tenant_id column, read
+ * from the live schema. Same rule and same single query as the Python DAL
+ * (scripts/lib/db_turso.py _discover_tenant_tables_fast in the harness), so a
+ * new tenant table is pinned without anyone remembering to list it here.
+ *
+ * Cached for a few minutes per instance. An EMPTY answer is treated as a
+ * failed read rather than "no tenant tables", because trusting it would unpin
+ * everything.
+ */
+const TENANT_TABLES_TTL_MS = 5 * 60_000;
+let tenantTablesCache: { at: number; names: Set<string> } | null = null;
+
+async function tenantScopedTables(): Promise<Set<string>> {
+  if (tenantTablesCache && Date.now() - tenantTablesCache.at < TENANT_TABLES_TTL_MS) {
+    return tenantTablesCache.names;
+  }
+  const r = await getTursoClient().execute(
+    "SELECT m.name AS name FROM sqlite_master m " +
+      "JOIN pragma_table_info(m.name) p ON p.name = 'tenant_id' " +
+      "WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'",
+  );
+  const names = new Set(r.rows.map((row) => String(row.name).toLowerCase()));
+  if (names.size === 0) throw new Error("tenant-scoped table discovery returned nothing");
+  tenantTablesCache = { at: Date.now(), names };
+  return names;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyTenantPin(q: any, table: string) {
+  const ownMarker = TT_UNOWNED_OWN_ROWS[table.toLowerCase()];
+  return ownMarker
+    ? q.or(`tenant_id.eq.${TT_TENANT_ID},and(tenant_id.is.null,${ownMarker})`)
+    : q.eq("tenant_id", TT_TENANT_ID);
+}
+
+/** The first tenant_id in a POST body that is not the pinned tenant, if any. */
+function foreignTenantInRows(body: unknown): string | null {
+  const rows = Array.isArray(body) ? body : [body];
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || !("tenant_id" in row)) continue;
+    const t = (row as Record<string, unknown>).tenant_id;
+    // A row with no tenant is not another company's row; it lands exactly as
+    // it did before this pin.
+    if (t !== null && t !== undefined && t !== TT_TENANT_ID) return String(t);
+  }
+  return null;
+}
+
+/**
+ * Any RPC argument naming a tenant must name SunBiz. patch_tenant_record_data
+ * must name one at all: it writes lead data, and it is the one RPC here that
+ * reaches tenant_records.
+ */
+function ttRpcRefusal(name: string, args: unknown): string | null {
+  const a = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const named = "p_tenant_id" in a;
+  if ((named || name === "patch_tenant_record_data") && a.p_tenant_id !== TT_TENANT_ID) {
+    return `rpc "${name}": this credential may only act on its own tenant`;
+  }
+  return null;
+}
+
+function refuseCrossTenant(caller: BridgeCaller, what: string) {
+  // Logged with the caller's identity so a refusal can be traced to a fleet.
+  console.warn(`[pg-bridge] ${caller} refused: ${what}`);
+  return bad(403, "this credential may only act on its own tenant's rows");
 }
 
 /**
@@ -286,7 +391,8 @@ function ready() {
 }
 
 async function handle(req: NextRequest, segments: string[], method: "GET" | "POST" | "PATCH") {
-  if (!authorised(req)) return bad(401, "invalid bridge credentials");
+  const caller = authorised(req);
+  if (!caller) return bad(401, "invalid bridge credentials");
   const notReady = ready();
   if (notReady) return notReady;
 
@@ -302,6 +408,10 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
     }
     let args: Record<string, unknown> = {};
     try { args = (await req.json()) ?? {}; } catch { args = {}; }
+    if (caller === "tt") {
+      const refusal = ttRpcRefusal(name, args);
+      if (refusal) return refuseCrossTenant(caller, refusal);
+    }
     const data = await fn(getTursoClient(), args);
     return NextResponse.json(data ?? null);
   }
@@ -318,12 +428,33 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
     return bad(501, `unsupported PostgREST feature: ${parsed.reason}`);
   }
 
+  // Tenant pin for the TT credential (see TT_TENANT_ID above).
+  let pinned = false;
+  if (caller === "tt") {
+    // An embedded select (`select=*,other_table(*)`) reads a SECOND table that
+    // the pin never sees. The runtime only selects plain column lists, so
+    // refusing embeds costs it nothing.
+    if (parsed.select.includes("(")) {
+      return bad(501, "unsupported PostgREST feature: embedded resources");
+    }
+    try {
+      pinned = (await tenantScopedTables()).has(table.toLowerCase());
+    } catch (e) {
+      // Fail closed: serving this caller unpinned because the schema read
+      // failed would reopen the exact door the pin closes. The runtime retries
+      // a 5xx.
+      console.warn(`[pg-bridge] tenant table discovery failed: ${e instanceof Error ? e.message : String(e)}`);
+      return bad(503, "tenant scope unavailable; retry");
+    }
+  }
+
   const db = createTursoPostgrest(getTursoClient());
 
   if (method === "GET") {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(table).select(parsed.select);
     q = applyFilters(q, parsed.filters);
+    if (pinned) q = applyTenantPin(q, table);
     if (parsed.order) {
       const [col, dir] = parsed.order.split(".");
       q = q.order(col, { ascending: dir !== "desc" });
@@ -339,6 +470,8 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
   try { body = await req.json(); } catch { body = undefined; }
 
   if (method === "POST") {
+    const foreign = pinned ? foreignTenantInRows(body) : null;
+    if (foreign) return refuseCrossTenant(caller, `POST ${table} row for tenant ${foreign.slice(0, 8)}`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let q: any = db.from(table).insert(body as never);
     if (wantsRows) q = q.select("*");
@@ -354,9 +487,20 @@ async function handle(req: NextRequest, segments: string[], method: "GET" | "POS
     // accidental table-wide write here would rewrite every lease row.
     return bad(400, "UPDATE requires a filter");
   }
+  if (
+    pinned &&
+    body &&
+    typeof body === "object" &&
+    "tenant_id" in body &&
+    (body as Record<string, unknown>).tenant_id !== TT_TENANT_ID
+  ) {
+    // Moving a row into another tenant is a cross-company write too.
+    return refuseCrossTenant(caller, `PATCH ${table} re-homing a row`);
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let q: any = db.from(table).update(body as never);
   q = applyFilters(q, parsed.filters);
+  if (pinned) q = applyTenantPin(q, table);
   if (wantsRows) q = q.select("*");
   const r = await q;
   if (r.error) return bad(400, r.error.message ?? "update failed");
