@@ -65,6 +65,9 @@ const TESTS = [
   // types digits as numbers and the comparison silently matches nothing.
   "tests/find-existing-lead-phone.test.ts",
   "tests/or-value-guard.test.ts",
+  // The new-lead form asks only for what a person types, and labels the region
+  // "Province / State" (portal audit, 2026-09-11).
+  "tests/oasis-new-lead-form.test.ts",
   // These three pinned the create path and the two stage lists but ran in no
   // suite, so a drift they catch could still ship. (Verifier, 2026-09-10.)
   "tests/turnkey-access-boundaries.test.ts",
