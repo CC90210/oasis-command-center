@@ -29,6 +29,7 @@ const ENV_KEYS = [
   "DRIP_INTAKE_URL",
   "DRIP_SUPPRESSION_BRAND",
   "PUBLIC_APP_URL",
+  "SUNBIZ_PUBLIC_FORM_ORIGIN",
 ];
 
 /** Run `fn` with a specific environment, restoring whatever was there before. */
@@ -321,6 +322,19 @@ withEnv({ BLUERISE_TRACKING_ORIGIN: "not-a-url" }, () => {
   const hosts = clickAllowedHosts();
   assert.ok(!hosts.has("not-a-url"), "unparseable origin contributes nothing");
   assert.ok(hosts.has("bluerisebusinesscapital.com"), "and does not break the rest");
+});
+
+// SunBiz's application-link host joins the allowlist. Without it, an unsigned
+// click on a merchant's own application link lands on the generic intake form,
+// and moving SUNBIZ_PUBLIC_FORM_ORIGIN to a new host would do that to all of them.
+withEnv({ SUNBIZ_PUBLIC_FORM_ORIGIN: "https://agent-dashboard-cc90210.vercel.app" }, () => {
+  assert.ok(clickAllowedHosts().has("agent-dashboard-cc90210.vercel.app"),
+    "the SunBiz form host in production today must be trusted");
+});
+withEnv({ SUNBIZ_PUBLIC_FORM_ORIGIN: "https://apply.sunbizfunding.com" }, () => {
+  const hosts = clickAllowedHosts();
+  assert.ok(hosts.has("apply.sunbizfunding.com"), "a newly configured SunBiz form host must be trusted");
+  assert.ok(hosts.has("oasisai.work"), "mail already in inboxes still points at the old host");
 });
 
 // ---------------------------------------------------------------------------
