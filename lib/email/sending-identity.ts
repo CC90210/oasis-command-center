@@ -17,6 +17,7 @@
 
 import { resolveTrackingBase, trackingHost } from "./tracking-base";
 import { ALL_BRAND_KEYS, getBrand, resolveBrandKey, type BrandKey } from "./brands";
+import { brandForTenant, unsubscribeBrandForTenant } from "./brand-for-tenant";
 
 const LEGACY_PLATFORM = "https://oasisai.work";
 
@@ -158,9 +159,19 @@ export function trackingOrigin(brand?: BrandKey): string {
  * as its own tenant, set this to that tenant's exact name. If it sends under the
  * existing tenant, leave it alone. scripts/verify-email-domain.mjs checks that
  * whatever is set here actually resolves to a tenant before you go live.
+ *
+ * PER TENANT (2026-09-11). With no tenant, or SunBiz's, the answer is exactly
+ * what it always was: that env knob is SunBiz's. Any other tenant gets its own
+ * name from brand-for-tenant, and a tenant we do not know gets null, because
+ * filing an opt-out under a guessed company is the defect, not a fallback.
  */
-export function suppressionBrand(): string {
-  return env("DRIP_SUPPRESSION_BRAND") || "SunBiz";
+export function suppressionBrand(): string;
+export function suppressionBrand(tenantId: string | null | undefined): string | null;
+export function suppressionBrand(tenantId?: string | null): string | null {
+  if (!tenantId || brandForTenant({ tenantId }) === "sunbiz") {
+    return env("DRIP_SUPPRESSION_BRAND") || "SunBiz";
+  }
+  return unsubscribeBrandForTenant(tenantId);
 }
 
 /** Where the generic CTA sends a lead that has no per-lead application link. The

@@ -17,7 +17,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
+import { sendTelegram } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
 import { DRIP_CHECKS, runCheck } from "./drip-checks";
@@ -25,8 +25,9 @@ import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
+import { TENANT_CRON_CHECKS } from "./tenant-cron-checks";
 
-import { computeCoverage } from "./coverage";
+import { computeCoverage, coverageGapMessages } from "./coverage";
 
 /**
  * Every check this run evaluates.
@@ -37,29 +38,14 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS];
+  return [
+    ...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS,
+    ...TENANT_CRON_CHECKS,
+  ];
 }
 
 
 type Db = ReturnType<typeof getServiceSupabase>;
-
-/**
- * Where a check's alerts go.
- *
- * `sunbiz-ops` is the default because every check that existed when this runner
- * was written was a SunBiz drip check, and the lane was hardcoded to match. The
- * estate outgrew that: the OASIS workspace-calendar check added in #334 would
- * have announced an OASIS booking outage into the CLIENT's ops channel, for a
- * product they do not operate. An alert in the wrong room is an alert nobody
- * acts on, which is indistinguishable from no alert at all -- the exact failure
- * mode this whole subsystem was built after.
- *
- * Defaulting rather than requiring the field keeps every existing check on the
- * lane it already used, so this is additive: nothing reroutes by accident.
- */
-function laneFor(check: { lane?: TelegramLane }): TelegramLane {
-  return check.lane ?? "sunbiz-ops";
-}
 
 const SEV_ICON: Record<string, string> = {
   failing: "🔴",
@@ -142,7 +128,7 @@ export async function runHealthChecks(
         recovered.push(result.id);
         await sendTelegram(
           `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
-          { lane: laneFor(check) },
+          { lane: check.lane },
         ).catch(() => undefined);
         await db.from("health_alert_state").upsert({
           alert_key: key, tenant_id: tenantId, last_signature: null,
@@ -165,7 +151,7 @@ export async function runHealthChecks(
       `${SEV_ICON[result.verdict]} <b>${esc(result.verdict.toUpperCase())}</b> — ${esc(result.id)}\n` +
       `${esc(check.describe(result))}\n` +
       `<i>next check in 15 min · re-alerts in ${decision.windowH}h if still bad</i>`;
-    const sent = await sendTelegram(body, { lane: laneFor(check) }).catch(() => ({ ok: false }));
+    const sent = await sendTelegram(body, { lane: check.lane }).catch(() => ({ ok: false }));
 
     // Record the alert attempt regardless of delivery. If Telegram is down we
     // must not spin re-sending every 15 minutes; the delivery self-test is the
@@ -205,7 +191,7 @@ export async function runHealthChecks(
         verdict: "failing",
         observed: 0,
         baseline: 1,
-        reason: `could not deliver the ${result.id} alert to the sunbiz-ops lane`.slice(0, 500),
+        reason: `could not deliver the ${result.id} alert to the ${check.lane} lane`.slice(0, 500),
         ran_at: new Date(nowMs).toISOString(),
       }).then(() => undefined, () => undefined);
     }
@@ -235,26 +221,32 @@ export async function runHealthChecks(
  * brands from the registry, and anything without a corresponding check is
  * reported. Low severity and weekly, because it is a backlog rather than an
  * outage — but never silent, because silence is how the list fell behind.
+ *
+ * Each company hears only about its own surfaces (CRON_ROUTE_COMPANY in
+ * coverage.ts). This used to post the whole list to sunbiz-ops, so SunBiz's
+ * operators were shown OASIS-only cron names and a gap in one of OASIS's own
+ * crons reached nobody at OASIS.
  */
 export async function reportCoverageGap(
   vercelConfig: unknown,
   opts: { notify?: boolean } = {},
-): Promise<{ uncovered: string[]; crons: number }> {
+): Promise<{ uncovered: string[]; crons: number; unowned: string[] }> {
   const cov = computeCoverage({
     vercelConfig,
     knownCheckIds: allChecks().map((c) => c.id),
   });
-  if (opts.notify && cov.uncovered.length > 0) {
-    const shown = cov.uncovered.slice(0, 15);
-    await sendTelegram(
-      `⚪ <b>MONITORING GAP</b> — ${cov.uncovered.length} surface(s) have no health check\n` +
-        shown.map((u) => `· ${esc(u)}`).join("\n") +
-        (cov.uncovered.length > shown.length ? `\n…and ${cov.uncovered.length - shown.length} more` : "") +
-        `\n<i>${cov.crons.length} cron routes discovered from config/cron-registry.json</i>`,
-      { lane: "sunbiz-ops" },
-    ).catch(() => undefined);
+  const { messages, unowned } = coverageGapMessages(cov.uncovered, cov.crons);
+  if (unowned.length > 0) {
+    // Sent to neither lane: guessing a company is how OASIS routes reached
+    // SunBiz's channel. tests/health-lanes-per-company.test.ts fails first.
+    console.error("[health] coverage gap entries that no company owns", { unowned });
   }
-  return { uncovered: cov.uncovered, crons: cov.crons.length };
+  if (opts.notify) {
+    for (const m of messages) {
+      await sendTelegram(m.text, { lane: m.lane }).catch(() => undefined);
+    }
+  }
+  return { uncovered: cov.uncovered, crons: cov.crons.length, unowned };
 }
 
 /**

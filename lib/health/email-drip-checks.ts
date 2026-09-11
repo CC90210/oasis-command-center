@@ -243,6 +243,7 @@ const CHECKS: DripCheck[] = [
     // THE volume check. Absolute, against the agreed number — see the header for
     // why the existing baseline version could not answer this question.
     id: "drips.email_volume_vs_target",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_above", floor: 0 }, // floor injected at runtime below
     observe: (db, tenantId, endMs) => countDripEmails(db, tenantId, endMs - DAY, endMs),
@@ -254,6 +255,7 @@ const CHECKS: DripCheck[] = [
     // throughput problem, silence is a broken pipe, and they need different
     // reactions at 3am.
     id: "drips.email_silence_hours",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" }, // replaced at runtime with a ceiling rule
     observe: (db, tenantId, endMs) => hoursSinceLastEmail(db, tenantId, endMs, maxSilentHours()),
@@ -276,6 +278,7 @@ const CHECKS: DripCheck[] = [
     // everywhere else — a green enrolment number sourced from a different
     // system entirely. Same engine, or the check is decoration.
     id: "drips.enrolments_24h",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_above", floor: 1 },
     observe: (db, tenantId, endMs) =>
@@ -293,6 +296,7 @@ const CHECKS: DripCheck[] = [
     // The dispatcher is dead: rows are DUE and nothing is claiming them. The
     // 2026-08-06 Vercel cron outage looked exactly like this for four days.
     id: "drips.email_due_unclaimed",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) =>
@@ -316,6 +320,7 @@ const CHECKS: DripCheck[] = [
     // exactly zero emails in its lifetime — invisible because every aggregate
     // check summed both brands together.
     id: "drips.bluerise_sent_24h",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_above", floor: 0 },
     observe: (db, tenantId, endMs) => countDripEmails(db, tenantId, endMs - DAY, endMs, "bluerise"),
@@ -343,6 +348,7 @@ const CHECKS: DripCheck[] = [
     // What this would have caught: 10 rows of "Invalid login: 535-5.7.8" on
     // 2026-08-11 — a dead mailbox credential, silently eating drip sends.
     id: "drips.email_failures_24h",
+    lane: "sunbiz-ops",
     severity: "high",
     rule: { kind: "must_be_zero" },
     observe: (db, tenantId, endMs) => countRealFailures(db, tenantId, endMs - DAY, endMs),

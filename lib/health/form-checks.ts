@@ -22,6 +22,7 @@ export const FORM_CHECKS: DripCheck[] = [
     // that cannot be missed or forgotten, because it re-asserts on the ladder
     // until recovered_at is set on every row.
     id: "forms.submit_failures_open",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     // The dead-letter table is estate-wide (tenant_slug is advisory text from
@@ -64,6 +65,7 @@ export const FORM_CHECKS: DripCheck[] = [
      * have fired at 18:12 on 2026-08-25, the first failed drop.
      */
     id: "forms.extraction_jobs_failed",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     // Tenant-scoped: unlike the estate-wide dead-letter table above, an

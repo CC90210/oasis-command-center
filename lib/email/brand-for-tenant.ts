@@ -66,6 +66,63 @@ export const TENANT_SLUG_BRAND: Readonly<Record<string, BrandKey>> = {
 };
 
 /**
+ * What else we know about each mapped tenant: its slug and its exact
+ * `tenants.name`. Verified against the live `tenants` table 2026-09-11.
+ *
+ * WHY. An unsubscribe link carries a `brand` string, and /api/unsubscribe files
+ * the opt-out under whichever tenant that string names. Every drip and cold
+ * link hardcoded "SunBiz", so an OASIS recipient who opted out would have been
+ * filed in SunBiz's suppression list — and, because suppression is enforced per
+ * tenant, OASIS would never have honored it. The name here is what a tenant's
+ * own links carry, and what the route resolves back to that same tenant.
+ *
+ * The same three tenants as TENANT_ID_BRAND and no others:
+ * tests/unsubscribe-brand-per-tenant.test.ts fails if the two drift.
+ */
+export const TENANT_ID_IDENTITY: Readonly<Record<string, { slug: string; name: string }>> = {
+  "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110": { slug: "submissions", name: "SunBiz" },
+  "ef8d389e-3f15-43f2-ae00-3660f69a1452": { slug: "oasis-ai-cc", name: "OASIS AI" },
+  "42423fde-be8b-454f-932a-750e8c9b743d": { slug: "oasis-webdev", name: "Oasis Web Studio" },
+};
+
+function identityFor(tenantId: string | null | undefined): { slug: string; name: string } | null {
+  const id = String(tenantId ?? "").trim().toLowerCase();
+  // Own properties only, for the reason given in brandForTenant.
+  return Object.prototype.hasOwnProperty.call(TENANT_ID_IDENTITY, id) ? TENANT_ID_IDENTITY[id] : null;
+}
+
+/**
+ * The `brand` a tenant's unsubscribe links carry, or null for a tenant we do
+ * not know. SunBiz's is "SunBiz", byte-identical to every link it has sent.
+ *
+ * null means "do not send", never "use SunBiz's": a guessed value files the
+ * recipient's opt-out under another company.
+ */
+export function unsubscribeBrandForTenant(tenantId: string | null | undefined): string | null {
+  return identityFor(tenantId)?.name ?? null;
+}
+
+/**
+ * The tenant an unsubscribe `brand` belongs to when it is one of ours: an
+ * exact, case-insensitive match on the name above. null sends the caller on to
+ * its general lookup.
+ */
+export function tenantIdForUnsubscribeBrand(brand: string | null | undefined): string | null {
+  const want = String(brand ?? "").trim().toLowerCase();
+  if (!want) return null;
+  for (const [id, who] of Object.entries(TENANT_ID_IDENTITY)) {
+    if (who.name.toLowerCase() === want) return id;
+  }
+  return null;
+}
+
+/** A mapped tenant's slug, or null. Lets a caller that holds only the id name
+ *  per-tenant settings by slug without a database round trip. */
+export function tenantSlugForId(tenantId: string | null | undefined): string | null {
+  return identityFor(tenantId)?.slug ?? null;
+}
+
+/**
  * The brand this tenant sends as, or null when we do not know.
  *
  * null means "refuse to send commercial mail", never "use the default". A

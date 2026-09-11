@@ -21,6 +21,8 @@
  * server route handlers / tool dispatchers; never call it client-side.
  */
 
+import { tenantSlugForId } from "@/lib/email/brand-for-tenant";
+
 /** Standard envelope every gated send path returns on the dry-run branch. */
 export type SendResult = {
   ok: boolean;
@@ -53,19 +55,67 @@ const CHANNEL_LIVE_ENV: Record<string, string> = {
   smartlead: "LIVE_SEND_SMARTLEAD",
 };
 
+/** Which tenant a send belongs to. Either field is enough; the slug names the flags. */
+export type SendTenant = { tenantId?: string | null; tenantSlug?: string | null };
+
+function flag(name: string): string {
+  return (process.env[name] || "").trim();
+}
+
+/**
+ * The env-name suffix for a tenant's own flags, or null when its slug is not
+ * known. submissions → SUBMISSIONS, oasis-ai-cc → OASIS_AI_CC.
+ *
+ * The id is resolved through brand-for-tenant's map, not the database: a kill
+ * switch must not hang on a lookup that can fail. An id that is supplied but
+ * unmapped does NOT fall through to the slug — the same rule as brandForTenant,
+ * because holding a primary key we do not recognise is when guessing is worst.
+ */
+export function tenantFlagSuffix(tenant?: SendTenant): string | null {
+  const id = String(tenant?.tenantId ?? "").trim();
+  const slug = id ? tenantSlugForId(id) : String(tenant?.tenantSlug ?? "").trim() || null;
+  return slug ? slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_") : null;
+}
+
+/** BRAVO_FORCE_DRY_RUN__<SLUG>=1: this tenant sends nothing, on any path that asks. */
+export function tenantForcedDryRun(tenant?: SendTenant): boolean {
+  const suffix = tenantFlagSuffix(tenant);
+  return suffix !== null && flag(`BRAVO_FORCE_DRY_RUN__${suffix}`) === "1";
+}
+
 /**
  * True when the dashboard must NOT issue a live outbound request.
  *
  * Precedence (fail-safe → dry-run by default):
  *   1. BRAVO_FORCE_DRY_RUN=1 — hard kill-switch, always clamps to dry-run.
- *   2. Per-channel LIVE_SEND_<CHANNEL> — "1" = live, "0" = dry, for that channel.
- *   3. Global DASHBOARD_LIVE_SEND=1 — live for any channel without its own flag.
- *   4. Otherwise dry-run.
+ *   2. The TENANT's own flags, when `tenant` is given and its slug is known:
+ *        BRAVO_FORCE_DRY_RUN__<SLUG>=1       — that tenant is always dry-run;
+ *        LIVE_SEND_<CHANNEL>__<SLUG>  1 / 0  — that tenant's channel live / dry;
+ *        DASHBOARD_LIVE_SEND__<SLUG>  1 / 0  — that tenant live / dry.
+ *   3. Per-channel LIVE_SEND_<CHANNEL> — "1" = live, "0" = dry, for that channel.
+ *   4. Global DASHBOARD_LIVE_SEND=1 — live for any channel without its own flag.
+ *   5. Otherwise dry-run.
  *
- * `channel` is optional so legacy callers (no channel) keep the global behavior.
+ * WHY step 2 (2026-09-11). These flags are Vercel env, one set for the whole
+ * deployment, and OASIS and SunBiz both send through it, so going live for one
+ * company went live for the other. A tenant's own flag now wins over the shared
+ * one. With no per-tenant flag set the answer is exactly what it was before.
+ *
+ * `channel` and `tenant` are optional so legacy callers keep the global behavior.
  */
-export function isDryRun(channel?: string): boolean {
+export function isDryRun(channel?: string, tenant?: SendTenant): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return true;
+  const suffix = tenantFlagSuffix(tenant);
+  if (suffix) {
+    if (tenantForcedDryRun(tenant)) return true;
+    const channelKey = channel ? CHANNEL_LIVE_ENV[channel.toLowerCase()] : undefined;
+    const own = channelKey ? flag(`${channelKey}__${suffix}`) : "";
+    if (own === "1") return false; // this tenant's channel explicitly live
+    if (own === "0") return true; // this tenant's channel explicitly dry-run
+    const all = flag(`DASHBOARD_LIVE_SEND__${suffix}`);
+    if (all === "1") return false; // this tenant explicitly live
+    if (all === "0") return true; // this tenant explicitly dry-run
+  }
   if (channel) {
     const envKey = CHANNEL_LIVE_ENV[channel.toLowerCase()];
     const v = envKey ? (process.env[envKey] || "").trim() : "";
@@ -73,4 +123,20 @@ export function isDryRun(channel?: string): boolean {
     if (v === "0") return true; // channel explicitly clamped to dry-run
   }
   return (process.env.DASHBOARD_LIVE_SEND || "").trim() !== "1";
+}
+
+/**
+ * DRIPS_LIVE, the drip engine's go-live act, for one tenant.
+ *
+ * DRIPS_LIVE__<SLUG>=0 keeps that tenant's drips dry while the shared switch is
+ * on, so SunBiz can stay live while OASIS rehearses, or the reverse. It can
+ * only turn a tenant OFF. The executor sizes its hourly cap, provider checks
+ * and email budget once per run from the shared switch, so a tenant switched on
+ * alone would send with none of those computed. With no per-tenant flag the
+ * answer is exactly `DRIPS_LIVE === "1"`, as before.
+ */
+export function isDripsLive(tenant?: SendTenant): boolean {
+  if (process.env.DRIPS_LIVE !== "1") return false;
+  const suffix = tenantFlagSuffix(tenant);
+  return !(suffix && flag(`DRIPS_LIVE__${suffix}`) === "0");
 }

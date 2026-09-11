@@ -22,8 +22,10 @@
  *
  * DRY-RUN BY DEFAULT: this function reports counts (candidates, guardrail
  * skips, would-enroll) on every call, but only WRITES anything — including
- * the timezone/rep_name backfill on the lead row — when BOTH: (1)
- * process.env.DRIPS_LIVE === '1', AND (2) the lead's stage is on the
+ * the timezone/rep_name backfill on the lead row — when BOTH: (1) the
+ * DRIPS_LIVE act holds for the sequence's tenant (DRIPS_LIVE === '1', with no
+ * DRIPS_LIVE__<SLUG>=0 clamp on that tenant: isDripsLive in
+ * lib/integrations/send-mode.ts), AND (2) the lead's stage is on the
  * DRIPS_ENROLL_STAGES allowlist (see the staging controls below). With either
  * unset, this cron is a pure read + report; it can run on a schedule
  * indefinitely without ever touching a lead or creating a drip_runs row.
@@ -35,6 +37,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isDripsLive } from "@/lib/integrations/send-mode";
 import { checkTcpaWindow } from "@/lib/tcpa-window";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import type { DripStep, DripTriggerFilter } from "./types";
@@ -619,7 +622,7 @@ function parseStepsSafe(steps: unknown): DripStep[] | null {
  * drips" goal in the plan.
  */
 export async function runEnrollDrips(): Promise<EnrollDripsResult> {
-  const live = process.env.DRIPS_LIVE === "1";
+  const live = isDripsLive();
   const enrollStages = parseEnrollStages(process.env.DRIPS_ENROLL_STAGES);
   const enrollLimit = parseEnrollLimit(process.env.DRIPS_ENROLL_LIMIT);
   const redripCooldownDays = parseRedripCooldownDays(process.env.DRIPS_REDRIP_COOLDOWN_DAYS);
@@ -661,6 +664,9 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
   for (const seq of sequences) {
     const stage = (seq.trigger_filter as { to: string }).to;
     const stageAllowed = enrollStages === "ALL" || enrollStages.has(stage);
+    // The go-live act for THIS sequence's tenant: the shared DRIPS_LIVE, less
+    // any DRIPS_LIVE__<SLUG>=0 clamp on it (lib/integrations/send-mode.ts).
+    const tenantLive = isDripsLive({ tenantId: seq.tenant_id });
     const skipped = emptySkipCounts();
     let candidates = 0;
     let enrolled = 0;
@@ -719,14 +725,14 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
       // applied there rather than here so that a lead they reject does not
       // consume a slot under the enrollment limit and starve the leads behind
       // it — see staticSkipReason() for why that ordering is load-bearing.
-      // Enrollment writes only when BOTH the global DRIPS_LIVE act holds AND
+      // Enrollment writes only when BOTH the DRIPS_LIVE act holds for this tenant AND
       // this stage is on the DRIPS_ENROLL_STAGES allowlist; otherwise this is a
       // report-only pass (candidate counted, nothing written). The per-sequence
       // DRIPS_ENROLL_LIMIT caps how many NEW rows this run creates. These gates
       // come BEFORE the wasShoppedRecently() DB call below so a report-only /
       // non-allowlisted run never fires a per-lead query across the whole
       // backlog (that made the endpoint exceed maxDuration on a full scan).
-      if (!live || !stageAllowed) continue;
+      if (!tenantLive || !stageAllowed) continue;
       if (enrollLimit !== 0 && enrolled >= enrollLimit) break;
       // Global rolling-24h intake ceiling across every sequence. Checked here,
       // inside the write path, so a report-only pass still reports true

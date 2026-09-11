@@ -24,6 +24,7 @@ import type { DripCheck } from "./drip-checks";
 export const DEPLOY_CHECKS: DripCheck[] = [
   {
     id: "deploy.prod_serves_main",
+    lane: "sunbiz-ops",
     severity: "critical",
     rule: { kind: "must_be_zero" },
     // Env is read at OBSERVE time, not module load, so tests can vary it and
