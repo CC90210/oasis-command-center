@@ -704,9 +704,17 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     `${view} must render a proof's source alongside the figure`,
   );
   // The standing brush-offs are on the card, not in a rep's memory. `bare`
-  // because BattleSection provides the shell and heading -- the panel's copy
-  // is unchanged, and its own file is asserted on below either way.
-  assert.match(src, /<ObjectionPanel bare \/>/, `${view} must render the objection panel`);
+  // because BattleSection provides the shell and heading -- the console's own
+  // markup is asserted separately by its own guard-list entry in
+  // web-leads-guards.test.ts. Swapped 2026-09-10: ObjectionPanel (a fixed
+  // eight-card table, identical on every lead) is replaced by ObjectionConsole
+  // (ranked per lead, and the surface that logs a tap to the database).
+  //
+  // Keyed on `lead.id`, not the top-level `leadId` prop: this section renders
+  // inside ScoredBody, a sibling component scope that only has `leadId` via
+  // its own `lead` prop (the already-fetched WebLead for this exact render) --
+  // the same object CallOutcomeLog's race guard checks elsewhere in this file.
+  assert.match(src, /<ObjectionConsole leadId=\{lead\.id\} bare \/>/, `${view} must render the objection console`);
 
   // The clean-answer instruction sits WITH the question, before the teach. A
   // rep reads down this card in real time, so the order on screen is the order
@@ -739,12 +747,17 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
 
   // The map itself. Prop order (id, then defaultOpen) is part of the contract
   // so these stay one-line greppable.
+  //
+  // The objections section defaults OPEN as of 2026-09-10 (see BattleCard.tsx).
+  // The opening-script assertion below is untouched on purpose: this file exists
+  // so an edit cannot silently collapse it, and an edit amending a neighbouring
+  // default is exactly the shape of edit that would.
   for (const [id, open] of [
     ["facts", false],
     ["presence", true],
     ["lead-with", true],
     ["opening", true],
-    ["brushoffs", false],
+    ["brushoffs", true],
     ["shape", true],
     ["fixes", true],
     ["competitors", true],
@@ -1161,16 +1174,131 @@ const MODEL_CODES = [
   // without a JARVIS checkout.
 }
 
-// The panel itself renders every field of every objection. Asserting the data
-// is complete (above) proves nothing if the component drops half of it.
+// ObjectionPanel.tsx (a fixed eight-card table read off a hardcoded array) was
+// deleted 2026-09-10 -- Task 9's ObjectionConsole/ObjectionCard render the
+// approved catalog ranked per lead instead. The deleted block above (git show
+// 7c220f07:tests/web-leads-battlecard.test.ts:1164-1174) pinned three things
+// against ObjectionPanel.tsx and nothing replaced them (task-10 fix round 1,
+// flagged then fixed): every field renders, every objection renders rather
+// than a hand-picked subset, and the surface never generates copy. That third
+// rule is the one that matters most -- this feature's whole promise is that
+// no unapproved wording reaches a rep, and an approval gate enforced only by
+// a person reading the component correctly, forever, is not a gate. Restated
+// here against the two components that took ObjectionPanel's place.
+
 {
-  const panel = read("components/web-leads/ObjectionPanel.tsx");
-  for (const field of ["o.says", "o.meaning", "o.response", "o.prevent", "o.source"]) {
-    assert.ok(panel.includes(field), `ObjectionPanel must render ${field}`);
+  const card = read("components/web-leads/ObjectionCard.tsx");
+  // The objection's own fields. The shape changed from ObjectionPanel's flat
+  // `o.response` -- answers now live on `objection.answers`, so this asserts
+  // the real property paths the component reads, not the old ones.
+  for (const field of ["objection.says", "objection.meaning", "objection.prevent", "objection.source"]) {
+    assert.ok(card.includes(field), `ObjectionCard must render ${field}`);
   }
-  assert.match(panel, /OBJECTIONS\.map/, "ObjectionPanel must render every objection, not a hand-picked subset");
-  // Same rule as the rest of the feature: nothing on this surface is generated.
-  assert.doesNotMatch(panel, /claudeMessages|anthropic|openai|generateText/i, "ObjectionPanel must never generate copy");
+
+  // THE SPOKEN LINE. This block used to assert `activeAnswer.body`, and a
+  // fix-round-3 review proved that wrong the same way the truncation block
+  // below was proved wrong: `activeAnswer.body` appears only in the
+  // COMPUTATION of `displayedBody`, so replacing the render with `{null}`
+  // left the string in the file and the whole suite passed. Aim at what is
+  // actually rendered instead: the JSX node itself, and the computation that
+  // feeds it, asserted separately so deleting either one fails.
+  // (Final review, M8.)
+  assert.match(
+    card,
+    /<p className="text-sm leading-relaxed text-fg">\{displayedBody\}<\/p>/,
+    "ObjectionCard must RENDER the spoken line, not merely compute it -- `{null}` in this node passed the old assertion",
+  );
+  assert.match(
+    card,
+    /const displayedBody = activeAnswer[\s\S]{0,200}?activeAnswer\.body/,
+    "ObjectionCard's rendered line must resolve to the ACTIVE answer's body, not a constant",
+  );
+
+  // LIMITATION, SAME ONE AS THE TRUNCATION BLOCK BELOW, restated here because
+  // this block was written under exactly the misapprehension that comment
+  // exists to name: these are source-text tripwires, not behavioural tests.
+  // The two assertions above are strictly stronger than `card.includes(
+  // "activeAnswer.body")` -- the render node and its computation must BOTH
+  // survive, so neither a dead-comment decoy nor a hollowed-out render passes
+  // on its own. They still cannot prove the matched node is the one React
+  // mounts, and a rewrite that keeps the same vocabulary elsewhere (renaming
+  // the variable, moving the paragraph into a child component, changing the
+  // className) passes or fails on TEXT rather than on behaviour. Proving the
+  // rendered output needs a rendering harness this repo's test convention
+  // does not use; do not add one to strengthen this further without that
+  // conversation happening first.
+}
+
+{
+  const console_ = read("components/web-leads/ObjectionConsole.tsx");
+  // No silent truncation. The console is allowed to open on a short slice
+  // (mid-call, a rep should not have to scroll past a wall of cards to reach
+  // the ones ranked highest) but there must be an explicit, user-facing way
+  // to reach the rest -- a fixed subset with no path to the remainder is
+  // exactly the kind of drop the deleted OBJECTIONS.map assertion existed to
+  // catch, restated for a component that is allowed to paginate on purpose.
+  //
+  // LIMITATION, STATED PLAINLY (task-10 fix round 2): these are source-text
+  // tripwires, like every other assertion in this file. They catch an
+  // outright deletion of the pattern. They CANNOT prove the matched text is
+  // the code actually feeding the render rather than a dead comment or an
+  // unreachable branch, and they cannot catch a behavioural change that
+  // keeps the same vocabulary elsewhere. A fix-round-2 review proved the
+  // first version of this block wrong on exactly that gap: it left the
+  // ternary regex's own text as a dead comment, changed the real `visible`
+  // computation to a hardcoded `state.objections.slice(0, 3)`, and every
+  // assertion below still passed. The two checks after the ternary match
+  // close THAT specific hole (a decoy plus a second real slice can no longer
+  // both satisfy "exactly one `.slice(` in the file" and "no literal-numeric
+  // slice bound anywhere in it") -- they do not make this a behavioural test.
+  // Nor do they constrain truncation in general: all three checks above match
+  // only on the literal text `.slice(`, so a fixed-length cutoff written with
+  // a different mechanism -- `.filter((_, i) => i < 3)`, `.splice(0, 3)`, a
+  // manual for-loop with a break, `Array.from({length: 3})`, and so on --
+  // passes every one of them untouched. This file only ever pins `.slice(`;
+  // it does not and cannot pin truncation as a class.
+  // Proving the render is actually unsliced needs a rendering harness this
+  // repo's test convention does not use; do not add one to strengthen this
+  // further without that conversation happening first.
+  assert.match(
+    console_,
+    /expanded\s*\?\s*state\.objections\s*:\s*state\.objections\.slice\(/,
+    "ObjectionConsole must fall back to the FULL ranked list once expanded, not a fixed subset",
+  );
+  // Exactly one `.slice(` call in the whole file. The legitimate console has
+  // exactly one (inside the ternary just asserted above); a second one --
+  // whether it replaces the real computation while the first survives as a
+  // dead comment, or sits anywhere else -- is a competing truncation this
+  // file has no business containing.
+  const sliceCallCount = (console_.match(/\.slice\(/g) || []).length;
+  assert.equal(
+    sliceCallCount,
+    1,
+    `ObjectionConsole.tsx must contain exactly one .slice( call, found ${sliceCallCount} -- a second one is a competing (and possibly live) truncation`,
+  );
+  // No slice bounded by a literal number anywhere in the file. The only
+  // legitimate bound is `state.openCount`, a value the server computed --
+  // never a number typed into the component, which is what a silent
+  // permanent truncation (`.slice(0, 3)`) looks like in source.
+  assert.doesNotMatch(
+    console_,
+    /\.slice\(\s*0\s*,\s*\d+\s*\)/,
+    "ObjectionConsole.tsx must never slice to a literal numeric bound -- the open count comes from the server (state.openCount), not a number typed into the component",
+  );
+  assert.match(
+    console_,
+    /onClick=\{\(\)\s*=>\s*setExpanded\(true\)\}/,
+    "ObjectionConsole must offer an explicit control that reaches the rest of the list",
+  );
+  assert.match(console_, /Show all \{state\.objections\.length\}/, "ObjectionConsole's expand control must name the true count, not a guess");
+}
+
+// Same rule as the rest of the feature: nothing on either surface is
+// generated. AI drafts a catalog row, a human approves it, and only approved
+// rows ever render -- neither component may itself call a model.
+for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-leads/ObjectionConsole.tsx"]) {
+  const src = read(view);
+  assert.doesNotMatch(src, /claudeMessages|anthropic|openai|generateText/i, `${view} must never generate copy`);
 }
 
 // ---------------------------------------------------------------------------

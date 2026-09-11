@@ -387,7 +387,10 @@ async function run() {
     for (const section of [
       "Who you are calling",
       "up against",
-      "<ObjectionPanel",
+      // Re-aimed 2026-09-10: ObjectionPanel (a fixed eight-card table) was
+      // deleted and replaced on the card by ObjectionConsole (the per-lead,
+      // catalog-ranked console) -- see BattleCard.tsx and its own task-10 commit.
+      "<ObjectionConsole",
       "<CallOutcomeLog",
       "<BusinessFacts",
     ]) {
@@ -396,7 +399,7 @@ async function run() {
     // No panel may be conditional on `embedded`.
     assert.doesNotMatch(
       card,
-      /\{\s*!?embedded\s*&&\s*<(Panel|ObjectionPanel|CallOutcomeLog|BusinessFacts|Hero)/,
+      /\{\s*!?embedded\s*&&\s*<(Panel|ObjectionConsole|CallOutcomeLog|BusinessFacts|Hero)/,
       "embedded must not gate any CONTENT panel -- it exists for layout chrome only",
     );
     // It IS allowed to drop the back link, which points at the leads pool and is

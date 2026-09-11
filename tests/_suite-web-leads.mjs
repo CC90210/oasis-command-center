@@ -69,6 +69,16 @@ const TESTS = [
   "tests/oasis-email-branding.test.ts",
   // Operator copy on the Automations tab must match a real job name.
   "tests/cron-descriptions-render.test.ts",
+  // The objection engine (2026-09-10). ranking is pure; the other two need no
+  // credentials either -- they exercise validation and projection only.
+  "tests/objection-ranking.test.ts",
+  "tests/objection-catalog.test.ts",
+  "tests/objection-events.test.ts",
+  "tests/objection-facts.test.ts",
+  // The auth gate and the tenant pins on both objection routes and both data
+  // modules, to the same convention as web-leads-outcome-guards above. Source
+  // reads only; no credentials.
+  "tests/objection-guards.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
