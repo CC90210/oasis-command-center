@@ -31,6 +31,11 @@ import { randomBytes } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, sha256 } from "@/lib/api-helpers";
 import {
+  executorHomeElsewhere,
+  isDeclaredExecutor,
+  wrongTenantPairingReason,
+} from "@/lib/bridge-executors";
+import {
   clientIp,
   isRateLimited,
   recordPairAttempt,
@@ -88,6 +93,32 @@ export async function POST(req: NextRequest) {
   const tokenHash = sha256(tokenPlain);
 
   const db = getServiceSupabase();
+
+  // Pair-time executor guard (lib/bridge-executors.ts): a machine that runs
+  // one tenant's crons may not be paired into another. Only a declared executor
+  // pays for this read; every other machine redeems exactly as before. It runs
+  // BEFORE the RPC, so a refusal leaves the code unconsumed.
+  if (isDeclaredExecutor(machineLabel)) {
+    const codeRow = await db
+      .from("bridge_pair_codes")
+      .select("tenant_id")
+      .eq("code", code)
+      .maybeSingle();
+    if (codeRow.error) {
+      // Fail closed, and only for the governed machines: pairing one of them
+      // without knowing the tenant is the exact mistake this guard exists for.
+      return bad(503, "could not verify which workspace this code belongs to; retry");
+    }
+    const codeTenant = (codeRow.data as { tenant_id?: unknown } | null)?.tenant_id;
+    const home = codeTenant ? executorHomeElsewhere(String(codeTenant), machineLabel) : null;
+    if (home) {
+      console.warn(
+        `[pair-code/redeem] refused "${machineLabel}": executor of tenant ${home}, code is for ${String(codeTenant).slice(0, 8)}`,
+      );
+      return bad(409, wrongTenantPairingReason(machineLabel, home));
+    }
+  }
+
   const { data: rpcData, error: rpcError } = await db.rpc("redeem_pair_code", {
     p_code: code,
     p_token_hash: tokenHash,

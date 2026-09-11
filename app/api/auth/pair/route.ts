@@ -52,6 +52,7 @@ import { bad, checkBearerSecret, sha256, isUniqueViolationError } from "@/lib/ap
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
+import { executorHomeElsewhere, wrongTenantPairingReason } from "@/lib/bridge-executors";
 import {
   clientIp as _clientIp,
   isRateLimited as _isRateLimited,
@@ -255,6 +256,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Pair-time executor guard (lib/bridge-executors.ts): a machine that runs
+  // one tenant's crons may not be paired into another. Checked BEFORE the
+  // profile update and the API-key seeding below, so a refused machine leaves
+  // nothing behind in the wrong tenant, including its provider keys.
+  const machine = body.machine || {};
+  const label = (machine.label as string | undefined) || "Local install";
+  if (profileRow.tenant_id) {
+    const home = executorHomeElsewhere(profileRow.tenant_id, label);
+    if (home) {
+      console.warn(
+        `[pair] refused "${label}": executor of tenant ${home}, asked to pair into ${profileRow.tenant_id.slice(0, 8)}`,
+      );
+      return bad(409, wrongTenantPairingReason(label, home));
+    }
+  }
+
   if (Object.keys(update).length > 0) {
     const r = await db
       .from("user_profiles")
@@ -362,9 +379,7 @@ export async function POST(req: NextRequest) {
   const tokenPlain = `oab_${randomBytes(32).toString("hex")}`;
   const tokenHash = sha256(tokenPlain);
 
-  const machine = body.machine || {};
   const fingerprint = (machine.fingerprint as string | undefined) || null;
-  const label = (machine.label as string | undefined) || "Local install";
   const nowIso = new Date().toISOString();
 
   const row = {

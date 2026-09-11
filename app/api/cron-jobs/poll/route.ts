@@ -20,6 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, getClientIp, sha256 } from "@/lib/api-helpers";
 import { rateLimit } from "@/lib/rate-limit";
+import { isExpectedExecutor } from "@/lib/bridge-executors";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,19 +53,9 @@ function checkPollRateLimit(req: NextRequest): NextResponse | null {
 // itself within the hour (three times on 2026-08-22, same machine
 // fingerprint). So the gate lives here, on the job pipe itself: an unexpected
 // executor receives an EMPTY job list and its result reports are refused.
-// Pairing stays open for ping/health; the cron pipe is exclusive.
-// Mirrors cron_health_check.EXPECTED_PAIRINGS in the harness — change both.
-const EXPECTED_EXECUTOR_BY_TENANT_PREFIX: Record<string, string> = {
-  ef8d389e: "CCPC (Windows)", // OASIS — CC's PC
-  aa04fa1f: "srv1723601 (Linux)", // SunBiz — the VPS
-};
-
-function isExpectedExecutor(tenantId: string, label: string): boolean {
-  const expected = EXPECTED_EXECUTOR_BY_TENANT_PREFIX[tenantId.slice(0, 8)];
-  // Tenants without a declared executor keep the old open behavior — this
-  // gate hardens the governed tenants without bricking future ones.
-  return expected === undefined || expected === label;
-}
+// The cron pipe is exclusive. The map (EXPECTED_EXECUTOR_BY_TENANT_PREFIX)
+// lives in lib/bridge-executors.ts, because the pair routes now refuse the same
+// machines at pair time too; cron_health_check.EXPECTED_PAIRINGS mirrors it.
 
 async function resolveBridge(
   req: NextRequest,
