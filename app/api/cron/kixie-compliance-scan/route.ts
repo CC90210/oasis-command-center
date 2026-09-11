@@ -9,7 +9,10 @@
  * forbidden phrases ("our lenders", "network of funders", ...) plus any
  * tenant-extra phrases from tenants.custom_fields.kixie_compliance_phrases.
  *
- * On hits: ONE consolidated Telegram alert (escaped, ≤80-char context snippet
+ * Only tenants listed in SCAN_LANES are read, and each one's results go only
+ * to its own lane.
+ *
+ * On hits: ONE consolidated Telegram alert per tenant (escaped, ≤80-char context snippet
  * per hit — never a transcript dump) + one agent_events row per flagged call
  * (event_type BRAVO_KIXIE_COMPLIANCE_FLAG) so /feed shows it. Already-flagged
  * calls (an event row exists for the interaction) are not re-alerted on the
@@ -30,7 +33,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { timingSafeEqual } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
+import { sendTelegram, escapeTelegramHtml, type TelegramLane } from "@/lib/notify/telegram";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,6 +47,25 @@ const MAX_ALERT_ITEMS = 15; // ~220 chars/line keeps the alert under Telegram's 
 const MAX_TENANT_EXTRA_PHRASES = 50;
 const SNIPPET_LEN = 80;
 const EVENT_TYPE = "BRAVO_KIXIE_COMPLIANCE_FLAG";
+
+/**
+ * Which tenants this scan reads, and whose channel each one's results go to.
+ *
+ * WHY PER TENANT (2026-09-11). The scan used to read EVERY tenant's Kixie
+ * interactions and post every flag to sunbiz-ops. Only SunBiz uses Kixie
+ * today, but the first OASIS call to land in lead_interactions would have been
+ * scanned against SunBiz's lender doctrine and its snippet posted in SunBiz's
+ * ops channel. Now a tenant is read only if it is listed here, and its flags
+ * and scorecard go only to its own lane.
+ *
+ * SunBiz is the only entry because the phrase list is SunBiz's doctrine: it
+ * positions as a direct lender. Another tenant is scanned by giving it its own
+ * row with its own lane, never by sharing this one.
+ */
+const SCAN_LANES: Readonly<Record<string, TelegramLane>> = {
+  "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110": "sunbiz-ops", // SunBiz, slug "submissions"
+};
+const SCANNED_TENANT_IDS = Object.keys(SCAN_LANES);
 
 /**
  * Forbidden phrases — the "never mention lenders" doctrine (hardwired
@@ -129,6 +151,8 @@ async function fetchInteractions(
         "id, tenant_id, lead_id, type, content, created_at, metadata, kixie_call_id, call_duration_sec, call_outcome",
       )
       .eq("agent_source", "kixie")
+      // Only tenants with their own lane are read at all (SCAN_LANES).
+      .in("tenant_id", SCANNED_TENANT_IDS)
       .gte("created_at", sinceIso)
       .order("created_at", { ascending: true })
       .range(page * PAGE, page * PAGE + PAGE - 1);
@@ -293,8 +317,12 @@ export async function GET(req: NextRequest) {
   }
 
   let alertSent = false;
-  if (newFlags.length > 0) {
-    const shown = newFlags.slice(0, MAX_ALERT_ITEMS);
+  // One alert per tenant, into that tenant's own lane. Only SCAN_LANES tenants
+  // were read, so every flag belongs to one of them.
+  for (const [tenantId, lane] of Object.entries(SCAN_LANES)) {
+    const tenantFlags = newFlags.filter((f) => f.tenant_id === tenantId);
+    if (tenantFlags.length === 0) continue;
+    const shown = tenantFlags.slice(0, MAX_ALERT_ITEMS);
     const lines = shown.map((f) => {
       const lead = f.lead_id ? f.lead_id.slice(0, 8) : "no-lead";
       return (
@@ -303,14 +331,13 @@ export async function GET(req: NextRequest) {
         `  <i>…${escapeTelegramHtml(f.snippet)}…</i>`
       );
     });
-    const more = newFlags.length > shown.length ? `\n…and ${newFlags.length - shown.length} more (see /feed).` : "";
+    const more = tenantFlags.length > shown.length ? `\n…and ${tenantFlags.length - shown.length} more (see /feed).` : "";
     const msg =
-      `🚨 <b>Kixie compliance flags</b> — ${newFlags.length} call${newFlags.length === 1 ? "" : "s"} ` +
+      `🚨 <b>Kixie compliance flags</b> — ${tenantFlags.length} call${tenantFlags.length === 1 ? "" : "s"} ` +
       `mentioned lender relationships in the last ${SCAN_WINDOW_HOURS}h:\n\n` +
       lines.join("\n") +
       more;
-    // sunbiz-ops: dialer compliance on SunBiz sending numbers.
-    const tg = await sendTelegram(msg, { lane: "sunbiz-ops" });
+    const tg = await sendTelegram(msg, { lane });
     if (!tg.ok) failures.push(`telegram_alert_failed: ${tg.reason || "unknown"}`);
     else alertSent = true;
   }
@@ -329,59 +356,66 @@ export async function GET(req: NextRequest) {
         voicemails: number;
         sentiment: Map<string, number>;
       };
-      const reps = new Map<string, RepStats>();
-      for (const row of calls) {
-        const meta = row.metadata || {};
-        const rep =
-          typeof meta.kixie_agent_email === "string" && meta.kixie_agent_email
-            ? meta.kixie_agent_email
-            : "(unknown)";
-        let s = reps.get(rep);
-        if (!s) {
-          s = { dials: new Set(), connects: 0, talkSec: 0, voicemails: 0, sentiment: new Map() };
-          reps.set(rep, s);
+      weeklyOut = [];
+      // One scorecard per tenant, into that tenant's own lane.
+      for (const [tenantId, lane] of Object.entries(SCAN_LANES)) {
+        const reps = new Map<string, RepStats>();
+        for (const row of calls) {
+          if (row.tenant_id !== tenantId) continue;
+          const meta = row.metadata || {};
+          const rep =
+            typeof meta.kixie_agent_email === "string" && meta.kixie_agent_email
+              ? meta.kixie_agent_email
+              : "(unknown)";
+          let s = reps.get(rep);
+          if (!s) {
+            s = { dials: new Set(), connects: 0, talkSec: 0, voicemails: 0, sentiment: new Map() };
+            reps.set(rep, s);
+          }
+          // Dials = unique kixie_call_id; a row missing one still counts once.
+          s.dials.add(row.kixie_call_id || `row:${row.id}`);
+          const dur = typeof row.call_duration_sec === "number" ? row.call_duration_sec : 0;
+          if (row.type === "call_answered" || dur >= 30) s.connects += 1;
+          s.talkSec += dur;
+          if (row.type === "call_voicemail" || row.call_outcome === "voicemail") s.voicemails += 1;
+          const senti = typeof meta.ci_sentiment === "string" && meta.ci_sentiment ? meta.ci_sentiment.toLowerCase() : "";
+          if (senti) s.sentiment.set(senti, (s.sentiment.get(senti) || 0) + 1);
         }
-        // Dials = unique kixie_call_id; a row missing one still counts once.
-        s.dials.add(row.kixie_call_id || `row:${row.id}`);
-        const dur = typeof row.call_duration_sec === "number" ? row.call_duration_sec : 0;
-        if (row.type === "call_answered" || dur >= 30) s.connects += 1;
-        s.talkSec += dur;
-        if (row.type === "call_voicemail" || row.call_outcome === "voicemail") s.voicemails += 1;
-        const senti = typeof meta.ci_sentiment === "string" && meta.ci_sentiment ? meta.ci_sentiment.toLowerCase() : "";
-        if (senti) s.sentiment.set(senti, (s.sentiment.get(senti) || 0) + 1);
-      }
 
-      weeklyOut = Array.from(reps.entries())
-        .sort((a, b) => b[1].dials.size - a[1].dials.size)
-        .map(([rep, s]) => ({
-          rep,
-          dials: s.dials.size,
-          connects: s.connects,
-          talk_time_sec: s.talkSec,
-          voicemails: s.voicemails,
-          sentiment: Object.fromEntries(s.sentiment),
-        }));
+        const tenantRows = Array.from(reps.entries())
+          .sort((a, b) => b[1].dials.size - a[1].dials.size)
+          .map(([rep, s]) => ({
+            tenant_id: tenantId,
+            rep,
+            dials: s.dials.size,
+            connects: s.connects,
+            talk_time_sec: s.talkSec,
+            voicemails: s.voicemails,
+            sentiment: Object.fromEntries(s.sentiment),
+          }));
+        weeklyOut.push(...tenantRows);
 
-      if (weeklyOut.length > 0) {
-        const header = "Rep                    Dials Conn  Talk   VM";
-        const rows = weeklyOut.map((r) => {
-          const senti = Object.entries(r.sentiment as Record<string, number>)
-            .map(([k, v]) => `${k.slice(0, 3)}:${v}`)
-            .join(" ");
-          return (
-            String(r.rep).slice(0, 22).padEnd(22) +
-            String(r.dials).padStart(5) +
-            String(r.connects).padStart(5) +
-            fmtTalk(Number(r.talk_time_sec)).padStart(7) +
-            String(r.voicemails).padStart(4) +
-            (senti ? `  ${senti}` : "")
-          );
-        });
-        const digest =
-          `📊 <b>Kixie rep scorecard</b> — last ${WEEKLY_WINDOW_DAYS} days\n` +
-          `<pre>${escapeTelegramHtml([header, ...rows].join("\n"))}</pre>`;
-        const tg = await sendTelegram(digest, { lane: "sunbiz-ops" });
-        if (!tg.ok) failures.push(`telegram_digest_failed: ${tg.reason || "unknown"}`);
+        if (tenantRows.length > 0) {
+          const header = "Rep                    Dials Conn  Talk   VM";
+          const rows = tenantRows.map((r) => {
+            const senti = Object.entries(r.sentiment as Record<string, number>)
+              .map(([k, v]) => `${k.slice(0, 3)}:${v}`)
+              .join(" ");
+            return (
+              String(r.rep).slice(0, 22).padEnd(22) +
+              String(r.dials).padStart(5) +
+              String(r.connects).padStart(5) +
+              fmtTalk(Number(r.talk_time_sec)).padStart(7) +
+              String(r.voicemails).padStart(4) +
+              (senti ? `  ${senti}` : "")
+            );
+          });
+          const digest =
+            `📊 <b>Kixie rep scorecard</b> — last ${WEEKLY_WINDOW_DAYS} days\n` +
+            `<pre>${escapeTelegramHtml([header, ...rows].join("\n"))}</pre>`;
+          const tg = await sendTelegram(digest, { lane });
+          if (!tg.ok) failures.push(`telegram_digest_failed: ${tg.reason || "unknown"}`);
+        }
       }
     } catch (e) {
       failures.push(`weekly_scorecard_failed: ${e instanceof Error ? e.message : "unknown"}`);
