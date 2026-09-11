@@ -67,6 +67,7 @@ import { loadApprovedPool } from "@/lib/drips/template-pool-store";
 import { wasShoppedRecently } from "@/lib/drips/enroller";
 import { dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { unsubscribeBrandForTenant } from "@/lib/email/brand-for-tenant";
+import { isDripsLive, tenantForcedDryRun } from "@/lib/integrations/send-mode";
 import { resolveDripSmsIdentity, staticRegistryNumbers, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
 import {
@@ -215,10 +216,15 @@ const SOFT_BUDGET_MS = 50_000;
  * lose the distinction between "we never went live" and "we hit the brakes".
  * Rows keep rendering, logging and advancing as dry runs, so nothing is lost.
  */
-function dripSendEnabled(): boolean {
+function dripSendEnabled(tenantId?: string): boolean {
   if ((process.env.BRAVO_FORCE_DRY_RUN || "").trim() === "1") return false;
   if (circuitOpen()) return false;
-  return process.env.DRIPS_LIVE === "1";
+  // Per row, the tenant's own clamps apply too (BRAVO_FORCE_DRY_RUN__<SLUG>,
+  // DRIPS_LIVE__<SLUG>=0 — lib/integrations/send-mode.ts). The run-level calls
+  // pass no tenant: they size caps and budgets from the shared switch, which a
+  // per-tenant clamp can only make more conservative.
+  if (tenantId && tenantForcedDryRun({ tenantId })) return false;
+  return isDripsLive(tenantId ? { tenantId } : undefined);
 }
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -1153,7 +1159,7 @@ async function processSmsStep(
   //
   // Skipped on a dry run, which is contracted to render, log and ADVANCE every
   // row without consulting a provider.
-  if (dripSendEnabled()) {
+  if (dripSendEnabled(row.tenant_id)) {
     const availability =
       run.availabilityByTenant.get(row.tenant_id) ?? (await loadProviderAvailability(row.tenant_id));
     const route = routeOutbound({ channel: "sms", purpose: "drip", brand: smsBrand, available: availability });
@@ -1208,8 +1214,8 @@ async function processSmsStep(
     identity = resolved;
   }
 
-  const dripsLive = process.env.DRIPS_LIVE === "1";
-  const shouldSend = dripSendEnabled();
+  const dripsLive = isDripsLive({ tenantId: row.tenant_id });
+  const shouldSend = dripSendEnabled(row.tenant_id);
 
   // Backstop: never re-send this lead the same sequence step (audit safety net).
   if (shouldSend && (await alreadySentStep(db, row))) {
@@ -1626,8 +1632,8 @@ async function processEmailStep(
   const subject = stripDashes(subjectRaw).slice(0, 200) || "Following up";
   const cleanBody = stripDashes(rendered);
 
-  const dripsLive = process.env.DRIPS_LIVE === "1";
-  const shouldSend = dripSendEnabled();
+  const dripsLive = isDripsLive({ tenantId: row.tenant_id });
+  const shouldSend = dripSendEnabled(row.tenant_id);
 
   // Backstop: never re-send this lead the same sequence step (audit safety net).
   if (shouldSend && (await alreadySentStep(db, row))) {

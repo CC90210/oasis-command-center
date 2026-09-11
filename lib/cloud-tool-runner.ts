@@ -1466,7 +1466,8 @@ async function toolSearchRecords(input: Record<string, unknown>, ctx: ToolContex
 // ----------------------------------------------------------------------------
 // SunBiz comms tools (Phase 3d, 2026-06-02) — Kixie + TextTorrent.
 //
-// Sends (call / sms / blast / inbox_reply) are dry-run gated via isDryRun().
+// Sends (call / sms / blast / inbox_reply) are dry-run gated via isDryRun(),
+// with the calling workspace's own flags checked before the shared ones.
 // List management (create_list / add_contact / block / unblock) runs live —
 // it never contacts a prospect, only shapes TT-side data — but still
 // requires the tenant's TT credentials, so it no-ops until those are wired.
@@ -1558,7 +1559,7 @@ async function toolKixieCall(input: Record<string, unknown>, ctx: ToolContext) {
       ? input.display_name.trim()
       : "Outbound call";
 
-  if (isDryRun()) {
+  if (isDryRun(undefined, { tenantId: ctx.tenantId })) {
     await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: `Call ${phone}`, userId: ctx.userId, type: "call_initiated", channel: "phone", provider: "kixie", dryRun: true });
     return { ok: true, dry_run: true, would_call: { target: phone, lead_id: leadId } };
   }
@@ -1578,7 +1579,7 @@ async function toolKixieSendSms(input: Record<string, unknown>, ctx: ToolContext
   if (!phone && leadId) phone = await resolveLeadPhone(ctx.tenantId, leadId);
   if (!phone) throw new Error("no_phone: pass target (E.164) or a lead_id with a stored phone.");
 
-  if (isDryRun()) {
+  if (isDryRun(undefined, { tenantId: ctx.tenantId })) {
     await logCommsInteraction({ tenantId: ctx.tenantId, leadId, toPhone: phone, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "kixie", dryRun: true });
     return { ok: true, dry_run: true, would_send: { target: phone, message, lead_id: leadId } };
   }
@@ -1599,7 +1600,7 @@ async function toolTextTorrentSend(input: Record<string, unknown>, ctx: ToolCont
   if (!number) throw new Error("no_phone: number must be E.164.");
   if (!message) throw new Error("message_required");
 
-  if (isDryRun()) {
+  if (isDryRun(undefined, { tenantId: ctx.tenantId })) {
     await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: true });
     return { ok: true, dry_run: true, would_send: { number, message } };
   }
@@ -1623,7 +1624,7 @@ async function toolTextTorrentInboxReply(input: Record<string, unknown>, ctx: To
   if (!number) throw new Error("no_phone: number must be E.164.");
   if (!message) throw new Error("message_required");
 
-  if (isDryRun()) {
+  if (isDryRun(undefined, { tenantId: ctx.tenantId })) {
     await logCommsInteraction({ tenantId: ctx.tenantId, leadId: null, toPhone: number, preview: message, userId: ctx.userId, type: "sms_sent", channel: "sms", provider: "texttorrent", dryRun: true });
     return { ok: true, dry_run: true, would_send: { number, message } };
   }
@@ -1655,7 +1656,7 @@ async function toolTextTorrentBlast(input: Record<string, unknown>, ctx: ToolCon
   if (!listId) throw new Error("list_id_required");
   if (!message) throw new Error("message_required");
 
-  if (isDryRun("texttorrent")) {
+  if (isDryRun("texttorrent", { tenantId: ctx.tenantId })) {
     return { ok: true, dry_run: true, would_create: { list_id: listId, message, scheduled_time: scheduledTime } };
   }
   const creds = await getTextTorrentCredentials(ctx.tenantId);
