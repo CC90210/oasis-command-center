@@ -37,7 +37,7 @@ import {
   ManifestPersistenceError,
   saveManifest,
 } from "@/lib/manifest/persistence";
-import { PROTECTED_SLUGS } from "@/lib/manifest/guards";
+import { PROTECTED_SLUGS, crossTenantGuard } from "@/lib/manifest/guards";
 import { buildSunbizSequenceRows } from "@/lib/sunbiz-default-sequences";
 import { isMissingTableError, isUniqueViolationError } from "@/lib/api-helpers";
 
@@ -107,6 +107,16 @@ export async function POST(req: NextRequest) {
   const existing = await getManifestRow(slug).catch(() => null);
   if (existing) {
     return NextResponse.json({ ok: false, error: "slug_taken" }, { status: 409 });
+  }
+  // No row is not the same as free: oasis-webdev has no row and is not a seed,
+  // so the reserved-slug check above never covered it. Same rule as the edit
+  // path in lib/manifest/guards.ts.
+  const claim = await crossTenantGuard(slug, profile.tenant_id);
+  if (!claim.ok) {
+    return NextResponse.json(
+      { ok: false, error: claim.error, reason: claim.reason },
+      { status: claim.status }
+    );
   }
 
   let manifest;
