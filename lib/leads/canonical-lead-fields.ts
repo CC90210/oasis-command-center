@@ -230,3 +230,26 @@ export function contactNameFor(data: Record<string, unknown>): string {
 export function hasNamedContact(data: Record<string, unknown>): boolean {
   return contactNameFor(data).length > 0;
 }
+
+/**
+ * The name a Kixie PowerList entry carries, per company.
+ *
+ * #405 moved the PowerList onto contactNameFor for OASIS, whose board keeps the
+ * business in `name` and leaves contact_name empty, so the dialer was showing
+ * "HVAC" as a first name. The route is shared, so SunBiz's dialer changed too:
+ * a merchant with no contact name, which used to show as the business, reached
+ * Kixie as a bare number.
+ *
+ * SunBiz gets its pre-#405 rule back exactly: contact_name, else business_name.
+ * It never read owner_name or name, so neither does this. OASIS keeps
+ * contactNameFor. A brand the fail-closed map does not know (null) also keeps
+ * the pre-#405 rule, because #405 was only ever about OASIS's board.
+ */
+export function powerlistContactNameFor(
+  data: Record<string, unknown>,
+  brand: string | null | undefined,
+): string {
+  if (brand === "oasis") return contactNameFor(data);
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return str(data.contact_name) || str(data.business_name);
+}

@@ -124,3 +124,20 @@ export function finalizeCopyList(
 export function isAddressShaped(value: string): boolean {
   return EMAIL_RE.test((value || "").trim());
 }
+
+/**
+ * Does a lead email copy anyone at all? OASIS only.
+ *
+ * The copy list was built for OASIS (#405, #421): its reps send from one shared
+ * mailbox and otherwise have no copy of what went out. The route is shared, so
+ * it reached SunBiz too, and a merchant's email started carrying the lead's rep
+ * and the sender in Cc, where a reply-all now reaches them. Before #405 this
+ * route copied nobody on a SunBiz send, and SunBiz gets that back.
+ *
+ * Takes the brand the route already resolved through the fail-closed map in
+ * lib/email/brand-for-tenant.ts, so this module stays import-free. A brand we
+ * do not recognise copies nobody.
+ */
+export function leadEmailCopiesReps(brand: string | null | undefined): boolean {
+  return brand === "oasis";
+}

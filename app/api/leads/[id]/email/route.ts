@@ -36,7 +36,7 @@ import { appendSignatureAndFooter } from "@/lib/config/email-signature";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
-import { buildCopyList, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
+import { buildCopyList, leadEmailCopiesReps, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
 import { resolveAssigneeEmail } from "@/lib/leads/assignee-email";
 import { renderQuickEmailHtml } from "@/lib/leads/quick-email-html";
 
@@ -404,43 +404,53 @@ export async function POST(
    * person holding the relationship. The sending mailbox is excluded inside the
    * sender, which is the only layer that knows its own From address.
    */
-  // The route never loaded the lead before now. `assigned_to` was read in only
-  // one place — assertMayWorkLead's non-admin branch — and an admin skips that
-  // query entirely, which is why an admin's send could never have found the
-  // assignee even in principle. Soft-fails: a lookup error costs the rep copy,
-  // never the prospect's email.
-  const { data: leadRow, error: leadRowError } = await db
-    .from("tenant_records")
-    .select("data")
-    .eq("tenant_id", sess.tenantId)
-    .eq("entity_type", "lead")
-    .eq("id", leadId)
-    .maybeSingle();
-  if (leadRowError) trackingWarnings.push("assignee_lead_read_failed");
-  const leadData = (leadRow?.data || {}) as Record<string, unknown>;
+  // OASIS ONLY. All of this was built for OASIS's shared mailbox and reached
+  // SunBiz because the route is shared: a merchant's email from a rep's own
+  // Gmail or the bridge started carrying the lead's rep and the sender in Cc,
+  // and every SunBiz send picked up a lead read, a roster lookup and warnings
+  // it never had. Before #405 this route copied nobody on SunBiz. There the
+  // list stays empty, which every transport below already sends with no Cc
+  // header. See leadEmailCopiesReps.
+  let copyList: string[] = [];
+  if (leadEmailCopiesReps(brand)) {
+    // The route never loaded the lead before now. `assigned_to` was read in only
+    // one place — assertMayWorkLead's non-admin branch — and an admin skips that
+    // query entirely, which is why an admin's send could never have found the
+    // assignee even in principle. Soft-fails: a lookup error costs the rep copy,
+    // never the prospect's email.
+    const { data: leadRow, error: leadRowError } = await db
+      .from("tenant_records")
+      .select("data")
+      .eq("tenant_id", sess.tenantId)
+      .eq("entity_type", "lead")
+      .eq("id", leadId)
+      .maybeSingle();
+    if (leadRowError) trackingWarnings.push("assignee_lead_read_failed");
+    const leadData = (leadRow?.data || {}) as Record<string, unknown>;
 
-  const assignee = await resolveAssigneeEmail(
-    sess.tenantId,
-    typeof leadData.assigned_to === "string" ? leadData.assigned_to : null,
-  );
-  // An owner who should have been copied and was not is worth a warning. Without
-  // this, a failed roster read looks exactly like an unassigned lead and the
-  // send still reports success — the rep simply never hears about their lead.
-  if (assignee.status === "lookup_failed") trackingWarnings.push("assignee_lookup_failed");
-  if (assignee.status === "no_address") trackingWarnings.push("assignee_has_no_address");
-  const assignedRepEmail = assignee.status === "resolved" ? assignee.email : null;
-  // The sending mailbox is excluded HERE, not only inside the shared sender.
-  // The bridge fallback leaves from the same address and has no way to know it,
-  // so a send that fell through to the bridge could still copy the From address
-  // onto its own message. Excluding once, at the point the list is built, closes
-  // every transport at the same place.
-  const oasisMailboxFrom = brand === "oasis" ? await resolveOasisMailboxFrom(sess.tenantId) : null;
-  const copyList = buildCopyList({
-    assignedRepEmail,
-    senderEmail: sess.email,
-    toEmail,
-    excludeAddresses: [oasisMailboxFrom],
-  });
+    const assignee = await resolveAssigneeEmail(
+      sess.tenantId,
+      typeof leadData.assigned_to === "string" ? leadData.assigned_to : null,
+    );
+    // An owner who should have been copied and was not is worth a warning. Without
+    // this, a failed roster read looks exactly like an unassigned lead and the
+    // send still reports success — the rep simply never hears about their lead.
+    if (assignee.status === "lookup_failed") trackingWarnings.push("assignee_lookup_failed");
+    if (assignee.status === "no_address") trackingWarnings.push("assignee_has_no_address");
+    const assignedRepEmail = assignee.status === "resolved" ? assignee.email : null;
+    // The sending mailbox is excluded HERE, not only inside the shared sender.
+    // The bridge fallback leaves from the same address and has no way to know it,
+    // so a send that fell through to the bridge could still copy the From address
+    // onto its own message. Excluding once, at the point the list is built, closes
+    // every transport at the same place.
+    const oasisMailboxFrom = brand === "oasis" ? await resolveOasisMailboxFrom(sess.tenantId) : null;
+    copyList = buildCopyList({
+      assignedRepEmail,
+      senderEmail: sess.email,
+      toEmail,
+      excludeAddresses: [oasisMailboxFrom],
+    });
+  }
 
   // ---- WHO SIGNS THE MESSAGE ---------------------------------------------
   //
