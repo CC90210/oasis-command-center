@@ -27,6 +27,31 @@ export function bad(status: number, error: string) {
  *
  *   export const GET = jsonRoute("api/cron-jobs GET", async () => { ... });
  */
+/**
+ * Persist a thrown handler error to agent_events so it can be READ later.
+ *
+ * Deliberately defensive: it swallows everything. If the database is the thing
+ * that broke, this insert will fail too, and an error reporter that throws
+ * turns one broken route into two.
+ */
+async function recordHandlerFailure(route: string, message: string, stack?: string) {
+  try {
+    const db = getServiceSupabase();
+    const now = new Date().toISOString();
+    await db.from("agent_events").insert({
+      id: crypto.randomUUID(),
+      event_type: "DASHBOARD_HANDLER_THREW",
+      publisher_agent: "oasis-command-center",
+      severity: "error",
+      payload: JSON.stringify({ route, message, stack: stack?.slice(0, 4000) }),
+      published_at: now,
+      created_at: now,
+    });
+  } catch {
+    // Intentionally silent — see the doc comment above.
+  }
+}
+
 export function jsonRoute<A extends unknown[]>(
   label: string,
   handler: (...args: A) => Promise<NextResponse>,
@@ -36,10 +61,16 @@ export function jsonRoute<A extends unknown[]>(
       return await handler(...args);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error(`[${label}] threw`, {
-        message,
-        stack: err instanceof Error ? err.stack : undefined,
-      });
+      const stack = err instanceof Error ? err.stack : undefined;
+      console.error(`[${label}] threw`, { message, stack });
+      // Also RECORD it. console.error reaches Vercel's runtime log, which is
+      // only readable live and not at all without repo-admin rights — so a
+      // failure the operator hits is otherwise reconstructable only from a
+      // screenshot of the banner. Persisting the message and stack means the
+      // next person to ask "why did this break" can query for the answer
+      // instead of trying to reproduce it. Fire-and-forget and fully
+      // swallowed: error reporting must never become a second failure.
+      void recordHandlerFailure(label, message, stack);
       return NextResponse.json(
         { ok: false, error: "handler_threw", message, route: label },
         { status: 500 },
