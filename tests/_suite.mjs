@@ -58,6 +58,13 @@ const TESTS = [
   // is stamped so /pipeline and /web-leads actually show it. Drives the real
   // records and quick-add route handlers against a local libSQL database.
   "tests/oasis-create-stage-contract.test.ts",
+  // Phone matching (2026-09-11): a returning merchant is found by an
+  // all-digit phone, a phone shared by another business is not a match, and
+  // every matched-lead path in quick-add answers with a sentence. The guard
+  // keeps runtime values out of JSON-path .or() strings, where the adapter
+  // types digits as numbers and the comparison silently matches nothing.
+  "tests/find-existing-lead-phone.test.ts",
+  "tests/or-value-guard.test.ts",
   // These three pinned the create path and the two stage lists but ran in no
   // suite, so a drift they catch could still ship. (Verifier, 2026-09-10.)
   "tests/turnkey-access-boundaries.test.ts",

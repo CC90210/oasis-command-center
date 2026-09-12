@@ -9,7 +9,8 @@
  *
  * Create-or-advance, deduped: if a lead already exists for this tenant (matched
  * by email/phone/business via findExistingLead) it is ADVANCED to the stage
- * (no duplicate); otherwise a new lead is created. createRecord AND updateRecord
+ * (no duplicate), never backwards past a later stage; otherwise a new lead is
+ * created. createRecord AND updateRecord
  * both fire BRAVO_RECORD_STATUS_CHANGED, so the drip enroller auto-enrolls the
  * lead into the stage's sequence (a phone-less lead simply skips the SMS-only
  * step 0 as no_contact_method — chosen behavior 2026-07-20).
@@ -24,6 +25,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
 import { findExistingLead } from "@/lib/forms/agent-routing";
+import { HARD_TERMINAL_STAGES, isFormStageDowngrade } from "@/lib/forms/stage-transition";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { OASIS_LEAD_STAGES } from "@/lib/oasis-stage-meta";
 import { isWebsiteSalesTenantSlug, OASIS_INTAKE_STAGE } from "@/lib/leads/canonical-lead-fields";
@@ -132,13 +134,20 @@ export async function POST(req: NextRequest) {
   // The stage the lead is actually in afterwards. Equal to `stage` on every
   // path except an OASIS create, where the planner may choose the default.
   let resultStage = stage;
+  // A sentence for the rep when an existing lead was deliberately left alone.
+  let message: string | null = null;
   try {
     // Create-or-advance, deduped on STRONG identity only (email/phone). We
     // deliberately DON'T match on business name here: two different merchants can
     // share a name, and merging them would advance the wrong file + lose the new
     // one's contact. A missed returning-merchant just yields a dup (harmless) vs a
-    // false merge (data loss).
-    const found = await findExistingLead(tenantId, { email, phone });
+    // false merge (data loss). The name goes in only so a phone shared by two
+    // businesses (an owner's cell) is not read as one merchant.
+    const found = await findExistingLead(
+      tenantId,
+      { email, phone, business: businessName },
+      { matchOnBusinessName: false },
+    );
     if (found) {
       if (
         !canMutateGenericLeadForTenant(
@@ -151,7 +160,20 @@ export async function POST(req: NextRequest) {
           { id: found.id, data: found.data },
         )
       ) {
-        return NextResponse.json({ ok: false, error: "lead_not_found" }, { status: 404 });
+        // Only a MATCHED lead reaches this line (a miss creates one), so any
+        // refusal here already tells the caller the contact exists. Saying so
+        // in a sentence discloses nothing more; no id, stage or owner is sent.
+        // It used to be a bare 404 lead_not_found, which the modal printed.
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "lead_exists_not_yours",
+            message: isWebsiteSalesWorkspace
+              ? "This lead is already in the workspace, but it isn't assigned to you, so it wasn't added again. Ask an admin to assign it to you."
+              : "This merchant is already on the board, but it isn't assigned to you, so it wasn't added again. Ask a manager to assign it to you.",
+          },
+          { status: 409 },
+        );
       }
       existing = true;
       leadId = found.id;
@@ -179,8 +201,23 @@ export async function POST(req: NextRequest) {
           );
         }
       } else if (fromStage !== stage) {
-        patch.stage = stage;
-        advanced = true;
+        // Never move a merchant BACK: the forward-only rule the public forms
+        // apply (lib/forms/stage-transition.ts). A lead already further down
+        // the funnel, or in default / opted_out, keeps its stage and gets no
+        // drip. Stages the lead board does not list (declined, dead_file,
+        // legacy) still move exactly as they did before.
+        const order = LEAD_PIPELINE_STAGES.map((s) => s.key);
+        const known = fromStage !== null && (order.includes(fromStage) || HARD_TERMINAL_STAGES.has(fromStage));
+        if (known && isFormStageDowngrade(fromStage, stage, order)) {
+          resultStage = fromStage as string;
+          const at =
+            LEAD_PIPELINE_STAGES.find((s) => s.key === fromStage)?.label ??
+            (fromStage === "opted_out" ? "Opted Out" : String(fromStage));
+          message = `That merchant already has a lead in ${at}, so it was left there instead of being moved back.`;
+        } else {
+          patch.stage = stage;
+          advanced = true;
+        }
       }
       // Fill in a MISSING contact name; never overwrite an existing one (their
       // file may already hold a better value than what the rep typed here).
@@ -279,5 +316,12 @@ export async function POST(req: NextRequest) {
     /* best-effort audit */
   }
 
-  return NextResponse.json({ ok: true, id: leadId, stage: resultStage, existing, advanced });
+  return NextResponse.json({
+    ok: true,
+    id: leadId,
+    stage: resultStage,
+    existing,
+    advanced,
+    ...(message ? { message } : {}),
+  });
 }
