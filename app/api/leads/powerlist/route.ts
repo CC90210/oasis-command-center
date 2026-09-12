@@ -29,7 +29,8 @@ import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { isReadOnlyRole } from "@/lib/role-gates";
 import { canMutateGenericLeadForTenant } from "@/lib/lead-access";
-import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
+import { powerlistContactNameFor } from "@/lib/leads/canonical-lead-fields";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -132,6 +133,8 @@ export async function POST(req: NextRequest) {
   const actor = await resolveActor(true);
   if (!actor.ok) return actor.resp;
   const { tenantId, userId, email } = actor;
+  // Which company's dialer-name rule applies. See powerlistContactNameFor.
+  const brand = brandForTenant({ tenantId });
 
   let body: { lead_ids?: unknown; powerlist_key?: unknown };
   try {
@@ -247,19 +250,18 @@ export async function POST(req: NextRequest) {
       skippedNoPhone.push(id);
       continue;
     }
-    // The PERSON to ask for — never the business.
+    // OASIS: the PERSON to ask for, never the business. SunBiz: its pre-#405
+    // name, which falls back to the business.
     //
-    // This was `contact_name || business_name`, and contact_name is empty on
-    // every lead on this board, so the fallback always won: the BUSINESS name
-    // was split on whitespace and pushed to Kixie as the contact's first and
-    // last name. A rep's dialer showed "HVAC" as a first name, and that is what
-    // gets read off the screen on a live call.
-    //
-    // contactNameFor() adds owner_name (which 1,853 leads carry) and refuses to
-    // return a name that IS the company. An empty result is correct and safe:
-    // firstName/lastName are optional below, so Kixie simply shows the number
-    // rather than a company masquerading as a person.
-    const nameSrc = contactNameFor(data);
+    // This was `contact_name || business_name` for every tenant. On the OASIS
+    // board contact_name is empty on every lead, so the BUSINESS name was split
+    // on whitespace and pushed to Kixie as first and last name; a rep's dialer
+    // showed "HVAC" as a first name. #405 fixed that by switching to
+    // contactNameFor, and because this route is shared it also took the
+    // business name away from SunBiz merchants with no contact name. Each
+    // company now keeps its own rule, chosen by the tenant's brand. An empty
+    // result is safe: firstName/lastName are optional below.
+    const nameSrc = powerlistContactNameFor(data, brand);
     const parts = nameSrc.split(/\s+/).filter(Boolean);
     const firstName = parts[0] || undefined;
     const lastName = parts.length > 1 ? parts.slice(1).join(" ") : undefined;

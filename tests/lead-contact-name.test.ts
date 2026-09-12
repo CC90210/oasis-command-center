@@ -125,7 +125,10 @@ run("every REP-FACING surface shows the person, not the business", () => {
   //    whitespace and pushed to Kixie as the contact's first and last name, so
   //    a rep's dialer displayed "HVAC" as a first name.
   const powerlist = readFileSync("app/api/leads/powerlist/route.ts", "utf8");
-  assert.match(powerlist, /const nameSrc = contactNameFor\(data\)/, "the dialer still names the business");
+  // Per company since 2026-09-11: OASIS resolves through contactNameFor, SunBiz
+  // keeps its pre-#405 business-name fallback. Both are asserted by execution
+  // in tests/sunbiz-restore-behaviour.test.ts.
+  assert.match(powerlist, /const nameSrc = powerlistContactNameFor\(data, brand\)/, "the dialer still names the business");
   assert.ok(
     !/str\(data\.contact_name\) \|\| str\(data\.business_name\)/.test(powerlist),
     "the business-name fallback is still feeding Kixie",

@@ -463,7 +463,10 @@ run("the send path is wired into the pipeline lead workspace, not just /leads", 
   // regex below used to pin `sess.email !== toEmail`, which stayed green while
   // the rep who owned the lead was never copied at all.
   const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
-  assert.match(route, /const copyList = buildCopyList\(/, "the copy list is not resolved");
+  // Assigned rather than declared since 2026-09-11: the list is built only when
+  // the brand copies reps (OASIS). tests/sunbiz-restore-behaviour.test.ts pins
+  // the gate.
+  assert.match(route, /copyList = buildCopyList\(/, "the copy list is not resolved");
   assert.match(route, /resolveAssigneeEmail\(/, "the lead's assigned rep is not looked up");
   assert.match(route, /cc: copyList/, "the send does not CC the rep");
   assert.match(

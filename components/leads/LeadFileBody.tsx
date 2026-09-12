@@ -38,6 +38,7 @@ import {
 } from "@/lib/sunbiz-templates-library";
 import { isLeadChannelEnabled } from "@/lib/leads/channel-registry";
 import { clairEnabledForTenantSlug } from "@/lib/clair/tenant-access";
+import { savesTypedRecipient, typedRecipientNote } from "@/lib/leads/typed-recipient";
 
 export type DocRow = {
   id: string;
@@ -438,6 +439,7 @@ export function LeadFileBody({
           </div>
 
           <DrawerFooter
+            tenantSlug={tenantSlug}
             recordId={recordId}
             entity={entity}
             recordData={record}
@@ -2305,11 +2307,13 @@ function CallButton({ recordId, phone }: { recordId: string; phone: string | nul
 }
 
 function DrawerFooter({
+  tenantSlug,
   recordId,
   entity,
   recordData,
   onChange,
 }: {
+  tenantSlug: string;
   recordId: string;
   entity: "lead" | "application";
   recordData: Record<string, unknown>;
@@ -2379,6 +2383,7 @@ function DrawerFooter({
           drawer without compacting the merchant info / tabs above. */}
       {mode === "email" && (
         <EmailComposer
+          tenantSlug={tenantSlug}
           recordId={recordId}
           entity={entity}
           toEmail={str(recordData.email)}
@@ -2437,12 +2442,14 @@ function EmailComposer({
   // Kept in the signature because every call site passes it and the prop is
   // meaningful; underscored so the linter knows the disuse is deliberate.
   entity: _entity,
+  tenantSlug,
   toEmail,
   leadName,
   leadCompany,
   onClose,
   onChange,
 }: {
+  tenantSlug: string;
   recordId: string;
   entity: "lead" | "application";
   toEmail: string | null;
@@ -2480,6 +2487,10 @@ function EmailComposer({
   // boundary.
   const toValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to.trim());
   const isNewAddress = to.trim().toLowerCase() !== (toEmail || "").trim().toLowerCase();
+  // Whether a send to a new address also saves it onto the record: OASIS yes
+  // (#401), SunBiz no, as before #401. The note under the recipient box is
+  // chosen from this same answer so it cannot promise what won't happen.
+  const savesTyped = savesTypedRecipient(tenantSlug);
   // Manual SunBiz template picker (CC 2026-06-23). Selecting a template fills
   // subject + body, personalized to this lead; the operator edits before
   // sending. send_gateway appends the brand signature, so templates carry no
@@ -2529,9 +2540,7 @@ function EmailComposer({
         )}
         {toValid && isNewAddress && (
           <div className="mt-1 text-[11px] text-fg-dim">
-            {toEmail
-              ? "Sending to a different address than the one on file — it'll be saved to this lead."
-              : "New address — it'll be saved to this lead so the next person isn't stuck."}
+            {typedRecipientNote({ saves: savesTyped, hasAddressOnFile: Boolean(toEmail) })}
           </div>
         )}
       </div>
@@ -2618,8 +2627,12 @@ function EmailComposer({
                 // we failed to deliver to would quietly overwrite a good record
                 // with a typo. Best-effort — a failed save must not turn a sent
                 // email into an error the rep thinks means "not sent".
+                // OASIS only: on SunBiz the typed address is used for this send
+                // and the merchant's email of record is left alone, as it was
+                // before #401 (set-field would also mirror it onto the linked
+                // application). See lib/leads/typed-recipient.ts.
                 let savedNote = "";
-                if (isNewAddress) {
+                if (isNewAddress && savesTyped) {
                   try {
                     const sf = await fetch(`/api/leads/${recordId}/set-field`, {
                       method: "POST",

@@ -347,6 +347,9 @@ const TESTS = [
   // renders -- see lib/web-leads/data.ts's owner_verification_state mapping.
   "tests/web-leads-owner-verification.test.ts",
   "lib/__tests__/turso-postgrest.test.mjs",
+  // 2026-09-11: three OASIS changes (#401, #405, #421) had also changed what
+  // SunBiz users get. Pins SunBiz's restored behaviour and OASIS's kept one.
+  "tests/sunbiz-restore-behaviour.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];
