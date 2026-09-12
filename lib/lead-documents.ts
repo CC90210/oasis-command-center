@@ -36,6 +36,8 @@ export const WATERMARK_VERSION = 4;
 
 export type LeadDocumentUploadResult = {
   ok: true;
+  /** True only when this call inserted the metadata row. */
+  created?: boolean;
   document: {
     id: string;
     filename: string;
@@ -156,7 +158,7 @@ export async function uploadLeadDocument(
     return { ok: false, error: `metadata_insert_failed: ${ins.error.message}` };
   }
 
-  return { ok: true, document: ins.data as LeadDocumentUploadResult["document"] };
+  return { ok: true, created: true, document: ins.data as LeadDocumentUploadResult["document"] };
 }
 
 /**
@@ -204,7 +206,7 @@ export async function registerLeadDocument(input: {
     .eq("storage_path", input.storagePath)
     .maybeSingle();
   if (dup.data) {
-    return { ok: true, document: dup.data as LeadDocumentUploadResult["document"] };
+    return { ok: true, created: false, document: dup.data as LeadDocumentUploadResult["document"] };
   }
 
   // Confirm the object exists + read its real size (anti-spoof).
@@ -250,7 +252,7 @@ export async function registerLeadDocument(input: {
   const doc = ins.data as LeadDocumentUploadResult["document"];
   // Stored CLEAN (2026-06-29) — bank statements are watermarked only at shop-out
   // (a derived copy), so direct-to-storage uploads land clean like every surface.
-  return { ok: true, document: doc };
+  return { ok: true, created: true, document: doc };
 }
 
 /**

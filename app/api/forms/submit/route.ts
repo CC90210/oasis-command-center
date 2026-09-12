@@ -8,7 +8,7 @@
  * Flow:
  *   1. Verify the HMAC token via lib/form-links.ts.
  *   2. Look up the form to confirm it's still enabled.
- *   3. Insert a form_submissions row (one per step completion).
+ *   3. Upsert one canonical form_submissions row per step completion.
  *   4. If form.step_outcomes maps this step_index to a lead.stage value,
  *      transition the lead via updateRecord. The Phase 2 publisher fires
  *      BRAVO_RECORD_STATUS_CHANGED automatically, which the Phase 4 drip
@@ -40,6 +40,7 @@ import {
 import { getClientIp } from "@/lib/api-helpers";
 import { verifyFormLink, signFormLink, type FormLinkPayload } from "@/lib/form-links";
 import { captureSubmitFailure } from "@/lib/forms/submit-failure-capture";
+import { canonicalFormSubmissionId } from "@/lib/forms/canonical-submission-id";
 import {
   parseFormSteps,
   type FormStep,
@@ -49,7 +50,12 @@ import { isFieldVisible, buildAnswerContext } from "@/lib/forms/visibility";
 import { isAcceptableCaptureAddress } from "@/lib/address/us-address";
 import { rateLimit } from "@/lib/rate-limit";
 import { createRecord, updateRecord, RecordsError } from "@/lib/manifest/data";
-import { uploadLeadDocument, registerLeadDocument, classifyDocTypeByFilename } from "@/lib/lead-documents";
+import {
+  LEAD_DOC_BUCKET,
+  uploadLeadDocument,
+  registerLeadDocument,
+  classifyDocTypeByFilename,
+} from "@/lib/lead-documents";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { resolvePublicForm } from "@/lib/forms/public-resolver";
 import { maybeQueueResumeEmail } from "@/lib/forms/maybe-queue-resume";
@@ -539,10 +545,9 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // in migration 055. Each file lands under <tenant_id>/<lead_id>/<filename>
   // — the tenant-prefix anchors the read RLS policy without an extra join.
   //
-  // Errors here don't abort the whole submission: a stage-transition can
-  // still go through with missing docs, and the operator sees the gap on
-  // the lead detail page. We log to stage_warning style so the UI can
-  // surface the partial-success state.
+  // Optional upload errors remain warnings so the operator can see the gap.
+  // Required upload errors fail closed after both upload paths have run, before
+  // any submission row or stage progression is written.
   const uploadedDocs: Array<{
     field_name: string;
     storage_path: string;
@@ -552,6 +557,11 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     doc_type: string;
   }> = [];
   const uploadWarnings: Array<{ field_name: string; reason: string }> = [];
+  const documentsCreatedByRequest: Array<{
+    id: string;
+    storage_path: string;
+    remove_object: boolean;
+  }> = [];
 
   // Schema-driven file validation. Without this an attacker could embed
   // arbitrary {inline_base64, ...} blobs against any payload key (even
@@ -674,12 +684,89 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         size_bytes: result.document.size_bytes,
         doc_type: result.document.doc_type,
       });
+      if (result.created) {
+        documentsCreatedByRequest.push({
+          id: result.document.id,
+          storage_path: result.document.storage_path,
+          remove_object: true,
+        });
+      }
     } catch (err) {
       uploadWarnings.push({
         field_name: fieldName,
         reason: err instanceof Error ? err.message : "unknown",
       });
     }
+  }
+
+  // A completed single-file step can be revisited with its persisted
+  // {storage_path,...} value instead of fresh inline bytes. Treat that value as
+  // an untrusted descriptor and run it through the same object-existence and
+  // tenant/lead-scope checks as the multi-file path below.
+  for (const field of currentStepFields.values()) {
+    if (field.type !== "file_upload") continue;
+    if (uploadedDocs.some((doc) => doc.field_name === field.name)) continue;
+    const raw = payload[field.name];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const desc = raw as {
+      storage_path?: unknown;
+      filename?: unknown;
+      mime_type?: unknown;
+    };
+    const storagePath = typeof desc.storage_path === "string" ? desc.storage_path : "";
+    const filename = typeof desc.filename === "string" && desc.filename ? desc.filename : "upload";
+    const mimeType = typeof desc.mime_type === "string" ? desc.mime_type : "";
+    const allowedMime = field.accept && field.accept.length > 0
+      ? field.accept
+      : ["application/pdf", "image/png", "image/jpeg", "image/webp"];
+    const mimeAllowed = allowedMime.some((rule) =>
+      rule.endsWith("/*") ? mimeType.startsWith(rule.slice(0, -1)) : mimeType === rule,
+    );
+    if (!storagePath || !mimeAllowed) {
+      uploadWarnings.push({
+        field_name: field.name,
+        reason: !storagePath ? "missing_storage_path" : `mime_not_allowed: ${mimeType}`,
+      });
+      delete payload[field.name];
+      continue;
+    }
+    const reg = await registerLeadDocument({
+      tenantId: form.tenant_id,
+      leadId: link.lead_id,
+      storagePath,
+      filename,
+      mimeType,
+      docType: classifyDocTypeByFilename(field.name),
+      uploadedBy: "form_intake",
+      source: "form_intake",
+      extraMetadata: { form_id: form.id, field_name: field.name, step_index: stepIndex },
+    });
+    if (!reg.ok) {
+      uploadWarnings.push({ field_name: field.name, reason: reg.error });
+      delete payload[field.name];
+      continue;
+    }
+    uploadedDocs.push({
+      field_name: field.name,
+      storage_path: reg.document.storage_path,
+      filename: reg.document.filename,
+      mime_type: reg.document.mime_type,
+      size_bytes: reg.document.size_bytes,
+      doc_type: reg.document.doc_type,
+    });
+    if (reg.created) {
+      documentsCreatedByRequest.push({
+        id: reg.document.id,
+        storage_path: reg.document.storage_path,
+        remove_object: false,
+      });
+    }
+    payload[field.name] = {
+      storage_path: reg.document.storage_path,
+      filename: reg.document.filename,
+      mime_type: reg.document.mime_type,
+      size_bytes: reg.document.size_bytes,
+    };
   }
 
   // Direct-to-Storage multi-file fields (file_upload_multi). The client uploaded
@@ -753,6 +840,15 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
         size_bytes: reg.document.size_bytes,
         doc_type: reg.document.doc_type,
       });
+      if (reg.created) {
+        documentsCreatedByRequest.push({
+          id: reg.document.id,
+          storage_path: reg.document.storage_path,
+          // The browser already owns this upload and will retry its descriptor.
+          // Remove only the registration row; preserve the verified object.
+          remove_object: false,
+        });
+      }
       cleaned.push({
         storage_path: reg.document.storage_path,
         filename: reg.document.filename,
@@ -763,6 +859,54 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     // Persist the server-verified descriptors (drops anything that failed
     // validation) so form_submissions.payload reflects what actually registered.
     payload[field.name] = cleaned;
+  }
+
+  // A descriptor is only a claim that the browser attempted an upload. Required
+  // file fields are satisfied only by documents the server has verified in
+  // Storage and registered above. This check intentionally runs after both
+  // upload paths; otherwise a minted signed URL that never received a PUT could
+  // still advance the application and persist a successful submission.
+  for (const field of currentStep.fields) {
+    if (!field.required || !isFieldVisible(field, mergedAnswers)) continue;
+    if (field.type !== "file_upload" && field.type !== "file_upload_multi") continue;
+    if (!uploadedDocs.some((doc) => doc.field_name === field.name)) {
+      if (documentsCreatedByRequest.length > 0) {
+        const rollback = await db
+          .from("lead_documents")
+          .delete()
+          .eq("tenant_id", form.tenant_id)
+          .eq("lead_id", link.lead_id)
+          .in("id", documentsCreatedByRequest.map((doc) => doc.id));
+        if (!rollback.error) {
+          const inlinePaths = documentsCreatedByRequest
+            .filter((doc) => doc.remove_object)
+            .map((doc) => doc.storage_path);
+          if (inlinePaths.length > 0) {
+            await db.storage.from(LEAD_DOC_BUCKET).remove(inlinePaths);
+          }
+        } else {
+          console.error("[forms/submit] required-upload rollback failed", {
+            tenant_id: form.tenant_id,
+            lead_id: link.lead_id,
+            document_count: documentsCreatedByRequest.length,
+          });
+        }
+      }
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "required_file_upload_failed",
+          field: field.name,
+          uploads: {
+            attempted: inlineFiles.filter((file) => file.fieldName === field.name).length +
+              (Array.isArray(payload[field.name]) ? (payload[field.name] as unknown[]).length : 0),
+            succeeded: 0,
+            warnings: uploadWarnings.filter((warning) => warning.field_name === field.name),
+          },
+        },
+        { status: 400 },
+      );
+    }
   }
 
   // After all uploads for this step, evaluate stage progression once.
@@ -819,27 +963,61 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
     size_bytes: d.size_bytes,
   }));
 
-  const insertRes = await db
+  // A browser can safely retry after losing the response. Keep one canonical
+  // row per form/lead/step and refresh it with the newly server-verified data
+  // instead of manufacturing a second completion record.
+  const existingSubmission = await db
     .from("form_submissions")
-    .insert({
-      form_id: form.id,
-      tenant_id: form.tenant_id,
-      lead_id: link.lead_id,
-      step_index: stepIndex,
-      payload,
-      file_attachments: resolvedAttachments,
-      ip_address: ipHeader,
-      user_agent: userAgent,
-    })
     .select("id")
-    .single();
-  if (insertRes.error) {
+    .eq("form_id", form.id)
+    .eq("tenant_id", form.tenant_id)
+    .eq("lead_id", link.lead_id)
+    .eq("step_index", stepIndex)
+    .order("submitted_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (existingSubmission.error) {
     return NextResponse.json(
-      { ok: false, error: insertRes.error.message },
+      { ok: false, error: existingSubmission.error.message },
       { status: 500 },
     );
   }
-  const submissionId = (insertRes.data as { id: string }).id;
+  const submissionWrite = existingSubmission.data
+    ? await db
+        .from("form_submissions")
+        .update({
+          payload,
+          file_attachments: resolvedAttachments,
+          ip_address: ipHeader,
+          user_agent: userAgent,
+          submitted_at: new Date().toISOString(),
+        })
+        .eq("id", (existingSubmission.data as { id: string }).id)
+        .eq("tenant_id", form.tenant_id)
+        .select("id")
+        .single()
+    : await db
+        .from("form_submissions")
+        .upsert({
+          id: canonicalFormSubmissionId(form.id, link.lead_id, stepIndex),
+          form_id: form.id,
+          tenant_id: form.tenant_id,
+          lead_id: link.lead_id,
+          step_index: stepIndex,
+          payload,
+          file_attachments: resolvedAttachments,
+          ip_address: ipHeader,
+          user_agent: userAgent,
+        }, { onConflict: "id" })
+        .select("id")
+        .single();
+  if (submissionWrite.error) {
+    return NextResponse.json(
+      { ok: false, error: submissionWrite.error.message },
+      { status: 500 },
+    );
+  }
+  const submissionId = (submissionWrite.data as { id: string }).id;
 
   // ---------------------------------------------------------------------
   // Channel of THIS submission (Adon 2026-08-24: "so we could easily see if
