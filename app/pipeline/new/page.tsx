@@ -132,6 +132,7 @@ export default async function PipelineNewLeadPage({
         tenantSlug={ownedSlug}
         entity={form.entity}
         optionLabels={form.optionLabels}
+        fieldLabels={form.fieldLabels}
         backPath="pipeline"
         backHref="/pipeline"
         landOnStagePath="/pipeline"

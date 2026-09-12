@@ -624,6 +624,37 @@ async function main() {
   assert.match(railSrc, /onChange\(switchCountry\(filters, c\.key\)\)/, "the switch must change boards through switchCountry");
   run("(c) My leads and Team leads report the other board, and their switch reaches it");
 
+  // Nothing a person types into /pipeline/new is dropped: a value in every
+  // field the form offers goes through the real route and comes back from the
+  // row. The form is an allow-list now (portal audit, 2026-09-11), so a field
+  // added to it that the route refused or lost would fail here. It runs after
+  // the board counts above, which count the owner's leads exactly.
+  const typed: Record<string, string> = {
+    name: "Boulangerie Saint-Denis",
+    company: "Boulangerie Saint-Denis Inc.",
+    email: "owner@boulangerie.test",
+    phone: "+1 514 555 0100",
+    website: "https://boulangerie.test",
+    industry: "Bakery",
+    business_city: "Montreal",
+    state: "QC",
+    source: "referral",
+    stage: "assigned",
+    notes: "Met at the market. Wants online ordering.",
+  };
+  assert.deepEqual(
+    Object.keys(typed).sort(),
+    adminForm.entity.fields.map((f) => f.name).sort(),
+    "the probe must type into exactly the fields the new-lead form offers",
+  );
+  const full = await postRecord("oasis-ai-cc", typed);
+  assert.equal(full.status, 200, `${full.body.error} — ${full.body.message}`);
+  const fullRow = await storedLead(full.body.record!.id);
+  for (const [key, value] of Object.entries(typed)) {
+    assert.equal(fullRow.data[key], value, `${key} was typed into the new-lead form and is missing from the saved lead`);
+  }
+  run("(c) every field the new-lead form offers is saved as typed");
+
   // ── (d) negatives — each refused with a sentence, and nothing written ───
   const n0 = await leadCount();
   const pool = await postRecord("oasis-ai-cc", { name: "Pool try", state: "ON", stage: POOL });

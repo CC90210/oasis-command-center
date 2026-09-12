@@ -25,8 +25,11 @@ for (const [stage, index] of [
 }
 assert.match(coachingNextStep("connected"), /assigned rep/i);
 
-const lifecycle = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
-const page = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
+// Line endings are normalised on read. A Windows checkout (core.autocrlf=true)
+// has CRLF, so the coaching-branch search below for "\n  }\n\n  return (" found
+// nothing and this file failed on every Windows machine while CI passed.
+const lifecycle = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8").replace(/\r\n/g, "\n");
+const page = readFileSync("app/pipeline/[id]/page.tsx", "utf8").replace(/\r\n/g, "\n");
 
 assert.match(lifecycle, /<LifecycleProgress activeIndex=\{activeMilestone\}/);
 assert.match(lifecycle, /aria-current=\{index === activeIndex \? "step"/);

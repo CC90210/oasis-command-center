@@ -29,7 +29,6 @@
 
 import { OASIS_LEAD_STAGES, type StageMeta } from "@/lib/oasis-stage-meta";
 import {
-  OASIS_STRUCTURED_LEAD_FIELDS,
   OASIS_WEBSITE_SALES_PROGRAM,
   rejectedOasisGenericPatchKeys,
   stagesForOasisRole,
@@ -61,6 +60,14 @@ export const OASIS_DEFAULT_CREATE_STAGE = "assigned";
 
 /** The lead field that places a lead on the Canada or the US board. */
 export const OASIS_LEAD_REGION_FIELD = "state";
+
+/**
+ * How the create form labels that field. The key stays `state` -- every lead,
+ * filter and board read uses it -- but its options include Canadian provinces,
+ * and a required field called "State" reads as US-only to a team working the
+ * Canada board.
+ */
+export const OASIS_LEAD_REGION_LABEL = "Province / State";
 
 export type OasisCreateViewer = {
   /**
@@ -261,8 +268,9 @@ function stageRefusal(
  * sentence the person can act on. Pure: never mutates `data`, never touches a
  * database. The route writes `plan.data` as-is.
  *
- * `requireRegion` is set by the records route (the form requires State). The
- * quick-add body has no region field, so it validates one only when present.
+ * `requireRegion` is set by both OASIS create doors: the records route (the
+ * form requires Province / State) and quick-add, which refuses a new OASIS
+ * lead without `state`. Left unset, a region is checked only when one is sent.
  */
 export function planOasisLeadCreate(input: {
   viewer: OasisCreateViewer;
@@ -359,20 +367,50 @@ export type OasisLeadCreateForm = {
   entity: ManifestEntityDef;
   /** Option labels for enum fields, keyed by field name then option value. */
   optionLabels: Record<string, Record<string, string>>;
+  /** Field labels that differ from the humanized key, keyed by field name. */
+  fieldLabels: Record<string, string>;
   stages: StageMeta[];
 };
+
+/**
+ * What the /pipeline/new form asks for: what a person adding a lead knows and
+ * types. Shown in the seed's order.
+ *
+ * An ALLOW-list, not the seed minus a deny-list. The seed lead also carries
+ * fields the pipeline fills in itself -- score, value_estimate, the site audit
+ * (website_condition, audit_findings) and the ai_* fields the scoring and
+ * next-action jobs write. Trimming only the lifecycle set left all ten on the
+ * form as empty boxes labelled "Ai Score" and "Ai Next Action At" (portal
+ * audit, 2026-09-11). The lead itself still carries them; a new lead just
+ * doesn't ask for them.
+ */
+export const OASIS_LEAD_CREATE_FIELDS: readonly string[] = [
+  "name",
+  "company",
+  "email",
+  "phone",
+  "website",
+  "industry",
+  "business_city",
+  OASIS_LEAD_REGION_FIELD,
+  "source",
+  "stage",
+  "notes",
+];
+
+const CREATE_FIELD_SET = new Set(OASIS_LEAD_CREATE_FIELDS);
 
 /**
  * The /pipeline/new form for this viewer.
  *
  * A trimmed COPY of the seed lead entity, never an edit of it: existing
  * researched leads and the edit form still rely on the seed's full 14-stage
- * enum. The copy offers
+ * enum. The copy offers only OASIS_LEAD_CREATE_FIELDS, with
  *   - stage: exactly creatableOasisStages(viewer), labelled as the board
  *     labels them ("Founder Meeting", not "Founder Meeting Booked")
- *   - state: required, a region code
- * and drops any field the server refuses on create (last_contacted_at is a
- * lifecycle field), because a picker must offer only what the server accepts.
+ *   - state: required, a region code, labelled "Province / State"
+ * Every field it offers is one the server accepts on create: a picker must
+ * offer only what the server accepts.
  */
 export function oasisLeadCreateForm(
   seedLead: ManifestEntityDef,
@@ -393,10 +431,7 @@ export function oasisLeadCreateForm(
     } else if (field.name === OASIS_LEAD_REGION_FIELD) {
       sawRegion = true;
       fields.push({ ...field, ...regionField });
-    } else if (
-      !OASIS_STRUCTURED_LEAD_FIELDS.has(field.name) &&
-      !OASIS_CREATE_REFUSED_FIELDS.has(field.name)
-    ) {
+    } else if (CREATE_FIELD_SET.has(field.name)) {
       fields.push({ ...field });
     }
   }
@@ -409,6 +444,7 @@ export function oasisLeadCreateForm(
         OASIS_LEAD_REGION_CODES.map((code) => [code, oasisRegionLabel(code)]),
       ),
     },
+    fieldLabels: { [OASIS_LEAD_REGION_FIELD]: OASIS_LEAD_REGION_LABEL },
     stages,
   };
 }

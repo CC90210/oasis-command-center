@@ -45,6 +45,13 @@ type Props = {
    */
   optionLabels?: Record<string, Record<string, string>>;
   /**
+   * Display labels for fields, keyed by field name. A field without one is
+   * labelled humanize(name). Only the label changes, never the key the value
+   * is saved under: /pipeline/new shows `state` as "Province / State" because
+   * its options include Canadian provinces.
+   */
+  fieldLabels?: Record<string, string>;
+  /**
    * After a successful CREATE, land on `${landOnStagePath}?stage=<the saved
    * record's stage>` instead of backHref — the column the new record is in.
    * The stage is read from the server's response, not from the form.
@@ -185,6 +192,7 @@ export function ManifestRecordForm({
   initial,
   editId,
   optionLabels,
+  fieldLabels,
   landOnStagePath,
 }: Props) {
   const router = useRouter();
@@ -431,6 +439,7 @@ export function ManifestRecordForm({
           onChange={(v) => setField(field.name, v)}
           disabled={saving}
           optionLabels={optionLabels?.[field.name]}
+          fieldLabel={fieldLabels?.[field.name]}
         />
       ))}
 
@@ -488,6 +497,7 @@ function FieldInput({
   onChange,
   disabled,
   optionLabels,
+  fieldLabel,
 }: {
   field: ManifestEntityField;
   value: unknown;
@@ -496,8 +506,10 @@ function FieldInput({
   disabled?: boolean;
   /** Display label per enum option; missing options fall back to humanize(). */
   optionLabels?: Record<string, string>;
+  /** This field's label; without one it falls back to humanize(field.name). */
+  fieldLabel?: string;
 }) {
-  const labelText = humanize(field.name);
+  const labelText = fieldLabel ?? humanize(field.name);
   const label = (
     <span className="text-xs font-semibold text-fg block mb-1">
       {labelText}
