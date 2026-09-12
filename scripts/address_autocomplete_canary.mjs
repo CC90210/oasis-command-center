@@ -32,9 +32,14 @@
 
 import { isAcceptableCaptureAddress } from "../lib/address/us-address.ts";
 
+// apply.sunbizfunding.com used to be in this list. It has no DNS record and no
+// stored SunBiz link uses it (0 of 935, 2026-09-11), so it reported BLOCKED on
+// every run. SunBiz's form host is whatever SUNBIZ_PUBLIC_FORM_ORIGIN names, so
+// that is what gets probed when it is set.
+const SUNBIZ_FORM_ORIGIN = (process.env.SUNBIZ_PUBLIC_FORM_ORIGIN || "").trim();
 const HOSTS = process.argv.includes("--host")
   ? [process.argv[process.argv.indexOf("--host") + 1]]
-  : ["https://sunbizfunding.com", "https://apply.sunbizfunding.com", "https://oasisai.work"];
+  : ["https://sunbizfunding.com", ...(SUNBIZ_FORM_ORIGIN ? [SUNBIZ_FORM_ORIGIN] : []), "https://oasisai.work"];
 
 const JSON_OUT = process.argv.includes("--json");
 

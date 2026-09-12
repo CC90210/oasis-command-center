@@ -52,6 +52,7 @@ import { smsPacingCaps, pacingDecision, windowStartFor, type PacingCounts } from
 import { emailCooloff, cooloffDays } from "@/lib/drips/optout-cooloff-core";
 import { getChannelLimits } from "@/lib/drips/channel-limits";
 import { withLeadSourceParam } from "@/lib/forms/lead-source";
+import { publicFormOrigin, sunbizFormLinkForSend } from "@/lib/forms/public-origin";
 import { mayTextFor } from "@/lib/sms/lawful-basis";
 import { smsSendAllowed, resetBreakerCache, claimBreakerProbe } from "@/lib/sms/send-breaker";
 import { routeOutbound, type ProviderAvailability } from "@/lib/routing/outbound-routing";
@@ -739,7 +740,7 @@ function isOptedOutOrDead(data: LeadData): boolean {
  *     rep_name from assigned_to, so this is populated for all but the rare
  *     fully-unassigned lead), else a brand-safe "your funding specialist".
  *     Exposed under BOTH names the seeded sequences reference. */
-function buildContext(
+export function buildContext(
   data: LeadData,
   // Which channel is carrying THIS render. The same application_url goes out
   // over sms AND email steps, so the channel tag has to be applied here rather
@@ -757,9 +758,14 @@ function buildContext(
   // else the generic SunBiz intake form (same URL pattern the live "Incomplete
   // Application" email uses) so a template never renders a blank link for a
   // hot_lead/follow_up lead. Env-overridable base for domain changes.
+  // Both are SunBiz links, so both go out on SunBiz's public origin, never
+  // OASIS's domain: a stored link keeps the host it was minted on, and 736
+  // SunBiz leads still held one on oasisai.work on 2026-09-11.
   const repSlug = repName.toLowerCase().split(/\s+/)[0].replace(/[^a-z]/g, "") || "team";
-  const intakeBase = process.env.DRIP_INTAKE_URL || "https://oasisai.work/f/submissions/initial-lead-capture";
-  const baseApplyUrl = str(data.application_url) || `${intakeBase}?rep=${repSlug}`;
+  const intakeBase =
+    process.env.DRIP_INTAKE_URL ||
+    `${publicFormOrigin({ tenantSlug: "submissions" })}/f/submissions/initial-lead-capture`;
+  const baseApplyUrl = sunbizFormLinkForSend(str(data.application_url) || `${intakeBase}?rep=${repSlug}`);
   // sms -> "text", email -> "email": the two names this codebase already uses
   // for those channels (lib/forms/lead-source.ts).
   const applyUrl = withLeadSourceParam(baseApplyUrl, channel === "sms" ? "text" : "email");
