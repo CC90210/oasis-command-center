@@ -147,6 +147,12 @@ try {
   );
   const current = "https://agent-dashboard-cc90210.vercel.app/f/submissions/full-application/tok_7";
   assert.equal(sunbizFormLinkForSend(current), current, "a link already on the SunBiz origin is untouched");
+  const foreign = "https://forms.some-lender.example/f/submissions/full-application/x?y=1";
+  assert.equal(
+    sunbizFormLinkForSend(foreign),
+    foreign,
+    "another site's link with the same path is not ours to rewrite",
+  );
 
   process.env.SUNBIZ_PUBLIC_FORM_ORIGIN = "https://apply.sunbizfunding.com";
   assert.equal(

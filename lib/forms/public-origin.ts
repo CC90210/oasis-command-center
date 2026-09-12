@@ -96,6 +96,39 @@ export function publicFormOrigin(input: {
 }
 
 /**
+ * Hosts this app has minted SunBiz form links on: OASIS's platform domain (before
+ * SUNBIZ_PUBLIC_FORM_ORIGIN existed), the Vercel host, SunBiz's own hosts, and
+ * whatever the origin settings name today. A link on any other host was not
+ * minted here and is not ours to rewrite. (Codex, PR #433.)
+ */
+const MINTED_FORM_HOSTS = new Set([
+  "oasisai.work",
+  "www.oasisai.work",
+  "agent-dashboard-cc90210.vercel.app",
+  "apply.sunbizfunding.com",
+  "sunbizfunding.com",
+  "www.sunbizfunding.com",
+]);
+
+function isThisAppsFormHost(host: string): boolean {
+  const h = host.toLowerCase();
+  if (MINTED_FORM_HOSTS.has(h)) return true;
+  for (const v of [
+    process.env.SUNBIZ_PUBLIC_FORM_ORIGIN,
+    process.env.OASIS_PUBLIC_ORIGIN,
+    process.env.NEXT_PUBLIC_SITE_URL,
+    process.env.PUBLIC_APP_URL,
+  ]) {
+    try {
+      if (v && new URL(v.trim()).hostname.toLowerCase() === h) return true;
+    } catch {
+      // not a URL; ignore
+    }
+  }
+  return false;
+}
+
+/**
  * A stored SunBiz form link, rebuilt on SunBiz's public origin for sending.
  *
  * A link is stored on the lead when it is minted, so it keeps the host it was
@@ -115,6 +148,7 @@ export function sunbizFormLinkForSend(url: string): string {
   }
   const [, root, slug] = parsed.pathname.split("/");
   if (root !== "f" || !FUNDING_TENANT_SLUGS.has((slug || "").toLowerCase())) return url;
+  if (!isThisAppsFormHost(parsed.hostname)) return url;
   const origin = sunbizPublicFormOrigin();
   if (parsed.origin === origin) return url;
   return `${origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
