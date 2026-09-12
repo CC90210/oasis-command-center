@@ -28,7 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ALL_BRAND_KEYS, getBrand, type BrandKey } from "../lib/email/brands";
 import { appendSignatureAndFooter } from "../lib/config/email-signature";
-import { TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict, mailboxBrandConflict } from "../lib/email/brand-for-tenant";
+import { BRAND_COMPANY, TENANT_SLUG_BRAND, TENANT_ID_BRAND, brandForTenant, brandTenantConflict, mailboxBrandConflict } from "../lib/email/brand-for-tenant";
 
 // ---------------------------------------------------------------------------
 // 1. A brand's footer names ITS OWN legal entity, and no other brand's.
@@ -238,6 +238,19 @@ assert.ok(
 );
 assert.equal(brandTenantConflict({ brand: "sunbiz", tenantSlug: "submissions" }), null);
 assert.equal(
+  brandTenantConflict({ brand: "bluerise", tenantSlug: "submissions" }),
+  null,
+  "Blue Rise is SunBiz's own second brand: SunBiz's workspace may send as it (12 Blue Rise follow-ups were refused on 2026-09-10)",
+);
+assert.ok(
+  brandTenantConflict({ brand: "bluerise", tenantSlug: "oasis-ai-cc" }),
+  "Blue Rise on the OASIS tenant must be flagged",
+);
+assert.ok(
+  brandTenantConflict({ brand: "oasis", tenantId: "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110" }),
+  "OASIS on the SunBiz tenant (by id) must be flagged",
+);
+assert.equal(
   brandTenantConflict({ brand: undefined, tenantSlug: "submissions" }),
   null,
   "an absent brand is not a conflict — the caller derives it",
@@ -332,6 +345,7 @@ assert.equal(
 
     compare("slug map", TENANT_SLUG_BRAND, pySlug);
     compare("tenant id map", TENANT_ID_BRAND, pyId);
+    compare("brand company map", BRAND_COMPANY, pyDict("BRAND_COMPANY"));
 
     // THE ADDRESS MUST MATCH ACROSS STACKS TOO.
     //

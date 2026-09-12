@@ -66,6 +66,20 @@ export const TENANT_SLUG_BRAND: Readonly<Record<string, BrandKey>> = {
 };
 
 /**
+ * brand -> company. SunBiz Funding and Bluerise Business Capital share premises
+ * by agreement, so their two brands are ONE company; OASIS is the other. A tenant
+ * may send as any brand of its own company (SunBiz's workspace sends Blue Rise's
+ * follow-ups as Blue Rise), never as another company's. Mirrors BRAND_COMPANY in
+ * scripts/lib/tenant_brand.py; tests/brand-identity-coherence.test.ts compares
+ * the two in both directions.
+ */
+export const BRAND_COMPANY: Readonly<Record<BrandKey, "oasis" | "sunbiz">> = {
+  oasis: "oasis",
+  sunbiz: "sunbiz",
+  bluerise: "sunbiz",
+};
+
+/**
  * The brand this tenant sends as, or null when we do not know.
  *
  * null means "refuse to send commercial mail", never "use the default". A
@@ -169,6 +183,10 @@ export function brandTenantConflict(args: {
   const supplied = resolveBrandKeyOrNull(args.brand);
   if (!supplied) return null;
   if (supplied === expected) return null;
+  // A second brand of the SAME company is not a conflict: SunBiz's workspace
+  // sends Blue Rise's follow-ups as Blue Rise. Comparing brands instead of
+  // companies refused all 12 of them on 2026-09-10.
+  if (BRAND_COMPANY[supplied] === BRAND_COMPANY[expected]) return null;
   return (
     `brand "${supplied}" does not match tenant ` +
     `${args.tenantId || args.tenantSlug} (which sends as "${expected}")`
