@@ -333,7 +333,7 @@ export const ANGLES: Record<string, Angle> = {
  * sales copy eventually asserts a measurement we never took. The honest fix is
  * to tell the rep what to do with an answer that does not go their way, which
  * is also just better selling. The failed checks are already on the card, in
- * order, under "what is worth fixing first".
+ * order, under "what we would build for them".
  *
  * The diagnostics were also reworded to be open questions rather than yes-or-no
  * ones, so that a good answer still moves the call somewhere.

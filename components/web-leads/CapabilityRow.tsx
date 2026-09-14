@@ -329,7 +329,7 @@ export function CapabilityRow({
             <div>
               <p className={SECTION_LABEL}>Where this stands today</p>
               <p className={CONTEXT_TEXT}>
-                {"There is no website for this business yet, so none of this has been measured and none of it exists to be fixed. Read this as part of what gets built, not as a list of things that are wrong."}
+                {"There is no live website for this business, so none of this has been measured and none of it exists to be fixed. Read this as part of what gets built, not as a list of things that are wrong."}
               </p>
             </div>
           )}

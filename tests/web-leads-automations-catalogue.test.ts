@@ -157,7 +157,10 @@ console.log("web-leads-automations-catalogue: null never renders as a figure OK"
   // Each non-scored state says something instead of nothing.
   assert.match(text("rowClean"), /they all passed/, "a clean row says it is clean");
   assert.match(text("rowUnscored"), /has been checked for this business/, "an unscored row says nothing was checked");
-  assert.match(text("rowNoWebsite"), /no website for this business yet/, "a no-website row says there is no site");
+  // "no LIVE website" rather than "no website ... yet": this row state is
+  // shared by `no_website` and `parked`, and "yet" asserts the first of those.
+  // A lapsed domain listed for sale is not a business that never built one.
+  assert.match(text("rowNoWebsite"), /no live website for this business/, "a no-website row says there is no live site");
   // And the grounding is really there on the scored one: the failing check's
   // own label and its remedies.ts cost line.
   assert.match(text("rowScored"), /LABEL:tel_link/, "a scored row names the specific failing check");
@@ -216,7 +219,7 @@ console.log("web-leads-automations-catalogue: bundle cost sentence suppressed of
   );
   assert.match(
     text("cardNoWebsiteOpen"),
-    /no website for this business yet/,
+    /no live website for this business/,
     "the no-website row state must now be reachable from a real card input",
   );
   // Neither may print a figure. A `null` recoverable is UNSCORED, and "0
