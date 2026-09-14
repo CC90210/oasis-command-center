@@ -53,7 +53,7 @@
 import { ChevronRight, Phone } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import { OpenNowCell } from "./OpeningHours";
-import { BattleCardLink, STAGE_LABEL, VisitSite, WebsiteCell } from "./LeadCells";
+import { BattleCardLink, OwnerBadge, STAGE_LABEL, VisitSite, WebsiteCell } from "./LeadCells";
 
 const LABEL = "text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted";
 
@@ -112,6 +112,17 @@ export function LeadCards({
                   <span className="mt-1 block truncate text-xs text-fg-dim">
                     {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
                   </span>
+                  {/* Who has it, directly under the name and above the contact
+                      details -- on a phone this is the fact that decides
+                      whether a rep reads any of the rest. `size="touch"` for
+                      the same reason VisitSite has one: this sits among thumb
+                      targets and a 10px pill reads as noise beside them.
+                      Renders nothing at all for an unclaimed lead. */}
+                  {l.claimState !== "unassigned" && (
+                    <span className="mt-1.5 block">
+                      <OwnerBadge lead={l} size="touch" />
+                    </span>
+                  )}
                   {/* The name a rep asks for. Shown only when someone was
                       actually identified — an "Ask for —" with nothing after it
                       teaches a rep to ignore the line. */}

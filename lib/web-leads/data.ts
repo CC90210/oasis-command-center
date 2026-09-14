@@ -27,6 +27,7 @@
 
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { mustSeeOwnRecordsOnly } from "@/lib/team-roles";
+import { getOasisSalesRepRoster } from "@/lib/team";
 import { managerRosterCoversAssignment } from "@/lib/role-surfaces";
 import type { WebLeadFilters, ScoreBand, LeadSort } from "./filters";
 import { countryOf, type LeadCountry } from "./filters";
@@ -35,7 +36,14 @@ import type { Sheet } from "./queries";
 import { WEBDEV_TENANT_ID, PAGE_SIZE, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import { invalidate, memo, TTL } from "./cache";
 import { resolveScore, type ScoreIndex, type ScoreState } from "./scores";
-import { factsFrom, isInBookOf, isReleasedFromBook } from "./claim";
+import {
+  factsFrom,
+  isInBookOf,
+  isReleasedFromBook,
+  claimState,
+  type ClaimFacts,
+  type ClaimState,
+} from "./claim";
 import { leadHours } from "./hours";
 import { isClaimable } from "./claim-ops";
 
@@ -67,6 +75,76 @@ export type Viewer = {
    */
   readableAssigneeIds?: readonly string[];
 };
+
+/**
+ * auth_user_id (LOWERCASED) -> the rep's display name, for the owner badge.
+ *
+ * Keyed lowercase because `assigned_to` is stored raw; assignedNameFor() does
+ * the matching lowercase on the lookup side. Memoised on the same TTL as the
+ * lead read, so adding the badge costs one roster query per 90 seconds per
+ * instance rather than one per request.
+ *
+ * Uses the SALES roster -- the same list the claim route validates an
+ * assignment against -- not every profile on the tenant, so the badge can only
+ * ever name somebody who could legitimately hold a lead.
+ */
+async function repNameMap(): Promise<ReadonlyMap<string, string>> {
+  return memo(`web-leads:rep-names:${WEBDEV_TENANT_ID}`, TTL.LEADS, async () => {
+    const roster = await getOasisSalesRepRoster(WEBDEV_TENANT_ID);
+    const map = new Map<string, string>();
+    for (const m of roster) {
+      const id = (m.auth_user_id || "").trim().toLowerCase();
+      if (!id) continue;
+      const name = (m.display_name || m.full_name || m.email || "").trim();
+      if (name) map.set(id, name);
+    }
+    return map;
+  });
+}
+
+/**
+ * May THIS viewer be told WHICH rep holds a lead?
+ *
+ * Extracted from the inline expression the row projection used, so the rule has
+ * one definition and the lead's owner NAME cannot drift from its owner ID: both
+ * are gated on this single predicate, and it is unit-tested directly in
+ * tests/web-leads-owner-badge.test.ts.
+ *
+ * Whether a lead is held at all is a different question with a different
+ * answer -- claimState() tells every viewer that much, because two reps working
+ * the same business is the problem the claim system exists to solve. This
+ * function governs only the identity, which is the cross-book disclosure PR
+ * #237 closed: this board carries outside contractors, and a roster of who
+ * works which business is not theirs to read.
+ */
+export function canSeeAssignee(facts: ClaimFacts, viewer: Viewer): boolean {
+  return (
+    isInBookOf(facts, viewer.userId) ||
+    viewer.isAdmin ||
+    managerCanReadAssignment(facts.assignedTo, viewer)
+  );
+}
+
+/**
+ * The holder's display name, or null when this viewer may not see it.
+ *
+ * Returns null rather than the raw id for an unknown holder: an operator shown
+ * a bare UUID learns nothing and a contractor shown one learns too much, so an
+ * unresolved name degrades to the plain "Taken" badge.
+ *
+ * `repNames` is keyed LOWERCASE while `assigned_to` is stored raw -- the same
+ * asymmetry tests/pipeline-own-book-chip.test.ts pins on the CRM side, where a
+ * case-sensitive lookup silently blanked the name.
+ */
+export function assignedNameFor(
+  facts: ClaimFacts,
+  viewer: Viewer,
+  repNames: ReadonlyMap<string, string>,
+): string | null {
+  if (!facts.assignedTo) return null;
+  if (!canSeeAssignee(facts, viewer)) return null;
+  return repNames.get(facts.assignedTo.trim().toLowerCase()) ?? null;
+}
 
 function managerCanReadAssignment(
   assignedTo: string | null | undefined,
@@ -197,6 +275,13 @@ export type WebLeadRow = WebLead & {
   scoreState: ScoreState;
   /** Auth user id of the rep who holds it, or null when it is in the pool. */
   assignedTo: string | null;
+  /** What this row should SAY about ownership, from this viewer's seat. Every
+   *  viewer gets this, so no rep works a lead another rep is already on. */
+  claimState: ClaimState;
+  /** WHO holds it, in words. Null when this viewer may not be told (the #237
+   *  fence) or when the holder is not on the sales roster. NOTE: this is the
+   *  REP. The business's own owner is `ownerName`, an unrelated field. */
+  assignedToName: string | null;
   /** Current lifecycle stage, for My Leads. */
   stage: string | null;
   /** True when a rep nominally holds this lead but the claim has lapsed -- see
@@ -609,6 +694,11 @@ export async function fetchLeads(
 
   const wanted = new Set(sheetIds);
   const q = f.query.toLowerCase();
+  // Names for the owner badge. Fails CLOSED to an empty map: if the roster read
+  // breaks, rows say "Taken" with no name rather than the board breaking or a
+  // raw UUID reaching an operator. The catch is here, not inside the memo, so a
+  // transient failure is not cached for the whole TTL.
+  const repNames = await repNameMap().catch(() => new Map<string, string>());
   const matching = (data || [])
     // Scope BEFORE mapping to WebLead: assigned_to lives on the raw row and
     // is deliberately not surfaced on WebLead (see the Viewer doc comment on
@@ -655,11 +745,7 @@ export async function fetchLeads(
         ? r.data.webdev_source_business_id
         : null;
       const facts = factsFrom(r.data || {});
-      const ownedByViewer = isInBookOf(facts, viewer.userId);
-      const assignmentVisible =
-        ownedByViewer ||
-        viewer.isAdmin ||
-        managerCanReadAssignment(facts.assignedTo, viewer);
+      const assignmentVisible = canSeeAssignee(facts, viewer);
       return {
         ...lead,
         ...resolveScore(lead.websiteUrl, bid, scoreIndex),
@@ -671,6 +757,12 @@ export async function fetchLeads(
         // leads in their own book; everyone else gets null, and the lead is
         // claimable either way.
         assignedTo: assignmentVisible ? facts.assignedTo : null,
+        // What the row SAYS about ownership, which every viewer gets, and WHO
+        // holds it, which only an owner/manager/admin gets. Splitting them is
+        // the point: a rep must be able to see that a lead is taken without
+        // being told whose it is. See claimState() and assignedNameFor().
+        claimState: claimState(facts, viewer.userId, now),
+        assignedToName: assignedNameFor(facts, viewer, repNames),
         stage: facts.stage,
         released: isReleasedFromBook(facts, now),
         lastCallAt: facts.lastCallAt,
@@ -758,6 +850,12 @@ export async function fetchLeads(
       score: l.score,
       scoreState: l.scoreState,
       assignedTo: l.assignedTo,
+      // Carried, never recomputed. toWebLead() has no viewer, so rebuilding
+      // these here would silently drop the gating and hand every rep the
+      // holder's name -- the phase-one values already answered both questions
+      // for THIS viewer.
+      claimState: l.claimState,
+      assignedToName: l.assignedToName,
       stage: l.stage,
       released: l.released,
       lastCallAt: l.lastCallAt,

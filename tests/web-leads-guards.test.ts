@@ -306,10 +306,34 @@ assert.match(
   /:\s*isClaimable\(r\.data \|\| \{\}, now\)/,
   "the pool scope must be isClaimable() -- anything else hands a contractor leads that are already in another rep's book",
 );
+// The three-way rule moved into canSeeAssignee() on 2026-09-14, when the owner
+// badge gave the SAME question a second consumer: the holder's display name.
+// Two copies of a disclosure rule is how one of them drifts, so it has one
+// definition and the guard now pins that definition AND both of its call sites
+// separately -- the property is unchanged, and collapsing any one of the three
+// still fails here.
+assert.match(
+  data,
+  /export function canSeeAssignee\(facts: ClaimFacts, viewer: Viewer\): boolean \{\s*return \(\s*isInBookOf\(facts, viewer\.userId\) \|\|\s*viewer\.isAdmin \|\|\s*managerCanReadAssignment\(facts\.assignedTo, viewer\)\s*\);/,
+  "canSeeAssignee must keep the exact three-way rule -- own book, admin, or a manager's server-resolved roster, and nothing else",
+);
 assert.match(
   fetchLeadsBody[0],
-  /const assignmentVisible =\s*ownedByViewer \|\|\s*viewer\.isAdmin \|\|\s*managerCanReadAssignment\(facts\.assignedTo, viewer\);[\s\S]*?assignedTo: assignmentVisible \? facts\.assignedTo : null/,
+  /const assignmentVisible = canSeeAssignee\(facts, viewer\);[\s\S]*?assignedTo: assignmentVisible \? facts\.assignedTo : null/,
   "fetchLeads must not surface another rep's user id on a pool lead -- an expired claim still names its previous owner",
+);
+assert.match(
+  fetchLeadsBody[0],
+  /assignedToName: assignedNameFor\(facts, viewer, repNames\)/,
+  "the holder's NAME must go through assignedNameFor, which gates on the same canSeeAssignee predicate -- a name identifies a rep just as surely as their user id does",
+);
+// The phase-two re-map rebuilds each row from its full blob. toWebLead() has no
+// viewer, so recomputing the badge there would drop the gate entirely and hand
+// every rep the holder's name; both fields must be CARRIED from phase one.
+assert.match(
+  fetchLeadsBody[0],
+  /claimState: l\.claimState,\s*assignedToName: l\.assignedToName,/,
+  "the full-blob re-map must carry claimState and assignedToName across rather than recomputing them without a viewer",
 );
 
 // ---------------------------------------------------------------------------

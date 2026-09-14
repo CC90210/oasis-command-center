@@ -171,6 +171,47 @@ export function isReleasedFromBook(f: ClaimFacts, now: number): boolean {
 }
 
 /**
+ * What a lead row should say about who holds it, from THIS viewer's seat.
+ *
+ * Adon, 2026-09-14: "when a rep assigns itself a lead ... it causes a lot of
+ * confusion between other reps who could assign it and you." Every row now
+ * carries this state so a rep can see, without opening anything, that a lead
+ * is somebody else's.
+ *
+ * DELIBERATELY NOT `assignedTo ? "taken" : "unassigned"`. A lead in the shared
+ * pool can still NAME a previous owner: an expired claim and a recycled loss
+ * are both claimable while `assigned_to` still points at whoever had it last.
+ * Labelling those "taken" would tell reps to skip the leads the recycling
+ * rules just handed back, quietly draining the callable pool -- the exact
+ * failure this module's header exists to prevent. So availability() decides,
+ * and the presence of an id only distinguishes "worked before" from "free".
+ *
+ * AVAILABILITY IS CHECKED BEFORE OWNERSHIP, INCLUDING THE VIEWER'S OWN. The
+ * first draft resolved "you" first, so a rep's own expired claim rendered
+ * "Yours" on a row sitting in the shared pool, which any rep may take (Codex
+ * review, 2026-09-14). A badge whose one job is "should I touch this lead"
+ * cannot tell its owner they still hold something the pool is offering to
+ * everyone else. Which rep worked it is not lost: My Leads keeps the row and
+ * marks it "Released, back in the pool".
+ */
+export type ClaimState = "unassigned" | "you" | "worked_before" | "taken";
+
+export function claimState(
+  f: ClaimFacts,
+  viewerUserId: string,
+  now: number,
+): ClaimState {
+  if (!f.assignedTo) return "unassigned";
+  // Claimable by anyone -- including by the rep whose name is still on it.
+  if (availability(f, now).available) return "worked_before";
+  // An unresolved viewer must never be told a lead is theirs. isInBookOf would
+  // already refuse an empty id, but stating it here keeps the fail-closed
+  // intent visible next to the branch that depends on it.
+  const viewer = (viewerUserId || "").trim();
+  return viewer && isInBookOf(f, viewer) ? "you" : "taken";
+}
+
+/**
  * Which of `leadIds` a rep may take, given what they already hold.
  *
  * PARTIAL SUCCESS IS THE NORMAL CASE, not an error: a rep multi-selects 60

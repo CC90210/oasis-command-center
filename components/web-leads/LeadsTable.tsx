@@ -158,7 +158,7 @@ import { LeadCards } from "./LeadCards";
 // ONE renderer per fact, shared with the card layout. See LeadCells.tsx: two
 // copies of the score renderer is how a phone ends up showing a bare 0 on a
 // lead the desktop describes as "We could not check this site".
-import { RowActions, STAGE_LABEL, WebsiteCell } from "./LeadCells";
+import { OwnerBadge, RowActions, STAGE_LABEL, WebsiteCell } from "./LeadCells";
 
 /** Matches the app's staggered animate-pulse-slow convention so the swap from
  *  skeleton to real rows is visually quiet. */
@@ -419,6 +419,19 @@ export function LeadsTable({
                     <span className="mt-1 block truncate text-xs text-fg-dim">
                       {[l.industry, [l.city, l.province].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || "No location on file"}
                     </span>
+                    {/* Under the name rather than in a column of its own. The
+                        module header measures this table at 1122px inside a
+                        974px box before the widths were tuned -- an eighth
+                        column would put that back and clip the row's controls.
+                        It also belongs here: the badge answers "should I touch
+                        this lead", which is the same glance as reading its
+                        name, and it renders nothing at all for the unclaimed
+                        rows that make up most of the pool. */}
+                    {l.claimState !== "unassigned" && (
+                      <span className="mt-1.5 block">
+                        <OwnerBadge lead={l} />
+                      </span>
+                    )}
                   </div>
                 </td>
                 {/* whitespace-nowrap on the CELL and on the number. A browser
