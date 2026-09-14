@@ -34,6 +34,7 @@ const VIEWERS: Array<[string, OasisCreateViewer]> = [
   ["admin", { isAdmin: true, teamRole: "owner" }],
   ["rep", { isAdmin: false, teamRole: "opener" }],
 ];
+const ASSIGNEES = [{ userId: "rep-1", label: "Ariel Rep" }];
 
 // ── (a) the form offers exactly what a person types ───────────────────────
 const TYPED_FIELDS = [
@@ -51,11 +52,19 @@ const TYPED_FIELDS = [
 ];
 assert.deepEqual([...OASIS_LEAD_CREATE_FIELDS], TYPED_FIELDS);
 for (const [who, viewer] of VIEWERS) {
-  const form = oasisLeadCreateForm(seedLead, viewer);
+  const form = oasisLeadCreateForm(seedLead, viewer, ASSIGNEES);
+  const expected = viewer.isAdmin
+    ? [...TYPED_FIELDS.slice(0, -2), "assigned_to", ...TYPED_FIELDS.slice(-2)]
+    : TYPED_FIELDS;
   assert.deepEqual(
     form.entity.fields.map((field) => field.name),
-    TYPED_FIELDS,
+    expected,
     `${who}: the new-lead form must ask only for what a person types`,
+  );
+  assert.deepEqual(
+    form.stages.map((stage) => stage.key),
+    ["assigned"],
+    `${who}: manual creation must have one clean Assigned entry point`,
   );
 }
 
@@ -72,7 +81,7 @@ const PIPELINE_FILLED = [
   "ai_next_action_at",
   "last_contacted_at",
 ];
-const adminForm = oasisLeadCreateForm(seedLead, VIEWERS[0][1]);
+const adminForm = oasisLeadCreateForm(seedLead, VIEWERS[0][1], ASSIGNEES);
 for (const name of PIPELINE_FILLED) {
   assert.ok(
     !adminForm.entity.fields.some((field) => field.name === name),
@@ -103,6 +112,7 @@ for (const [who, viewer] of VIEWERS) {
   const plan = planOasisLeadCreate({
     viewer,
     creatorUserId: "user-1",
+    resolvedAssigneeUserId: viewer.isAdmin ? "rep-1" : "user-1",
     data: typed,
     now: new Date(),
     requireRegion: true,
@@ -121,14 +131,19 @@ assert.ok(region.enum_values!.includes("QC") && region.enum_values!.includes("FL
 assert.equal(OASIS_LEAD_REGION_LABEL, "Province / State");
 assert.deepEqual(
   adminForm.fieldLabels,
-  { [OASIS_LEAD_REGION_FIELD]: "Province / State" },
-  "only the region is relabelled; every other field keeps its humanized name",
+  { [OASIS_LEAD_REGION_FIELD]: "Province / State", assigned_to: "Sales rep" },
+  "the region and admin-only assignee use explicit human labels",
 );
 
 // The label reaches the screen: the page hands it to the form, and the form
 // prefers it over humanize(key) while still saving the value under the key.
 const page = read("app/pipeline/new/page.tsx");
 assert.match(page, /fieldLabels=\{form\.fieldLabels\}/, "/pipeline/new must pass the field labels to the form");
+assert.match(
+  page,
+  /session\.isAdmin\s*\?\s*"Add a lead to Pipeline; choose its sales rep\. It starts in Assigned\."\s*:\s*"Add a lead you sourced; it enters your Pipeline at Assigned\."/,
+  "the page copy must distinguish admin assignment from rep self-sourcing while naming the one entry stage",
+);
 const formSource = read("components/manifest/ManifestRecordForm.tsx");
 assert.match(formSource, /fieldLabel=\{fieldLabels\?\.\[field\.name\]\}/, "the form must hand each field its label");
 assert.match(

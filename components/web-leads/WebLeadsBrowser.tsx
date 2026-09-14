@@ -412,6 +412,14 @@ export function WebLeadsBrowser({
   const mine = view === "mine";
   const team = view === "team";
   const canOperateCurrentView = canMutate && !team;
+  const actionableLeads = useMemo(
+    () => (mine ? leads.filter((lead) => !lead.released) : leads),
+    [mine, leads],
+  );
+  const actionableIds = useMemo(
+    () => new Set(actionableLeads.map((lead) => lead.id)),
+    [actionableLeads],
+  );
 
   // A book shows one board at a time. When this board is empty and the other
   // is not, say so -- "nothing in your book" would be false.
@@ -438,7 +446,7 @@ export function WebLeadsBrowser({
    */
   const runClaim = useCallback(async () => {
     if (!canOperateCurrentView) return;
-    const ids = Array.from(selected);
+    const ids = Array.from(selected).filter((id) => !mine || actionableIds.has(id));
     if (ids.length === 0) return;
     setClaiming(true);
     setClaimNote(null);
@@ -459,8 +467,11 @@ export function WebLeadsBrowser({
       if (mine) {
         const n = (body.released || []).length;
         const failed = (body.refused || []).length;
+        const trackingFailed = (body.trackingFailed || []).length;
         setClaimNote(
-          `Released ${n} back to the pool.` + (failed ? ` ${failed} could not be released.` : ""),
+          `Released ${n} back to the pool.` +
+            (failed ? ` ${failed} could not be released.` : "") +
+            (trackingFailed ? ` ${trackingFailed} releases saved, but their activity tracking needs an admin check.` : ""),
         );
       } else {
         const got = (body.claimed || []).length;
@@ -492,7 +503,7 @@ export function WebLeadsBrowser({
     } finally {
       setClaiming(false);
     }
-  }, [canOperateCurrentView, selected, mine, assignTo, repLabel]);
+  }, [canOperateCurrentView, selected, mine, actionableIds, assignTo, repLabel]);
 
   /**
    * YOU CANNOT CALL WHAT YOU DO NOT HOLD.
@@ -515,7 +526,14 @@ export function WebLeadsBrowser({
    */
   const startCalling = useCallback(async () => {
     if (!canOperateCurrentView) return;
-    if (mine) { setCalling(true); return; }
+    if (mine) {
+      if (actionableLeads.length === 0) {
+        setClaimNote("Nothing active to call. Released leads remain here for history and must be claimed again before anyone works them.");
+        return;
+      }
+      setCalling(true);
+      return;
+    }
     const ids = leads.map((l) => l.id);
     if (ids.length === 0) return;
     setClaiming(true);
@@ -554,23 +572,27 @@ export function WebLeadsBrowser({
     } finally {
       setClaiming(false);
     }
-  }, [canOperateCurrentView, mine, leads, push, filters]);
+  }, [canOperateCurrentView, mine, leads, actionableLeads.length, push, filters]);
 
   const toggle = useCallback((id: string) => {
+    if (mine && !actionableIds.has(id)) return;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
-  }, []);
+  }, [mine, actionableIds]);
 
   const toggleAll = useCallback((ids: string[], select: boolean) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      for (const id of ids) { if (select) next.add(id); else next.delete(id); }
+      for (const id of ids) {
+        if (mine && !actionableIds.has(id)) continue;
+        if (select) next.add(id); else next.delete(id);
+      }
       return next;
     });
-  }, []);
+  }, [mine, actionableIds]);
 
   const listBlock = (
     // `2xl:flex` rather than `flex`: below 1536 the rail is a sheet, so there
@@ -619,7 +641,7 @@ export function WebLeadsBrowser({
           queryDraft={queryDraft}
           onQueryDraft={setQueryDraft}
           onStartCalling={startCalling}
-          canStartCalling={!loading && leads.length > 0 && !claiming}
+          canStartCalling={!loading && actionableLeads.length > 0 && !claiming}
           selectedCount={selected.size}
           onClaim={runClaim}
           claiming={claiming}
@@ -662,8 +684,8 @@ export function WebLeadsBrowser({
           team
             ? "Read-only roster view of every lead assigned to the OASIS sales team."
             : mine
-            ? "The leads you have claimed. Nobody else can call these while you hold them."
-            : "Canadian businesses by province, city and industry. Website status is from a public directory and has not been verified, confirm on the call."
+            ? "Active claims are yours to work. Released rows stay visible here for history."
+            : "Unassigned prospect pool. Qualify here; Claim or Assign moves a lead into Pipeline at Assigned."
         }
         action={<ViewSwitcher active={view} onChange={setView} canSeeTeamAndAssign={canSeeTeamAndAssign} />}
       />
@@ -687,7 +709,7 @@ export function WebLeadsBrowser({
 
       {calling && canOperateCurrentView && (
         <CallMode
-          leads={leads}
+          leads={actionableLeads}
           // Page AND filter identity: a rep who changes a filter in another tab
           // and comes back is working a different queue even at the same page
           // number, and the cursor should start over rather than land mid-list.

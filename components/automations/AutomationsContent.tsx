@@ -26,6 +26,7 @@ import { getActiveProfile, getBridgeOnline, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { Clock, Cpu, Cloud, Download } from "lucide-react";
 import Link from "next/link";
@@ -86,6 +87,8 @@ export async function AutomationsContent({
       .map((key) => String(key).trim().toLowerCase())
       .filter(Boolean)),
   );
+  const isClientAutomationSurface =
+    !externalTenantSurfacesBlocked() && tenantSlug === "sun";
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -149,7 +152,7 @@ export async function AutomationsContent({
           </p>
           <p>
             <span className="text-fg font-bold">Where output ends up.</span>{" "}
-            {tenantSlug === "sun"
+            {isClientAutomationSurface
               ? "Back in the dashboard — the Daily Plan, the deal records, the Breeze BD deal queue below, and alerts. Calls and texts to merchants go out through Kixie and TextTorrent. Scored Breeze deals go to Ezra's Telegram for approve/decline — approving there creates the lead."
               : "Telegram (alerts + briefs), local files (snapshots), or back into the dashboard (scoring + sync jobs)."}
           </p>
@@ -157,7 +160,7 @@ export async function AutomationsContent({
             <span className="text-fg font-bold">Switching jobs on/off.</span> Each row has a
             toggle. Flip it off and the job stops within a minute — spec stays saved.
           </p>
-          {tenantSlug === "sun" && (
+          {isClientAutomationSurface && (
             <p>
               <span className="text-fg font-bold">The four sections below.</span>{" "}
               <span className="text-fg">Modules</span> is what the system can do — your live
@@ -200,7 +203,7 @@ export async function AutomationsContent({
             // tenant and no rep gets CC's machine's daemon list.
             <BackgroundWorkersPanel />
           )}
-          {tenantSlug === "sun" && (
+          {isClientAutomationSurface && (
             // SURFACE, NOT ROLE. This read `(isOperator || tenantSlug === "sun")`
             // until 2026-08-17, and the first half of that leaked a client's book
             // onto OASIS's own operations page.

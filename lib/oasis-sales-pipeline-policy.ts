@@ -1,5 +1,10 @@
-import { OASIS_LEAD_STAGES, type StageMeta } from "@/lib/oasis-stage-meta";
+import {
+  OASIS_LEAD_STAGES,
+  OASIS_PRE_HANDOFF_STAGE_KEYS,
+  type StageMeta,
+} from "@/lib/oasis-stage-meta";
 import { normalizeCollaborators } from "@/lib/lead-scope";
+import { factsFrom, isReleasedFromBook } from "@/lib/web-leads/claim";
 
 export const OASIS_WEBSITE_SALES_PROGRAM = "website_sales_v1";
 
@@ -32,6 +37,14 @@ export const OPENER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
 export const CLOSER_PIPELINE_STAGE_KEYS = REP_PIPELINE_STAGE_KEYS;
 
 /**
+ * Generic ownership handoff ends before the founder meeting. Later sales and
+ * delivery stages carry frozen attribution/workflow owners and must move only
+ * through their audited lifecycle actions.
+ */
+export const OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES: ReadonlySet<string> =
+  new Set(OASIS_PRE_HANDOFF_STAGE_KEYS);
+
+/**
  * The manager coaches every assigned lead after it leaves the prospect pool.
  * `researched` is deliberately absent: those are unworked directory prospects,
  * not an assigned rep's pipeline. Assignment is enforced separately by the
@@ -42,6 +55,7 @@ export const MANAGER_PIPELINE_STAGE_KEYS: readonly string[] = OASIS_LEAD_STAGES
   .filter((stage) => stage !== "researched");
 
 export const BUILDER_DELIVERY_STAGE_KEYS = [
+  "won",
   "onboarding",
   "in_build",
   "client_review",
@@ -118,6 +132,22 @@ export function stagesForOasisRole(role: string, isOwner = false, adminAccess = 
 }
 
 type PipelineRow = { id: string; data: Record<string, unknown> };
+
+/**
+ * A claim returned to Leads is no longer active Pipeline work for any role.
+ *
+ * Claim ageing applies only while the record is still in the pre-handoff
+ * prospect workflow. Once a founder meeting is booked, the stage itself proves
+ * active work; an old claimed_at must never hide a paid or delivery record.
+ * Lost keeps its separate 90-day recycle rule from claim.ts.
+ */
+export function isReleasedOasisPipelineRow(
+  row: PipelineRow,
+  now: number = Date.now(),
+): boolean {
+  const facts = factsFrom(row.data || {});
+  return isReleasedFromBook(facts, now);
+}
 
 type OasisViewer = {
   role: string;
@@ -231,7 +261,7 @@ export function roleMayOperateOasisSalesLead(teamRole: string | null | undefined
  * editor treats it as a writable field. Omitting it would make this predicate
  * stricter than every other access path in the codebase — and would break the
  * two-party sale outright, where an opener hands a lead to a closer, stops
- * being `assigned_to`, and is still owed 20% on it. They must be able to open
+ * being `assigned_to`, and is still owed 15% on it. They must be able to open
  * the deal they are being paid for.
  *
  * Fail-closed: an unresolved identity, or a record nobody owns, opens nothing.
@@ -409,6 +439,8 @@ export const OASIS_STRUCTURED_LEAD_FIELDS = new Set<string>([
   "collaborators",
   "sales_program",
   "sales_motion",
+  "lead_source_track",
+  "sourced_by_user_id",
   "attributed_rep_user_id",
   "attribution_frozen_at",
   "last_contact_at",
@@ -516,17 +548,21 @@ export function filterWebsiteSalesRows<T extends PipelineRow>(
   const programRows = (options.programScoped ?? true)
     ? rows.filter((row) => row.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM)
     : rows;
-  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return programRows;
+  const now = Date.now();
+  const activeProgramRows = programRows.filter((row) => !isReleasedOasisPipelineRow(row, now));
+  if (isOasisPipelineAdmin(viewer.role, viewer.isOwner, viewer.adminAccess)) return activeProgramRows;
   if (!viewer.userId) return [];
   const userId = viewer.userId.toLowerCase();
   const allowedStages = stageSetForOasisRole(viewer.role);
-  return programRows.filter((row) => {
+  return activeProgramRows.filter((row) => {
     const assignedTo = typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : "";
+    const isBuilder = viewer.role.trim().toLowerCase() === "builder";
+    const deliveryOwned = isBuilder && ownsOasisDeliveryRecord(row, userId);
     // Same predicate pair as canOpenOasisSalesRecord's builder branch: board,
     // record read, and per-lead writes cannot disagree about whose row this is.
     const owned =
-      viewer.role.trim().toLowerCase() === "builder"
-        ? ownsOasisDeliveryRecord(row, userId) || ownsOasisSalesRecord(row, userId)
+      isBuilder
+        ? deliveryOwned || ownsOasisSalesRecord(row, userId)
         : assignedTo === userId;
     return owned && allowedStages.has(String(row.data.stage || ""));
   });

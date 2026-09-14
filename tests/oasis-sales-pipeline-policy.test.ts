@@ -11,8 +11,10 @@ import {
   canOpenOasisSalesRecord,
   canMutateOasisSalesRecord,
   filterWebsiteSalesRows,
+  isReleasedOasisPipelineRow,
   isOasisPipelineAdmin,
   mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
   resolveOasisDeliveryQueueScope,
   stagesForOasisRole,
 } from "../lib/oasis-sales-pipeline-policy";
@@ -35,7 +37,7 @@ assert.deepEqual(REP_PIPELINE_STAGE_KEYS, [
 assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
 assert.deepEqual(OPENER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
 assert.deepEqual(CLOSER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
-assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["onboarding", "in_build", "client_review"]);
+assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["won", "onboarding", "in_build", "client_review"]);
 
 assert.deepEqual(stagesForOasisRole("agent").map((s) => s.key), AGENT_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("opener").map((s) => s.key), OPENER_PIPELINE_STAGE_KEYS);
@@ -79,6 +81,16 @@ assert.equal(
 
 const rows = [
   { id: "fresh", data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "REP-1", stage: "assigned" } },
+  {
+    id: "expired",
+    data: {
+      sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+      assigned_to: "rep-1",
+      stage: "assigned",
+      claimed_at: "2000-01-01T00:00:00.000Z",
+      last_call_at: null,
+    },
+  },
   { id: "legacy", data: { assigned_to: "REP-1", stage: "qualified" } },
   { id: "other-rep", data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-2", stage: "assigned" } },
   { id: "post-handoff", data: { sales_program: OASIS_WEBSITE_SALES_PROGRAM, assigned_to: "rep-1", stage: "proposal_sent" } },
@@ -89,6 +101,48 @@ assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: "rep-1" }
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "opener", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "closer", userId: "rep-1" }).map((r) => r.id), ["fresh", "post-handoff"]);
 assert.deepEqual(filterWebsiteSalesRows(rows, { role: "agent", userId: null }), []);
+
+const staleClaimAt = "2000-01-01T00:00:00.000Z";
+for (const stage of ["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"]) {
+  assert.equal(
+    isReleasedOasisPipelineRow({
+      id: `active-${stage}`,
+      data: {
+        assigned_to: "rep-1",
+        stage,
+        claimed_at: staleClaimAt,
+        last_call_at: null,
+      },
+    }),
+    false,
+    `${stage} is an active handoff/delivery record, not an expiring prospect claim`,
+  );
+}
+assert.equal(
+  isReleasedOasisPipelineRow({
+    id: "stale-assigned",
+    data: {
+      assigned_to: "rep-1",
+      stage: "assigned",
+      claimed_at: staleClaimAt,
+      last_call_at: null,
+    },
+  }),
+  true,
+  "an untouched Assigned prospect still returns to Leads after the claim window",
+);
+assert.equal(
+  isReleasedOasisPipelineRow({
+    id: "recyclable-lost",
+    data: {
+      assigned_to: "rep-1",
+      stage: "lost",
+      lost_at: staleClaimAt,
+    },
+  }),
+  true,
+  "the independent 90-day Lost recycle rule remains intact",
+);
 
 const managerReadable = {
   id: "rep-owned",
@@ -219,7 +273,7 @@ assert.equal(
   false,
   "same for an opener",
 );
-/* ─── the two-party sale. An opener who handed off is still owed 20%. ────────
+/* ─── the two-party sale. An opener who handed off is still owed 15%. ────────
  * Once a closer takes the deal, `assigned_to` is the closer — the opener is
  * only in `collaborators`. An ownership check that ignored that field would
  * lock the opener out of the one deal they are being paid on. */
@@ -281,6 +335,16 @@ assert.equal(
   true,
   "a builder named as collaborator can OPEN the row he may MUTATE — since 2026-08-25 he is a sales operator, and read must never sit below write",
 );
+assert.equal(
+  ownsOasisDeliveryRecord(collaboratorOnlyBuild, "builder-1"),
+  false,
+  "sales collaboration does not grant control of another builder's paid fulfillment handoff",
+);
+assert.equal(
+  ownsOasisDeliveryRecord(fulfillmentOwnedBuild, "builder-1"),
+  true,
+  "the explicit fulfillment owner controls delivery even while assigned_to still names the closer",
+);
 assert.deepEqual(
   filterWebsiteSalesRows(
     [assignedBuild, anotherBuildersBuild, fulfillmentOwnedBuild, collaboratorOnlyBuild],
@@ -321,6 +385,11 @@ assert.deepEqual(
   "internal/admin delivery viewers retain the complete tenant queue",
 );
 assert.equal(mayOperateOasisDeliveryStage("builder", "onboarding"), true);
+assert.equal(
+  mayOperateOasisDeliveryStage("builder", "won"),
+  true,
+  "the assigned builder can accept a fully paid deal into onboarding",
+);
 assert.equal(mayOperateOasisDeliveryStage("builder", "launched"), false);
 
 /* ─── CC, 2026-08-25: the builder sells too. The full loop, pinned. ─────────

@@ -41,6 +41,12 @@ import { classifyBulkRecipients, summarizeClassification, redactForResponse } fr
 import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
 import { sanitizeBlastMessage, getTenantLenderNames } from "@/lib/integrations/blast-safety";
 import { stripDashes, matchPositioningPhrases, matchLenderNames } from "@/lib/integrations/blast-safety-core";
+import { getOasisSalesRepRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
+import {
+  OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
+  isReleasedOasisPipelineRow,
+} from "@/lib/oasis-sales-pipeline-policy";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -140,8 +146,9 @@ export async function POST(req: NextRequest) {
         { status: 403 },
       );
     }
-    // Validate the assignee once (null = clear). A non-UUID is a 400; a UUID that
-    // isn't a member of this tenant is rejected before we touch any record.
+    // Validate the assignee once before touching a record. OASIS destinations
+    // are limited to the active tenant sales roster for admins too; legacy
+    // workspaces retain their broader tenant-member assignment model.
     const raw = body.assigned_to;
     let nextAssignedTo: string | null = null;
     if (typeof raw === "string" && raw.trim().length) {
@@ -151,7 +158,35 @@ export async function POST(req: NextRequest) {
       }
       nextAssignedTo = candidate;
     }
-    if (nextAssignedTo) {
+    if (isOasisBulkWorkspace && !nextAssignedTo) {
+      return NextResponse.json(
+        { ok: false, error: "assignee_required", message: "Choose an active sales rep for these leads." },
+        { status: 422 },
+      );
+    }
+    if (nextAssignedTo && isOasisBulkWorkspace) {
+      let roster;
+      try {
+        roster = await getOasisSalesRepRoster(tenantId);
+      } catch (error) {
+        console.error("[leads.bulk] OASIS sales roster could not be verified", {
+          tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          { ok: false, error: "sales_roster_unavailable", message: "The sales roster could not be verified." },
+          { status: 503 },
+        );
+      }
+      const resolved = resolveAssignableTarget(roster, nextAssignedTo);
+      if (!resolved) {
+        return NextResponse.json(
+          { ok: false, error: "target_not_on_sales_roster", message: "Choose an active sales rep from this workspace." },
+          { status: 422 },
+        );
+      }
+      nextAssignedTo = resolved;
+    } else if (nextAssignedTo) {
       const member = await db
         .from("user_profiles")
         .select("auth_user_id")
@@ -163,6 +198,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    let claimRequired = 0;
     for (const id of ids) {
       const existing = await db
         .from("tenant_records")
@@ -175,16 +211,40 @@ export async function POST(req: NextRequest) {
         out.skipped += 1;
         continue;
       }
+      const bulkRecord = existing.data as {
+        id: string;
+        entity_type: "lead" | "application" | "funded_deal" | "renewal";
+        data: Record<string, unknown>;
+      };
+      const currentStage = str(bulkRecord.data.stage).toLowerCase();
+      const currentOwner = str(bulkRecord.data.assigned_to).toLowerCase();
+      if (
+        isOasisBulkWorkspace &&
+        (!currentOwner ||
+          !currentStage ||
+          currentStage === "unassigned" ||
+          currentStage === "researched" ||
+          isReleasedOasisPipelineRow(bulkRecord))
+      ) {
+        out.skipped += 1;
+        claimRequired += 1;
+        continue;
+      }
+      if (
+        isOasisBulkWorkspace &&
+        (bulkRecord.entity_type !== "lead" ||
+          !OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES.has(currentStage))
+      ) {
+        out.skipped += 1;
+        continue;
+      }
       const occurredAt = new Date().toISOString();
       const upd = await assignLifecycleOwner({
         tenantId,
-        record: existing.data as {
-          id: string;
-          entity_type: "lead" | "application" | "funded_deal" | "renewal";
-          data: Record<string, unknown>;
-        },
+        record: bulkRecord,
         assignedTo: nextAssignedTo,
         occurredAt,
+        resetClaimClock: isOasisBulkWorkspace,
       });
       if (!upd.ok) {
         out.failed += 1;
@@ -215,7 +275,19 @@ export async function POST(req: NextRequest) {
       });
       if (interaction.error) out.trackingFailed += 1;
     }
-    return NextResponse.json({ ok: true, op, ...out });
+    return NextResponse.json({
+      ok: true,
+      op,
+      ...out,
+      ...(isOasisBulkWorkspace
+        ? {
+            claim_required: claimRequired,
+            ...(claimRequired > 0
+              ? { message: `${claimRequired} pool lead${claimRequired === 1 ? "" : "s"} stayed untouched. Use Leads and its Assign action to claim them correctly.` }
+              : {}),
+          }
+        : {}),
+    });
   }
 
   if (op === "cc_blast") {

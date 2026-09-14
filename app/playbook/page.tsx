@@ -9,6 +9,8 @@ import {
 } from "@/lib/client-profiles";
 import { listPlaybooks, type PlaybookFile } from "@/lib/playbooks";
 import { getActiveProfile, getTenant } from "@/lib/queries";
+import { WEBSITE_PACKAGES } from "@/lib/website-sales";
+import { COMPANY_TRACK_BPS, SELF_TRACK_BPS } from "@/lib/website-sales-comp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,13 +22,16 @@ type PlaybookSection = {
   body: string;
 };
 
+const starterOffer = WEBSITE_PACKAGES.starter;
+const percent = (basisPoints: number) => `${basisPoints / 100}%`;
+
 const SECTIONS: PlaybookSection[] = [
   {
     href: "/playbook/deals",
     title: "Website Offer + Deal Architecture",
-    subtitle: "$2K / $3.5K / $5K+ packages - commission - automation upsells",
+    subtitle: `$${starterOffer.setupFloor} setup + $${starterOffer.monthlyFloor}/month entry offer - commission - automation upsells`,
     body:
-      "The canonical website-first offer: Essential, Growth, and Authority packages; approved automation add-ons; founder pricing authority; rep attribution; and tiered commission on collected setup revenue.",
+      `The canonical website-first offer starts with Starter at $${starterOffer.setupFloor} setup plus $${starterOffer.monthlyFloor}/month. It includes approved automation add-ons, founder pricing authority, durable rep attribution, and the ${percent(COMPANY_TRACK_BPS.opener)} open / ${percent(COMPANY_TRACK_BPS.closer)} close / ${percent(SELF_TRACK_BPS.open_close)} find-and-close commission ladder on collected setup revenue.`,
   },
   {
     href: "/playbook/script",

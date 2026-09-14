@@ -26,6 +26,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
 import { SESSION_COOKIE, signSession, tursoAuthActive } from "@/lib/turso-auth";
 import { consumeSessionLinkToken, safeInternalPath } from "@/lib/turso-auth-admin";
+import { getClientIp } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const ip = getClientIp(req);
   const gate = rateLimit({ key: `turso-session:${ip}`, capacity: 10, refillPerSec: 10 / 900 });
   if (!gate.allowed) {
     return NextResponse.redirect(new URL("/login?err=too_many_attempts", req.url));

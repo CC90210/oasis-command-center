@@ -76,11 +76,12 @@ export function LeadCards({
       {leads.map((l) => {
         // The identical condition the table applies. A rep may only dial what
         // they hold; see the module header.
-        const dialable = Boolean(l.phone) && showStage && canSelect;
+        const selectable = canSelect && !l.released;
+        const dialable = Boolean(l.phone) && showStage && selectable;
         return (
           <li key={l.id} className="overflow-hidden rounded-xl border border-bg-border bg-bg-panel">
             <div className="flex items-start gap-1 px-2.5 pt-2.5">
-              {canSelect && (
+              {selectable && (
                 // The 14px box keeps the app's dark-theme convention; the
                 // 44px label around it is the hit area. Ticking a card must
                 // never be a coin toss -- a claim is a compare-and-swap that
@@ -207,7 +208,7 @@ export function LeadCards({
                 <p className="flex min-h-11 items-center justify-center gap-2 rounded-lg border border-bg-border px-4 text-center text-sm text-fg-muted">
                   <Phone className="h-4 w-4 shrink-0 text-fg-dim" aria-hidden />
                   <span className="whitespace-nowrap tabular-nums">{l.phone}</span>
-                  <span className="text-xs text-fg-dim">· claim to call</span>
+                  <span className="text-xs text-fg-dim">{l.released ? "· released" : "· claim to call"}</span>
                 </p>
               ) : (
                 <p className="flex min-h-11 items-center justify-center rounded-lg border border-bg-border px-4 text-sm text-fg-dim">

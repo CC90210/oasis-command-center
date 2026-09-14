@@ -1,10 +1,20 @@
 import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import { mayQuoteAndClose } from "@/lib/team-roles";
+import type { LeadSourceTrack } from "@/lib/website-sales-comp";
 
 export const OASIS_WEBSITE_TENANT_SLUG = "oasis-webdev";
 
 export type RepDisposition = "attempted" | "voicemail" | "connected" | "lost";
 
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Select payout provenance from the persisted lead only. Missing, malformed,
+ * or browser-invented values fail closed to the company track.
+ */
+export function resolveWebsiteSalesLeadSourceTrack(value: unknown): LeadSourceTrack {
+  return value === "self" ? "self" : "company";
+}
 
 /**
  * Role floor for changing the OASIS sales lifecycle. Ownership is checked
@@ -19,13 +29,59 @@ export function mayWorkWebsiteSalesLifecycle(
   return roleMayOperateOasisSalesLead(teamRole);
 }
 
+/**
+ * Quote/payment/close authority follows the current deal seat, not historical
+ * opener attribution. After a two-person handoff the opener remains a reader
+ * and keeps their 15% line, while only the assigned or recorded audit-host rep
+ * may execute closer actions.
+ */
+export function mayRepRunWebsiteSalesDeal(input: {
+  actorUserId: unknown;
+  assignedTo: unknown;
+  auditHostUserId: unknown;
+}): boolean {
+  const normalize = (value: unknown) =>
+    typeof value === "string" ? value.trim().toLowerCase() : "";
+  const actor = normalize(input.actorUserId);
+  if (!actor) return false;
+  return actor === normalize(input.assignedTo) || actor === normalize(input.auditHostUserId);
+}
+
+/**
+ * A request-id replay is safe only when the payment payload is byte-for-byte
+ * equivalent after the same normalization used by the first write. Otherwise
+ * a reused key could turn a changed receipt, amount, currency, or payee shape
+ * into a misleading generic success.
+ */
+export function matchesWebsiteSalesPaymentReplay(
+  body: Record<string, unknown>,
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!metadata) return false;
+  const amount = Number(body.paymentAmount);
+  const amountCents = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || !Number.isSafeInteger(amountCents)) return false;
+  const provider = body.paymentProvider === "manual" ? "manual" : "stripe";
+  const reference = typeof body.paymentReference === "string" ? body.paymentReference.trim() : "";
+  const currency = body.paymentCurrency === "USD" ? "USD" : "CAD";
+  const builderUserId = typeof body.builderUserId === "string" && body.builderUserId.trim()
+    ? body.builderUserId.trim().toLowerCase()
+    : null;
+  const storedBuilderUserId = typeof metadata.builder_user_id === "string" && metadata.builder_user_id.trim()
+    ? metadata.builder_user_id.trim().toLowerCase()
+    : null;
+  return metadata.payment_provider === provider &&
+    metadata.provider_reference === reference &&
+    Number(metadata.installment_amount_cents) === amountCents &&
+    metadata.currency === currency &&
+    storedBuilderUserId === builderUserId;
+}
+
 export type WebsiteSalesCloseParties = {
   closerUserId: string;
   openerUserId: string | null;
   closedByRep: boolean;
 };
-
-const ADMIN_VERIFIED_CLOSER_ROLES = new Set(["agent", "closer", "manager"]);
 
 /**
  * A founder clicking "payment verified" is not evidence that the founder ran
@@ -46,17 +102,18 @@ export function mayCreditAdminVerifiedCloser(input: {
     typeof value === "string" && USER_ID.test(value.trim()) ? value.trim().toLowerCase() : "";
   const candidate = normalizeUserId(input.candidateUserId);
   const frozenOpener = normalizeUserId(input.frozenOpenerUserId);
-  if (!candidate || candidate === frozenOpener || input.isOwner === true || input.isOwner === 1) return false;
-  const liveRole = typeof input.liveTeamRole === "string" ? input.liveTeamRole.trim().toLowerCase() : "";
-  if (!ADMIN_VERIFIED_CLOSER_ROLES.has(liveRole)) return false;
+  if (!candidate || input.isOwner === true || input.isOwner === 1) return false;
+  if (!mayQuoteAndClose(input.liveTeamRole)) return false;
 
   const auditHost = normalizeUserId(input.auditHostUserId);
   const assigned = normalizeUserId(input.assignedTo);
-  const recordedAuditHostRole =
-    typeof input.recordedAuditHostRole === "string" ? input.recordedAuditHostRole.trim().toLowerCase() : "";
-  return candidate === assigned || (
-    candidate === auditHost && ADMIN_VERIFIED_CLOSER_ROLES.has(recordedAuditHostRole)
-  );
+  const verifiedAuditHost = candidate === auditHost && mayQuoteAndClose(input.recordedAuditHostRole);
+  // When the candidate is also the frozen opener, assignment alone is not new
+  // evidence that they ran the close. A matching audit-host record plus their
+  // live close-capable profile is. That produces one combined sales party, not
+  // duplicate opener and closer lines for the same person.
+  if (candidate === frozenOpener) return verifiedAuditHost;
+  return candidate === assigned || verifiedAuditHost;
 }
 
 /** Freeze handoff credit to the existing opener, then the assigned rep, and
@@ -102,17 +159,21 @@ export function resolveWebsiteSalesCloseParties(input: {
       : "";
 
   if (input.isTrueAdmin) {
-    if (trustedCloser && trustedCloser !== attributed) {
+    if (trustedCloser) {
       return {
         closerUserId: trustedCloser,
-        openerUserId: attributed || (assigned !== trustedCloser ? assigned || null : null),
+        openerUserId: attributed && attributed !== trustedCloser
+          ? attributed
+          : assigned && assigned !== trustedCloser
+            ? assigned
+            : null,
         closedByRep: true,
       };
     }
     // When a founder actually closes, the paid sales party is the opener.
     // Frozen attribution is the strongest opener fact; assignment is the
     // legacy fallback. Treating that rep as a full-stack closer would overpay
-    // the common "rep books, founder closes" path at 40% instead of 20%.
+    // the common "rep books, founder closes" path at 35% instead of 15%.
     const openerUserId = attributed || assigned;
     if (!openerUserId) return null;
     return {
@@ -158,6 +219,35 @@ const NEXT_OASIS_LIFECYCLE_STAGE: Readonly<Record<string, string>> = {
 
 export function nextOasisLifecycleStage(stage: unknown): string | null {
   return typeof stage === "string" ? NEXT_OASIS_LIFECYCLE_STAGE[stage] ?? null : null;
+}
+
+const ADMIN_SET_STAGE_TARGETS = new Set([
+  "researched",
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+  "founder_meeting_booked",
+  "demo_completed",
+  "proposal_sent",
+  "lost",
+]);
+const PAID_OR_DELIVERY_STAGES = new Set(["won", "onboarding", "in_build", "client_review", "launched"]);
+
+/**
+ * Won proves full payment and delivery stages prove explicit handoffs. The
+ * generic dropdown may repair ordinary sales stages, but cannot mint either
+ * fact without its guarded workflow action. It also cannot erase the visible
+ * lifecycle after those facts exist: refunds, voids, and delivery handoffs
+ * have structured actions that keep the deal and commission ledger coupled.
+ */
+export function mayAdminSetWebsiteSalesStage(currentStage: unknown, targetStage: unknown): boolean {
+  return (
+    typeof currentStage === "string" &&
+    typeof targetStage === "string" &&
+    !PAID_OR_DELIVERY_STAGES.has(currentStage) &&
+    ADMIN_SET_STAGE_TARGETS.has(targetStage)
+  );
 }
 
 const ADMIN_DIRECT_ADVANCE_STAGES = new Set([

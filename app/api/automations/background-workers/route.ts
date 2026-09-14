@@ -1,13 +1,11 @@
 /**
- * GET /api/automations/background-workers — operator's local PM2 daemons
- * + standalone Skool daemon status, sourced from integrations_health rows
- * the bridge daemon writes on each /api/bridge/ping cycle (60s).
+ * GET /api/automations/background-workers — tenant-exact worker inventory.
+ * Local/remote process health comes from integrations_health, cloud jobs use
+ * their own health source, and retired rows are informational only.
  *
- * Why integrations_health (and not a fresh remote probe): the operator's
- * machine is the source of truth — only it can see its own PM2 list. The
- * bridge already pushes that snapshot on every heartbeat (see
- * bravo_cli/local_bridge.py detect_pm2_daemons), so the dashboard just
- * reads back the last-pinged value.
+ * The machine supervisor is the source of truth for process state. Its bridge
+ * pushes a snapshot on every heartbeat, so this route reads the last trusted
+ * value without probing an operator machine from the cloud.
  *
  * Response shape:
  *   {
@@ -22,23 +20,41 @@
  *       metadata: Record<string, unknown>,
  *       last_ping_at: string | null,
  *       purpose: string,             // 1-line "what this daemon does"
+ *       runtime: "local" | "cloud" | "remote" | "retired",
+ *       control_mode: "local_fleet" | "remote_bridge" | "none",
+ *       status_source: "integrations_health" | "website_sales_meeting_worker_health" | "none",
  *       archived_on?: string,        // ISO date if status === "archived"
  *       archived_reason?: string,    // short why-archived if status === "archived"
  *       owner: "cc" | "adon" | "shared", // B4 (2026-07-23) — who this worker belongs to
  *     }>,
  *   }
  *
- * Operator-only: scoped to the session's tenant_id via user_profiles. Empire
- * vs tenant doesn't matter here — each tenant's bridge pushes its own row.
+ * System-surface only and tenant-exact: OASIS inventory is never a fallback
+ * for an unrelated workspace.
  */
 
 import { NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { bridgeControlEligibility } from "@/lib/bridge-proxy";
-import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
+import {
+  capabilitiesFor,
+  isOasisSurfaceTenant,
+  resolvePersona,
+} from "@/lib/role-surfaces";
+import type {
+  WorkerControlMode,
+  WorkerRuntime,
+  WorkerStatusSource,
+} from "@/lib/automations/worker-status";
+import {
+  resolveWorkerControlMode,
+  selectWorkerInventory,
+} from "@/lib/automations/worker-status";
 import { jsonRoute } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
@@ -47,20 +63,17 @@ export const dynamic = "force-dynamic";
 /**
  * Authoritative list of expected background workers + their purpose copy.
  * Mirrors ecosystem.config.js. Keep these two files in sync — adding a
- * PM2 daemon there without adding the description here just means it
+ * supervised daemon there without adding the description here just means it
  * shows up as an "unknown background worker" on the dashboard.
  */
-const EXPECTED_WORKERS: Array<{
+const OASIS_WORKERS: Array<{
   service: string;
   label: string;
   purpose: string;
-  /**
-   * When false, the dashboard's pm2 Start/Stop/Restart buttons are hidden
-   * for this worker. Used for standalone Python daemons that own their
-   * own lock files and aren't registered with pm2 (Skool engine, etc) —
-   * sending `pm2 start skool_engine` would fail because pm2 doesn't
-   * know about it.
-   */
+  runtime?: WorkerRuntime;
+  control_mode?: WorkerControlMode;
+  status_source?: WorkerStatusSource;
+  /** Rolling-deploy compatibility for the former PM2-only UI contract. */
   manageable_via_pm2?: boolean;
   archived_on?: string;
   archived_reason?: string;
@@ -68,16 +81,8 @@ const EXPECTED_WORKERS: Array<{
    * Set when this worker is NOT supposed to be running on the operator's
    * machine. The string is the reason, shown on the tile.
    *
-   * Added 2026-09-02. Two tiles had been red for months for reasons that were
-   * not faults: the Skool daemon is retired code kept on disk deliberately,
-   * and the dashboard email consumer is hosted on the VPS. Rendering both as
-   * "Down — stopped reporting" made the board unreadable — an operator who
-   * learns that some red is normal stops reading the red that is not, which is
-   * how the same board hid three genuinely dead daemons.
-   *
-   * These are excluded from the healthy/total pill: a denominator that counts
-   * workers nobody intends to run here can never reach full, so it stops
-   * meaning anything.
+   * Retained for rolling compatibility. New rows use runtime="retired" as the
+   * explicit source of truth instead of encoding lifecycle in prose.
    */
   not_expected_here?: string;
 }> = [
@@ -139,23 +144,20 @@ const EXPECTED_WORKERS: Array<{
     service: "pm2.dashboard-email-consumer",
     label: "Dashboard email sender",
     purpose: "Sends emails queued from the Command Center's lead-drawer composer. Polls lead_interactions every 10s.",
-    // Hosted on the VPS, not the operator's machine: ecosystem.config.js gates
-    // it behind IS_LINUX so queued mail still drains when the laptop is off.
-    // The operator's bridge therefore has no process to report, which is why
-    // this tile read "Down — stopped reporting" rather than "runs elsewhere".
-    //
-    // A second copy here is NOT the fix: dashboard_email_consumer._mark_status
-    // is read-modify-write with no row claim, so two consumers double-send.
-    // That needs a compare-and-swap on metadata.status before this can run in
-    // two places.
-    //
-    // Which is exactly why the controls are OFF (CodeRabbit, PR #376). Leaving
-    // this undefined defaults it to manageable, so the panel would render a
-    // live Start button whose only effect is to launch the local duplicate the
-    // comment above refuses to allow. Saying "must not run here" while shipping
-    // the button that makes it run here is worse than saying nothing.
-    manageable_via_pm2: false,
-    not_expected_here: "Runs on the VPS so queued mail drains while this machine is off",
+    // OASIS has its own company-scoped process on the operator's Windows fleet.
+    // A separate tenant process can share the executable name without sharing
+    // its queue because the consumer filters by the host mailbox's tenant map.
+    runtime: "local",
+    control_mode: "local_fleet",
+    status_source: "integrations_health",
+  },
+  {
+    service: "pm2.dashboard-email-queue-monitor",
+    label: "Email queue monitor",
+    purpose: "Watches the OASIS email sender and alerts if queued messages stop draining.",
+    runtime: "local",
+    control_mode: "local_fleet",
+    status_source: "integrations_health",
   },
   {
     service: "pm2.atlas-telegram",
@@ -176,6 +178,9 @@ const EXPECTED_WORKERS: Array<{
     // is still on disk at scripts/_archive/skool/ for revival when the
     // operator launches their own community.
     purpose: "Posts/replies in a Skool community. Code preserved at scripts/_archive/skool/ — revive only when the operator launches their own community.",
+    runtime: "retired",
+    control_mode: "none",
+    status_source: "none",
     // Standalone Python script — owns its own lock file. The supervisor does
     // not know about it, so the Start/Stop/Restart buttons are hidden.
     manageable_via_pm2: false,
@@ -186,45 +191,57 @@ const EXPECTED_WORKERS: Array<{
 // Wrapped: this panel renders alongside the cron list, so a throw here left the
 // tab stuck on "Loading..." next to the other panel's error banner.
 export const GET = jsonRoute("api/automations/background-workers GET", async () => {
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const session = await resolveSessionContext();
+  if (!session.ok) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
   const db = getServiceSupabase();
-  const profile = await db
-    .from("user_profiles")
-    .select("id, tenant_id, team_role, is_owner, admin_access")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const profileRow = profile.data as
-    | {
-        id: string | null;
-        tenant_id: string | null;
-        team_role: string | null;
-        is_owner: boolean | null;
-        admin_access: boolean | null;
-      }
-    | null;
-  const profileId = profileRow?.id ?? null;
-  const tenantId = profileRow?.tenant_id ?? null;
-  if (!tenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const profileId = session.profileId;
+  const tenantId = session.tenantId;
   // Owner/admin gate (mirrors authorizeBridgeRequest's is_owner + admin_access
   // promotion). Only these roles may bounce VPS daemons, so only they get
   // Start/Stop/Restart buttons — everyone else sees the workers read-only.
   const role = (
-    profileRow?.is_owner === true
+    session.isTrueAdmin
       ? "owner"
-      : profileRow?.admin_access === true
+      : session.adminAccess
         ? "admin"
-        : profileRow?.team_role || "read_only"
+        : session.teamRole
   )
     .trim()
     .toLowerCase();
 
-  // Tenant-aware worker set. SunBiz operators see the VPS daemons (pushed by
-  // the VPS bridge under the tenant_id); everyone else sees the operator's
-  // local empire daemons (pushed under their own profile_id).
+  // Choose from two exact inventories. OASIS slug is authoritative when old
+  // profile metadata disagrees; unrelated tenants receive neither inventory.
   const tenant = await getTenant(tenantId);
-  const isSun = (tenant ? resolveClientProfileSlug(tenant) : null) === "sun";
-  const workerSet = isSun ? SUNBIZ_WORKERS : EXPECTED_WORKERS;
+  const tenantSlug = tenant?.slug?.trim().toLowerCase() || null;
+  const oasisOnlyDeployment = externalTenantSurfacesBlocked();
+  if (oasisOnlyDeployment && !isOasisSurfaceTenant(tenantSlug)) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  const persona = resolvePersona({
+    teamRole: session.teamRole,
+    isTrueAdmin: session.isTrueAdmin,
+    adminAccess: session.adminAccess,
+  });
+  if (!capabilitiesFor(persona, tenantSlug).canSeeSystemSurfaces) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+
+  const inventory = oasisOnlyDeployment
+    ? "oasis"
+    : selectWorkerInventory({
+        isOasisTenant: isOasisSurfaceTenant(tenantSlug),
+        isClientProfile: (tenant ? resolveClientProfileSlug(tenant) : null) === "sun",
+      });
+  if (inventory === "none") {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
+  const isOasis = inventory === "oasis";
+  const isSun = inventory === "client";
+  const workerSet = isOasis
+    ? OASIS_WORKERS
+    : (await import("@/lib/automations/sunbiz-workers")).SUNBIZ_WORKERS;
   // SunBiz daemons live on the VPS — start/stop/restart routes through the
   // server-side bridge proxy (control/route.ts). Decide whether to show the
   // controls with the SAME resolver + role gate POST enforces, via the shared
@@ -243,6 +260,17 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     .order("last_seen_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (pairing.error) {
+    console.error("[background-workers] bridge pairing health read failed", pairing.error);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "bridge_health_unavailable",
+        message: "Automation health could not be verified. Refresh in a moment.",
+      },
+      { status: 503 },
+    );
+  }
   const lastSeenAt = (pairing.data as { last_seen_at: string | null } | null)?.last_seen_at ?? null;
   const bridgeOnline = lastSeenAt
     ? Date.now() - new Date(lastSeenAt).getTime() < 120_000
@@ -267,10 +295,36 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       ? await db
           .from("integrations_health")
           .select("service, status, metadata, last_ping_at")
+          .eq("tenant_id", tenantId)
           .eq("profile_id", profileId)
           .in("service", services)
       : null;
-  if (healthRows && !healthRows.error && Array.isArray(healthRows.data)) {
+  if (!healthRows) {
+    console.error("[background-workers] worker health profile is unavailable", {
+      tenantId,
+      profileId,
+    });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "worker_health_identity_unavailable",
+        message: "This workspace's worker health identity could not be verified.",
+      },
+      { status: 503 },
+    );
+  }
+  if (healthRows.error) {
+    console.error("[background-workers] worker health read failed", healthRows.error);
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "worker_health_unavailable",
+        message: "Automation health could not be verified. Refresh in a moment.",
+      },
+      { status: 503 },
+    );
+  }
+  if (Array.isArray(healthRows.data)) {
     for (const r of healthRows.data as Array<{
       service: string;
       status: string;
@@ -288,7 +342,25 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   const now = Date.now();
   const workers = workerSet.map((w) => {
     const archived = Boolean(w.archived_on);
-    const h = archived ? undefined : healthMap.get(w.service);
+    const configuredRuntime =
+      "runtime" in w ? (w.runtime as WorkerRuntime | undefined) : undefined;
+    const runtime: WorkerRuntime = configuredRuntime ?? (isSun ? "remote" : "local");
+    const configuredControl =
+      "control_mode" in w ? (w.control_mode as WorkerControlMode | undefined) : undefined;
+    const controlMode = resolveWorkerControlMode({
+      runtime,
+      configuredMode:
+        configuredControl ?? (w.manageable_via_pm2 === false ? "none" : undefined),
+      teamRole: session.teamRole,
+      isTrueAdmin: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+      remoteControlAllowed: sunbizControl,
+    });
+    const configuredStatusSource =
+      "status_source" in w ? (w.status_source as WorkerStatusSource | undefined) : undefined;
+    const statusSource: WorkerStatusSource =
+      configuredStatusSource ?? (runtime === "retired" ? "none" : "integrations_health");
+    const h = archived || runtime === "retired" ? undefined : healthMap.get(w.service);
     // Standalone (non-pm2) workers don't have their lifecycle in pm2's
     // jlist, so the bridge's heartbeat sometimes reports a stale
     // "healthy" status row (e.g., Skool was once running months ago,
@@ -306,7 +378,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       Boolean(h) && (!Number.isFinite(pingedAt) || now - pingedAt > DAEMON_HEALTH_STALE_MS);
     const status = archived
       ? ("archived" as const)
-      : w.manageable_via_pm2 === false || unreporting
+      : runtime === "retired" || unreporting
         ? ("down" as const)
         : reportedStatus;
     return {
@@ -320,8 +392,11 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       // Strip stale metadata for forced-down standalones AND unreporting
       // workers so the tooltip doesn't show a phantom PID/uptime from the
       // last time the bridge actually saw the process.
-      metadata: w.manageable_via_pm2 === false || unreporting ? {} : h?.metadata || {},
+      metadata: runtime === "retired" || unreporting ? {} : h?.metadata || {},
       last_ping_at: h?.last_ping_at || null,
+      runtime,
+      control_mode: controlMode,
+      status_source: statusSource,
       // Default to true so existing pm2-managed workers keep their action
       // buttons. Skool (the one non-pm2 standalone) flips this false. SunBiz
       // workers are controllable only once the VPS bridge proxy is configured
@@ -333,13 +408,8 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       // one entry ships a live Start button whose only effect is to launch the
       // duplicate that entry exists to prevent — and for the email sender, a
       // duplicate means every queued message sends twice.
-      manageable_via_pm2:
-        "not_expected_here" in w && w.not_expected_here
-          ? false
-          : isSun
-            ? sunbizControl
-            : w.manageable_via_pm2 !== false,
-      // B4 (2026-07-23): EXPECTED_WORKERS (CC's own local empire daemons)
+      manageable_via_pm2: controlMode !== "none",
+      // B4 (2026-07-23): OASIS_WORKERS (CC's own local empire daemons)
       // predates the owner field and has no Breeze/adon entries — default
       // "cc". SUNBIZ_WORKERS always carries an explicit owner.
       owner: "owner" in w ? w.owner : "cc",
@@ -354,12 +424,23 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   // This is a cloud worker, not a local PM2 daemon. Keeping it separate from
   // bridge health makes it clear that booked-client reminders do not depend on
   // the operator's laptop being online.
-  if (!isSun) {
+  if (isOasis) {
     const cloudHealth = await db
       .from("website_sales_meeting_worker_health")
       .select("status,last_run_at,processed,failed,last_error")
       .eq("id", 1)
       .maybeSingle();
+    if (cloudHealth.error) {
+      console.error("[background-workers] cloud worker health read failed", cloudHealth.error);
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "cloud_worker_health_unavailable",
+          message: "Cloud automation health could not be verified. Refresh in a moment.",
+        },
+        { status: 503 },
+      );
+    }
     const health = cloudHealth.data as {
       status: "healthy" | "degraded";
       last_run_at: string;
@@ -373,6 +454,9 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       service: "cloud.founder-meeting-reminders",
       label: "Founder meeting reminders",
       purpose: "Sends consent-aware booking confirmations and 10-minute reminders from the verified Google Calendar handoff.",
+      runtime: "cloud",
+      control_mode: "none",
+      status_source: "website_sales_meeting_worker_health",
       // Cloud-hosted, but it DOES report here (website_sales_meeting_worker_health),
       // so it is a real member of the pill's denominator — unlike the two
       // workers that carry a reason string.
@@ -387,7 +471,7 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
       } : { runtime: "cloud", state: "waiting for first scheduled run" },
       last_ping_at: health?.last_run_at || null,
       manageable_via_pm2: false,
-      owner: "shared",
+      owner: "cc",
     });
   }
 

@@ -22,6 +22,7 @@ import {
   roleMayOperateOasisSalesLead,
   roleMaySelfEditLead,
 } from "@/lib/oasis-sales-pipeline-policy";
+import { availability, factsFrom, isActionableBy, isInBookOf } from "@/lib/web-leads/claim";
 
 export type PerLeadAccess =
   | { ok: true }
@@ -126,6 +127,32 @@ export async function assertMayWorkLead(args: {
           adminAccess: args.adminAccess,
         })
       : ownsOasisSalesRecord(row, args.userId);
+
+  if (mine && effectiveMode === "owned_oasis_sales" && args.userId) {
+    const facts = factsFrom(row.data || {});
+    const now = Date.now();
+    // DNC is organization-wide. A collaborator is allowed to work a shared
+    // lead, but must never bypass the lead-level suppression simply because
+    // isInBookOf only describes the current assignee.
+    if (availability(facts, now).reason === "do_not_call") {
+      return {
+        ok: false,
+        status: 409,
+        error: "do_not_call",
+        message: "This lead is on the do-not-call list and cannot be worked.",
+      };
+    }
+    if (isInBookOf(facts, args.userId)) {
+      if (!isActionableBy(facts, args.userId, now)) {
+        return {
+          ok: false,
+          status: 409,
+          error: "claim_released",
+          message: "This claim has returned to the Leads pool. Claim it again before working it.",
+        };
+      }
+    }
+  }
 
   return mine
     ? { ok: true }

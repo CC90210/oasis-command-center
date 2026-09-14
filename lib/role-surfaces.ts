@@ -106,13 +106,8 @@ export type SurfaceCapabilities = {
   /**
    * Commission rows for the OASIS sales roster this viewer coaches — what a
    * manager needs to verify the override they are paid on. NOT the tenant-wide
-   * ledger.
-   *
-   * ⚠ DECLARED, NOT YET ENFORCED (2026-08-21). Same status as
-   * canSeeTeamPipeline above, and additionally blocked on the multi-party
-   * commission ledger: website_sales_commissions is still one row per deal
-   * keyed on a single rep_user_id, so there is no manager-override row for this
-   * flag to reveal even once a reader exists.
+   * ledger. The commission API enforces this with the same canonical,
+   * manager-scoped roster used by Today and the Pipeline.
    */
   canSeeTeamCommission: boolean;
   /** Every rep's commission — the payout ledger a founder approves from. */
@@ -455,6 +450,13 @@ export const SURFACE_CAPABILITIES: Record<Persona, SurfaceCapabilities> = {
   legacy: LEGACY,
 };
 
+/** One shared gate for the page, API, and navigation entry to commissions. */
+export function maySeeCommissionSurface(capabilities: SurfaceCapabilities): boolean {
+  return capabilities.canSeeCommissionLedger ||
+    capabilities.canSeeTeamCommission ||
+    capabilities.canSeeOwnCommissionOnly;
+}
+
 /**
  * The capability record for a persona STANDING IN A PARTICULAR WORKSPACE.
  *
@@ -567,6 +569,7 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  "/commissions",
   "/settings",
   // The Leads browser (CC, 2026-08-21): "those sales reps should be able to
   // access the leads page so they can import leads themselves."
@@ -575,7 +578,8 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // of Canadian businesses with website status, filtered by province, city and
   // industry. Nothing in it is assigned to anyone, so opening it to reps
   // exposes no colleague's pipeline. It is what makes self-sourcing possible,
-  // which is the track that pays them 25/40/70 rather than 20/30.
+  // which pays 35% for finding and closing; company-supplied work pays 15%
+  // for opening or 25% for closing (70% is the separate build-it-too special).
   "/web-leads",
 ];
 
@@ -596,6 +600,7 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  "/commissions",
   "/settings",
   // Managers assign from the same pool their reps source from.
   "/web-leads",
@@ -635,6 +640,7 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   "/schedule",
   "/pipeline",
   "/playbook",
+  "/commissions",
   "/settings",
   "/founders/marketing",
   // CC, 2026-08-25: the builder/marketing hire also sells, so he sources from

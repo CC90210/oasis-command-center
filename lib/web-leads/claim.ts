@@ -52,6 +52,7 @@ import {
   OASIS_COLD_OUTBOUND_MOTION,
   OASIS_WEBSITE_SALES_PROGRAM,
 } from "@/lib/leads/canonical-lead-fields";
+import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
 
 export type ClaimFacts = {
   /** Auth user id of the owning rep, or null when nobody holds it. */
@@ -71,6 +72,16 @@ export type ClaimFacts = {
 export const CLAIM_STALE_DAYS = 7;
 export const LOST_RECYCLE_DAYS = 90;
 export const MAX_LEADS_PER_REP = 250;
+
+/**
+ * Stages where ownership is still a prospect claim and may age back into the
+ * shared Leads pool. After the founder handoff, stage is durable workflow
+ * state: an old claim timestamp must not make a paid or delivery record
+ * claimable. A missing stage stays eligible for legacy pool rows.
+ */
+export const ACTIVE_PROSPECT_CLAIM_STAGES: ReadonlySet<string> = new Set([
+  ...OASIS_PRE_HANDOFF_STAGE_KEYS,
+]);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -130,10 +141,18 @@ export function availability(f: ClaimFacts, now: number): Availability {
     return { available: false, reason: "in_progress" };
   }
 
-  // 3. Nobody holds it, and it is not a recent loss.
+  // 3. Handoff, paid, and delivery records are never prospect inventory. This
+  //    check comes before ownership so even an accidentally orphaned Won row
+  //    fails closed instead of appearing in Leads for somebody to claim.
+  const stage = f.stage?.trim().toLowerCase() || "";
+  if (stage && !ACTIVE_PROSPECT_CLAIM_STAGES.has(stage)) {
+    return { available: false, reason: "in_progress" };
+  }
+
+  // 4. Nobody holds it, and it is neither a recent loss nor active workflow.
   if (!f.assignedTo) return { available: true, reason: "unclaimed" };
 
-  // 4. Claimed but never actually dialled. `lastCallAt` set at all means the
+  // 5. Claimed but never actually dialled. `lastCallAt` set at all means the
   //    rep is working it, whatever the stage says -- one logged call resets
   //    this, which is the behaviour a rep expects and the one that rewards
   //    logging.
@@ -168,6 +187,20 @@ export function isInBookOf(f: ClaimFacts, userId: string): boolean {
  *  what the "Released" marker in My Leads is keyed on. */
 export function isReleasedFromBook(f: ClaimFacts, now: number): boolean {
   return Boolean(f.assignedTo) && availability(f, now).available;
+}
+
+/**
+ * Whether this rep still has write authority over a lead in their book.
+ *
+ * A lapsed claim deliberately remains readable so the rep can understand where
+ * it went. Read history is not ownership: once availability() returns the lead
+ * to the pool, the former owner must not dial it, log a disposition, or run a
+ * lifecycle mutation while another rep can claim it.
+ */
+export function isActionableBy(f: ClaimFacts, userId: string, now: number): boolean {
+  if (!isInBookOf(f, userId)) return false;
+  const state = availability(f, now);
+  return !state.available && state.reason !== "do_not_call";
 }
 
 /**
@@ -255,10 +288,22 @@ export function planClaim(
 /** The `data` patch that records a claim. Stamped fields are cleared as well as
  *  set: a recycled lead carries the PREVIOUS owner's lost_at, and leaving it in
  *  place would make the new owner's lead read as already-lost and recycle again
- *  90 days later regardless of what the new rep does with it. */
-export function claimPatch(userId: string, nowIso: string): Record<string, unknown> {
+ *  90 days later regardless of what the new rep does with it.
+ *
+ * Source provenance is deliberately absent from this patch. A claim changes
+ * who works the lead, not who originally sourced it. Durable
+ * `sourced_by_user_id` lets payout logic distinguish the original rep from a
+ * later closer; missing legacy identity fails closed in the payout engine. */
+export function claimPatch(
+  userId: string,
+  nowIso: string,
+): Record<string, unknown> {
   return {
     assigned_to: userId,
+    // Collaboration is scoped to the previous owner's active book. A recycled
+    // lead must not carry those write grants into the next rep's claim.
+    collaborators: [],
+    assigned_at: nowIso,
     claimed_at: nowIso,
     sales_program: OASIS_WEBSITE_SALES_PROGRAM,
     sales_motion: OASIS_COLD_OUTBOUND_MOTION,
@@ -274,7 +319,10 @@ export function claimPatch(userId: string, nowIso: string): Record<string, unkno
  *  here -- releasing a lead must not un-suppress a business that asked not to
  *  be called. */
 export function releasePatch(): Record<string, unknown> {
-  return { assigned_to: null, claimed_at: null };
+  // Releasing ownership also releases every delegated write grant. Keeping
+  // collaborators here would leave the former team able to mutate a lead that
+  // is back in the shared pool or has since been claimed by somebody else.
+  return { assigned_to: null, claimed_at: null, collaborators: [] };
 }
 
 /** Read the ownership facts off a raw stored `data` blob. Tolerant of missing

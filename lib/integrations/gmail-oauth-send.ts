@@ -17,7 +17,6 @@
  */
 
 import "server-only";
-import { createHash } from "node:crypto";
 import { getUserIntegrationBundle, setUserIntegrationValue } from "@/lib/user-integration-store";
 import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 // Per-rep sign-off + canonical legal footer (2026-07-10). Replaces the local
@@ -26,6 +25,9 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 import type { BrandKey } from "@/lib/email/brands";
+import { gmailMessageIdForIdempotencyKey } from "@/lib/integrations/email-delivery-safety";
+
+export { gmailMessageIdForIdempotencyKey } from "@/lib/integrations/email-delivery-safety";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -94,11 +96,6 @@ async function refreshAccessToken(
 function encodeHeader(value: string): string {
   if (/^[\x20-\x7E]*$/.test(value)) return value;
   return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
-}
-
-export function gmailMessageIdForIdempotencyKey(idempotencyKey: string): string {
-  const digest = createHash("sha256").update(idempotencyKey, "utf8").digest("hex");
-  return `<oasis-${digest}@oasisai.work>`;
 }
 
 export function gmailAddressesMatch(actual: string, expected: string): boolean {

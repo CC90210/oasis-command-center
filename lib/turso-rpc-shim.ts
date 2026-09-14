@@ -219,15 +219,10 @@ export async function approve_sunbiz_draft(client: Client, args: Record<string, 
   return null; // CAS lost: concurrent approval / state change — nothing usable was written
 }
 /**
- * Port of public.close_website_deal — comp v2 shape
- * (database/147_website_sales_comp_v2.sql; tables in
- * database/turso/147_website_sales_engine.turso.sql).
- *
- * Rate keys on WHO CLOSED, not deal size: p_closed_by_rep=true means the
- * attributed rep ran the close themselves (30%); false means the founder
- * closed a rep-opened deal (20%). $2,000 collected-setup floor. Commission is
- * ALWAYS inserted 'accrued' — rep-closed deals never auto-approve; the
- * founder-gated accrued→approved→paid flow is untouched.
+ * Active website close transaction. The historical RPC signature is retained,
+ * while v4 arithmetic comes exclusively from lib/website-sales-comp.ts.
+ * Commission is always inserted `accrued`; verified collection never bypasses
+ * the founder-gated accrued → approved → paid flow.
  *
  * The PG original's auth.role()='service_role' guard has no Turso equivalent:
  * this shim is only reachable through getServiceSupabase()'s rpc proxy, which
@@ -372,6 +367,14 @@ export async function close_website_deal(client: Client, args: Record<string, un
     throw new Error(`close_website_deal: tenant_records.data is not valid JSON for id=${p_lead_id}`);
   }
   let onboardingIntake = buildBriefForOnboarding(leadData.build_brief);
+  const p_lead_source_track: LeadSourceTrack = args.p_lead_source_track === "self" ? "self" : "company";
+  const frozenLeadSourceTrack: LeadSourceTrack = leadData.lead_source_track === "self" ? "self" : "company";
+  if (p_lead_source_track !== frozenLeadSourceTrack) {
+    throw new Error("lead_source_track_does_not_match_frozen_lead");
+  }
+  const frozenSourceUserId = typeof leadData.sourced_by_user_id === "string"
+    ? leadData.sourced_by_user_id.trim().toLowerCase()
+    : "";
 
   // Closer guard, adapted per 147: the owner/admin check applies only on the
   // founder path. On the rep path the closer IS the rep, and authorization
@@ -390,16 +393,13 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // purpose — internal staff are not commissioned. `builder` IS present: they
   // are paid a flat fee from the same ledger.
 
-  // COMP v3. 147 threw here below $2,000:
+  // The retired v2 close threw here below $2,000:
   //
   //     if (p_setup_amount < 2000) throw new Error("collected setup below
   //     commission floor");
   //
-  // which meant a $500 website could not be CLOSED at all — not merely that it
-  // paid nothing. CC sells those. The floor survives as a SPLIT threshold
-  // instead (lib/website-sales-comp.ts): under it, the deal pays one full-stack
-  // operator rather than a chain of specialists, because $100 and $150 is not
-  // worth two people's time. The deal always books.
+  // which meant a $500 website could not be closed at all. V4 treats $500 as
+  // the Starter book price and supports separate opener and closer accruals.
   const v_closed_by = p_closed_by_rep ? p_rep_user_id : p_founder_user_id;
   const collectedCents = Math.round(p_collected_amount * 100);
 
@@ -443,15 +443,158 @@ export async function close_website_deal(client: Client, args: Record<string, un
     throw new Error("verified_payment_plan_does_not_match_close");
   }
 
-  // Optional v3 arguments. Absent preserves the v2 shape for a one-person
-  // sale; a handoff explicitly supplies the frozen opener as a second party.
+  // Optional multi-party arguments. A handoff explicitly supplies the frozen
+  // opener as a second party. With no separate opener, provenance decides the
+  // sales label: a company-fed rep is still a closer; only a rep who actually
+  // sourced the lead receives the full_stack/find-and-close line.
   const p_builder_user_id = typeof args.p_builder_user_id === "string" ? args.p_builder_user_id : null;
-  const p_manager_user_id = typeof args.p_manager_user_id === "string" ? args.p_manager_user_id : null;
-  const p_lead_source_track: LeadSourceTrack = args.p_lead_source_track === "self" ? "self" : "company";
+  const p_manager_user_id = typeof args.p_manager_user_id === "string" && args.p_manager_user_id.trim()
+    ? args.p_manager_user_id.trim().toLowerCase()
+    : null;
   const effectiveOpenerUserId = p_closed_by_rep ? p_opener_user_id : p_rep_user_id;
   const effectiveCloserUserId = p_closed_by_rep ? p_rep_user_id : null;
+  const automationText = JSON.stringify(automationIds);
 
-  // The rep's own trailing-30-day collected total drives their accelerator.
+  const persistedResponseFor = async (dealId: string, idempotent: boolean) => {
+    const persistedDealRs = await tx.execute({
+      sql: `SELECT sold_price_cents, setup_amount
+            FROM website_deals
+            WHERE tenant_id = ? AND id = ? AND status = 'won'
+            LIMIT 1`,
+      args: [p_tenant_id, dealId],
+    });
+    const persistedDeal = persistedDealRs.rows[0] as Record<string, unknown> | undefined;
+    if (!persistedDeal) throw new Error("persisted_deal_missing_after_close");
+    const soldPriceValue = Number(persistedDeal.sold_price_cents);
+    const persistedCollectedCents = Number.isSafeInteger(soldPriceValue)
+      ? soldPriceValue
+      : Math.round(Number(persistedDeal.setup_amount) * 100);
+    if (!Number.isSafeInteger(persistedCollectedCents)) {
+      throw new Error("persisted_deal_collected_amount_invalid");
+    }
+
+    const persistedCommissionRs = await tx.execute({
+      sql: `SELECT id, rep_user_id, party_role, amount_cents, rate_bps, notes, comp_version
+            FROM website_sales_commissions
+            WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual'
+            ORDER BY rowid`,
+      args: [p_tenant_id, dealId],
+    });
+    const persistedRows = persistedCommissionRs.rows as Array<Record<string, unknown>>;
+    if (persistedRows.length === 0) throw new Error("persisted_commission_rows_missing_after_close");
+
+    const payoutLines = persistedRows.map((row) => {
+      const amountCents = Number(row.amount_cents);
+      const rateBps = Number(row.rate_bps);
+      if (!Number.isSafeInteger(amountCents) || !Number.isSafeInteger(rateBps)) {
+        throw new Error("persisted_commission_amount_invalid");
+      }
+      let notes: string[] = [];
+      if (typeof row.notes === "string" && row.notes.trim()) {
+        try {
+          const decoded = JSON.parse(row.notes);
+          notes = Array.isArray(decoded) ? decoded.map(String) : [row.notes];
+        } catch {
+          notes = [row.notes];
+        }
+      }
+      return {
+        commissionId: String(row.id),
+        user_id: String(row.rep_user_id),
+        role: String(row.party_role),
+        amount_cents: amountCents,
+        rate_bps: rateBps,
+        notes,
+      };
+    });
+    const primaryLine =
+      payoutLines.find((line) => line.role === "full_stack" || line.role === "closer") ?? payoutLines[0];
+    const totalHumanCents = payoutLines.reduce((sum, line) => sum + line.amount_cents, 0);
+    const persistedCompVersion = Number(persistedRows[0].comp_version);
+    if (!Number.isSafeInteger(persistedCompVersion)) {
+      throw new Error("persisted_commission_version_invalid");
+    }
+    return {
+      deal_id: dealId,
+      commission_id: primaryLine.commissionId,
+      commission_amount: primaryLine.amount_cents / 100,
+      comp_version: persistedCompVersion,
+      payout_lines: payoutLines.map(({ commissionId: _commissionId, ...line }) => line),
+      total_human_cents: totalHumanCents,
+      oasis_retained_cents: persistedCollectedCents - totalHumanCents,
+      guardrail_applied: payoutLines.some((line) => line.notes.some((note) => note.startsWith("guardrail:"))),
+      idempotent,
+    };
+  };
+
+  // Resolve request-id replays before reading trailing volume or running the
+  // current payout engine. The deal's own first accrual belongs to trailing
+  // volume now; recomputing here can cross a band and return numbers that were
+  // never written. A replay is a read of frozen ledger facts, not a new quote.
+  const replayRs = await tx.execute({
+    sql: `SELECT id, lead_id, type,
+                 json_extract(metadata, '$.action') AS action
+          FROM lead_interactions
+          WHERE tenant_id = ?
+            AND agent_source = 'website_sales_pipeline'
+            AND json_extract(metadata, '$.request_id') = ?
+          LIMIT 1`,
+    args: [p_tenant_id, requestId],
+  });
+  if (replayRs.rows.length > 0) {
+    const replay = replayRs.rows[0] as Record<string, unknown>;
+    if (String(replay.lead_id ?? "") !== p_lead_id) {
+      throw new Error("close_website_deal: request_id_reused_for_different_lead");
+    }
+    const replayAction = replay.action == null ? null : String(replay.action);
+    if (
+      String(replay.type ?? "") !== "deal_closed" ||
+      (replayAction !== null && replayAction !== "record_payment")
+    ) {
+      throw new Error("request_id_reused_for_different_action");
+    }
+    const replayDeal = await tx.execute({
+      sql: `SELECT id, rep_user_id, founder_user_id, package_id, automation_ids,
+                   currency, setup_amount, monthly_amount, payment_reference, payment_provider,
+                   verified_payment_id, payment_plan_id, opener_user_id, closer_user_id, builder_user_id,
+                   manager_user_id, lead_source_track, sold_price_cents
+            FROM website_deals WHERE tenant_id = ? AND lead_id = ? AND status = 'won'`,
+      args: [p_tenant_id, p_lead_id],
+    });
+    const existing = replayDeal.rows[0] as Record<string, unknown> | undefined;
+    if (
+      !existing ||
+      existing.rep_user_id !== p_rep_user_id ||
+      existing.founder_user_id !== p_founder_user_id ||
+      existing.package_id !== p_package_id ||
+      String(existing.automation_ids ?? "[]") !== automationText ||
+      existing.currency !== p_currency ||
+      Number(existing.setup_amount) !== p_setup_amount ||
+      Number(existing.sold_price_cents) !== collectedCents ||
+      Number(existing.monthly_amount) !== p_monthly_amount ||
+      existing.payment_reference !== p_payment_reference ||
+      existing.payment_provider !== p_payment_provider ||
+      existing.verified_payment_id !== p_verified_payment_id ||
+      existing.payment_plan_id !== p_payment_plan_id ||
+      ((existing.opener_user_id ?? null) as string | null) !== effectiveOpenerUserId ||
+      ((existing.closer_user_id ?? null) as string | null) !== effectiveCloserUserId ||
+      ((existing.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
+      ((existing.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
+      String(existing.lead_source_track ?? "company") !== p_lead_source_track
+    ) {
+      throw new Error("deal_already_closed_mismatch");
+    }
+    const replayResponse = await persistedResponseFor(String(existing.id), true);
+    await tx.commit();
+    return replayResponse;
+  }
+
+  const hasSeparateOpener = Boolean(p_opener_user_id && p_opener_user_id !== p_rep_user_id);
+
+  // Each sales contractor's own trailing-30-day collected total drives their
+  // accelerator. A split deal therefore needs separate opener and closer
+  // lookups; borrowing the closer's volume (or omitting the opener's) breaks
+  // the signed per-contractor accelerator rule.
   // Read from the ledger rather than passed in: a caller that could set its own
   // volume could set its own rate.
   // COLLECTED REVENUE, not commission earned.
@@ -459,8 +602,8 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // Summing amount_cents was wrong and it underpaid reps against their own
   // signed agreement: VOLUME_ACCELERATOR bands are collected-revenue figures,
   // and lib/contracts/templates.ts states the accelerator is "measured on the
-  // Contractor's own collected revenue over the trailing 30 days". At a 30%
-  // rate a rep who collected $25,000 sums roughly $7,500 of commission, never
+  // Contractor's own collected revenue over the trailing 30 days". At a 25%
+  // rate a rep who collected $25,000 sums roughly $6,250 of commission, never
   // reaches the $10,000 band, and is paid below the rate they signed.
   //
   // DISTINCT on payment_reference because a multi-party deal writes several
@@ -475,40 +618,78 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // inflating their trailing volume by the retainer and buying them an
   // accelerator band they did not sell. Builder lines carry basis 0 and are
   // excluded for the same reason: a flat build fee is not revenue that rep sold.
-  const trailingRs = await tx.execute({
-    sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
-            SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
-            FROM website_sales_commissions
-            WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
-              AND status IN ('accrued','approved','paid')
-              AND "party_role" IN ('opener','closer','full_stack')
-              AND created_at >= ?
-          )`,
-    args: [p_tenant_id, p_rep_user_id, new Date(Date.now() - 30 * 864e5).toISOString()],
-  });
-  const trailing30dCollectedCents = Number(trailingRs.rows[0]?.["c"] ?? 0);
+  const trailingByUserId = new Map<string, number>();
+  const trailingCutoff = new Date(Date.now() - 30 * 864e5).toISOString();
+  const salesUserIds = Array.from(new Set([
+    p_rep_user_id,
+    ...(hasSeparateOpener ? [p_opener_user_id!] : []),
+  ]));
+  for (const salesUserId of salesUserIds) {
+    const trailingRs = await tx.execute({
+      sql: `SELECT COALESCE(SUM(c), 0) AS c FROM (
+              SELECT DISTINCT "payment_reference", "basis_amount_cents" AS c
+              FROM website_sales_commissions
+              WHERE tenant_id = ? AND rep_user_id = ? AND entry_type = 'accrual'
+                AND status IN ('accrued','approved','paid')
+                AND "party_role" IN ('opener','closer','full_stack')
+                AND created_at >= ?
+            )`,
+      args: [p_tenant_id, salesUserId, trailingCutoff],
+    });
+    trailingByUserId.set(salesUserId, Number(trailingRs.rows[0]?.["c"] ?? 0));
+  }
+  const trailingFor = (userId: string) => trailingByUserId.get(userId) ?? 0;
 
   const parties: PartyInput[] = [];
+  const isSelfSourcedSoleClose =
+    p_closed_by_rep &&
+    !hasSeparateOpener &&
+    p_lead_source_track === "self" &&
+    frozenSourceUserId !== "" &&
+    frozenSourceUserId === p_rep_user_id.toLowerCase();
   if (!p_closed_by_rep) {
     // Founder close: the primary rep opened and handed off. They earn the
     // opener line only; the founder is recorded on the deal but is not a
     // commissioned closer.
-    parties.push({ userId: p_rep_user_id, role: "opener" });
-  } else if (p_opener_user_id && p_opener_user_id !== p_rep_user_id) {
+    parties.push({
+      userId: p_rep_user_id,
+      role: "opener",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
+  } else if (hasSeparateOpener) {
     // A separate opener handed off, so the attributed rep is the closer.
-    parties.push({ userId: p_opener_user_id, role: "opener" });
-    parties.push({ userId: p_rep_user_id, role: "closer", trailing30dCollectedCents });
-  } else {
-    // One person owns the sale. Whether they also BUILT it decides 40% vs 70%
-    // on the self-sourced ladder.
+    parties.push({
+      userId: p_opener_user_id!,
+      role: "opener",
+      trailing30dCollectedCents: trailingFor(p_opener_user_id!),
+    });
+    parties.push({
+      userId: p_rep_user_id,
+      role: "closer",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
+  } else if (isSelfSourcedSoleClose) {
+    // This rep supplied the lead and closed it. Building it too activates the
+    // retained 70% all-in special instead of adding a second flat builder line.
     parties.push({
       userId: p_rep_user_id,
       role: "full_stack",
-      trailing30dCollectedCents,
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
       builtItToo: p_builder_user_id === p_rep_user_id,
     });
+  } else {
+    // No separate opener does not manufacture finding credit. The company
+    // supplied the lead, so this remains the standard 25% closer line.
+    parties.push({
+      userId: p_rep_user_id,
+      role: "closer",
+      trailing30dCollectedCents: trailingFor(p_rep_user_id),
+    });
   }
-  if (p_builder_user_id && p_builder_user_id !== p_rep_user_id) {
+  if (p_builder_user_id && !(isSelfSourcedSoleClose && p_builder_user_id === p_rep_user_id)) {
+    // On a company-fed close, the closer may also legitimately be the builder.
+    // Keep both role rows even when they have the same user id; only the 70%
+    // self-source close+build special already includes delivery compensation.
     parties.push({ userId: p_builder_user_id, role: "builder" });
   }
 
@@ -525,88 +706,6 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // never silently re-opens rows that already closed.
   const clawbackDeadlineIso = new Date(Date.now() + CLAWBACK_WINDOW_DAYS * 864e5).toISOString();
 
-  // The v2 legacy mirrors, kept so existing readers of `rate`/`amount` keep
-  // working. Derived from the plan, never computed a second time — two
-  // independent calculations of the same money is how they disagree.
-  const primaryLine =
-    plan.lines.find((l) => l.role === "full_stack" || l.role === "closer") ?? plan.lines[0] ?? null;
-  const automationText = JSON.stringify(automationIds);
-
-  const responseFor = (dealId: string, commissionId: string, idempotent = false) => ({
-    deal_id: dealId,
-    commission_id: commissionId,
-    commission_amount: primaryLine ? primaryLine.amountCents / 100 : 0,
-    comp_version: COMP_VERSION,
-    payout_lines: plan.lines.map((line) => ({
-      user_id: line.userId,
-      role: line.role,
-      amount_cents: line.amountCents,
-      rate_bps: line.rateBps,
-      notes: line.notes,
-    })),
-    total_human_cents: plan.totalHumanCents,
-    oasis_retained_cents: plan.oasisRetainedCents,
-    guardrail_applied: plan.guardrailApplied,
-    idempotent,
-  });
-
-    const replayRs = await tx.execute({
-      sql: `SELECT id, lead_id FROM lead_interactions
-            WHERE tenant_id = ?
-              AND agent_source = 'website_sales_pipeline'
-              AND json_extract(metadata, '$.request_id') = ?
-            LIMIT 1`,
-      args: [p_tenant_id, requestId],
-    });
-    if (replayRs.rows.length > 0) {
-      if (String(replayRs.rows[0].lead_id ?? "") !== p_lead_id) {
-        throw new Error("close_website_deal: request_id_reused_for_different_lead");
-      }
-      const replayDeal = await tx.execute({
-        sql: `SELECT id, rep_user_id, founder_user_id, package_id, automation_ids,
-                     currency, setup_amount, monthly_amount, payment_reference, payment_provider,
-                     verified_payment_id, payment_plan_id, opener_user_id, closer_user_id, builder_user_id,
-                     manager_user_id, lead_source_track, sold_price_cents
-              FROM website_deals WHERE tenant_id = ? AND lead_id = ? AND status = 'won'`,
-        args: [p_tenant_id, p_lead_id],
-      });
-      const existing = replayDeal.rows[0] as Record<string, unknown> | undefined;
-      if (
-        !existing ||
-        existing.rep_user_id !== p_rep_user_id ||
-        existing.founder_user_id !== p_founder_user_id ||
-        existing.package_id !== p_package_id ||
-        String(existing.automation_ids ?? "[]") !== automationText ||
-        existing.currency !== p_currency ||
-        Number(existing.setup_amount) !== p_setup_amount ||
-        Number(existing.sold_price_cents) !== collectedCents ||
-        Number(existing.monthly_amount) !== p_monthly_amount ||
-        existing.payment_reference !== p_payment_reference ||
-        existing.payment_provider !== p_payment_provider ||
-        existing.verified_payment_id !== p_verified_payment_id ||
-        existing.payment_plan_id !== p_payment_plan_id ||
-        ((existing.opener_user_id ?? null) as string | null) !== effectiveOpenerUserId ||
-        ((existing.closer_user_id ?? null) as string | null) !== effectiveCloserUserId ||
-        ((existing.builder_user_id ?? null) as string | null) !== p_builder_user_id ||
-        ((existing.manager_user_id ?? null) as string | null) !== p_manager_user_id ||
-        String(existing.lead_source_track ?? "company") !== p_lead_source_track
-      ) {
-        throw new Error("deal_already_closed_mismatch");
-      }
-      const replayCommission = await tx.execute({
-        sql: `SELECT id FROM website_sales_commissions
-              WHERE tenant_id = ? AND deal_id = ? AND entry_type = 'accrual'
-              ORDER BY created_at LIMIT 1`,
-        args: [p_tenant_id, String(existing.id)],
-      });
-      await tx.commit();
-      return responseFor(
-        String(existing.id),
-        String(replayCommission.rows[0]?.id ?? ""),
-        true,
-      );
-    }
-
     if (!p_closed_by_rep) {
       const founderRs = await tx.execute({
         sql: `SELECT 1 FROM user_profiles
@@ -617,17 +716,36 @@ export async function close_website_deal(client: Client, args: Record<string, un
       if (founderRs.rows.length === 0) throw new Error("founder_not_authorized_for_tenant");
     }
     const repRs = await tx.execute({
-      sql: `SELECT 1 FROM user_profiles
+      sql: `SELECT manager_user_id FROM user_profiles
             WHERE tenant_id = ? AND auth_user_id = ?
               AND team_role IN ('agent','closer','opener','builder','manager') LIMIT 1`,
       args: [p_tenant_id, p_rep_user_id],
     });
     if (repRs.rows.length === 0) throw new Error("rep_not_agent_for_tenant");
+    const assignedManagerUserId = p_closed_by_rep && typeof repRs.rows[0].manager_user_id === "string"
+      && String(repRs.rows[0].manager_user_id).trim()
+      ? String(repRs.rows[0].manager_user_id).trim().toLowerCase()
+      : null;
+    if (assignedManagerUserId !== p_manager_user_id) {
+      throw new Error("manager_attribution_does_not_match_closer_profile");
+    }
+    if (p_manager_user_id) {
+      if (p_manager_user_id === p_rep_user_id.toLowerCase()) {
+        throw new Error("manager_cannot_manage_self");
+      }
+      const managerRs = await tx.execute({
+        sql: `SELECT 1 FROM user_profiles
+              WHERE tenant_id = ? AND auth_user_id = ?
+                AND team_role = 'manager' AND COALESCE(is_owner, 0) = 0 LIMIT 1`,
+        args: [p_tenant_id, p_manager_user_id],
+      });
+      if (managerRs.rows.length === 0) throw new Error("manager_not_authorized_for_tenant");
+    }
     if (p_opener_user_id) {
       const openerRs = await tx.execute({
         sql: `SELECT 1 FROM user_profiles
               WHERE tenant_id = ? AND auth_user_id = ?
-                AND team_role IN ('agent','closer','opener','manager') LIMIT 1`,
+                AND team_role IN ('agent','closer','opener','builder','manager') LIMIT 1`,
         args: [p_tenant_id, p_opener_user_id],
       });
       if (openerRs.rows.length === 0) throw new Error("opener_not_sales_rep_for_tenant");
@@ -688,7 +806,7 @@ export async function close_website_deal(client: Client, args: Record<string, un
     const mergedLeadData: Record<string, unknown> = {
       ...atomicLeadData,
       ...(leadPatch as Record<string, unknown>),
-      stage:"onboarding",
+      stage:"won",
       last_contacted_at:atomicLastTouch,
     };
 
@@ -879,7 +997,7 @@ export async function close_website_deal(client: Client, args: Record<string, un
         changed_by:actorUserId,
         correlation_id:requestId,
         from:expectedStage,
-        to:"onboarding",
+        to:"won",
       }),
       occurredAt,
     ],
@@ -901,17 +1019,19 @@ export async function close_website_deal(client: Client, args: Record<string, un
   if (commissionRows.length === 0 || commissionRows.some((r) => !r)) {
     throw new Error("payment_reference_already_used_by_another_deal");
   }
-  const cRow = commissionRows[0]!;
 
-  // perform patch_tenant_record_data(... 'stage','onboarding' ...) — through
-  // the ported CAS implementation later in this file (hoisted declaration).
+  // The paid lead is now Won. The prepared onboarding row becomes active only
+  // when the guarded Won → Onboarding direct advance runs.
+  // Build the outward result from those just-persisted rows too, so the first
+  // response and every replay share one durable source of monetary truth.
+  const persistedResponse = await persistedResponseFor(dealId, false);
   await tx.commit();
 
   // RETURNS jsonb — supabase-js callers receive this object as { data }.
   // The first three keys are the v2 contract and are unchanged, so existing
   // callers keep working; `commission_amount` reports the PRIMARY line (the
   // closer or full-stack operator), which is what it always meant.
-  return responseFor(dealId, String(cRow.id));
+  return persistedResponse;
   } catch (error) {
     if (!tx.closed) await tx.rollback();
     throw dbError("close_website_deal", driverError(error));

@@ -45,6 +45,7 @@ import { authorizeBridgeRequest, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { bridgeExecToolAllowedForRole } from "@/lib/role-gates";
 import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -52,11 +53,17 @@ export const dynamic = "force-dynamic";
 const ALLOWED_ACTIONS = new Set(["start", "stop", "restart"]);
 
 export async function POST(req: Request) {
+  if (externalTenantSurfacesBlocked()) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   // Auth + tenant gate + VPS target resolution, all server-side. SunBiz
   // ('submissions') tenant or operator passes; everyone else 403/503.
   const auth = await authorizeBridgeRequest();
   if (!auth.ok) {
     return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+  if (auth.tenantSlug !== "submissions") {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
   // pm2 start/stop/restart is a shell-tier action on the shared VPS. Gate it to

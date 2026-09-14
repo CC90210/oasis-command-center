@@ -24,6 +24,7 @@ import "server-only";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
 import type { DripCheck } from "./drip-checks";
+import { isProductionRuntime } from "./runtime-environment";
 
 /**
  * Observed values double as the failure MODE, so `describe` can stay a pure
@@ -60,7 +61,7 @@ export const CALENDAR_CHECKS: DripCheck[] = [
       // credential. Previews and local dev legitimately run without one, and
       // grading those would be a standing false alarm that gets the whole
       // channel muted — the same reasoning as deploy.prod_serves_main.
-      if (process.env.VERCEL_ENV !== "production") return OK;
+      if (!isProductionRuntime()) return OK;
 
       const config = systemCalendarConfig();
       // Not a degraded state: with no workspace credential, EVERY host whose
@@ -89,7 +90,7 @@ export const CALENDAR_CHECKS: DripCheck[] = [
       if (r.observed === UNCONFIGURED) {
         return (
           "THE SHARED OASIS CALENDAR IS NOT CONFIGURED — GOOGLE_SYSTEM_CALENDAR_CLIENT_ID, " +
-          "_CLIENT_SECRET and _REFRESH_TOKEN must all be set in Vercel production. " +
+          "_CLIENT_SECRET and _REFRESH_TOKEN must all be set in the production runtime. " +
           "Until they are, any host without a working personal Google connection cannot be " +
           "booked at all, because the fallback that covers them has nothing to run on."
         );

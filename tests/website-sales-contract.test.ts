@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import {
   AUTOMATION_ADD_ONS,
-  COMMISSION_MODEL,
   RETIRED_AUTOMATION_ADD_ONS,
   WEBSITE_PACKAGES,
   WEBSITE_SALES_STAGES,
   automationAddOn,
-  calculateCommission,
   isSellableAutomation,
   validateQuote,
 } from "../lib/website-sales";
+import { COMPANY_TRACK_BPS, COMP_VERSION, SELF_TRACK_BPS } from "../lib/website-sales-comp";
 import { mapLeadImportHeader } from "../lib/leads-import-parser";
 import { OASIS_LEAD_STAGE_KEYS } from "../lib/oasis-stage-meta";
 
+assert.equal(WEBSITE_PACKAGES.starter.setupFloor, 500);
+assert.equal(WEBSITE_PACKAGES.starter.monthlyFloor, 150);
 assert.equal(WEBSITE_PACKAGES.essential.setupFloor, 2_000);
 assert.equal(WEBSITE_PACKAGES.growth.monthlyFloor, 350);
 assert.equal(WEBSITE_PACKAGES.authority.includedAutomationCount, 2);
@@ -36,15 +37,20 @@ assert.ok(
 );
 assert.equal(isSellableAutomation("ai_voice_receptionist"), false);
 
-// Comp v2: who closed decides the rate (opener 20% / opener-closer 30%),
-// deal size no longer changes it. $2,000 setup floor unchanged.
-assert.equal(COMMISSION_MODEL.floorSetup, 2_000);
-assert.deepEqual(calculateCommission(2_000, false), { rate: 0.2, amount: 400 });
-assert.deepEqual(calculateCommission(2_000, true), { rate: 0.3, amount: 600 });
-assert.deepEqual(calculateCommission(3_500, false), { rate: 0.2, amount: 700 });
-assert.deepEqual(calculateCommission(5_000, true), { rate: 0.3, amount: 1_500 });
-assert.deepEqual(calculateCommission(1_999, false), { rate: 0, amount: 0 });
-assert.deepEqual(calculateCommission(1_999, true), { rate: 0, amount: 0 });
+// Comp v4 has one active integer rate source: open 15%, close 25%, find+close 35%.
+assert.equal(COMP_VERSION, 4);
+assert.deepEqual(COMPANY_TRACK_BPS, { opener: 1_500, closer: 2_500 });
+assert.equal(SELF_TRACK_BPS.open_close, 3_500);
+
+assert.deepEqual(validateQuote("starter", 500, 150, false), { ok: true });
+assert.deepEqual(validateQuote("starter", 499, 150, false), {
+  ok: false,
+  error: "Setup price is below the Starter floor of 500",
+});
+assert.deepEqual(validateQuote("starter", 500, 149, false), {
+  ok: false,
+  error: "Monthly price is below the Starter floor of 150",
+});
 
 assert.deepEqual(validateQuote("growth", 3_499, 350, false), {
   ok: false,

@@ -26,6 +26,7 @@ export function teamInviteOrigin(
   env: InviteEmailEnvironment = process.env,
 ): string {
   return (
+    safeOrigin(env.BRAVO_DASHBOARD_URL) ||
     safeOrigin(env.PUBLIC_APP_URL) ||
     safeOrigin(env.OASIS_PUBLIC_ORIGIN) ||
     safeOrigin(env.NEXT_PUBLIC_SITE_URL) ||

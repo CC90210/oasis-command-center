@@ -133,8 +133,9 @@ assert.doesNotMatch(
   "a manager collaborator must not gain cross-rep website-sales write access",
 );
 
-assert.match(toolbar, /Call now/);
-assert.match(toolbar, /\/api\/leads\/\$\{leadId\}\/call/);
+assert.match(toolbar, /Open dialer/);
+assert.match(toolbar, /href=\{`tel:\$\{dialTarget\}`\}/);
+assert.doesNotMatch(toolbar, /\/api\/leads\/\$\{leadId\}\/call/);
 assert.doesNotMatch(toolbar, /Schedule founder audit/, "booking lives in the stage-specific next-step panel");
 for (const removed of ["Send check-in", "Pause auto follow-ups", "AI tools", "Suggest next move"]) {
   assert.equal(toolbar.includes(removed), false, `${removed} is removed from the OASIS lead UI`);

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { deploymentGitRef, deploymentGitSha } from "@/lib/health/runtime-environment";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -50,8 +51,8 @@ export async function GET() {
     {
       status: "ok",
       service: "command-center",
-      version: process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA?.slice(0, 8) || "dev",
-      branch: process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_REF || "main",
+      version: deploymentGitSha()?.slice(0, 8) || "dev",
+      branch: deploymentGitRef() || "main",
       deployed_at: process.env.VERCEL_GIT_COMMIT_AUTHOR_LOGIN
         ? new Date(START_TIME).toISOString()
         : new Date(START_TIME).toISOString(),

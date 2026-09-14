@@ -15,6 +15,7 @@ assert.equal(check.severity, "critical", "nobody being able to book is critical"
 
 const ENV_KEYS = [
   "VERCEL_ENV",
+  "DEPLOY_ENV",
   "GOOGLE_SYSTEM_CALENDAR_CLIENT_ID",
   "GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET",
   "GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN",
@@ -34,6 +35,7 @@ function restore() {
 
 function configure() {
   process.env.VERCEL_ENV = "production";
+  delete process.env.DEPLOY_ENV;
   process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_ID = "workspace-client";
   process.env.GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET = "workspace-secret";
   process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN = "workspace-refresh";
@@ -98,9 +100,20 @@ async function run() {
     }) as typeof globalThis.fetch;
     assert.equal(await observe(), 0, "a transport failure is unknown, not dead");
 
+    // Cloudflare production is held to the same check. The old VERCEL_ENV-only
+    // gate silently turned this monitor off after a platform cutover.
+    configure();
+    delete process.env.VERCEL_ENV;
+    process.env.DEPLOY_ENV = "production";
+    delete process.env.GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN;
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    assert.equal(await observe(), 1, "Cloudflare production must not bypass calendar health");
+
     // ─── 5. Non-production is never graded ──────────────────────────────────
     configure();
     process.env.VERCEL_ENV = "preview";
+    delete process.env.DEPLOY_ENV;
     globalThis.fetch = (async () => {
       throw new Error("no network call should happen off production");
     }) as typeof globalThis.fetch;

@@ -4,6 +4,11 @@
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "DEPLOY_ENV": "production",
+    "DEPLOY_PLATFORM": "cloudflare",
+    "DEPLOY_SURFACE": "oasis"
+  },
   "assets": {
     "binding": "ASSETS",
     "directory": ".open-next/assets"

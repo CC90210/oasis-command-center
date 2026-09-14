@@ -50,6 +50,7 @@ const TESTS = [
   "tests/web-leads-guards.test.ts",
   "tests/web-leads-manager-access.test.ts",
   "tests/web-leads-claim.test.ts",
+  "tests/web-leads-release-tracking.test.ts",
   "tests/web-leads-assign-target.test.ts",
   "tests/web-leads-assign-to-rep.test.ts",
   "tests/web-leads-territory-assign.test.ts",
@@ -68,6 +69,7 @@ const TESTS = [
   "tests/lead-contact-name.test.ts",
   // A rep may add a lead they sourced, and it lands in their own book.
   "tests/rep-creates-own-lead.test.ts",
+  "tests/oasis-admin-create-assignee.test.ts",
   // An OASIS email must name OASIS, in the signature as well as the footer.
   "tests/oasis-email-branding.test.ts",
   // Operator copy on the Automations tab must match a real job name.

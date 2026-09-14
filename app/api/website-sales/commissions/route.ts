@@ -1,9 +1,40 @@
 import { NextResponse } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import {
+  SURFACE_CAPABILITIES,
+  maySeeCommissionSurface,
+  resolvePersona,
+} from "@/lib/role-surfaces";
+import {
+  loadWebsiteSalesCommissionListing,
+  loadWebsiteSalesCommissionSummary,
+} from "@/lib/website-sales-commission-summary";
+import { getOasisSalesRepRoster } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+const RECENT_LEDGER_LIMIT = 500;
+const COMMISSION_SELECT =
+  "id,deal_id,rep_user_id,payment_reference,entry_type,party_role,basis_amount_cents,rate_bps,amount_cents,collected_setup_amount,rate,amount,status,approved_by,approved_at,paid_by,paid_at,payout_reference,voided_by,voided_at,void_reason,created_at";
+const LOOKUP_CHUNK_SIZE = 200;
+
+async function loadRowsInChunks<T>(
+  ids: string[],
+  label: string,
+  read: (chunk: string[]) => PromiseLike<{
+    data: unknown;
+    error: { message: string } | null;
+  }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let offset = 0; offset < ids.length; offset += LOOKUP_CHUNK_SIZE) {
+    const result = await read(ids.slice(offset, offset + LOOKUP_CHUNK_SIZE));
+    if (result.error) throw new Error(`${label}:${result.error.message}`);
+    rows.push(...((result.data ?? []) as T[]));
+  }
+  return rows;
+}
 
 type CommissionRow = {
   id: string;
@@ -86,65 +117,115 @@ function cents(primary: unknown, legacy: unknown): number {
 export async function GET() {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const persona = resolvePersona({
+    teamRole: session.teamRole,
+    isTrueAdmin: session.isTrueAdmin,
+    adminAccess: session.adminAccess,
+  });
+  if (!maySeeCommissionSurface(SURFACE_CAPABILITIES[persona])) {
+    return NextResponse.json({ ok: false, error: "forbidden_commission_role" }, { status: 403 });
+  }
 
   const db = getServiceSupabase();
-  let commissionQuery = db
-    .from("website_sales_commissions")
-    .select(
-      "id,deal_id,rep_user_id,payment_reference,entry_type,party_role,basis_amount_cents,rate_bps,amount_cents,collected_setup_amount,rate,amount,status,approved_by,approved_at,paid_by,paid_at,payout_reference,voided_by,voided_at,void_reason,created_at",
-    )
-    .eq("tenant_id", session.tenantId)
-    .order("created_at", { ascending: false })
-    .limit(500);
-  if (!session.isAdmin) commissionQuery = commissionQuery.eq("rep_user_id", session.userId);
-  const commissionsResult = await commissionQuery;
-  if (commissionsResult.error) {
-    return NextResponse.json({ ok: false, error: commissionsResult.error.message }, { status: 500 });
+  let ledgerScope: "tenant" | "manager_team" | "self" = "tenant";
+  let repScope: { repUserId?: string; repUserIds?: string[] } = {};
+  if (!session.isAdmin && persona === "manager") {
+    try {
+      const directReports = await getOasisSalesRepRoster(session.tenantId, session.userId);
+      ledgerScope = "manager_team";
+      repScope = {
+        // The manager sees their own sales/override entries plus only the reps
+        // whose canonical tenant roster row points to this manager.
+        repUserIds: Array.from(new Set([
+          session.userId,
+          ...directReports.map((rep) => rep.auth_user_id).filter((id): id is string => Boolean(id)),
+        ])),
+      };
+    } catch (error) {
+      console.error("[website-sales.commissions.manager-scope]", error);
+      return NextResponse.json({ ok: false, error: "commission_scope_unavailable" }, { status: 500 });
+    }
+  } else if (!session.isAdmin) {
+    ledgerScope = "self";
+    repScope = { repUserId: session.userId };
   }
-  const commissions = (commissionsResult.data ?? []) as CommissionRow[];
+  let listing;
+  try {
+    listing = await loadWebsiteSalesCommissionListing<CommissionRow>(db, {
+      tenantId: session.tenantId,
+      ...repScope,
+      columns: COMMISSION_SELECT,
+      recentLimit: RECENT_LEDGER_LIMIT,
+    });
+  } catch (error) {
+    console.error("[website-sales.commissions.listing]", error);
+    return NextResponse.json({ ok: false, error: "commission_listing_unavailable" }, { status: 500 });
+  }
+  const commissions = listing.rows;
+  let summary;
+  try {
+    summary = await loadWebsiteSalesCommissionSummary(db, {
+      tenantId: session.tenantId,
+      ...repScope,
+    });
+  } catch (error) {
+    console.error("[website-sales.commissions.summary]", error);
+    return NextResponse.json({ ok: false, error: "commission_summary_unavailable" }, { status: 500 });
+  }
 
   const dealIds = [...new Set(commissions.map((row) => row.deal_id).filter(Boolean))];
-  const dealsResult = dealIds.length
-    ? await db
+  let deals: DealRow[];
+  try {
+    deals = await loadRowsInChunks<DealRow>(dealIds, "commission_deals_failed", (chunk) =>
+      db
         .from("website_deals")
         .select("id,lead_id,package_id,currency,setup_amount,monthly_amount,payment_provider,verified_payment_id,closed_at")
         .eq("tenant_id", session.tenantId)
-        .in("id", dealIds)
-    : { data: [], error: null };
-  if (dealsResult.error) {
-    return NextResponse.json({ ok: false, error: dealsResult.error.message }, { status: 500 });
+        .in("id", chunk)
+        .order("id", { ascending: true }),
+    );
+  } catch (error) {
+    console.error("[website-sales.commissions.deals]", error);
+    return NextResponse.json({ ok: false, error: "commission_deals_unavailable" }, { status: 500 });
   }
-  const deals = (dealsResult.data ?? []) as DealRow[];
   const dealsById = new Map(deals.map((deal) => [deal.id, deal]));
 
   const leadIds = [...new Set(deals.map((deal) => deal.lead_id).filter(Boolean))];
-  const leadsResult = leadIds.length
-    ? await db
+  let leads: Array<{ id: string; data: unknown }>;
+  try {
+    leads = await loadRowsInChunks<Array<{ id: string; data: unknown }>[number]>(
+      leadIds,
+      "commission_leads_failed",
+      (chunk) => db
         .from("tenant_records")
         .select("id,data")
         .eq("tenant_id", session.tenantId)
         .eq("entity_type", "lead")
-        .in("id", leadIds)
-    : { data: [], error: null };
-  if (leadsResult.error) {
-    return NextResponse.json({ ok: false, error: leadsResult.error.message }, { status: 500 });
+        .in("id", chunk)
+        .order("id", { ascending: true }),
+    );
+  } catch (error) {
+    console.error("[website-sales.commissions.leads]", error);
+    return NextResponse.json({ ok: false, error: "commission_leads_unavailable" }, { status: 500 });
   }
-  const leadsById = new Map(
-    ((leadsResult.data ?? []) as Array<{ id: string; data: unknown }>).map((lead) => [lead.id, lead.data]),
-  );
+  const leadsById = new Map(leads.map((lead) => [lead.id, lead.data]));
 
   const receiptIds = [...new Set(deals.map((deal) => deal.verified_payment_id).filter((id): id is string => !!id))];
-  const receiptsResult = receiptIds.length
-    ? await db
+  let receipts: ReceiptRow[];
+  try {
+    receipts = await loadRowsInChunks<ReceiptRow>(receiptIds, "commission_receipts_failed", (chunk) =>
+      db
         .from("website_sales_payment_receipts")
         .select("id,provider,provider_reference,status,amount_cents,currency,verified_at")
         .eq("tenant_id", session.tenantId)
-        .in("id", receiptIds)
-    : { data: [], error: null };
-  if (receiptsResult.error) {
-    return NextResponse.json({ ok: false, error: receiptsResult.error.message }, { status: 500 });
+        .in("id", chunk)
+        .order("id", { ascending: true }),
+    );
+  } catch (error) {
+    console.error("[website-sales.commissions.receipts]", error);
+    return NextResponse.json({ ok: false, error: "commission_receipts_unavailable" }, { status: 500 });
   }
-  const receiptsById = new Map(((receiptsResult.data ?? []) as ReceiptRow[]).map((receipt) => [receipt.id, receipt]));
+  const receiptsById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
 
   const profileIds = [
     ...new Set(
@@ -153,18 +234,22 @@ export async function GET() {
         .filter((id): id is string => !!id),
     ),
   ];
-  const profilesResult = profileIds.length
-    ? await db
+  let profiles: ProfileRow[];
+  try {
+    profiles = await loadRowsInChunks<ProfileRow>(profileIds, "commission_profiles_failed", (chunk) =>
+      db
         .from("user_profiles")
         .select("auth_user_id,email,full_name,display_name,team_role")
         .eq("tenant_id", session.tenantId)
-        .in("auth_user_id", profileIds)
-    : { data: [], error: null };
-  if (profilesResult.error) {
-    return NextResponse.json({ ok: false, error: profilesResult.error.message }, { status: 500 });
+        .in("auth_user_id", chunk)
+        .order("auth_user_id", { ascending: true }),
+    );
+  } catch (error) {
+    console.error("[website-sales.commissions.profiles]", error);
+    return NextResponse.json({ ok: false, error: "commission_profiles_unavailable" }, { status: 500 });
   }
   const profilesById = new Map(
-    ((profilesResult.data ?? []) as ProfileRow[])
+    profiles
       .filter((profile): profile is ProfileRow & { auth_user_id: string } => !!profile.auth_user_id)
       .map((profile) => [profile.auth_user_id, profile]),
   );
@@ -228,8 +313,18 @@ export async function GET() {
       userId: session.userId,
       isAdmin: session.isAdmin,
       canManagePayouts: session.isTrueAdmin,
+      ledgerScope,
     },
     data,
+    summary,
+    page: {
+      returned: data.length,
+      recentLimit: RECENT_LEDGER_LIMIT,
+      recentReturned: listing.recentCount,
+      outstandingCount: listing.outstandingCount,
+      completeOutstanding: true,
+      hasMore: summary.entryCount > data.length,
+    },
   });
 }
 

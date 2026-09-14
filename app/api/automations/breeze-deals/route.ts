@@ -26,7 +26,7 @@ import { NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -97,6 +97,9 @@ function toSafeDeal(row: CandidateRow) {
 }
 
 export async function GET(req: Request) {
+  if (externalTenantSurfacesBlocked()) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const user = await getSessionUser();
   if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   const db = getServiceSupabase();
@@ -109,23 +112,13 @@ export async function GET(req: Request) {
   const sessionTenantId = (profile.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
   if (!sessionTenantId) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
-  // Resolve the SunBiz tenant. Sun operators use their own tenant; empire
-  // operators fall through to the slug lookup (bridge-proxy convention).
-  let dealsTenantId: string | null = null;
+  // Exact-session boundary: access to another workspace elsewhere in the
+  // product is never permission for this endpoint to switch tenants silently.
   const tenant = await getTenant(sessionTenantId);
-  if (tenant && resolveClientProfileSlug(tenant) === "sun") {
-    dealsTenantId = sessionTenantId;
-  } else if (isOperatorEmail(user.email || undefined)) {
-    const sun = await db
-      .from("tenants")
-      .select("id")
-      .eq("slug", "submissions")
-      .maybeSingle();
-    dealsTenantId = (sun.data as { id: string } | null)?.id ?? null;
+  if (!tenant || resolveClientProfileSlug(tenant) !== "sun") {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
-  if (!dealsTenantId) {
-    return NextResponse.json({ ok: false, error: "not_available_for_tenant" }, { status: 403 });
-  }
+  const dealsTenantId = sessionTenantId;
 
   const url = new URL(req.url);
   const statusParam = (url.searchParams.get("status") || "pending_review").toLowerCase();

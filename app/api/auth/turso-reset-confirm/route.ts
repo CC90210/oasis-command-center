@@ -16,6 +16,7 @@ import { createClient } from "@libsql/client";
 import { createHash } from "node:crypto";
 import { rateLimit } from "@/lib/rate-limit";
 import { SESSION_COOKIE, signSession, tursoAuthActive } from "@/lib/turso-auth";
+import { getClientIp } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
   if (!tursoAuthActive()) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const ip = getClientIp(req);
   const gate = rateLimit({ key: `reset-confirm:${ip}`, capacity: 10, refillPerSec: 10 / 900 });
   if (!gate.allowed) {
     return NextResponse.json({ error: "too many attempts" }, { status: 429 });

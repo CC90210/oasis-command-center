@@ -8,15 +8,19 @@ import {
   dispositionPatch,
   mayAgentBookFounder,
   mayAgentQualify,
+  mayAdminSetWebsiteSalesStage,
   mayCloseWebsiteDeal,
   mayRecordDisposition,
   maySendWebsiteProposal,
   mayUseDirectAdvance,
   mayWorkWebsiteSalesLifecycle,
   mayCreditAdminVerifiedCloser,
+  mayRepRunWebsiteSalesDeal,
+  matchesWebsiteSalesPaymentReplay,
   nextOasisLifecycleStage,
   resolveWebsiteSalesCloseParties,
   resolveWebsiteSalesHandoffRep,
+  resolveWebsiteSalesLeadSourceTrack,
   type RepDisposition,
 } from "@/lib/website-sales-workflow";
 import { runStageTransitionHooks } from "@/lib/portals/stage-hooks";
@@ -38,7 +42,11 @@ import {
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
 import { normalizeCollaborators } from "@/lib/lead-scope";
-import { mayOperateOasisDeliveryStage, ownsOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
+  ownsOasisSalesRecord,
+} from "@/lib/oasis-sales-pipeline-policy";
 import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
@@ -140,6 +148,46 @@ async function resolveOpenerAttendee(
   return fullName ? { email, displayName: fullName } : { email };
 }
 
+async function resolveCreditedCloserManager(
+  db: ReturnType<typeof getServiceSupabase>,
+  tenantId: string,
+  closerUserId: string,
+): Promise<string | null> {
+  const closer = await db
+    .from("user_profiles")
+    .select("manager_user_id")
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", closerUserId)
+    .maybeSingle();
+  if (closer.error) throw new Error(`manager_relationship_lookup_failed:${closer.error.message}`);
+  if (!closer.data) throw new Error("credited_closer_profile_missing");
+  const managerUserId = typeof closer.data.manager_user_id === "string"
+    ? closer.data.manager_user_id.trim().toLowerCase()
+    : "";
+  if (!managerUserId) return null;
+  if (!UUID.test(managerUserId) || managerUserId === closerUserId.toLowerCase()) {
+    throw new Error("manager_relationship_invalid");
+  }
+  const manager = await db
+    .from("user_profiles")
+    .select("auth_user_id,team_role,is_owner")
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", managerUserId)
+    .eq("team_role","manager")
+    .maybeSingle();
+  if (
+    manager.error ||
+    !manager.data ||
+    manager.data.is_owner === true ||
+    manager.data.is_owner === 1
+  ) {
+    throw new Error(manager.error
+      ? `manager_relationship_lookup_failed:${manager.error.message}`
+      : "manager_relationship_invalid");
+  }
+  return managerUserId;
+}
+
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ leadId: string }> }) {
   const session = await resolveSessionContext();
   if (!session.ok) return NextResponse.json({ ok:false,error:"unauthorized" },{status:401});
@@ -180,9 +228,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     return NextResponse.json({ok:false,error:"not_cold_outbound_lead"},{status:409});
   }
   const currentStage = typeof current.stage === "string" ? current.stage : "";
+  const leadSourceTrack = resolveWebsiteSalesLeadSourceTrack(current.lead_source_track);
   const assignedToUser = String(current.assigned_to || "").toLowerCase() === session.userId.toLowerCase();
   const attributedToUser = String(current.attributed_rep_user_id || "").toLowerCase() === session.userId.toLowerCase();
   const actorOwnsSalesLead = ownsOasisSalesRecord({ id: row.id, data: current }, session.userId);
+  const actorHoldsDealSeat = mayRepRunWebsiteSalesDeal({
+    actorUserId:session.userId,
+    assignedTo:current.assigned_to,
+    auditHostUserId:current.audit_host_user_id,
+  });
   // A manager's frozen attribution survives a handoff for reporting, but it is
   // not continuing write authority. Managers operate their own assigned lead
   // normally and coach every other roster lead read-only. The explicit
@@ -191,12 +245,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (
     session.teamRole.trim().toLowerCase() === "manager" &&
     !session.isAdmin &&
-    !assignedToUser
+    !assignedToUser &&
+    !actorHoldsDealSeat
   ) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
   const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
-  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisSalesRecord(
+  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(
     { id:row.id, data:current },
     session.userId,
   );
@@ -214,16 +269,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
   if (!session.isAdmin && !builderOwnsDelivery && !assignedToUser && !attributedToUser && !actorOwnsSalesLead) {
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
-  // Role and ownership are both load-bearing. Explicit closers and legacy
-  // full-stack agents may quote or close; explicit openers cannot. Ownership
-  // may come from current assignment or frozen attribution, so a legacy
-  // full-stack rep keeps the ability to close a deal they originated.
-  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && (assignedToUser || attributedToUser || actorOwnsSalesLead);
+  // Role and current deal-seat ownership are both load-bearing. Frozen opener
+  // attribution remains read access and 15% credit after handoff; it is not
+  // permission to quote, record payment, or take the closer's commission.
+  const repMayRunDeal = mayQuoteAndClose(session.teamRole) && actorHoldsDealSeat;
   const body = await req.json().catch(() => null) as Record<string,unknown>|null;
   if (!body || typeof body.action !== "string") return NextResponse.json({ok:false,error:"invalid_body"},{status:400});
-  if (builderMayRunDelivery && !builderOnOwnSalesLead && body.action !== "advance") {
-    return NextResponse.json({ok:false,error:"builder_delivery_action_only"},{status:403});
-  }
   const trackedAction = ["advance","disposition","qualify","book_founder","founder_meeting_sms_consent","complete_audit","set_stage","proposal","create_payment_link","deal_outcome","record_payment"].includes(body.action);
   const requestId = typeof body.requestId === "string" && UUID.test(body.requestId) ? body.requestId : null;
   if (trackedAction && !requestId) return NextResponse.json({ok:false,error:"request_id_required"},{status:400});
@@ -251,6 +302,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         metadata.deal_outcome !== body.outcome
       ) {
         return NextResponse.json({ok:false,error:"request_id_reused_for_different_outcome"},{status:409});
+      }
+      if (
+        body.action === "record_payment" &&
+        !matchesWebsiteSalesPaymentReplay(body, metadata)
+      ) {
+        return NextResponse.json({ok:false,error:"payment_request_replay_mismatch"},{status:409});
       }
       if (body.action === "book_founder") {
         const founderUserId = typeof body.founderUserId === "string" ? body.founderUserId.trim() : "";
@@ -424,6 +481,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         ...(checkout ? { checkoutReference:checkout.reference, checkoutUrl:checkout.url } : {}),
       });
     }
+  }
+  // An idempotent replay is a read of the already-persisted result. Run that
+  // before applying the builder's post-close delivery-only mutation gate: a
+  // selling builder may have handed fulfillment to another builder between
+  // the original write and an uncertain-response retry.
+  if (builderMayRunDelivery && !builderOnOwnSalesLead && body.action !== "advance") {
+    return NextResponse.json({ok:false,error:"builder_delivery_action_only"},{status:403});
   }
   if (trackedAction && typeof body.expectedStage !== "string") {
     return NextResponse.json({ok:false,error:"expected_stage_required"},{status:400});
@@ -796,20 +860,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     // Reps get the missing Assigned -> Attempting Contact edge. Later rep
     // edges deliberately stay behind their structured outcome, qualification,
     // and founder-handoff gates. Admins can continue the full lifecycle.
-    if (!mayUseDirectAdvance(currentStage, session.isAdmin, repMayRunDeal) && !builderMayRunDelivery) {
+    if (!mayUseDirectAdvance(currentStage, session.isAdmin, repMayRunDeal) && !builderOwnsDelivery) {
       return NextResponse.json({ok:false,error:"use_structured_lifecycle_action"},{status:409});
     }
     patch = { stage:nextStage };
   } else if (body.action === "set_stage") {
-    // Direct admin stage control (2026-08-25 operator plan): a true admin may
-    // move a lead to ANY valid stage from the header dropdown, including the
-    // structured targets. Downstream guards (stored_proposal_incomplete,
-    // verified_meeting_required, builder_handoff_not_ready) still fail loudly
-    // when a server-generated artifact is missing, so out-of-order moves can
-    // never corrupt the payment or meeting ledgers — they just surface a
-    // readable error instead of being silently blocked here.
+    // Admin repair is limited to ordinary sales stages before payment. Won
+    // proves verified full collection and delivery stages prove explicit
+    // lifecycle handoffs; neither fact can be minted OR erased from the generic
+    // dropdown while its deal and commission ledger remain live.
     if (!WEBSITE_SALES_STAGES.includes(body.stage as never)) return NextResponse.json({ok:false,error:"invalid_stage"},{status:400});
     if (!session.isAdmin) return NextResponse.json({ok:false,error:"rep_stage_forbidden"},{status:403});
+    if (!mayAdminSetWebsiteSalesStage(currentStage, body.stage)) {
+      return NextResponse.json({ok:false,error:"use_structured_lifecycle_action"},{status:409});
+    }
     if (currentStage === body.stage) return NextResponse.json({ok:true,noop:true,data:current});
     patch = { stage:body.stage };
   } else if (body.action === "proposal") {
@@ -938,7 +1002,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         ? current.audit_host_role.trim().toLowerCase()
         : "";
       const closerCandidates = [auditHostUserId, assignedUserId]
-        .filter((value): value is string => typeof value === "string" && UUID.test(value) && value !== frozenOpener)
+        .filter((value): value is string => typeof value === "string" && UUID.test(value))
         .filter((value, index, list) => list.indexOf(value) === index);
       for (const frozenCloser of closerCandidates) {
         const closerProfile = await db
@@ -947,8 +1011,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           .eq("tenant_id",session.tenantId)
           .eq("auth_user_id",frozenCloser)
           .maybeSingle();
+        if (closerProfile.error) {
+          return NextResponse.json({
+            ok:false,
+            error:"manager_relationship_lookup_failed",
+            detail:closerProfile.error.message,
+          },{status:503});
+        }
+        if (!closerProfile.data) {
+          return NextResponse.json({ok:false,error:"credited_closer_profile_missing"},{status:409});
+        }
         if (
-          closerProfile.data &&
           mayCreditAdminVerifiedCloser({
             candidateUserId:frozenCloser,
             frozenOpenerUserId:frozenOpener,
@@ -973,6 +1046,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     });
     if (!closeParties || !UUID.test(closeParties.closerUserId) || (closeParties.openerUserId !== null && !UUID.test(closeParties.openerUserId))) {
       return NextResponse.json({ok:false,error:"missing_close_attribution"},{status:409});
+    }
+    let managerUserId: string | null = null;
+    if (closeParties.closedByRep) {
+      try {
+        managerUserId = await resolveCreditedCloserManager(
+          db,
+          session.tenantId,
+          closeParties.closerUserId,
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "manager_relationship_invalid";
+        return NextResponse.json({
+          ok:false,
+          error:detail.startsWith("manager_relationship_lookup_failed")
+            ? "manager_relationship_lookup_failed"
+            : detail,
+          detail,
+        },{status:detail.startsWith("manager_relationship_lookup_failed") ? 500 : 409});
+      }
     }
     const builderUserId = typeof body.builderUserId === "string" ? body.builderUserId.trim() : "";
     const packageId = current.recommended_tier as WebsitePackageId;
@@ -1202,7 +1294,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
         p_metadata:{
           payment_plan_id:paymentPlanId,
           verified_payment_id:verifiedPaymentId,
+          payment_provider:verifiedPayment.provider,
           provider_reference:verifiedPayment.reference,
+          currency:verifiedPayment.currency,
+          builder_user_id:typeof body.builderUserId === "string" && body.builderUserId.trim()
+            ? body.builderUserId.trim().toLowerCase()
+            : null,
           installment_kind:"deposit",
           installment_amount_cents:verifiedPayment.amountCents,
           collected_setup_amount_cents:collectedCents,
@@ -1248,7 +1345,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       .eq("team_role","builder")
       .maybeSingle();
     if (!builder.data) return NextResponse.json({ok:false,error:"builder_not_authorized"},{status:400});
-    // Comp v3 resolves the closer separately from the frozen opener so a
+    // Comp v4 resolves the closer separately from the frozen opener so a
     // two-person handoff keeps both ledger parties. The RPC re-verifies role,
     // assignment, attribution, and founder authority; this flag grants nothing
     // by itself.
@@ -1258,7 +1355,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     // themselves (self-run deal with no founder in the loop).
     const bookedFounder = typeof current.booked_founder === "string" && UUID.test(current.booked_founder) ? current.booked_founder : null;
     const founderUserId = closedByRep ? (bookedFounder ?? session.userId) : session.userId;
-    const finalStage = "onboarding";
+    const finalStage = "won";
     const collaborators = [
       openerUserId,
       closerUserId,
@@ -1268,7 +1365,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       .filter((userId, index, list) => list.indexOf(userId) === index)
       .slice(0, 5);
     const closeContent = [
-      `Payment verified and fulfillment opened: ${WEBSITE_PACKAGES[packageId].name}.`,
+      `Payment verified and commission accrued: ${WEBSITE_PACKAGES[packageId].name}.`,
       `${currency} ${setupAmount} collected across ${activeReceipts.length} verified receipt(s) against the quoted setup + ${monthlyAmount}/month.`,
       `Assigned builder: ${builderUserId}.`,
       transitionNote ? `Note: ${transitionNote}` : "",
@@ -1305,6 +1402,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       opener_user_id:openerUserId,
       closer_user_id:closedByRep ? closerUserId : null,
       builder_user_id:builderUserId,
+      lead_source_track:leadSourceTrack,
       closed_outcome:"won",
       package_id:packageId,
       quoted_setup_amount:setupAmount,
@@ -1314,6 +1412,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       monthly_amount:monthlyAmount,
       currency,
       payment_provider:verifiedPayment.provider,
+      provider_reference:verifiedPayment.reference,
+      installment_amount_cents:verifiedPayment.amountCents,
       verified_payment_id:verifiedPaymentId,
     };
     const result = await db.rpc("close_website_deal", {
@@ -1334,6 +1434,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       p_payment_plan_id:paymentPlanId,
       p_closed_by_rep:closedByRep,
       p_builder_user_id:builderUserId,
+      p_manager_user_id:managerUserId,
+      p_lead_source_track:leadSourceTrack,
       p_expected_stage:currentStage,
       p_expected_owner_id:typeof current.assigned_to === "string" ? current.assigned_to : null,
       p_request_id:requestId,
@@ -1362,7 +1464,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       data:{...current,...closeLeadPatch,stage:finalStage},
       transitions:[{field:"stage",from:currentStage,to:finalStage}],
     });
-    return NextResponse.json({ok:true,result:result.data,touchAt:occurredAt,builderUserId});
+    return NextResponse.json({
+      ok:true,
+      result:result.data,
+      touchAt:occurredAt,
+      builderUserId,
+      stage:finalStage,
+      commissionAccrued:true,
+      fulfillmentOpened:false,
+    });
   } else return NextResponse.json({ok:false,error:"unknown_action"},{status:400});
 
   // A lifecycle move is a touch by product definition. Persist the canonical

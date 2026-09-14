@@ -366,7 +366,7 @@ export function LeadLifecycleActions({
   const initialPackageId =
     initialOffer?.packageId && initialOffer.packageId in WEBSITE_PACKAGES
       ? (initialOffer.packageId as WebsitePackageId)
-      : "essential";
+      : "starter";
   const [packageId, setPackageId] = useState<WebsitePackageId>(initialPackageId);
   const [setupAmount, setSetupAmount] = useState(
     String(initialOffer?.setupAmount ?? WEBSITE_PACKAGES[initialPackageId].setupFloor),
@@ -390,6 +390,9 @@ export function LeadLifecycleActions({
   const [builderUserId, setBuilderUserId] = useState(initialOffer?.builderUserId || "");
   const [paymentProvider, setPaymentProvider] = useState<"stripe" | "manual">("stripe");
   const [manualPaymentConfirmed, setManualPaymentConfirmed] = useState(false);
+  // Keep one key across an uncertain network retry. It changes only after the
+  // server confirms the installment, so a lost response cannot book twice.
+  const [paymentRequestId, setPaymentRequestId] = useState(() => crypto.randomUUID());
 
   // Whether a shared OASIS workspace calendar can carry a booking for a host
   // who has not connected their own Google account. A DIFFERENT fact from
@@ -442,7 +445,7 @@ export function LeadLifecycleActions({
   const nextMeta = nextStage ? findOasisStage("lead", nextStage) : null;
   const mayAdvance =
     mayUseDirectAdvance(currentStage, canManage, canRunDeal) ||
-    (canRunDelivery && ["onboarding", "in_build", "client_review"].includes(currentStage));
+    (canRunDelivery && ["won", "onboarding", "in_build", "client_review"].includes(currentStage));
   const disabled = busy || refreshPending;
   const checkoutHref = safeStripeCheckoutUrl(checkoutUrl);
   const paymentCompletesSetup =
@@ -687,6 +690,25 @@ export function LeadLifecycleActions({
     );
     if (result?.checkoutReference) setPaymentReference(result.checkoutReference);
     if (result?.checkoutUrl) setCheckoutUrl(result.checkoutUrl);
+  }
+
+  async function recordPayment() {
+    const result = await patch(
+      {
+        action: "record_payment",
+        requestId: paymentRequestId,
+        paymentProvider,
+        paymentReference: paymentReference.trim(),
+        paymentAmount: Number(paymentDueAmount),
+        paymentCurrency: currency,
+        manualPaymentConfirmed,
+        builderUserId,
+      },
+      paymentCompletesSetup
+        ? "Setup paid in full. Commission accrued once; the lead is in Won and the builder is assigned for onboarding."
+        : "Deposit verified. The balance is ready, with commission and fulfillment still locked.",
+    );
+    if (result) setPaymentRequestId(crypto.randomUUID());
   }
 
   async function recordDealOutcome() {
@@ -1015,10 +1037,9 @@ export function LeadLifecycleActions({
             <div>
               <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">1 · Place the call</div>
               <LeadActionToolbar
-                leadId={leadId}
                 displayName={displayLeadName}
                 phone={leadPhone}
-                onCallAccepted={() => {
+                onDialerOpened={() => {
                   setCallAccepted(true);
                   setCallOutcome("");
                 }}
@@ -1044,7 +1065,7 @@ export function LeadLifecycleActions({
             </div>
             <fieldset disabled={!callAccepted || disabled} className="space-y-4 disabled:opacity-50">
               <legend className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">2 · Choose one outcome</legend>
-              {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after the call provider accepts the call.</p> : null}
+              {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after you open the dialer or confirm the call already happened.</p> : null}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                 {[["attempted", "No answer"], ["voicemail", "Voicemail left"], ["connected", "Connected"], ["lost", "Close as lost"]].map(([value, label]) => (
                   <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium ${callOutcome === value ? "border-accent/60 bg-accent/10 text-fg" : "border-bg-border bg-bg-elev/25 text-fg-muted"}`}>
@@ -1108,7 +1129,7 @@ export function LeadLifecycleActions({
                 "Decision-maker confirmed",
                 "Website problem confirmed",
                 "Timing confirmed",
-                "Open to $2,000+",
+                "Open to $500 setup + $150/month",
               ].map((label, index) => (
                 <QualificationGateCard
                   key={label}
@@ -1861,25 +1882,10 @@ export function LeadLifecycleActions({
                 (paymentProvider === "stripe" && !checkoutHref) ||
                 (paymentProvider === "manual" && (!canManage || !manualPaymentConfirmed))
               }
-              onClick={() =>
-                patch(
-                  {
-                    action: "record_payment",
-                    paymentProvider,
-                    paymentReference: paymentReference.trim(),
-                    paymentAmount: Number(paymentDueAmount),
-                    paymentCurrency: currency,
-                    manualPaymentConfirmed,
-                    builderUserId,
-                  },
-                  paymentCompletesSetup
-                    ? "Setup paid in full. Commission accrued once and the builder handoff opened."
-                    : "Deposit verified. The balance is ready, with commission and fulfillment still locked.",
-                )
-              }
+              onClick={() => void recordPayment()}
               className="btn-primary !px-4 !py-2 text-sm"
             >
-              {paymentCompletesSetup ? "Verify balance & start fulfillment" : "Verify setup deposit"}
+              {paymentCompletesSetup ? "Verify balance & mark Won" : "Verify setup deposit"}
             </button>
           </div>
           <details className="rounded-lg border border-bg-border px-3 py-2 text-xs text-fg-muted">
@@ -2298,6 +2304,10 @@ function readableError(code: string): string {
     stage_changed_refresh: "This lead moved in another session. Refresh before continuing.",
     request_id_reused_for_different_lead: "This handoff request belongs to another lead. Refresh and try again.",
     request_id_reused_for_different_action: "This handoff request was already used for another action. Refresh and try again.",
+    payment_request_replay_mismatch: "This payment was already recorded with different details. Refresh the lead before recording another payment.",
+    manager_relationship_invalid: "The closer's manager record is not a valid active manager. Ask an admin to correct it before closing.",
+    manager_relationship_lookup_failed: "The closer's manager record could not be read. Nothing was closed; retry in a moment.",
+    credited_closer_profile_missing: "The credited closer has no profile in this workspace. Ask an admin to restore it before closing.",
   };
   return known[code] || code.replaceAll("_", " ");
 }

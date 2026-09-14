@@ -92,6 +92,7 @@ export type MemberRow = {
   admin_access: boolean;
   invited_by: string | null;
   joined_at: string;
+  manager_user_id?: string | null;
 };
 
 function cleanMemberName(value: string | null | undefined): string | null {
@@ -294,12 +295,15 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
  * intentionally excluded, so this list can never authorize unassigned,
  * founder, or system records.
  */
-export async function getOasisSalesRepRoster(tenantId: string): Promise<MemberRow[]> {
+export async function getOasisSalesRepRoster(
+  tenantId: string,
+  managerUserId?: string,
+): Promise<MemberRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
     .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at",
+      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id",
     )
     .eq("tenant_id", tenantId)
     .order("joined_at", { ascending: true });
@@ -309,12 +313,19 @@ export async function getOasisSalesRepRoster(tenantId: string): Promise<MemberRo
   // query to sales roles first could discard the authoritative owner/admin row
   // and retain a stale manager/agent duplicate, silently admitting a founder
   // identity into the manager's cross-rep read boundary.
-  return canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
+  const roster = canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
     (member) =>
       Boolean(member.auth_user_id?.trim()) &&
       member.is_owner !== true &&
       member.admin_access !== true &&
       isOasisPipelineRepRole(member.team_role),
+  );
+  if (managerUserId === undefined) return roster;
+  const managerId = managerUserId.trim().toLowerCase();
+  if (!managerId) return [];
+  return roster.filter((member) =>
+    member.auth_user_id?.trim().toLowerCase() !== managerId &&
+    member.manager_user_id?.trim().toLowerCase() === managerId,
   );
 }
 

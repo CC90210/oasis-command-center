@@ -49,7 +49,7 @@ import { invalidate } from "./cache";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import {
   availability, factsFrom, isInBookOf, planClaim, claimPatch, releasePatch,
-  MAX_LEADS_PER_REP, type ClaimPlan,
+  ACTIVE_PROSPECT_CLAIM_STAGES, MAX_LEADS_PER_REP, type ClaimPlan,
 } from "./claim";
 
 /** How many leads a rep currently holds. Counts rows whose assigned_to is this
@@ -211,7 +211,7 @@ export async function claimLeads(
     const excess = after - MAX_LEADS_PER_REP;
     if (excess > 0) {
       const giveBack = claimed.slice(-excess);
-      await releaseLeads(userId, false, giveBack);
+      await releaseLeads(userId, false, giveBack, false);
       overflowRefused = giveBack.map((id) => ({ id, reason: "at_capacity" as const }));
       for (const id of giveBack) {
         const i = claimed.indexOf(id);
@@ -287,8 +287,9 @@ export async function releaseLeads(
   userId: string,
   isAdmin: boolean,
   leadIds: string[],
-): Promise<{ released: string[]; refused: string[] }> {
-  if (leadIds.length === 0) return { released: [], refused: [] };
+  trackRelease = true,
+): Promise<{ released: string[]; refused: string[]; trackingFailed: string[] }> {
+  if (leadIds.length === 0) return { released: [], refused: [], trackingFailed: [] };
   const db = getServiceSupabase();
 
   const { data, error } = await db
@@ -306,6 +307,11 @@ export async function releaseLeads(
 
   const allowed = rows.filter((r) => {
     const facts = factsFrom(r.data || {});
+    // A manual release is a prospecting action, not a lifecycle repair tool.
+    // Missing stages remain releasable for legacy pool rows, but founder
+    // handoff, paid, lost, and delivery records keep their durable owner.
+    const stage = facts.stage?.trim().toLowerCase() || "";
+    if (stage && !ACTIVE_PROSPECT_CLAIM_STAGES.has(stage)) return false;
     if (isAdmin) return Boolean(facts.assignedTo);
     return isInBookOf(facts, userId);
   });
@@ -350,7 +356,45 @@ export async function releaseLeads(
   }
 
   if (released.length > 0) invalidate("web-leads:leads");
-  return { released, refused };
+
+  let trackingFailed: string[] = [];
+  if (trackRelease && released.length > 0) {
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const interactions = released.map((id) => {
+      const previous = factsFrom(byId.get(id)?.data || {});
+      const content = "Lead released to the shared prospect pool.";
+      return {
+        tenant_id: WEBDEV_TENANT_ID,
+        lead_id: id,
+        type: "lead_reassigned",
+        channel: "system",
+        direction: "internal",
+        agent_source: "web_leads_release",
+        actor_user_id: userId,
+        subject: "Lead released",
+        content,
+        content_preview: content,
+        created_at: nowIso,
+        metadata: {
+          action: "release",
+          from_assigned_to: previous.assignedTo,
+          assigned_to: null,
+          from_stage: previous.stage,
+        },
+      };
+    });
+    const tracking = await db.from("lead_interactions").insert(interactions);
+    if (tracking.error) {
+      console.error("[web-leads.release] ownership cleared but interaction tracking failed", {
+        leadIds: released,
+        userId,
+        error: tracking.error.message,
+      });
+      trackingFailed = [...released];
+    }
+  }
+
+  return { released, refused, trackingFailed };
 }
 
 /** Availability for a single already-read lead. Exported so the list read can

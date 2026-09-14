@@ -13,27 +13,17 @@
  * calculateCommission() rounds with `Math.round(x * rate * 100) / 100`. That is
  * survivable for ONE payee. This model pays up to four people from one pot and
  * then hands the remainder to a manager, so a half-cent of float drift
- * compounds across the split and lands in somebody's pay. A rate of 30% is 3000
+ * compounds across the split and lands in somebody's pay. A rate of 25% is 2500
  * bps here, and a $4,000 deal is 400000 cents; both are exact.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * THE TWO TRACKS (CC, 2026-08-20)
+ * COMP V4 LADDER (CC, 2026-09-14)
  * ─────────────────────────────────────────────────────────────────────────────
- * Who sourced the lead decides which ladder applies. That is the whole reason
- * an opener is 20% on one line of CC's note and 25% on another — the numbers
- * were never inconsistent, they describe different tracks.
- *
- *   COMPANY-SOURCED   the OASIS funnel produced the lead.
- *                     opener 20% · closer 30% · builder flat · manager 20% of
- *                     what OASIS retains.
- *
- *   SELF-SOURCED      the rep brought it. A ladder, by how many stages one
- *                     person owns: 25% hand-off · 40% open+close · 70%
- *                     open+close+build · 85% an outside client run on OASIS
- *                     tooling.
- *
- * Both ladders are monotonic — doing more always pays more — and a self-sourced
- * opener (25%) out-earns a company-fed one (20%), which is the point.
+ * The standard ladder is one clear promise: open 15%, close 25%, and find plus
+ * close 35%. The durable lead_source_track decides whether one operator can
+ * receive the find-plus-close line; it never changes the opener or specialist
+ * closer base rates. The existing 70% sourced + closed + built special and 85%
+ * external-harness licence remain explicit exceptions.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * WHAT THIS FILE DOES NOT DECIDE
@@ -45,9 +35,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * WIRED. close_website_deal() in lib/turso-rpc-shim.ts pays from this module,
  * and lib/contracts/templates.ts states these rates in the agreements people
- * sign. calculateCommission() in lib/website-sales.ts is no longer on the close
- * path — it survives only as the v2 reference and for rows stamped
- * comp_version=2.
+ * sign. Historical v2 rows keep their stored amounts and rates; no v2
+ * calculator remains active in the application.
  *
  * THE NUMBERS ARE PUBLISHED, so changing one here changes what a person is
  * told as well as what they are paid:
@@ -68,13 +57,14 @@ export type LeadSourceTrack = "company" | "self";
 /**
  * Bumped whenever the ARITHMETIC changes, and written onto every ledger row.
  *
- * 146 shipped deal-size tiers (10/12.5/15%). 147 replaced them with
- * who-closed (20/30%). This is the third model, and the first that pays more
- * than one person per deal. Rows must record which one produced them: without
+ * 146 shipped deal-size tiers (10/12.5/15%). 147 replaced them with the
+ * retired v2 single-payee model. V3 added multiple parties; v4 establishes the
+ * 15/25/35 standard ladder and the $500 Starter book price. Rows must record
+ * which model produced them: without
  * it, a re-close of an old deal would be re-rated under today's rules, and a
  * 2026 payout dispute could not be reconstructed.
  */
-export const COMP_VERSION = 3 as const;
+export const COMP_VERSION = 4 as const;
 
 /** Basis points. 10_000 bps = 100%. */
 export type Bps = number;
@@ -92,22 +82,19 @@ export const BPS_SCALE = 10_000 as const;
  */
 export const MAX_HUMAN_PAYOUT_BPS: Bps = 8_500;
 
-/** Company-sourced: the Oasis funnel produced this lead. */
+/** Company-sourced: the Oasis funnel produced this lead. Finding credit is not
+ * available on this track, so even a sole commissioned seller is a closer. */
 export const COMPANY_TRACK_BPS = {
-  opener: 2_000,
-  closer: 3_000,
-  /** One person did both on a company lead. Deliberately NOT 2000+3000: the
-   *  specialist rates are the price of specialist labour, and a single operator
-   *  costs OASIS less handoff. Still well above either rate alone. */
-  full_stack: 4_000,
+  opener: 1_500,
+  closer: 2_500,
 } as const;
 
-/** Self-sourced: the rep brought the deal. CC's ladder, verbatim. */
+/** Self-sourced: standard ladder plus the retained build/licence specials. */
 export const SELF_TRACK_BPS = {
-  /** Sourced it, handed it to a closer. A referral with nurture attached. */
-  opener: 2_500,
+  /** Opened it and handed it to a closer. */
+  opener: 1_500,
   /** Sourced, opened and closed it. */
-  open_close: 4_000,
+  open_close: 3_500,
   /** Sourced, closed, and built it. OASIS keeps 30% for the harness. */
   full_stack: 7_000,
   /** Their own client, run on OASIS tooling. A licence, not a commission —
@@ -125,8 +112,8 @@ export const MANAGER_OVERRIDE_BPS: Bps = 2_000;
  *  to the SALES portion only — never to a builder's flat fee, never to the
  *  manager override. Ordered high-to-low; first match wins. */
 export const VOLUME_ACCELERATOR: ReadonlyArray<{ fromCents: number; bonusBps: Bps }> = [
-  { fromCents: 2_500_00, bonusBps: 500 },
-  { fromCents: 1_000_00, bonusBps: 200 },
+  { fromCents: 25_000_00, bonusBps: 500 },
+  { fromCents: 10_000_00, bonusBps: 200 },
   { fromCents: 0, bonusBps: 0 },
 ];
 
@@ -140,8 +127,9 @@ export const BELOW_BOOK_PENALTY_BPS: Bps = 500;
 export const BELOW_FLOOR_PENALTY_BPS: Bps = 1_000;
 
 /**
- * Below this collected setup, specialist splits are unavailable and the deal is
- * full-stack only.
+ * Below the minimum Starter book price, specialist splits are unavailable and
+ * a founder-approved exception is full-stack only. At $500, both the opener
+ * and closer accrue their exact shares.
  *
  * THIS IS NOT A COMMISSION BAN, which is what it was in 147:
  *
@@ -149,12 +137,10 @@ export const BELOW_FLOOR_PENALTY_BPS: Bps = 1_000;
  *     commission floor'
  *
  * That threw, so a $500 website could not be closed at all — and CC sells them.
- * The economics that motivated the floor are real, though: two specialists
- * splitting a $500 deal earn $100 and $150, which is not worth either person's
- * time and leaves OASIS almost nothing. The answer is that small tickets are
- * one person's job, not that they are forbidden.
+ * The old $2,000 split threshold contradicted the live Starter offer and could
+ * silently drop credited specialists. V4 aligns the threshold to Starter.
  */
-export const SPECIALIST_SPLIT_FLOOR_CENTS = 2_000_00;
+export const SPECIALIST_SPLIT_FLOOR_CENTS = 500_00;
 
 export type PackageTier = {
   /** Below this, founder approval is required and the rate drops. */
@@ -168,33 +154,16 @@ export type PackageTier = {
 /**
  * The price book.
  *
- * ⚠ RECONCILIATION NEEDED — see the note at the end of this comment.
- *
- * `floorCents` mirrors the `setupFloor` values already live in
- * lib/website-sales.ts, so nothing here contradicts what the quote validator
- * already enforces. `bookCents` and `builderFeeCents` are NEW: 147 had no
- * concept of a standard price, only a floor, so "sold above book" had nothing
- * to measure against.
- *
- * `starter` is also new. lib/website-sales.ts has no package under $2,000, and
- * website_deals.package_id CHECKs to ('essential','growth','authority'), so a
- * $500 website was unrepresentable — the tier exists because CC sells them.
- *
- * DATA, NOT CONSTANTS-IN-LOGIC: every rate function below takes the tier as an
+ * `floorCents` mirrors the sellable packages in lib/website-sales.ts. Starter
+ * is $500 setup at both floor and book, so selling the standard offer does not
+ * incur a discount penalty. DATA, NOT CONSTANTS-IN-LOGIC: every rate function below takes the tier as an
  * argument. Changing a price is an edit to this object and nothing else, which
  * matters because prices move and redeploying arithmetic to change one is how
  * comp models rot.
  *
- * ⚠ The book prices CC approved on 2026-08-20 (Starter 1,500 / Growth 4,000 /
- * Premium 10,000, floors 500 / 2,500 / 6,000) were approved BEFORE anyone had
- * read lib/website-sales.ts, which already carried its own ladder
- * (2,000 / 3,500 / 5,000 floors). Rather than silently overwrite live floors
- * with approved-but-uninformed ones, the floors here stay as the code has them
- * and the book prices sit above each floor at CC's intended spread. This needs
- * ten seconds of CC's attention, not a guess — flagged, not buried.
  */
 export const PRICE_BOOK: Readonly<Record<string, PackageTier>> = {
-  starter: { floorCents: 500_00, bookCents: 1_500_00, builderFeeCents: 150_00 },
+  starter: { floorCents: 500_00, bookCents: 500_00, builderFeeCents: 150_00 },
   essential: { floorCents: 2_000_00, bookCents: 3_000_00, builderFeeCents: 300_00 },
   growth: { floorCents: 3_500_00, bookCents: 5_000_00, builderFeeCents: 500_00 },
   authority: { floorCents: 5_000_00, bookCents: 8_000_00, builderFeeCents: 1_000_00 },
@@ -254,7 +223,10 @@ export function baseRateBps(args: {
   }
   if (role === "opener") return COMPANY_TRACK_BPS.opener;
   if (role === "closer") return COMPANY_TRACK_BPS.closer;
-  if (role === "full_stack") return COMPANY_TRACK_BPS.full_stack;
+  // `full_stack` carries finding credit and is therefore self-track only. A
+  // company-fed sole seller must be constructed as `closer`, which preserves
+  // both the 25% arithmetic and the truthful ledger label.
+  if (role === "full_stack") return 0;
   return 0;
 }
 
@@ -430,15 +402,30 @@ export function computePayout(deal: DealInput): PayoutPlan {
   // 7. The manager, off what OASIS actually retains.
   const retainedBeforeManager = collected - humanTotal;
   if (deal.managerUserId && retainedBeforeManager > 0) {
-    const amount = applyBps(retainedBeforeManager, MANAGER_OVERRIDE_BPS);
-    if (amount > 0) {
+    const nominalAmount = applyBps(retainedBeforeManager, MANAGER_OVERRIDE_BPS);
+    if (nominalAmount > 0) {
+      // The ceiling covers EVERY human, including the manager. Preserve the
+      // teammate lines already earned and cap only the override to remaining
+      // headroom. A zero line is retained when fully clipped so the ledger says
+      // why the manager received nothing instead of silently dropping them.
+      const remainingHeadroom = Math.max(0, ceiling - humanTotal);
+      const amount = Math.min(nominalAmount, remainingHeadroom);
+      const managerNotes = [
+        `${MANAGER_OVERRIDE_BPS}bps of OASIS retained (${retainedBeforeManager}c), not of gross`,
+      ];
+      if (amount < nominalAmount) {
+        guardrailApplied = true;
+        managerNotes.push(
+          `guardrail: manager override clipped from ${nominalAmount}c to ${amount}c (payout cap ${MAX_HUMAN_PAYOUT_BPS}bps)`,
+        );
+      }
       lines.push({
         userId: deal.managerUserId,
         role: "manager",
         basisCents: retainedBeforeManager,
         rateBps: MANAGER_OVERRIDE_BPS,
         amountCents: amount,
-        notes: [`${MANAGER_OVERRIDE_BPS}bps of OASIS retained (${retainedBeforeManager}c), not of gross`],
+        notes: managerNotes,
       });
       humanTotal += amount;
     }

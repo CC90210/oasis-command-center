@@ -42,25 +42,21 @@ import {
   COMPANY_TRACK_BPS,
   SELF_TRACK_BPS,
   PRICE_BOOK,
-  SPECIALIST_SPLIT_FLOOR_CENTS,
 } from "@/lib/website-sales-comp";
 import { operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import { timeAgo, truncate } from "@/lib/fmt";
 import { contactNameFor } from "@/lib/leads/canonical-lead-fields";
+import {
+  formatCommissionAmounts,
+  loadWebsiteSalesCommissionSummary,
+  type CommissionAmountStatus,
+  type WebsiteSalesCommissionSummary,
+} from "@/lib/website-sales-commission-summary";
 
 type LeadData = Record<string, unknown>;
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 type Read<T> = { ok: true; value: T } | { ok: false };
-
-type CommissionRow = {
-  id: string;
-  amount: number | null;
-  rate: number | null;
-  status: string | null;
-  collected_setup_amount: number | null;
-  created_at: string | null;
-};
 
 function str(data: LeadData, key: string): string {
   const v = data[key];
@@ -120,21 +116,15 @@ async function loadMyQueue(
 async function loadMyCommissions(
   tenantId: string,
   userId: string,
-): Promise<Read<CommissionRow[]>> {
+): Promise<Read<WebsiteSalesCommissionSummary>> {
   try {
-    const db = getServiceSupabase();
-    const result = await db
-      .from("website_sales_commissions")
-      .select("id,amount,rate,status,collected_setup_amount,created_at")
-      .eq("tenant_id", tenantId)
-      .eq("rep_user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(200);
-    if (result.error) {
-      console.error("[rep-today.commissions]", result.error);
-      return { ok: false };
-    }
-    return { ok: true, value: (result.data || []) as CommissionRow[] };
+    return {
+      ok: true,
+      value: await loadWebsiteSalesCommissionSummary(getServiceSupabase(), {
+        tenantId,
+        repUserId: userId,
+      }),
+    };
   } catch (err) {
     console.error("[rep-today.commissions]", err);
     return { ok: false };
@@ -196,23 +186,21 @@ export async function RepToday({
 
   const meetingsBooked = byStage.get("founder_meeting_booked") || 0;
 
-  const commissions = commissionRead.ok ? commissionRead.value : [];
-  const sumOf = (statuses: string[]) =>
-    commissions
-      .filter((c) => statuses.includes((c.status || "").toLowerCase()))
-      .reduce((n, c) => n + (Number(c.amount) || 0), 0);
-  const accrued = sumOf(["accrued"]);
-  const approved = sumOf(["approved"]);
-  const paid = sumOf(["paid"]);
   // Em dash on a failed read. See the file header: a zero here is a claim about
   // this person's pay, and we do not make claims we could not verify.
-  const commissionValue = (n: number) => (commissionRead.ok ? money(n) : "—");
+  const commissionValue = (statuses: CommissionAmountStatus[]) =>
+    commissionRead.ok ? formatCommissionAmounts(commissionRead.value.totals, statuses) : "—";
+  const accruedValue = commissionValue(["accrued"]);
+  const approvedValue = commissionValue(["approved"]);
+  const paidValue = commissionValue(["paid"]);
+  const hasAccrued = commissionRead.ok && commissionRead.value.totals.some((total) => total.accruedCents > 0);
 
   // From the payout engine, not retyped. This card is what a rep believes
   // they earn; a number here the engine does not pay is a promise broken to
   // the person least able to audit it.
   const openerPct = Math.round(COMPANY_TRACK_BPS.opener / 100);
   const closerPct = Math.round(COMPANY_TRACK_BPS.closer / 100);
+  const finderCloserPct = Math.round(SELF_TRACK_BPS.open_close / 100);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -267,11 +255,11 @@ export async function RepToday({
         />
         <Stat
           label="Commission accrued"
-          value={commissionValue(accrued)}
+          value={accruedValue}
           hint={
             !commissionRead.ok
               ? "could not read your commission"
-              : accrued > 0
+              : hasAccrued
                 ? "awaiting founder approval"
                 : "nothing accrued yet"
           }
@@ -410,25 +398,25 @@ export async function RepToday({
 
           <Card
             title="What you have earned"
-            subtitle={commissionRead.ok ? "your rows only" : "read failed"}
+            subtitle={commissionRead.ok ? "your complete ledger · currencies shown separately" : "read failed"}
           >
             {!commissionRead.ok ? (
               <EmptyState message="Your commission ledger could not be read. This is a fault on our side — it does not mean nothing was recorded." />
-            ) : commissions.length === 0 ? (
-              <EmptyState message="No commission recorded yet. It starts accruing the moment a deal you opened collects its setup payment." />
+            ) : commissionRead.value.entryCount === 0 ? (
+              <EmptyState message="No commission recorded yet. A credited deal accrues when its full setup payment is verified and it enters Won." />
             ) : (
               <dl className="space-y-2.5">
                 {[
-                  { label: "Accrued", value: accrued, note: "awaiting founder approval" },
-                  { label: "Approved", value: approved, note: "cleared, not yet paid" },
-                  { label: "Paid", value: paid, note: "in your pocket" },
+                  { label: "Accrued", value: accruedValue, note: "awaiting founder approval" },
+                  { label: "Approved", value: approvedValue, note: "cleared, not yet paid" },
+                  { label: "Paid", value: paidValue, note: "in your pocket" },
                 ].map((line) => (
                   <div key={line.label} className="flex items-baseline justify-between gap-3">
                     <dt className="text-xs text-fg-muted">
                       {line.label}
                       <span className="block text-[10px] text-fg-dim">{line.note}</span>
                     </dt>
-                    <dd className="text-lg font-bold tabular-nums text-fg">{money(line.value)}</dd>
+                    <dd className="text-lg font-bold tabular-nums text-fg">{line.value}</dd>
                   </div>
                 ))}
               </dl>
@@ -438,7 +426,7 @@ export async function RepToday({
       </section>
 
       {/*
-        The comp plan, stated rather than implied. Rates and floor are read from
+        The comp plan, stated rather than implied. Rates are read from
         lib/website-sales-comp.ts — the same module close_website_deal pays from — so
         this card cannot drift away from what actually gets paid. The example is
         arithmetic on the published floor, clearly labelled as such; it is a
@@ -463,28 +451,25 @@ export async function RepToday({
             </div>
             <div className="mt-1.5 text-2xl font-bold tabular-nums text-accent">{openerPct}%</div>
             <p className="mt-1 text-xs text-fg-dim">
-              You book the founder meeting, CC or Adon closes. On collected setup revenue.
+              You qualify and book the meeting; another closer or founder closes. On collected setup revenue.
             </p>
           </div>
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
             <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              You open and close it
+              You close it
             </div>
             <div className="mt-1.5 text-2xl font-bold tabular-nums text-accent">{closerPct}%</div>
             <p className="mt-1 text-xs text-fg-dim">
-              You run the deal end to end. Same collected setup revenue, half again the rate.
+              You close a company-provided lead. Any separately credited opener gets their own 15%.
             </p>
           </div>
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
             <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-              Solo threshold
+              You find and close it
             </div>
-            <div className="mt-1.5 text-2xl font-bold tabular-nums text-fg">
-              {money(SPECIALIST_SPLIT_FLOOR_CENTS / 100)}
-            </div>
+            <div className="mt-1.5 text-2xl font-bold tabular-nums text-accent">{finderCloserPct}%</div>
             <p className="mt-1 text-xs text-fg-dim">
-              Under this, one person works the deal end to end instead of splitting it. It still
-              pays in full.
+              You sourced the lead yourself and ran the close. On verified collected setup revenue.
             </p>
           </div>
         </div>

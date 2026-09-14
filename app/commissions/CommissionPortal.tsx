@@ -16,6 +16,12 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import {
+  commissionPartyRoleLabel,
+  formatCommissionAmounts,
+  type CommissionAmountStatus,
+  type WebsiteSalesCommissionSummary,
+} from "@/lib/website-sales-commission-summary";
 
 type Commission = {
   id: string;
@@ -56,8 +62,18 @@ type PortalResponse = {
     userId: string;
     isAdmin: boolean;
     canManagePayouts: boolean;
+    ledgerScope: "tenant" | "manager_team" | "self";
   };
   data?: Commission[];
+  summary?: WebsiteSalesCommissionSummary;
+  page?: {
+    returned: number;
+    recentLimit: number;
+    recentReturned: number;
+    outstandingCount: number;
+    completeOutstanding: boolean;
+    hasMore: boolean;
+  };
 };
 
 type Editor = { id: string; mode: "paid" | "void" } | null;
@@ -92,19 +108,11 @@ function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function totalsFor(rows: Commission[], statuses: Commission["status"][]): string {
-  const totals = new Map<string, number>();
-  for (const row of rows) {
-    if (!statuses.includes(row.status)) continue;
-    totals.set(row.currency, (totals.get(row.currency) ?? 0) + row.amountCents);
-  }
-  if (totals.size === 0) return money(0, "CAD");
-  return [...totals.entries()].map(([currency, cents]) => money(cents, currency)).join(" + ");
-}
-
 export function CommissionPortal() {
   const [rows, setRows] = useState<Commission[]>([]);
   const [viewer, setViewer] = useState<PortalResponse["viewer"]>();
+  const [summary, setSummary] = useState<WebsiteSalesCommissionSummary | null>(null);
+  const [page, setPage] = useState<PortalResponse["page"]>();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,12 +129,16 @@ export function CommissionPortal() {
     try {
       const response = await fetch("/api/website-sales/commissions", { cache: "no-store" });
       const payload = (await response.json().catch(() => null)) as PortalResponse | null;
-      if (!response.ok || !payload?.ok || !payload.viewer) {
+      if (!response.ok || !payload?.ok || !payload.viewer || !payload.summary || !payload.page) {
         throw new Error(payload?.error || "Unable to load the commission ledger.");
       }
       setRows(payload.data ?? []);
       setViewer(payload.viewer);
+      setSummary(payload.summary);
+      setPage(payload.page);
     } catch (caught) {
+      setSummary(null);
+      setPage(undefined);
       setError(caught instanceof Error ? caught.message : "Unable to load the commission ledger.");
     } finally {
       setLoading(false);
@@ -142,6 +154,8 @@ export function CommissionPortal() {
     () => (statusFilter === "all" ? rows : rows.filter((row) => row.status === statusFilter)),
     [rows, statusFilter],
   );
+  const summaryValue = (statuses: CommissionAmountStatus[]) =>
+    summary ? formatCommissionAmounts(summary.totals, statuses) : "—";
 
   const mutate = useCallback(async (
     row: Commission,
@@ -196,10 +210,15 @@ export function CommissionPortal() {
       )}
 
       <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <SummaryCard icon={Clock3} label="Accrued" value={totalsFor(rows, ["accrued"])} hint="Awaiting founder approval" />
-        <SummaryCard icon={ShieldCheck} label="Approved" value={totalsFor(rows, ["approved"])} hint="Cleared for payout" />
-        <SummaryCard icon={Banknote} label="Paid" value={totalsFor(rows, ["paid"])} hint="Transfer reference recorded" />
-        <SummaryCard icon={CircleDollarSign} label="Net ledger" value={totalsFor(rows, ["accrued", "approved", "paid", "offset"])} hint={`${rows.length} ledger ${rows.length === 1 ? "entry" : "entries"}`} />
+        <SummaryCard icon={Clock3} label="Accrued" value={summaryValue(["accrued"])} hint="Awaiting founder approval" />
+        <SummaryCard icon={ShieldCheck} label="Approved" value={summaryValue(["approved"])} hint="Cleared for payout" />
+        <SummaryCard icon={Banknote} label="Paid" value={summaryValue(["paid"])} hint="Transfer reference recorded" />
+        <SummaryCard
+          icon={CircleDollarSign}
+          label="Net ledger"
+          value={summaryValue(["accrued", "approved", "paid", "offset"])}
+          hint={summary ? `${summary.entryCount} complete ledger ${summary.entryCount === 1 ? "entry" : "entries"}` : "Ledger unavailable"}
+        />
       </section>
 
       <section className="overflow-hidden rounded-xl border border-bg-border bg-bg-panel shadow-card">
@@ -207,10 +226,19 @@ export function CommissionPortal() {
           <div>
             <div className="flex items-center gap-2 text-sm font-semibold text-fg">
               <BadgeCheck size={16} className="text-accent" />
-              {viewer?.isAdmin ? "Team payout ledger" : "My commission ledger"}
+              {viewer?.ledgerScope === "manager_team"
+                ? "My team commission ledger"
+                : viewer?.isAdmin
+                  ? "Team payout ledger"
+                  : "My commission ledger"}
             </div>
             <p className="mt-1 text-xs text-fg-muted">
-              Commission appears only after the collected payment is verified against the closed deal.
+              {viewer?.ledgerScope === "manager_team"
+                ? "Includes your own entries and your direct reports only. "
+                : ""}
+              {page?.hasMore
+                ? `Showing the latest ${page.recentReturned} entries plus every accrued or approved payout (${page.outstandingCount} outstanding). Paid and refund filters cover recent history; totals above include all ${summary?.entryCount ?? 0} entries.`
+                : "Commission appears only after the full setup payment is verified and the lead enters Won."}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -242,8 +270,8 @@ export function CommissionPortal() {
         {filtered.length === 0 ? (
           <div className="px-5 py-14 text-center">
             <CircleDollarSign className="mx-auto mb-3 text-fg-dim" size={28} />
-            <p className="text-sm font-medium text-fg">No commission entries in this view</p>
-            <p className="mt-1 text-xs text-fg-muted">A verified collected payment creates the ledger entry automatically.</p>
+            <p className="text-sm font-medium text-fg">No commission entries in this {page?.hasMore ? "recent " : ""}view</p>
+            <p className="mt-1 text-xs text-fg-muted">A fully verified setup payment moves the lead to Won and creates each credited accrual automatically.</p>
           </div>
         ) : (
           <div className="divide-y divide-bg-border">
@@ -271,7 +299,7 @@ export function CommissionPortal() {
                         </span>
                       </div>
                       <div className="mt-1 text-xs text-fg-muted">Deal {row.dealId.slice(0, 12)} · {titleCase(row.packageId || "custom")}</div>
-                      {viewer?.isAdmin && (
+                      {(viewer?.isAdmin || viewer?.ledgerScope === "manager_team") && (
                         <div className="mt-3 flex items-start gap-2 text-xs text-fg-muted">
                           <UserRound size={13} className="mt-0.5 shrink-0 text-accent" />
                           <div>
@@ -302,7 +330,7 @@ export function CommissionPortal() {
 
                     <div>
                       <FieldLabel>Role & rate</FieldLabel>
-                      <div className="mt-1 text-sm font-semibold text-fg">{titleCase(row.partyRole)}</div>
+                      <div className="mt-1 text-sm font-semibold text-fg">{commissionPartyRoleLabel(row.partyRole, row.rateBps)}</div>
                       <div className="mt-1 text-xs tabular-nums text-fg-muted">{(row.rateBps / 100).toFixed(2)}%</div>
                     </div>
 

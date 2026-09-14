@@ -72,8 +72,9 @@ assert(
 assert(
   lifecycle.includes("Host & time") &&
     lifecycle.includes("Create Google Meet & send invite") &&
-    actionToolbar.includes("Call now") &&
-    actionToolbar.includes("/api/leads/${leadId}/call") &&
+    actionToolbar.includes("Open dialer") &&
+    actionToolbar.includes("tel:${dialTarget}") &&
+    !actionToolbar.includes("/api/leads/${leadId}/call") &&
     !actionToolbar.includes("Send check-in") &&
     !actionToolbar.includes("Pause auto follow-ups") &&
     !actionToolbar.includes("AI tools"),
@@ -96,7 +97,7 @@ assert(
   pipelinePage.includes("listOasisPipelineWindow({") &&
     pipelinePage.includes("stageKeys: assigneeScope.allowed ? stages.map") &&
     pipelinePage.includes("assignedToAny: assigneeScope.allowed ? teamAssigneeUnion") &&
-    pipelineQuery.includes('whereIn: { assigned_to: teamAssignees }') &&
+    pipelineQuery.includes('whereIn: { assigned_to: teamAssignees, stage: stageKeys }') &&
     pipelineQuery.includes("limit: 2_000") &&
     pipelineQuery.includes("oasis_pipeline_team_scope_exceeds_safe_window"),
   "team access is pushed into one bounded database query and fails closed before an incomplete roster book can render",

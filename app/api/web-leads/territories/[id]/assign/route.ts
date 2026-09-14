@@ -97,7 +97,11 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   }
 
   try {
-    const result = await assignTerritory({ territoryId: id, assignedTo });
+    const result = await assignTerritory({
+      territoryId: id,
+      assignedTo,
+      actorUserId: session.userId,
+    });
     if (!result.ok) {
       return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
     }

@@ -26,6 +26,18 @@ import type { StageMeta } from "./sunbiz-stage-meta";
 
 export type { StageMeta };
 
+/**
+ * Prospect stages where a rep's ownership is still a claim that may expire.
+ * Founder handoff and delivery stages are durable workflow, never pool stock.
+ */
+export const OASIS_PRE_HANDOFF_STAGE_KEYS = [
+  "researched",
+  "assigned",
+  "attempting_contact",
+  "connected",
+  "qualified",
+] as const;
+
 // Palette is tuned so every stage chip clears WCAG AA contrast (>=4.5:1
 // for normal text against white). Three stages were darkened from the
 // initial palette during the V6.9 ribbon-pass contrast audit:

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { rejectedOasisGenericPatchKeys } from "../lib/oasis-sales-pipeline-policy";
 
 const read = (path: string): string => readFileSync(path, "utf8");
 
@@ -50,11 +51,21 @@ assert.match(setField, /rejectedOasisGenericPatchKeys/);
 assert.match(setField, /use_website_sales_workflow/);
 assert.match(setField, /ownsOasisSalesRecord/);
 assert.match(setField, /roleMayOperateOasisSalesLead/);
+assert.deepEqual(
+  rejectedOasisGenericPatchKeys({ lead_source_track: "self", sourced_by_user_id: "rep-2" }),
+  ["lead_source_track", "sourced_by_user_id"],
+  "generic manifest PATCH must not rewrite frozen commission provenance",
+);
 
 assert.match(assign, /assertMayWorkLead/);
 assert.match(assign, /accessMode: "owned_oasis_sales"/);
 assert.match(assign, /use_website_sales_workflow/);
-assert.match(assign, /OASIS_REP_ASSIGNABLE_STAGES/);
+assert.match(assign, /OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES/);
+assert.match(
+  assign,
+  /OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES\.has\(currentStage\)/,
+  "generic reassignment must actually enforce the pre-handoff stage allowlist",
+);
 assert.match(bulk, /isOasisBulkWorkspace[\s\S]*?!sess\.isAdmin[\s\S]*?use_individual_sales_workflow/);
 
 console.log("oasis-mutation-bypass-guards: OK");

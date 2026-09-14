@@ -29,6 +29,7 @@ import {
   canMutateOasisSalesRecord,
   canOpenOasisSalesRecord,
   mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
   ownsOasisSalesRecord,
 } from "@/lib/oasis-sales-pipeline-policy";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
@@ -158,7 +159,9 @@ export default async function PipelineLeadDetailPage({
     // here is how UI and API drifted apart before. Ownership stays separate.
     (session.isTrueAdmin || (mayQuoteAndClose(session.teamRole) && repOwnsDeal));
   const canRunDelivery =
-    session.ok && mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey);
+    session.ok &&
+    mayOperateOasisDeliveryStage(session.teamRole, metrics.stageKey) &&
+    ownsOasisDeliveryRecord(activeRecord, session.userId);
   // A sales manager works their TEAM's book, not just their own seat
   // (CC directive, 2026-09-01, asked three times).
   //

@@ -25,6 +25,7 @@ import { safe } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { getOasisSalesRepRoster } from "@/lib/team";
 import {
   creatableOasisStages,
   oasisLeadCreateForm,
@@ -105,7 +106,40 @@ export default async function PipelineNewLeadPage({
     );
   }
 
-  const form = oasisLeadCreateForm(leadEntity, viewer);
+  const roster = session.isAdmin
+    ? await getOasisSalesRepRoster(tenantId).catch((error) => {
+        console.error("[pipeline.new] OASIS sales roster could not be loaded", {
+          tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      })
+    : [];
+  if (roster === null) {
+    return (
+      <Unavailable
+        subtitle="The sales roster could not be verified."
+        detail="Refresh and try again. No lead was saved without a verified owner."
+      />
+    );
+  }
+  if (session.isAdmin && roster.length === 0) {
+    return (
+      <Unavailable
+        subtitle="Add an active sales rep before creating a Pipeline lead."
+        detail="Every Pipeline lead needs a named sales owner."
+      />
+    );
+  }
+  const assigneeOptions = (roster || []).map((member) => ({
+    userId: member.auth_user_id!.trim(),
+    label:
+      member.display_name?.trim() ||
+      member.full_name?.trim() ||
+      member.email?.trim() ||
+      "Sales rep",
+  }));
+  const form = oasisLeadCreateForm(leadEntity, viewer, assigneeOptions);
   const sp = (await searchParams) || {};
   const initialStage = preselectOasisCreateStage(sp.stage, form.stages);
 
@@ -114,9 +148,9 @@ export default async function PipelineNewLeadPage({
       <PageHeader
         title="New lead"
         subtitle={
-          form.stages.length > 1
-            ? "Add a lead at any stage on the board. It's assigned to you."
-            : "Add a lead you sourced. It starts in Assigned, in your book."
+          session.isAdmin
+            ? "Add a lead to Pipeline; choose its sales rep. It starts in Assigned."
+            : "Add a lead you sourced; it enters your Pipeline at Assigned."
         }
         action={
           <Link

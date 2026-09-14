@@ -60,8 +60,8 @@ test("client panels are gated on the surface, not on the viewer's role", () => {
       "will happily serve it because empire operators resolve to the SunBiz tenant",
   );
   assert.ok(
-    SRC.includes('{tenantSlug === "sun" && ('),
-    "the client section must be gated on tenantSlug === \"sun\" alone",
+    SRC.includes('!externalTenantSurfacesBlocked() && tenantSlug === "sun"'),
+    "the client section must require both the client tenant and a non-OASIS deployment",
   );
 });
 

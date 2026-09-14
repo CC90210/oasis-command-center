@@ -41,6 +41,8 @@ import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
+import { getOasisSalesRepRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -242,11 +244,10 @@ export async function POST(
    * AN OASIS LEAD IS PLANNED, STAMPED AND OWNED SERVER-SIDE.
    *
    * planOasisLeadCreate (lib/oasis-lead-create.ts) is the one rule both create
-   * doors share -- this route and /api/leads/quick-add. It decides which stages
-   * this caller may start a lead in (an admin: every stage the board draws; a
-   * sales rep: Assigned), refuses lifecycle fields a create may not carry, and
-   * stamps the fields the board and /web-leads read: the creator as owner, the
-   * cold_outbound motion, the website-sales program.
+   * doors share -- this route and rep-only /api/leads/quick-add. Every new lead
+   * starts in Assigned, lifecycle fields remain server-owned, and the planner
+   * stamps the motion/program/ownership fields both boards read. An admin picks
+   * a verified sales-roster owner; a rep-created lead is self-owned.
    *
    * Before 2026-09-10 this route accepted only `researched` -- a stage the board
    * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
@@ -257,10 +258,64 @@ export async function POST(
    */
   let data: Record<string, unknown> = { ...body.data };
   if (isOasisSalesLead) {
+    let resolvedAssigneeUserId = user.id;
+    const plannerData: Record<string, unknown> = { ...body.data };
+    if (r.is_admin) {
+      const requestedAssignee =
+        typeof body.data.assigned_to === "string" ? body.data.assigned_to.trim() : "";
+      if (!requestedAssignee) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "assignee_required",
+            message: "Choose the sales rep who will own this lead in Pipeline.",
+            fields: ["assigned_to"],
+          },
+          { status: 422 },
+        );
+      }
+
+      let roster;
+      try {
+        roster = await getOasisSalesRepRoster(r.tenant_id);
+      } catch (error) {
+        console.error("[manifest.records] OASIS sales roster could not be verified", {
+          tenantId: r.tenant_id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "sales_roster_unavailable",
+            message: "The sales roster could not be verified, so the lead was not saved. Try again in a moment.",
+          },
+          { status: 503 },
+        );
+      }
+      const resolved = resolveAssignableTarget(roster, requestedAssignee);
+      if (!resolved) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "target_not_on_sales_roster",
+            message: "Choose an active sales rep from this workspace.",
+            fields: ["assigned_to"],
+          },
+          { status: 422 },
+        );
+      }
+      resolvedAssigneeUserId = resolved;
+      // The browser value proved intent only. The planner receives the
+      // canonical roster id separately and continues treating assigned_to as
+      // a protected lifecycle field in every other caller.
+      delete plannerData.assigned_to;
+    }
+
     const plan = planOasisLeadCreate({
       viewer: { isAdmin: r.is_admin, teamRole: r.team_role },
       creatorUserId: user.id,
-      data: body.data,
+      resolvedAssigneeUserId: resolvedAssigneeUserId,
+      data: plannerData,
       now: new Date(),
       requireRegion: true,
     });

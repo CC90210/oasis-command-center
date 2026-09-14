@@ -18,9 +18,9 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * TEAM IS A THIRD SCOPE, AND IT IS THE POINT
  * ─────────────────────────────────────────────────────────────────────────────
- * An OASIS manager sees every teammate in the canonical OASIS sales roster. The
- * roster is tenant- and role-scoped before commission rows are queried, and
- * when the roster is empty the downstream query does not run at all.
+ * An OASIS manager sees their direct reports from the canonical OASIS sales
+ * roster. The roster is tenant-, role-, and manager-scoped before commission
+ * rows are queried, and when it is empty the downstream query does not run.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * AN ABSENT ANSWER IS NOT A ZERO
@@ -38,21 +38,20 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorDateKey } from "@/lib/dates";
 import { MANAGER_OVERRIDE_BPS } from "@/lib/website-sales-comp";
 import { getOasisSalesRepRoster } from "@/lib/team";
+import {
+  formatCommissionAmounts,
+  loadWebsiteSalesCommissionSummary,
+  type WebsiteSalesCommissionSummary,
+} from "@/lib/website-sales-commission-summary";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 type Read<T> = { ok: true; value: T } | { ok: false };
 
 type RepRow = { auth_user_id: string; display_name: string | null; full_name: string | null; team_role: string | null };
-type LineRow = { rep_user_id: string | null; amount_cents: number | null };
 
-// Two decimals, always. maximumFractionDigits: 0 rounded 150 cents to "$2" —
-// on a page whose entire job is telling someone what they earned.
-const money = (cents: number) =>
-  `$${(cents / 100).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-async function loadTeam(tenantId: string): Promise<Read<RepRow[]>> {
+async function loadTeam(tenantId: string, managerUserId: string): Promise<Read<RepRow[]>> {
   try {
-    const rows = await getOasisSalesRepRoster(tenantId);
+    const rows = await getOasisSalesRepRoster(tenantId, managerUserId);
     return {
       ok: true,
       value: rows.map((row) => ({
@@ -62,69 +61,71 @@ async function loadTeam(tenantId: string): Promise<Read<RepRow[]>> {
         team_role: row.team_role,
       })),
     };
-  } catch {
+  } catch (error) {
+    console.error("[manager-today.roster]", error);
     return { ok: false };
   }
 }
 
-/** Enough headroom for a real team, plus one row so truncation is DETECTABLE
- *  rather than silent. See the guard below. */
-const LINE_PAGE = 2_000;
-
-async function loadTeamLines(tenantId: string, repIds: string[]): Promise<Read<LineRow[]>> {
+async function loadTeamLines(
+  tenantId: string,
+  repIds: string[],
+): Promise<Read<WebsiteSalesCommissionSummary>> {
   // No roster, no query. Sending an empty `in` list is how "this manager has no
   // reps" quietly becomes "every row in the tenant" on some clients.
-  if (repIds.length === 0) return { ok: true, value: [] };
   try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("website_sales_commissions")
-      .select("rep_user_id, amount_cents")
-      .eq("tenant_id", tenantId)
-      .eq("entry_type", "accrual")
-      // LIVE ROWS ONLY. Without this the total counts commissions that were
-      // clawed back: a refund moves the accrual to status='offset' and writes a
-      // negative refund_offset row, and entry_type='accrual' alone keeps the
-      // original. A manager would see money on the board that the company
-      // reclaimed weeks ago, and coach against a number that is not real.
-      .in("status", ["accrued", "approved", "paid"])
-      .in("rep_user_id", repIds)
-      .order("id", { ascending: true })
-      .limit(LINE_PAGE + 1);
-    if (r.error) return { ok: false };
-    const rows = (r.data || []) as LineRow[];
-    // A CAP THAT BINDS IS A WRONG TOTAL, NOT A SMALL ONE. Reading a fixed page
-    // and summing it renders a partial figure as a complete one — the manager
-    // sees "team commission: $18,400" with no hint that rows were dropped. If
-    // the cap is reached we report a FAILED read instead, because "couldn't
-    // load" is honest and a truncated total is not.
-    if (rows.length > LINE_PAGE) return { ok: false };
-    return { ok: true, value: rows };
-  } catch {
+    return {
+      ok: true,
+      value: await loadWebsiteSalesCommissionSummary(getServiceSupabase(), {
+        tenantId,
+        repUserIds: repIds,
+        // The manager's override has its own card below. Keeping manager-role
+        // rows out of team sales prevents the same dollars appearing twice.
+        excludePartyRole: "manager",
+      }),
+    };
+  } catch (error) {
+    console.error("[manager-today.team-commissions]", error);
     return { ok: false };
   }
 }
 
-async function loadMyOverride(tenantId: string, managerUserId: string): Promise<Read<number>> {
+async function loadMyOverride(
+  tenantId: string,
+  managerUserId: string,
+): Promise<Read<WebsiteSalesCommissionSummary>> {
   try {
-    const db = getServiceSupabase();
-    const r = await db
-      .from("website_sales_commissions")
-      .select("amount_cents")
-      .eq("tenant_id", tenantId)
-      .eq("rep_user_id", managerUserId)
-      .eq("party_role", "manager")
-      .in("status", ["accrued", "approved", "paid"])
-      .order("id", { ascending: true })
-      .limit(LINE_PAGE + 1);
-    if (r.error) return { ok: false };
-    if ((r.data || []).length > LINE_PAGE) return { ok: false };
-    const total = (r.data || []).reduce(
-      (s: number, row: { amount_cents: number | null }) => s + Number(row.amount_cents ?? 0),
-      0,
-    );
-    return { ok: true, value: total };
-  } catch {
+    return {
+      ok: true,
+      value: await loadWebsiteSalesCommissionSummary(getServiceSupabase(), {
+        tenantId,
+        repUserId: managerUserId,
+        partyRole: "manager",
+      }),
+    };
+  } catch (error) {
+    console.error("[manager-today.override]", error);
+    return { ok: false };
+  }
+}
+
+async function loadMySales(
+  tenantId: string,
+  managerUserId: string,
+): Promise<Read<WebsiteSalesCommissionSummary>> {
+  try {
+    return {
+      ok: true,
+      value: await loadWebsiteSalesCommissionSummary(getServiceSupabase(), {
+        tenantId,
+        repUserId: managerUserId,
+        // A manager may sell personally. Keep those opener/closer/full-stack
+        // earnings separate from the manager override displayed beside them.
+        excludePartyRole: "manager",
+      }),
+    };
+  } catch (error) {
+    console.error("[manager-today.personal-sales]", error);
     return { ok: false };
   }
 }
@@ -139,10 +140,11 @@ export async function ManagerToday({
   managerName: string;
 }) {
   const dateKey = operatorDateKey();
-  const teamRead = await loadTeam(tenantId);
+  const teamRead = await loadTeam(tenantId, userId);
   const repIds = teamRead.ok ? teamRead.value.map((r) => r.auth_user_id).filter(Boolean) : [];
-  const [rawLinesRead, overrideRead] = await Promise.all([
+  const [rawLinesRead, ownSalesRead, overrideRead] = await Promise.all([
     loadTeamLines(tenantId, repIds),
+    loadMySales(tenantId, userId),
     loadMyOverride(tenantId, userId),
   ]);
 
@@ -154,16 +156,8 @@ export async function ManagerToday({
   // earned nothing this month.
   //
   // An unknown roster makes the team total unknowable. Say so.
-  const linesRead: Read<LineRow[]> = teamRead.ok ? rawLinesRead : { ok: false };
-
-  const byRep = new Map<string, number>();
-  if (linesRead.ok) {
-    for (const l of linesRead.value) {
-      if (!l.rep_user_id) continue;
-      byRep.set(l.rep_user_id, (byRep.get(l.rep_user_id) ?? 0) + Number(l.amount_cents ?? 0));
-    }
-  }
-  const teamTotal = [...byRep.values()].reduce((s, v) => s + v, 0);
+  const linesRead: Read<WebsiteSalesCommissionSummary> = teamRead.ok ? rawLinesRead : { ok: false };
+  const activeStatuses = ["accrued", "approved", "paid"] as const;
   const nameOf = (r: RepRow) => r.display_name || r.full_name || r.auth_user_id.slice(0, 8);
 
   return (
@@ -177,32 +171,37 @@ export async function ManagerToday({
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <Stat
           label="OASIS sales reps"
           value={teamRead.ok ? String(teamRead.value.length) : "—"}
-          hint={teamRead.ok ? "canonical OASIS sales-rep roster" : "couldn't load the sales roster"}
+          hint={teamRead.ok ? "your direct reports" : "couldn't load your direct reports"}
         />
         <Stat
-          label="Team commission (accrued)"
-          value={linesRead.ok ? money(teamTotal) : "—"}
-          hint={linesRead.ok ? "what your reps have earned" : "couldn't load — this is not $0"}
+          label="Team commissions earned"
+          value={linesRead.ok ? formatCommissionAmounts(linesRead.value.totals, [...activeStatuses]) : "—"}
+          hint={linesRead.ok ? "accrued, approved, and paid · currencies separated" : "couldn't load — this is not $0"}
+        />
+        <Stat
+          label="Your sales commissions"
+          value={ownSalesRead.ok ? formatCommissionAmounts(ownSalesRead.value.totals, [...activeStatuses]) : "—"}
+          hint={ownSalesRead.ok ? "your own opener, closer, and full-deal earnings" : "couldn't load — this is not $0"}
         />
         <Stat
           label="Your override"
-          value={overrideRead.ok ? money(overrideRead.value) : "—"}
+          value={overrideRead.ok ? formatCommissionAmounts(overrideRead.value.totals, [...activeStatuses]) : "—"}
           hint={`${(MANAGER_OVERRIDE_BPS / 100).toFixed(0)}% of what OASIS retains`}
         />
       </div>
 
       <Card
         title="OASIS sales team"
-        subtitle="Every profile in the canonical OASIS sales-rep roster for this workspace."
+        subtitle="Your direct reports in the canonical OASIS sales roster."
       >
         {!teamRead.ok ? (
-          <EmptyState message="Couldn't load your roster. This read failed — it does not mean you have no reps. Reload in a minute." />
+          <EmptyState message="Couldn't load your direct reports. This read failed — it does not mean you have no reps. Reload in a minute." />
         ) : teamRead.value.length === 0 ? (
-          <EmptyState message="No OASIS sales profiles are connected to this workspace yet." />
+          <EmptyState message="No active sales reps are assigned to you as direct reports yet." />
         ) : (
           <div className="divide-y divide-bg-border">
             {teamRead.value.map((rep) => (
@@ -212,7 +211,9 @@ export async function ManagerToday({
                   <div className="text-xs text-fg-dim">{rep.team_role ?? "—"}</div>
                 </div>
                 <div className="text-sm font-semibold text-fg tabular-nums">
-                  {linesRead.ok ? money(byRep.get(rep.auth_user_id) ?? 0) : "—"}
+                  {linesRead.ok
+                    ? formatCommissionAmounts(linesRead.value.byRep[rep.auth_user_id] ?? [], [...activeStatuses])
+                    : "—"}
                 </div>
               </div>
             ))}
@@ -222,10 +223,10 @@ export async function ManagerToday({
 
       <Card
         title="Coaching"
-        subtitle="Open the all-rep pipeline to review ownership, follow-up, and stage progress."
+        subtitle="Open the workspace sales pipeline to review ownership, follow-up, and stage progress."
       >
         <EmptyState
-          message="The pipeline is scoped to this OASIS sales roster. Use the rep filter to focus on one person without leaving the team view."
+          message="The commission totals above include only your direct reports. The Pipeline shows the wider OASIS sales roster; use its rep filter to focus on one person."
           cta={
             <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
               Go to pipeline

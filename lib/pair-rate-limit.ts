@@ -34,6 +34,7 @@
 
 import type { NextRequest } from "next/server";
 import { getServiceSupabase } from "./supabase-server";
+import { getClientIp } from "./api-helpers";
 
 export const PAIR_RATE_WINDOW_SECONDS = 60;
 export const PAIR_RATE_MAX_FAILURES = 10;
@@ -69,12 +70,8 @@ const FAILURE_OUTCOMES: PairOutcome[] = [
  * Returns null if no header is set (local dev / direct hit).
  */
 export function clientIp(req: NextRequest): string | null {
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return req.headers.get("x-real-ip") || null;
+  const ip = getClientIp(req);
+  return ip === "unknown" ? null : ip;
 }
 
 /**

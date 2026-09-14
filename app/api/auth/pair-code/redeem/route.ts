@@ -29,7 +29,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, sha256 } from "@/lib/api-helpers";
+import { bad, publicAppBaseUrl, sha256 } from "@/lib/api-helpers";
 import {
   clientIp,
   isRateLimited,
@@ -132,9 +132,7 @@ export async function POST(req: NextRequest) {
     return bad(500, "redeem_returned_empty");
   }
 
-  const baseUrl =
-    process.env.BRAVO_DASHBOARD_URL ||
-    "https://agent-dashboard-cc90210.vercel.app";
+  const baseUrl = publicAppBaseUrl();
 
   // Log the successful redeem against the IP-keyed rate-limit row AND a
   // second row keyed on the resolved profile_id, so the pair endpoint's

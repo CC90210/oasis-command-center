@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
-  availability, isInBookOf, isReleasedFromBook, planClaim, claimPatch, releasePatch, factsFrom,
+  availability, isActionableBy, isInBookOf, isReleasedFromBook, planClaim, claimPatch, releasePatch, factsFrom,
   CLAIM_STALE_DAYS, LOST_RECYCLE_DAYS, MAX_LEADS_PER_REP, type ClaimFacts,
 } from "../lib/web-leads/claim";
 
@@ -60,12 +60,47 @@ assert.equal(
   false,
   "claiming a lead must never write the dnc field",
 );
+assert.equal(
+  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", "2026-08-23T12:00:00Z"), "lead_source_track"),
+  false,
+  "claiming must not rewrite frozen source provenance",
+);
+assert.equal(
+  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", "2026-08-23T12:00:00Z"), "sourced_by_user_id"),
+  false,
+  "claiming must preserve the immutable sourcing identity",
+);
+assert.equal(
+  ({ lead_source_track: "self", sourced_by_user_id: "rep-original", ...claimPatch("rep-a", "2026-08-23T12:00:00Z") }).lead_source_track,
+  "self",
+  "a reassignment must retain its frozen source track; payout checks the durable source identity",
+);
+assert.equal(
+  ({ sourced_by_user_id: "rep-original", ...claimPatch("rep-a", "2026-08-23T12:00:00Z") }).sourced_by_user_id,
+  "rep-original",
+);
 
 // ---------------------------------------------------------------------------
 // 2. The pool keeps circulating.
 // ---------------------------------------------------------------------------
 
 assert.equal(availability(base, NOW).reason, "unclaimed", "an unowned lead is claimable");
+
+assert.equal(
+  isActionableBy(f({ assignedTo: "rep-a", claimedAt: iso(DAY) }), "rep-a", NOW),
+  true,
+  "a current owner must be able to work their lead",
+);
+assert.equal(
+  isActionableBy(f({ assignedTo: "rep-a", claimedAt: iso(8 * DAY) }), "rep-a", NOW),
+  false,
+  "an expired claim may stay visible for history but must not remain actionable",
+);
+assert.equal(
+  isActionableBy(f({ assignedTo: "rep-a", stage: "lost", lostAt: iso(91 * DAY) }), "rep-a", NOW),
+  false,
+  "a recycled loss must not remain actionable by its former owner",
+);
 
 // "NOT INTERESTED" IS A FACT ABOUT THE CONVERSATION, NOT ABOUT WHO HOLDS THE
 // RECORD. A first draft checked "nobody holds it" before the lost branch, which
@@ -93,6 +128,35 @@ assert.equal(
   availability(f({ assignedTo: "rep-a", claimedAt: iso((CLAIM_STALE_DAYS + 1) * DAY) }), NOW).reason,
   "claim_expired",
   "a claim with no call logged in 7 days returns to the pool",
+);
+
+for (const stage of ["founder_meeting_booked", "proposal_sent", "won", "onboarding", "in_build", "client_review", "launched"]) {
+  const activeWorkflow = f({
+    assignedTo: "rep-a",
+    stage,
+    claimedAt: iso((CLAIM_STALE_DAYS + 30) * DAY),
+    lastCallAt: null,
+  });
+  assert.equal(
+    availability(activeWorkflow, NOW).reason,
+    "in_progress",
+    `${stage} must never recycle through the prospect pool just because claimed_at is old`,
+  );
+  assert.equal(
+    isReleasedFromBook(activeWorkflow, NOW),
+    false,
+    `${stage} must stay visible as active paid/handoff work`,
+  );
+  assert.equal(
+    isActionableBy(activeWorkflow, "rep-a", NOW),
+    true,
+    `${stage} must remain actionable by its recorded owner`,
+  );
+}
+assert.equal(
+  availability(f({ assignedTo: null, stage: "won", claimedAt: iso(40 * DAY) }), NOW).reason,
+  "in_progress",
+  "an orphaned paid record must fail closed instead of becoming claimable inventory",
 );
 
 // ONE LOGGED CALL RESETS IT. A rep working a lead must not lose it on day 8
@@ -225,6 +289,7 @@ assert.equal(
 {
   const patch = claimPatch("rep-b", "2026-08-23T12:00:00Z");
   assert.equal(patch.assigned_to, "rep-b");
+  assert.deepEqual(patch.collaborators, [], "a new claim must clear the previous owner's collaborators");
   assert.equal(patch.claimed_at, "2026-08-23T12:00:00Z");
   assert.equal(patch.stage_entered_at, "2026-08-23T12:00:00Z");
   assert.equal(patch.last_contacted_at, "2026-08-23T12:00:00Z", "claiming into Assigned counts as a lifecycle touch");
@@ -240,6 +305,12 @@ assert.equal(
   assert.equal(availability(after, NOW).reason, "held");
   assert.equal(isInBookOf(after, "rep-b"), true);
 }
+
+assert.deepEqual(
+  releasePatch().collaborators,
+  [],
+  "releasing a lead must revoke every collaborator's write grant",
+);
 
 // ---------------------------------------------------------------------------
 // 7. factsFrom is strict about dnc in BOTH directions.
@@ -427,6 +498,16 @@ assert.equal(
     /\.eq\("updated_at", r\.updated_at\)/,
     "releasing must also pin the row version so it cannot erase a concurrent contact/context edit while the owner stays the same",
   );
+  assert.match(
+    releaseFn![0],
+    /\.from\("lead_interactions"\)\.insert\(/,
+    "a successful explicit release must append an interaction ledger entry",
+  );
+  assert.match(
+    releaseFn![0],
+    /trackingFailed/,
+    "a release whose ownership write lands but audit insert fails must report the tracking gap",
+  );
 
   // The per-lead swap says nothing about a rep's own total. Two overlapping
   // requests from one rep both read the same held count and both grant the
@@ -467,7 +548,7 @@ assert.equal(
     /onStartCalling=\{startCalling\}/,
     "Start calling must go through the claiming path, not straight into Call Mode",
   );
-  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[canOperateCurrentView, mine, leads, push, filters\]\);/);
+  const fn = ui.match(/const startCalling = useCallback\([\s\S]*?\n {2}\}, \[[^\]]+\]\);/);
   assert.ok(fn, "startCalling must be findable");
   assert.match(
     fn![0],
@@ -476,8 +557,8 @@ assert.equal(
   );
   assert.match(
     fn![0],
-    /if \(mine\) \{ setCalling\(true\); return; \}/,
-    "My leads opens Call Mode directly -- those leads are already the rep's",
+    /if \(mine\)[\s\S]*?actionableLeads\.length[\s\S]*?setCalling\(true\)/,
+    "My leads must refuse an all-released queue and open Call Mode only over actionable ownership",
   );
   assert.match(
     fn![0],
@@ -493,6 +574,16 @@ assert.equal(
   const claimIdx = fn![0].indexOf("/api/web-leads/claim");
   const openIdx = fn![0].lastIndexOf("setCalling(true)");
   assert.ok(openIdx > claimIdx, "Call Mode must open only after the claim returns");
+
+  assert.match(
+    ui,
+    /<CallMode[\s\S]{0,180}?leads=\{actionableLeads\}/,
+    "released rows must never be passed into Call Mode",
+  );
+  for (const file of ["components/web-leads/LeadCards.tsx", "components/web-leads/LeadsTable.tsx"]) {
+    const source = fs.readFileSync(path.join(process.cwd(), file), "utf8");
+    assert.match(source, /!l\.released/, `${file} must remove dial and selection actions from released rows`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +606,19 @@ assert.equal(
   assert.match(browser, /canMutate/, "the browser must receive and enforce mutation capability");
   assert.match(toolbar, /canMutate/, "claim and Start calling controls must be hidden for read-only viewers");
   assert.match(table, /canSelect/, "claim-selection checkboxes must be hidden for read-only viewers");
+}
+
+// ---------------------------------------------------------------------------
+// 15. A lapsed owner keeps read history, not write authority.
+// ---------------------------------------------------------------------------
+
+{
+  const access = fs.readFileSync(path.join(process.cwd(), "lib/leads/rep-lead-access.ts"), "utf8");
+  assert.match(access, /isActionableBy\(facts, args\.userId, now\)/,
+    "the shared OASIS mutation gate must re-check derived claim expiry server-side");
+  assert.match(access, /claim_released/, "a former owner must receive a specific released-claim refusal");
+  assert.match(access, /availability\(facts, now\)\.reason === "do_not_call"/,
+    "do-not-call must be refused explicitly instead of being mislabeled as an expired claim");
 }
 
 console.log("web-leads-claim ok");

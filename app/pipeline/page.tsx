@@ -150,7 +150,7 @@ export default async function PipelinePage({
   const boardFilter = oasisBoardProgramFilter(tenantSlug);
 
   // Optional ?q= filter — match across the operator-relevant fields.
-  // Search is applied by the database before each bounded stage window.
+  // Search is applied by the database before the bounded working-set read.
   // WHO IS ON THE BOARD. Admins use the tenant member directory. Managers use
   // only the server-resolved OASIS sales roster, and that same allowlist is
   // applied in the database query. A forged ?rep= id, `unassigned`, founder or
@@ -256,12 +256,10 @@ export default async function PipelinePage({
     ? assigneeScope.assignedTo
     : undefined;
 
-  // Bounded, database-first windows. Overview mode fetches at most 40 newest
-  // rows per stage with exact totals; a selected stage exposes every older row
-  // through 100-row pages. Program, role/rep, working stage and search all run
-  // before range(), so neither old deals nor search hits can disappear behind
-  // the former global 500-row cap. Legacy OASIS tenants omit only the program
-  // predicate; migration 161 gives their cold working rows the motion marker.
+  // Read the complete bounded sales scope, then remove released claims before
+  // calculating exact stage totals and the selected 100-row page. Program,
+  // role/rep, working stages, and search stay server-side. Reaching the 2,000
+  // row safety ceiling fails loudly instead of rendering partial counts.
   let pipelineWindow;
   let memberNameMap: Map<string, string>;
   let ownedSlug: string | null;
