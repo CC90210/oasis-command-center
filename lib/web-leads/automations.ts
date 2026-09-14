@@ -61,14 +61,18 @@
  *   3. No dollar figure is attached to a customer outcome. We have no
  *      revenue data for these businesses, the same standing rule
  *      `angles.ts` documents. Cost is stated in customers and behaviour.
- *   4. No money at all, in any string an owner hears. Spec §7.3 allows a
- *      competitor price with a `source`, but that exemption has nowhere to
- *      live here: every field below is spoken or read off the screen
- *      mid-call, and `angles.ts` holds the standing rule that not one
- *      spoken sentence carries a number. The prices in the strategy doc are
- *      in any case a recommendation Adon has not signed off for reps to say
- *      aloud (§5). The test enforces the flat ban, and its own comment says
- *      so rather than claiming the source-gated check it cannot perform.
+ *   4. No money, in any string an owner hears. Spec §7.3 allows a competitor
+ *      price with a `source`, but that exemption has nowhere to live here:
+ *      every field below is spoken or read off the screen mid-call, and
+ *      `angles.ts` holds the standing rule that not one spoken sentence
+ *      carries a number. The prices in the strategy doc are in any case a
+ *      recommendation Adon has not signed off for reps to say aloud (§5),
+ *      which is why the guard's widest arm is aimed squarely at their
+ *      shape: a bare figure with a period on it, "497 a month".
+ *      ⚠️ The test is pattern matching, not money semantics, and its own
+ *      comment lists what it catches AND what it misses. Read that list
+ *      before trusting it; a clean run is not proof that a price is absent,
+ *      only that none of the three matched shapes is present.
  *   5. No entry names the defect as a defect. Every line names a behaviour
  *      of the owner's customer instead. An owner whose nephew built the
  *      site is otherwise being asked to insult somebody they like, and that
@@ -531,7 +535,7 @@ export const CAPABILITIES: Capability[] = [
     ],
     stage: "month_six_plus",
     stageReason:
-      "This touches your bookings and customer records, which is a bigger ask than a website, so it waits until month six or later and comes with a written page on exactly where that data lives and who's accountable for it.",
+      "This touches your bookings and customer records, which is a bigger ask than a website, so it waits until month six or later, and nothing gets switched on until we have answered in writing where that data lives and who's accountable for it.",
     codes: [],
   },
   {
@@ -559,7 +563,7 @@ export const CAPABILITIES: Capability[] = [
     ],
     stage: "month_six_plus",
     stageReason:
-      "Same reason as the front desk: it's inside your bookings and customer data, so it's a month-six-plus conversation with the data-custody page in hand, not a first-call add-on.",
+      "Same reason as the front desk: it's inside your bookings and customer data, so it's a month-six-plus conversation once those same data questions have been answered in writing, not a first-call add-on.",
     codes: [],
   },
   {

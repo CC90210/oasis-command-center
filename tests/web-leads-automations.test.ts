@@ -79,7 +79,24 @@ console.log("web-leads-automations: OK");
 // The em dash is written as an escape so this guard file does not itself
 // contain the character it bans.
 const DASH = /\u2014|--/;
-const MONEY = /[$£€]|\b(?:dollars?|cents?|bucks|grand|quid|CAD|USD)\b/i;
+// Money, in the three shapes this copy could plausibly carry it. Kept as
+// three named arms rather than one regex because the third is the only one
+// that needed inventing and it is the one most likely to need tuning.
+const MONEY_SYMBOL = /[$£€]/;
+const MONEY_NOUN = /\b(?:dollars?|cents?|bucks|grand|quid|CAD|USD)\b/i;
+// A figure with a period attached: "497 a month", "four ninety seven a month",
+// "two thousand a month", "a couple hundred a week". This is the shape the
+// CA$497 / CA$197 offer price takes when a rep says it out loud without the
+// currency, which is the one number this file actually risks carrying.
+const NUM =
+  "(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|" +
+  "fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|couple|few|dozen)";
+const PERIOD = "(?:a|an|per|each|every)\\s+(?:month|week|year|day|hour|job|call|lead|visit|customer)";
+const MONEY_RATE = new RegExp(
+  "\\b(?:\\d[\\d,]*k?|(?:a\\s+)?" + NUM + "(?:[\\s-]+(?:and\\s+)?" + NUM + ")*)\\s+" + PERIOD + "\\b",
+  "i",
+);
+const statesMoney = (s: string) => MONEY_SYMBOL.test(s) || MONEY_NOUN.test(s) || MONEY_RATE.test(s);
 
 const repFacing = (c: (typeof CAPABILITIES)[number]) => [
   c.title,
@@ -123,27 +140,45 @@ for (const cap of CAPABILITIES) {
   // Rule 3, spec 7.3. We have no revenue data for these businesses, so a
   // customer outcome is never stated in money.
   //
-  // WHAT THIS ACTUALLY CHECKS, stated exactly, because the first version of
-  // this guard overclaimed: it is a FLAT BAN on money-shaped language in every
-  // owner-facing and rep-facing string, not the source-gated check spec 7.3
-  // describes. Two reasons it is not source-gated. First, a regex cannot tell
-  // a customer outcome from a competitor price, so the source-gated version
-  // passed a dollar figure attached to an outcome as long as the capability
-  // carried any `source` at all, including a junk one. Second, 7.3's
-  // competitor-price exemption has nowhere to live here: `Capability` has no
-  // coaching field, every string this guard reads is spoken to an owner or
-  // read off the screen mid-call, and `angles.ts` holds the standing rule that
-  // not one spoken sentence carries a number.
+  // WHAT THIS CATCHES, exactly. Three shapes, and nothing else:
+  //   1. A currency symbol anywhere: $, £, €. So "$400", "CA$497".
+  //   2. The money nouns, as whole words: dollar(s), cent(s), bucks, grand,
+  //      quid, CAD, USD. So "five grand a month", "four hundred dollars".
+  //   3. A figure with a period attached: a digit run, or a spelled-out
+  //      number, IMMEDIATELY followed by (a|an|per|each|every) + (month,
+  //      week, year, day, hour, job, call, lead, visit, customer). So
+  //      "497 a month", "four ninety seven a month", "two thousand a month",
+  //      "a couple hundred a week", "5k a month".
   //
-  // It also matches word forms, not just digits, because "five grand a month"
-  // sailed through the digit-only version.
+  // WHAT IT MISSES, stated so nobody trusts it further than it goes:
+  //   - A bare figure with neither a symbol nor a period phrase. "We charge
+  //     497" passes. So does "the price is four ninety seven".
+  //   - A figure separated from its period by other words: "497, billed
+  //     every month" passes.
+  //   - A period noun not on the list above: "497 a location" passes.
+  //   - Any amount implied without either signal at all.
+  // A clean run is therefore NOT proof that no price is present. It is proof
+  // that none of the three matched shapes is.
   //
-  // If a competitor price is ever genuinely needed, the fix is a new field on
-  // `Capability` for notes a rep reads rather than speaks, with `source`
-  // required on it. Not a hole punched in this.
+  // It is word-list and shape matching, not money semantics, and it does not
+  // pretend otherwise: "a grand old firm" false-positives on arm 2. That is
+  // harmless here (the fix is to reword) and it is the honest evidence that
+  // arm 2 matches a word, not a meaning.
+  //
+  // WHY A FLAT BAN AND NOT THE SOURCE-GATED CHECK 7.3 DESCRIBES. A regex
+  // cannot tell a customer outcome from a competitor price, and the earlier
+  // source-gated version proved it: a dollar figure attached to an outcome
+  // passed as long as the capability carried any `source` at all, including
+  // a junk one. And 7.3's competitor-price exemption has nowhere to live
+  // here anyway: `Capability` has no field for a note a rep READS rather
+  // than SPEAKS, every string below is spoken or read off the screen
+  // mid-call, and `angles.ts` holds the standing rule that not one spoken
+  // sentence carries a number. If a competitor price is ever genuinely
+  // needed, the fix is a new coaching-note field with `source` required on
+  // it, not a hole punched in this.
   for (const s of repFacing(cap)) {
     assert.ok(
-      !MONEY.test(s),
+      !statesMoney(s),
       `${cap.id}: copy an owner hears never states money, we have no revenue data: ${s.slice(0, 60)}`,
     );
   }
