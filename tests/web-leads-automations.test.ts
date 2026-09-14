@@ -69,3 +69,75 @@ for (const cap of CAPABILITIES) {
 }
 
 console.log("web-leads-automations: OK");
+
+// ---------------------------------------------------------------------------
+// The copy rules. These are rep-facing and owner-facing strings; a violation
+// reaches a stranger's ear on a cold call, which is why they are pinned here
+// rather than left to review.
+// ---------------------------------------------------------------------------
+
+// The em dash is written as an escape so this guard file does not itself
+// contain the character it bans.
+const DASH = /\u2014|--/;
+const MONEY = /[$£€]\s?\d|\bCA\$|\b\d+\s?(?:dollars|bucks)\b/i;
+
+const repFacing = (c: (typeof CAPABILITIES)[number]) => [
+  c.title,
+  c.summary,
+  c.whatItIs,
+  c.howYouSayIt,
+  c.costsThem ?? "",
+  c.stageReason ?? "",
+  ...c.whatWeDeliver,
+];
+
+for (const cap of CAPABILITIES) {
+  for (const layer of ["title", "summary", "whatItIs", "howYouSayIt"] as const) {
+    assert.ok(cap[layer] && String(cap[layer]).trim().length > 0, `${cap.id}.${layer} must not be empty`);
+  }
+  assert.ok(cap.whatWeDeliver.length > 0, `${cap.id}.whatWeDeliver must list something`);
+  for (const line of cap.whatWeDeliver) {
+    assert.ok(line.trim().length > 0, `${cap.id}.whatWeDeliver must not carry an empty line`);
+  }
+
+  // Website bundles are defect-driven, so they must say how a customer is lost
+  // today. Ladder entries are not, and may omit it.
+  if (cap.stage === "today") {
+    assert.ok(
+      cap.costsThem && cap.costsThem.trim().length > 0,
+      `${cap.id} covers measurable checks, so it must say how a customer is lost today`,
+    );
+  }
+
+  for (const s of repFacing(cap)) {
+    assert.ok(!DASH.test(s), `${cap.id}: no em dash and no "--" in copy a rep reads aloud: ${s.slice(0, 60)}`);
+  }
+
+  // Rule 4 of the offer strategy: never lead with AI. It may appear inside a
+  // later-stage entry's own detail; it may not appear on a row a rep opens with.
+  if (cap.stage === "today") {
+    assert.ok(!/\bAI\b/i.test(cap.title), `${cap.id}: a today-stage title must not lead with AI`);
+    assert.ok(!/\bAI\b/i.test(cap.summary), `${cap.id}: a today-stage summary must not lead with AI`);
+  }
+
+  // Rule 3: we have no revenue data for these businesses, so no money appears
+  // anywhere in copy. A competitor price would be allowed, but only with a
+  // `source` on the capability that cites it.
+  for (const s of repFacing(cap)) {
+    if (MONEY.test(s)) {
+      assert.ok(
+        cap.source && cap.source.trim().length > 0,
+        `${cap.id}: a figure in copy needs a source on the capability: ${s.slice(0, 60)}`,
+      );
+    }
+  }
+
+  // The two registers must actually differ.
+  assert.notEqual(
+    cap.howYouSayIt.trim().toLowerCase(),
+    cap.whatItIs.trim().toLowerCase(),
+    `${cap.id}: the spoken line and the owner explanation must be different writing`,
+  );
+}
+
+console.log("web-leads-automations copy rules: OK");
