@@ -30,29 +30,31 @@
  * answer a question; they are styled quieter and smaller so none of them can
  * be mistaken for the script at a glance mid-sentence.
  *
- * ═══ NO NUMBER IS PRINTED ON A ROW, DELIBERATELY ═══════════════════════════
+ * ═══ THE FIGURE ON THE ROW ═════════════════════════════════════════════════
  *
- * `FixFirst` in `BattleCard.tsx` printed "+9.8" per row, and its docblock
- * states why it printed no SECOND number beside it: "a check's raw points
- * and a dimension's weighted recoverable points are different scales, and
- * two numbers on one row that do not sum invite the prospect's next question
- * to be about our arithmetic instead of their website."
+ * `recoverable` is WEIGHTED composite points (fix round 2, 2026-09-14):
+ * `points * weight * 100 / dimensionRawTotal`, summed over the codes this
+ * lead actually failed. That is the same unit `recoverablePoints` in
+ * `angles.ts` produces and the same unit `FixFirst` printed as "+9.8", so
+ * the figure is comparable across capabilities and across the rest of the
+ * card, and it is printed here in `FixFirst`'s own convention: right
+ * aligned, one decimal, tabular numerals, the constant cyan every "+points"
+ * figure on this card wears. That cyan is the METRIC's identity, worn
+ * identically at every value, not a grade.
  *
- * A capability bundle inherits that problem whole. `matchCapabilities` sums
- * `DimensionProfile.checks[].points` across the codes a bundle covers, and
- * those points are scored inside each dimension's own 100, so a bundle
- * spanning two dimensions sums two different scales. The sum is a perfectly
- * good SORT KEY, which is what `automations-match.ts` built it for and what
- * keeps this list "the build, in order". It is not a figure anybody should
- * read aloud. So the ordering is kept and the number is not printed.
+ * An earlier draft of this component printed no figure at all, on the
+ * grounds that a bundle sum mixed scales. That was true of the RAW key it
+ * was written against and is not true of this one, and it also misread
+ * `FixFirst`, which prints the weighted figure on the row and declines only
+ * to print a raw per-check number beside it (it prints raw inside the
+ * expanded detail, with the denominator named: "{points} of this area's 100
+ * pts"). Fixing the key dissolved the objection.
  *
- * `ranking` below is what survives of it on screen: a bar whose LENGTH is
- * that sort key relative to the largest one in the same list, wearing the
- * capability's identity hue. It carries no units and no figure, and its
- * caption says in words what it is and what it is not. It renders only for
- * a capability whose codes were actually measured and actually failed;
- * every other state gets a sentence instead. See CapabilityCatalogue's
- * docblock for where the value comes from.
+ * `ranking` is the same value expressed as a bar length relative to the
+ * largest entry in the same list, which is what makes the ORDER legible at
+ * a glance rather than requiring a rep to compare decimals mid-sentence.
+ * Both render only for a capability whose codes were actually measured and
+ * actually failed; every other state gets a sentence instead, never a zero.
  *
  * ═══ THE IDENTITY HUE ══════════════════════════════════════════════════════
  *
@@ -61,6 +63,15 @@
  * encodes WHICH area, never how bad: trust is that blue at a score of 4 and
  * at a score of 94. This component never picks a hue itself and never
  * derives one from a value; it renders whatever the catalogue passes.
+ *
+ * `hue` is NULLABLE, and null renders NO DOT (fix round 2, 2026-09-14). It
+ * must not fall back to `FALLBACK_HUE`: that hue's `to` is `#7dd3fc`, which
+ * is byte-identical to `DIM_HUES.content.to`, and the dot paints `hue.to`
+ * alone, so a fallback dot is pixel-identical to a content dot. On an
+ * ordinary lead that would put the same mark on `say-what-you-do` and on
+ * every unresolved row, breaking the one-colour-one-area coding three tests
+ * protect. No area identified, no identity mark.
+ *
  * Nothing else here is coloured by a score, a stage or a judgement.
  */
 
@@ -135,6 +146,66 @@ const SECTION_LABEL = "text-[10px] font-bold uppercase tracking-[0.14em] text-fg
 const CONTEXT_TEXT = "mt-1.5 text-xs leading-relaxed text-fg-muted";
 
 /**
+ * Checks the model scores but cannot currently MEASURE for a prospect.
+ *
+ * A VERBATIM SECOND COPY of `UNMEASURABLE_CHECKS` in `BattleCard.tsx`, kept
+ * because that one is module-private and this task may not edit that file.
+ * Both are empty today: model v2 (2026-09-02) retired the one entry this
+ * carried rather than keep apologising for it, and the map stays because
+ * the honest-disclaimer machinery is the feature and the next unmeasurable
+ * check will need it.
+ *
+ * WHAT THIS DOES NOT COVER, and it matters: these are two independent maps,
+ * not one shared constant. Adding an entry to `BattleCard.tsx`'s map alone
+ * changes nothing on this component, and vice versa. Task 5 exports and
+ * dedupes the evidence renderer; this copy must go in that change rather
+ * than be left as a second place to remember.
+ */
+const UNMEASURABLE_CHECKS: Record<string, string> = {};
+
+/**
+ * The four honest states of a per-check evidence line, in the order
+ * `MeasuredLine` in `BattleCard.tsx` tries them. The unmeasurable branch is
+ * FIRST and is not optional: a check our own model cannot measure for
+ * anybody is named as our flaw, before any attempt to read a signal that
+ * was never going to be there.
+ *
+ *   unmeasurable -> named as our flaw, with an instruction to ignore it
+ *   measured     -> the crawler's own numbers for THIS site
+ *   unmeasured   -> the crawl recorded other things but not this: said in
+ *                   words, never guessed
+ *   no blob      -> nothing renders, because with no signals at all there
+ *                   is no way to tell "unrecorded" from "very old row"
+ */
+function EvidenceLine({ code, signals }: { code: string; signals: Record<string, unknown> | null }) {
+  const unmeasurable = UNMEASURABLE_CHECKS[code];
+  if (unmeasurable) {
+    return (
+      <p className="mt-1 text-xs leading-relaxed text-fg-dim">
+        <span className="font-medium text-fg-muted">Not measurable:</span> {unmeasurable}
+      </p>
+    );
+  }
+  const line = checkEvidenceFor(code, signals);
+  if (line) {
+    return (
+      <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+        <span className="font-medium text-fg-dim">Seen on the site:</span> {line}
+      </p>
+    );
+  }
+  if (signals) {
+    return (
+      <p className="mt-1 text-xs leading-relaxed text-fg-dim">
+        <span className="font-medium text-fg-muted">Not recorded:</span>{" "}
+        {"the crawl did not capture what this check needs, so verify it by eye before quoting it."}
+      </p>
+    );
+  }
+  return null;
+}
+
+/**
  * The ordering bar. Length only, no figure, no units, wearing the identity
  * hue. `drawn` and `reduced` are the same first-draw gate `FixFirst`'s
  * meter used and carry the same meaning: `drawn` is the parent section's
@@ -182,6 +253,7 @@ export function CapabilityRow({
   onToggle,
   checks,
   signals,
+  recoverable,
   ranking,
   drawn,
   reduced,
@@ -189,8 +261,10 @@ export function CapabilityRow({
 }: {
   capability: Capability;
   state: RowState;
-  /** The primary dimension's identity hue, chosen by the catalogue. */
-  hue: { from: string; to: string };
+  /** The primary dimension's identity hue, chosen by the catalogue. NULL
+   *  when no primary dimension could be resolved, which renders no dot at
+   *  all rather than the shared fallback hue. See the file docblock. */
+  hue: { from: string; to: string } | null;
   open: boolean;
   onToggle: () => void;
   /** Code to the audit's own check row, for the label and nothing else.
@@ -203,9 +277,13 @@ export function CapabilityRow({
    *  it: with no blob there is nothing to distinguish "not recorded" from
    *  "very old row". */
   signals: Record<string, unknown> | null;
-  /** Position in the ordering, 0 to 100, relative to the largest entry in
-   *  the same list. Null means this capability has no measured ordering
-   *  value, which is every state except `scored`. Never a score. */
+  /** The weighted composite points this capability would recover for this
+   *  lead, from `Matched.recoverable`. Printed on the row in `FixFirst`'s
+   *  convention. Null means UNSCORED, which is every state except
+   *  `scored`, and renders nothing at all rather than a zero. */
+  recoverable: number | null;
+  /** The same value as a bar length, 0 to 100, relative to the largest
+   *  entry in the same list. Null whenever `recoverable` is. */
   ranking: number | null;
   drawn: boolean;
   reduced: boolean;
@@ -227,23 +305,41 @@ export function CapabilityRow({
         aria-controls={detailId}
         className="block w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
       >
-        <span className="flex items-baseline gap-1.5">
-          <ChevronDown
-            aria-hidden
-            className={`h-3.5 w-3.5 shrink-0 text-fg-dim transition-transform motion-reduce:transition-none ${open ? "" : "-rotate-90"}`}
-          />
-          {/* The identity hue of this capability's primary dimension: the
-              same colour this area wears on the radar and in the shape
-              list. Which area, never how bad. */}
-          <span
-            aria-hidden
-            className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full"
-            style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }}
-          />
-          <span className="min-w-0">
-            <span className="block text-sm font-semibold text-fg">{capability.title}</span>
-            <span className="mt-0.5 block text-xs leading-relaxed text-fg-dim">{capability.summary}</span>
+        <span className="flex items-baseline justify-between gap-3">
+          <span className="flex min-w-0 items-baseline gap-1.5">
+            <ChevronDown
+              aria-hidden
+              className={`h-3.5 w-3.5 shrink-0 text-fg-dim transition-transform motion-reduce:transition-none ${open ? "" : "-rotate-90"}`}
+            />
+            {/* The identity hue of this capability's primary dimension: the
+                same colour this area wears on the radar and in the shape
+                list. Which area, never how bad. Omitted entirely when no
+                dimension resolved, because the shared fallback hue is
+                byte-identical to the content dimension's. */}
+            {hue && (
+              <span
+                aria-hidden
+                className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }}
+              />
+            )}
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold text-fg">{capability.title}</span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-fg-dim">{capability.summary}</span>
+            </span>
           </span>
+          {/* Weighted composite points, the same unit and the same constant
+              cyan FixFirst prints. The cyan is the metric's own identity,
+              worn identically at every value, not a grade. Absent, never
+              zeroed, when this capability is unscored. */}
+          {recoverable !== null && (
+            <span
+              className="shrink-0 text-sm tabular-nums [font-family:var(--battle-data)]"
+              style={{ color: "#7dd3fc" }}
+            >
+              +{recoverable.toFixed(1)}
+            </span>
+          )}
         </span>
       </button>
 
@@ -281,30 +377,20 @@ export function CapabilityRow({
                 {failedCodes.map((code) => {
                   const label = checks.get(code)?.label ?? null;
                   const costs = costLineFor(code);
-                  const evidence = checkEvidenceFor(code, signals);
                   return (
                     <li key={code}>
                       {label && <p className="text-xs font-semibold text-fg">{label}</p>}
                       {costs && <p className="mt-1 text-xs leading-relaxed text-fg-dim">{costs}</p>}
-                      {evidence ? (
-                        <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-                          <span className="font-medium text-fg-dim">Seen on the site:</span> {evidence}
-                        </p>
-                      ) : signals ? (
-                        <p className="mt-1 text-xs leading-relaxed text-fg-dim">
-                          <span className="font-medium text-fg-muted">Not recorded:</span>{" "}
-                          {"the crawl did not capture what this check needs, so verify it by eye before quoting it."}
-                        </p>
-                      ) : null}
+                      <EvidenceLine code={code} signals={signals} />
                     </li>
                   );
                 })}
               </ul>
-              {ranking !== null && (
+              {ranking !== null && hue && (
                 <div className="mt-3">
                   <RankingBar pct={ranking} hue={hue} drawn={drawn} reduced={reduced} />
                   <p className="mt-1 text-[11px] leading-relaxed text-fg-muted/80">
-                    {"How much of the failing work in this list sits under this one, next to the rest of it. It is what puts the list in this order. It is not their score and it is not points off their score."}
+                    {"The figure on the row, drawn against the largest one in this list. It is points back on their overall score, which is the same number the rest of this card counts in."}
                   </p>
                 </div>
               )}

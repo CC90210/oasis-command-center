@@ -66,15 +66,30 @@
  * website or because nothing was ever checked. A real number, INCLUDING a
  * real `0`, means an audit looked and that is what it found.
  *
- * Nothing in this component turns `null` into `0`. `rankingFor` returns
- * `null` for it and every state except `scored`, `CapabilityRow` draws no
- * bar and prints no figure when it is null, and the row renders a written
- * sentence saying nothing has been checked. Telling an owner with no
- * website that they have "0 points to recover" is the failure this typing
- * exists to prevent, and a `0` is also a materially different claim from a
- * `null`: "we checked and it is fine" must never render as "we have no
- * idea". Note also that no bundle sum is printed even when it IS a real
- * number, for the scale reason `CapabilityRow`'s docblock sets out.
+ * Nothing in this component turns `null` into `0`. Both `recoverable` and
+ * `ranking` are passed as `null` for every state except `scored`,
+ * `CapabilityRow` draws no bar and prints no figure when they are null, and
+ * the row renders a written sentence saying nothing has been checked.
+ * Telling an owner with no website that they have "0 points to recover" is
+ * the failure this typing exists to prevent, and a `0` is also a materially
+ * different claim from a `null`: "we checked and it is fine" must never
+ * render as "we have no idea".
+ *
+ * The same distinction decides the PANEL HEADLINE, not only the rows: see
+ * `everyPrimaryRowScored` below. A panel whose rows are a mix of real
+ * numbers and nulls is a PARTIAL audit and says so, because the headline is
+ * the sentence a rep reads aloud.
+ *
+ * WHAT `recoverable` IS (fix round 2, 2026-09-14): weighted composite
+ * points, `points * weight * 100 / dimensionRawTotal` summed over this
+ * lead's failing codes. It was a RAW sum of `checks[].points` until this
+ * round, which was a defect and not a display problem: raw points are not
+ * comparable across dimensions (one is worth between 0.2708 and 0.0800
+ * composite, a 3.39x spread), so the list ranked structured data markup
+ * above tap-to-call while `selectAngle` chose the opposite angle on the
+ * same card. Fixed in `automations-match.ts`, whose docblock carries the
+ * full reasoning and the numbers. Because the key is now the same unit the
+ * rest of the card prints, the figure is printed on the row.
  *
  * ═══ THE IDENTITY HUE, AND WHERE IT COMES FROM ═════════════════════════════
  *
@@ -89,12 +104,19 @@
  *
  * WHAT THAT DOES NOT COVER, stated rather than glossed: with no audit, no
  * website, or a code not present in `dimensions`, no primary dimension can
- * be resolved and `hueFor` returns its neutral fallback. Ladder entries
- * carry no codes at all and always take that fallback. So on a no-audit
- * lead every dot on this list is the same neutral colour. That is honest
- * (nothing here has been measured, so no area has been identified) but it
- * does mean the hue is not a constant per capability across leads the way
- * it is per dimension across surfaces.
+ * be resolved. Ladder entries carry no codes at all and never resolve one.
+ * Those rows get `hue: null` and render NO DOT (fix round 2, 2026-09-14).
+ * They must not fall back to `FALLBACK_HUE`: that hue's `to` is `#7dd3fc`
+ * and `DIM_HUES.content.to` is the same string, and the dot paints `to`
+ * alone, so a fallback dot was pixel-identical to a content dot. On an
+ * ordinary scored lead that put the content dimension's mark on
+ * `say-what-you-do` and on all five ladder entries at once, which is
+ * exactly the one-colour-one-area coding three tests protect. No area
+ * identified, no identity mark.
+ *
+ * It does still mean the hue is not a constant per capability across leads
+ * the way it is per dimension across surfaces: an unaudited lead's list
+ * carries no dots at all.
  *
  * ═══ THE ANGLE ALREADY ON SCREEN ═══════════════════════════════════════════
  *
@@ -145,11 +167,13 @@ import { matchCapabilities, type Matched } from "@/lib/web-leads/automations-mat
  *  these renders above the primary list in every case, including the cases
  *  where there is plenty to show, so the panel is never rows with no
  *  explanation. */
-const PRIMARY_INTRO: Record<"noWebsite" | "noAudit" | "clean" | "ranked", string> = {
+const PRIMARY_INTRO: Record<"noWebsite" | "noAudit" | "partial" | "clean" | "ranked", string> = {
   noWebsite:
     "There is no website for this business, so there is nothing to pick apart. This is the whole build, as one thing. Talk about what they would get, not about what is wrong.",
   noAudit:
     "This site has not been checked yet, so nothing below is ranked and no finding here is specific to them. It is the full list of what we build for a website. Ask what they have rather than telling them.",
+  partial:
+    "We only got through part of this site. Nothing we did look at came back failing, but several of the things below were never checked at all, and each row says which it is. Do not tell them the site came back clean.",
   clean:
     "We checked this site and none of the things we look for came back failing. There is nothing to open a call on here. These are the pieces we would still own and run for them.",
   ranked: "What we would build for them, heaviest first.",
@@ -255,17 +279,32 @@ export function CapabilityCatalogue({
   const primary = matched.relevant.length > 0 ? matched.relevant : matched.rest;
   const secondary = matched.relevant.length > 0 ? matched.rest : [];
 
+  // "Clean" is a claim about COVERAGE, not just about findings, so it is
+  // only made when every row in the panel carries a real number. `hasAudit`
+  // alone is not enough: it is true as soon as ONE dimension has checks, and
+  // `audit.ts`'s `coerceProfile` validates a stored profile with
+  // `Array.isArray(profile.dimensions)` and nothing per-dimension, so a
+  // partial or older-MODEL_VERSION profile reaches here intact. Without this
+  // an eight-row panel whose rows each read "nothing this covers has been
+  // checked" sat under a headline saying the site came back clean, and the
+  // headline is the part a rep reads aloud. `automations-match.ts` marks
+  // those rows `null` precisely so this distinction survives; flattening it
+  // back here would have thrown that away.
+  const everyPrimaryRowScored = primary.every((m) => typeof m.recoverable === "number");
   const introKey: keyof typeof PRIMARY_INTRO = !hasWebsite
     ? "noWebsite"
     : !hasAudit
       ? "noAudit"
       : matched.relevant.length > 0
         ? "ranked"
-        : "clean";
+        : everyPrimaryRowScored
+          ? "clean"
+          : "partial";
 
-  // The largest ordering value in the primary list, used only to scale the
+  // The largest weighted value in the primary list, used only to scale the
   // bars against each other. Floored at 1 so a list whose values are all 0
-  // divides by something, and never used as a figure.
+  // divides by something. The FIGURE each row prints is `recoverable`
+  // itself, not this ratio.
   const maxRanking = useMemo(() => {
     const values = primary.map((m) => m.recoverable).filter((v): v is number => typeof v === "number");
     return Math.max(1, ...values);
@@ -293,11 +332,14 @@ export function CapabilityCatalogue({
         key={entry.capability.id}
         capability={entry.capability}
         state={state}
-        hue={hueFor(dimensionKey ?? "")}
+        // Null, never FALLBACK_HUE: its `to` is byte-identical to the
+        // content dimension's, and the dot paints `to` alone.
+        hue={dimensionKey ? hueFor(dimensionKey) : null}
         open={openId === entry.capability.id}
         onToggle={() => setOpenId((prev) => (prev === entry.capability.id ? null : entry.capability.id))}
         checks={checkByCode}
         signals={signals}
+        recoverable={state.kind === "scored" ? entry.recoverable : null}
         ranking={ranking}
         drawn={drawn}
         reduced={reduced}

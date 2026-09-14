@@ -8,17 +8,52 @@
  * `rest` (it covers no code this lead failed, or the site was never
  * audited), and `ladder` (the five offer-ladder entries, which carry no
  * codes and are never matched against an audit at all). `relevant` and
- * `rest` are ordered by the summed `points` of the lead's own failing
- * checks inside that capability's `codes`, descending, with the capability
- * `id` as an explicit secondary key so two calls with the same input
- * produce byte-identical order. `ladder` is ordered by its own stage
+ * `rest` are ordered by the summed WEIGHTED recoverable points of the
+ * lead's own failing checks inside that capability's `codes`, descending,
+ * with the capability `id` as an explicit secondary key so two calls with
+ * the same input produce byte-identical order. `ladder` is ordered by its own stage
  * progression (`today` < `after_evidence` < `month_six_plus` < `year_plus`,
  * per `automations.ts`'s exported `STAGES`), then the same `id` tie-break.
  *
+ * WHY THE KEY IS WEIGHTED, AND WHAT IT COST TO GET WRONG (fix round 2,
+ * 2026-09-14). This module originally summed `DimensionProfile.checks[].points`
+ * as-is. Raw check points are NOT comparable across dimensions and ranking
+ * on them is a defect, not a simplification. Each dimension normalises to
+ * its own raw total (conversion 96, trust 92, design 86, the rest 100) and
+ * then carries a very different weight into the composite (conversion 0.26
+ * down to discoverability 0.08), so one raw point is worth between 0.2708
+ * and 0.0800 composite: a 3.39x spread. `angles.ts` carries the standing
+ * written warning on exactly this, above `selectAngle`: "Ranking on the raw
+ * score sends a rep into the smaller conversation and, worse, into the
+ * smaller build."
+ *
+ * What it did on a live call: a lead failing only `local_schema` (raw 36,
+ * weighted 2.88) ranked ABOVE a lead failing only `tel_link` (raw 18,
+ * weighted 4.88), so the rep opened on structured data markup instead of
+ * "your phone number is not tappable" -- while the angle rendered higher on
+ * the same card, chosen by `selectAngle`'s weighted function, said the
+ * opposite. The card contradicted itself.
+ *
+ * The key is now composite points: `points * weight * 100 / rawTotal` per
+ * code, where `rawTotal` is the summed `points` of every check in that
+ * code's own dimension. Summed over ALL of a dimension's failing codes this
+ * reproduces `recoverablePoints(d)` from `angles.ts` exactly (that function
+ * is `(100 - score) * weight`, and `100 - score` is `failedRaw / rawTotal *
+ * 100` whenever the stored `score` was computed as earned over that same
+ * raw total, which is how `quality-model.js` produces it). So a capability
+ * bundle's figure is in the SAME UNIT as the number the rest of the battle
+ * card already speaks, and is printable rather than merely sortable.
+ *
+ * The identity is pinned by a test rather than asserted here: a capability
+ * bundle generally covers only PART of a dimension, so its own sum equals
+ * `recoverablePoints` only when the bundle's failing codes are all of that
+ * dimension's failing codes. The test builds that case deliberately.
+ *
  * WHAT THIS DOES NOT DO. It does not decide anything about copy, does not
- * touch `automations.ts` (imported read-only), does not re-derive a scoring
- * model -- `DimensionProfile.checks[].points` is the only source of a
- * recoverable value, summed as-is. It performs no I/O and calls no model:
+ * touch `automations.ts` (imported read-only), and does not re-derive or
+ * re-weight the scoring model: `points`, `weight` and the checks list all
+ * ride the stored profile row, and nothing here carries a copy of a model
+ * constant to drift. It performs no I/O and calls no model:
  * a rep opens the battle card mid-call and nothing here may wait on
  * anything, which is also what makes every rule below testable in
  * isolation, with no database and no network, in
@@ -113,8 +148,13 @@ export type Matched = {
    *  codes at all), and equal to the FULL `codes` list for every entry in
    *  `relevant` when `opts.hasWebsite` is false (see module docblock). */
   failedCodes: string[];
-  /** Sum of `points` across `failedCodes`, from this lead's own audit --
-   *  but ONLY when at least one of `capability.codes` was actually observed
+  /** Summed WEIGHTED recoverable points across `failedCodes`, from this
+   *  lead's own audit -- composite points, the same unit `recoverablePoints`
+   *  in `angles.ts` produces and the same unit the battle card already
+   *  prints, so this value is printable and not merely a sort key. Raw
+   *  `checks[].points` are deliberately NOT used: see WHY THE KEY IS
+   *  WEIGHTED in the module docblock. Set only when at least one of
+   *  `capability.codes` was actually observed
    *  in `dimensions`. `number`, including a real `0`, means an audit
    *  looked at this capability's codes and that is what it found (`0` =
    *  verified clean, nothing to recover). `null` means UNSCORED: no code
@@ -176,12 +216,22 @@ export type MatchOptions = {
  *  (`0`) is a stronger, more specific claim than a capability nobody has
  *  looked at yet (`null`) -- "we checked and it's fine" must never render
  *  behind "we have no idea", so `null` is the lowest-priority position, not
- *  a mid-table one. Two `null`s tie-break by `id` exactly like two reals. */
+ *  a mid-table one. Two `null`s tie-break by `id` exactly like two reals.
+ *
+ *  THE TIE IS AN EPSILON, NOT AN EQUALITY (fix round 2, 2026-09-14). The
+ *  key became a weighted float, so two values that are mathematically equal
+ *  can differ in the last bit and a strict `!==` would then rank one above
+ *  the other on floating-point noise instead of falling through to the id.
+ *  Renders would still agree with each other, but the id tie-break would be
+ *  unreachable for exactly the cases it was written for. 1e-9 is the same
+ *  epsilon `selectAngle` in `angles.ts` uses on the same unit. */
 function byRecoverableThenId(a: Matched, b: Matched): number {
-  if (a.recoverable !== b.recoverable) {
-    if (a.recoverable === null) return 1;
-    if (b.recoverable === null) return -1;
-    return b.recoverable - a.recoverable;
+  if (a.recoverable === null || b.recoverable === null) {
+    if (a.recoverable === null && b.recoverable !== null) return 1;
+    if (b.recoverable === null && a.recoverable !== null) return -1;
+  } else {
+    const diff = b.recoverable - a.recoverable;
+    if (Math.abs(diff) > 1e-9) return diff;
   }
   if (a.capability.id === b.capability.id) return 0;
   return a.capability.id < b.capability.id ? -1 : 1;
@@ -223,12 +273,20 @@ export function matchCapabilities(dimensions: DimensionProfile[], opts: MatchOpt
   // case fall out of this general loop with no special branch: zero checks
   // means zero codes observed for every capability.
   const observedCodes = new Set<string>();
-  const pointsByCode = new Map<string, number>();
+  const weightedByCode = new Map<string, number>();
   const failedCodesSeen = new Set<string>();
   for (const dimension of dimensions) {
+    // The dimension's own raw denominator, summed from the checks it
+    // carries rather than read from a constant, so this module still holds
+    // no copy of the scoring model to drift (same reasoning `angles.ts`
+    // gives for taking `weight` off the stored profile row).
+    const rawTotal = dimension.checks.reduce((n, c) => n + c.points, 0);
     for (const c of dimension.checks) {
       observedCodes.add(c.code);
-      pointsByCode.set(c.code, c.points);
+      // COMPOSITE points, not raw. See WHY THE KEY IS WEIGHTED above. A
+      // dimension whose checks carry no points at all has nothing
+      // recoverable in it and contributes 0; this also guards the divide.
+      weightedByCode.set(c.code, rawTotal > 0 ? (c.points * dimension.weight * 100) / rawTotal : 0);
       if (!c.has) failedCodesSeen.add(c.code);
     }
   }
@@ -239,7 +297,7 @@ export function matchCapabilities(dimensions: DimensionProfile[], opts: MatchOpt
     const anyCodeObserved = capability.codes.some((code) => observedCodes.has(code));
     const failedCodes = capability.codes.filter((code) => failedCodesSeen.has(code));
     const recoverable: number | null = anyCodeObserved
-      ? failedCodes.reduce((sum, code) => sum + (pointsByCode.get(code) ?? 0), 0)
+      ? failedCodes.reduce((sum, code) => sum + (weightedByCode.get(code) ?? 0), 0)
       : null;
     const matched: Matched = { capability, failedCodes, recoverable };
     (failedCodes.length > 0 ? relevant : rest).push(matched);

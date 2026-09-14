@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { CAPABILITIES } from "../lib/web-leads/automations";
 import { matchCapabilities } from "../lib/web-leads/automations-match";
+import { recoverablePoints } from "../lib/web-leads/angles";
 import type { DimensionProfile } from "../lib/web-leads/audit";
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,17 @@ function check(code: string, points: number, has: boolean) {
 
 function dims(checks: ReturnType<typeof check>[]): DimensionProfile[] {
   return [{ key: "fixture", label: "fixture", score: 0, weight: 1, checks, missing: [] }];
+}
+
+/** The recoverable key is a weighted float now (fix round 2), so equality
+ *  on it is an epsilon, matching the 1e-9 the module's own comparator and
+ *  `selectAngle` both use. */
+function closeTo(actual: number | null, expected: number, message: string) {
+  assert.ok(typeof actual === "number", `${message}: expected a number, got ${actual}`);
+  assert.ok(
+    Math.abs((actual as number) - expected) < 1e-9,
+    `${message}: expected ${expected}, got ${actual}`,
+  );
 }
 
 // A fixture grounded in real bundle codes (automations.ts is reviewed and
@@ -65,7 +77,12 @@ function allIds(m: ReturnType<typeof matchCapabilities>): string[] {
   const easyToCall = m.relevant.find((x) => x.capability.id === "easy-to-call");
   assert.ok(easyToCall, "easy-to-call failed tel_link for this lead and must be in relevant");
   assert.deepEqual(easyToCall!.failedCodes, ["tel_link"], "only the failing code is named, not phone_in_header");
-  assert.equal(easyToCall!.recoverable, 10);
+  // WEIGHTED, not the raw 10. MIXED is one dimension of weight 1 whose
+  // checks sum to a raw total of 78, so tel_link's 10 raw points are
+  // 10 * 1 * 100 / 78 composite points. The literal is written out rather
+  // than recomputed from the formula, so this assertion is independent of
+  // the implementation it is checking.
+  closeTo(easyToCall!.recoverable, 12.820512820512821, "easy-to-call is weighted, not raw");
 
   const reach = m.rest.find((x) => x.capability.id === "reach-without-phoning");
   assert.ok(reach, "reach-without-phoning has no failing code for this lead and must be in rest, not dropped");
@@ -78,11 +95,18 @@ function allIds(m: ReturnType<typeof matchCapabilities>): string[] {
 console.log("web-leads-automations-match: bucketing OK");
 
 // ---------------------------------------------------------------------------
-// 2. relevant is ordered by summed recoverable points, descending, with a
-//    deterministic tie-break (capability id, ascending) so two renders agree.
-//    book-themselves-in=25, easy-to-call=10, then a genuine tie at 5 between
-//    load-fast-enough-to-stay and tell-them-what-to-do-next, broken by id:
-//    "load-fast-enough-to-stay" < "tell-them-what-to-do-next".
+// 2. relevant is ordered by summed WEIGHTED recoverable points, descending,
+//    with a deterministic tie-break (capability id, ascending) so two
+//    renders agree. MIXED is a single dimension of weight 1 and raw total
+//    78, so weighting scales every entry by the same 100/78 and the order
+//    is unchanged from the raw one: book-themselves-in (25 raw, 32.05),
+//    easy-to-call (10 raw, 12.82), then a genuine tie at 5 raw / 6.41
+//    between load-fast-enough-to-stay and tell-them-what-to-do-next, broken
+//    by id: "load-fast-enough-to-stay" < "tell-them-what-to-do-next".
+//
+//    That the order is unchanged HERE is the point of section 2a below: a
+//    one-dimension fixture cannot tell a raw key from a weighted one, which
+//    is exactly how the raw key survived Task 3's review.
 // ---------------------------------------------------------------------------
 {
   const m = matchCapabilities(MIXED, { hasWebsite: true });
@@ -101,6 +125,73 @@ console.log("web-leads-automations-match: bucketing OK");
   );
 }
 console.log("web-leads-automations-match: ordering + tie-break OK");
+
+// ---------------------------------------------------------------------------
+// 2a. THE ORDERING IS WEIGHTED, AND THIS IS THE CASE THAT PROVES IT.
+//
+//     Raw check points are not comparable across dimensions: each dimension
+//     normalises to its own raw total and then carries a different weight
+//     into the composite, so one raw point is worth between 0.2708 and
+//     0.0800 composite. `angles.ts` carries the standing warning above
+//     `selectAngle`: "Ranking on the raw score sends a rep into the smaller
+//     conversation and, worse, into the smaller build."
+//
+//     The real numbers from the scoring model. `local_schema` is worth 36
+//     raw inside discoverability (raw total 100, weight 0.08) => 2.88
+//     composite. `tel_link` is worth 18 raw inside conversion (raw total
+//     96, weight 0.26) => 4.875 composite. So RAW ranks structured data
+//     markup FIRST and tap-to-call second; WEIGHTED ranks them the other
+//     way round, and weighted is the order `selectAngle` already used to
+//     choose the angle printed higher on the same card. Under the raw key
+//     the card contradicted itself.
+//
+//     PROVED TO FIRE: reverting the module to `pointsByCode` (raw) flips
+//     this sequence and the first assertion below fails with
+//     "expected [ 'easy-to-call', 'findable-and-safe-to-click' ]". Run
+//     2026-09-14 before the fix, on this exact fixture.
+// ---------------------------------------------------------------------------
+{
+  const CROSS: DimensionProfile[] = [
+    {
+      key: "conversion", label: "Conversion", score: 81.25, weight: 0.26, missing: [],
+      // Raw total 96, matching the model's conversion dimension.
+      checks: [check("tel_link", 18, false), check("phone_in_header", 78, true)],
+    },
+    {
+      key: "discoverability", label: "Discoverability", score: 64, weight: 0.08, missing: [],
+      // Raw total 100, matching the model's discoverability dimension.
+      checks: [check("local_schema", 36, false), check("https", 64, true)],
+    },
+  ];
+  const m = matchCapabilities(CROSS, { hasWebsite: true });
+
+  assert.deepEqual(
+    m.relevant.map((x) => x.capability.id),
+    ["easy-to-call", "findable-and-safe-to-click"],
+    "tap-to-call (18 raw / 4.875 weighted) must outrank structured data markup (36 raw / 2.88 weighted): ranking on raw points sends the rep into the smaller build",
+  );
+
+  closeTo(m.relevant[0].recoverable, 4.875, "tel_link weighted");
+  closeTo(m.relevant[1].recoverable, 2.88, "local_schema weighted");
+
+  // And the figure is in the SAME UNIT as the number the rest of the card
+  // prints. easy-to-call covers tel_link and phone_in_header, which are ALL
+  // of the conversion dimension's checks here, so its bundle sum must equal
+  // `recoverablePoints` for that whole dimension exactly. (This identity
+  // holds per-dimension, not per-bundle in general: a bundle usually covers
+  // only part of a dimension. The fixture is built so it does not.)
+  closeTo(
+    m.relevant[0].recoverable,
+    recoverablePoints(CROSS[0]),
+    "a bundle covering all of a dimension's failing codes must equal recoverablePoints for that dimension",
+  );
+  closeTo(
+    m.relevant[1].recoverable,
+    recoverablePoints(CROSS[1]),
+    "same identity on the discoverability side",
+  );
+}
+console.log("web-leads-automations-match: weighted ordering across dimensions OK");
 
 // ---------------------------------------------------------------------------
 // 3. null sorts after every real number, including a real 0 (fix round 1,
