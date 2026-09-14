@@ -19,6 +19,7 @@
  * running anything. These call the real functions instead.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   buildCopyList,
@@ -388,4 +389,134 @@ run("the HTML stays small enough that Gmail will not clip it", () => {
   // that carries the opt-out.
   const html = renderQuickEmailHtml("Hi Simon,\n\n" + "A reasonable paragraph. ".repeat(40));
   assert.ok(html.length < 60_000, `html was ${html.length} bytes`);
+});
+
+run("a direct dashboard send cannot be drained by the background worker", () => {
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  const insertAt = route.indexOf('.from("lead_interactions")');
+  const insertEnd = route.indexOf('.select("id, created_at")', insertAt);
+  const directAttemptAt = route.indexOf("if (await operatorHasAppPassword");
+  const queuedBranchAt = route.indexOf('if (brand === "oasis" && sendResult.status === "queued")');
+  const sentBranchAt = route.indexOf('if (sendResult.status === "sent")');
+  const eventAt = route.indexOf('event_type: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD"');
+
+  assert.ok(
+    insertAt > 0 && insertEnd > insertAt && directAttemptAt > insertEnd,
+    "the send reservation is missing",
+  );
+  const reservation = route.slice(insertAt, insertEnd);
+  assert.match(
+    reservation,
+    /status:\s*brand === "oasis" \? "direct_attempting" : "queued"/,
+    "the private reservation is not bounded to the OASIS portal",
+  );
+  assert.match(
+    reservation,
+    /brand === "oasis" \? \{ direct_attempt_started_at: directAttemptStartedAt \} : \{\}/,
+    "the direct-attempt receipt leaks into another tenant's established queue path",
+  );
+
+  assert.ok(queuedBranchAt > directAttemptAt, "there is no explicit fallback-only queue branch");
+  const queuedBranch = route.slice(queuedBranchAt, sentBranchAt > queuedBranchAt ? sentBranchAt : undefined);
+  assert.match(queuedBranch, /status:\s*"queued"/, "fallback never makes the row drainable");
+  assert.match(
+    queuedBranch,
+    /\.eq\("tenant_id",\s*sess\.tenantId\)/,
+    "the queue transition is not tenant-scoped",
+  );
+  assert.match(
+    queuedBranch,
+    /\.eq\("metadata->>status",\s*"direct_attempting"\)/,
+    "the queue transition can overwrite a terminal send status",
+  );
+  assert.ok(
+    eventAt > queuedBranchAt && eventAt < sentBranchAt,
+    "the OASIS queue event is published outside the fallback-only branch",
+  );
+  assert.match(
+    queuedBranch,
+    /queue_transition_failed/,
+    "a failed queue transition is reported as success",
+  );
+  assert.match(
+    queuedBranch,
+    /try \{[\s\S]*?\.eq\("metadata->>status", "direct_attempting"\)[\s\S]*?\} catch \(err\) \{[\s\S]*?queue transition failed[\s\S]*?status: 503/,
+    "a thrown queue transition is not reported as an unconfirmed fallback",
+  );
+  assert.match(
+    queuedBranch,
+    /trackingWarnings\.push\("queue_event_publish_failed"\)/,
+    "a failed queue event publish is silent",
+  );
+  assert.match(
+    queuedBranch,
+    /try \{[\s\S]*?\.from\("agent_events"\)\.insert\([\s\S]*?\} catch \(err\) \{\s*queueEventFailure = err;/,
+    "a thrown event write escapes after the row is already queued",
+  );
+  const eventFailureAt = queuedBranch.indexOf("if (queueEventFailure)");
+  assert.ok(eventFailureAt > 0, "the queue event result is never checked");
+  assert.doesNotMatch(
+    queuedBranch.slice(eventFailureAt),
+    /return NextResponse/,
+    "an event nudge failure returns an unsafe retryable response after the row is queued",
+  );
+
+  assert.ok(sentBranchAt > queuedBranchAt, "the terminal sent branch is missing");
+  const sentBranch = route.slice(sentBranchAt);
+  assert.match(
+    sentBranch,
+    /\.eq\("metadata->>status",\s*"direct_attempting"\)/,
+    "the sent transition is not a compare-and-set from the reservation",
+  );
+  assert.match(
+    sentBranch,
+    /trackingWarnings\.push\("sent_receipt_update_failed"\)/,
+    "a failed sent receipt write is silent",
+  );
+  const sentReceiptFailureAt = sentBranch.indexOf("if (statusUpdate.error || !statusUpdate.data?.id)");
+  const nonOasisSentAt = sentBranch.indexOf("} else {", sentReceiptFailureAt);
+  assert.ok(sentReceiptFailureAt > 0 && nonOasisSentAt > sentReceiptFailureAt);
+  assert.match(
+    sentBranch.slice(0, nonOasisSentAt),
+    /try \{[\s\S]*?\.eq\("metadata->>status", "direct_attempting"\)[\s\S]*?\} catch \(err\) \{[\s\S]*?sent_receipt_update_failed/,
+    "a thrown sent-receipt write escapes after irreversible delivery",
+  );
+  assert.doesNotMatch(
+    sentBranch.slice(sentReceiptFailureAt, nonOasisSentAt),
+    /return NextResponse/,
+    "receipt bookkeeping tells the rep delivery failed after the email was already sent",
+  );
+
+  const postDeliveryStage = route.slice(sentBranchAt).match(
+    /if \(brand === "oasis"\) \{\s*await bumpLeadStage\(\);/,
+  );
+  assert.ok(postDeliveryStage, "the OASIS lead advances before send or fallback is confirmed");
+});
+
+run("the queue-ordering refinement cannot alter another tenant's mail path", () => {
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  const insertEnd = route.indexOf('.select("id, created_at")');
+  const directAttemptAt = route.indexOf("if (await operatorHasAppPassword");
+  const nonOasisEventGate = route.indexOf('if (brand !== "oasis")', insertEnd);
+  const originalEvent = route.indexOf(
+    'eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD"',
+    nonOasisEventGate,
+  );
+  assert.ok(
+    nonOasisEventGate > insertEnd && originalEvent > nonOasisEventGate && originalEvent < directAttemptAt,
+    "the existing non-OASIS queue event no longer fires before its direct fallback path",
+  );
+
+  const sentBranchAt = route.indexOf('if (sendResult.status === "sent")');
+  const sentBranch = route.slice(sentBranchAt);
+  assert.match(
+    sentBranch,
+    /status:\s*brand === "oasis" \? "sent" : gmailFrom \? "sent" : "auto_sent"/,
+    "the established non-OASIS sent/auto_sent receipt semantics changed",
+  );
+  assert.match(
+    sentBranch,
+    /The established non-OASIS path[\s\S]*?\.update\(\{ metadata: sentMetadata \}\)[\s\S]*?\.eq\("tenant_id", sess\.tenantId\);/,
+    "the non-OASIS terminal update was accidentally put behind the OASIS compare-and-set",
+  );
 });

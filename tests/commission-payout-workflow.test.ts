@@ -386,11 +386,18 @@ async function main() {
   );
 
   const route = readFileSync("app/api/website-sales/commissions/route.ts", "utf8");
+  const ledgerReader = readFileSync("lib/website-sales-commission-summary.ts", "utf8");
   const page = readFileSync("app/commissions/page.tsx", "utf8");
   const clientUi = readFileSync("app/commissions/CommissionPortal.tsx", "utf8");
   const nav = readFileSync("lib/nav-config.ts", "utf8");
-  assert(route.includes('.eq("tenant_id", session.tenantId)'), "every commission read stays tenant-scoped");
-  assert(route.includes('.eq("rep_user_id", session.userId)'), "a rep can fetch only their own ledger rows");
+  assert(
+    route.includes("tenantId: session.tenantId") && ledgerReader.includes('.eq("tenant_id", tenantId)'),
+    "every commission read stays tenant-scoped through the shared ledger reader",
+  );
+  assert(
+    route.includes("repUserId: session.userId") && ledgerReader.includes('.eq("rep_user_id", repUserId)'),
+    "a rep can fetch only their own ledger rows through the shared ledger reader",
+  );
   assert(route.includes("session.isTrueAdmin"), "payout mutations require a permanent founder/admin role");
   assert(route.includes('rpc("transition_commission_entry"'), "the API delegates money-state CAS to Turso");
   assert.equal(route.includes('.from("website_sales_commissions").update'), false, "the route cannot rewrite status directly");

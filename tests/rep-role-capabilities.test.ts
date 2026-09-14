@@ -182,8 +182,13 @@ assert.equal(mayQuoteAndClose("clos er"), false, "a mangled role must not match"
 const salesRoute = stripComments(read("app/api/website-sales/[leadId]/route.ts"));
 assert.match(
   salesRoute,
-  /mayQuoteAndClose\(session\.teamRole\)\s*&&\s*\(assignedToUser \|\| attributedToUser \|\| actorOwnsSalesLead\)/,
-  "the deal gate must require BOTH the role and ownership -- either alone is not a gate",
+  /const repMayRunDeal\s*=\s*mayQuoteAndClose\(session\.teamRole\)\s*&&\s*actorHoldsDealSeat/,
+  "the deal gate must require BOTH a close-capable role and the current assigned/audit-host seat",
+);
+assert.match(
+  salesRoute,
+  /mayRepRunWebsiteSalesDeal\(\{[\s\S]*?assignedTo:current\.assigned_to,[\s\S]*?auditHostUserId:current\.audit_host_user_id/,
+  "historical opener attribution cannot be reused as present-day authority to quote or close",
 );
 // The old bare-role check must not creep back.
 assert.doesNotMatch(
@@ -250,7 +255,7 @@ console.log("rep-role-capabilities ok");
 //                            a price.
 //   close RPC allowlist      p_rep_user_id -- the ATTRIBUTED rep, the person
 //                            being PAID. An opener absolutely belongs there:
-//                            they earn the 20% opener rate when a founder
+//                            they earn the 15% opener rate when a founder
 //                            closes the lead they sourced. Removing them would
 //                            silently stop paying setters for two-party sales.
 //

@@ -73,11 +73,39 @@ for (const role of ROLES) {
 /* ── 3. THE RATES. Each agreement must quote the engine's own numbers. ─────*/
 assert.ok(rendered.opener.includes(pct(COMPANY_TRACK_BPS.opener)), "opener agreement states the company-sourced opener rate");
 assert.ok(rendered.opener.includes(pct(SELF_TRACK_BPS.opener)), "opener agreement states the self-sourced opener rate");
+for (const role of ["opener", "closer", "manager"] as ContractRole[]) {
+  assert.equal(
+    rendered[role].includes("Self-sourced work pays more"),
+    false,
+    `${role}: must not promise a sourcing premium on opening alone under the 15/25/35 ladder`,
+  );
+  assert.ok(
+    /finding and closing/i.test(rendered[role]),
+    `${role}: must explain that the 35% rate is earned by finding and closing the deal`,
+  );
+}
 
 assert.ok(rendered.closer.includes(pct(COMPANY_TRACK_BPS.closer)), "closer agreement states the company-sourced closer rate");
-assert.ok(rendered.closer.includes(pct(COMPANY_TRACK_BPS.full_stack)), "closer agreement states the company full-stack rate");
 assert.ok(rendered.closer.includes(pct(SELF_TRACK_BPS.open_close)), "closer agreement states the self open+close rate");
 assert.ok(rendered.closer.includes(pct(SELF_TRACK_BPS.full_stack)), "closer agreement states the self full-stack rate");
+assert.equal(
+  Object.prototype.hasOwnProperty.call(COMPANY_TRACK_BPS, "full_stack"),
+  false,
+  "the company track must not expose a 35% full-stack rate; 35% requires finding the lead",
+);
+assert.equal(
+  /Opened AND closed a company-sourced lead/i.test(rendered.closer),
+  false,
+  "the closer agreement must not promise 35% merely for handling a company-fed lead alone",
+);
+assert.ok(
+  /company-sourced lead, whether or not a separate opener is credited/i.test(rendered.closer),
+  "the closer agreement must make the company-fed sole-close rate unambiguous",
+);
+for (const role of ["opener", "closer", "manager"] as ContractRole[]) {
+  assert.ok(rendered[role].includes("$10,000+ collected"), `${role}: first accelerator threshold is exactly $10,000`);
+  assert.ok(rendered[role].includes("$25,000+ collected"), `${role}: second accelerator threshold is exactly $25,000`);
+}
 
 assert.ok(rendered.manager.includes(pct(MANAGER_OVERRIDE_BPS)), "manager agreement states the override rate");
 assert.ok(

@@ -366,7 +366,7 @@ export function LeadLifecycleActions({
   const initialPackageId =
     initialOffer?.packageId && initialOffer.packageId in WEBSITE_PACKAGES
       ? (initialOffer.packageId as WebsitePackageId)
-      : "essential";
+      : "starter";
   const [packageId, setPackageId] = useState<WebsitePackageId>(initialPackageId);
   const [setupAmount, setSetupAmount] = useState(
     String(initialOffer?.setupAmount ?? WEBSITE_PACKAGES[initialPackageId].setupFloor),
@@ -390,6 +390,9 @@ export function LeadLifecycleActions({
   const [builderUserId, setBuilderUserId] = useState(initialOffer?.builderUserId || "");
   const [paymentProvider, setPaymentProvider] = useState<"stripe" | "manual">("stripe");
   const [manualPaymentConfirmed, setManualPaymentConfirmed] = useState(false);
+  // Keep one key across an uncertain network retry. It changes only after the
+  // server confirms the installment, so a lost response cannot book twice.
+  const [paymentRequestId, setPaymentRequestId] = useState(() => crypto.randomUUID());
 
   // Whether a shared OASIS workspace calendar can carry a booking for a host
   // who has not connected their own Google account. A DIFFERENT fact from
@@ -687,6 +690,25 @@ export function LeadLifecycleActions({
     );
     if (result?.checkoutReference) setPaymentReference(result.checkoutReference);
     if (result?.checkoutUrl) setCheckoutUrl(result.checkoutUrl);
+  }
+
+  async function recordPayment() {
+    const result = await patch(
+      {
+        action: "record_payment",
+        requestId: paymentRequestId,
+        paymentProvider,
+        paymentReference: paymentReference.trim(),
+        paymentAmount: Number(paymentDueAmount),
+        paymentCurrency: currency,
+        manualPaymentConfirmed,
+        builderUserId,
+      },
+      paymentCompletesSetup
+        ? "Setup paid in full. Commission accrued once; the lead is in Won and the builder is assigned for onboarding."
+        : "Deposit verified. The balance is ready, with commission and fulfillment still locked.",
+    );
+    if (result) setPaymentRequestId(crypto.randomUUID());
   }
 
   async function recordDealOutcome() {
@@ -1108,7 +1130,7 @@ export function LeadLifecycleActions({
                 "Decision-maker confirmed",
                 "Website problem confirmed",
                 "Timing confirmed",
-                "Open to $2,000+",
+                "Open to $500 setup + $150/month",
               ].map((label, index) => (
                 <QualificationGateCard
                   key={label}
@@ -1861,25 +1883,10 @@ export function LeadLifecycleActions({
                 (paymentProvider === "stripe" && !checkoutHref) ||
                 (paymentProvider === "manual" && (!canManage || !manualPaymentConfirmed))
               }
-              onClick={() =>
-                patch(
-                  {
-                    action: "record_payment",
-                    paymentProvider,
-                    paymentReference: paymentReference.trim(),
-                    paymentAmount: Number(paymentDueAmount),
-                    paymentCurrency: currency,
-                    manualPaymentConfirmed,
-                    builderUserId,
-                  },
-                  paymentCompletesSetup
-                    ? "Setup paid in full. Commission accrued once and the builder handoff opened."
-                    : "Deposit verified. The balance is ready, with commission and fulfillment still locked.",
-                )
-              }
+              onClick={() => void recordPayment()}
               className="btn-primary !px-4 !py-2 text-sm"
             >
-              {paymentCompletesSetup ? "Verify balance & start fulfillment" : "Verify setup deposit"}
+              {paymentCompletesSetup ? "Verify balance & mark Won" : "Verify setup deposit"}
             </button>
           </div>
           <details className="rounded-lg border border-bg-border px-3 py-2 text-xs text-fg-muted">

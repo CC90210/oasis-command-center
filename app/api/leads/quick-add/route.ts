@@ -90,6 +90,16 @@ export async function POST(req: NextRequest) {
   // OASIS quick-add with no explicit stage would fail its own validation.
   const quickAddSlug = await resolveOwnedSlug(sess.tenantId);
   const isWebsiteSalesWorkspace = isWebsiteSalesTenantSlug(quickAddSlug);
+  if (isWebsiteSalesWorkspace && sess.isAdmin) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "use_pipeline_new",
+        message: "Use Pipeline > New lead so you can choose a verified sales rep. Admin quick-add is disabled for OASIS leads.",
+      },
+      { status: 409 },
+    );
+  }
   // An OASIS role that may add no lead may use neither branch below: not to
   // create one, and not to touch one that already exists. The create planner
   // gives the same refusal, from the same place.
@@ -237,6 +247,9 @@ export async function POST(req: NextRequest) {
       const plan = planOasisLeadCreate({
         viewer: { isAdmin: sess.isAdmin, teamRole: sess.teamRole },
         creatorUserId: sess.userId,
+        // This door is rep-only on OASIS; admins use /pipeline/new so the
+        // destination is selected from the verified sales roster.
+        resolvedAssigneeUserId: sess.userId,
         data: {
           business_name: businessName,
           ...(contactName ? { contact_name: contactName } : {}),

@@ -165,6 +165,9 @@ const SAVE_ERROR_SENTENCES: Record<string, string> = {
   stage_not_creatable: "A new lead can't start in that stage. Pick another one.",
   region_required: "Pick the province or state this business is in.",
   invalid_region: "Pick a province or state from the list.",
+  assignee_required: "Choose the sales rep who will own this lead.",
+  target_not_on_sales_roster: "Choose an active sales rep from this workspace.",
+  sales_roster_unavailable: "The sales roster could not be verified. Try again in a moment.",
   validation: "One of the values wasn't accepted. Check the fields and try again.",
   not_found: "This record no longer exists. Reload the page.",
   conflict: "Someone changed this record while you were editing. Reload the page and try again.",
@@ -537,7 +540,7 @@ function FieldInput({
     </div>
   ) : null;
 
-  if (field.type === "enum" && field.enum_values && field.enum_values.length > 0) {
+  if (field.type === "enum" && field.enum_values) {
     return (
       <label className="block">
         {label}

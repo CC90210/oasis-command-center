@@ -124,24 +124,22 @@ import {
 
 // ── 5. The healthy/total pill must be able to read FULL ───────────────────
 //
-// Counting workers nobody intends to run here capped the board at 8/12 — its
-// best possible score. An operator who learns that some red is normal stops
-// reading the red that is not, and three genuinely dead daemons sat unnoticed
-// behind exactly that number.
+// Runtime is the explicit source of truth: local and cloud workers count,
+// while retired inventory stays visible without poisoning the score.
 {
   const board = [
-    { status: "healthy" as const },                                       // scheduler
-    { status: "healthy" as const },                                       // bridge
-    { status: "down" as const, not_expected_here: "Runs on the VPS" },     // email sender
-    { status: "down" as const, not_expected_here: "Retired 2026-05-18" },  // skool
-    { status: "archived" as const },
+    { status: "healthy" as const, runtime: "local" as const },
+    { status: "healthy" as const, runtime: "local" as const },
+    { status: "healthy" as const, runtime: "cloud" as const },
+    { status: "down" as const, runtime: "retired" as const },
+    { status: "archived" as const, runtime: "retired" as const },
   ];
   const counted = board.filter(countsTowardHealth);
-  assert.equal(counted.length, 2, "only workers meant to run here are counted");
+  assert.equal(counted.length, 3, "active local + cloud workers are counted; retired inventory is not");
   assert.equal(
     counted.filter((w) => w.status === "healthy").length,
     counted.length,
-    "with both real workers healthy the pill must read FULL, not 2/4",
+    "with every active worker healthy the pill must read FULL",
   );
 }
 
@@ -153,6 +151,16 @@ import {
   assert.equal(countsTowardHealth({ status: "degraded" }), true,
     "a degraded worker must count");
   assert.equal(countsTowardHealth({ status: "healthy" }), true);
+  assert.equal(
+    countsTowardHealth({ status: "down", runtime: "retired" }),
+    false,
+    "retired inventory never counts as an outage",
+  );
+  assert.equal(
+    countsTowardHealth({ status: "healthy", runtime: "cloud" }),
+    true,
+    "a reporting cloud automation is part of OASIS health",
+  );
 }
 
 console.log("worker-status: all assertions passed");

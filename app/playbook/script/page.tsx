@@ -15,7 +15,7 @@ const TRACKS = {
 const OBJECTIONS = [
   ["Send me something", "Absolutely. What would be most useful: the website issue I noticed, or a couple of ideas to improve it? Great — I’ll note that for CC or Adon. Let’s also grab 15 minutes so they can show you instead of sending another generic PDF."],
   ["We already have a website person", "That makes sense. I’m not asking you to replace them today. I only noticed [issue]. Is that already being fixed, or has it been sitting there?"],
-  ["How much is it?", "Projects start around $2,000, but I don’t scope or price them. My job is to see if the problem is real. CC or Adon can show you the right option on the Meet."],
+  ["How much is it?", "Projects start at $500 setup plus $150/month, but I don’t scope or price them. My job is to see if the problem is real. CC or Adon can show you the right option on the Meet."],
   ["I’m busy", "No problem. Is later today better, or should I call tomorrow?"],
   ["Not interested", "Totally fair. Before I go — is that because the website is already working well, or because improving it is not a priority right now?"],
   ["We get business from referrals", "That’s a good position to be in. When those referrals look you up before calling, does the website help confirm the recommendation?"],
@@ -45,7 +45,7 @@ export default function ScriptPage() {
       <Talk label="Explain why it matters">“The reason I called is that when someone checks you out on their phone, [problem] can make it harder for them to [call / book / request a quote]. Is the website bringing you many leads right now?”</Talk>
       <Talk label="Ask, then listen">“If you could improve one thing about the website or how new leads come in, what would it be?”</Talk>
       <Talk label="Check who decides">“Would you be the person who decides whether to improve it?”</Talk>
-      <Talk label="Check timing and budget">“Is this something you would want to improve in the next few months?” Then: “If the right solution started around $2,000, would it be worth seeing what that could look like?”</Talk>
+      <Talk label="Check timing and budget">“Is this something you would want to improve in the next few months?” Then: “If the right solution started at $500 setup plus $150/month, would it be worth seeing what that could look like?”</Talk>
       <Talk label="Book the Meet">“That sounds worth a proper look. CC and Adon handle the audit and options. I can book you a quick Google Meet so they can show you exactly what they would change. Is [time A] or [time B] better?”</Talk>
     </Card>
 

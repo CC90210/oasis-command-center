@@ -232,7 +232,7 @@ function header(title: string, v: ContractVars): string {
 }
 
 const SOURCING = `
-## 2. How a lead is sourced changes the rate
+## 2. Lead sourcing and credit
 
 Two tracks, and which one applies is recorded on the deal at the time it closes.
 
@@ -240,9 +240,10 @@ Two tracks, and which one applies is recorded on the deal at the time it closes.
   marketing or inbound channels.
 - **Self-sourced** — the Contractor found the client themselves.
 
-Self-sourced work pays more, because the Contractor supplied what the company
-otherwise pays to generate. The track is frozen when the deal closes; re-sourcing
-a client later does not re-rate a deal that has already paid.
+Opening alone earns the same 15% base rate on either track. Finding and closing
+the deal earns the 35% combined rate because the Contractor supplied the lead
+and completed the sale. The track is frozen when the deal closes; re-sourcing a
+client later does not re-rate a deal that has already paid.
 `.trim();
 
 export function openerAgreement(v: ContractVars): string {
@@ -290,13 +291,15 @@ ${SOURCING}
 
 | What the Contractor did | Rate on cash collected |
 |---|---|
-| Closed a company-sourced lead opened by someone else | **${pct(COMPANY_TRACK_BPS.closer)}** |
-| Opened AND closed a company-sourced lead | **${pct(COMPANY_TRACK_BPS.full_stack)}** |
+| Closed a company-sourced lead | **${pct(COMPANY_TRACK_BPS.closer)}** |
 | Opened and closed a self-sourced lead | **${pct(SELF_TRACK_BPS.open_close)}** |
 | Self-sourced, closed, and built it | **${pct(SELF_TRACK_BPS.full_stack)}** |
 
-Where an opener booked the meeting, the opener is paid their own share
-separately. The rates above are the Contractor's, not a pool to divide.
+Closing a company-sourced lead, whether or not a separate opener is credited,
+earns the single closer rate above. The combined 35% rate applies only when the
+Contractor found the client and closed the deal. Where an opener is credited,
+the opener is paid their own share separately; these rates are not a pool to
+divide.
 
 ### Packages
 

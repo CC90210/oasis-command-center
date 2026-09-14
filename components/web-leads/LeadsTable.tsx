@@ -214,7 +214,8 @@ export function LeadsTable({
    *  ownership, so its checkboxes are not read controls. */
   canSelect: boolean;
 }) {
-  const allOnPageSelected = leads.length > 0 && leads.every((l) => selected.has(l.id));
+  const selectableLeads = canSelect ? leads.filter((l) => !l.released) : [];
+  const allOnPageSelected = selectableLeads.length > 0 && selectableLeads.every((l) => selected.has(l.id));
   // pageSize is passed in rather than hardcoded: a literal 50 here would
   // silently disagree with PAGE_SIZE in data.ts the moment either changed, and
   // the pager would offer pages the API never returns.
@@ -303,10 +304,11 @@ export function LeadsTable({
                     type="checkbox"
                     className="h-3.5 w-3.5 rounded accent-accent align-middle"
                     checked={allOnPageSelected}
+                    disabled={selectableLeads.length === 0}
                     // Selects THIS PAGE, not the whole filtered set. A checkbox
                     // that silently ticked 31,016 rows would let one click claim
                     // far past a rep's cap and read as if it had worked.
-                    onChange={() => onToggleAll(leads.map((l) => l.id), !allOnPageSelected)}
+                    onChange={() => onToggleAll(selectableLeads.map((l) => l.id), !allOnPageSelected)}
                     aria-label={allOnPageSelected ? "Clear selection on this page" : "Select every lead on this page"}
                   />
                 </th>
@@ -385,13 +387,15 @@ export function LeadsTable({
                       inset ring, and the row's actions fade in. Nothing draws a
                       line, nothing shifts position, so the list does not jitter
                       as the cursor travels down it. */}
-                  <input
-                    type="checkbox"
-                    className="h-3.5 w-3.5 rounded accent-accent align-middle"
-                    checked={selected.has(l.id)}
-                    onChange={() => onToggle(l.id)}
-                    aria-label={`Select ${l.name}`}
-                  />
+                  {!l.released && (
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded accent-accent align-middle"
+                      checked={selected.has(l.id)}
+                      onChange={() => onToggle(l.id)}
+                      aria-label={`Select ${l.name}`}
+                    />
+                  )}
                 </td>}
                 <td className={`py-3.5 ${canSelect ? "pl-3" : "pl-4"} pr-4 align-middle`}>
                   {/* `min-w-full max-w-0` IS LOAD-BEARING, not decoration. See
@@ -428,7 +432,7 @@ export function LeadsTable({
                     deep. A number a rep cannot read in one glance is not a
                     number. */}
                 <td className="w-[10.5rem] whitespace-nowrap px-4 py-3 align-middle">
-                  {l.phone && showStage && canSelect ? (
+                  {l.phone && showStage && canSelect && !l.released ? (
                     <a
                       href={`tel:${l.phone}`}
                       onClick={(e) => e.stopPropagation()}

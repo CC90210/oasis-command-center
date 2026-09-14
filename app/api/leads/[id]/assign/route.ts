@@ -14,9 +14,10 @@
  *   { assigned_to: string | null }   — auth_user_id of the assignee,
  *                                       or null to clear assignment.
  *
- * Authorization: shared CRM semantics on legacy tenants. On OASIS, admins may
- * reassign anything; a sales rep may only transfer their own pre-handoff lead
- * to another pre-handoff sales role. Founder/builder ownership is workflow-only.
+ * Authorization: shared CRM semantics on legacy tenants. On OASIS, generic
+ * reassignment ends at the founder handoff for everyone, including admins; a
+ * sales rep may only transfer their own pre-handoff lead to another sales role.
+ * Closer and builder ownership is workflow-only after that point.
  *
  * Response 200: { ok: true, assigned_to: string | null }
  * Response 4xx: { ok: false, error, message? }
@@ -34,7 +35,13 @@ import {
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
-import { roleMayOperateOasisSalesLead } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
+  isReleasedOasisPipelineRow,
+  roleMayOperateOasisSalesLead,
+} from "@/lib/oasis-sales-pipeline-policy";
+import { getOasisSalesRepRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,25 +52,6 @@ const UUID_RE =
 // Generic reassignment is only a pre-handoff convenience. Once a 15-minute
 // audit is booked, ownership belongs to the structured closer/payment/builder
 // workflow so attribution and fulfillment cannot be rewritten out of band.
-const OASIS_REP_ASSIGNABLE_STAGES = new Set([
-  "researched",
-  "assigned",
-  "attempting_contact",
-  "connected",
-  "qualified",
-]);
-const OASIS_PRE_HANDOFF_ASSIGNEE_ROLES = new Set([
-  "opener",
-  "closer",
-  "builder",
-  "marketing",
-  "agent",
-  "manager",
-  "admin",
-  "owner",
-  "member",
-]);
-
 export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
@@ -111,29 +99,56 @@ export async function POST(
   }
 
   const db = getServiceSupabase();
-  let nextAssigneeRole: string | null = null;
+  const tenantSlug = await resolveOwnedSlug(tenantId);
+  if (!tenantSlug) {
+    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
+  }
+  const isOasisWorkspace = isWebsiteSalesTenantSlug(tenantSlug);
 
-  // Verify the candidate UUID is a member of THIS tenant. OASIS non-admin
-  // transfers also validate the assignee's sales role after loading the lead.
+  // Verify the candidate against the authoritative destination set. OASIS is
+  // sales-roster-only for admins and reps alike; legacy workspaces retain the
+  // broader tenant-member assignment rule.
   if (nextAssignedTo) {
-    const memberCheck = await db
-      .from("user_profiles")
-      .select("auth_user_id, team_role")
-      .eq("tenant_id", tenantId)
-      .eq("auth_user_id", nextAssignedTo)
-      .maybeSingle();
-    if (!memberCheck.data) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "not_a_tenant_member",
-          message: "That user isn't on this tenant.",
-        },
-        { status: 400 },
-      );
+    if (isOasisWorkspace) {
+      let roster;
+      try {
+        roster = await getOasisSalesRepRoster(tenantId);
+      } catch (error) {
+        console.error("[leads.assign] OASIS sales roster could not be verified", {
+          tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          { ok: false, error: "sales_roster_unavailable", message: "The sales roster could not be verified." },
+          { status: 503 },
+        );
+      }
+      const resolved = resolveAssignableTarget(roster, nextAssignedTo);
+      if (!resolved) {
+        return NextResponse.json(
+          { ok: false, error: "target_not_on_sales_roster", message: "Choose an active sales rep from this workspace." },
+          { status: 422 },
+        );
+      }
+      nextAssignedTo = resolved;
+    } else {
+      const memberCheck = await db
+        .from("user_profiles")
+        .select("auth_user_id")
+        .eq("tenant_id", tenantId)
+        .eq("auth_user_id", nextAssignedTo)
+        .maybeSingle();
+      if (!memberCheck.data) {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "not_a_tenant_member",
+            message: "That user isn't on this tenant.",
+          },
+          { status: 400 },
+        );
+      }
     }
-    nextAssigneeRole =
-      typeof memberCheck.data.team_role === "string" ? memberCheck.data.team_role : null;
   }
 
   // Existence + entity-type check — patch_tenant_record_data has tenant
@@ -157,10 +172,6 @@ export async function POST(
     data: Record<string, unknown>;
   };
 
-  const tenantSlug = await resolveOwnedSlug(tenantId);
-  if (!tenantSlug) {
-    return NextResponse.json({ ok: false, error: "tenant_scope_unresolved" }, { status: 500 });
-  }
   const isOasisSalesLead =
     record.entity_type === "lead" &&
     (record.data.sales_program === OASIS_WEBSITE_SALES_PROGRAM ||
@@ -169,6 +180,49 @@ export async function POST(
     return NextResponse.json(
       { ok: false, error: "forbidden_role", message: "Your role can't reassign this record." },
       { status: 403 },
+    );
+  }
+  if (isOasisSalesLead && !nextAssignedTo) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "assignee_required",
+        message: "OASIS leads need an active sales rep. Use Leads and its Release action to return work to the shared pool.",
+      },
+      { status: 422 },
+    );
+  }
+  const currentStage =
+    typeof record.data.stage === "string" ? record.data.stage.trim().toLowerCase() : "";
+  const currentOwner =
+    typeof record.data.assigned_to === "string"
+      ? record.data.assigned_to.trim().toLowerCase()
+      : "";
+  if (
+    isOasisSalesLead &&
+    (!currentOwner ||
+      !currentStage ||
+      currentStage === "unassigned" ||
+      currentStage === "researched" ||
+      isReleasedOasisPipelineRow(record))
+  ) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "use_web_leads_claim",
+        message: "Assign untouched prospects from Leads so ownership, stage, and commission provenance are recorded together.",
+      },
+      { status: 409 },
+    );
+  }
+  if (isOasisSalesLead && !OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES.has(currentStage)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "use_website_sales_workflow",
+        message: "This lead has entered its guarded handoff. Reassign it through the website sales workflow.",
+      },
+      { status: 409 },
     );
   }
   if (isOasisSalesLead && !sess.isAdmin) {
@@ -187,24 +241,13 @@ export async function POST(
         { status: access.status },
       );
     }
-
-    const currentOwner =
-      typeof record.data.assigned_to === "string"
-        ? record.data.assigned_to.trim().toLowerCase()
-        : "";
-    const currentStage =
-      typeof record.data.stage === "string" ? record.data.stage.trim().toLowerCase() : "";
     const isAllowedTransfer =
       !currentOwner ||
       currentOwner === sess.userId.toLowerCase() ||
       sess.isAdmin ||
       sess.teamRole === "manager" ||
       sess.teamRole === "owner";
-    if (
-      !isAllowedTransfer ||
-      (nextAssignedTo !== null &&
-        !OASIS_PRE_HANDOFF_ASSIGNEE_ROLES.has((nextAssigneeRole || "").toLowerCase()))
-    ) {
+    if (!isAllowedTransfer) {
       return NextResponse.json(
         {
           ok: false,
@@ -228,6 +271,7 @@ export async function POST(
     record,
     assignedTo: nextAssignedTo,
     occurredAt,
+    resetClaimClock: isOasisSalesLead,
   });
   if (!update.ok) {
     return NextResponse.json(

@@ -16,7 +16,9 @@
  *                /pipeline filters on sales_motion and /web-leads needs an
  *                owner for My leads
  *
- * (a) and (b) pin the stage lists to each other. (c) drives the REAL route
+ * The current integrity rule is deliberately simpler: every hand-created lead
+ * starts in Assigned, then audited lifecycle actions move it. (a) and (b) pin
+ * that single entry point to the form and server. (c) drives the REAL route
  * handlers — POST /api/manifest/<slug>/records/lead and POST
  * /api/leads/quick-add — through the real session check, profile resolution,
  * tenant gate and data layer, against a local libSQL database, then reads the
@@ -71,6 +73,14 @@ const OPENER = "0a0a0a0a-0000-4000-8000-000000000002";
 const MEMBER = "0a0a0a0a-0000-4000-8000-000000000003";
 const SUN_AGENT = "0a0a0a0a-0000-4000-8000-000000000004";
 const OTHER_REP = "0a0a0a0a-0000-4000-8000-000000000005";
+const BULK_ELIGIBLE = "0c0c0c0c-0000-4000-8000-000000000001";
+const BULK_WON = "0c0c0c0c-0000-4000-8000-000000000002";
+const BULK_DELIVERY = "0c0c0c0c-0000-4000-8000-000000000003";
+const BULK_POOL = "0c0c0c0c-0000-4000-8000-000000000004";
+const SINGLE_ELIGIBLE = "0c0c0c0c-0000-4000-8000-000000000005";
+const SINGLE_POOL = "0c0c0c0c-0000-4000-8000-000000000006";
+const EXPIRED_CLAIM = "0c0c0c0c-0000-4000-8000-000000000007";
+const OLD_ASSIGNMENT_AT = "2026-09-01T00:00:00.000Z";
 const SUN_TENANT = "5a5a5a5a-0000-4000-8000-00000000005a";
 
 type ApiBody = {
@@ -84,6 +94,11 @@ type ApiBody = {
   stage?: string;
   existing?: boolean;
   advanced?: boolean;
+  updated?: number;
+  skipped?: number;
+  failed?: number;
+  trackingFailed?: number;
+  claim_required?: number;
 };
 
 function run(name: string) {
@@ -118,10 +133,10 @@ async function main() {
   // (a) creatable ⊆ board ⊆ admin set_stage, for every role
   // ───────────────────────────────────────────────────────────────────────
   const ROLE_VIEWERS = [
-    { label: "owner", teamRole: "owner", isOwner: true, adminAccess: false, expect: BOARD_ALL },
-    { label: "admin", teamRole: "admin", isOwner: false, adminAccess: false, expect: BOARD_ALL },
+    { label: "owner", teamRole: "owner", isOwner: true, adminAccess: false, expect: ["assigned"] },
+    { label: "admin", teamRole: "admin", isOwner: false, adminAccess: false, expect: ["assigned"] },
     { label: "member", teamRole: "member", isOwner: false, adminAccess: false, expect: [] as string[] },
-    { label: "admin_access", teamRole: "opener", isOwner: false, adminAccess: true, expect: BOARD_ALL },
+    { label: "admin_access", teamRole: "opener", isOwner: false, adminAccess: true, expect: ["assigned"] },
     { label: "opener", teamRole: "opener", isOwner: false, adminAccess: false, expect: ["assigned"] },
     { label: "closer", teamRole: "closer", isOwner: false, adminAccess: false, expect: ["assigned"] },
     { label: "manager", teamRole: "manager", isOwner: false, adminAccess: false, expect: ["assigned"] },
@@ -180,10 +195,11 @@ async function main() {
   // (b) the /pipeline/new picker offers exactly the server allowlist
   // ───────────────────────────────────────────────────────────────────────
   const seedLead = OASIS_SEED.data_model!.find((entity) => entity.name === "lead")!;
+  const ASSIGNEES = [{ userId: OPENER, label: "OASIS opener" }];
   const seedStagesBefore = [...(seedLead.fields.find((f) => f.name === "stage")!.enum_values || [])];
   for (const v of ROLE_VIEWERS) {
     const viewer = viewerFor(v);
-    const form = create.oasisLeadCreateForm(seedLead, viewer);
+    const form = create.oasisLeadCreateForm(seedLead, viewer, ASSIGNEES);
     const stageField = form.entity.fields.find((f) => f.name === "stage")!;
     const picker = stageField.enum_values || [];
     assert.deepEqual(picker, v.expect, `${v.label}: picker`);
@@ -194,6 +210,7 @@ async function main() {
       const plan = create.planOasisLeadCreate({
         viewer,
         creatorUserId: OWNER,
+        resolvedAssigneeUserId: viewer.isAdmin ? OPENER : OWNER,
         data: { name: "Probe", state: "ON", stage: key },
         now: new Date(),
         requireRegion: true,
@@ -208,8 +225,8 @@ async function main() {
       );
     }
   }
-  const adminForm = create.oasisLeadCreateForm(seedLead, { isAdmin: true, teamRole: "owner" });
-  assert.equal(adminForm.optionLabels.stage.founder_meeting_booked, "Founder Meeting");
+  const adminForm = create.oasisLeadCreateForm(seedLead, { isAdmin: true, teamRole: "owner" }, ASSIGNEES);
+  assert.deepEqual(adminForm.optionLabels.stage, { assigned: "Assigned" });
   assert.deepEqual(
     seedLead.fields.find((f) => f.name === "stage")!.enum_values,
     seedStagesBefore,
@@ -233,7 +250,7 @@ async function main() {
   // A picker offers only what the server accepts: no lifecycle field survives
   // into the create form (last_contacted_at did, and 409'd when filled in).
   for (const field of adminForm.entity.fields) {
-    if (field.name === "stage") continue;
+    if (field.name === "stage" || field.name === "assigned_to") continue;
     assert.deepEqual(
       policy.rejectedOasisGenericPatchKeys({ [field.name]: "x" }),
       [],
@@ -244,13 +261,13 @@ async function main() {
   // ?stage= preselects only a stage the viewer may create in.
   const adminStages = create.creatableOasisStages({ isAdmin: true, teamRole: "owner" });
   const repStages = create.creatableOasisStages({ isAdmin: false, teamRole: "opener" });
-  assert.equal(create.preselectOasisCreateStage("founder_meeting_booked", adminStages), "founder_meeting_booked");
+  assert.equal(create.preselectOasisCreateStage("founder_meeting_booked", adminStages), "assigned");
   assert.equal(create.preselectOasisCreateStage("founder_meeting_booked", repStages), "assigned");
   assert.equal(create.preselectOasisCreateStage(POOL, adminStages), "assigned");
   assert.equal(create.preselectOasisCreateStage(undefined, adminStages), "assigned");
 
   const newPage = readFileSync("app/pipeline/new/page.tsx", "utf8");
-  assert.match(newPage, /const form = oasisLeadCreateForm\(leadEntity, viewer\)/);
+  assert.match(newPage, /const form = oasisLeadCreateForm\(leadEntity, viewer, assigneeOptions\)/);
   assert.match(newPage, /entity=\{form\.entity\}/, "the page must render the trimmed form, not the seed entity");
   assert.match(newPage, /optionLabels=\{form\.optionLabels\}/);
   assert.match(newPage, /preselectOasisCreateStage\(sp\.stage, form\.stages\)/, "D8: ?stage= preselects");
@@ -340,18 +357,18 @@ async function main() {
   const stampNow = new Date("2026-09-10T12:00:00.000Z");
   for (const slug of ["oasis", "oasis-ai-cc", "oasis-webdev"]) {
     const filter = create.oasisBoardProgramFilter(slug);
-    const stamp = create.oasisLeadCreateStamp({ stage: "assigned", creatorUserId: OWNER, now: stampNow });
+    const stamp = create.oasisLeadCreateStamp({ stage: "assigned", ownerUserId: OPENER, sourceTrack: "company", now: stampNow });
     assert.equal(filter.salesMotion, OASIS_COLD_OUTBOUND_MOTION, `${slug} board filters on the motion`);
     assert.equal(stamp.sales_motion, filter.salesMotion, `${slug}: stamp fails the board's motion filter`);
     if (filter.salesProgram) assert.equal(stamp.sales_program, filter.salesProgram);
   }
   assert.deepEqual(create.oasisBoardProgramFilter("sun"), { salesProgram: null, salesMotion: null });
-  const upper = create.oasisLeadCreateStamp({ stage: "lost", creatorUserId: OWNER.toUpperCase(), now: stampNow });
-  assert.equal(upper.assigned_to, OWNER, "assigned_to is lowercased");
+  const upper = create.oasisLeadCreateStamp({ stage: "lost", ownerUserId: OPENER.toUpperCase(), sourceTrack: "company", now: stampNow });
+  assert.equal(upper.assigned_to, OPENER, "assigned_to is lowercased");
   assert.equal(upper.lost_at, stampNow.toISOString(), "a lead created as lost carries lost_at");
-  assert.equal("claimed_at" in upper, false, "claimed_at would let the 7-day rule release a hand-made lead");
+  assert.equal(upper.claimed_at, stampNow.toISOString(), "manual ownership must start the normal claim-expiry clock");
   assert.equal(
-    "lost_at" in create.oasisLeadCreateStamp({ stage: "won", creatorUserId: OWNER, now: stampNow }),
+    "lost_at" in create.oasisLeadCreateStamp({ stage: "won", ownerUserId: OPENER, sourceTrack: "company", now: stampNow }),
     false,
   );
   run("(b) the stamp satisfies the board filter on every OASIS slug");
@@ -370,7 +387,8 @@ async function main() {
     CREATE TABLE user_profiles (
       id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
-      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT
+      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT,
+      invited_by TEXT, manager_user_id TEXT, joined_at TEXT, updated_at TEXT
     );
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (
@@ -396,8 +414,8 @@ async function main() {
     CREATE TABLE forms (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT, enabled INTEGER DEFAULT 1, created_at TEXT);
   `);
   const profile = (id: string, authId: string, email: string, tenant: string, role: string, owner = 0) => ({
-    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
+    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, joined_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
     args: [id, authId, email, tenant, role, owner],
   });
   const lead = (id: string, tenant: string, data: Record<string, unknown>) => ({
@@ -409,6 +427,7 @@ async function main() {
       ...[
         [OWNER, "cc@oasis.test"],
         [OPENER, "opener@oasis.test"],
+        [OTHER_REP, "closer@oasis.test"],
         [MEMBER, "member@oasis.test"],
         [SUN_AGENT, "agent@sun.test"],
       ].map(([id, email]) => ({
@@ -417,6 +436,7 @@ async function main() {
       })),
       profile("p-owner", OWNER, "cc@oasis.test", WEBDEV_TENANT_ID, "owner", 1),
       profile("p-opener", OPENER, "opener@oasis.test", WEBDEV_TENANT_ID, "opener"),
+      profile("p-closer", OTHER_REP, "closer@oasis.test", WEBDEV_TENANT_ID, "closer"),
       profile("p-member", MEMBER, "member@oasis.test", WEBDEV_TENANT_ID, "member"),
       profile("p-sun", SUN_AGENT, "agent@sun.test", SUN_TENANT, "agent"),
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS AI')", args: [WEBDEV_TENANT_ID] },
@@ -431,6 +451,12 @@ async function main() {
         name: "Other Rep Lead", state: "ON", stage: "connected", assigned_to: OTHER_REP,
         sales_motion: OASIS_COLD_OUTBOUND_MOTION, sales_program: OASIS_WEBSITE_SALES_PROGRAM,
       }),
+      // A legacy working-stage row without an owner must never consume a slot
+      // or appear on the Team pipeline before the query is paginated.
+      lead("unassigned-working-1", WEBDEV_TENANT_ID, {
+        name: "Unassigned Working Lead", state: "ON", stage: "assigned",
+        sales_motion: OASIS_COLD_OUTBOUND_MOTION, sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+      }),
     ],
     "write",
   );
@@ -440,6 +466,8 @@ async function main() {
   const { NextRequest } = await import("next/server");
   const records = await import("../app/api/manifest/[slug]/records/[entity]/route");
   const quickAdd = await import("../app/api/leads/quick-add/route");
+  const bulk = await import("../app/api/leads/bulk/route");
+  const singleAssign = await import("../app/api/leads/[id]/assign/route");
   const { listOasisPipelineWindow, resolveOasisPipelineAssigneeScope } = await import(
     "../lib/oasis-pipeline-query"
   );
@@ -447,14 +475,27 @@ async function main() {
   const { parseFilters, filtersToParams, switchCountry } = await import("../lib/web-leads/filters");
   const { EMPTY_SCORE_INDEX } = await import("../lib/web-leads/scores");
 
+  let activeUserId: string | null = null;
   const login = (userId: string, email: string) => {
+    activeUserId = userId;
     sessionCookie = signSession({ sub: userId, email, exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
   };
-  const postRecord = async (slug: string, data: Record<string, unknown>) => {
+  const postRecord = async (
+    slug: string,
+    data: Record<string, unknown>,
+    options: { withoutAdminAssignee?: boolean } = {},
+  ) => {
+    const submitted =
+      activeUserId === OWNER &&
+      slug === "oasis-ai-cc" &&
+      !options.withoutAdminAssignee &&
+      !("assigned_to" in data)
+        ? { ...data, assigned_to: OTHER_REP }
+        : data;
     const req = new NextRequest(`http://localhost/api/manifest/${slug}/records/lead`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ data }),
+      body: JSON.stringify({ data: submitted }),
     });
     const res = await records.POST(req, { params: Promise.resolve({ slug, entity: "lead" }) });
     return { status: res.status, body: (await res.json()) as ApiBody };
@@ -466,6 +507,35 @@ async function main() {
       body: JSON.stringify(body),
     });
     const res = await quickAdd.POST(req);
+    return { status: res.status, body: (await res.json()) as ApiBody };
+  };
+  const postBulk = async (body: Record<string, unknown>) => {
+    const req = new NextRequest("http://localhost/api/leads/bulk", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const res = await bulk.POST(req);
+    return { status: res.status, body: (await res.json()) as ApiBody };
+  };
+  const postSingleAssign = async (id: string, assignedTo: string | null) => {
+    const req = new NextRequest(`http://localhost/api/leads/${id}/assign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assigned_to: assignedTo }),
+    });
+    const res = await singleAssign.POST(req, { params: Promise.resolve({ id }) });
+    return { status: res.status, body: (await res.json()) as ApiBody };
+  };
+  const patchRecord = async (id: string, patch: Record<string, unknown>) => {
+    const req = new NextRequest(`http://localhost/api/manifest/oasis-ai-cc/records/lead?id=${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ patch }),
+    });
+    const res = await records.PATCH(req, {
+      params: Promise.resolve({ slug: "oasis-ai-cc", entity: "lead" }),
+    });
     return { status: res.status, body: (await res.json()) as ApiBody };
   };
   const storedLead = async (id: string) => {
@@ -483,6 +553,7 @@ async function main() {
   const US = parseFilters(new URLSearchParams("country=us"));
   const ownerViewer = { userId: OWNER, teamRole: "owner", isAdmin: true };
   const openerViewer = { userId: OPENER, teamRole: "opener", isAdmin: false };
+  const closerViewer = { userId: OTHER_REP, teamRole: "closer", isAdmin: false };
   const memberViewer = { userId: MEMBER, teamRole: "member", isAdmin: false };
   const mineIds = async (viewer: typeof ownerViewer, filters = CA, scope: "mine" | "team" = "mine") =>
     new Set(
@@ -527,62 +598,87 @@ async function main() {
   // cached book cannot pass the "appears immediately" check below.
   assert.equal((await mineIds(ownerViewer)).size, 0);
   assert.deepEqual([...(await mineIds(ownerViewer, CA, "team"))], ["other-rep-1"]);
+  assert.equal(
+    (await pipelineRows({ userId: OWNER, teamRole: "owner", isOwner: true }, "assigned")).includes(
+      "unassigned-working-1",
+    ),
+    false,
+    "the admin pipeline paginated an unassigned working-stage row",
+  );
   // A role with no scoping reads every row it is handed, so the only thing
   // keeping another rep's leads off a member's Team tab is that the team read
   // fetches its own book plus a roster it does not have. (Verifier, 2026-09-10.)
   assert.deepEqual([...(await mineIds(memberViewer, CA, "team"))], [],
     "a member's Team tab listed leads another rep holds");
 
-  // An OWNER creates one lead in every stage the board draws — no phone on
-  // any of them, the way a lead typed in from a referral often arrives.
+  // An OWNER creates one lead at the single manual entry point. Every later
+  // stage must be reached through the audited lifecycle rather than creation.
   login(OWNER, "cc@oasis.test");
   const created: Record<string, string> = {};
-  for (const stage of BOARD_ALL) {
-    const res = await postRecord("oasis-ai-cc", {
-      name: `Owner lead ${stage}`,
-      company: `Company ${stage}`,
+  const createdAssigned = await postRecord("oasis-ai-cc", {
+    name: "Owner lead assigned",
+    company: "Assigned Company",
+    state: "ON",
+    stage: "assigned",
+  });
+  assert.equal(createdAssigned.status, 200, createdAssigned.body.message);
+  const storedAssigned = await storedLead(createdAssigned.body.record!.id);
+  assert.equal(storedAssigned.tenantId, WEBDEV_TENANT_ID);
+  assert.equal(storedAssigned.data.stage, "assigned");
+  assert.equal(storedAssigned.data.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
+  assert.equal(storedAssigned.data.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
+  assert.equal(storedAssigned.data.assigned_to, OTHER_REP);
+  assert.equal(storedAssigned.data.lead_source_track, "company");
+  assert.equal(storedAssigned.data.sourced_by_user_id, null);
+  assert.equal(typeof storedAssigned.data.assigned_at, "string");
+  assert.equal(typeof storedAssigned.data.stage_entered_at, "string");
+  assert.equal(typeof storedAssigned.data.claimed_at, "string");
+  created.assigned = createdAssigned.body.record!.id;
+
+  const provenanceRewrite = await patchRecord(created.assigned, {
+    lead_source_track: "self",
+    sourced_by_user_id: OPENER,
+  });
+  assert.equal(provenanceRewrite.status, 409, "generic manifest PATCH rewrote commission provenance");
+  assert.equal(provenanceRewrite.body.error, "use_website_sales_workflow");
+  assert.deepEqual(provenanceRewrite.body.fields, ["lead_source_track", "sourced_by_user_id"]);
+  const provenanceAfterPatch = await storedLead(created.assigned);
+  assert.equal(provenanceAfterPatch.data.lead_source_track, "company");
+  assert.equal(provenanceAfterPatch.data.sourced_by_user_id, null);
+
+  for (const stage of BOARD_ALL.filter((key) => key !== "assigned")) {
+    const refused = await postRecord("oasis-ai-cc", {
+      name: `No create ${stage}`,
       state: "ON",
       stage,
     });
-    assert.equal(res.status, 200, `${stage}: ${res.body.error} — ${res.body.message}`);
-    assert.equal(res.body.record!.tenant_id, WEBDEV_TENANT_ID, `${stage}: wrong tenant`);
-    const stored = await storedLead(res.body.record!.id);
-    assert.equal(stored.tenantId, WEBDEV_TENANT_ID, `${stage}: row written to the wrong tenant`);
-    assert.equal(stored.data.stage, stage);
-    assert.equal(stored.data.sales_motion, OASIS_COLD_OUTBOUND_MOTION, `${stage}: no sales_motion stamp`);
-    assert.equal(stored.data.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
-    assert.equal(stored.data.assigned_to, OWNER, `${stage}: the creator does not own it`);
-    assert.equal(typeof stored.data.assigned_at, "string");
-    assert.equal(typeof stored.data.stage_entered_at, "string");
-    assert.equal("claimed_at" in stored.data, false);
-    assert.equal("lost_at" in stored.data, stage === "lost");
-    created[stage] = res.body.record!.id;
+    assert.equal(refused.status, 409, `admin created directly in ${stage}`);
+    assert.equal(refused.body.error, "stage_not_creatable");
+    assert.deepEqual(refused.body.allowed_stages, [{ key: "assigned", label: "Assigned" }]);
   }
-  run("(c) an owner creates a lead in each of the 13 board stages, stamped and owned");
+  run("(c) an owner creates only in Assigned; every later lifecycle stage is refused");
 
-  for (const stage of BOARD_ALL) {
-    const ids = await pipelineRows({ userId: OWNER, teamRole: "owner", isOwner: true }, stage);
-    assert.ok(ids.includes(created[stage]), `/pipeline?stage=${stage} does not show the lead just created there`);
-  }
-  run("(c) each lead appears on /pipeline in the stage it was created in");
+  const assignedIds = await pipelineRows({ userId: OWNER, teamRole: "owner", isOwner: true }, "assigned");
+  assert.ok(assignedIds.includes(created.assigned), "/pipeline?stage=assigned misses the lead just created there");
+  run("(c) the new lead appears on /pipeline in Assigned");
 
   const ownerMine = await mineIds(ownerViewer);
-  for (const stage of BOARD_ALL) {
-    assert.ok(ownerMine.has(created[stage]), `My leads does not show the ${stage} lead just created`);
-  }
-  assert.equal(ownerMine.size, BOARD_ALL.length, "My leads holds something that is not the owner's");
+  assert.equal(ownerMine.size, 0, "admin-created leads must not silently enter the admin's own book");
+  const assignedRepMine = await mineIds(closerViewer);
+  assert.ok(assignedRepMine.has(created.assigned), "the selected rep's My leads misses the new lead");
+  assert.equal(assignedRepMine.size, 2, "the selected rep's book has an unexpected row count");
   const ownerTeam = await mineIds(ownerViewer, CA, "team");
-  for (const stage of BOARD_ALL) assert.ok(ownerTeam.has(created[stage]), `Team leads misses ${stage}`);
+  assert.ok(ownerTeam.has(created.assigned), "Team leads misses the new Assigned lead");
   assert.ok(ownerTeam.has("other-rep-1"), "an admin's Team leads must show every rep's book");
   assert.ok(!ownerTeam.has("pool-1"), "Team leads is a book — the prospect pool must not flood it");
   run("(c) each lead appears in /web-leads My leads and Team leads immediately, with no phone");
 
   // D7: the region code decides the board, and it is normalised.
-  const us = await postRecord("oasis-ai-cc", { name: "Miami Lead", state: "fl", stage: "qualified" });
+  const us = await postRecord("oasis-ai-cc", { name: "Miami Lead", state: "fl", stage: "assigned" });
   assert.equal(us.status, 200, us.body.message);
   assert.equal((await storedLead(us.body.record!.id)).data.state, "FL");
-  assert.ok(!(await mineIds(ownerViewer)).has(us.body.record!.id), "a US lead appeared on the Canada board");
-  assert.ok((await mineIds(ownerViewer, US)).has(us.body.record!.id), "a US lead is missing from the US board");
+  assert.ok(!(await mineIds(closerViewer)).has(us.body.record!.id), "a US lead appeared on the Canada board");
+  assert.ok((await mineIds(closerViewer, US)).has(us.body.record!.id), "a US lead is missing from the US board");
   run("(c) a US region code puts the lead on the US board, not the Canada one");
 
   // ...and the book the page opens on SAYS where it is. My leads and Team
@@ -590,8 +686,8 @@ async function main() {
   // change neither tab had a country switch, so this lead was on no screen CC
   // could reach from the page (review, 2026-09-10). The book read now counts
   // both boards, and the book tabs render the rail's own switch.
-  const caBook = await fetchLeads(CA, [], ownerViewer, EMPTY_SCORE_INDEX, { scope: "mine", now: Date.now() });
-  assert.deepEqual(caBook.boards, { ca: BOARD_ALL.length, us: 1 }, "My leads on Canada must report the US lead");
+  const caBook = await fetchLeads(CA, [], closerViewer, EMPTY_SCORE_INDEX, { scope: "mine", now: Date.now() });
+  assert.deepEqual(caBook.boards, { ca: 2, us: 1 }, "My leads on Canada must report the US lead");
   assert.equal(caBook.total, caBook.boards!.ca, "the board count disagrees with the list it labels");
   const caTeam = await fetchLeads(CA, [], ownerViewer, EMPTY_SCORE_INDEX, { scope: "team", now: Date.now() });
   assert.equal(caTeam.boards?.us, 1, "Team leads on Canada must report the US lead");
@@ -602,7 +698,7 @@ async function main() {
   assert.equal(switched.view, "mine", "switching boards must stay on My leads");
   assert.equal(switched.country, "us");
   assert.ok(
-    (await mineIds(ownerViewer, switched)).has(us.body.record!.id),
+    (await mineIds(closerViewer, switched)).has(us.body.record!.id),
     "the My leads switch does not reach the US lead",
   );
   // The pool keeps its rail's facet counts and gets no book count.
@@ -639,6 +735,7 @@ async function main() {
     business_city: "Montreal",
     state: "QC",
     source: "referral",
+    assigned_to: OTHER_REP,
     stage: "assigned",
     notes: "Met at the market. Wants online ordering.",
   };
@@ -674,14 +771,22 @@ async function main() {
   assert.equal(badRegion.body.error, "invalid_region");
   assertReadable(badRegion.body, "invalid_region");
 
+  const missingAssignee = await postRecord(
+    "oasis-ai-cc",
+    { name: "Ownerless", state: "ON", stage: "assigned" },
+    { withoutAdminAssignee: true },
+  );
+  assert.equal(missingAssignee.status, 422);
+  assert.equal(missingAssignee.body.error, "assignee_required");
+  assert.deepEqual(missingAssignee.body.fields, ["assigned_to"]);
+
   const forged = await postRecord("oasis-ai-cc", {
-    name: "Forged", state: "ON", stage: "assigned", assigned_to: OTHER_REP,
+    name: "Forged", state: "ON", stage: "assigned", assigned_to: SUN_AGENT,
   });
-  assert.equal(forged.status, 409);
-  assert.equal(forged.body.error, "protected_lifecycle_fields");
+  assert.equal(forged.status, 422);
+  assert.equal(forged.body.error, "target_not_on_sales_roster");
   assert.deepEqual(forged.body.fields, ["assigned_to"]);
-  assert.match(forged.body.message!, /Assigned To/);
-  assertReadable(forged.body, "protected_lifecycle_fields");
+  assertReadable(forged.body, "target_not_on_sales_roster");
 
   login(OPENER, "opener@oasis.test");
   const repWon = await postRecord("oasis-ai-cc", { name: "Rep Won", state: "ON", stage: "won" });
@@ -712,6 +817,9 @@ async function main() {
   const repStored = await storedLead(repLead.body.record!.id);
   assert.equal(repStored.data.assigned_to, OPENER);
   assert.equal(repStored.data.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
+  assert.equal(repStored.data.lead_source_track, "self");
+  assert.equal(repStored.data.sourced_by_user_id, OPENER);
+  assert.equal(typeof repStored.data.claimed_at, "string");
   const repBoard = await pipelineRows({ userId: OPENER, teamRole: "opener", isOwner: false }, "assigned");
   assert.ok(repBoard.includes(repLead.body.record!.id), "a rep's own lead is missing from their pipeline");
   assert.ok(!repBoard.includes(created.assigned), "a rep's pipeline shows the owner's lead");
@@ -723,33 +831,136 @@ async function main() {
   );
   run("(c) a rep's lead lands in Assigned, on their own pipeline and in their own book");
 
+  // Bulk assignment is useful for pre-handoff sales work, but it must use the
+  // same roster and lifecycle boundary as the single-lead handoff.
+  await seed.batch(
+    [
+      lead(BULK_ELIGIBLE, WEBDEV_TENANT_ID, {
+        name: "Bulk eligible", state: "ON", stage: "assigned", assigned_to: OPENER,
+        lead_source_track: "self", sourced_by_user_id: OPENER,
+        claimed_at: OLD_ASSIGNMENT_AT, assigned_at: OLD_ASSIGNMENT_AT, last_call_at: OLD_ASSIGNMENT_AT,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(BULK_WON, WEBDEV_TENANT_ID, {
+        name: "Bulk won", state: "ON", stage: "won", assigned_to: OPENER,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(BULK_DELIVERY, WEBDEV_TENANT_ID, {
+        name: "Bulk delivery", state: "ON", stage: "in_build", assigned_to: OPENER,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(BULK_POOL, WEBDEV_TENANT_ID, {
+        name: "Bulk pool", state: "ON", stage: "researched", assigned_to: null,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(SINGLE_ELIGIBLE, WEBDEV_TENANT_ID, {
+        name: "Single eligible", state: "ON", stage: "connected", assigned_to: OPENER,
+        lead_source_track: "self", sourced_by_user_id: OPENER,
+        claimed_at: OLD_ASSIGNMENT_AT, assigned_at: OLD_ASSIGNMENT_AT, last_call_at: OLD_ASSIGNMENT_AT,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(SINGLE_POOL, WEBDEV_TENANT_ID, {
+        name: "Single pool", state: "ON", stage: "researched", assigned_to: null,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+      lead(EXPIRED_CLAIM, WEBDEV_TENANT_ID, {
+        name: "Expired claim", state: "ON", stage: "assigned", assigned_to: OPENER,
+        lead_source_track: "self", sourced_by_user_id: OPENER,
+        claimed_at: "2000-01-01T00:00:00.000Z", last_call_at: null,
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+      }),
+    ],
+    "write",
+  );
+  login(OWNER, "cc@oasis.test");
+  const invalidSingleTarget = await postSingleAssign(BULK_ELIGIBLE, MEMBER);
+  assert.equal(invalidSingleTarget.status, 422, "single assignment accepted a non-sales tenant member");
+  assert.equal(invalidSingleTarget.body.error, "target_not_on_sales_roster");
+  assert.equal((await storedLead(BULK_ELIGIBLE)).data.assigned_to, OPENER);
+
+  const refusedSingleClear = await postSingleAssign(SINGLE_ELIGIBLE, null);
+  assert.equal(refusedSingleClear.status, 422, "single assignment left an active OASIS lead ownerless");
+  assert.equal(refusedSingleClear.body.error, "assignee_required");
+  assert.match(refusedSingleClear.body.message!, /Leads.*Release/i);
+  assert.equal((await storedLead(SINGLE_ELIGIBLE)).data.assigned_to, OPENER);
+
+  const singlePool = await postSingleAssign(SINGLE_POOL, OTHER_REP);
+  assert.equal(singlePool.status, 409, "generic single assignment partially claimed a pool lead");
+  assert.equal(singlePool.body.error, "use_web_leads_claim");
+  assert.equal((await storedLead(SINGLE_POOL)).data.assigned_to, null);
+  assert.equal((await storedLead(SINGLE_POOL)).data.stage, "researched");
+
+  const singleExpired = await postSingleAssign(EXPIRED_CLAIM, OTHER_REP);
+  assert.equal(singleExpired.status, 409, "generic single assignment bypassed the Leads claim path for an expired claim");
+  assert.equal(singleExpired.body.error, "use_web_leads_claim");
+  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER);
+
+  const validSingle = await postSingleAssign(SINGLE_ELIGIBLE, OTHER_REP);
+  assert.equal(validSingle.status, 200, validSingle.body.message);
+  const singleAfter = await storedLead(SINGLE_ELIGIBLE);
+  assert.equal(singleAfter.data.assigned_to, OTHER_REP);
+  assert.equal(singleAfter.data.stage, "connected", "active transfer rewound the lifecycle stage");
+  assert.equal(singleAfter.data.lead_source_track, "self");
+  assert.equal(singleAfter.data.sourced_by_user_id, OPENER, "single reassignment rewrote frozen source credit");
+  assert.notEqual(singleAfter.data.claimed_at, OLD_ASSIGNMENT_AT);
+  assert.equal(singleAfter.data.assigned_at, singleAfter.data.claimed_at);
+  assert.equal(singleAfter.data.last_call_at, null, "the previous owner's call clock leaked into the new book");
+
+  const invalidBulkTarget = await postBulk({
+    op: "assign",
+    ids: [BULK_ELIGIBLE],
+    assigned_to: MEMBER,
+  });
+  assert.equal(invalidBulkTarget.status, 422, "bulk assignment accepted a non-sales tenant member");
+  assert.equal(invalidBulkTarget.body.error, "target_not_on_sales_roster");
+  assert.equal((await storedLead(BULK_ELIGIBLE)).data.assigned_to, OPENER);
+
+  const guardedBulk = await postBulk({
+    op: "assign",
+    ids: [BULK_ELIGIBLE, BULK_WON, BULK_DELIVERY, BULK_POOL, EXPIRED_CLAIM],
+    assigned_to: OTHER_REP,
+  });
+  assert.equal(guardedBulk.status, 200, guardedBulk.body.message);
+  assert.deepEqual(
+    {
+      updated: guardedBulk.body.updated,
+      skipped: guardedBulk.body.skipped,
+      failed: guardedBulk.body.failed,
+    },
+    { updated: 1, skipped: 4, failed: 0 },
+    "bulk assignment must update only the eligible pre-handoff lead",
+  );
+  assert.equal(guardedBulk.body.claim_required, 2);
+  assert.match(guardedBulk.body.message!, /Leads.*Assign/i);
+  const reassignedEligible = await storedLead(BULK_ELIGIBLE);
+  assert.equal(reassignedEligible.data.assigned_to, OTHER_REP);
+  assert.equal(reassignedEligible.data.stage, "assigned");
+  assert.equal(reassignedEligible.data.lead_source_track, "self");
+  assert.equal(reassignedEligible.data.sourced_by_user_id, OPENER, "reassignment rewrote immutable source credit");
+  assert.notEqual(reassignedEligible.data.claimed_at, OLD_ASSIGNMENT_AT);
+  assert.equal(reassignedEligible.data.assigned_at, reassignedEligible.data.claimed_at);
+  assert.equal(reassignedEligible.data.last_call_at, null);
+  assert.equal((await storedLead(BULK_WON)).data.assigned_to, OPENER, "Won ownership changed out of band");
+  assert.equal((await storedLead(BULK_DELIVERY)).data.assigned_to, OPENER, "delivery ownership changed out of band");
+  assert.equal((await storedLead(BULK_POOL)).data.assigned_to, null, "bulk assign partially claimed a pool row");
+  assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER, "bulk assign bypassed canonical re-claim for an expired row");
+  run("(c)/(d) bulk assignment accepts a sales-roster target and refuses guarded stages");
+
   // ── quick-add: the second create door, same planner on OASIS ────────────
   login(OWNER, "cc@oasis.test");
+  const qaAdminSkip = await postQuickAdd({
+    business_name: "Quick Stage Skip", email: "stage-skip@quick.test", stage: "won", state: "ON",
+  });
+  assert.equal(qaAdminSkip.status, 409, "admin quick-add bypassed the roster-bound Pipeline form");
+  assert.equal(qaAdminSkip.body.error, "use_pipeline_new");
+  assertReadable(qaAdminSkip.body, "quick-add admin won");
   const qaOwner = await postQuickAdd({
-    business_name: "Quick Founder Co", email: "founder@quick.test", stage: "founder_meeting_booked", state: "ON",
+    business_name: "Quick Founder Co", email: "founder@quick.test", stage: "assigned", state: "ON",
   });
-  assert.equal(qaOwner.status, 200, qaOwner.body.message);
-  assert.equal(qaOwner.body.stage, "founder_meeting_booked");
-  const qaOwnerRow = await storedLead(qaOwner.body.id!);
-  assert.equal(qaOwnerRow.tenantId, WEBDEV_TENANT_ID);
-  assert.equal(qaOwnerRow.data.assigned_to, OWNER);
-  assert.equal(qaOwnerRow.data.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
-  assert.ok(
-    (await pipelineRows({ userId: OWNER, teamRole: "owner", isOwner: true }, "founder_meeting_booked")).includes(
-      qaOwner.body.id!,
-    ),
-    "a quick-added OASIS lead is missing from /pipeline",
-  );
-  // A quick-add of a lead that already exists never moves it, even for an
-  // admin: its stage moves only through the lead's own lifecycle actions.
-  const qaOwnerSkip = await postQuickAdd({
-    business_name: "Quick Founder Co", email: "founder@quick.test", state: "ON", stage: "won",
-  });
-  assert.equal(qaOwnerSkip.status, 409, "quick-add moved an existing OASIS lead");
-  assert.equal(qaOwnerSkip.body.error, "lead_exists");
-  assert.equal(qaOwnerSkip.body.id, qaOwner.body.id);
-  assertReadable(qaOwnerSkip.body, "quick-add of an existing lead");
-  assert.equal((await storedLead(qaOwner.body.id!)).data.stage, "founder_meeting_booked");
+  assert.equal(qaOwner.status, 409, "admin quick-add created an admin-owned Pipeline lead");
+  assert.equal(qaOwner.body.error, "use_pipeline_new");
+  assert.match(qaOwner.body.message!, /New lead/i);
+  assertReadable(qaOwner.body, "quick-add admin assigned");
   // Claim facts cannot ride in on a create: a claimed_at in the past would
   // make a hand-made lead read as an expired claim and release it to the pool.
   const claimForge = await postRecord("oasis-ai-cc", {

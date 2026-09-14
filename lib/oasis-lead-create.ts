@@ -101,10 +101,9 @@ export function oasisBoardStages(viewer: {
 /**
  * Which stages this viewer may create a lead in.
  *
- *   admin        every stage their board draws (13 today) -- CC's ask
- *   sales role   `assigned` only; moving a lead further is the guided
- *                lifecycle's job, and direct stage moves are admin-only
- *                (set_stage) for the same reason
+ *   admin/rep    `assigned` only; moving a lead further is the guided
+ *                lifecycle's job. Creation never manufactures history by
+ *                dropping a brand-new lead into a later stage.
  *   anyone else  nothing
  *
  * Fails closed: an unknown role, or a role whose board lacks `assigned`,
@@ -112,15 +111,8 @@ export function oasisBoardStages(viewer: {
  */
 export function creatableOasisStages(viewer: OasisCreateViewer): StageMeta[] {
   const role = (viewer.teamRole || "").trim().toLowerCase();
-  if (viewer.isAdmin) {
-    // A capability admin is always a pipeline admin (owner/admin/admin_access
-    // are all in isOasisPipelineAdmin), so their board is every stage. Passing
-    // isOwner routes them through the same function the board uses rather than
-    // a second hand-written list.
-    return oasisBoardStages({ teamRole: role, isOwner: true });
-  }
-  if (!mayWorkWebsiteSalesLifecycle(role)) return [];
-  return oasisBoardStages({ teamRole: role }).filter(
+  if (!viewer.isAdmin && !mayWorkWebsiteSalesLifecycle(role)) return [];
+  return oasisBoardStages({ teamRole: role, isOwner: viewer.isAdmin }).filter(
     (stage) => stage.key === OASIS_DEFAULT_CREATE_STAGE,
   );
 }
@@ -152,19 +144,22 @@ export function oasisRegionLabel(code: string): string {
  *
  *   sales_motion      the /pipeline filter (lib/oasis-pipeline-query.ts)
  *   sales_program     the oasis-webdev board's program predicate
- *   assigned_to       the creator, lowercased: every "is this in my book"
+ *   assigned_to       the server-resolved owner, lowercased: every "is this in my book"
  *                     check (lead-scope, web-leads isInBookOf, the rep
  *                     pipeline read) compares a lowercased id
- *   assigned_at, stage_entered_at   now
+ *   assigned_at, claimed_at, stage_entered_at   now
+ *   sourced_by_user_id the rep creator for self-sourced work; null for
+ *                     company/admin-created leads
  *   lost_at           now, only for a lead created as lost
  *
- * `claimed_at` is deliberately NOT set. A claim with no timestamp reads as
- * held (lib/web-leads/claim.ts availability()), so a lead someone typed in by
- * hand is never released back to the pool by the 7-day stale-claim rule.
+ * Manual and pool-created assignments share the same expiry clock. An untouched
+ * lead therefore returns to Leads after the normal stale-claim window instead
+ * of staying in somebody's Pipeline forever.
  */
 export function oasisLeadCreateStamp(input: {
   stage: string;
-  creatorUserId: string;
+  ownerUserId: string;
+  sourceTrack: "company" | "self";
   now: Date;
 }): Record<string, unknown> {
   const at = input.now.toISOString();
@@ -173,8 +168,12 @@ export function oasisLeadCreateStamp(input: {
     stage_entered_at: at,
     sales_program: OASIS_WEBSITE_SALES_PROGRAM,
     sales_motion: OASIS_COLD_OUTBOUND_MOTION,
-    assigned_to: input.creatorUserId.trim().toLowerCase(),
+    assigned_to: input.ownerUserId.trim().toLowerCase(),
     assigned_at: at,
+    claimed_at: at,
+    lead_source_track: input.sourceTrack,
+    sourced_by_user_id:
+      input.sourceTrack === "self" ? input.ownerUserId.trim().toLowerCase() : null,
     ...(input.stage === "lost" ? { lost_at: at } : {}),
   };
 }
@@ -190,7 +189,8 @@ export type OasisLeadCreateRefusal = {
     | "protected_lifecycle_fields"
     | "stage_not_creatable"
     | "region_required"
-    | "invalid_region";
+    | "invalid_region"
+    | "assignee_required";
   /** A sentence a person can act on. The form shows this, never `error`. */
   message: string;
   fields?: string[];
@@ -275,6 +275,8 @@ function stageRefusal(
 export function planOasisLeadCreate(input: {
   viewer: OasisCreateViewer;
   creatorUserId: string;
+  /** Server-resolved destination. Browser-owned assigned_to is never passed here. */
+  resolvedAssigneeUserId: string;
   data: Record<string, unknown>;
   now: Date;
   requireRegion?: boolean;
@@ -288,6 +290,21 @@ export function planOasisLeadCreate(input: {
       message: "We couldn't tell who is adding this lead, so it wasn't saved. Sign in again and retry.",
     };
   }
+
+  const resolvedAssignee = (input.resolvedAssigneeUserId || "").trim();
+  if (input.viewer.isAdmin && !resolvedAssignee) {
+    return {
+      ok: false,
+      status: 422,
+      error: "assignee_required",
+      fields: ["assigned_to"],
+      message: "Choose the sales rep who will own this lead in Pipeline.",
+    };
+  }
+  // A non-admin create is always self-owned even if a future trusted caller
+  // accidentally supplies a different id. Admin callers may use only the id
+  // their route already resolved against the tenant sales roster.
+  const ownerUserId = input.viewer.isAdmin ? resolvedAssignee : creator;
 
   const allowed = creatableOasisStages(input.viewer);
   if (allowed.length === 0) return oasisForbiddenRoleRefusal();
@@ -357,7 +374,12 @@ export function planOasisLeadCreate(input: {
     data: {
       ...data,
       ...(region ? { [OASIS_LEAD_REGION_FIELD]: region } : {}),
-      ...oasisLeadCreateStamp({ stage: requested, creatorUserId: creator, now: input.now }),
+      ...oasisLeadCreateStamp({
+        stage: requested,
+        ownerUserId,
+        sourceTrack: input.viewer.isAdmin ? "company" : "self",
+        now: input.now,
+      }),
     },
   };
 }
@@ -370,6 +392,11 @@ export type OasisLeadCreateForm = {
   /** Field labels that differ from the humanized key, keyed by field name. */
   fieldLabels: Record<string, string>;
   stages: StageMeta[];
+};
+
+export type OasisLeadAssigneeOption = {
+  userId: string;
+  label: string;
 };
 
 /**
@@ -415,8 +442,23 @@ const CREATE_FIELD_SET = new Set(OASIS_LEAD_CREATE_FIELDS);
 export function oasisLeadCreateForm(
   seedLead: ManifestEntityDef,
   viewer: OasisCreateViewer,
+  assignees: readonly OasisLeadAssigneeOption[] = [],
 ): OasisLeadCreateForm {
   const stages = creatableOasisStages(viewer);
+  const normalizedAssignees = Array.from(
+    new Map(
+      assignees
+        .map((option) => ({ userId: option.userId.trim(), label: option.label.trim() }))
+        .filter((option) => option.userId)
+        .map((option) => [option.userId.toLowerCase(), option] as const),
+    ).values(),
+  );
+  const assigneeField: ManifestEntityField = {
+    name: "assigned_to",
+    type: "enum",
+    required: true,
+    enum_values: normalizedAssignees.map((option) => option.userId),
+  };
   const regionField: ManifestEntityField = {
     name: OASIS_LEAD_REGION_FIELD,
     type: "enum",
@@ -427,6 +469,7 @@ export function oasisLeadCreateForm(
   let sawRegion = false;
   for (const field of seedLead.fields) {
     if (field.name === "stage") {
+      if (viewer.isAdmin) fields.push(assigneeField);
       fields.push({ ...field, type: "enum", required: true, enum_values: stages.map((stage) => stage.key) });
     } else if (field.name === OASIS_LEAD_REGION_FIELD) {
       sawRegion = true;
@@ -443,8 +486,14 @@ export function oasisLeadCreateForm(
       [OASIS_LEAD_REGION_FIELD]: Object.fromEntries(
         OASIS_LEAD_REGION_CODES.map((code) => [code, oasisRegionLabel(code)]),
       ),
+      ...(viewer.isAdmin
+        ? { assigned_to: Object.fromEntries(normalizedAssignees.map((option) => [option.userId, option.label])) }
+        : {}),
     },
-    fieldLabels: { [OASIS_LEAD_REGION_FIELD]: OASIS_LEAD_REGION_LABEL },
+    fieldLabels: {
+      [OASIS_LEAD_REGION_FIELD]: OASIS_LEAD_REGION_LABEL,
+      ...(viewer.isAdmin ? { assigned_to: "Sales rep" } : {}),
+    },
     stages,
   };
 }

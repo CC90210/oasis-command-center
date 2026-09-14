@@ -6,6 +6,7 @@ import {
   type ListRecordsResult,
   type TenantRecord,
 } from "@/lib/manifest/data";
+import { isReleasedOasisPipelineRow } from "@/lib/oasis-sales-pipeline-policy";
 
 export const OASIS_PIPELINE_OVERVIEW_LIMIT = 40;
 export const OASIS_PIPELINE_STAGE_PAGE_SIZE = 100;
@@ -116,6 +117,7 @@ type RecordLister = (input: {
   where?: Record<string, EqualityValue>;
   whereIn?: Record<string, readonly string[]>;
   whereEmpty?: readonly string[];
+  whereNotEmpty?: readonly string[];
   search?: { fields: readonly string[]; query: string };
 }) => Promise<ListRecordsResult>;
 
@@ -217,13 +219,11 @@ function scopedWindowFromRows(input: {
 }
 
 /**
- * Query the OASIS board in bounded stage windows.
+ * Query the OASIS board from one bounded, server-filtered working set.
  *
- * Overview mode fetches at most 40 newest matches per stage while retaining an
- * exact DB count. Selecting a stage switches to a conventional 100-row page.
- * Every filter (program, assignee, stage, and search) is applied by listRecords
- * before range(), so older rows and search hits remain reachable through the
- * stage pager rather than disappearing behind an arbitrary global cap.
+ * The complete active set is read before released claims are removed, counts
+ * are computed, and the selected stage is paged. If a scope reaches the safe
+ * read ceiling we fail loudly instead of displaying partial counts.
  */
 export async function listOasisPipelineWindow(
   input: {
@@ -283,10 +283,15 @@ export async function listOasisPipelineWindow(
   const viewerUserId = input.viewerUserId?.trim().toLowerCase() || null;
   const assignedTo = input.assignedTo?.trim().toLowerCase() || null;
   if (teamAssignees) {
+    const where: Record<string, EqualityValue> = {};
+    if (input.salesProgram) where.sales_program = input.salesProgram;
+    if (input.salesMotion) where.sales_motion = input.salesMotion;
     const scoped = await deps.list({
       tenant_id: input.tenantId,
       entity: "lead",
-      whereIn: { assigned_to: teamAssignees },
+      whereIn: { assigned_to: teamAssignees, stage: stageKeys },
+      ...(Object.keys(where).length ? { where } : {}),
+      ...(search ? { search } : {}),
       sort: "-updated_at",
       limit: 2_000,
     });
@@ -296,8 +301,9 @@ export async function listOasisPipelineWindow(
     if (scoped.total >= 2_000) {
       throw new Error("oasis_pipeline_team_scope_exceeds_safe_window");
     }
+    const now = Date.now();
     return scopedWindowFromRows({
-      rows: scoped.rows,
+      rows: scoped.rows.filter((row) => !isReleasedOasisPipelineRow(row, now)),
       stageKeys,
       activeStage,
       requestedPage,
@@ -306,11 +312,13 @@ export async function listOasisPipelineWindow(
       query: input.query,
     });
   }
-  if (
-    viewerUserId &&
-    assignedTo === viewerUserId &&
-    deps.listForViewer
-  ) {
+  if (viewerUserId && assignedTo !== viewerUserId) {
+    throw new Error("oasis_pipeline_viewer_scope_mismatch");
+  }
+  if (viewerUserId && !deps.listForViewer) {
+    throw new Error("oasis_pipeline_viewer_reader_unavailable");
+  }
+  if (viewerUserId && deps.listForViewer) {
     const fulfillmentOwnerId = input.fulfillmentOwnerId?.trim().toLowerCase() || null;
     const [scoped, fulfillment] = await Promise.all([
       deps.listForViewer({
@@ -336,7 +344,11 @@ export async function listOasisPipelineWindow(
     if (scoped.total >= 2_000 || fulfillment.total >= 2_000) {
       throw new Error("oasis_pipeline_rep_scope_exceeds_safe_window");
     }
-    const byId = new Map(scoped.rows.map((row) => [row.id, row]));
+    const now = Date.now();
+    const activeScopedRows = scoped.rows.filter(
+      (row) => !isReleasedOasisPipelineRow(row, now),
+    );
+    const byId = new Map(activeScopedRows.map((row) => [row.id, row]));
     for (const row of fulfillment.rows) byId.set(row.id, row);
     return scopedWindowFromRows({
       rows: [...byId.values()].sort((left, right) =>
@@ -351,32 +363,16 @@ export async function listOasisPipelineWindow(
     });
   }
 
-  // Admin/owner boards are also small in the live OASIS sales program. Read
-  // the bounded working set once and group it in memory; if a future tenant
-  // grows past the generic ceiling, discard the partial window and fall back
-  // to the exact per-stage queries below.
-  //
-  // The stage filter is the whole point of the read being "bounded"
-  // (2026-09-02). Without it this asked for every lead in the tenant and then
-  // threw most of them away in scopedWindowFromRows, which only groups rows
-  // whose stage is in stageKeys. Measured on the live OASIS tenant: 1846 rows
-  // and 3.0 MB of JSON crossing the wire in 1056 ms, of which 1678 rows were
-  // `researched` — a stage app/pipeline/page.tsx removes from `stages` before
-  // it ever gets here, so 91% of that payload was fetched to be discarded.
-  // With the predicate: 168 rows, 292 KB, 249 ms.
-  //
-  // It made the ADMIN board the slow one, which is the opposite of how it
-  // reads. Every other scope was already bounded: a rep whose viewerUserId is
-  // also the assignee takes the listForViewer branch above (two parallel
-  // reads), and anything else falls to the per-stage readStage calls below,
-  // capped at OASIS_PIPELINE_OVERVIEW_LIMIT (40) per stage on the overview and
-  // OASIS_PIPELINE_STAGE_PAGE_SIZE (100) on a selected stage. A 40-row stage
-  // read measures 152 ms — 8 ms above a bare network round trip. Only this
-  // branch was unbounded in the dimension that costs: bytes.
-  if (input.assignedTo === undefined && !viewerUserId) {
+  // Admin/owner and explicit-assignee boards use the same exact active-set
+  // calculation. Server predicates keep the transfer bounded; expiry is then
+  // applied before counts and pagination so every role sees the same truth.
+  {
     const where: Record<string, EqualityValue> = {};
     if (input.salesProgram) where.sales_program = input.salesProgram;
     if (input.salesMotion) where.sales_motion = input.salesMotion;
+    if (input.assignedTo !== undefined && input.assignedTo !== null) {
+      where.assigned_to = assignedTo;
+    }
     const scoped = await deps.list({
       tenant_id: input.tenantId,
       entity: "lead",
@@ -386,106 +382,27 @@ export async function listOasisPipelineWindow(
       // whereIn rejects an empty list rather than silently dropping the
       // filter, so a future refactor cannot quietly restore the full scan.
       whereIn: { stage: stageKeys },
+      ...(input.assignedTo === null
+        ? { whereEmpty: ["assigned_to"] }
+        : input.assignedTo === undefined
+          ? { whereNotEmpty: ["assigned_to"] }
+          : {}),
       ...(Object.keys(where).length ? { where } : {}),
       ...(search ? { search } : {}),
     });
-    if (scoped.total < 2_000) {
-      return scopedWindowFromRows({
-        rows: scoped.rows,
-        stageKeys,
-        activeStage,
-        requestedPage,
-        salesProgram: input.salesProgram,
-        salesMotion: input.salesMotion,
-        query: input.query,
-      });
+    if (scoped.total >= 2_000) {
+      throw new Error("oasis_pipeline_scope_exceeds_safe_window");
     }
-  }
-
-  const whereFor = (stage: string): Record<string, EqualityValue> => {
-    const where: Record<string, EqualityValue> = { stage };
-    if (input.salesProgram) where.sales_program = input.salesProgram;
-    if (input.salesMotion) where.sales_motion = input.salesMotion;
-    // `undefined` means everyone; null is the explicit unassigned bucket and
-    // is expressed separately so legacy empty-string assignees are included.
-    if (input.assignedTo !== undefined && input.assignedTo !== null) {
-      where.assigned_to = input.assignedTo;
-    }
-    return where;
-  };
-
-  const listPage = (
-    stage: string,
-    limit: number,
-    offset: number,
-  ): Promise<ListRecordsResult> =>
-    deps.list({
-      tenant_id: input.tenantId,
-      entity: "lead",
-      sort: "-updated_at",
-      limit,
-      offset,
-      where: whereFor(stage),
-      ...(teamAssignees ? { whereIn: { assigned_to: teamAssignees } } : {}),
-      ...(input.assignedTo === null
-        ? { whereEmpty: ["assigned_to"] }
-        : {}),
-      ...(search ? { search } : {}),
+    const now = Date.now();
+    return scopedWindowFromRows({
+      rows: scoped.rows.filter((row) => !isReleasedOasisPipelineRow(row, now)),
+      stageKeys,
+      activeStage,
+      requestedPage,
+      salesProgram: input.salesProgram,
+      salesMotion: input.salesMotion,
+      query: input.query,
     });
-
-  const readStage = async (stage: string, page: number): Promise<ListRecordsResult> => {
-    const includeRows = activeStage === null || activeStage === stage;
-    const limit = includeRows
-      ? activeStage
-        ? OASIS_PIPELINE_STAGE_PAGE_SIZE
-        : OASIS_PIPELINE_OVERVIEW_LIMIT
-      : 1;
-    const offset = activeStage && includeRows ? (page - 1) * OASIS_PIPELINE_STAGE_PAGE_SIZE : 0;
-    return listPage(stage, limit, offset);
-  };
-
-  let page = activeStage ? requestedPage : 1;
-  const stageResults = await Promise.all(stageKeys.map((stage) => readStage(stage, page)));
-  const byStage = new Map(stageKeys.map((stage, index) => [stage, stageResults[index]]));
-
-  // A stale/shared URL may point past the last page after rows move stages.
-  // Clamp to the last real page and re-read it instead of rendering a false
-  // empty state while the exact count says records exist.
-  if (activeStage) {
-    const activeResult = byStage.get(activeStage)!;
-    const lastPage = Math.max(1, Math.ceil(activeResult.total / OASIS_PIPELINE_STAGE_PAGE_SIZE));
-    if (page > lastPage) {
-      page = lastPage;
-      byStage.set(activeStage, await readStage(activeStage, page));
-    }
   }
 
-  const stageCounts = Object.fromEntries(
-    stageKeys.map((stage) => [stage, byStage.get(stage)?.total ?? 0]),
-  );
-  const rows = stageKeys.flatMap((stage) => {
-    if (activeStage && activeStage !== stage) return [];
-    return byStage.get(stage)?.rows ?? [];
-  });
-  const total = Object.values(stageCounts).reduce((sum, count) => sum + count, 0);
-  const activeTotal = activeStage ? stageCounts[activeStage] ?? 0 : total;
-  const pageSize = activeStage ? OASIS_PIPELINE_STAGE_PAGE_SIZE : OASIS_PIPELINE_OVERVIEW_LIMIT;
-  const shownFrom = rows.length === 0 ? 0 : activeStage ? (page - 1) * pageSize + 1 : 1;
-  const shownTo = activeStage ? Math.min(activeTotal, (page - 1) * pageSize + rows.length) : rows.length;
-
-  return {
-    rows,
-    stageCounts,
-    total,
-    activeStage,
-    page,
-    pageSize,
-    shownFrom,
-    shownTo,
-    hasPrevious: Boolean(activeStage && page > 1),
-    hasNext: Boolean(activeStage && page * pageSize < activeTotal),
-    truncatedStages: stageKeys.filter(
-      (stage) => !activeStage && (stageCounts[stage] ?? 0) > OASIS_PIPELINE_OVERVIEW_LIMIT,
-    ),
-  };
 }

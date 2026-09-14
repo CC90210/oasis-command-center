@@ -11,6 +11,8 @@ export async function assignLifecycleOwner(input: {
   record: RecordRow;
   assignedTo: string | null;
   occurredAt?: string;
+  /** Reset the ownership clock without altering lifecycle/source fields. */
+  resetClaimClock?: boolean;
 }): Promise<{ ok: true; updatedIds: string[]; previousOwners: Array<string | null> } | { ok: false; error: string }> {
   const db = getServiceSupabase();
   const rows = new Map<string, RecordRow>([[input.record.id, input.record]]);
@@ -44,14 +46,25 @@ export async function assignLifecycleOwner(input: {
 
   const previousOwners: Array<string | null> = [];
   const updatedIds: string[] = [];
+  const ownershipChangedAt = input.occurredAt ?? new Date().toISOString();
   for (const row of rows.values()) {
-    previousOwners.push(typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : null);
+    const previousOwner =
+      typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : null;
+    previousOwners.push(previousOwner);
+    const ownerChanged = previousOwner !== input.assignedTo;
     const update = await db.rpc("patch_tenant_record_data", {
       p_id: row.id,
       p_tenant_id: input.tenantId,
       p_patch: {
         assigned_to: input.assignedTo,
         ...(input.occurredAt ? { last_contacted_at: input.occurredAt } : {}),
+        ...(input.resetClaimClock && ownerChanged
+          ? {
+              assigned_at: input.assignedTo ? ownershipChangedAt : null,
+              claimed_at: input.assignedTo ? ownershipChangedAt : null,
+              last_call_at: null,
+            }
+          : {}),
       },
     });
     if (update.error) return { ok: false, error: update.error.message };

@@ -88,6 +88,8 @@ export type ListRecordsInput = {
   whereIn?: Record<string, readonly string[]>;
   /** Top-level data keys where both a missing/null value and "" mean empty. */
   whereEmpty?: readonly string[];
+  /** Top-level data keys that must contain a non-empty value. */
+  whereNotEmpty?: readonly string[];
   /**
    * Case-insensitive contains search across selected top-level data keys.
    * Applied in PostgREST before ordering/range so pagination searches the
@@ -200,6 +202,17 @@ export async function listRecords(input: ListRecordsInput): Promise<ListRecordsR
         throw new RecordsError("validation", `invalid empty filter field "${field}"`);
       }
       q = q.or(`data->>${field}.is.null,data->>${field}.eq.""`);
+    }
+  }
+
+  if (input.whereNotEmpty) {
+    for (const field of [...new Set(input.whereNotEmpty)]) {
+      if (!DATA_FIELD_RE.test(field)) {
+        throw new RecordsError("validation", `invalid non-empty filter field "${field}"`);
+      }
+      // `neq ""` already excludes SQL NULL, but keep the explicit null guard
+      // so the intended shape is identical on Postgres and the libSQL adapter.
+      q = q.not(`data->>${field}`, "is", null).neq(`data->>${field}`, "");
     }
   }
 

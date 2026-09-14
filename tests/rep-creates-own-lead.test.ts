@@ -40,6 +40,7 @@ import {
   OASIS_COLD_OUTBOUND_MOTION,
   OASIS_WEBSITE_SALES_PROGRAM,
 } from "../lib/leads/canonical-lead-fields";
+import { availability, CLAIM_STALE_DAYS, factsFrom } from "../lib/web-leads/claim";
 
 function run(name: string, fn: () => void) {
   fn();
@@ -57,7 +58,14 @@ function planFor(
   creatorUserId: string,
   data: Record<string, unknown>,
 ) {
-  return planOasisLeadCreate({ viewer, creatorUserId, data, now: NOW, requireRegion: true });
+  return planOasisLeadCreate({
+    viewer,
+    creatorUserId,
+    resolvedAssigneeUserId: viewer.isAdmin ? REP_ID : creatorUserId,
+    data,
+    now: NOW,
+    requireRegion: true,
+  });
 }
 
 console.log("rep-creates-own-lead:");
@@ -80,6 +88,11 @@ run("every sales role CC named may create a lead", () => {
   // ...and a role that does NOT work leads still cannot.
   assert.equal(mayWorkWebsiteSalesLifecycle("read_only"), false, "read_only gained lead creation");
   assert.deepEqual(creatableOasisStages({ isAdmin: false, teamRole: "read_only" }), []);
+  assert.deepEqual(
+    creatableOasisStages({ isAdmin: true, teamRole: "owner" }).map((stage) => stage.key),
+    ["assigned"],
+    "admins must use the same clean Assigned entry point as reps",
+  );
 });
 
 run("all four gates are open, not three", () => {
@@ -137,6 +150,17 @@ run("a rep's lead is theirs, in Assigned, stamped with the sales_motion the boar
     "no sales_motion stamp: /pipeline filters on it, so the lead is on no board",
   );
   assert.equal(plan.data.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
+  assert.equal(plan.data.lead_source_track, "self", "a rep-entered lead must retain self-sourced commission provenance");
+  assert.equal(plan.data.sourced_by_user_id, REP_ID.toLowerCase(), "self-source credit must be frozen to the creator");
+  assert.equal(plan.data.claimed_at, NOW.toISOString(), "manual creates must use the same expiry clock as pool claims");
+  assert.equal(
+    availability(
+      factsFrom(plan.data),
+      NOW.getTime() + (CLAIM_STALE_DAYS + 1) * 24 * 60 * 60 * 1_000,
+    ).reason,
+    "claim_expired",
+    "manual creates must return to Leads under the same stale-claim rule as claimed inventory",
+  );
   // The board's filter is the other half of the contract, on every OASIS slug.
   for (const slug of ["oasis", "oasis-ai-cc", "oasis-webdev"]) {
     assert.equal(
@@ -147,17 +171,34 @@ run("a rep's lead is theirs, in Assigned, stamped with the sales_motion the boar
   }
 });
 
-run("an admin's lead gets the same stamp — the half that was missing", () => {
+run("an admin's lead is assigned to the roster-resolved rep", () => {
   const plan = planFor({ isAdmin: true, teamRole: "owner" }, ADMIN_ID, {
     name: "CC's referral",
     state: "ON",
-    stage: "founder_meeting_booked",
+    stage: "assigned",
   });
-  assert.ok(plan.ok, "an admin could not create in Founder Meeting");
+  assert.ok(plan.ok, "an admin could not create in Assigned");
   if (!plan.ok) return;
-  assert.equal(plan.data.stage, "founder_meeting_booked");
-  assert.equal(plan.data.assigned_to, ADMIN_ID.toLowerCase(), "an admin's lead has no owner");
+  assert.equal(plan.data.stage, "assigned");
+  assert.equal(plan.data.assigned_to, REP_ID.toLowerCase(), "the chosen sales rep does not own the admin-created lead");
   assert.equal(plan.data.sales_motion, OASIS_COLD_OUTBOUND_MOTION, "an admin's lead has no sales_motion");
+  assert.equal(plan.data.lead_source_track, "company", "an admin-created lead must use company provenance");
+  assert.equal(plan.data.sourced_by_user_id, null, "company-provided work must not invent a sourcing rep");
+  assert.equal(plan.data.claimed_at, NOW.toISOString(), "admin-assigned leads must expire on the normal claim clock");
+});
+
+run("an admin cannot skip lifecycle stages while creating a lead", () => {
+  for (const stage of ["qualified", "founder_meeting_booked", "won", "in_build"] as const) {
+    const plan = planFor({ isAdmin: true, teamRole: "owner" }, ADMIN_ID, {
+      name: "No stage skip",
+      state: "ON",
+      stage,
+    });
+    assert.equal(plan.ok, false, `an admin created a new lead directly in ${stage}`);
+    if (plan.ok) continue;
+    assert.equal(plan.error, "stage_not_creatable");
+    assert.deepEqual(plan.allowedStages, [{ key: "assigned", label: "Assigned" }]);
+  }
 });
 
 run("the widened API stays narrow: OASIS leads only", () => {
@@ -169,7 +210,7 @@ run("the widened API stays narrow: OASIS leads only", () => {
     /repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle/,
     "rep creation is not scoped to OASIS leads",
   );
-  assert.match(api, /if \(isOasisSalesLead\) \{\s*const plan = planOasisLeadCreate\(/);
+  assert.match(api, /if \(isOasisSalesLead\) \{[\s\S]*?const plan = planOasisLeadCreate\(/);
 });
 
 run("the stamp is SERVER-side, so ownership cannot be forged", () => {

@@ -15,7 +15,13 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { assignTerritory, chunk, withAssignedTo, isUuid } from "@/lib/web-leads/assign";
+import {
+  assignTerritory,
+  chunk,
+  isTerritoryAssignmentEligible,
+  withAssignedTo,
+  isUuid,
+} from "@/lib/web-leads/assign";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 
@@ -23,6 +29,8 @@ const TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const TERRITORY = "11111111-1111-4111-8111-111111111111";
 const OTHER_TERRITORY = "99999999-9999-4999-8999-999999999999";
 const AGENT = "22222222-2222-4222-8222-222222222222";
+const ACTOR = "33333333-3333-4333-8333-333333333333";
+const SOURCE_REP = "44444444-4444-4444-8444-444444444444";
 
 // ---------------------------------------------------------------------------
 // 1. Route source assertions -- same style as tests/web-leads-guards.test.ts.
@@ -54,6 +62,11 @@ const AGENT = "22222222-2222-4222-8222-222222222222";
   assert.ok(iSession >= 0 && iTenant > iSession, "session check must precede the tenant check");
   assert.ok(iAdmin > iTenant, "admin check must precede body parsing setup");
   assert.ok(iBody > iAdmin, "body must not be read until after every auth check");
+  assert.match(
+    src,
+    /assignTerritory\(\{\s*territoryId:\s*id,\s*assignedTo,\s*actorUserId:\s*session\.userId,?\s*\}\)/,
+    "the authenticated actor must be passed into per-lead audit entries",
+  );
 
   const listRoute = "app/api/web-leads/territories/route.ts";
   const listSrc = read(listRoute);
@@ -67,12 +80,13 @@ const AGENT = "22222222-2222-4222-8222-222222222222";
 // ---------------------------------------------------------------------------
 type Call = {
   table: string;
-  mode: "select" | "update";
+  mode: "select" | "update" | "insert";
   eqs: Record<string, unknown>;
   filters: [string, string, unknown][];
+  ors: string[];
   cols?: string;
   opts?: { count?: string; head?: boolean };
-  payload?: Record<string, unknown>;
+  payload?: Record<string, unknown> | Record<string, unknown>[];
   limit?: number;
 };
 type Responder = (call: Call) => { data: unknown; error: { message: string } | null; count?: number };
@@ -80,7 +94,7 @@ type Responder = (call: Call) => { data: unknown; error: { message: string } | n
 function makeFakeDb(responder: Responder) {
   const calls: Call[] = [];
   function from(table: string) {
-    const state: Call = { table, mode: "select", eqs: {}, filters: [] };
+    const state: Call = { table, mode: "select", eqs: {}, filters: [], ors: [] };
     function terminal() {
       calls.push(JSON.parse(JSON.stringify(state)));
       return Promise.resolve(responder(state));
@@ -96,12 +110,21 @@ function makeFakeDb(responder: Responder) {
         state.payload = payload;
         return chain;
       },
+      insert(payload: Record<string, unknown> | Record<string, unknown>[]) {
+        state.mode = "insert";
+        state.payload = payload;
+        return terminal();
+      },
       eq(c: string, v: unknown) {
         state.eqs[c] = v;
         return chain;
       },
       filter(c: string, op: string, v: unknown) {
         state.filters.push([c, op, v]);
+        return chain;
+      },
+      or(predicate: string) {
+        state.ors.push(predicate);
         return chain;
       },
       limit(n: number) {
@@ -121,9 +144,38 @@ function makeFakeDb(responder: Responder) {
 }
 
 const LEADS = [
-  { id: "lead-a", data: { webdev_territory_id: TERRITORY, business_name: "A Salon", assigned_to: null } },
-  { id: "lead-b", data: { webdev_territory_id: TERRITORY, business_name: "B Salon", assigned_to: "old-rep" } },
-  { id: "lead-c", data: { webdev_territory_id: TERRITORY, business_name: "C Salon", assigned_to: null } },
+  {
+    id: "lead-a",
+    updated_at: "2026-09-14T10:00:00.000Z",
+    data: { webdev_territory_id: TERRITORY, business_name: "A Salon", assigned_to: null },
+  },
+  {
+    id: "lead-b",
+    updated_at: "2026-09-14T10:01:00.000Z",
+    data: {
+      webdev_territory_id: TERRITORY,
+      business_name: "B Salon",
+      assigned_to: null,
+      stage: "researched",
+      lead_source_track: "self",
+    },
+  },
+  {
+    id: "lead-c",
+    updated_at: "2026-09-14T10:02:00.000Z",
+    data: {
+      webdev_territory_id: TERRITORY,
+      business_name: "C Salon",
+      assigned_to: "old-rep",
+      stage: "qualified",
+      lead_source_track: "self",
+      claimed_at: "2026-09-01T00:00:00.000Z",
+    },
+  },
+  { id: "lead-d", updated_at: "2026-09-14T10:03:00.000Z", data: { webdev_territory_id: TERRITORY, assigned_to: "old-rep", stage: "won" } },
+  { id: "lead-e", updated_at: "2026-09-14T10:04:00.000Z", data: { webdev_territory_id: TERRITORY, assigned_to: "builder", stage: "in_build" } },
+  { id: "lead-f", updated_at: "2026-09-14T10:05:00.000Z", data: { webdev_territory_id: TERRITORY, assigned_to: "old-rep", stage: "lost" } },
+  { id: "lead-g", updated_at: "2026-09-14T10:06:00.000Z", data: { webdev_territory_id: TERRITORY, assigned_to: null, stage: "researched", dnc: true } },
 ];
 
 /** Standard responder: territory + member exist, tenant_records read returns LEADS. */
@@ -145,6 +197,9 @@ function baseResponder(overrides: Partial<Record<string, Responder>> = {}): Resp
     if (call.table === "tenant_records" && call.mode === "update") {
       return { data: [{ id: call.eqs.id }], error: null };
     }
+    if (call.table === "lead_interactions" && call.mode === "insert") {
+      return { data: null, error: null };
+    }
     throw new Error(`unexpected call: ${call.table}/${call.mode}`);
   };
 }
@@ -153,13 +208,16 @@ async function main() {
   // ---- Assign: propagation hits only the matching leads, preserving data ---
   {
     const db = makeFakeDb(baseResponder());
-    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT.toUpperCase() }, db);
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT.toUpperCase(), actorUserId: ACTOR }, db);
     assert.equal(result.ok, true);
     if (result.ok && result.mode === "assigned") {
       assert.equal(result.assignedTo, AGENT, "assignee must be normalized to lowercase");
-      assert.equal(result.leadsMatched, 3);
-      assert.equal(result.leadsUpdated, 3);
+      assert.equal(result.leadsMatched, 7);
+      assert.equal(result.leadsUpdated, 2);
+      assert.equal(result.leadsSkipped, 5);
+      assert.equal(result.leadsRaced, 0);
       assert.equal(result.leadsFailed, 0);
+      assert.equal(result.trackingFailed, 0);
     } else {
       assert.fail("expected an 'assigned' result");
     }
@@ -175,15 +233,60 @@ async function main() {
     assert.equal(leadRead!.eqs.entity_type, "lead", "lead read must be scoped to entity_type=lead");
 
     const leadWrites = db.calls.filter((c) => c.table === "tenant_records" && c.mode === "update");
-    assert.equal(leadWrites.length, 3, "one write per matched lead");
+    assert.equal(leadWrites.length, 2, "only untouched pool rows may be written");
     for (const w of leadWrites) {
       assert.equal(w.payload!.data && (w.payload!.data as Record<string, unknown>).assigned_to, AGENT);
       assert.equal(w.eqs.tenant_id, TENANT);
       assert.equal(w.eqs.entity_type, "lead");
+      assert.equal(
+        w.eqs.updated_at,
+        LEADS.find((lead) => lead.id === w.eqs.id)!.updated_at,
+        "the write must compare-and-swap the exact row version read",
+      );
+      assert.deepEqual(
+        w.ors,
+        ['data->>assigned_to.is.null,data->>assigned_to.eq.""'],
+        "the write must also prove the row is still unowned",
+      );
     }
-    // Other fields on the lead must survive the write untouched.
+    // Other fields on an eligible pool lead survive, while stale source credit
+    // is reset because the new rep did not originate the lead.
     const bWrite = leadWrites.find((w) => w.eqs.id === "lead-b")!;
     assert.equal((bWrite.payload!.data as Record<string, unknown>).business_name, "B Salon");
+    assert.equal((bWrite.payload!.data as Record<string, unknown>).stage, "assigned");
+    assert.equal((bWrite.payload!.data as Record<string, unknown>).lead_source_track, "company");
+
+    assert.equal(
+      leadWrites.some((w) => w.eqs.id === "lead-c"),
+      false,
+      "territory propagation must not reassign an active self-sourced lead",
+    );
+    assert.deepEqual(
+      LEADS.find((lead) => lead.id === "lead-c")!.data,
+      {
+        webdev_territory_id: TERRITORY,
+        business_name: "C Salon",
+        assigned_to: "old-rep",
+        stage: "qualified",
+        lead_source_track: "self",
+        claimed_at: "2026-09-01T00:00:00.000Z",
+      },
+      "skipped active rows must retain owner, stage, and self-source provenance",
+    );
+
+    const auditCalls = db.calls.filter((c) => c.table === "lead_interactions" && c.mode === "insert");
+    assert.equal(auditCalls.length, 1, "successful territory intake must write an audit batch");
+    const auditRows = auditCalls[0].payload as Record<string, unknown>[];
+    assert.deepEqual(auditRows.map((row) => row.lead_id).sort(), ["lead-a", "lead-b"]);
+    for (const row of auditRows) {
+      assert.equal(row.tenant_id, TENANT);
+      assert.equal(row.actor_user_id, ACTOR);
+      assert.equal(row.agent_source, "web_leads_territory_assign");
+      const metadata = row.metadata as Record<string, unknown>;
+      assert.equal(metadata.assigned_to, AGENT);
+      assert.equal(metadata.lead_source_track, "company");
+      assert.equal(metadata.to_stage, "assigned");
+    }
   }
 
   // ---- Assign: a failed batch is reported, not swallowed ------------------
@@ -192,19 +295,66 @@ async function main() {
       baseResponder({
         tenant_records: (call) => {
           if (call.mode === "select") return { data: LEADS, error: null };
-          // lead-b's write fails; the others still succeed.
+          // One of the two eligible pool writes fails; skipped active rows are
+          // never attempted and therefore are not misreported as failures.
           if (call.eqs.id === "lead-b") return { data: null, error: { message: "conflict" } };
           return { data: [{ id: call.eqs.id }], error: null };
         },
       }),
     );
-    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT }, db);
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT, actorUserId: ACTOR }, db);
     assert.equal(result.ok, true);
     if (result.ok && result.mode === "assigned") {
-      assert.equal(result.leadsMatched, 3);
-      assert.equal(result.leadsUpdated, 2, "the two leads that succeeded must still count as updated");
+      assert.equal(result.leadsMatched, 7);
+      assert.equal(result.leadsUpdated, 1, "the eligible lead that succeeded must still count as updated");
+      assert.equal(result.leadsSkipped, 5, "protected rows are reported separately from failed writes");
+      assert.equal(result.leadsRaced, 0);
       assert.equal(result.leadsFailed, 1, "the failed lead must be counted, never silently dropped");
+      assert.equal(result.trackingFailed, 0);
       assert.match(result.message, /1 failed/, "the response must say a batch partially failed");
+    } else {
+      assert.fail("expected an 'assigned' result");
+    }
+  }
+
+  // ---- Assign: a lead claimed after the read loses the CAS, not its owner ---
+  {
+    const db = makeFakeDb(
+      baseResponder({
+        tenant_records: (call) => {
+          if (call.mode === "select") return { data: LEADS, error: null };
+          if (call.eqs.id === "lead-b") return { data: [], error: null };
+          return { data: [{ id: call.eqs.id }], error: null };
+        },
+      }),
+    );
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT, actorUserId: ACTOR }, db);
+    assert.equal(result.ok, true);
+    if (result.ok && result.mode === "assigned") {
+      assert.equal(result.leadsUpdated, 1);
+      assert.equal(result.leadsSkipped, 5);
+      assert.equal(result.leadsRaced, 1, "a concurrent claim must be counted as a lost race");
+      assert.equal(result.leadsFailed, 0, "a clean CAS miss is not a database failure");
+      assert.equal(result.trackingFailed, 0);
+      assert.match(result.message, /1 changed while assigning/i);
+    } else {
+      assert.fail("expected an 'assigned' result");
+    }
+  }
+
+  // ---- Assign: audit failure is surfaced without inventing history ---------
+  {
+    const db = makeFakeDb(
+      baseResponder({
+        lead_interactions: () => ({ data: null, error: { message: "audit unavailable" } }),
+      }),
+    );
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT, actorUserId: ACTOR }, db);
+    assert.equal(result.ok, true);
+    if (result.ok && result.mode === "assigned") {
+      assert.equal(result.leadsUpdated, 2);
+      assert.equal(result.trackingFailed, 2, "each successful ownership write without an audit row must be counted");
+      assert.match(result.message, /2 audit entr/i);
     } else {
       assert.fail("expected an 'assigned' result");
     }
@@ -213,7 +363,7 @@ async function main() {
   // ---- Unassign: NEVER writes to tenant_records ----------------------------
   {
     const db = makeFakeDb(baseResponder());
-    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: null }, db);
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: null, actorUserId: ACTOR }, db);
     assert.equal(result.ok, true);
     if (result.ok && result.mode === "unassigned") {
       assert.equal(result.assignedTo, null);
@@ -241,7 +391,7 @@ async function main() {
         leadgen_territories: () => ({ data: [], error: null }),
       }),
     );
-    const result = await assignTerritory({ territoryId: OTHER_TERRITORY, assignedTo: AGENT }, db);
+    const result = await assignTerritory({ territoryId: OTHER_TERRITORY, assignedTo: AGENT, actorUserId: ACTOR }, db);
     assert.deepEqual(result, { ok: false, status: 404, error: "territory_not_found" });
     assert.equal(db.calls.filter((c) => c.table === "tenant_records").length, 0, "must not touch leads for a territory that doesn't exist");
   }
@@ -253,7 +403,7 @@ async function main() {
         user_profiles: () => ({ data: null, error: null }),
       }),
     );
-    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT }, db);
+    const result = await assignTerritory({ territoryId: TERRITORY, assignedTo: AGENT, actorUserId: ACTOR }, db);
     assert.deepEqual(result, { ok: false, status: 400, error: "assignee_not_in_tenant" });
     assert.equal(
       db.calls.filter((c) => c.table === "leadgen_territories" && c.mode === "update").length,
@@ -266,11 +416,11 @@ async function main() {
   {
     const db = makeFakeDb(baseResponder());
     assert.deepEqual(
-      await assignTerritory({ territoryId: "not-a-uuid", assignedTo: null }, db),
+      await assignTerritory({ territoryId: "not-a-uuid", assignedTo: null, actorUserId: ACTOR }, db),
       { ok: false, status: 400, error: "invalid_territory_id" },
     );
     assert.deepEqual(
-      await assignTerritory({ territoryId: TERRITORY, assignedTo: "not-a-uuid" }, db),
+      await assignTerritory({ territoryId: TERRITORY, assignedTo: "not-a-uuid", actorUserId: ACTOR }, db),
       { ok: false, status: 400, error: "invalid_assigned_to" },
     );
   }
@@ -278,20 +428,26 @@ async function main() {
   // ---- Pure helpers ---------------------------------------------------------
   assert.deepEqual(chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.deepEqual(chunk([], 5), []);
-  // UPDATED 2026-08-26: this previously asserted that withAssignedTo adds
-  // `assigned_to` and NOTHING else, which is exactly the bug it encoded -- a
-  // territory-assigned lead was never stamped into the website-sales program, so
-  // filterWebsiteSalesRows dropped it and the rep who had just been given the
-  // lead could not see it on /pipeline. `sales_program` is now always stamped.
-  //
-  // `stage: "researched"` is still expected to survive verbatim, and that is the
-  // other half of the contract: an existing stage is never rewound. See the
-  // dedicated cases at the end of this file.
-  assert.deepEqual(withAssignedTo({ business_name: "X", stage: "researched" }, AGENT), {
+  assert.equal(isTerritoryAssignmentEligible({}), true);
+  assert.equal(isTerritoryAssignmentEligible({ stage: "researched" }), true);
+  assert.equal(isTerritoryAssignmentEligible({ stage: "unassigned" }), true);
+  assert.equal(isTerritoryAssignmentEligible({ stage: "assigned" }), false);
+  assert.equal(isTerritoryAssignmentEligible({ stage: "researched", dnc: true }), false);
+  const assignedAt = "2026-09-14T12:00:00.000Z";
+  assert.deepEqual(withAssignedTo({ business_name: "X", stage: "researched" }, AGENT, assignedAt), {
     business_name: "X",
-    stage: "researched",
     assigned_to: AGENT,
+    assigned_at: assignedAt,
+    claimed_at: assignedAt,
     sales_program: "website_sales_v1",
+    sales_motion: "cold_outbound",
+    lead_source_track: "company",
+    sourced_by_user_id: null,
+    last_contacted_at: assignedAt,
+    last_call_at: null,
+    lost_at: null,
+    stage: "assigned",
+    stage_entered_at: assignedAt,
   });
   assert.equal(isUuid(TERRITORY), true);
   assert.equal(isUuid("nope"), false);
@@ -322,22 +478,39 @@ void main().catch((error) => {
   const out = withAssignedTo({ business_name: "Silverthorne" }, "rep-1", "2026-08-26T00:00:00.000Z");
   assert.equal(out.assigned_to, "rep-1");
   assert.equal(out.sales_program, "website_sales_v1", "without this the lead never reaches /pipeline");
+  assert.equal(out.sales_motion, "cold_outbound", "without this the lead is rejected by the OASIS pipeline query");
+  assert.equal(out.lead_source_track, "company", "territory-fed work is company sourced");
   assert.equal(out.stage, "assigned");
+  assert.equal(out.claimed_at, "2026-08-26T00:00:00.000Z");
+  assert.equal(out.assigned_at, "2026-08-26T00:00:00.000Z");
   assert.equal(out.stage_entered_at, "2026-08-26T00:00:00.000Z");
 }
 {
-  // 2. AND IT MUST NOT REWIND WORK IN FLIGHT. Re-assigning a lead already at
-  //    `qualified` may never reset it to `assigned`: that destroys the rep's
-  //    recorded progress, and because `lost` drives the 90-day recycle in
-  //    claim.ts, rewinding stage can recycle a deliberately closed lead.
-  const out = withAssignedTo(
-    { business_name: "X", stage: "qualified", stage_entered_at: "2026-08-01T00:00:00.000Z" },
-    "rep-2",
-    "2026-08-26T00:00:00.000Z",
-  );
-  assert.equal(out.stage, "qualified", "an in-flight stage must survive re-assignment");
-  assert.equal(out.stage_entered_at, "2026-08-01T00:00:00.000Z", "and keep its original clock");
-  assert.equal(out.sales_program, "website_sales_v1", "membership is still stamped, idempotently");
+  // 2. Territory propagation is intake-only. An active self-sourced row is
+  //    returned byte-for-byte unchanged, including owner and source credit.
+  const active = {
+      business_name: "X",
+      assigned_to: "rep-1",
+      lead_source_track: "self",
+      stage: "qualified",
+      stage_entered_at: "2026-08-01T00:00:00.000Z",
+      last_contacted_at: "2026-08-09T00:00:00.000Z",
+      last_call_at: "2026-08-10T00:00:00.000Z",
+      lost_at: "2026-08-11T00:00:00.000Z",
+  };
+  const out = withAssignedTo(active, "rep-2", "2026-08-26T00:00:00.000Z");
+  assert.deepEqual(out, active);
+}
+for (const stage of ["lost", "in_build"] as const) {
+  const history = {
+    stage,
+    stage_entered_at: "2026-07-01T00:00:00.000Z",
+    last_contacted_at: "2026-07-02T00:00:00.000Z",
+    last_call_at: "2026-07-03T00:00:00.000Z",
+    lost_at: stage === "lost" ? "2026-07-04T00:00:00.000Z" : null,
+  };
+  const out = withAssignedTo(history, "rep-history", "2026-08-26T00:00:00.000Z");
+  assert.deepEqual(out, history, `${stage}: territory assignment must leave the row untouched`);
 }
 {
   // 3. A blank-string stage counts as absent, not as a stage. A whitespace value
@@ -346,12 +519,28 @@ void main().catch((error) => {
   assert.equal(out.stage, "assigned");
 }
 {
-  // 4. Every other field is still carried through untouched -- the original
-  //    reason this function was written as a merge.
+  // 4. DNC rows never enter a rep's calling book, even while still researched.
   const out = withAssignedTo({ business_name: "Y", phone: "555", dnc: true }, "rep-4", "2026-08-26T00:00:00.000Z");
   assert.equal(out.business_name, "Y");
   assert.equal(out.phone, "555");
   assert.equal(out.dnc, true);
+  assert.equal(out.assigned_to, undefined);
+}
+{
+  // A malformed legacy self flag without a durable source identity fails
+  // closed to company. A real frozen source identity survives assignment; the
+  // payout engine decides whether that source is also the closer.
+  const self = withAssignedTo({ lead_source_track: "self" }, "rep-5", "2026-08-26T00:00:00.000Z");
+  assert.equal(self.lead_source_track, "company");
+  const invalid = withAssignedTo({ lead_source_track: "partner" }, "rep-5", "2026-08-26T00:00:00.000Z");
+  assert.equal(invalid.lead_source_track, "company");
+  const frozen = withAssignedTo(
+    { stage: "researched", assigned_to: null, lead_source_track: "self", sourced_by_user_id: SOURCE_REP },
+    AGENT,
+    "2026-08-26T00:00:00.000Z",
+  );
+  assert.equal(frozen.lead_source_track, "self");
+  assert.equal(frozen.sourced_by_user_id, SOURCE_REP);
 }
 
 console.log("web-leads-territory-assign pipeline-visibility ok");

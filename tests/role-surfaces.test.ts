@@ -37,6 +37,7 @@ import {
   capabilitiesFor,
   filterNavForPersona,
   isOasisSurfaceTenant,
+  maySeeCommissionSurface,
   personaMayVisit,
   resolvePersona,
   type Persona,
@@ -262,6 +263,7 @@ const FULL_NAV = [
   // the fixture happened to omit it.
   { href: "/leads", label: "Leads" },
   { href: "/playbook", label: "Playbook" },
+  { href: "/commissions", label: "Commissions" },
   { href: "/operations", label: "Operations" },
   { href: "/automations", label: "Automations" },
   { href: "/health", label: "Health" },
@@ -273,12 +275,12 @@ const FULL_NAV = [
 const repNav = filterNavForPersona(FULL_NAV, "sales");
 assert.deepEqual(
   repNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
-  "a rep gets work surfaces plus safe personal Settings",
+  ["/", "/schedule", "/pipeline", "/playbook", "/commissions", "/settings"],
+  "a rep gets work surfaces, their commission ledger, and safe personal Settings",
 );
 // REMOVED, not disabled. Greying a tab is not removing it, and a disabled row
 // still advertises the surface exists.
-assert.equal(repNav.length, 5);
+assert.equal(repNav.length, 6);
 assert.equal(
   repNav.some((n) => "enabled" in n),
   false,
@@ -302,8 +304,8 @@ for (const persona of ["founder", "worker", "readonly", "legacy"] as Persona[]) 
 const mgrNav = filterNavForPersona(FULL_NAV, "manager");
 assert.deepEqual(
   mgrNav.map((n) => n.href),
-  ["/", "/schedule", "/pipeline", "/playbook", "/settings"],
-  "a manager gets the roster-scoped pipeline and safe Settings",
+  ["/", "/schedule", "/pipeline", "/playbook", "/commissions", "/settings"],
+  "a manager gets the roster-scoped pipeline, commission ledger, and safe Settings",
 );
 assert.equal(
   personaMayVisit("manager", "/analytics"),
@@ -386,7 +388,26 @@ assert.equal(personaMayVisit("sales", "/analytics"), false);
 assert.equal(personaMayVisit("sales", "/founders/marketing"), false);
 assert.equal(personaMayVisit("sales", "/"), true);
 assert.equal(personaMayVisit("sales", "/settings"), true);
+assert.equal(personaMayVisit("sales", "/commissions"), true);
+assert.equal(personaMayVisit("manager", "/commissions"), true);
+assert.equal(personaMayVisit("builder", "/commissions"), true);
+assert.equal(personaMayVisit("marketing", "/commissions"), false);
 assert.ok(SALES_NAV_ALLOWLIST.includes("/"), "Today is on the allowlist");
+
+for (const persona of ["founder", "sales", "manager", "builder"] as Persona[]) {
+  assert.equal(
+    maySeeCommissionSurface(SURFACE_CAPABILITIES[persona]),
+    true,
+    `${persona} has a declared commission capability and may reach the commission surface`,
+  );
+}
+for (const persona of ["marketing", "worker", "readonly"] as Persona[]) {
+  assert.equal(
+    maySeeCommissionSurface(SURFACE_CAPABILITIES[persona]),
+    false,
+    `${persona} has no commission capability and must fail closed`,
+  );
+}
 
 /* ───────── 4. the sales render path never ASKS for company financials ────── */
 
@@ -703,9 +724,42 @@ for (const refused of ["sales", "manager", "readonly", "worker"] as Persona[]) {
 }
 
 const managerToday = read("components/today/ManagerToday.tsx");
+const commissionPage = read("app/commissions/page.tsx");
+const commissionApi = read("app/api/website-sales/commissions/route.ts");
 const managerCode = stripComments(managerToday);
 const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
 const teamPolicy = stripComments(read("lib/team.ts"));
+const commissionReader = stripComments(read("lib/website-sales-commission-summary.ts"));
+
+assert.ok(
+  commissionPage.includes("resolveViewerSurface") && commissionPage.includes("maySeeCommissionSurface"),
+  "the Commission page must apply the same capability gate as its navigation",
+);
+assert.match(
+  commissionPage,
+  /if \(!surface\.ok \|\| !maySeeCommissionSurface\(surface\.capabilities\)\) notFound\(\)/,
+  "the Commission page fails closed when viewer identity cannot be resolved",
+);
+assert.ok(
+  commissionApi.includes("resolvePersona") && commissionApi.includes("maySeeCommissionSurface"),
+  "the commission API must reject authenticated personas with no commission capability",
+);
+assert.ok(
+  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId)") &&
+    commissionApi.includes('persona === "manager"') &&
+    commissionApi.includes("repUserIds"),
+  "a manager commission ledger must use a server-resolved direct-report scope",
+);
+assert.equal(
+  (commissionApi.match(/\.\.\.repScope/g) ?? []).length,
+  2,
+  "the same manager/rep boundary must constrain both visible ledger rows and complete totals",
+);
+assert.ok(
+  commissionApi.includes('ledgerScope = "manager_team"') &&
+    read("app/commissions/CommissionPortal.tsx").includes("My team commission ledger"),
+  "the manager ledger must identify its wider scope truthfully",
+);
 
 assert.ok(
   /surface\.persona === "manager"/.test(dispatcherCode),
@@ -723,15 +777,16 @@ for (const reader of FINANCIAL_READERS) {
   );
 }
 assert.ok(
-  managerCode.includes("getOasisSalesRepRoster(tenantId)") &&
+  managerCode.includes("getOasisSalesRepRoster(tenantId, managerUserId)") &&
     salesPerformance.includes("getOasisSalesRepRoster(tenantId)"),
-  "ManagerToday must use the canonical OASIS sales roster",
+  "ManagerToday must use the manager-scoped canonical OASIS sales roster",
 );
 assert.ok(
   teamPolicy.includes('.eq("tenant_id", tenantId)') &&
     teamPolicy.includes("canonicalizeTenantMembers((data || []) as MemberRow[]).filter") &&
-    teamPolicy.includes("isOasisPipelineRepRole(member.team_role)"),
-  "the canonical roster must canonicalize the full tenant before applying the sales-role allowlist",
+    teamPolicy.includes("isOasisPipelineRepRole(member.team_role)") &&
+    teamPolicy.includes("member.manager_user_id?.trim().toLowerCase() === managerId"),
+  "the canonical roster must canonicalize the full tenant before applying the role and direct-report boundaries",
 );
 assert.equal(
   teamPolicy.includes('.in("team_role", [...OASIS_PIPELINE_REP_ROLES])'),
@@ -739,11 +794,21 @@ assert.equal(
   "a query-level role filter can retain a stale sales duplicate after hiding its owner/admin row",
 );
 assert.ok(
-  managerCode.includes('.in("rep_user_id"'),
+  managerCode.includes("repUserIds: repIds") && commissionReader.includes('.in("rep_user_id", repUserIds)'),
   "team commission must be scoped to the roster, not fetched tenant-wide and filtered in memory",
 );
 assert.ok(
-  /repIds\.length === 0/.test(managerCode),
+  managerCode.includes("repUserId: managerUserId") &&
+    managerCode.includes('excludePartyRole: "manager"') &&
+    managerToday.includes("Your sales commissions"),
+  "a manager who sells must see their own non-override commission on Today",
+);
+assert.ok(
+  managerCode.includes('partyRole: "manager"') && managerToday.includes("Your override"),
+  "manager sales commission and manager override must remain separate totals",
+);
+assert.ok(
+  /repUserIds\?\.length === 0/.test(commissionReader),
   "an empty roster must short-circuit the query: an empty `in` list is how 'no reps' becomes 'every row'",
 );
 assert.ok(
@@ -772,7 +837,7 @@ for (const reader of FINANCIAL_READERS) {
 
 // The rep page must not name the commission table without the own-rows predicate.
 assert.ok(
-  repCode.includes('.eq("rep_user_id"'),
+  repCode.includes("repUserId: userId") && commissionReader.includes('.eq("rep_user_id", repUserId)'),
   "RepToday must scope commissions to the viewing rep",
 );
 assert.equal(

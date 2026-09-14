@@ -14,21 +14,70 @@
 export type WorkerStatusInput = {
   status: "healthy" | "degraded" | "down" | "unconfigured" | "archived";
   metadata?: Record<string, unknown> | null;
+  /** Where the process executes. Missing is accepted for older API rows. */
+  runtime?: WorkerRuntime;
   /** Reason this worker is not meant to run on this machine, if it isn't. */
   not_expected_here?: string;
 };
 
+export type WorkerRuntime = "local" | "cloud" | "remote" | "retired";
+export type WorkerControlMode = "local_fleet" | "remote_bridge" | "none";
+export type WorkerStatusSource =
+  | "integrations_health"
+  | "website_sales_meeting_worker_health"
+  | "none";
+export type WorkerInventory = "oasis" | "client" | "none";
+
+/**
+ * Resolve lifecycle control without trusting a catalog entry to authorize the
+ * viewer. Catalog control_mode says what the process supports; session role
+ * decides whether this response may expose that control path.
+ */
+export function resolveWorkerControlMode(input: {
+  runtime: WorkerRuntime;
+  configuredMode?: WorkerControlMode;
+  /** Carried for executable role-matrix tests; role text alone never grants control. */
+  teamRole?: string;
+  isTrueAdmin: boolean;
+  adminAccess: boolean;
+  remoteControlAllowed?: boolean;
+}): WorkerControlMode {
+  if (
+    input.runtime === "cloud" ||
+    input.runtime === "retired" ||
+    input.configuredMode === "none"
+  ) {
+    return "none";
+  }
+  if (input.runtime === "local") {
+    return input.isTrueAdmin || input.adminAccess ? "local_fleet" : "none";
+  }
+  return input.remoteControlAllowed === true ? "remote_bridge" : "none";
+}
+
+/** OASIS slug wins if legacy profile metadata disagrees with the tenant. */
+export function selectWorkerInventory(input: {
+  isOasisTenant: boolean;
+  isClientProfile: boolean;
+}): WorkerInventory {
+  if (input.isOasisTenant) return "oasis";
+  if (input.isClientProfile) return "client";
+  return "none";
+}
+
 /**
  * The workers the healthy/total pill should actually count.
  *
- * Two tiles were permanently red for reasons that were not faults — retired
- * code kept on disk deliberately, and a daemon hosted on the VPS. Counting
- * them put the pill's best possible reading at 8/12: a gauge that can never
- * read full, which teaches the operator that some red is normal. Three
- * genuinely dead daemons then sat unnoticed behind exactly that number.
+ * Active local, cloud, and remote workers count. Retired inventory does not.
+ * `not_expected_here` remains as a rolling-deploy compatibility fallback so
+ * an older response still cannot poison the denominator.
  */
 export function countsTowardHealth(worker: WorkerStatusInput): boolean {
-  return worker.status !== "archived" && !worker.not_expected_here;
+  return (
+    worker.status !== "archived" &&
+    worker.runtime !== "retired" &&
+    !worker.not_expected_here
+  );
 }
 
 /**

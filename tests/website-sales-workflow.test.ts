@@ -6,11 +6,15 @@ import {
   mayAgentBookFounder,
   mayCloseWebsiteDeal,
   mayCreditAdminVerifiedCloser,
+  mayRepRunWebsiteSalesDeal,
+  matchesWebsiteSalesPaymentReplay,
+  mayAdminSetWebsiteSalesStage,
   mayRecordDisposition,
   maySendWebsiteProposal,
   mayUseDirectAdvance,
   mayWorkWebsiteSalesLifecycle,
   nextOasisLifecycleStage,
+  resolveWebsiteSalesLeadSourceTrack,
   resolveWebsiteSalesHandoffRep,
   resolveWebsiteSalesCloseParties,
 } from "../lib/website-sales-workflow";
@@ -44,6 +48,32 @@ assert.equal(nextOasisLifecycleStage("client_review"), "launched");
 assert.equal(nextOasisLifecycleStage("lost"), null);
 assert.equal(nextOasisLifecycleStage("launched"), null);
 assert.equal(nextOasisLifecycleStage("garbage"), null);
+
+for (const protectedStage of ["won", "onboarding", "in_build", "client_review", "launched"]) {
+  assert.equal(
+    mayAdminSetWebsiteSalesStage("qualified", protectedStage),
+    false,
+    `${protectedStage} requires the verified-payment or direct delivery transition`,
+  );
+}
+for (const ordinaryStage of ["researched", "assigned", "qualified", "proposal_sent", "lost"]) {
+  assert.equal(mayAdminSetWebsiteSalesStage("connected", ordinaryStage), true);
+}
+for (const paidOrDeliveryStage of ["won", "onboarding", "in_build", "client_review", "launched"]) {
+  assert.equal(
+    mayAdminSetWebsiteSalesStage(paidOrDeliveryStage, "lost"),
+    false,
+    `${paidOrDeliveryStage} cannot be rewritten by the generic dropdown after payment/delivery facts exist`,
+  );
+}
+assert.equal(resolveWebsiteSalesLeadSourceTrack("self"), "self");
+for (const untrustedOrMissing of [undefined, null, "", "SELF", "company", "referral", { track: "self" }]) {
+  assert.equal(
+    resolveWebsiteSalesLeadSourceTrack(untrustedOrMissing),
+    "company",
+    "only the exact durable lead field may select the self-sourced payout track",
+  );
+}
 
 assert.equal(mayUseDirectAdvance("assigned", false), true, "rep may start outreach");
 assert.equal(
@@ -85,6 +115,81 @@ assert.equal(mayWorkWebsiteSalesLifecycle("read_only"), false);
 assert.equal(mayWorkWebsiteSalesLifecycle("delivery"), false, "delivery reviews a deal, it does not work one");
 assert.equal(mayWorkWebsiteSalesLifecycle(null), false, "an absent role must fail closed");
 assert.equal(mayWorkWebsiteSalesLifecycle("read_only", true), true, "an explicit admin grant can operate the lifecycle");
+
+assert.equal(
+  mayRepRunWebsiteSalesDeal({
+    actorUserId: "11111111-1111-4111-8111-111111111111",
+    assignedTo: "22222222-2222-4222-8222-222222222222",
+    auditHostUserId: "22222222-2222-4222-8222-222222222222",
+  }),
+  false,
+  "after handoff, frozen opener attribution is read/15% credit — it cannot steal the closer's deal action",
+);
+assert.equal(
+  mayRepRunWebsiteSalesDeal({
+    actorUserId: "22222222-2222-4222-8222-222222222222",
+    assignedTo: "22222222-2222-4222-8222-222222222222",
+    auditHostUserId: "22222222-2222-4222-8222-222222222222",
+  }),
+  true,
+  "the assigned audit-host closer retains quote, payment, and close authority",
+);
+
+assert.equal(
+  mayCreditAdminVerifiedCloser({
+    candidateUserId: "22222222-2222-4222-8222-222222222222",
+    frozenOpenerUserId: "11111111-1111-4111-8111-111111111111",
+    auditHostUserId: "22222222-2222-4222-8222-222222222222",
+    assignedTo: "33333333-3333-4333-8333-333333333333",
+    recordedAuditHostRole: "builder",
+    liveTeamRole: "builder",
+    isOwner: false,
+  }),
+  true,
+  "a selling builder is a canonical close-capable audit host and keeps closer credit when a founder verifies payment",
+);
+assert.equal(
+  mayCreditAdminVerifiedCloser({
+    candidateUserId: "22222222-2222-4222-8222-222222222222",
+    frozenOpenerUserId: "11111111-1111-4111-8111-111111111111",
+    auditHostUserId: "22222222-2222-4222-8222-222222222222",
+    assignedTo: "33333333-3333-4333-8333-333333333333",
+    recordedAuditHostRole: "builder",
+    liveTeamRole: "builder",
+    isOwner: true,
+  }),
+  false,
+  "owner exclusion remains load-bearing even when the stored role can close",
+);
+
+const paymentReplayBody = {
+  paymentProvider: "manual",
+  paymentReference: "receipt-123",
+  paymentAmount: 500,
+  paymentCurrency: "CAD",
+  builderUserId: "33333333-3333-4333-8333-333333333333",
+};
+const paymentReplayMetadata = {
+  payment_provider: "manual",
+  provider_reference: "receipt-123",
+  installment_amount_cents: 50_000,
+  currency: "CAD",
+  builder_user_id: "33333333-3333-4333-8333-333333333333",
+};
+assert.equal(matchesWebsiteSalesPaymentReplay(paymentReplayBody, paymentReplayMetadata), true);
+for (const changed of [
+  { paymentProvider: "stripe" },
+  { paymentReference: "different-receipt" },
+  { paymentAmount: 499 },
+  { paymentCurrency: "USD" },
+  { builderUserId: "44444444-4444-4444-8444-444444444444" },
+]) {
+  assert.equal(
+    matchesWebsiteSalesPaymentReplay({ ...paymentReplayBody, ...changed }, paymentReplayMetadata),
+    false,
+    `a same-key payment replay cannot change ${Object.keys(changed)[0]}`,
+  );
+}
 
 assert.deepEqual(
   resolveWebsiteSalesCloseParties({
@@ -140,9 +245,35 @@ assert.deepEqual(
   {
     closerUserId: "11111111-1111-4111-8111-111111111111",
     openerUserId: null,
-    closedByRep: false,
+    closedByRep: true,
   },
-  "an admin cannot relabel the frozen opener as a distinct closer without independent closer evidence",
+  "one rep who both opened and hosted the close resolves to one closer/full-stack party, never duplicate roles",
+);
+assert.equal(
+  mayCreditAdminVerifiedCloser({
+    candidateUserId: "11111111-1111-4111-8111-111111111111",
+    frozenOpenerUserId: "11111111-1111-4111-8111-111111111111",
+    auditHostUserId: "11111111-1111-4111-8111-111111111111",
+    assignedTo: "11111111-1111-4111-8111-111111111111",
+    recordedAuditHostRole: "closer",
+    liveTeamRole: "closer",
+    isOwner: false,
+  }),
+  true,
+  "the same opener earns close credit only when durable audit-host and live-role evidence prove they hosted",
+);
+assert.equal(
+  mayCreditAdminVerifiedCloser({
+    candidateUserId: "11111111-1111-4111-8111-111111111111",
+    frozenOpenerUserId: "11111111-1111-4111-8111-111111111111",
+    auditHostUserId: null,
+    assignedTo: "11111111-1111-4111-8111-111111111111",
+    recordedAuditHostRole: null,
+    liveTeamRole: "closer",
+    isOwner: false,
+  }),
+  false,
+  "same-person assignment alone cannot upgrade frozen opening credit into a close",
 );
 assert.equal(
   mayCreditAdminVerifiedCloser({

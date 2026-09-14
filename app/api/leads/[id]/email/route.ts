@@ -1,20 +1,14 @@
 /**
- * POST /api/leads/[id]/email — queue an outbound email to a lead from
- * the dashboard.
+ * POST /api/leads/[id]/email — send an outbound email to a lead from
+ * the dashboard, with the background consumer as the final fallback.
  *
- * The dashboard runs on Vercel and doesn't hold SMTP / Gmail OAuth
- * credentials directly — send_gateway.py on the operator's machine
- * does. So this endpoint QUEUES the send by inserting a
- * lead_interactions row with status='queued', and emits an
- * agent_events row of type BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD that
- * send_gateway listens for. The daemon picks up the row, performs the
- * actual SMTP send, then updates the row to status='sent' and POSTs
- * back to /api/outbound/log for the canonical audit trail.
- *
- * Until the daemon side is wired (Phase 3 of the drawer build), the
- * queued row at least preserves the operator's intent in the audit
- * log so nothing is lost — and it surfaces in the timeline panel as
- * "queued" so the operator can see it landed.
+ * On OASIS, the route first writes a private `direct_attempting` reservation,
+ * then tries the available direct transports. A successful direct delivery
+ * makes that reservation terminal. Only when every direct path declines or
+ * fails is the same row atomically exposed as `queued` and the worker event
+ * published. This prevents the portal and background consumer from sending the
+ * same interaction at the same time. Other tenants retain their established
+ * queue-first path.
  *
  * Auth: session-cookie → tenant.
  * Body: { to_email: string, subject: string, body: string }
@@ -51,15 +45,13 @@ export const maxDuration = 60;
  * Auto-fire the email via the bridge `send_email` tool — INSTANT send for
  * owner/admin (parallel to the shop-out auto-trigger, commit 4957702). Members
  * fall back to the queue (/api/bridge/exec-tool's role gate rejects write tools
- * for non-admin); that queue is drained by the dashboard-email-consumer daemon,
- * which now runs on the always-on VPS (moved from Windows-only → IS_LINUX in
- * ecosystem.config.js, 2026-06-29 — Windows-only meant queued lead-emails never
- * sent whenever CC's PC was off; 21 rows had piled up undelivered). So: admins
- * send instantly here; members + any bridge hiccup are covered by the VPS daemon.
+ * for non-admin). A tenant-scoped fallback consumer drains that queue on its
+ * configured host, so members and bridge interruptions still have a recovery
+ * path without one tenant's worker claiming another tenant's mail.
  *
- * Failure modes (best-effort): timeout / bridge offline / role denied →
- * row stays at status='queued' and the VPS consumer drains it on its next poll.
- * Never blocks the queue confirmation.
+ * Failure modes: timeout / bridge offline / role denied return a fallback
+ * outcome. On OASIS, the caller then atomically exposes the reservation as
+ * `queued`; the configured fallback consumer drains it on its next poll.
  */
 async function triggerImmediateSend(
   req: NextRequest,
@@ -231,6 +223,7 @@ export async function POST(
   const db = getServiceSupabase();
   const truncatedBody = text.slice(0, MAX_BODY);
   const truncatedSubject = subject.slice(0, MAX_SUBJECT);
+  const directAttemptStartedAt = new Date().toISOString();
 
   // ---- RESOLVE THE SENDING IDENTITY BEFORE QUEUEING ANYTHING ------------
   //
@@ -268,9 +261,12 @@ export async function POST(
     );
   }
 
-  // Insert the queued interaction. send_gateway.py polls
-  // lead_interactions WHERE status='queued' AND channel='email' and
-  // performs the actual send + status update.
+  // Reserve the interaction before attempting any transport, but do NOT make
+  // it drainable yet. The background consumer selects only
+  // metadata.status='queued'. Inserting that status before the direct send
+  // created a double-send race: the consumer could deliver this row while
+  // this request was delivering the same message. The reservation becomes
+  // queued only after every direct path returns a fallback outcome.
   const ins = await db
     .from("lead_interactions")
     .insert({
@@ -300,7 +296,8 @@ export async function POST(
         // their personal Gmail via Settings → Personal, sends from
         // THEIR address instead of the tenant-shared submissions@.
         acted_by_user_id: sess.userId,
-        status: "queued",
+        status: brand === "oasis" ? "direct_attempting" : "queued",
+        ...(brand === "oasis" ? { direct_attempt_started_at: directAttemptStartedAt } : {}),
       },
     })
     .select("id, created_at")
@@ -330,23 +327,22 @@ export async function POST(
   // lib/realtime/conversations-nudge.ts.
   await nudgeConversations(sess.tenantId);
 
-  // Emit an agent_event so send_gateway's event-bus listener picks it
-  // up immediately instead of waiting for its next poll cycle.
-  // Failure to emit is non-fatal — the daemon's polling fallback will
-  // still find the row. Uses the canonical publishAgentEvent helper so
-  // the schema (correlation_id, publisher_agent, severity) is right.
-  await publishAgentEvent({
-    eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD",
-    tenantId: sess.tenantId,
-    publisher: "dashboard",
-    targetAgent: "send_gateway",
-    payload: {
-      lead_id: leadId,
-      interaction_id: ins.data.id,
-      channel: "email",
-      to_email: toEmail,
-    },
-  });
+  // Preserve the established queue-first behavior for every other tenant. The
+  // OASIS path publishes only after its direct reservation becomes queued.
+  if (brand !== "oasis") {
+    await publishAgentEvent({
+      eventType: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD",
+      tenantId: sess.tenantId,
+      publisher: "dashboard",
+      targetAgent: "send_gateway",
+      payload: {
+        lead_id: leadId,
+        interaction_id: ins.data.id,
+        channel: "email",
+        to_email: toEmail,
+      },
+    });
+  }
 
   // Engine moves the lead forward through the sales motion. For SunBiz
   // that's imported → sent_application; for OASIS that's researched/
@@ -354,16 +350,21 @@ export async function POST(
   // based on tenant.
   // Engine guards manual overrides so an operator-set stage isn't yanked.
   let stageBumped: string | null = null;
-  try {
-    const stageEvent = await dispatchLeadStageEvent({
-      type: "outbound_email_queued",
-      tenantId: sess.tenantId,
-      leadId,
-    });
-    stageBumped = stageEvent.fired ? stageEvent.to : null;
-  } catch (err) {
-    trackingWarnings.push("stage_dispatch_failed");
-    console.error("[leads.email] stage dispatch failed", err);
+  const bumpLeadStage = async () => {
+    try {
+      const stageEvent = await dispatchLeadStageEvent({
+        type: "outbound_email_queued",
+        tenantId: sess.tenantId,
+        leadId,
+      });
+      stageBumped = stageEvent.fired ? stageEvent.to : null;
+    } catch (err) {
+      trackingWarnings.push("stage_dispatch_failed");
+      console.error("[leads.email] stage dispatch failed", err);
+    }
+  };
+  if (brand !== "oasis") {
+    await bumpLeadStage();
   }
 
   // brand + tenantSlug were resolved BEFORE the queue insert above, so a
@@ -682,29 +683,147 @@ export async function POST(
     sendResult = await queueFallback();
   }
 
-  // If the send actually fired, flip the queued row to sent so the timeline
-  // reflects reality and the daemon doesn't double-send. Non-fatal on failure.
-  if (sendResult.status === "sent") {
-    const statusUpdate = await db
-      .from("lead_interactions")
-      .update({
-        metadata: {
-          requested_by_profile_id: sess.profileId,
-          requested_by_email: sess.email,
-          acted_by_user_id: sess.userId,
-          status: gmailFrom ? "sent" : "auto_sent",
-          sent_via: sendResult.agent_source,
-          ...(gmailFrom ? { from_address: gmailFrom } : {}),
-          ...(gmailMsgId ? { gmail_message_id: gmailMsgId } : {}),
-          sent_at: new Date().toISOString(),
+  // Only now, after every immediate transport declined or failed, may the OASIS
+  // fallback consumer see the row. This is a compare-and-set from our private
+  // reservation state: a terminal receipt can never be put back on the queue.
+  if (brand === "oasis" && sendResult.status === "queued") {
+    const queuedAt = new Date().toISOString();
+    try {
+      const queueTransition = await db
+        .from("lead_interactions")
+        .update({
+          metadata: {
+            requested_by_profile_id: sess.profileId,
+            requested_by_email: sess.email,
+            acted_by_user_id: sess.userId,
+            status: "queued",
+            direct_attempt_started_at: directAttemptStartedAt,
+            queued_at: queuedAt,
+            queue_reason: sendResult.reason,
+          },
+        })
+        .eq("id", ins.data.id)
+        .eq("tenant_id", sess.tenantId)
+        .eq("metadata->>status", "direct_attempting")
+        .select("id")
+        .maybeSingle();
+      if (queueTransition.error || !queueTransition.data?.id) {
+        throw queueTransition.error || new Error("reservation_state_mismatch");
+      }
+    } catch (err) {
+      console.error("[leads.email] queue transition failed", {
+        interaction_id: ins.data.id,
+        tenant_id: sess.tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "queue_transition_failed",
+          interaction_id: ins.data.id,
+          message: "Direct delivery did not complete and the fallback queue could not be confirmed.",
         },
-      })
-      .eq("id", ins.data.id)
-      .eq("tenant_id", sess.tenantId);
-    if (statusUpdate.error) {
-      trackingWarnings.push("interaction_status_update_failed");
-      console.error("[leads.email] sent status update failed", statusUpdate.error);
+        { status: 503 },
+      );
     }
+
+    // Publish only after the row is drainable. The polling consumer can still
+    // recover a queued row if publication fails, so that bookkeeping failure is
+    // loud in logs and in the response warning but must not invite a resend.
+    let queueEventFailure: unknown = null;
+    try {
+      const queueEvent = await db.from("agent_events").insert({
+        event_type: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD",
+        publisher_agent: "dashboard",
+        severity: "info",
+        target_agent: "send_gateway",
+        correlation_id: sess.tenantId,
+        payload: {
+          tenant_id: sess.tenantId,
+          lead_id: leadId,
+          interaction_id: ins.data.id,
+          channel: "email",
+          to_email: toEmail,
+        },
+      });
+      queueEventFailure = queueEvent.error;
+    } catch (err) {
+      queueEventFailure = err;
+    }
+    if (queueEventFailure) {
+      trackingWarnings.push("queue_event_publish_failed");
+      console.error("[leads.email] queue event publish failed", {
+        interaction_id: ins.data.id,
+        tenant_id: sess.tenantId,
+        error:
+          queueEventFailure instanceof Error
+            ? queueEventFailure.message
+            : String(queueEventFailure),
+      });
+    }
+  }
+
+  // A confirmed direct delivery becomes terminal from the same private
+  // reservation. The queue branch above is mutually exclusive, so this row can
+  // never be exposed to the consumer after a successful send.
+  if (sendResult.status === "sent") {
+    const sentMetadata = {
+      requested_by_profile_id: sess.profileId,
+      requested_by_email: sess.email,
+      acted_by_user_id: sess.userId,
+      status: brand === "oasis" ? "sent" : gmailFrom ? "sent" : "auto_sent",
+      ...(brand === "oasis" ? { direct_attempt_started_at: directAttemptStartedAt } : {}),
+      sent_via: sendResult.agent_source,
+      ...(gmailFrom ? { from_address: gmailFrom } : {}),
+      ...(gmailMsgId ? { gmail_message_id: gmailMsgId } : {}),
+      sent_at: new Date().toISOString(),
+    };
+    if (brand === "oasis") {
+      try {
+        const statusUpdate = await db
+          .from("lead_interactions")
+          .update({ metadata: sentMetadata })
+          .eq("id", ins.data.id)
+          .eq("tenant_id", sess.tenantId)
+          .eq("metadata->>status", "direct_attempting")
+          .select("id")
+          .maybeSingle();
+        if (statusUpdate.error || !statusUpdate.data?.id) {
+          trackingWarnings.push("sent_receipt_update_failed");
+          console.error("[leads.email] sent receipt update failed", {
+            interaction_id: ins.data.id,
+            tenant_id: sess.tenantId,
+            error: statusUpdate.error?.message || "reservation_state_mismatch",
+          });
+        }
+      } catch (err) {
+        trackingWarnings.push("sent_receipt_update_failed");
+        console.error("[leads.email] sent receipt update failed", {
+          interaction_id: ins.data.id,
+          tenant_id: sess.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      // The established non-OASIS path intentionally keeps its original
+      // unconditional terminal receipt update.
+      const statusUpdate = await db
+        .from("lead_interactions")
+        .update({ metadata: sentMetadata })
+        .eq("id", ins.data.id)
+        .eq("tenant_id", sess.tenantId);
+      if (statusUpdate.error) {
+        trackingWarnings.push("interaction_status_update_failed");
+        console.error("[leads.email] sent status update failed", statusUpdate.error);
+      }
+    }
+  }
+
+  // The OASIS sales stage advances only after the message is confirmed sent or
+  // the fallback reservation is confirmed queued. A failed queue transition
+  // returns above and therefore cannot move a lead for an email that may vanish.
+  if (brand === "oasis") {
+    await bumpLeadStage();
   }
 
   return NextResponse.json({
