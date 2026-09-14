@@ -103,15 +103,50 @@ assert.equal(
   "a 90-day recycled loss is callable again, and the badge should say it was worked, not that it is held",
 );
 
-// --- a lead I hold whose claim lapsed still reads as mine ---
+// --- MY OWN lapsed lead is not "Yours" either, because it is not mine ---
+//
+// Caught in review (Codex, 2026-09-14). The first draft resolved "you" before
+// consulting availability, so a rep's own expired claim rendered "Yours" on a
+// row sitting in the SHARED POOL, where any rep may take it. A badge whose one
+// job is "should I touch this lead" must not tell its owner they still hold
+// something the pool is actively offering to everyone else.
+//
+// Availability decides FIRST, for every viewer. Which rep worked it is not
+// lost: My Leads keeps the row and marks it "Released, back in the pool".
 assert.equal(
   claimState(
     facts({ assignedTo: ME, claimedAt: iso(NOW - (CLAIM_STALE_DAYS + 1) * DAY_MS) }),
     ME,
     NOW,
   ),
+  "worked_before",
+  "my own EXPIRED claim is back in the pool for anyone -- labelling it 'Yours' claims a hold I no longer have",
+);
+assert.equal(
+  claimState(
+    facts({
+      assignedTo: ME,
+      stage: "lost",
+      lostAt: iso(NOW - (LOST_RECYCLE_DAYS + 1) * DAY_MS),
+      lastCallAt: iso(NOW - (LOST_RECYCLE_DAYS + 1) * DAY_MS),
+    }),
+    ME,
+    NOW,
+  ),
+  "worked_before",
+  "my own recycled loss is callable by anyone again, so it must not read as still mine",
+);
+
+// --- but a lead I genuinely still hold IS mine, by every route ---
+assert.equal(
+  claimState(facts({ assignedTo: ME, claimedAt: iso(NOW - DAY_MS), lastCallAt: iso(NOW - DAY_MS) }), ME, NOW),
   "you",
-  "my own lapsed lead stays labelled mine -- My Leads already marks it Released; it must not read as an anonymous 'worked before'",
+  "a lead I claimed and have dialled is held, and reads as mine",
+);
+assert.equal(
+  claimState(facts({ assignedTo: ME, claimedAt: iso(NOW - 400 * DAY_MS), dnc: true }), ME, NOW),
+  "you",
+  "a do-not-call lead never returns to the pool, so it stays attributed to whoever holds it",
 );
 
 // --- an unresolved viewer must never be told a lead is theirs ---

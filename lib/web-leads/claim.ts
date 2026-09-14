@@ -186,8 +186,13 @@ export function isReleasedFromBook(f: ClaimFacts, now: number): boolean {
  * failure this module's header exists to prevent. So availability() decides,
  * and the presence of an id only distinguishes "worked before" from "free".
  *
- * `you` is resolved BEFORE availability so a rep's own lapsed lead still reads
- * as theirs; My Leads marks that row "Released" separately.
+ * AVAILABILITY IS CHECKED BEFORE OWNERSHIP, INCLUDING THE VIEWER'S OWN. The
+ * first draft resolved "you" first, so a rep's own expired claim rendered
+ * "Yours" on a row sitting in the shared pool, which any rep may take (Codex
+ * review, 2026-09-14). A badge whose one job is "should I touch this lead"
+ * cannot tell its owner they still hold something the pool is offering to
+ * everyone else. Which rep worked it is not lost: My Leads keeps the row and
+ * marks it "Released, back in the pool".
  */
 export type ClaimState = "unassigned" | "you" | "worked_before" | "taken";
 
@@ -197,12 +202,13 @@ export function claimState(
   now: number,
 ): ClaimState {
   if (!f.assignedTo) return "unassigned";
+  // Claimable by anyone -- including by the rep whose name is still on it.
+  if (availability(f, now).available) return "worked_before";
   // An unresolved viewer must never be told a lead is theirs. isInBookOf would
   // already refuse an empty id, but stating it here keeps the fail-closed
   // intent visible next to the branch that depends on it.
   const viewer = (viewerUserId || "").trim();
-  if (viewer && isInBookOf(f, viewer)) return "you";
-  return availability(f, now).available ? "worked_before" : "taken";
+  return viewer && isInBookOf(f, viewer) ? "you" : "taken";
 }
 
 /**
