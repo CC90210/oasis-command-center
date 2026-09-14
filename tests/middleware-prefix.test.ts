@@ -111,6 +111,34 @@ for (const internal of [
   );
 }
 
+/**
+ * THE PUBLIC FORM'S OWN BEACONS MUST REACH THEIR ROUTES.
+ *
+ * /api/perf/vitals is sent by the MERCHANT'S browser from the public
+ * application form, where no session cookie exists. Left off the allowlist,
+ * middleware answered 401 and every merchant filling in a funding application
+ * collected console errors on the page — measured live on production
+ * 2026-09-14, alongside a consent beacon that was failing for its own reason.
+ *
+ * The route is a public surface by design and gates itself fail-closed before
+ * reading anything (same-origin check, 1 KB cap, strict schema, rate cap,
+ * log-only). Same rule as the internal HMAC routes above: the route owns its
+ * auth, so middleware has to let it get there.
+ */
+assert.equal(
+  isPublic("/api/perf/vitals"),
+  true,
+  "/api/perf/vitals is sent from the session-less public form and self-gates on same-origin; 401ing it here breaks the merchant's page",
+);
+// The allowlist entry must NOT become a blanket /api/perf prefix.
+for (const notPublic of ["/api/perf", "/api/perf/anything-else", "/api/perf/vitals-admin"]) {
+  assert.equal(
+    isPublic(notPublic),
+    false,
+    `${notPublic} must stay session-gated — only the vitals beacon is public`,
+  );
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.
