@@ -41,6 +41,7 @@ const TESTS = [
   "tests/web-leads-hours.test.ts",
   "tests/web-leads-audit.test.ts",
   "tests/web-leads-remedies.test.ts",
+  "tests/web-leads-automations.test.ts",
   "tests/web-leads-battlecard.test.ts",
   "tests/web-leads-manager-battlecard.test.ts",
   "tests/web-leads-url-safety.test.ts",
