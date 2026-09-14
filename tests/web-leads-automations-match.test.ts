@@ -223,8 +223,9 @@ console.log("web-leads-automations-match: weighted ordering across dimensions OK
 //     `Math.round((earned / total) * 100)`, and `recoverablePoints` reads
 //     that stored value. Deriving the share from `points / rawTotal`
 //     instead reconstructs an UNROUNDED score, and the two disagree by up
-//     to 0.5 * weight. Across the 1,152 reachable failing-subsets that put
-//     504 of them (44%) at a different printed figure from `FixFirst` on
+//     to 0.5 * weight. Across the 1,145 reachable failing-subsets (the sum
+//     of 2^n - 1 per dimension; the empty failing set is not a failing
+//     subset) that put 504 of them (44%) at a different printed figure from `FixFirst` on
 //     the same card, and ordered 1,764 dimension pairs oppositely to
 //     `selectAngle`.
 //
@@ -272,9 +273,10 @@ console.log("web-leads-automations-match: weighted ordering across dimensions OK
   // message below said "EQUAL exactly". It does not. The shares are divided
   // out per code and added back up in binary floating point, so the sum
   // recovers the total exactly in most cases and lands within 2 ulp of it in
-  // the rest: Task 4's enumeration over its 1,145 reachable audit subsets
-  // found exact `===` in 857 and a difference in 288, worst case 2 ulp, and
-  // an independent 185,815-case randomised sweep found the same bound. Under
+  // the rest: enumerating the 1,145 reachable failing-subsets (the sum of
+  // 2^n - 1 per dimension, because a dimension with nothing failing is not a
+  // failing subset) finds exact `===` in 857 and a difference in 288, worst
+  // case 2 ulp, and an independent 185,815-case randomised sweep the same. Under
   // 1e-14 across the range this module produces, which is orders of
   // magnitude below the comparator's 1e-9 tie and invisible at one decimal
   // place, so nothing a rep sees moves.

@@ -297,11 +297,29 @@ assert.equal(Object.keys(ANGLES).length, DIMENSION_KEYS.length, "one angle per d
   assert.ok(IF_THE_ANSWER_IS_CLEAN.length >= 120, "the clean-answer instruction is a stub");
   assert.ok(!IF_THE_ANSWER_IS_CLEAN.includes("—"), "no em dashes in anything a rep reads");
   // It must send the rep somewhere real rather than just saying "back off".
-  // "What is worth fixing first" is a panel that is already on the card.
+  //
+  // CHECKED AGAINST THE CARD, NOT AGAINST A LITERAL (fix round 1,
+  // 2026-09-14). This asserted the phrase "what is worth fixing first", which
+  // was the section's title until the capability catalogue took it over. The
+  // heading stopped existing and this assertion carried on passing, because
+  // it only ever compared the sentence against itself: a guard certifying a
+  // dead cross-reference, on a line that renders in the opening-script block,
+  // open by default, directly under what a rep reads aloud.
+  //
+  // So the expected phrase is now READ OUT OF BattleCard.tsx. If the section
+  // is retitled again, this fails on the next run instead of quietly
+  // pointing a rep at a heading that is not on screen.
+  const buildTitleMatch = read("components/web-leads/BattleCard.tsx").match(
+    /const BUILD_TITLE = "([^"]+)";/,
+  );
+  assert.ok(
+    buildTitleMatch,
+    "BattleCard.tsx must define BUILD_TITLE -- if the build section's title moved, re-aim this at wherever it lives now rather than deleting the check",
+  );
   assert.match(
     IF_THE_ANSWER_IS_CLEAN,
-    /what is worth fixing first/i,
-    "the clean-answer instruction must route the rep to the ranked list already on the card",
+    new RegExp(buildTitleMatch![1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+    `the clean-answer instruction must name a heading that is actually on the card; it must point at "${buildTitleMatch![1]}"`,
   );
 }
 
@@ -636,10 +654,39 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
 
   // The gate itself, not just the sentences: no chart may render for a
   // non-scored lead.
+  //
+  // ASSERTED ON THE WHOLE ARM AS OF FIX ROUND 1 (2026-09-14), not on a
+  // 160-character window after the condition. That window was a proxy for
+  // "NotScored is the first thing in this branch", and it broke the moment
+  // the branch gained a second child. Widening it would have been a
+  // relaxation; extracting the arm and naming every chart that may not appear
+  // in it is what the window was standing in for, and it is stronger: a chart
+  // added at the END of the arm was never caught before and is now.
+  const notScoredArm = (() => {
+    const start = src.indexOf('audit.state !== "scored" ? (');
+    if (start === -1) return null;
+    const rest = src.slice(start);
+    const end = rest.indexOf("\n          ) : (");
+    return end === -1 ? null : rest.slice(0, end);
+  })();
+  assert.ok(
+    notScoredArm && notScoredArm.length > 200,
+    `${view}: could not extract the non-scored arm of the body ternary -- the extraction broke, and a guard checking an empty string passes while protecting nothing`,
+  );
+  assert.match(notScoredArm!, /<NotScored/, `${view} must route every non-scored state to the sentence renderer`);
+  for (const chart of ["<Radar3D", "<DesignationPlate", "<DimensionShape", "<Competitors", "<CompetitorArena3D", "<Meter", "<PercentileSentence"]) {
+    assert.ok(
+      !notScoredArm!.includes(chart),
+      `${view}: ${chart} must never render for a non-scored lead -- a chart drawn from an audit that does not exist is a fabricated accusation with a gradient on it`,
+    );
+  }
+  // What IS allowed in that arm, and is the reason it now has two children:
+  // the capability catalogue, which is the entire pitch for a lead with no
+  // website and which renders no chart and no number.
   assert.match(
-    src,
-    /audit\.state !== "scored"[\s\S]{0,160}?<NotScored/,
-    `${view} must route every non-scored state to the sentence renderer before any chart`,
+    notScoredArm!,
+    /<BuildCatalogue/,
+    `${view}: a lead with no score must still be shown what we would build for them; it is the best lead this feature produces`,
   );
 
   // Every external link goes through preferredSiteUrl (bare domains navigate
@@ -785,36 +832,111 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
   // change this block exists to catch, and the person making it is the person
   // least likely to notice.
   //
-  // What is pinned here is the SUB COPY, because the section's promise
-  // changed and a stale promise over a new panel is worse than no promise: a
-  // rep who reads "what is worth fixing first" over a list that includes
-  // things nothing is wrong with, plus a ladder of things we will not sell
-  // today, is being set up to say something the panel does not support.
-  const fixesSection = src.slice(src.indexOf('id="fixes"'));
-  const fixesHeader = fixesSection.slice(0, fixesSection.indexOf(">"));
-  assert.ok(
-    fixesHeader.length > 100,
-    `${view}: could not extract the "fixes" section header -- the extraction broke, and an assertion over an empty string passes while protecting nothing`,
+  // What is pinned here is the SECTION'S PROMISE, because it changed and a
+  // stale promise over a new panel is worse than no promise: a rep who reads
+  // "what is worth fixing first" over a list that includes things nothing is
+  // wrong with, plus a ladder of things we will not sell today, is being set
+  // up to say something the panel does not support.
+  //
+  // TWO MOUNTS AS OF FIX ROUND 1 (2026-09-14), so the title and the sub are
+  // constants and the assertions are on the constants. See the two-mount
+  // block immediately below for why there are two and how they are held
+  // together.
+  const buildTitle = src.match(/const BUILD_TITLE = "([^"]+)";/);
+  const buildSub = src.match(/const BUILD_SUB =\s*\r?\n?\s*"([^"]+)";/);
+  assert.ok(buildTitle, `${view} must define BUILD_TITLE`);
+  assert.ok(buildSub, `${view} must define BUILD_SUB`);
+  assert.equal(
+    buildTitle![1],
+    "What we would build for them",
+    `${view}: the build section must be titled as what we would build, not only as what is worth fixing -- it lists capabilities that are verified clean and capabilities we will not sell for months`,
   );
   assert.match(
-    fixesHeader,
-    /title="What we would build for them"/,
-    `${view}: the "fixes" section must be titled as what we would build, not only as what is worth fixing -- it now lists capabilities that are verified clean and capabilities we will not sell for months`,
-  );
-  assert.match(
-    fixesHeader,
-    /sub="[^"]*Tap a row[^"]*"/,
-    `${view}: the "fixes" sub must tell a rep the rows open for detail -- everything below the title line is behind a tap`,
+    buildSub![1],
+    /Tap a row/,
+    `${view}: the build sub must tell a rep the rows open for detail -- everything below the title line is behind a tap`,
   );
   assert.doesNotMatch(
-    fixesHeader,
+    buildSub![1],
     /worth fixing first/,
-    `${view}: the "fixes" section must not still promise a ranked defect list; that framing belonged to FixFirst`,
+    `${view}: the build section must not still promise a ranked defect list; that framing belonged to FixFirst`,
+  );
+  // The sub must not claim the whole catalogue is on screen. It is not: the
+  // capabilities with nothing failing sit behind the catalogue's own "show
+  // all" control, and a sub promising "everything" over a one-row panel is
+  // the same class of overclaim as the coverage headline Task 4 fixed.
+  assert.doesNotMatch(
+    buildSub![1],
+    /\bEverything\b/i,
+    `${view}: the build sub must not say everything is listed -- the clean capabilities are behind "show all"`,
+  );
+  // And it must not assert an audit unconditionally, because one of the two
+  // mounts is for leads that have no audit at all.
+  assert.doesNotMatch(
+    buildSub![1],
+    /^[^.]*\btheir own audit found\b/,
+    `${view}: the build sub is shared with the no-audit mount, so it may not open by asserting an audit`,
+  );
+
+  // ── THE TWO MOUNTS ──────────────────────────────────────────────────────
+  // The catalogue is mounted twice: inside ScoredBody for a scored lead, and
+  // at container level for a lead with no score. The second exists because
+  // ScoredBody renders only for `state === "scored"`, which made the
+  // no-website case -- the single best lead this feature produces -- the one
+  // case the catalogue could never render for. The same reason PresenceBlock
+  // sits at container level.
+  //
+  // These assertions are the anti-drift contract: ONE invocation of the
+  // catalogue, wrapped, and both sections reading the same two constants. Two
+  // hand-written call sites would be two prop sets and two titles that can
+  // disagree about one business mid-call.
+  assert.equal(
+    (src.match(/<CapabilityCatalogue\b/g) || []).length,
+    1,
+    `${view}: the catalogue must be invoked exactly once, inside BuildCatalogue -- a second invocation is a second prop set that can drift`,
+  );
+  assert.equal(
+    (src.match(/<BuildCatalogue\b/g) || []).length,
+    2,
+    `${view}: the catalogue must be mounted twice, once for a scored lead and once for a lead with no score`,
+  );
+  assert.equal(
+    (src.match(/title=\{BUILD_TITLE\} sub=\{BUILD_SUB\}|title=\{BUILD_TITLE\}\s*\r?\n\s*sub=\{BUILD_SUB\}/g) || []).length,
+    2,
+    `${view}: both mounts must wear the same title and sub, from the constants`,
   );
   assert.match(
     src,
-    /<CapabilityCatalogue\b/,
-    `${view} must render the capability catalogue in the section FixFirst used to hold`,
+    /<BattleSection id="build" defaultOpen=\{true\}/,
+    `${view}: the no-score mount must be a section of its own, open by default -- a rep calling a business with no website has nothing else to sell from`,
+  );
+  // The no-score mount passes the shared empty audit, not a fabricated one.
+  assert.match(
+    src,
+    /dimensions=\{NO_DIMENSIONS\}/,
+    `${view}: the no-score mount must pass the empty audit, which is what those leads actually have`,
+  );
+  // Both mounts read ONE derivation of hasWebsite, and it comes from the
+  // audit rather than from the directory's website field.
+  // Each mount, extracted, must pass the derived value rather than its own.
+  const mounts = src.match(/<BuildCatalogue[\s\S]*?\/>/g) || [];
+  assert.equal(mounts.length, 2, `${view}: expected two BuildCatalogue elements, found ${mounts.length}`);
+  for (const [i, mount] of mounts.entries()) {
+    assert.match(
+      mount,
+      /hasWebsite=\{hasWebsite\}/,
+      `${view}: mount ${i + 1} must read the one derived hasWebsite value, not a literal or a second derivation`,
+    );
+  }
+  assert.match(
+    src,
+    /const hasWebsite = hasLiveWebsite\(audit\);/,
+    `${view}: hasWebsite must be derived from the audit by the one shared function, never from lead.websiteUrl`,
+  );
+  assert.doesNotMatch(
+    src,
+    /hasWebsite=\{true\}|hasWebsite=\{Boolean\(lead\.websiteUrl\)\}/,
+    `${view}: no mount may assert a website instead of reading the audit`,
   );
   // FixFirst is deleted, not merely unmounted. Both halves are asserted --
   // the definition and any render of it -- because deleting the call site
@@ -1089,12 +1211,21 @@ const MODEL_CODES = [
   assert.match(auditParts, /import \{ evidenceStateFor/, "audit-parts must render the measured sentences");
   assert.match(src, /from "\.\/audit-parts"/, `${view} must take the measured line from the shared module`);
   assert.match(capabilityRow, /from "\.\/audit-parts"/, "CapabilityRow must take the same measured line, not a second copy of it");
+  // COUNTED, NOT MERELY PRESENT (fix round 1, 2026-09-14). The original
+  // assertion counted three surfaces; the first re-aim counted two here and
+  // checked only for PRESENCE in CapabilityRow, which would have passed with
+  // the third surface reduced to a single leftover call. Each file is counted
+  // and the total is asserted, so losing any one surface fails.
   const measuredUses = (src.match(/<MeasuredLine code=/g) || []).length;
+  const rowMeasuredUses = (capabilityRow.match(/<MeasuredLine code=/g) || []).length;
   assert.ok(measuredUses >= 2, `${view}: the measured line must reach the faults list and the detail panel (found ${measuredUses})`);
-  assert.match(
-    capabilityRow,
-    /<MeasuredLine code=/,
-    "CapabilityRow: the measured line must reach the capability drill-down, which is the third surface and used to be FixFirst's",
+  assert.ok(
+    rowMeasuredUses >= 1,
+    `CapabilityRow: the measured line must reach the capability drill-down, which is the third surface and used to be FixFirst's (found ${rowMeasuredUses})`,
+  );
+  assert.ok(
+    measuredUses + rowMeasuredUses >= 3,
+    `the measured line must reach all three detail surfaces a rep can open on a failing check (found ${measuredUses + rowMeasuredUses})`,
   );
   assert.match(src, /of 100 points earned/, `${view} must show the area score's arithmetic`);
   assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);

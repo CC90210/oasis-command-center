@@ -49,10 +49,10 @@
  * `quality-model.js`'s `scoreDimension` stores
  * `Math.round((earned / total) * 100)`, and `recoverablePoints` reads that
  * stored, rounded value. The two therefore disagreed by up to
- * `0.5 * weight` (worst case 0.1300, on conversion), which across the 1,152
+ * `0.5 * weight` (worst case 0.1300, on conversion), which across the 1,145
  * reachable failing-subsets of the seven dimensions meant:
  *
- *   - 504 of 1,152 (44%) printed a DIFFERENT FIGURE at one decimal place
+ *   - 504 of 1,145 (44%) printed a DIFFERENT FIGURE at one decimal place
  *     than `FixFirst` printed for the same lead, on the same card, at the
  *     same time (both rendered together until Task 5 deleted `FixFirst`
  *     and gave its section to the catalogue); and
@@ -73,18 +73,27 @@
  * does. The shares are divided out per code and added back up in binary
  * floating point, so the sum recovers the total EXACTLY in most cases and
  * lands within 2 ulp of it in the rest. Measured twice, by two different
- * harnesses that agree on the bound: the Task 4 review round enumerated its
- * 1,145 reachable audit subsets and found exact `===` in 857 of them and a
- * difference in the other 288, worst case 2 ulp; a 185,815-case randomised
- * sweep over this same expression, run while writing this note, found exact
- * in 83.7% and worst case 2 ulp again. Neither harness is checked in, so
- * the percentages are a measurement and not a guarantee; the 2 ulp bound is
- * what the text below relies on. Across the whole range of values this module can produce (0 to
+ * harnesses that agree on the bound: enumerating the 1,145 reachable subsets
+ * gives exact `===` in 857 of them and a difference in the other 288, worst
+ * case 2 ulp; a 185,815-case randomised sweep over this same expression
+ * found exact in 83.7% and worst case 2 ulp again.
+ *
+ * Across the whole range of values this module can produce (0 to
  * `100 * 0.26`), 2 ulp is under 1e-14: orders of magnitude below the 1e-9
  * the comparator ties on, and invisible at the one decimal place the card
  * prints, so the ORDERING and the PRINTED FIGURE are unaffected. What is
  * not true, and what "bit for bit" claimed, is that a strict equality check
  * holds on every lead.
+ *
+ * ON THE SUBSET COUNT, since two numbers were in circulation (fix round 1,
+ * 2026-09-14): it is 1,145, not 1,152. 1,152 is the sum of 2^n over the
+ * seven dimensions' check counts, which includes the EMPTY failing set once
+ * per dimension. A dimension with nothing failing is not a failing subset:
+ * it contributes no capability to `relevant` and no share to split. The
+ * correct count is the sum of (2^n - 1), and the difference is exactly 7,
+ * one per dimension. Every figure above is over 1,145. Neither harness is
+ * checked in, so the percentages are a measurement rather than a guarantee;
+ * the 2 ulp bound is what the text relies on.
  *
  * The identity is pinned by a test rather than asserted here, and the
  * fixture's `score` must be a value `Math.round` can actually produce: fix
@@ -192,7 +201,39 @@
 
 import { CAPABILITIES, STAGES } from "./automations";
 import type { Capability } from "./automations";
-import type { DimensionProfile } from "./audit";
+import type { AuditResult, DimensionProfile } from "./audit";
+
+/**
+ * Does this lead have a LIVE website, from the audit's own state. This is the
+ * one place `MatchOptions.hasWebsite` is derived from, and it lives beside the
+ * option it feeds rather than inline at the call site, because it is now read
+ * twice: the battle card mounts the catalogue once for a scored lead and once
+ * for a lead that has no score to show.
+ *
+ * TWO STATES MEAN NO LIVE SITE, not one:
+ *
+ *   no_website  `auditFor` returns this at rule 1, for a lead carrying no
+ *               website URL at all. Nothing was ever there to look at.
+ *   parked      the domain resolved to a for-sale parking page. We DID look,
+ *               and what we found was the absence of a live site. Treating
+ *               this as "has a website" put the no-audit intro ("this site
+ *               has not been checked yet") directly under the card's own
+ *               measured sentence ("their domain has lapsed and is listed for
+ *               sale"), which is one screen contradicting itself.
+ *
+ * Every other state means there IS a site: `unreachable` means our crawler was
+ * blocked and the site may be excellent, `not_scored` means nobody has looked
+ * yet, and `scored` means we looked and measured it. None of those may be told
+ * "there is no website for this business", which is why this is a two-state
+ * check and not "is the audit scored".
+ *
+ * It is a function over the audit and never over `lead.websiteUrl`: the audit
+ * is the measurement, and a wrong `true` here sends a business with no site
+ * down the per-check defect path.
+ */
+export function hasLiveWebsite(audit: Pick<AuditResult, "state">): boolean {
+  return audit.state !== "no_website" && audit.state !== "parked";
+}
 
 export type Matched = {
   capability: Capability;

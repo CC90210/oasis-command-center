@@ -339,7 +339,7 @@ export const ANGLES: Record<string, Angle> = {
  * ones, so that a good answer still moves the call somewhere.
  */
 export const IF_THE_ANSWER_IS_CLEAN =
-  "If they do the thing and nothing is wrong with it, do not push. Say so out loud and give them the point, because arguing with an answer you asked for is how a call ends. This is one check out of several in an area they are losing, so take the next line under what is worth fixing first and ask about that instead.";
+  "If they do the thing and nothing is wrong with it, do not push. Say so out loud and give them the point, because arguing with an answer you asked for is how a call ends. This is one check out of several in an area they are losing, so take the next line under what we would build for them and ask about that instead.";
 
 /**
  * ═══ THE OBJECTION PANEL ════════════════════════════════════════════════════

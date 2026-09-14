@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { CAPABILITIES } from "../lib/web-leads/automations";
 import { UNMEASURABLE_CHECKS, evidenceStateFor } from "../lib/web-leads/check-evidence";
+import { hasLiveWebsite } from "../lib/web-leads/automations-match";
 
 // ---------------------------------------------------------------------------
 // The catalogue COMPONENTS, pinned against their rendered output.
@@ -163,6 +164,79 @@ console.log("web-leads-automations-catalogue: null never renders as a figure OK"
   assert.match(text("rowScored"), /copy your number by hand/, "and renders that check's own remedies.ts cost line");
 }
 console.log("web-leads-automations-catalogue: bundle cost sentence suppressed off a finding OK");
+
+// ---------------------------------------------------------------------------
+// 4b. THE STATES THAT WERE UNREACHABLE FROM THE CARD (fix round 1,
+//     2026-09-14).
+//
+//     The catalogue shipped mounted only inside `ScoredBody`, which renders
+//     only for `audit.state === "scored"`. Every capability's codes sit
+//     inside the live 44-code model, so on a current-model audit every
+//     capability is scored -- which meant the no-website intro, the no-audit
+//     intro and the whole `unscored` row state could not appear on a real
+//     card at all. The lead they exist for, a business with no website, is
+//     the best lead this feature produces.
+//
+//     There is now a second mount at container level. These assertions go
+//     through `hasLiveWebsite` and the empty audit, which is EXACTLY what
+//     that mount passes -- not a hand-written boolean -- so the derivation
+//     itself is under test rather than being supplied by the fixture.
+// ---------------------------------------------------------------------------
+{
+  // The derivation, over every state of the union. Two states mean no live
+  // site, and `parked` is the one that is easy to get wrong: we did look, and
+  // what we found was the absence of a site.
+  assert.equal(hasLiveWebsite({ state: "no_website" }), false, "a lead with no website URL has no live site");
+  assert.equal(hasLiveWebsite({ state: "parked" }), false, "a lapsed domain listed for sale is not a live site");
+  assert.equal(hasLiveWebsite({ state: "unreachable" }), true, "a site our crawler was blocked from may be excellent; it is not absent");
+  assert.equal(hasLiveWebsite({ state: "not_scored" }), true, "nobody has looked yet, which is not the same as nothing being there");
+  assert.equal(hasLiveWebsite({ state: "scored" }), true, "a scored lead obviously has a site");
+
+  // And what each of those four renders on the card.
+  assert.match(text("cardNoWebsite"), /no website for this business/, "a no-website lead must be told there is no website");
+  assert.match(text("cardParked"), /no website for this business/, "a parked domain is a no-website pitch, not an unchecked one");
+  assert.match(text("cardNotScored"), /has not been checked yet/, "an unscored lead must be told nothing has been checked");
+  assert.match(text("cardUnreachable"), /has not been checked yet/, "an unreachable site must be told nothing has been checked");
+
+  // The half that matters more: neither pair may claim the other's fact.
+  // Telling a rep calling a business with no website that "this site has not
+  // been checked yet" invents a site; telling a rep whose crawl was blocked
+  // that "there is no website for this business" invents its absence.
+  assert.doesNotMatch(text("cardNoWebsite"), /has not been checked yet/, "a no-website lead must not be told a site went unchecked");
+  assert.doesNotMatch(text("cardParked"), /has not been checked yet/, "a parked lead must not be told its site went unchecked; we looked");
+  assert.doesNotMatch(text("cardUnreachable"), /no website for this business/, "a blocked crawl must never be reported as the absence of a website");
+  assert.doesNotMatch(text("cardNotScored"), /no website for this business/, "an unchecked site must never be reported as the absence of a website");
+
+  // The two ROW states, dead until the second mount existed. They live inside
+  // an opened detail, so these scenarios open one.
+  assert.match(
+    text("cardNotScoredOpen"),
+    /Nothing this covers has been checked for this business/,
+    "the unscored row state must now be reachable from a real card input",
+  );
+  assert.match(
+    text("cardNoWebsiteOpen"),
+    /no website for this business yet/,
+    "the no-website row state must now be reachable from a real card input",
+  );
+  // Neither may print a figure. A `null` recoverable is UNSCORED, and "0
+  // points to recover" told to an owner with no website is the exact claim
+  // the null typing exists to prevent.
+  for (const key of ["cardNoWebsite", "cardParked", "cardNotScored", "cardUnreachable", "cardNotScoredOpen", "cardNoWebsiteOpen"]) {
+    assert.doesNotMatch(text(key), /\+\d/, `${key}: a lead with no score must never be shown a points figure`);
+  }
+
+  // Every capability is on screen in both cases, because nothing is held back
+  // behind "show all" when nothing was measured.
+  for (const key of ["cardNoWebsite", "cardParked", "cardNotScored", "cardUnreachable"]) {
+    assert.equal(
+      html[key].split("aria-expanded").length - 1,
+      TODAY_COUNT + LADDER_COUNT,
+      `${key}: the whole catalogue must render for a lead with no score, because it is the entire pitch`,
+    );
+  }
+}
+console.log("web-leads-automations-catalogue: the no-score card states are reachable OK");
 
 // ---------------------------------------------------------------------------
 // 5. THE UNMEASURABLE BRANCH IS FIRST. A check our own model cannot measure

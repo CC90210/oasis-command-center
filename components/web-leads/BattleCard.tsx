@@ -189,6 +189,7 @@ import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from
 import { hueFor, GOLD, CYAN } from "./battle-hud";
 import { Meter, MeasuredLine, RemedyLines } from "./audit-parts";
 import { CapabilityCatalogue } from "./CapabilityCatalogue";
+import { hasLiveWebsite } from "@/lib/web-leads/automations-match";
 import { Radar3D } from "./Radar3D";
 import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
@@ -1012,6 +1013,81 @@ function NotScored({ audit }: { audit: AuditResult }) {
   );
 }
 
+/**
+ * THE BUILD SECTION, WHICH THIS CARD MOUNTS TWICE (fix round 1, 2026-09-14).
+ *
+ * WHY TWICE. The catalogue's whole reason for existing is the lead with no
+ * website: that rep has nothing to pick apart and everything to sell. But the
+ * `fixes` section lives inside `ScoredBody`, which renders ONLY for
+ * `audit.state === "scored"` -- so the one mount the spec asked for could
+ * never show the no-website case. It was not one dead branch either: with no
+ * dimensions there is no audit, so the no-website intro, the no-audit intro
+ * and the whole `unscored` row state were unreachable from this card as
+ * shipped. The compiler says the same thing out loud: writing
+ * `audit.state !== "no_website"` inside `ScoredBody` is TS2367, because the
+ * types have no overlap. A lead with no site now gets the catalogue at
+ * container level, which is exactly what `PresenceBlock` already does and for
+ * exactly the same reason -- the lead with no website is the lead that block
+ * exists for too.
+ *
+ * HOW THE TWO MOUNTS ARE KEPT IN STEP. They share everything except the
+ * section id and the props that genuinely differ per lead. The title and the
+ * sub are the two constants below, so neither call site can carry its own
+ * wording; the catalogue itself is invoked in exactly ONE place in this file,
+ * `BuildCatalogue`, so neither call site can pass its own prop set. What is
+ * left at each call site is `id`, `dimensions`, `hasWebsite` and
+ * `selectedAngleKey`, and each of those is different on purpose. Pinned in
+ * tests/web-leads-battlecard.test.ts counts them: the catalogue element is
+ * written once, the wrapper element twice, and both sections read the same
+ * two constants.
+ *
+ * THE TWO MOUNTS ARE MUTUALLY EXCLUSIVE. One is inside the `scored` arm of
+ * the body ternary and the other inside the `not scored` arm, so a rep never
+ * sees two catalogues, and the ids stay distinct so the tab strip and the
+ * per-section collapse memory never have to disambiguate them.
+ */
+const BUILD_TITLE = "What we would build for them";
+
+/** True on EVERY lead, which is the constraint that shaped it. A scored lead
+ *  ranks; a lead with no site has nothing to rank and the catalogue's own
+ *  intro paragraph says so directly underneath. So this promises no audit,
+ *  claims no ranking unconditionally, and does not say "everything" -- the
+ *  clean and verified-clean capabilities sit behind the catalogue's own "show
+ *  all" control and are genuinely not on screen. */
+const BUILD_SUB =
+  "What Oasis would build, own and run for this business. Where their own audit found something, the heaviest items come first. Tap a row for what it is, what it is costing them, and the line to say.";
+
+/** An empty audit, as a module constant so both the identity and the value are
+ *  stable: `CapabilityCatalogue` memoises on `dimensions`, and a fresh `[]`
+ *  per render would invalidate that memo on every render of a card that has
+ *  nothing to memoise in the first place. */
+const NO_DIMENSIONS: DimensionProfile[] = [];
+
+/** The single invocation of `CapabilityCatalogue` in this file. Both mounts
+ *  render this rather than the catalogue directly, so the prop set cannot
+ *  drift between them. */
+function BuildCatalogue({
+  dimensions, hasWebsite, signals, selectedAngleKey, drawn, reduced,
+}: {
+  dimensions: DimensionProfile[];
+  hasWebsite: boolean;
+  signals: Record<string, unknown> | null;
+  selectedAngleKey: string | null;
+  drawn: boolean;
+  reduced: boolean;
+}) {
+  return (
+    <CapabilityCatalogue
+      dimensions={dimensions}
+      hasWebsite={hasWebsite}
+      signals={signals}
+      drawn={drawn}
+      reduced={reduced}
+      selectedAngleKey={selectedAngleKey}
+    />
+  );
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // The card
 // ───────────────────────────────────────────────────────────────────────────
@@ -1242,20 +1318,20 @@ export function BattleCard({
   // never shown wearing a warning label. lib/web-leads/trust.ts.
   const trust = assessTrust({ audit, signals, urlVerification });
   const onlinePresence = state.payload.onlinePresence ?? null;
-  // DOES THIS BUSINESS HAVE A WEBSITE AT ALL, from the AUDIT rather than from
-  // the directory's `websiteUrl` field. `auditFor` returns `no_website` for
-  // exactly the leads it found no site on, so the audit is the measurement
-  // and this reads it. The capability catalogue branches on this value and a
-  // wrong `true` puts a per-check defect list in front of a rep calling a
-  // business that has no site to have defects.
+  // DOES THIS BUSINESS HAVE A LIVE WEBSITE, from the AUDIT rather than from
+  // the directory's `websiteUrl` field. The two states that mean "no" and why
+  // both of them count are documented on `hasLiveWebsite` in
+  // lib/web-leads/automations-match.ts, which is the one place this is
+  // decided and which is unit-tested against every state of the union.
   //
   // It is computed HERE, before the ternary below, because this is the last
   // scope in which `audit` is still the whole `AuditResult` union. Inside the
-  // scored branch the type has narrowed and the comparison would not compile
-  // at all, which is the type system saying what the comment says: down there
-  // the answer is structurally `true`, and asserting it by hand is what this
-  // avoids.
-  const hasWebsite = audit.state !== "no_website";
+  // scored branch the type has narrowed and the same comparison does not
+  // compile at all (TS2367: '"scored"' and '"no_website"' have no overlap),
+  // which is the type system stating the defect this fix round repaired: down
+  // there the answer is structurally `true`, so the no-website case could
+  // never render. Both mounts below read this one value.
+  const hasWebsite = hasLiveWebsite(audit);
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
@@ -1319,7 +1395,37 @@ export function BattleCard({
             // warning. The re-check control is on the honesty panel above.
             <UntrustedPanel hide={trust.hide} />
           ) : audit.state !== "scored" ? (
-            <NotScored audit={audit} />
+            // THE SECOND MOUNT. `NotScored` is the honest sentence about what
+            // we do and do not know; the catalogue underneath it is the
+            // entire pitch for this lead. A business with no website at all
+            // is the best lead this feature produces, and until this mount
+            // existed that rep got one line saying "No website found yet,
+            // needs checking" and nothing to sell.
+            //
+            // `NO_DIMENSIONS` is not a stand-in for an audit: no non-scored
+            // state carries dimensions at all, so this IS the lead's audit
+            // data. With it, `hasWebsite` alone picks the intro, and it is
+            // derived from the audit's own state by `hasLiveWebsite`, so a
+            // no-website or parked lead gets "there is no website for this
+            // business" and an unreachable or unchecked one gets "this site
+            // has not been checked yet". Neither sentence claims a
+            // measurement we did not take.
+            <>
+              <NotScored audit={audit} />
+              <BattleSection id="build" defaultOpen={true} title={BUILD_TITLE} sub={BUILD_SUB}>
+                <BuildCatalogue
+                  dimensions={NO_DIMENSIONS}
+                  hasWebsite={hasWebsite}
+                  signals={signals}
+                  // No dimensions means `selectAngle` has nothing to choose
+                  // from, so no angle renders higher up this card and there
+                  // is nothing for the overlap note to warn about.
+                  selectedAngleKey={null}
+                  drawn={drawn}
+                  reduced={reduced}
+                />
+              </BattleSection>
+            </>
           ) : (
             <ScoredBody
               lead={lead}
@@ -1988,16 +2094,16 @@ function ScoredBody({
         <BattleSection
           id="fixes"
           defaultOpen={true}
-          title="What we would build for them"
-          sub="Everything Oasis would build, own and run for this business, heaviest first where their own audit found something. Tap a row for what it is, what it is costing them, and the line to say."
+          title={BUILD_TITLE}
+          sub={BUILD_SUB}
         >
-          <CapabilityCatalogue
+          <BuildCatalogue
             dimensions={audit.dimensions}
             hasWebsite={hasWebsite}
             signals={signals}
+            selectedAngleKey={angle?.key ?? null}
             drawn={drawn}
             reduced={reduced}
-            selectedAngleKey={angle?.key ?? null}
           />
         </BattleSection>
       </div>

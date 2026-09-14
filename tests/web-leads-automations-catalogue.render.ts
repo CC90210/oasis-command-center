@@ -33,9 +33,15 @@ import { CapabilityCatalogue } from "../components/web-leads/CapabilityCatalogue
 import { CapabilityRow, type RowState } from "../components/web-leads/CapabilityRow";
 import { CheckEvidenceLine } from "../components/web-leads/audit-parts";
 import { CAPABILITIES } from "../lib/web-leads/automations";
+import { hasLiveWebsite } from "../lib/web-leads/automations-match";
 import type { CheckResult, DimensionProfile } from "../lib/web-leads/audit";
 
 const check = (code: string, points: number, has: boolean): CheckResult => ({ code, label: `LABEL:${code}`, points, has });
+
+/** What the card's no-score mount passes. Not a fixture standing in for an
+ *  audit: no non-scored `AuditResult` variant carries dimensions, so this is
+ *  the audit data those leads actually have. */
+const NO_DIMENSIONS: DimensionProfile[] = [];
 
 /** The score `quality-model.js` would actually store for these checks. */
 function storedScore(checks: CheckResult[]): number {
@@ -147,6 +153,37 @@ const scenarios: Record<string, () => string> = {
   rowUnscored: () => row({ kind: "unscored" }),
   rowNoWebsite: () => row({ kind: "noWebsite" }),
   rowNoHue: () => row({ kind: "scored", failedCodes: ["tel_link"] }, { hue: null }),
+
+  // ── THE FOUR NON-SCORED CARD STATES, through the card's own inputs ──────
+  //
+  // Fix round 1, 2026-09-14. The catalogue is now mounted a second time, at
+  // container level, for a lead `ScoredBody` never renders for. These four
+  // scenarios pass EXACTLY what that mount passes: the empty audit (no
+  // non-scored AuditResult variant carries dimensions at all) and
+  // `hasLiveWebsite` applied to the real audit state, rather than a hand
+  // written `hasWebsite` boolean. So a change to that derivation moves these
+  // renders, which is the point: the previous version could not have caught
+  // a wrong `true` because the fixture supplied the answer.
+  cardNoWebsite: () => catalogue({ dimensions: NO_DIMENSIONS, hasWebsite: hasLiveWebsite({ state: "no_website" }) }),
+  cardParked: () => catalogue({ dimensions: NO_DIMENSIONS, hasWebsite: hasLiveWebsite({ state: "parked" }) }),
+  cardNotScored: () => catalogue({ dimensions: NO_DIMENSIONS, hasWebsite: hasLiveWebsite({ state: "not_scored" }) }),
+  cardUnreachable: () => catalogue({ dimensions: NO_DIMENSIONS, hasWebsite: hasLiveWebsite({ state: "unreachable" }) }),
+  // The same two with a row opened, because the per-row state sentences live
+  // inside the detail and a server render has no click available. These are
+  // the `unscored` and `noWebsite` ROW states, which were unreachable from
+  // the card for the same reason the intros were.
+  cardNotScoredOpen: () =>
+    catalogue({
+      dimensions: NO_DIMENSIONS,
+      hasWebsite: hasLiveWebsite({ state: "not_scored" }),
+      defaultOpenId: "easy-to-call",
+    }),
+  cardNoWebsiteOpen: () =>
+    catalogue({
+      dimensions: NO_DIMENSIONS,
+      hasWebsite: hasLiveWebsite({ state: "no_website" }),
+      defaultOpenId: "easy-to-call",
+    }),
 
   // The unmeasurable branch, rendered directly from its own state.
   //
