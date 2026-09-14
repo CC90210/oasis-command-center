@@ -79,7 +79,7 @@ console.log("web-leads-automations: OK");
 // The em dash is written as an escape so this guard file does not itself
 // contain the character it bans.
 const DASH = /\u2014|--/;
-const MONEY = /[$£€]\s?\d|\bCA\$|\b\d+\s?(?:dollars|bucks)\b/i;
+const MONEY = /[$£€]|\b(?:dollars?|cents?|bucks|grand|quid|CAD|USD)\b/i;
 
 const repFacing = (c: (typeof CAPABILITIES)[number]) => [
   c.title,
@@ -120,16 +120,32 @@ for (const cap of CAPABILITIES) {
     assert.ok(!/\bAI\b/i.test(cap.summary), `${cap.id}: a today-stage summary must not lead with AI`);
   }
 
-  // Rule 3: we have no revenue data for these businesses, so no money appears
-  // anywhere in copy. A competitor price would be allowed, but only with a
-  // `source` on the capability that cites it.
+  // Rule 3, spec 7.3. We have no revenue data for these businesses, so a
+  // customer outcome is never stated in money.
+  //
+  // WHAT THIS ACTUALLY CHECKS, stated exactly, because the first version of
+  // this guard overclaimed: it is a FLAT BAN on money-shaped language in every
+  // owner-facing and rep-facing string, not the source-gated check spec 7.3
+  // describes. Two reasons it is not source-gated. First, a regex cannot tell
+  // a customer outcome from a competitor price, so the source-gated version
+  // passed a dollar figure attached to an outcome as long as the capability
+  // carried any `source` at all, including a junk one. Second, 7.3's
+  // competitor-price exemption has nowhere to live here: `Capability` has no
+  // coaching field, every string this guard reads is spoken to an owner or
+  // read off the screen mid-call, and `angles.ts` holds the standing rule that
+  // not one spoken sentence carries a number.
+  //
+  // It also matches word forms, not just digits, because "five grand a month"
+  // sailed through the digit-only version.
+  //
+  // If a competitor price is ever genuinely needed, the fix is a new field on
+  // `Capability` for notes a rep reads rather than speaks, with `source`
+  // required on it. Not a hole punched in this.
   for (const s of repFacing(cap)) {
-    if (MONEY.test(s)) {
-      assert.ok(
-        cap.source && cap.source.trim().length > 0,
-        `${cap.id}: a figure in copy needs a source on the capability: ${s.slice(0, 60)}`,
-      );
-    }
+    assert.ok(
+      !MONEY.test(s),
+      `${cap.id}: copy an owner hears never states money, we have no revenue data: ${s.slice(0, 60)}`,
+    );
   }
 
   // The two registers must actually differ.

@@ -61,15 +61,32 @@
  *   3. No dollar figure is attached to a customer outcome. We have no
  *      revenue data for these businesses, the same standing rule
  *      `angles.ts` documents. Cost is stated in customers and behaviour.
- *   4. Any figure carries `source`. Nothing below cites one: the prices in
- *      the strategy doc are a recommendation Adon has not signed off for
- *      reps to say aloud (§5), and a spoken number that turns out to be
- *      wrong about a specific business is the worst thing this product can
- *      produce.
+ *   4. No money at all, in any string an owner hears. Spec §7.3 allows a
+ *      competitor price with a `source`, but that exemption has nowhere to
+ *      live here: every field below is spoken or read off the screen
+ *      mid-call, and `angles.ts` holds the standing rule that not one
+ *      spoken sentence carries a number. The prices in the strategy doc are
+ *      in any case a recommendation Adon has not signed off for reps to say
+ *      aloud (§5). The test enforces the flat ban, and its own comment says
+ *      so rather than claiming the source-gated check it cannot perform.
  *   5. No entry names the defect as a defect. Every line names a behaviour
  *      of the owner's customer instead. An owner whose nephew built the
  *      site is otherwise being asked to insult somebody they like, and that
  *      ends the call quietly without the rep ever finding out why.
+ *
+ * 🚨 ONE RULE NO TEST CAN HOLD, and it is the one review caught twice
+ * (2026-09-11). A BUNDLE RENDERS WHEN ANY ONE OF ITS CODES FAILED, so no
+ * copy here may state a definite fact about all of them. `look-established`
+ * covers eight codes: a lead missing only `map` and `years_trading` has its
+ * testimonials, credentials and photographs on the page, and "I could not
+ * find any of it" is a false absolute the owner disproves in one click while
+ * the rep is still speaking. `findable-and-safe-to-click` said a shared link
+ * "arrives as a plain blue link" to leads whose `og_tags` pass. Both are now
+ * hedged the way `easy-to-call` always was ("for most of the people I call"),
+ * or narrowed to a behaviour that holds whichever code failed. A rep caught
+ * in a falsifiable claim on a cold call has lost more than the point. Write
+ * "some of it", "on most of the sites I look at", "it can arrive as"; never
+ * "none of it", "right now it is", "you have no".
  *
  * `title`, `summary`, `stage`, `stageReason` and `codes` were set by Task 1
  * and are unchanged here.
@@ -182,7 +199,7 @@ export const CAPABILITIES: Capability[] = [
     whatWeDeliver: [
       "A short contact form on every page: name, number, and the job. Nothing else.",
       "A working email address, so a message reaches you outside business hours.",
-      "A chat box for a quick question, answered while they are still on the page.",
+      "A chat box on the page, so a quick question reaches you instead of going to somebody else.",
       "At least three ways to reach you, so a phone call is never the only option.",
       "Every message routed to an inbox you actually read, and tested before launch.",
     ],
@@ -258,15 +275,16 @@ export const CAPABILITIES: Capability[] = [
       "and where they go looking is exactly where your competitors are.",
     howYouSayIt:
       "Let me ask you one thing. When somebody is choosing between you and two other names they found " +
-      "the same afternoon, what is the thing that makes them pick you? Whatever you just told me, I " +
-      "could not find any of it on the page. The people who already know you do not need it there. The " +
-      "person who does not know you is looking for one reason to trust somebody, and if your page will " +
-      "not give them one they will go and find it somewhere else. That is the part that costs you, and " +
-      "it costs you quietly.",
+      "the same afternoon, what is the thing that makes them pick you? Whatever you just told me, some " +
+      "of it is not on the page, and a stranger only ever gets what is on the page. The people who " +
+      "already know you do not need it there. The one who does not know you is looking for a reason to " +
+      "trust somebody, and every piece of that which is missing is one more reason to go and look for " +
+      "it somewhere else. That is the part that costs you, and it costs you quietly.",
     whatWeDeliver: [
       "Your best reviews on the site itself, with the customer's first name and their town.",
       "Licence, insurance and any certifications stated plainly beside your contact details.",
-      "Real photographs of your crew and finished jobs, in place of stock images.",
+      "Your own photographs of the crew and the finished work, which you send us, placed through the " +
+        "site instead of stock images.",
       "Your address and a map, so nobody has to wonder whether you are local.",
       "How long you have been in business, in one line, where trust gets decided.",
       "Whatever guarantee you already give a customer, written down where a nervous one sees it.",
@@ -298,9 +316,10 @@ export const CAPABILITIES: Capability[] = [
       "A design built around your services and your photographs, not a theme with your name dropped into it.",
       "Type, spacing and colour chosen once and used the same way on every page.",
       "Your logo and colours across the whole site, including the small icon in the browser tab.",
-      "Any website-builder badge removed from the footer, replaced with one that belongs to your business.",
+      "Any website-builder badge gone, and a page footer that looks like it belongs to your business " +
+        "in its place.",
       "The pages rebuilt on current code, so they line up properly on new phones and new screens.",
-      "Dates and details kept current, so nobody has to wonder whether you are still trading.",
+      "Content changes without a per-edit bill, so dates and details are not left going stale.",
     ],
     stage: "today",
     codes: [
@@ -334,7 +353,7 @@ export const CAPABILITIES: Capability[] = [
       "They go back to the results and open the next name instead, and that is the whole decision. It " +
       "takes them no time at all and you never hear about it.",
     whatWeDeliver: [
-      "A layout that reflows for phones, tablets and desktops, built for the phone first.",
+      "A layout that reshapes itself for phones, tablets and desktops, built for the phone first.",
       "A menu and buttons sized for a thumb rather than a mouse pointer.",
       "Your number and your hours reachable on a phone without a single pinch.",
       "No sideways scrolling on any screen, checked on real phone sizes before launch.",
@@ -391,9 +410,10 @@ export const CAPABILITIES: Capability[] = [
       "gets the slow version, and they are not invested in you yet, so they do not wait it out. You " +
       "will never get a complaint about this one. You just get fewer calls.",
     whatWeDeliver: [
-      "Hosting and a build set up so the page appears almost immediately.",
+      "Faster hosting, so the page appears almost immediately.",
       "Images and page weight cut right down, so it opens on a weak signal.",
-      "The code that holds up the first view moved out of the way, so something shows instantly.",
+      "The page rebuilt to show up first and load the extras quietly after, so something is there " +
+        "straight away.",
       "The speed measured before and after, so you can see it rather than take our word for it.",
     ],
     stage: "today",
@@ -411,15 +431,16 @@ export const CAPABILITIES: Capability[] = [
     costsThem:
       "People searching for the work rather than for your name never reach you at all, and they are " +
       "precisely the ones who have not already chosen somebody. When a happy customer does pass your " +
-      "link on, it arrives as a bare blue link and gets scrolled past, and if a browser flags the site " +
-      "as not secure first, a good share of visitors close the tab before they read a word.",
+      "link on, it can arrive as a bare blue link that gets scrolled past, and if a browser flags the " +
+      "site as not secure first, a good share of visitors close the tab before they read a word.",
     howYouSayIt:
       "Where are your new customers coming from at the moment? And if somebody searched for the work " +
       "you do rather than for you by name, where do you reckon you would come up? The reason I am " +
       "asking is that anyone typing your name in has already chosen you. The whole job of this part is " +
       "the people who have not. The other half of it is the moment a happy customer texts you to their " +
-      "brother-in-law. Right now that arrives as a plain blue link with nothing on it, so a " +
-      "recommendation from a friend turns up looking like spam.",
+      "brother-in-law. On most of the sites I look at, that lands as a bare blue link with no picture " +
+      "and no name on it, and the person on the other end scrolls past a recommendation they would " +
+      "have acted on.",
     whatWeDeliver: [
       "A title and a description written for every page, so your search result reads like your business.",
       "Your business details published in the format search engines and map listings read.",
@@ -505,7 +526,8 @@ export const CAPABILITIES: Capability[] = [
       "The answers written with you first, so it never guesses at your prices or your area.",
       "Anything outside what it was given handed to you, with what the caller wanted.",
       "Every call logged and readable, so you can check what it said.",
-      "A written page on where the data lives, who can see it, and how to switch it off.",
+      "Nothing switched on until where the data sits, who can see it and how to turn it off has been " +
+        "answered for you in writing.",
     ],
     stage: "month_six_plus",
     stageReason:
@@ -532,7 +554,8 @@ export const CAPABILITIES: Capability[] = [
       "Confirmations and reminders to the customer, so fewer of them forget you are coming.",
       "Changes and cancellations handled without a phone call to you.",
       "The final say kept with you: any slot can be held back or blocked off.",
-      "The same written page on where the booking and customer data lives.",
+      "The same gate as the front desk: nothing switched on until those same data questions have been " +
+        "answered in writing.",
     ],
     stage: "month_six_plus",
     stageReason:
@@ -557,8 +580,10 @@ export const CAPABILITIES: Capability[] = [
     whatWeDeliver: [
       "Time spent watching how the work actually moves through your business.",
       "A written scope with a price on it, before anything gets built.",
-      "The software built, run and maintained by us.",
-      "Yours the same way the site is: you own it, and you keep it if you leave.",
+      "The software built and run by us, with the support arrangement written into that scope before " +
+        "anything starts.",
+      "Who owns it, and what happens to it if you leave, settled in that written scope rather than " +
+        "assumed from the website arrangement.",
       "Nothing scoped until the tiers before it have been running and reported on.",
     ],
     stage: "year_plus",
