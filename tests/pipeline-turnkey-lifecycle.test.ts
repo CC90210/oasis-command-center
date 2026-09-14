@@ -72,8 +72,9 @@ assert(
 assert(
   lifecycle.includes("Host & time") &&
     lifecycle.includes("Create Google Meet & send invite") &&
-    actionToolbar.includes("Call now") &&
-    actionToolbar.includes("/api/leads/${leadId}/call") &&
+    actionToolbar.includes("Open dialer") &&
+    actionToolbar.includes("tel:${dialTarget}") &&
+    !actionToolbar.includes("/api/leads/${leadId}/call") &&
     !actionToolbar.includes("Send check-in") &&
     !actionToolbar.includes("Pause auto follow-ups") &&
     !actionToolbar.includes("AI tools"),

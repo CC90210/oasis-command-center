@@ -437,6 +437,7 @@ async function main() {
   assert.deepEqual(withAssignedTo({ business_name: "X", stage: "researched" }, AGENT, assignedAt), {
     business_name: "X",
     assigned_to: AGENT,
+    collaborators: [],
     assigned_at: assignedAt,
     claimed_at: assignedAt,
     sales_program: "website_sales_v1",

@@ -289,6 +289,7 @@ assert.equal(
 {
   const patch = claimPatch("rep-b", "2026-08-23T12:00:00Z");
   assert.equal(patch.assigned_to, "rep-b");
+  assert.deepEqual(patch.collaborators, [], "a new claim must clear the previous owner's collaborators");
   assert.equal(patch.claimed_at, "2026-08-23T12:00:00Z");
   assert.equal(patch.stage_entered_at, "2026-08-23T12:00:00Z");
   assert.equal(patch.last_contacted_at, "2026-08-23T12:00:00Z", "claiming into Assigned counts as a lifecycle touch");
@@ -304,6 +305,12 @@ assert.equal(
   assert.equal(availability(after, NOW).reason, "held");
   assert.equal(isInBookOf(after, "rep-b"), true);
 }
+
+assert.deepEqual(
+  releasePatch().collaborators,
+  [],
+  "releasing a lead must revoke every collaborator's write grant",
+);
 
 // ---------------------------------------------------------------------------
 // 7. factsFrom is strict about dnc in BOTH directions.

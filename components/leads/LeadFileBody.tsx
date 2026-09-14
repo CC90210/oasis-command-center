@@ -2616,8 +2616,8 @@ function EmailComposer({
                 const ss = j.send_status as
                   | { status?: string; via?: string; from_address?: string; reason?: string }
                   | undefined;
+                setUncertain(ss?.status === "delivery_unknown");
                 if (ss?.status === "delivery_unknown") {
-                  setUncertain(true);
                   setStatus(
                     "Delivery could not be confirmed. Do not resend yet; check the timeline or recipient mailbox first",
                   );
@@ -2667,8 +2667,15 @@ function EmailComposer({
                 setSubject("");
                 setBody("");
                 if (onChange) await onChange();
+              } else if (j?.delivery_state === "not_started") {
+                setUncertain(false);
+                setStatus(j.message || j.error || `Failed (${r.status})`);
               } else {
-                setStatus(j.error || `Failed (${r.status})`);
+                setUncertain(true);
+                setStatus(
+                  j?.message ||
+                    "Delivery could not be confirmed. Check the timeline before resending.",
+                );
               }
             } catch (e) {
               // NOT a plain failure message. This composer posts to the SAME

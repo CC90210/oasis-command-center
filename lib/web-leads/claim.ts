@@ -300,6 +300,9 @@ export function claimPatch(
 ): Record<string, unknown> {
   return {
     assigned_to: userId,
+    // Collaboration is scoped to the previous owner's active book. A recycled
+    // lead must not carry those write grants into the next rep's claim.
+    collaborators: [],
     assigned_at: nowIso,
     claimed_at: nowIso,
     sales_program: OASIS_WEBSITE_SALES_PROGRAM,
@@ -316,7 +319,10 @@ export function claimPatch(
  *  here -- releasing a lead must not un-suppress a business that asked not to
  *  be called. */
 export function releasePatch(): Record<string, unknown> {
-  return { assigned_to: null, claimed_at: null };
+  // Releasing ownership also releases every delegated write grant. Keeping
+  // collaborators here would leave the former team able to mutate a lead that
+  // is back in the shared pool or has since been claimed by somebody else.
+  return { assigned_to: null, claimed_at: null, collaborators: [] };
 }
 
 /** Read the ownership facts off a raw stored `data` blob. Tolerant of missing

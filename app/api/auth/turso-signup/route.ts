@@ -26,6 +26,7 @@ import {
   tursoAuthActive,
 } from "@/lib/turso-auth";
 import { validateActiveInviteForEmail } from "@/lib/invite-account-recovery";
+import { getClientIp } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
   if (!tursoAuthActive()) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const ip = getClientIp(req);
   const gate = rateLimit({ key: `signup:${ip}`, capacity: 5, refillPerSec: 5 / 3600 });
   if (!gate.allowed) {
     return NextResponse.json({ error: "too many attempts" }, { status: 429 });

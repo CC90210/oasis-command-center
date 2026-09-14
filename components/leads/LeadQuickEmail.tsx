@@ -140,9 +140,15 @@ export function LeadQuickEmail({
         ok?: boolean;
         error?: string;
         message?: string;
+        delivery_state?: string;
         send_status?: { status?: string; reason?: string };
       };
       if (!res.ok || !json.ok) {
+        if (json.delivery_state === "not_started") {
+          setUnconfirmed(false);
+          setStatus(json.message || json.error || `Send failed (${res.status}).`);
+          return;
+        }
         throw new Error(json.message || json.error || `send_${res.status}`);
       }
 

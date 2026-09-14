@@ -27,6 +27,7 @@ import { normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,6 +76,16 @@ export async function POST(
   if (!tenantId) {
     return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 400 });
   }
+  const tenant = await db
+    .from("tenants")
+    .select("slug")
+    .eq("id", tenantId)
+    .maybeSingle();
+  if (tenant.error || !tenant.data?.slug) {
+    console.error("[leads.call] tenant lookup failed", tenant.error || "tenant_not_found");
+    return NextResponse.json({ ok: false, error: "tenant_lookup_failed" }, { status: 503 });
+  }
+  const allowEnvFallback = !isOasisSurfaceTenant(String(tenant.data.slug));
   // Role gate (2026-06-18): placing an outbound call is a member+ capability —
   // Broad tenant visibility is insufficient: the strict helper below requires
   // an admin or the assigned/collaborating OASIS sales operator.
@@ -148,7 +159,7 @@ export async function POST(
   // Kixie API rejects the call. The error surfaces back to the operator.
   let creds;
   try {
-    creds = await getKixieCredentials(tenantId);
+    creds = await getKixieCredentials(tenantId, { allowEnvFallback });
   } catch (err) {
     return NextResponse.json(
       {

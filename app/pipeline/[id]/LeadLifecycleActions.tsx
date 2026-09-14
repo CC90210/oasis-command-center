@@ -1037,10 +1037,9 @@ export function LeadLifecycleActions({
             <div>
               <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">1 · Place the call</div>
               <LeadActionToolbar
-                leadId={leadId}
                 displayName={displayLeadName}
                 phone={leadPhone}
-                onCallAccepted={() => {
+                onDialerOpened={() => {
                   setCallAccepted(true);
                   setCallOutcome("");
                 }}
@@ -1066,7 +1065,7 @@ export function LeadLifecycleActions({
             </div>
             <fieldset disabled={!callAccepted || disabled} className="space-y-4 disabled:opacity-50">
               <legend className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-dim">2 · Choose one outcome</legend>
-              {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after the call provider accepts the call.</p> : null}
+              {!callAccepted ? <p className="text-xs text-fg-muted">Outcome choices unlock after you open the dialer or confirm the call already happened.</p> : null}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                 {[["attempted", "No answer"], ["voicemail", "Voicemail left"], ["connected", "Connected"], ["lost", "Close as lost"]].map(([value, label]) => (
                   <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2.5 text-xs font-medium ${callOutcome === value ? "border-accent/60 bg-accent/10 text-fg" : "border-bg-border bg-bg-elev/25 text-fg-muted"}`}>

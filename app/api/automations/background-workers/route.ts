@@ -39,8 +39,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getTenant } from "@/lib/queries";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { bridgeControlEligibility } from "@/lib/bridge-proxy";
-import { SUNBIZ_WORKERS } from "@/lib/automations/sunbiz-workers";
 import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
+import { externalTenantSurfacesBlocked } from "@/lib/deployment-surface";
 import {
   capabilitiesFor,
   isOasisSurfaceTenant,
@@ -215,6 +215,10 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
   // profile metadata disagrees; unrelated tenants receive neither inventory.
   const tenant = await getTenant(tenantId);
   const tenantSlug = tenant?.slug?.trim().toLowerCase() || null;
+  const oasisOnlyDeployment = externalTenantSurfacesBlocked();
+  if (oasisOnlyDeployment && !isOasisSurfaceTenant(tenantSlug)) {
+    return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  }
   const persona = resolvePersona({
     teamRole: session.teamRole,
     isTrueAdmin: session.isTrueAdmin,
@@ -224,16 +228,20 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
-  const inventory = selectWorkerInventory({
-    isOasisTenant: isOasisSurfaceTenant(tenantSlug),
-    isClientProfile: (tenant ? resolveClientProfileSlug(tenant) : null) === "sun",
-  });
+  const inventory = oasisOnlyDeployment
+    ? "oasis"
+    : selectWorkerInventory({
+        isOasisTenant: isOasisSurfaceTenant(tenantSlug),
+        isClientProfile: (tenant ? resolveClientProfileSlug(tenant) : null) === "sun",
+      });
   if (inventory === "none") {
     return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
   const isOasis = inventory === "oasis";
   const isSun = inventory === "client";
-  const workerSet = isOasis ? OASIS_WORKERS : SUNBIZ_WORKERS;
+  const workerSet = isOasis
+    ? OASIS_WORKERS
+    : (await import("@/lib/automations/sunbiz-workers")).SUNBIZ_WORKERS;
   // SunBiz daemons live on the VPS — start/stop/restart routes through the
   // server-side bridge proxy (control/route.ts). Decide whether to show the
   // controls with the SAME resolver + role gate POST enforces, via the shared

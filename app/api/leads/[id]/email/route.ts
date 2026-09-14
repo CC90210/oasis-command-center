@@ -155,17 +155,27 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_SUBJECT = 200;
 const MAX_BODY = 32_000;
 
+/** A structured refusal made before any provider or durable queue boundary.
+ * Clients may safely preserve the draft and offer retry only when this marker
+ * is present. Every later failure is intentionally treated as unconfirmed. */
+function emailNotStarted(payload: Record<string, unknown>, status: number) {
+  return NextResponse.json(
+    { ok: false, delivery_state: "not_started", ...payload },
+    { status },
+  );
+}
+
 export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {
   const { id: leadId } = await ctx.params;
   if (!UUID_RE.test(leadId)) {
-    return NextResponse.json({ ok: false, error: "invalid_lead_id" }, { status: 400 });
+    return emailNotStarted({ error: "invalid_lead_id" }, 400);
   }
   const sess = await resolveSessionContext();
   if (!sess.ok) {
-    return NextResponse.json({ ok: false, error: sess.reason }, { status: 401 });
+    return emailNotStarted({ error: sess.reason }, 401);
   }
   const access = await assertMayWorkLead({
     teamRole: sess.teamRole,
@@ -177,9 +187,9 @@ export async function POST(
     accessMode: "owned_oasis_sales",
   });
   if (!access.ok) {
-    return NextResponse.json(
-      { ok: false, error: access.error, message: access.message },
-      { status: access.status },
+    return emailNotStarted(
+      { error: access.error, message: access.message },
+      access.status,
     );
   }
 
@@ -187,19 +197,19 @@ export async function POST(
   try {
     body = (await req.json()) as typeof body;
   } catch {
-    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+    return emailNotStarted({ error: "invalid_json" }, 400);
   }
   const toEmail = typeof body.to_email === "string" ? body.to_email.trim() : "";
   const subject = typeof body.subject === "string" ? body.subject.trim() : "";
   const text = typeof body.body === "string" ? body.body : "";
   if (!EMAIL_RE.test(toEmail)) {
-    return NextResponse.json({ ok: false, error: "invalid_email" }, { status: 400 });
+    return emailNotStarted({ error: "invalid_email" }, 400);
   }
   if (!subject) {
-    return NextResponse.json({ ok: false, error: "subject_required" }, { status: 400 });
+    return emailNotStarted({ error: "subject_required" }, 400);
   }
   if (!text.trim()) {
-    return NextResponse.json({ ok: false, error: "body_required" }, { status: 400 });
+    return emailNotStarted({ error: "body_required" }, 400);
   }
 
   // Opt-out gate BEFORE we queue or send — both the direct operator-Gmail path
@@ -208,15 +218,15 @@ export async function POST(
   // for a suppressed recipient. [[fail-closed-default]] (audit 2026-07-01)
   const emailSupp = await checkEmailSuppressed(sess.tenantId, toEmail);
   if (emailSupp.suppressed) {
-    return NextResponse.json(
-      { ok: false, error: "suppressed", message: "Recipient previously unsubscribed — send blocked." },
-      { status: 409 },
+    return emailNotStarted(
+      { error: "suppressed", message: "Recipient previously unsubscribed — send blocked." },
+      409,
     );
   }
   if (emailSupp.checkFailed) {
-    return NextResponse.json(
-      { ok: false, error: "suppression_check_failed", message: "Could not verify unsubscribe status — send blocked (fail-closed)." },
-      { status: 503 },
+    return emailNotStarted(
+      { error: "suppression_check_failed", message: "Could not verify unsubscribe status — send blocked (fail-closed)." },
+      503,
     );
   }
 
@@ -249,14 +259,14 @@ export async function POST(
   const brand = brandForTenant({ tenantId: sess.tenantId, tenantSlug });
   if (!brand) {
     // Nothing has been queued yet, so this refusal actually refuses.
-    return NextResponse.json(
+    return emailNotStarted(
       {
         error: "no_sending_brand",
         detail:
           `This workspace (${tenantSlug || sess.tenantId}) has no sending identity configured, ` +
           "so nothing was queued or sent. Map it in lib/email/brand-for-tenant.ts.",
       },
-      { status: 409 },
+      409,
     );
   }
   const directReservedAt = new Date().toISOString();
@@ -310,7 +320,7 @@ export async function POST(
     .select("id, created_at")
     .single();
   if (ins.error) {
-    return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
+    return emailNotStarted({ error: ins.error.message }, 500);
   }
   const trackingWarnings: string[] = [];
   const queuedAt =

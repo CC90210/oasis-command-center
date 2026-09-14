@@ -221,6 +221,7 @@ export async function getTenantIntegrationValue(
 export async function getTenantIntegrationBundle(
   tenantId: string,
   service: string,
+  options: { allowEnvFallback?: boolean } = {},
 ): Promise<Record<string, string>> {
   const db = getServiceSupabase();
   const r = await db
@@ -236,11 +237,13 @@ export async function getTenantIntegrationBundle(
       console.error("[tenant-integration-store] decrypt failed", { service, field: row.field_key, err });
     }
   }
-  const envMap = ENV_FALLBACKS[service] || {};
-  for (const fieldKey of Object.keys(envMap)) {
-    if (bundle[fieldKey]) continue;
-    const value = readEnvFallback(service, fieldKey);
-    if (value) bundle[fieldKey] = value;
+  if (options.allowEnvFallback !== false) {
+    const envMap = ENV_FALLBACKS[service] || {};
+    for (const fieldKey of Object.keys(envMap)) {
+      if (bundle[fieldKey]) continue;
+      const value = readEnvFallback(service, fieldKey);
+      if (value) bundle[fieldKey] = value;
+    }
   }
   return bundle;
 }

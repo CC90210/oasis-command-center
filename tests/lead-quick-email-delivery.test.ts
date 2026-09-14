@@ -585,23 +585,40 @@ run("the queue-ordering refinement cannot alter another tenant's mail path", () 
   );
 });
 
-run("an unconfirmed inbox response cannot offer a duplicate-send retry", () => {
-  const inbox = readFileSync("components/conversations/InboxShell.tsx", "utf8");
-  const requestAt = inbox.indexOf("async function handleSendEmail()");
-  const retryAt = inbox.indexOf("function handleRetry", requestAt);
-  assert.ok(requestAt >= 0 && retryAt > requestAt, "the inbox email handler is missing");
-  const handler = inbox.slice(requestAt, retryAt);
-
-  assert.match(handler, /if \(!res\.ok \|\| !data\.ok\)[\s\S]*?setUnconfirmedIds/);
-  assert.match(handler, /catch \{[\s\S]*?setUnconfirmedIds/);
-  assert.match(handler, /It may already be queued or sent/);
-  assert.match(handler, /sendStatus === "delivery_unknown"[\s\S]*?setUnconfirmedIds/);
-
-  const responseFailure = handler.slice(
-    handler.indexOf("if (!res.ok || !data.ok)"),
-    handler.indexOf("setAiSuggestion(null)"),
+run("the API certifies only failures that occur before the delivery boundary", () => {
+  const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
+  assert.match(
+    route,
+    /function emailNotStarted[\s\S]*?delivery_state: "not_started"/,
+    "only the API can certify that a provider/queue boundary was never crossed",
   );
-  const networkFailure = handler.slice(handler.lastIndexOf("} catch {"));
-  assert.doesNotMatch(responseFailure, /setFailedIds|setFailedDrafts/);
-  assert.doesNotMatch(networkFailure, /setFailedIds|setFailedDrafts|email not sent/i);
+  assert.match(route, /if \(ins\.error\) \{\s*return emailNotStarted/);
+});
+
+run("the lead-file composer clears a prior unknown latch after a confirmed outcome", () => {
+  const source = readFileSync("components/leads/LeadFileBody.tsx", "utf8");
+  const composerAt = source.indexOf("function EmailComposer(");
+  const smsAt = source.indexOf("function SmsComposer(", composerAt);
+  const composer = source.slice(composerAt, smsAt);
+  assert.match(composer, /setUncertain\(ss\?\.status === "delivery_unknown"\)/);
+  assert.match(composer, /j\?\.delivery_state === "not_started"[\s\S]*?setUncertain\(false\)/);
+  assert.match(composer, /else \{[\s\S]*?setUncertain\(true\)[\s\S]*?Delivery could not be confirmed/);
+});
+
+run("the pipeline quick-email composer retries only a certified pre-send refusal", () => {
+  const source = readFileSync("components/leads/LeadQuickEmail.tsx", "utf8");
+  const handlerAt = source.indexOf("async function send()");
+  const renderAt = source.indexOf("return (", handlerAt);
+  assert.ok(handlerAt >= 0 && renderAt > handlerAt, "the quick-email send handler is missing");
+  const handler = source.slice(handlerAt, renderAt);
+  assert.match(handler, /delivery_state\?: string/);
+  assert.match(
+    handler,
+    /if \(!res\.ok \|\| !json\.ok\)[\s\S]*?json\.delivery_state === "not_started"[\s\S]*?setUnconfirmed\(false\)[\s\S]*?return;/,
+  );
+  assert.match(
+    handler,
+    /catch \(err\)[\s\S]*?setUnconfirmed\(true\)[\s\S]*?Couldn't confirm the send/,
+    "unknown and network outcomes must remain latched against duplicate sends",
+  );
 });

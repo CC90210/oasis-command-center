@@ -9,6 +9,7 @@ process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = dbFile;
 
 const REP = "22222222-2222-4222-8222-222222222222";
+const FORMER_COLLABORATOR = "55555555-5555-4555-8555-555555555555";
 
 async function main() {
   const { WEBDEV_TENANT_ID } = await import("../lib/web-leads/tenant");
@@ -136,7 +137,7 @@ async function main() {
   const postHandoffData = JSON.parse(String(postHandoffRow.rows[0].data)) as Record<string, unknown>;
   assert.equal(postHandoffData.assigned_to, REP, "release must not detach a paid workflow record");
 
-  await insertLead("lead-release-ok");
+  await insertLead("lead-release-ok", { collaborators: [FORMER_COLLABORATOR] });
   const first = await releaseLeads(REP, false, ["lead-release-ok"]);
   assert.deepEqual(first.released, ["lead-release-ok"]);
   assert.deepEqual(first.refused, []);
@@ -149,6 +150,25 @@ async function main() {
   const releasedData = JSON.parse(String(releasedRow.rows[0].data)) as Record<string, unknown>;
   assert.equal(releasedData.assigned_to, null);
   assert.equal(releasedData.claimed_at, null);
+  assert.deepEqual(releasedData.collaborators, []);
+
+  const formerCollaboratorAccess = await assertMayWorkLead({
+    teamRole: "opener",
+    userId: FORMER_COLLABORATOR,
+    tenantId: WEBDEV_TENANT_ID,
+    leadId: "lead-release-ok",
+    accessMode: "owned_oasis_sales",
+  });
+  assert.deepEqual(
+    formerCollaboratorAccess,
+    {
+      ok: false,
+      status: 403,
+      error: "forbidden_role",
+      message: "You can only run this on leads assigned to you.",
+    },
+    "a released lead must not retain a former collaborator's write access",
+  );
 
   const audit = await db.execute({
     sql: "SELECT type, agent_source, actor_user_id, metadata FROM lead_interactions WHERE lead_id = ?",

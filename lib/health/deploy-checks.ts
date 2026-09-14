@@ -20,6 +20,12 @@
 
 import "server-only";
 import type { DripCheck } from "./drip-checks";
+import {
+  deploymentGitRef,
+  deploymentGitSha,
+  deploymentIsDirty,
+  isProductionRuntime,
+} from "./runtime-environment";
 
 export const DEPLOY_CHECKS: DripCheck[] = [
   {
@@ -32,8 +38,8 @@ export const DEPLOY_CHECKS: DripCheck[] = [
       // Only the PRODUCTION deployment is doctrine-bound to main. Previews
       // serve branches by design, and local dev has no Vercel identity —
       // grading those would be a standing false alarm.
-      if (process.env.VERCEL_ENV !== "production") return 0;
-      const ref = process.env.VERCEL_GIT_COMMIT_REF;
+      if (!isProductionRuntime()) return 0;
+      const ref = deploymentGitRef();
       // No git identity at all is the WORST case, not a pass: it means a
       // local working tree was CLI-deployed with no repo metadata.
       if (!ref) return 1;
@@ -41,14 +47,14 @@ export const DEPLOY_CHECKS: DripCheck[] = [
       // branch's name while serving contents that exist nowhere in git
       // (Codex P1): Vercel stamps that case VERCEL_GIT_DIRTY=true. Only the
       // literal "true" fails — the var is absent on GitHub-triggered builds.
-      if (process.env.VERCEL_GIT_DIRTY === "true") return 1;
+      if (deploymentIsDirty()) return 1;
       return ref === "main" ? 0 : 1;
     },
     describe: (r) => {
-      const ref = process.env.VERCEL_GIT_COMMIT_REF;
-      const sha = (process.env.VERCEL_GIT_COMMIT_SHA || "").slice(0, 8);
+      const ref = deploymentGitRef();
+      const sha = (deploymentGitSha() || "").slice(0, 8);
       if (r.observed === 0) return `production is serving main (${sha || "sha unknown"}).`;
-      const dirty = process.env.VERCEL_GIT_DIRTY === "true";
+      const dirty = deploymentIsDirty();
       return (
         `PRODUCTION IS NOT SERVING MAIN — this deployment was built from ` +
         (ref

@@ -11,6 +11,7 @@ import {
   tursoAuthActive,
   verifyPassword,
 } from "@/lib/turso-auth";
+import { getClientIp } from "@/lib/api-helpers";
 
 export const runtime = "nodejs";
 
@@ -28,7 +29,7 @@ export async function POST(req: NextRequest) {
   if (!tursoAuthActive()) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const ip = getClientIp(req);
   if (rateLimited(`turso-login:${ip}`, 10, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "too many attempts" }, { status: 429 });
   }

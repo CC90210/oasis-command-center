@@ -48,7 +48,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { bad, checkBearerSecret, sha256, isUniqueViolationError } from "@/lib/api-helpers";
+import {
+  bad,
+  checkBearerSecret,
+  isUniqueViolationError,
+  publicAppBaseUrl,
+  sha256,
+} from "@/lib/api-helpers";
 import { encryptField } from "@/lib/field-encryption";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
@@ -404,9 +410,7 @@ export async function POST(req: NextRequest) {
     return bad(500, `pair insert failed: ${ins.error?.message || "unknown"}`);
   }
 
-  const baseUrl =
-    process.env.BRAVO_DASHBOARD_URL ||
-    "https://agent-dashboard-cc90210.vercel.app";
+  const baseUrl = publicAppBaseUrl();
 
   // Log the successful pair attempt. Uses the resolved profile_id (which
   // is canonical — operator may have hit either the bearer or HMAC path,
