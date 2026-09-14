@@ -4,13 +4,13 @@
  * CapabilityCatalogue — the ranked list of what Oasis would build for the
  * business a rep is on the phone with, grouped by when it becomes sellable.
  *
- * It replaces `FixFirst` in `BattleCard.tsx`, which ranked the seven scored
+ * It replaced `FixFirst` in `BattleCard.tsx`, which ranked the seven scored
  * DIMENSIONS. This ranks the fifteen reviewed CAPABILITIES in
  * `lib/web-leads/automations.ts`, which are the same measurements regrouped
  * into things an owner recognises as something they would buy. Nobody
  * purchases `og_tags`; they purchase "show up properly when someone shares
- * your page". Wiring it into the card, and deleting `FixFirst`, is the next
- * task; this component is not yet rendered anywhere.
+ * your page". Since Task 5 (2026-09-14) this is what the card's `fixes`
+ * section renders, and `FixFirst` is deleted.
  *
  * ═══ WHAT IT DOES ══════════════════════════════════════════════════════════
  *
@@ -35,8 +35,7 @@
  * because that engine has to learn, which this one does not. It does not
  * read, modify or re-derive the scoring model, and it does not decide any
  * copy: every prospect-facing sentence comes from `automations.ts`,
- * `remedies.ts` or `check-evidence.ts`. It does not currently render inside
- * `BattleCard.tsx` at all.
+ * `remedies.ts` or `check-evidence.ts`.
  *
  * ═══ THE PRIMARY PANEL IS NOT ALWAYS `relevant` ════════════════════════════
  *
@@ -152,8 +151,8 @@
  * The only colour keyed to anything is the dimension identity hue, which
  * encodes which area and never how bad, exactly as `battle-hud.ts`
  * documents. Stage groups are labelled in words. Nothing is tinted by a
- * score, a stage or a judgement, and this file joins the colour ban list in
- * `tests/web-leads-guards.test.ts` in the next task.
+ * score, a stage or a judgement, and this file is on the colour ban list in
+ * `tests/web-leads-guards.test.ts`.
  */
 
 import { useMemo, useState } from "react";
@@ -339,14 +338,17 @@ export function CapabilityCatalogue({
   // bars against each other. The FIGURE each row prints is `recoverable`
   // itself, not this ratio.
   //
-  // NO FLOOR (fix round 3, 2026-09-14). This was `Math.max(1, ...values)`,
-  // a floor written when the key was raw check points whose smallest
-  // non-zero value was 4. Weighted composite points go well below 1: the
-  // design dimension with only `favicon` failing is 0.6512. That lead's
-  // sole row then drew at 65% of a bar captioned "drawn against the largest
-  // one in this list" while BEING the largest one in the list. Null when
-  // there is nothing positive to scale against, which makes every `ranking`
-  // null and draws no bar at all rather than a meaningless one.
+  // NO FLOOR (fix round 3, 2026-09-14; the figures below corrected in Task
+  // 5, because they were carried over from the round-2 key and no longer
+  // described what this code computes). This was `Math.max(1, ...values)`, a
+  // floor written when the key was raw check points whose smallest non-zero
+  // value was 4. Weighted composite points go well below 1: on the design
+  // dimension of the sub-one fixture, with only `favicon` failing, the value
+  // is 0.70. Under the floor that lead's sole row drew at 70% of a bar
+  // captioned "drawn against the largest one in this list" while BEING the
+  // largest one in the list. Null when there is nothing positive to scale
+  // against, which makes every `ranking` null and draws no bar at all rather
+  // than a meaningless one.
   const maxRanking = useMemo(() => {
     const values = primary
       .map((m) => m.recoverable)

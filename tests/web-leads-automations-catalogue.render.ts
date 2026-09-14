@@ -30,7 +30,8 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CapabilityCatalogue } from "../components/web-leads/CapabilityCatalogue";
-import { CapabilityRow, UNMEASURABLE_CHECKS, type RowState } from "../components/web-leads/CapabilityRow";
+import { CapabilityRow, type RowState } from "../components/web-leads/CapabilityRow";
+import { CheckEvidenceLine } from "../components/web-leads/audit-parts";
 import { CAPABILITIES } from "../lib/web-leads/automations";
 import type { CheckResult, DimensionProfile } from "../lib/web-leads/audit";
 
@@ -75,8 +76,9 @@ const PARTIAL_WITH_FAILURE: DimensionProfile[] = [
 ];
 
 /** A single failing capability whose weighted value is below 1.0: design
- *  with only `favicon` failing is 0.6512. Pins that the ranking bar is
- *  scaled against the real maximum and not against a floor of 1. */
+ *  with only `favicon` failing is 0.70 at the shape below (stored score 95,
+ *  weight 0.14). Pins that the ranking bar is scaled against the real
+ *  maximum and not against a floor of 1, which would draw it at 70%. */
 const SOLE_SUB_ONE: DimensionProfile[] = [
   dimension("design", 0.14, [
     check("favicon", 5, false),
@@ -146,24 +148,29 @@ const scenarios: Record<string, () => string> = {
   rowNoWebsite: () => row({ kind: "noWebsite" }),
   rowNoHue: () => row({ kind: "scored", failedCodes: ["tel_link"] }, { hue: null }),
 
-  // The unmeasurable branch. The map is empty in production, so the only way
-  // to render the branch is to put an entry in it. `tel_link` is chosen
-  // because `checkEvidenceFor` DOES produce a line for it from the signals
-  // passed here, which is what makes "unmeasurable wins" a real ordering
-  // claim rather than a vacuous one: if the branch were last, the evidence
-  // line would render instead.
-  rowUnmeasurableWins: () => {
-    const code = "tel_link";
-    UNMEASURABLE_CHECKS[code] = "OUR MODEL CANNOT MEASURE THIS ONE YET.";
-    try {
-      return row({ kind: "scored", failedCodes: [code] }, { signals: { telLinks: 0 } });
-    } finally {
-      delete UNMEASURABLE_CHECKS[code];
-    }
-  },
-  // The same render with the map left empty, so the test can prove the
-  // evidence line WOULD have appeared and the branch above really displaced
-  // it rather than there being nothing to displace.
+  // The unmeasurable branch, rendered directly from its own state.
+  //
+  // WHY IT IS RENDERED THIS WAY NOW (Task 5, 2026-09-14). The table is empty
+  // in production, so this scenario used to reach the branch by writing an
+  // entry into it, rendering, and deleting the entry again in a `finally`.
+  // That is the only reason the table was exported as mutable module state,
+  // which Task 4 flagged as a smell and deferred. The table is now a plain
+  // `const` beside the module that turns a code into a sentence, and the
+  // ORDER of the four states lives in `evidenceStateFor`, which takes the
+  // table as an argument and which the test calls directly with no
+  // rendering at all. This scenario is kept to prove the RENDERING half:
+  // that an `unmeasurable` state really does put "Not measurable:" on
+  // screen, naming it as our flaw.
+  rowUnmeasurableLine: () =>
+    renderToStaticMarkup(
+      React.createElement(CheckEvidenceLine, {
+        state: { kind: "unmeasurable" as const, note: "OUR MODEL CANNOT MEASURE THIS ONE YET." },
+      }),
+    ),
+  // The ordinary path through a real row, with the table empty: this code
+  // and these signals DO produce an evidence line. It is the control that
+  // keeps the ordering claim in the test a real one, by showing there was
+  // something for the unmeasurable branch to displace.
   rowEvidenceWithoutUnmeasurable: () =>
     row({ kind: "scored", failedCodes: ["tel_link"] }, { signals: { telLinks: 0 } }),
 };

@@ -196,10 +196,13 @@ console.log("web-leads-automations-match: ordering + tie-break OK");
 
   // And the figure is in the SAME UNIT as the number the rest of the card
   // prints. easy-to-call covers tel_link and phone_in_header, which are ALL
-  // of the conversion dimension's checks here, so its bundle sum must equal
-  // `recoverablePoints` for that whole dimension exactly. (This identity
-  // holds per-dimension, not per-bundle in general: a bundle usually covers
-  // only part of a dimension. The fixture is built so it does not.)
+  // of the conversion dimension's checks here, so its bundle sum must
+  // recover `recoverablePoints` for that whole dimension. Asserted with
+  // `closeTo`, and that is not laziness: the shares are summed in floating
+  // point and land within 2 ulp of the total rather than always on it. See
+  // §2b for the measurement. (This identity holds per-dimension, not
+  // per-bundle in general: a bundle usually covers only part of a dimension.
+  // The fixture is built so it does not.)
   closeTo(
     m.relevant[0].recoverable,
     recoverablePoints(CROSS[0]),
@@ -260,18 +263,35 @@ console.log("web-leads-automations-match: weighted ordering across dimensions OK
   closeTo(m.relevant[0].recoverable, 4.94, "conversion off the stored 81, not 4.875 off an unrounded 81.25");
   closeTo(m.relevant[1].recoverable, 4.86, "trust off the stored 73, not 4.8913 off an unrounded 72.826");
 
-  // The identity that makes the figure printable: both bundles here own
-  // ALL of their dimension's failing codes, so each must equal
-  // recoverablePoints for its dimension bit for bit, not merely close.
+  // The identity that makes the figure printable: both bundles here own ALL
+  // of their dimension's failing codes, so each recovers recoverablePoints
+  // for its dimension.
+  //
+  // HOW EXACT, SAID PROPERLY (corrected in Task 5, 2026-09-14). This comment
+  // used to claim the identity holds "bit for bit" on every lead, and the
+  // message below said "EQUAL exactly". It does not. The shares are divided
+  // out per code and added back up in binary floating point, so the sum
+  // recovers the total exactly in most cases and lands within 2 ulp of it in
+  // the rest: Task 4's enumeration over its 1,145 reachable audit subsets
+  // found exact `===` in 857 and a difference in 288, worst case 2 ulp, and
+  // an independent 185,815-case randomised sweep found the same bound. Under
+  // 1e-14 across the range this module produces, which is orders of
+  // magnitude below the comparator's 1e-9 tie and invisible at one decimal
+  // place, so nothing a rep sees moves.
+  //
+  // The assertions stay STRICT rather than being relaxed to the bound,
+  // because these two fixtures are in the exact 857 and a strict check is
+  // the stronger pin for them. What changed is the claim in the message: it
+  // now says exact ON THIS FIXTURE, not exact everywhere.
   assert.equal(
     m.relevant[0].recoverable,
     recoverablePoints(ROUNDED[0]),
-    "a bundle owning all of a dimension's failing codes must EQUAL recoverablePoints exactly, whatever rounding produced the stored score",
+    "a bundle owning all of a dimension's failing codes must recover recoverablePoints for that dimension; on this fixture the float sum lands on it exactly, and in general within 2 ulp of it",
   );
   assert.equal(
     m.relevant[1].recoverable,
     recoverablePoints(ROUNDED[1]),
-    "same identity on the trust side",
+    "same identity on the trust side, exact on this fixture and within 2 ulp in general",
   );
 }
 console.log("web-leads-automations-match: key derives from the stored rounded score OK");

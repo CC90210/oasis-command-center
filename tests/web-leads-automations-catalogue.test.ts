@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { CAPABILITIES } from "../lib/web-leads/automations";
+import { UNMEASURABLE_CHECKS, evidenceStateFor } from "../lib/web-leads/check-evidence";
 
 // ---------------------------------------------------------------------------
 // The catalogue COMPONENTS, pinned against their rendered output.
@@ -166,22 +167,48 @@ console.log("web-leads-automations-catalogue: bundle cost sentence suppressed of
 // ---------------------------------------------------------------------------
 // 5. THE UNMEASURABLE BRANCH IS FIRST. A check our own model cannot measure
 //    for anybody is named as our flaw BEFORE any attempt to read a signal
-//    that was never going to be there. The map is empty in production, so
-//    the render helper puts one entry in it and takes it out again.
+//    that was never going to be there.
 //
-//    The control scenario is what makes this a real ordering claim: the same
-//    code and the same signals, with the map empty, DO produce an evidence
-//    line. So the unmeasurable branch displaced something rather than
-//    winning by default.
+//    PINNED IN TWO HALVES (Task 5, 2026-09-14), because the claim has two
+//    halves. The ORDER is `evidenceStateFor`'s, a pure function in
+//    lib/web-leads/check-evidence.ts, called here directly with an explicit
+//    table. The RENDERING is CheckEvidenceLine's, exercised by the render
+//    helper from an explicit state.
+//
+//    This replaces the previous shape, where the only way to reach the
+//    branch was for the render helper to write an entry into
+//    UNMEASURABLE_CHECKS and delete it again -- which is the only reason
+//    that table was exported as mutable module state at all. It is a plain
+//    const now.
+//
+//    The control is what makes this a real ordering claim rather than a
+//    vacuous one: with the table empty, the same code and the same signals
+//    DO produce an evidence line, so the unmeasurable branch displaced
+//    something rather than winning by default.
 // ---------------------------------------------------------------------------
 {
-  assert.match(html.rowEvidenceWithoutUnmeasurable, /Seen on the site:/, "control: this code and these signals DO produce an evidence line");
-  assert.match(html.rowUnmeasurableWins, /Not measurable:/, "an unmeasurable check is named as our flaw");
-  assert.doesNotMatch(
-    html.rowUnmeasurableWins,
-    /Seen on the site:/,
+  const SIGNALS = { telLinks: 0 };
+  const control = evidenceStateFor("tel_link", SIGNALS);
+  assert.equal(
+    control.kind,
+    "measured",
+    "control: with the table empty, this code and these signals DO resolve to a measured line",
+  );
+  const displaced = evidenceStateFor("tel_link", SIGNALS, { tel_link: "OUR MODEL CANNOT MEASURE THIS ONE YET." });
+  assert.equal(
+    displaced.kind,
+    "unmeasurable",
     "the unmeasurable branch must come FIRST and displace the evidence line, not render beside it",
   );
+  // The production table really is empty, so no check on a live card is
+  // currently disclaimed. Asserted rather than assumed: an entry added here
+  // would silently change what every surface says about that check.
+  assert.deepEqual(UNMEASURABLE_CHECKS, {}, "the unmeasurable table is empty in production");
+
+  // And the rendering half: an unmeasurable state names it as our flaw.
+  assert.match(html.rowUnmeasurableLine, /Not measurable:/, "an unmeasurable check is named as our flaw");
+  assert.doesNotMatch(html.rowUnmeasurableLine, /Seen on the site:/, "and only that, not both lines at once");
+  assert.match(html.rowEvidenceWithoutUnmeasurable, /Seen on the site:/, "control, rendered: the evidence line is what it displaces");
 }
 console.log("web-leads-automations-catalogue: unmeasurable branch fires first OK");
 

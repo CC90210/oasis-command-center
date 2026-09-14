@@ -468,6 +468,36 @@ for (const view of [
   // failed the assertion as intended, and both were reverted.
   "components/web-leads/LeadCells.tsx",
   "components/web-leads/LeadCards.tsx",
+  // Added 2026-09-14 with the capability catalogue, which took over the
+  // card's "fixes" section from FixFirst. Two things on this surface read
+  // like they want a colour and neither may get one.
+  //
+  // A STAGE LABEL READS LIKE A STATUS. Every row carries when it becomes
+  // sellable -- "Sell this on this call", "Later, month six at the earliest"
+  // -- and a stage is one tint away from looking like a verdict on the
+  // business rather than a note about our own sequencing. A greyed or
+  // ambered "later" row tells a rep this is the weak part of the offer, which
+  // is the opposite of why those entries are on screen: they exist so a rep
+  // can answer a question about them without opening the call with them.
+  //
+  // A RANKING FIGURE READS LIKE A SCORE. Each scored row prints weighted
+  // composite points and draws a bar, and both are ORDER, not grade: the
+  // largest one on a good site and the largest one on a terrible site look
+  // identical here by design. Tinting either turns "this is the heaviest
+  // thing we would build" into "your site is bad", which is a claim about a
+  // stranger's business that a rep would then say out loud. The bar wears the
+  // dimension identity hue the caller passes and nothing else.
+  //
+  // Proved to fire against CapabilityRow.tsx by planting `text-red-500` on
+  // the points figure once (2026-09-14): the assertion failed as intended,
+  // and the class was reverted before commit.
+  "components/web-leads/CapabilityCatalogue.tsx",
+  "components/web-leads/CapabilityRow.tsx",
+  // And the module both of them and BattleCard.tsx now share. It renders the
+  // meter, the remedy pair and the evidence line for every audit surface in
+  // the feature at once, which makes it the single highest-leverage place to
+  // put a verdict colour on this screen: one class here lands on all three.
+  "components/web-leads/audit-parts.tsx",
   // Added 2026-08-25 when the website block reached the CRM board. This page
   // renders the same website_condition / audit_findings sentences the battle
   // card does, on the screen a rep actually works from, so the same rule

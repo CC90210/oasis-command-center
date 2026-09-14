@@ -771,6 +771,61 @@ assert.deepEqual(evidenceFrom({ hasViewportMeta: "sort of" }), []);
     );
   }
 
+  // THE "fixes" SECTION IS NOW THE CAPABILITY CATALOGUE (Task 5, 2026-09-14).
+  // `FixFirst` ranked the seven scored DIMENSIONS and is deleted;
+  // `CapabilityCatalogue` ranks the fifteen reviewed CAPABILITIES and carries
+  // the stage ladder. The id and the default-open state above are UNCHANGED
+  // and stay pinned by the map: this section is read mid-call and may not
+  // cost a click.
+  //
+  // EVERY OTHER SECTION'S ASSERTION IN THIS BLOCK IS BYTE-IDENTICAL TO WHAT
+  // IT WAS BEFORE THIS EDIT. Nothing in the default map moved, no teaser
+  // assertion moved, and no neighbouring section's copy was touched. That is
+  // said out loud because an edit to a neighbour is exactly the shape of
+  // change this block exists to catch, and the person making it is the person
+  // least likely to notice.
+  //
+  // What is pinned here is the SUB COPY, because the section's promise
+  // changed and a stale promise over a new panel is worse than no promise: a
+  // rep who reads "what is worth fixing first" over a list that includes
+  // things nothing is wrong with, plus a ladder of things we will not sell
+  // today, is being set up to say something the panel does not support.
+  const fixesSection = src.slice(src.indexOf('id="fixes"'));
+  const fixesHeader = fixesSection.slice(0, fixesSection.indexOf(">"));
+  assert.ok(
+    fixesHeader.length > 100,
+    `${view}: could not extract the "fixes" section header -- the extraction broke, and an assertion over an empty string passes while protecting nothing`,
+  );
+  assert.match(
+    fixesHeader,
+    /title="What we would build for them"/,
+    `${view}: the "fixes" section must be titled as what we would build, not only as what is worth fixing -- it now lists capabilities that are verified clean and capabilities we will not sell for months`,
+  );
+  assert.match(
+    fixesHeader,
+    /sub="[^"]*Tap a row[^"]*"/,
+    `${view}: the "fixes" sub must tell a rep the rows open for detail -- everything below the title line is behind a tap`,
+  );
+  assert.doesNotMatch(
+    fixesHeader,
+    /worth fixing first/,
+    `${view}: the "fixes" section must not still promise a ranked defect list; that framing belonged to FixFirst`,
+  );
+  assert.match(
+    src,
+    /<CapabilityCatalogue\b/,
+    `${view} must render the capability catalogue in the section FixFirst used to hold`,
+  );
+  // FixFirst is deleted, not merely unmounted. Both halves are asserted --
+  // the definition and any render of it -- because deleting the call site
+  // while leaving the function behind is the shape that leaves a second,
+  // unreachable ranked list in the file for the next person to wire back in.
+  // The NAME is deliberately still allowed to appear: the comment in
+  // BattleCard.tsx explaining what this section used to be has to be able to
+  // say what it replaced.
+  assert.doesNotMatch(src, /function FixFirst\b/, `${view}: FixFirst must be deleted, not left defined and unused`);
+  assert.doesNotMatch(src, /<FixFirst\b/, `${view}: nothing may still render FixFirst`);
+
   // Every closed-by-default section carries a teaser. A closed section with no
   // teaser is a mystery drawer, and a rep will not open a mystery mid-call.
   for (const id of ["facts", "brushoffs", "faults", "evidence"]) {
@@ -1016,11 +1071,31 @@ const MODEL_CODES = [
   // And the card actually renders the join: the measured line beside every
   // failing check in all three detail surfaces, and the arithmetic beside
   // every area score.
+  //
+  // RE-AIMED, NOT RELAXED (Task 5, 2026-09-14). The three surfaces used to be
+  // three blocks inside BattleCard.tsx, and this counted `<MeasuredLine` in
+  // that one file. The third of them, FixFirst's drill-down, is now
+  // CapabilityRow's expanded detail in its own file, and `MeasuredLine`
+  // itself moved to the shared audit-parts module both files import. So the
+  // count over BattleCard.tsx is 2 and the third is asserted where it now
+  // lives. The requirement is unchanged: every one of the three surfaces a
+  // rep can open on a failing check shows what the crawler actually measured.
+  // Dropping the third surface from the count instead of following it is how
+  // a guard quietly stops guarding.
   const view = "components/web-leads/BattleCard.tsx";
   const src = read(view);
-  assert.match(src, /import \{ checkEvidenceFor \}/, `${view} must render the measured sentences`);
+  const capabilityRow = read("components/web-leads/CapabilityRow.tsx");
+  const auditParts = read("components/web-leads/audit-parts.tsx");
+  assert.match(auditParts, /import \{ evidenceStateFor/, "audit-parts must render the measured sentences");
+  assert.match(src, /from "\.\/audit-parts"/, `${view} must take the measured line from the shared module`);
+  assert.match(capabilityRow, /from "\.\/audit-parts"/, "CapabilityRow must take the same measured line, not a second copy of it");
   const measuredUses = (src.match(/<MeasuredLine code=/g) || []).length;
-  assert.ok(measuredUses >= 3, `${view}: the measured line must reach the faults list, the fix drill-down and the detail panel (found ${measuredUses})`);
+  assert.ok(measuredUses >= 2, `${view}: the measured line must reach the faults list and the detail panel (found ${measuredUses})`);
+  assert.match(
+    capabilityRow,
+    /<MeasuredLine code=/,
+    "CapabilityRow: the measured line must reach the capability drill-down, which is the third surface and used to be FixFirst's",
+  );
   assert.match(src, /of 100 points earned/, `${view} must show the area score's arithmetic`);
   assert.match(src, /of this area(&apos;|')s 100 pts/, `${view} must show each failing check's exact worth`);
 }
@@ -1113,13 +1188,40 @@ const MODEL_CODES = [
   assert.match(src, /scoreHidden=\{Boolean\(trust\.hide\)\}/, `${view} must hide the hero score too -- a hidden body under a big glowing number is not hidden`);
   assert.match(src, /<MeasurementHonesty/, `${view} must render the honesty strip on every card`);
   assert.match(src, /Re-check this site now/, `${view} must offer the one-lead re-check`);
-  assert.match(src, /UNMEASURABLE_CHECKS/, `${view} must keep the unmeasurable-check machinery -- the next broken measurement needs it`);
+  // THE UNMEASURABLE-CHECK MACHINERY MOVED (Task 5, 2026-09-14), so this is
+  // re-aimed at where it lives rather than relaxed. It was module-private in
+  // BattleCard.tsx; the capability catalogue needed it too and, unable to
+  // import it, grew a second copy that could not see the first. It is now one
+  // table in lib/web-leads/check-evidence.ts, beside the function that turns
+  // a check code into a sentence, and BattleCard reaches it through the
+  // shared MeasuredLine.
+  //
+  // Aiming this at BattleCard.tsx by name would now pass on the COMMENT there
+  // that explains the move, which is a guard certifying prose.
+  const evidence = read("lib/web-leads/check-evidence.ts");
+  const auditParts = read("components/web-leads/audit-parts.tsx");
+  const capabilityRow = read("components/web-leads/CapabilityRow.tsx");
+  assert.match(evidence, /export const UNMEASURABLE_CHECKS/, "the unmeasurable-check machinery must survive the move -- the next broken measurement needs it");
   // Model v2 retired the sitemap check outright (0.5% corpus pass -- the
   // measurement, not the sites, was broken), which was the "coordinated
   // MODEL_VERSION bump" the old annotation called for. The map must now be
   // EMPTY: an entry for a check the model no longer scores is dead copy.
-  assert.match(src, /const UNMEASURABLE_CHECKS: Record<string, string> = \{\};/, `${view}: no unmeasurable entries should remain after the v2 sitemap retirement`);
-  assert.match(src, /Not recorded:/, `${view}: a failed check with no recorded signal must say so, never stay silent`);
+  // (Also asserted on the live object, not just the source text, in
+  // tests/web-leads-automations-catalogue.test.ts §5.)
+  assert.match(evidence, /export const UNMEASURABLE_CHECKS: Record<string, string> = \{\};/, "no unmeasurable entries should remain after the v2 sitemap retirement");
+  assert.match(src, /<MeasuredLine code=/, `${view} must still render the unmeasurable/measured/unrecorded line beside a failing check`);
+  assert.match(auditParts, /Not recorded:/, "a failed check with no recorded signal must say so, never stay silent");
+  // One sentence, not two. It existed twice with two different wordings
+  // (Task 4's copy dropped "treat this line with caution" and the data
+  // typeface), which is the drift that made this file the wrong place to
+  // check it from.
+  assert.equal(
+    (auditParts.match(/Not recorded:/g) || []).length,
+    1,
+    "the unrecorded sentence must exist exactly once in the shared module",
+  );
+  assert.doesNotMatch(src, /Not recorded:/, `${view} must not carry a second copy of the unrecorded sentence`);
+  assert.doesNotMatch(capabilityRow, /Not recorded:/, "CapabilityRow must not carry a second copy of the unrecorded sentence");
 
   const route = read("app/api/web-leads/[id]/battlecard/route.ts");
   assert.match(route, /urlVerification/, "the battlecard payload must carry the URL-ownership verdict");
@@ -1732,9 +1834,28 @@ for (const view of ["components/web-leads/ObjectionCard.tsx", "components/web-le
   assert.doesNotMatch(r3d, /scale\.x = p\.mesh\.scale\.z = active \?/, "the selected beam's scale must ride the damped mix, not a ternary snap");
 
   const src = read("components/web-leads/BattleCard.tsx");
-  assert.doesNotMatch(src, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
-  const scaleXDraws = (src.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
-  assert.ok(scaleXDraws >= 2, "both the Meter and the head-to-head track must draw via scaleX");
+  // RE-AIMED, NOT RELAXED (Task 5, 2026-09-14): `Meter` moved to
+  // components/web-leads/audit-parts.tsx so the capability catalogue could
+  // draw the same bar instead of the near-copy it had grown (which had lost
+  // the tick overlay while both bars rendered on the same card). Both drawers
+  // are still counted, each in the file it now lives in, and the requirement
+  // is unchanged: transform, never width.
+  const bars = src + read("components/web-leads/audit-parts.tsx");
+  assert.doesNotMatch(bars, /transition[^}]{0,80}width 420ms/, "meters must animate transform, never width -- width re-lays-out every frame");
+  const scaleXDraws = (bars.match(/transform: drawn \? "scaleX\(1\)" : "scaleX\(0\)"/g) || []).length;
+  assert.ok(scaleXDraws >= 2, `both the Meter and the head-to-head track must draw via scaleX (found ${scaleXDraws})`);
+  // One meter, not two. The catalogue's copy is gone; if a second one comes
+  // back, the tick overlay is the first thing it loses.
+  assert.doesNotMatch(
+    read("components/web-leads/CapabilityRow.tsx"),
+    /repeating-linear-gradient/,
+    "CapabilityRow must draw the shared Meter, not a second bar of its own",
+  );
+  assert.match(
+    read("components/web-leads/audit-parts.tsx"),
+    /repeating-linear-gradient/,
+    "the shared Meter keeps the tick overlay every bar on this card wears",
+  );
 
   // Registry callbacks are identity-stable: recreated callbacks invalidate
   // every section's registration effect on every state change -- an

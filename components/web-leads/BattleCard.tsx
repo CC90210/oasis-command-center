@@ -182,12 +182,13 @@ import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
-import { checkEvidenceFor } from "@/lib/web-leads/check-evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionConsole } from "./ObjectionConsole";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
+import { Meter, MeasuredLine, RemedyLines } from "./audit-parts";
+import { CapabilityCatalogue } from "./CapabilityCatalogue";
 import { Radar3D } from "./Radar3D";
 import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
@@ -394,80 +395,13 @@ function Panel({ children, className = "" }: { children: React.ReactNode; classN
   );
 }
 
-/** "Costs them:" / "We'd fix it:" — the two lines a rep reads aloud, from the
- *  hand-written table in remedies.ts. Renders nothing when a code has no entry
- *  rather than an empty bullet or the word "undefined". */
-function RemedyLines({ code }: { code: string }) {
-  const remedy = remedyFor(code);
-  if (!remedy) return null;
-  return (
-    <div className="mt-1.5 space-y-1 text-xs leading-relaxed text-fg-dim">
-      <p><span className="font-medium text-fg-muted">Costs them:</span> {remedy.costs}</p>
-      <p><span className="font-medium text-fg-muted">We&apos;d fix it:</span> {remedy.fix}</p>
-    </div>
-  );
-}
-
-/**
- * Checks the model scores but cannot currently MEASURE for prospects. Named
- * here so every surface that renders a check says so in the same words
- * instead of letting the rep argue a line we manufactured.
- *
- * Model v2 (2026-09-02) retired the one entry this carried: `sitemap` failed
- * 99.5% of the corpus by construction (the crawler never fetched a
- * prospect's robots file), and v2's answer was the coordinated
- * MODEL_VERSION bump the previous docblock here called for -- remove the
- * check rather than keep apologising for it. The map STAYS, empty: the
- * honest-disclaimer machinery is the feature, and the next unmeasurable
- * check will need it.
- */
-const UNMEASURABLE_CHECKS: Record<string, string> = {};
-
-/**
- * The pinpointed measurement behind one check (Adon, 2026-09-01: "you have to
- * pinpoint things in the website that are showing that"). Renders the
- * crawler's own numbers for THIS site next to the check they decided --
- * "Server took 2,340 ms to send its first byte; under 800 ms earns the
- * point." -- so a score is never a number a rep has to take on faith.
- *
- * Three states, all honest (Adon, 2026-09-01: "you don't generate
- * information, you just say it"):
- *   - measured   -> "Seen on the site: ..." with the site's own numbers
- *   - unmeasured -> the crawl recorded other things but not what THIS check
- *                   needs: said in words, never guessed
- *   - unmeasurable -> a check our model cannot currently measure for any
- *                   prospect: named as our flaw, with an instruction to
- *                   ignore it
- * Only when there is no signals blob at all does nothing render -- there is
- * nothing to distinguish "unrecorded" from "very old row" without one.
- */
-function MeasuredLine({ code, signals }: { code: string; signals: Record<string, unknown> | null }) {
-  const unmeasurable = UNMEASURABLE_CHECKS[code];
-  if (unmeasurable) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
-        <span className="font-medium text-fg-muted">Not measurable:</span> {unmeasurable}
-      </p>
-    );
-  }
-  const line = checkEvidenceFor(code, signals);
-  if (line) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-muted [font-family:var(--battle-data)]">
-        <span className="font-medium" style={{ color: "#7dd3fc" }}>Seen on the site:</span> {line}
-      </p>
-    );
-  }
-  if (signals) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
-        <span className="font-medium text-fg-muted">Not recorded:</span> the crawl did not capture what this check
-        needs, so treat this line with caution and verify by eye before quoting it.
-      </p>
-    );
-  }
-  return null;
-}
+/* `RemedyLines`, `UNMEASURABLE_CHECKS` and `MeasuredLine` used to live here,
+   module-private. Task 5 (2026-09-14) moved the two renderers to
+   `./audit-parts` and the table to `lib/web-leads/check-evidence.ts`, because
+   the capability catalogue needed all three and, unable to import them,
+   reimplemented them: three unintended differences appeared between the two
+   copies inside one task. Both surfaces now render the same markup from the
+   same source. Nothing about what this card draws changed. */
 
 /**
  * The honest-sentence panel that replaces the entire scored body when trust
@@ -612,43 +546,9 @@ function earnedPoints(d: DimensionProfile): number {
   return d.checks.reduce((n, c) => n + (c.has ? c.points : 0), 0);
 }
 
-/** The bar's LENGTH is the value; its colour, when a `hue` is given, is the
- *  dimension's fixed identity hue (see battle-hud.ts) -- the same hue at 4 as
- *  at 94, so rule 1 holds. With no hue it stays the neutral fill. The tick
- *  overlay segments the fill into a HUD readout; it is engraved on the track,
- *  identical at every value. */
-function Meter({
-  value, drawn, reduced, hue,
-}: {
-  value: number;
-  drawn: boolean;
-  reduced: boolean;
-  hue?: { from: string; to: string };
-}) {
-  const pct = Math.min(100, Math.max(0, value));
-  return (
-    <span className="relative block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
-      {/* Drawn with transform, not width (round 9): width is a layout
-          property and animating it re-lays-out every frame; scaleX from a
-          left origin is the identical picture on the compositor. */}
-      <span
-        className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
-        style={{
-          width: `${pct}%`,
-          transform: drawn ? "scaleX(1)" : "scaleX(0)",
-          transformOrigin: "left",
-          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
-          background: hue ? `linear-gradient(90deg, ${hue.from}, ${hue.to})` : undefined,
-          boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
-        }}
-      />
-      <span
-        className="absolute inset-0"
-        style={{ background: "repeating-linear-gradient(90deg, transparent 0px, transparent 7px, rgba(6,7,10,0.6) 7px, rgba(6,7,10,0.6) 8px)" }}
-      />
-    </span>
-  );
-}
+/* `Meter` moved to `./audit-parts` with the same two callers it always had
+   plus the capability row, which had grown a near-copy of it without the tick
+   overlay. See that file. */
 
 /**
  * ParticleField — the drifting plexus behind the hero (Adon, 2026-09-01:
@@ -1342,6 +1242,20 @@ export function BattleCard({
   // never shown wearing a warning label. lib/web-leads/trust.ts.
   const trust = assessTrust({ audit, signals, urlVerification });
   const onlinePresence = state.payload.onlinePresence ?? null;
+  // DOES THIS BUSINESS HAVE A WEBSITE AT ALL, from the AUDIT rather than from
+  // the directory's `websiteUrl` field. `auditFor` returns `no_website` for
+  // exactly the leads it found no site on, so the audit is the measurement
+  // and this reads it. The capability catalogue branches on this value and a
+  // wrong `true` puts a per-check defect list in front of a rep calling a
+  // business that has no site to have defects.
+  //
+  // It is computed HERE, before the ternary below, because this is the last
+  // scope in which `audit` is still the whole `AuditResult` union. Inside the
+  // scored branch the type has narrowed and the comparison would not compile
+  // at all, which is the type system saying what the comment says: down there
+  // the answer is structurally `true`, and asserting it by hand is what this
+  // avoids.
+  const hasWebsite = audit.state !== "no_website";
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
@@ -1412,6 +1326,7 @@ export function BattleCard({
               audit={audit}
               competitors={competitors}
               signals={signals}
+              hasWebsite={hasWebsite}
               drawn={drawn}
               reduced={reduced}
             />
@@ -1874,12 +1789,26 @@ function DesignationPlate({
 }
 
 function ScoredBody({
-  lead, audit, competitors, signals, drawn, reduced,
+  lead, audit, competitors, signals, hasWebsite, drawn, reduced,
 }: {
   lead: WebLead;
   audit: Extract<AuditResult, { state: "scored" }>;
   competitors: CompetitorContext | null;
   signals: Record<string, unknown> | null;
+  /** Whether this lead has a website at all, read off the audit's own state
+   *  by the card container (the one scope where `AuditResult` is still the
+   *  whole union) and handed down. `CapabilityCatalogue` branches on it, and
+   *  a wrong `true` sends a lead with no site down the defect path, so the
+   *  MEASUREMENT decides it and never the directory's `websiteUrl` field.
+   *
+   *  WHAT THIS IS NOT, stated rather than implied: it is not a guard for
+   *  this component. `ScoredBody` renders only for `state === "scored"`, so
+   *  every value reaching this prop today is `true`. It is a prop rather
+   *  than a literal `true` at the call site because a literal would be this
+   *  file asserting a fact about the audit instead of reading one, and
+   *  because the derivation then sits at the one place that can still see a
+   *  `no_website` audit. */
+  hasWebsite: boolean;
   drawn: boolean;
   reduced: boolean;
 }) {
@@ -1894,7 +1823,6 @@ function ScoredBody({
   const headline = failed[0] || null;
   const angle = useMemo(() => selectAngle(audit.dimensions), [audit.dimensions]);
   const evidence = useMemo(() => evidenceFrom(signals), [signals]);
-  const maxRecoverable = Math.max(1, ...worstFirst.map(recoverablePoints));
   const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
   const failingAreas = worstFirst.filter((d) => d.checks.some((c) => !c.has)).length;
   // ONE selection for the whole shape section (round 7): the designation
@@ -2042,20 +1970,34 @@ function ScoredBody({
           />
         </BattleSection>
 
+        {/*
+          THE SECTION IS NOW THE CATALOGUE, NOT THE RANKED DIMENSIONS (Task 5,
+          2026-09-14). `FixFirst` ranked the seven scored DIMENSIONS, which is
+          the scoring model's own vocabulary: nobody buys "discoverability".
+          `CapabilityCatalogue` ranks the fifteen reviewed CAPABILITIES in
+          `lib/web-leads/automations.ts`, which are the same measurements
+          regrouped into things an owner recognises as something they would
+          buy, and it carries the stage ladder the dimension list had nowhere
+          to put. The figure on a row is still weighted composite points, the
+          same unit this card prints everywhere else.
+
+          `id` and `defaultOpen` are unchanged and pinned by
+          tests/web-leads-battlecard.test.ts: this is read mid-call and may
+          not cost a click.
+        */}
         <BattleSection
           id="fixes"
           defaultOpen={true}
-          title="What is worth fixing first"
-          sub="Points back on the total score if that area were brought to full marks. This is the build, in order. Tap a row for the checks behind it."
+          title="What we would build for them"
+          sub="Everything Oasis would build, own and run for this business, heaviest first where their own audit found something. Tap a row for what it is, what it is costing them, and the line to say."
         >
-          <FixFirst
-            worstFirst={worstFirst}
-            maxRecoverable={maxRecoverable}
-            totalAreas={audit.dimensions.length}
-            totalChecks={totalChecks}
+          <CapabilityCatalogue
+            dimensions={audit.dimensions}
+            hasWebsite={hasWebsite}
             signals={signals}
             drawn={drawn}
             reduced={reduced}
+            selectedAngleKey={angle?.key ?? null}
           />
         </BattleSection>
       </div>
@@ -2464,121 +2406,6 @@ function DimensionShape({
           )}
         </div>
       )}
-    </>
-  );
-}
-
-/**
- * The ranked fix list, with the checks behind each rank one tap away.
- *
- * Each row expands IN PLACE to the failing checks it is made of, so "worth
- * +9.8" is never an unexplained number: the rep taps it and reads exactly
- * which checks make up the claim, in the remedy language the rest of the card
- * speaks. No per-check number is printed here on purpose -- a check's raw
- * points and a dimension's weighted recoverable points are different scales,
- * and two numbers on one row that do not sum invite the prospect's next
- * question to be about our arithmetic instead of their website.
- */
-function FixFirst({
-  worstFirst, maxRecoverable, totalAreas, totalChecks, signals, drawn, reduced,
-}: {
-  worstFirst: DimensionProfile[];
-  maxRecoverable: number;
-  totalAreas: number;
-  totalChecks: number;
-  signals: Record<string, unknown> | null;
-  drawn: boolean;
-  reduced: boolean;
-}) {
-  const [openKeys, setOpenKeys] = useState<ReadonlySet<string>>(new Set());
-
-  function toggle(key: string) {
-    setOpenKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-
-  return (
-    <>
-      <ul className="space-y-1.5">
-        {worstFirst.map((d) => {
-          const points = recoverablePoints(d);
-          const misses = d.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points);
-          const expandable = misses.length > 0;
-          const openRow = openKeys.has(d.key);
-          const hue = hueFor(d.key);
-          const row = (
-            <>
-              <span className="flex items-baseline justify-between gap-3 text-sm">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  {expandable && (
-                    <ChevronDown
-                      aria-hidden
-                      className={`h-3.5 w-3.5 shrink-0 text-fg-dim transition-transform motion-reduce:transition-none ${openRow ? "" : "-rotate-90"}`}
-                    />
-                  )}
-                  {/* The same identity hue this dimension wears on the radar
-                      and in the shape list -- one colour, three surfaces. */}
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
-                  <span className="truncate text-fg">{d.label}</span>
-                  {expandable && (
-                    <span className="shrink-0 text-[10px] text-fg-faint">
-                      {misses.length} {misses.length === 1 ? "check" : "checks"}
-                    </span>
-                  )}
-                </span>
-                {/* One constant cyan for every "+points" figure -- the metric's
-                    own identity, not a grade. */}
-                <span className="shrink-0 tabular-nums [font-family:var(--battle-data)]" style={{ color: "#7dd3fc" }}>+{points.toFixed(1)}</span>
-              </span>
-              <span className="mt-1.5 block">
-                <Meter value={(points / maxRecoverable) * 100} drawn={drawn} reduced={reduced} hue={hue} />
-              </span>
-            </>
-          );
-          return (
-            <li key={d.key}>
-              {expandable ? (
-                <button
-                  type="button"
-                  onClick={() => toggle(d.key)}
-                  aria-expanded={openRow}
-                  className="block w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-                >
-                  {row}
-                </button>
-              ) : (
-                // A full-marks area has nothing to expand and says so instead
-                // of rendering a control that does nothing.
-                <div className="px-2 py-1.5">{row}</div>
-              )}
-              {expandable && openRow && (
-                <ul className="mb-1.5 ml-2 mt-1 space-y-2.5 rounded-lg border border-accent/15 bg-bg-raised/50 p-3 backdrop-blur-sm motion-safe:animate-fade-in">
-                  {misses.map((check) => (
-                    <li key={check.code}>
-                      <div className="flex items-baseline justify-between gap-3">
-                        <p className="text-sm font-semibold text-fg">{check.label}</p>
-                        <span className="shrink-0 text-[11px] tabular-nums text-fg-dim [font-family:var(--battle-data)]">
-                          {check.points} of this area&apos;s 100 pts
-                        </span>
-                      </div>
-                      <MeasuredLine code={check.code} signals={signals} />
-                      <RemedyLines code={check.code} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      <p className="mt-4 border-t border-bg-border pt-3 text-xs text-fg-dim">
-        {totalAreas} areas, {totalChecks} individual checks. Everything failing is listed below with what each one
-        costs them.
-      </p>
     </>
   );
 }

@@ -54,7 +54,8 @@
  *
  *   - 504 of 1,152 (44%) printed a DIFFERENT FIGURE at one decimal place
  *     than `FixFirst` printed for the same lead, on the same card, at the
- *     same time (both render until Task 5 deletes `FixFirst`); and
+ *     same time (both rendered together until Task 5 deleted `FixFirst`
+ *     and gave its section to the catalogue); and
  *   - 1,764 dimension pairs ORDERED OPPOSITELY to `recoverablePoints`,
  *     which is the function `selectAngle` uses to choose the angle printed
  *     higher up that card. Worked example: conversion with raw 18 failing
@@ -65,8 +66,25 @@
  * eliminate, back at a smaller magnitude. Taking the total from the stored
  * score and splitting it removes it by construction: the sum over ALL of a
  * dimension's failing codes is `Math.max(0, 100 - score) * weight`, which
- * IS `recoverablePoints(d)`, bit for bit, whatever rounding produced the
- * stored score.
+ * is `recoverablePoints(d)`, whatever rounding produced the stored score.
+ *
+ * HOW CLOSE "IS" ACTUALLY IS, corrected in Task 5 (2026-09-14). This
+ * sentence used to end "bit for bit", and that is not what the arithmetic
+ * does. The shares are divided out per code and added back up in binary
+ * floating point, so the sum recovers the total EXACTLY in most cases and
+ * lands within 2 ulp of it in the rest. Measured twice, by two different
+ * harnesses that agree on the bound: the Task 4 review round enumerated its
+ * 1,145 reachable audit subsets and found exact `===` in 857 of them and a
+ * difference in the other 288, worst case 2 ulp; a 185,815-case randomised
+ * sweep over this same expression, run while writing this note, found exact
+ * in 83.7% and worst case 2 ulp again. Neither harness is checked in, so
+ * the percentages are a measurement and not a guarantee; the 2 ulp bound is
+ * what the text below relies on. Across the whole range of values this module can produce (0 to
+ * `100 * 0.26`), 2 ulp is under 1e-14: orders of magnitude below the 1e-9
+ * the comparator ties on, and invisible at the one decimal place the card
+ * prints, so the ORDERING and the PRINTED FIGURE are unaffected. What is
+ * not true, and what "bit for bit" claimed, is that a strict equality check
+ * holds on every lead.
  *
  * The identity is pinned by a test rather than asserted here, and the
  * fixture's `score` must be a value `Math.round` can actually produce: fix
