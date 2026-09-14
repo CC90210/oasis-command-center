@@ -171,6 +171,41 @@ export function isReleasedFromBook(f: ClaimFacts, now: number): boolean {
 }
 
 /**
+ * What a lead row should say about who holds it, from THIS viewer's seat.
+ *
+ * Adon, 2026-09-14: "when a rep assigns itself a lead ... it causes a lot of
+ * confusion between other reps who could assign it and you." Every row now
+ * carries this state so a rep can see, without opening anything, that a lead
+ * is somebody else's.
+ *
+ * DELIBERATELY NOT `assignedTo ? "taken" : "unassigned"`. A lead in the shared
+ * pool can still NAME a previous owner: an expired claim and a recycled loss
+ * are both claimable while `assigned_to` still points at whoever had it last.
+ * Labelling those "taken" would tell reps to skip the leads the recycling
+ * rules just handed back, quietly draining the callable pool -- the exact
+ * failure this module's header exists to prevent. So availability() decides,
+ * and the presence of an id only distinguishes "worked before" from "free".
+ *
+ * `you` is resolved BEFORE availability so a rep's own lapsed lead still reads
+ * as theirs; My Leads marks that row "Released" separately.
+ */
+export type ClaimState = "unassigned" | "you" | "worked_before" | "taken";
+
+export function claimState(
+  f: ClaimFacts,
+  viewerUserId: string,
+  now: number,
+): ClaimState {
+  if (!f.assignedTo) return "unassigned";
+  // An unresolved viewer must never be told a lead is theirs. isInBookOf would
+  // already refuse an empty id, but stating it here keeps the fail-closed
+  // intent visible next to the branch that depends on it.
+  const viewer = (viewerUserId || "").trim();
+  if (viewer && isInBookOf(f, viewer)) return "you";
+  return availability(f, now).available ? "worked_before" : "taken";
+}
+
+/**
  * Which of `leadIds` a rep may take, given what they already hold.
  *
  * PARTIAL SUCCESS IS THE NORMAL CASE, not an error: a rep multi-selects 60

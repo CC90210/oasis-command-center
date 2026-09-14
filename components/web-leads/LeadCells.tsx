@@ -21,7 +21,7 @@
  */
 
 import Link from "next/link";
-import { BarChart3, ExternalLink } from "lucide-react";
+import { BarChart3, ExternalLink, History, Lock, UserCheck } from "lucide-react";
 import type { WebLeadRow } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 
@@ -35,7 +35,13 @@ import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
  */
 export const STAGE_LABEL: Record<string, string> = {
   researched: "New",
-  assigned: "Mine, not called",
+  // NOT "Mine, not called". This map is keyed on the lead's stage and knows
+  // nothing about who is looking, so "Mine" rendered on the Team tab for a lead
+  // the viewer does not hold -- a lead Matt claimed read as "Mine" on Jordan's
+  // screen. Ownership is OwnerBadge's job now; a stage label describes the
+  // lead's lifecycle and stays viewer-neutral. Pinned in
+  // tests/web-leads-owner-badge.test.ts.
+  assigned: "Claimed, not called",
   attempting_contact: "Trying to reach",
   connected: "Spoke to them",
   qualified: "Qualified",
@@ -49,6 +55,70 @@ export const STAGE_LABEL: Record<string, string> = {
   client_review: "Client review",
   launched: "Launched",
 };
+
+/**
+ * WHO HAS THIS LEAD — the badge that stops two reps working the same business.
+ *
+ * Adon, 2026-09-14: "I want to have a section where you could see immediately,
+ * not just by clicking in, but by seeing it on the lead page initially, if that
+ * lead is assigned and who it's assigned to. That way I know if it's assigned
+ * to someone that I shouldn't be clicking on it."
+ *
+ * TWO SIGNALS, DIFFERENT AUDIENCES, and keeping them apart is the whole design:
+ *   - THAT a lead is held goes to everyone, because a rep who cannot see it
+ *     dials a business a colleague is already talking to.
+ *   - WHO holds it is resolved server-side and arrives as null for a viewer who
+ *     may not be told (lib/web-leads/data.ts's assignedNameFor). This board
+ *     carries outside contractors, and a roster of which rep works which
+ *     business is the cross-book disclosure PR #237 closed. The component never
+ *     decides this; it renders whatever the server was willing to send.
+ *
+ * NOTHING renders for an unclaimed lead. Absence means free, and a badge on all
+ * 31,000 pool rows would be noise on the one screen that has to stay scannable.
+ *
+ * "Worked before" is NOT "Taken". A lead whose claim expired, or whose "not
+ * interested" recycled after 90 days, is back in the pool and anyone may take
+ * it while `assigned_to` still names whoever had it last. Labelling those
+ * "Taken" would tell reps to skip leads the recycling rules just handed back --
+ * a badge that quietly drains the callable pool. claimState() draws that line.
+ *
+ * NO RED, GREEN OR AMBER: this file is on the colour ban list in
+ * tests/web-leads-guards.test.ts. Ownership is not a verdict about a lead's
+ * quality, so it reads in the neutral palette and stays legible in greyscale.
+ */
+export function OwnerBadge({ lead, size = "row" }: { lead: WebLeadRow; size?: "row" | "touch" }) {
+  if (lead.claimState === "unassigned") return null;
+
+  const name = lead.assignedToName;
+  const { Icon, text, tone } =
+    lead.claimState === "you"
+      ? { Icon: UserCheck, text: "Yours", tone: "border-accent/40 text-accent" }
+      : lead.claimState === "taken"
+        ? {
+            Icon: Lock,
+            text: name ? `Taken · ${name}` : "Taken",
+            tone: "border-bg-border text-fg-muted",
+          }
+        : {
+            Icon: History,
+            text: name ? `Worked before · ${name}` : "Worked before",
+            tone: "border-bg-border text-fg-dim",
+          };
+
+  return (
+    <span
+      className={`inline-flex max-w-full items-center gap-1 rounded border bg-bg-elev/50 px-1.5 ${
+        size === "touch" ? "py-1 text-[11px]" : "py-0.5 text-[10px]"
+      } font-semibold leading-none ${tone}`}
+      // The badge truncates on a narrow column; a rep must still be able to
+      // read the whole thing without opening the lead.
+      title={text}
+    >
+      <Icon className={size === "touch" ? "h-3.5 w-3.5 shrink-0" : "h-3 w-3 shrink-0"} aria-hidden />
+      <span className="truncate">{text}</span>
+    </span>
+  );
+}
 
 /**
  * "View site" straight from the row, so a rep can look at what they are about
