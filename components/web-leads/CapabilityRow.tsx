@@ -160,8 +160,14 @@ const CONTEXT_TEXT = "mt-1.5 text-xs leading-relaxed text-fg-muted";
  * changes nothing on this component, and vice versa. Task 5 exports and
  * dedupes the evidence renderer; this copy must go in that change rather
  * than be left as a second place to remember.
+ *
+ * EXPORTED ONLY SO A TEST CAN PIN THE BRANCH. `BattleCard.tsx`'s copy is
+ * module-private, and with the map empty in both there is no other way to
+ * render this branch and prove it comes FIRST. Nothing in the application
+ * reads or writes it from outside this file; a test that mutates it must
+ * restore it.
  */
-const UNMEASURABLE_CHECKS: Record<string, string> = {};
+export const UNMEASURABLE_CHECKS: Record<string, string> = {};
 
 /**
  * The four honest states of a per-check evidence line, in the order

@@ -25,8 +25,22 @@ function check(code: string, points: number, has: boolean) {
   return { code, label: code, points, has };
 }
 
+/** The score `quality-model.js`'s `scoreDimension` would actually STORE for
+ *  these checks: `Math.round((earned / total) * 100)`. Written out here so
+ *  every fixture in this file is self-consistent with production, and so no
+ *  fixture can pin a score production cannot produce. Fix round 2's
+ *  cross-dimension fixture used `81.25`, which would have been stored as
+ *  `81`; the assertion passed while testing a shape the model never emits.
+ *  (Fix round 3, 2026-09-14.) */
+function storedScore(checks: ReturnType<typeof check>[]): number {
+  const total = checks.reduce((n, c) => n + c.points, 0);
+  if (total === 0) return 0;
+  const earned = checks.reduce((n, c) => (c.has ? n + c.points : n), 0);
+  return Math.round((earned / total) * 100);
+}
+
 function dims(checks: ReturnType<typeof check>[]): DimensionProfile[] {
-  return [{ key: "fixture", label: "fixture", score: 0, weight: 1, checks, missing: [] }];
+  return [{ key: "fixture", label: "fixture", score: storedScore(checks), weight: 1, checks, missing: [] }];
 }
 
 /** The recoverable key is a weighted float now (fix round 2), so equality
@@ -77,12 +91,15 @@ function allIds(m: ReturnType<typeof matchCapabilities>): string[] {
   const easyToCall = m.relevant.find((x) => x.capability.id === "easy-to-call");
   assert.ok(easyToCall, "easy-to-call failed tel_link for this lead and must be in relevant");
   assert.deepEqual(easyToCall!.failedCodes, ["tel_link"], "only the failing code is named, not phone_in_header");
-  // WEIGHTED, not the raw 10. MIXED is one dimension of weight 1 whose
-  // checks sum to a raw total of 78, so tel_link's 10 raw points are
-  // 10 * 1 * 100 / 78 composite points. The literal is written out rather
-  // than recomputed from the formula, so this assertion is independent of
-  // the implementation it is checking.
-  closeTo(easyToCall!.recoverable, 12.820512820512821, "easy-to-call is weighted, not raw");
+  // WEIGHTED off the STORED score, not the raw 10 and not an unrounded
+  // derivation. MIXED is one dimension of weight 1, raw total 78, earned
+  // 33, so the stored score is Math.round(42.307...) = 42 and the whole
+  // dimension has (100 - 42) * 1 = 58 recoverable points. 45 raw points
+  // are failing, of which tel_link is 10, so tel_link's share is
+  // 58 * 10 / 45. The literal is written out rather than recomputed from
+  // the formula, so this assertion is independent of the implementation it
+  // is checking.
+  closeTo(easyToCall!.recoverable, 12.88888888888889, "easy-to-call is weighted off the stored score");
 
   const reach = m.rest.find((x) => x.capability.id === "reach-without-phoning");
   assert.ok(reach, "reach-without-phoning has no failing code for this lead and must be in rest, not dropped");
@@ -97,12 +114,12 @@ console.log("web-leads-automations-match: bucketing OK");
 // ---------------------------------------------------------------------------
 // 2. relevant is ordered by summed WEIGHTED recoverable points, descending,
 //    with a deterministic tie-break (capability id, ascending) so two
-//    renders agree. MIXED is a single dimension of weight 1 and raw total
-//    78, so weighting scales every entry by the same 100/78 and the order
-//    is unchanged from the raw one: book-themselves-in (25 raw, 32.05),
-//    easy-to-call (10 raw, 12.82), then a genuine tie at 5 raw / 6.41
-//    between load-fast-enough-to-stay and tell-them-what-to-do-next, broken
-//    by id: "load-fast-enough-to-stay" < "tell-them-what-to-do-next".
+//    renders agree. MIXED is a single dimension, so every entry is scaled
+//    by the same 58/45 and the order is unchanged from the raw one:
+//    book-themselves-in (25 raw, 32.22), easy-to-call (10 raw, 12.89), then
+//    a genuine tie at 5 raw / 6.44 between load-fast-enough-to-stay and
+//    tell-them-what-to-do-next, broken by id:
+//    "load-fast-enough-to-stay" < "tell-them-what-to-do-next".
 //
 //    That the order is unchanged HERE is the point of section 2a below: a
 //    one-dimension fixture cannot tell a raw key from a weighted one, which
@@ -151,28 +168,31 @@ console.log("web-leads-automations-match: ordering + tie-break OK");
 //     2026-09-14 before the fix, on this exact fixture.
 // ---------------------------------------------------------------------------
 {
+  // Raw total 96, matching the model's conversion dimension. earned 78, so
+  // scoreDimension STORES Math.round(81.25) = 81, and the dimension has
+  // (100 - 81) * 0.26 = 4.94 recoverable. NOTE the 81, not 81.25: fix round
+  // 2's version of this fixture wrote the unrounded value, which production
+  // can never store, so it pinned nothing.
+  const CONV_CHECKS = [check("tel_link", 18, false), check("phone_in_header", 78, true)];
+  // Raw total 100, matching the model's discoverability dimension. earned
+  // 64, stored score 64 exactly, so (100 - 64) * 0.08 = 2.88 recoverable.
+  const DISC_CHECKS = [check("local_schema", 36, false), check("https", 64, true)];
   const CROSS: DimensionProfile[] = [
-    {
-      key: "conversion", label: "Conversion", score: 81.25, weight: 0.26, missing: [],
-      // Raw total 96, matching the model's conversion dimension.
-      checks: [check("tel_link", 18, false), check("phone_in_header", 78, true)],
-    },
-    {
-      key: "discoverability", label: "Discoverability", score: 64, weight: 0.08, missing: [],
-      // Raw total 100, matching the model's discoverability dimension.
-      checks: [check("local_schema", 36, false), check("https", 64, true)],
-    },
+    { key: "conversion", label: "Conversion", score: storedScore(CONV_CHECKS), weight: 0.26, missing: [], checks: CONV_CHECKS },
+    { key: "discoverability", label: "Discoverability", score: storedScore(DISC_CHECKS), weight: 0.08, missing: [], checks: DISC_CHECKS },
   ];
+  assert.equal(CROSS[0].score, 81, "the fixture must carry the score production would store, not the unrounded one");
+
   const m = matchCapabilities(CROSS, { hasWebsite: true });
 
   assert.deepEqual(
     m.relevant.map((x) => x.capability.id),
     ["easy-to-call", "findable-and-safe-to-click"],
-    "tap-to-call (18 raw / 4.875 weighted) must outrank structured data markup (36 raw / 2.88 weighted): ranking on raw points sends the rep into the smaller build",
+    "tap-to-call (18 raw / 4.94 weighted) must outrank structured data markup (36 raw / 2.88 weighted): ranking on raw points sends the rep into the smaller build",
   );
 
-  closeTo(m.relevant[0].recoverable, 4.875, "tel_link weighted");
-  closeTo(m.relevant[1].recoverable, 2.88, "local_schema weighted");
+  closeTo(m.relevant[0].recoverable, 4.94, "tel_link weighted off the stored score");
+  closeTo(m.relevant[1].recoverable, 2.88, "local_schema weighted off the stored score");
 
   // And the figure is in the SAME UNIT as the number the rest of the card
   // prints. easy-to-call covers tel_link and phone_in_header, which are ALL
@@ -192,6 +212,122 @@ console.log("web-leads-automations-match: ordering + tie-break OK");
   );
 }
 console.log("web-leads-automations-match: weighted ordering across dimensions OK");
+
+// ---------------------------------------------------------------------------
+// 2b. THE KEY COMES OFF THE STORED, ROUNDED SCORE. Fix round 3, 2026-09-14.
+//
+//     `scoreDimension` in quality-model.js stores
+//     `Math.round((earned / total) * 100)`, and `recoverablePoints` reads
+//     that stored value. Deriving the share from `points / rawTotal`
+//     instead reconstructs an UNROUNDED score, and the two disagree by up
+//     to 0.5 * weight. Across the 1,152 reachable failing-subsets that put
+//     504 of them (44%) at a different printed figure from `FixFirst` on
+//     the same card, and ordered 1,764 dimension pairs oppositely to
+//     `selectAngle`.
+//
+//     This is the coordinator's worked example, built to production shape.
+//     conversion: raw total 96, tel_link 18 failing => earned 78 => stored
+//     score 81 => 19 * 0.26 = 4.94. trust: raw total 92, testimonials 25
+//     failing => earned 67 => stored score round(72.826) = 73 => 27 * 0.18
+//     = 4.86. So conversion outranks trust, which is what
+//     `recoverablePoints` says and therefore what the angle at the top of
+//     the card says.
+//
+//     Under the UNROUNDED derivation the same lead gives conversion
+//     18 * 0.26 * 100 / 96 = 4.875 and trust 25 * 0.18 * 100 / 92 = 4.8913,
+//     so trust would outrank conversion and the card would contradict
+//     itself again.
+//
+//     PROVED TO FIRE: restoring the round-2 expression flips the sequence
+//     to ["look-established", "easy-to-call"]. Run 2026-09-14.
+// ---------------------------------------------------------------------------
+{
+  const CONV = [check("tel_link", 18, false), check("phone_in_header", 78, true)];
+  const TRUST = [check("testimonials", 25, false), check("credentials", 67, true)];
+  const ROUNDED: DimensionProfile[] = [
+    { key: "conversion", label: "Conversion", score: storedScore(CONV), weight: 0.26, missing: [], checks: CONV },
+    { key: "trust", label: "Trust", score: storedScore(TRUST), weight: 0.18, missing: [], checks: TRUST },
+  ];
+  assert.equal(ROUNDED[0].score, 81, "conversion stores 81, not 81.25");
+  assert.equal(ROUNDED[1].score, 73, "trust stores 73, not 72.826");
+
+  const m = matchCapabilities(ROUNDED, { hasWebsite: true });
+  assert.deepEqual(
+    m.relevant.map((x) => x.capability.id),
+    ["easy-to-call", "look-established"],
+    "conversion(18 raw) must outrank trust(25 raw) off the STORED scores, as recoverablePoints and therefore selectAngle do; the unrounded derivation reverses this",
+  );
+  closeTo(m.relevant[0].recoverable, 4.94, "conversion off the stored 81, not 4.875 off an unrounded 81.25");
+  closeTo(m.relevant[1].recoverable, 4.86, "trust off the stored 73, not 4.8913 off an unrounded 72.826");
+
+  // The identity that makes the figure printable: both bundles here own
+  // ALL of their dimension's failing codes, so each must equal
+  // recoverablePoints for its dimension bit for bit, not merely close.
+  assert.equal(
+    m.relevant[0].recoverable,
+    recoverablePoints(ROUNDED[0]),
+    "a bundle owning all of a dimension's failing codes must EQUAL recoverablePoints exactly, whatever rounding produced the stored score",
+  );
+  assert.equal(
+    m.relevant[1].recoverable,
+    recoverablePoints(ROUNDED[1]),
+    "same identity on the trust side",
+  );
+}
+console.log("web-leads-automations-match: key derives from the stored rounded score OK");
+
+// ---------------------------------------------------------------------------
+// 2c. THE COMPARATOR'S TIE IS AN EPSILON, AND IT IS REACHABLE.
+//
+//     Added in fix round 2 and pinned by nothing until now: replacing
+//     `Math.abs(diff) > 1e-9` with `diff !== 0` left this file and all 40
+//     suite files green. It is reachable, and this is a production-shaped
+//     lead that reaches it.
+//
+//     conversion: raw total 100, tel_link 7 failing => stored score 93 =>
+//     7 * 0.26 = 1.82. design: raw total 100, favicon 13 failing => stored
+//     score 87 => 13 * 0.14 = 1.8200000000000003. The same number to any
+//     decimal anyone would print, 2.22e-16 apart in float.
+//
+//     "easy-to-call" sorts before "look-current" by id, and carries the
+//     SMALLER float. So a strict comparator puts look-current first on
+//     2.22e-16 of noise, and the epsilon falls through to the id as the
+//     module's docblock says it does.
+//
+//     PROVED TO FIRE: with `diff !== 0` the sequence below comes back
+//     ["look-current", "easy-to-call"]. Run 2026-09-14.
+// ---------------------------------------------------------------------------
+{
+  const CONV = [check("tel_link", 7, false), check("phone_in_header", 93, true)];
+  const DESIGN = [check("favicon", 13, false), check("web_fonts", 87, true)];
+  const NOISE: DimensionProfile[] = [
+    { key: "conversion", label: "Conversion", score: storedScore(CONV), weight: 0.26, missing: [], checks: CONV },
+    { key: "design", label: "Design", score: storedScore(DESIGN), weight: 0.14, missing: [], checks: DESIGN },
+  ];
+  const m = matchCapabilities(NOISE, { hasWebsite: true });
+
+  const easy = m.relevant.find((x) => x.capability.id === "easy-to-call")!;
+  const current = m.relevant.find((x) => x.capability.id === "look-current")!;
+  assert.notEqual(
+    easy.recoverable,
+    current.recoverable,
+    "the fixture must actually produce two DIFFERENT floats, or this pins nothing",
+  );
+  assert.ok(
+    Math.abs((easy.recoverable as number) - (current.recoverable as number)) < 1e-9,
+    "and they must be within the epsilon, or it is an ordinary ordering case",
+  );
+  assert.ok(
+    (easy.recoverable as number) < (current.recoverable as number),
+    "easy-to-call must carry the SMALLER float, so a strict comparator would put look-current first",
+  );
+  assert.deepEqual(
+    m.relevant.map((x) => x.capability.id),
+    ["easy-to-call", "look-current"],
+    "two keys 2.22e-16 apart are a tie and must fall through to the id tie-break; a strict !== ranks on floating-point noise instead",
+  );
+}
+console.log("web-leads-automations-match: epsilon tie is reachable and pinned OK");
 
 // ---------------------------------------------------------------------------
 // 3. null sorts after every real number, including a real 0 (fix round 1,

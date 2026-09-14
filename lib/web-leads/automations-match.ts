@@ -34,20 +34,55 @@
  * the same card, chosen by `selectAngle`'s weighted function, said the
  * opposite. The card contradicted itself.
  *
- * The key is now composite points: `points * weight * 100 / rawTotal` per
- * code, where `rawTotal` is the summed `points` of every check in that
- * code's own dimension. Summed over ALL of a dimension's failing codes this
- * reproduces `recoverablePoints(d)` from `angles.ts` exactly (that function
- * is `(100 - score) * weight`, and `100 - score` is `failedRaw / rawTotal *
- * 100` whenever the stored `score` was computed as earned over that same
- * raw total, which is how `quality-model.js` produces it). So a capability
- * bundle's figure is in the SAME UNIT as the number the rest of the battle
- * card already speaks, and is printable rather than merely sortable.
+ * The key is composite points. Per failing code it is
+ * `Math.max(0, 100 - dimension.score) * dimension.weight * points / failedRaw`,
+ * where `failedRaw` is the summed `points` of the FAILING checks in that
+ * code's own dimension. That is `recoverablePoints(d)` from `angles.ts`
+ * split across the codes that earned it, in proportion to their raw points.
+ * So a capability bundle's figure is in the SAME UNIT as the number the
+ * rest of the battle card already speaks, and is printable rather than
+ * merely sortable.
  *
- * The identity is pinned by a test rather than asserted here: a capability
- * bundle generally covers only PART of a dimension, so its own sum equals
- * `recoverablePoints` only when the bundle's failing codes are all of that
- * dimension's failing codes. The test builds that case deliberately.
+ * 🚨 THE ROUNDING, AND WHY IT IS NOT A ROUNDING ERROR (fix round 3,
+ * 2026-09-14). Fix round 2 computed the share as `points * weight * 100 /
+ * rawTotal`, which is the same quantity derived from an UNROUNDED score.
+ * `quality-model.js`'s `scoreDimension` stores
+ * `Math.round((earned / total) * 100)`, and `recoverablePoints` reads that
+ * stored, rounded value. The two therefore disagreed by up to
+ * `0.5 * weight` (worst case 0.1300, on conversion), which across the 1,152
+ * reachable failing-subsets of the seven dimensions meant:
+ *
+ *   - 504 of 1,152 (44%) printed a DIFFERENT FIGURE at one decimal place
+ *     than `FixFirst` printed for the same lead, on the same card, at the
+ *     same time (both render until Task 5 deletes `FixFirst`); and
+ *   - 1,764 dimension pairs ORDERED OPPOSITELY to `recoverablePoints`,
+ *     which is the function `selectAngle` uses to choose the angle printed
+ *     higher up that card. Worked example: conversion with raw 18 failing
+ *     against trust with raw 25 failing. The unrounded key said trust;
+ *     `recoverablePoints` says conversion.
+ *
+ * That is the same self-contradicting card the weighting fix existed to
+ * eliminate, back at a smaller magnitude. Taking the total from the stored
+ * score and splitting it removes it by construction: the sum over ALL of a
+ * dimension's failing codes is `Math.max(0, 100 - score) * weight`, which
+ * IS `recoverablePoints(d)`, bit for bit, whatever rounding produced the
+ * stored score.
+ *
+ * The identity is pinned by a test rather than asserted here, and the
+ * fixture's `score` must be a value `Math.round` can actually produce: fix
+ * round 2's test used `81.25`, which `scoreDimension` would have stored as
+ * `81`, so it passed while pinning something production cannot do. A
+ * capability bundle also generally covers only PART of a dimension, so its
+ * own sum equals `recoverablePoints` only when the bundle's failing codes
+ * are all of that dimension's failing codes; the test builds that case
+ * deliberately.
+ *
+ * WHAT THIS STILL DOES NOT GUARANTEE: the split across codes WITHIN a
+ * dimension is proportional to raw points, which is a choice this module
+ * makes, not a number the scoring model stores. Only the per-dimension
+ * total is a quantity `quality-model.js` and `angles.ts` also compute. Two
+ * capabilities splitting one dimension are therefore ordered by this
+ * module's own proportional rule.
  *
  * WHAT THIS DOES NOT DO. It does not decide anything about copy, does not
  * touch `automations.ts` (imported read-only), and does not re-derive or
@@ -276,17 +311,31 @@ export function matchCapabilities(dimensions: DimensionProfile[], opts: MatchOpt
   const weightedByCode = new Map<string, number>();
   const failedCodesSeen = new Set<string>();
   for (const dimension of dimensions) {
-    // The dimension's own raw denominator, summed from the checks it
-    // carries rather than read from a constant, so this module still holds
-    // no copy of the scoring model to drift (same reasoning `angles.ts`
-    // gives for taking `weight` off the stored profile row).
-    const rawTotal = dimension.checks.reduce((n, c) => n + c.points, 0);
+    // THE WHOLE DIMENSION'S recoverable total, taken from the STORED score
+    // via the same expression `recoverablePoints` uses, then split across
+    // the checks that actually failed in proportion to their raw points.
+    //
+    // Splitting the stored total is what makes this agree with the rest of
+    // the card. Deriving the share from `points / rawTotal` instead (fix
+    // round 1's shape) reconstructs an UNROUNDED score, and
+    // `quality-model.js`'s `scoreDimension` stores
+    // `Math.round((earned / total) * 100)`. See THE ROUNDING, AND WHY IT IS
+    // NOT A ROUNDING ERROR in the module docblock for what that cost.
+    const recoverableTotal = Math.max(0, 100 - dimension.score) * dimension.weight;
+    const failedRaw = dimension.checks.reduce((n, c) => (c.has ? n : n + c.points), 0);
     for (const c of dimension.checks) {
       observedCodes.add(c.code);
-      // COMPOSITE points, not raw. See WHY THE KEY IS WEIGHTED above. A
-      // dimension whose checks carry no points at all has nothing
-      // recoverable in it and contributes 0; this also guards the divide.
-      weightedByCode.set(c.code, rawTotal > 0 ? (c.points * dimension.weight * 100) / rawTotal : 0);
+      // Only a FAILING check can carry recoverable points, so a passing one
+      // is 0 here. That 0 is never summed either way (`recoverable` below
+      // reduces over `failedCodes` only); it is set so the map has an entry
+      // for every observed code and `observedCodes` and this map can never
+      // disagree about what was seen.
+      //
+      // `failedRaw === 0` means nothing failed in this dimension, so there
+      // is no failing code to divide among and nothing to recover; the
+      // guard is there for the divide, not for a reachable share.
+      const share = !c.has && failedRaw > 0 ? (recoverableTotal * c.points) / failedRaw : 0;
+      weightedByCode.set(c.code, share);
       if (!c.has) failedCodesSeen.add(c.code);
     }
   }

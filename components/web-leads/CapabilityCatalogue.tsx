@@ -80,16 +80,16 @@
  * numbers and nulls is a PARTIAL audit and says so, because the headline is
  * the sentence a rep reads aloud.
  *
- * WHAT `recoverable` IS (fix round 2, 2026-09-14): weighted composite
- * points, `points * weight * 100 / dimensionRawTotal` summed over this
- * lead's failing codes. It was a RAW sum of `checks[].points` until this
- * round, which was a defect and not a display problem: raw points are not
- * comparable across dimensions (one is worth between 0.2708 and 0.0800
- * composite, a 3.39x spread), so the list ranked structured data markup
- * above tap-to-call while `selectAngle` chose the opposite angle on the
- * same card. Fixed in `automations-match.ts`, whose docblock carries the
- * full reasoning and the numbers. Because the key is now the same unit the
- * rest of the card prints, the figure is printed on the row.
+ * WHAT `recoverable` IS: weighted composite points. It is
+ * `recoverablePoints(dimension)` from `angles.ts` split across the codes
+ * that failed, in proportion to their raw points, summed over the codes
+ * this capability covers. `automations-match.ts`'s docblock carries the
+ * derivation and the two defects behind it, both of which made the card
+ * contradict itself and both of which are fixed there rather than papered
+ * over here: a RAW sum of `checks[].points` (fix round 2), and then a share
+ * derived from an UNROUNDED score when `quality-model.js` stores a rounded
+ * one (fix round 3). Because the value is now the same unit the rest of the
+ * card prints, and agrees with it, the figure is printed on the row.
  *
  * ═══ THE IDENTITY HUE, AND WHERE IT COMES FROM ═════════════════════════════
  *
@@ -232,6 +232,7 @@ export function CapabilityCatalogue({
   drawn,
   reduced,
   selectedAngleKey = null,
+  defaultOpenId = null,
 }: {
   /** This lead's audit, straight from the stored profile. An empty array is
    *  the "no audit at all" case and is handled, not guarded against. */
@@ -250,12 +251,23 @@ export function CapabilityCatalogue({
    *  `selectAngle`. Null when no angle was selected, which suppresses every
    *  overlap note. */
   selectedAngleKey?: string | null;
+  /** Which row starts open. Defaults to none, which is what the card wants
+   *  on arrival. It exists for two reasons and both are real: the ranking
+   *  bar lives inside a detail, so with no interaction available a server
+   *  render can otherwise never reach it (which is how the bar's scaling
+   *  went unpinned through two review rounds); and `BattleCard.tsx`'s
+   *  docblock already describes a radar-axis tap opening one detail in
+   *  place, so this is the seam Task 5 needs if that ever points at a
+   *  capability. It seeds state and does not control it: a later change to
+   *  this prop does NOT move the open row, because the rep's own taps own
+   *  it from first render onward. */
+  defaultOpenId?: string | null;
 }) {
   // One open row across every group on this panel. A rep is reading, not
   // comparing, and a second open detail pushes the first off the screen
   // they are mid-sentence on. Held here rather than per row so opening a
   // ladder entry closes an open website entry too.
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(defaultOpenId);
   const [showRest, setShowRest] = useState(false);
 
   const matched = useMemo(() => matchCapabilities(dimensions, { hasWebsite }), [dimensions, hasWebsite]);
@@ -301,13 +313,45 @@ export function CapabilityCatalogue({
           ? "clean"
           : "partial";
 
+  // THE COVERAGE FACT HAS TO BE ON SCREEN WITH NO INTERACTION (fix round 3,
+  // 2026-09-14). The `partial` intro above only fires when `relevant` is
+  // empty. A partially-audited lead that DOES have a failing code takes the
+  // `ranked` branch instead, and the capabilities nobody checked have empty
+  // `failedCodes`, so they are in `rest`, so they are in `secondary`, so
+  // they are behind the collapsed "show all" control. Rendered, that lead
+  // showed one row, one figure, and a control: the words "nothing this
+  // covers has been checked" were not in the DOM at all, two interactions
+  // away. A rep reads "heaviest first" over a one-of-ten sample and has
+  // nothing on screen telling them six of seven dimensions were never
+  // looked at. "Heaviest first" is a coverage claim a partial audit cannot
+  // support.
+  //
+  // So the count is computed across BOTH lists and rendered as its own
+  // always-visible line under the intro. It counts capabilities, not
+  // checks, because capabilities are what the rows are; `recoverable ===
+  // null` is exactly "no code this one covers was observed", which is the
+  // distinction `automations-match.ts` exists to preserve.
+  const unscoredCount = [...matched.relevant, ...matched.rest].filter((m) => m.recoverable === null).length;
+  const todayCount = matched.relevant.length + matched.rest.length;
+  const showCoverageNote = introKey === "ranked" && unscoredCount > 0;
+
   // The largest weighted value in the primary list, used only to scale the
-  // bars against each other. Floored at 1 so a list whose values are all 0
-  // divides by something. The FIGURE each row prints is `recoverable`
+  // bars against each other. The FIGURE each row prints is `recoverable`
   // itself, not this ratio.
+  //
+  // NO FLOOR (fix round 3, 2026-09-14). This was `Math.max(1, ...values)`,
+  // a floor written when the key was raw check points whose smallest
+  // non-zero value was 4. Weighted composite points go well below 1: the
+  // design dimension with only `favicon` failing is 0.6512. That lead's
+  // sole row then drew at 65% of a bar captioned "drawn against the largest
+  // one in this list" while BEING the largest one in the list. Null when
+  // there is nothing positive to scale against, which makes every `ranking`
+  // null and draws no bar at all rather than a meaningless one.
   const maxRanking = useMemo(() => {
-    const values = primary.map((m) => m.recoverable).filter((v): v is number => typeof v === "number");
-    return Math.max(1, ...values);
+    const values = primary
+      .map((m) => m.recoverable)
+      .filter((v): v is number => typeof v === "number" && v > 0);
+    return values.length > 0 ? Math.max(...values) : null;
   }, [primary]);
 
   const ladderByStage = useMemo(() => {
@@ -324,7 +368,7 @@ export function CapabilityCatalogue({
     const state = stateFor(entry, hasWebsite);
     const dimensionKey = primaryDimensionKey(entry.capability, dimensionByCode);
     const ranking =
-      state.kind === "scored" && typeof entry.recoverable === "number"
+      state.kind === "scored" && typeof entry.recoverable === "number" && maxRanking !== null
         ? (entry.recoverable / maxRanking) * 100
         : null;
     return (
@@ -351,6 +395,12 @@ export function CapabilityCatalogue({
   return (
     <div>
       <p className="text-xs leading-relaxed text-fg-muted">{PRIMARY_INTRO[introKey]}</p>
+
+      {showCoverageNote && (
+        <p className="mt-1.5 text-xs leading-relaxed text-fg-muted">
+          {`We only got through part of this site: ${unscoredCount} of the ${todayCount} areas below were never checked at all. What is ranked here is ranked on the part we did see, so do not tell them this is everything.`}
+        </p>
+      )}
 
       {primary.length > 0 ? (
         <ul className="mt-3 space-y-1">{primary.map(renderRow)}</ul>
