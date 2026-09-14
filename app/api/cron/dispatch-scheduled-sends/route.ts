@@ -53,6 +53,10 @@ import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/in
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import {
+  recoverStaleDashboardEmailReservations,
+  type DashboardEmailReservationRecovery,
+} from "@/lib/leads/dashboard-email-reservations";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -307,6 +311,23 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   const nowIso = new Date().toISOString();
   const staleBeforeIso = new Date(Date.now() - STALE_SENDING_MINUTES * 60_000).toISOString();
 
+  // Recover direct-email requests that were interrupted by a platform kill.
+  // Pre-dispatch reservations are safe to queue; a row whose provider call
+  // already began is terminally marked unknown and NEVER auto-retried.
+  let dashboardEmailRecovery: DashboardEmailReservationRecovery = {
+    inspected: 0,
+    queued: 0,
+    delivery_unknown: 0,
+    raced: 0,
+    errors: 0,
+  };
+  try {
+    dashboardEmailRecovery = await recoverStaleDashboardEmailReservations({ db });
+  } catch (err) {
+    dashboardEmailRecovery.errors += 1;
+    console.error("[dispatch-scheduled-sends] dashboard email reservation recovery failed", err);
+  }
+
   // 1) Stale-'sending' recovery — see file header. Best-effort; a failure
   // here just means a stuck row waits for the next run's recovery attempt.
   let reclaimed = 0;
@@ -335,7 +356,13 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   }
   const dueIds = (dueRes.data || []).map((r) => (r as { id: string }).id);
   if (dueIds.length === 0) {
-    return NextResponse.json({ ok: true, reclaimed, claimed: 0, processed: 0 });
+    return NextResponse.json({
+      ok: true,
+      reclaimed,
+      dashboard_email_recovery: dashboardEmailRecovery,
+      claimed: 0,
+      processed: 0,
+    });
   }
 
   // 3) Claim: conditional UPDATE (status still 'pending' at write time) —
@@ -391,6 +418,7 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({
     ok: true,
     reclaimed,
+    dashboard_email_recovery: dashboardEmailRecovery,
     claimed: claimed.length,
     processed,
     sent: sentCount,

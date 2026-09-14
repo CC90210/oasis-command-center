@@ -215,6 +215,7 @@ const TESTS = [
   "tests/sunbiz-application-chase.test.ts",
   "tests/form-handoff-copy.test.ts",
   "tests/email-idempotency-marker.test.ts",
+  "tests/lead-email-reservation-recovery.test.ts",
   "tests/watermark-large-pdf.test.ts",
   "tests/drip-activity.test.ts",
   "tests/template-interchange.test.ts",

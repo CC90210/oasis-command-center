@@ -55,6 +55,7 @@ export const MANAGER_PIPELINE_STAGE_KEYS: readonly string[] = OASIS_LEAD_STAGES
   .filter((stage) => stage !== "researched");
 
 export const BUILDER_DELIVERY_STAGE_KEYS = [
+  "won",
   "onboarding",
   "in_build",
   "client_review",

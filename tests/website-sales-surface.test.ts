@@ -8,6 +8,7 @@ const playbook = readFileSync("app/playbook/page.tsx", "utf8");
 const dealPlaybook = readFileSync("app/playbook/deals/page.tsx", "utf8");
 const nav = readFileSync("lib/nav-config.ts", "utf8");
 const workflowRoute = readFileSync("app/api/website-sales/[leadId]/route.ts", "utf8");
+const pipelineDetail = readFileSync("app/pipeline/[id]/page.tsx", "utf8");
 const repToday = readFileSync("components/today/RepToday.tsx", "utf8");
 const nextAction = readFileSync("lib/ai-next-action.ts", "utf8");
 
@@ -68,10 +69,32 @@ assert.match(
   /paymentRequestId[\s\S]*?action:\s*"record_payment"[\s\S]*?requestId:\s*paymentRequestId/,
   "record-payment retries reuse one client-stable request ID until the server confirms success",
 );
+const replayGuardIndex = workflowRoute.indexOf("if (requestId)");
+const deliveryGateIndex = workflowRoute.indexOf("builder_delivery_action_only");
+assert.ok(replayGuardIndex >= 0 && deliveryGateIndex >= 0, "both lifecycle markers must exist");
 assert.ok(
-  workflowRoute.indexOf("if (requestId)") < workflowRoute.indexOf("builder_delivery_action_only"),
+  replayGuardIndex < deliveryGateIndex,
   "idempotency replay runs before the delivery-only builder gate can reject a selling builder after handoff",
 );
+assert.match(
+  lifecycle,
+  /canRunDelivery\s*&&\s*\["won",\s*"onboarding",\s*"in_build",\s*"client_review"\]\.includes\(currentStage\)/,
+  "the assigned builder can advance a fully paid Won lead into onboarding",
+);
+assert.ok(
+  workflowRoute.includes("ownsOasisDeliveryRecord") &&
+    workflowRoute.includes("!builderOwnsDelivery") &&
+    pipelineDetail.includes("ownsOasisDeliveryRecord(activeRecord, session.userId)"),
+  "delivery advances require the assigned fulfillment owner in both the API and rendered controls",
+);
+for (const code of [
+  "payment_request_replay_mismatch",
+  "manager_relationship_invalid",
+  "manager_relationship_lookup_failed",
+  "credited_closer_profile_missing",
+]) {
+  assert.match(lifecycle, new RegExp(`${code}:\\s*"[^"_]+(?:[ _][^"_]+)*"`), `${code} has readable rep-facing copy`);
+}
 assert.ok(
   workflowRoute.includes("matchesWebsiteSalesPaymentReplay") &&
     workflowRoute.includes("payment_request_replay_mismatch"),
@@ -81,6 +104,20 @@ assert.match(
   workflowRoute,
   /select\("manager_user_id"\)[\s\S]*?team_role","manager"[\s\S]*?p_manager_user_id:managerUserId/,
   "the close path resolves and validates the credited closer's manager before writing the payout ledger",
+);
+const closerCandidateAt = workflowRoute.indexOf("for (const frozenCloser of closerCandidates)");
+const closePartiesAt = workflowRoute.indexOf("const closeParties = resolveWebsiteSalesCloseParties", closerCandidateAt);
+assert.ok(closerCandidateAt >= 0 && closePartiesAt > closerCandidateAt, "the founder close attribution block is missing");
+const closerCandidateBlock = workflowRoute.slice(closerCandidateAt, closePartiesAt);
+assert.match(
+  closerCandidateBlock,
+  /if \(closerProfile\.error\)[\s\S]*?error:"manager_relationship_lookup_failed"[\s\S]*?status:503/,
+  "a closer profile read failure must stop payment verification instead of erasing the closer's commission",
+);
+assert.match(
+  closerCandidateBlock,
+  /if \(!closerProfile\.data\)[\s\S]*?error:"credited_closer_profile_missing"[\s\S]*?status:409/,
+  "a missing frozen closer profile must stop payment verification instead of classifying a founder-only close",
 );
 for (const role of ["You open it", "You close it", "You find and close it"]) {
   assert.ok(repToday.includes(role), `Today states the exact v4 role card: ${role}`);

@@ -140,7 +140,7 @@ export function LeadQuickEmail({
         ok?: boolean;
         error?: string;
         message?: string;
-        send_status?: { status?: string };
+        send_status?: { status?: string; reason?: string };
       };
       if (!res.ok || !json.ok) {
         throw new Error(json.message || json.error || `send_${res.status}`);
@@ -151,6 +151,19 @@ export function LeadQuickEmail({
       // to do here for that — it is why this posts to that route rather than
       // rolling its own send.
       const sent = json.send_status?.status === "sent";
+      if (json.send_status?.status === "delivery_unknown") {
+        setUnconfirmed(true);
+        setStatus(
+          "Delivery could not be confirmed. Do not resend yet; check the timeline or recipient mailbox first.",
+        );
+        router.refresh();
+        return;
+      }
+      if (json.send_status?.status === "blocked") {
+        setStatus(`Send blocked: ${json.send_status.reason || "review the mailbox configuration or recipient consent."}`);
+        router.refresh();
+        return;
+      }
       let note = sent ? "Sent." : "Queued to send.";
 
       // Persist anything the rep changed, AFTER a successful send. Writing a

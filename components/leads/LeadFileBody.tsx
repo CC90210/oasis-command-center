@@ -2614,8 +2614,23 @@ function EmailComposer({
                 // when available (send_status.via === 'gmail_oauth'), else it
                 // queues to the submissions@ daemon. Reflect the real outcome.
                 const ss = j.send_status as
-                  | { status?: string; via?: string; from_address?: string }
+                  | { status?: string; via?: string; from_address?: string; reason?: string }
                   | undefined;
+                if (ss?.status === "delivery_unknown") {
+                  setUncertain(true);
+                  setStatus(
+                    "Delivery could not be confirmed. Do not resend yet; check the timeline or recipient mailbox first",
+                  );
+                  if (onChange) await onChange();
+                  return;
+                }
+                if (ss?.status === "blocked") {
+                  setStatus(
+                    `Send blocked: ${ss.reason || "review the mailbox configuration or recipient consent"}`,
+                  );
+                  if (onChange) await onChange();
+                  return;
+                }
                 let base = "Queued";
                 if (ss?.status === "sent" && ss?.via === "gmail_oauth" && ss?.from_address) {
                   base = `Sent from ${ss.from_address}`;

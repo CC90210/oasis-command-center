@@ -32,7 +32,7 @@ async function main() {
     sql: "INSERT INTO tenants (id, slug) VALUES (?, 'oasis-ai-cc')",
     args: [WEBDEV_TENANT_ID],
   });
-  const insertLead = async (id: string) => {
+  const insertLead = async (id: string, overrides: Record<string, unknown> = {}) => {
     await db.execute({
       sql: `INSERT INTO tenant_records
             (id, tenant_id, entity_type, data, created_at, updated_at)
@@ -45,6 +45,7 @@ async function main() {
           assigned_to: REP,
           claimed_at: "2026-09-01T00:00:00.000Z",
           stage: "assigned",
+          ...overrides,
         }),
       ],
     });
@@ -56,6 +57,7 @@ async function main() {
     args: ["lead-expired"],
   });
   const { assertMayWorkLead } = await import("../lib/leads/rep-lead-access");
+  const { releaseLeads } = await import("../lib/web-leads/claim-ops");
   const expiredAccess = await assertMayWorkLead({
     teamRole: "opener",
     userId: REP,
@@ -89,8 +91,52 @@ async function main() {
     message: "This lead is on the do-not-call list and cannot be worked.",
   });
 
+  await insertLead("lead-dnc-collaborator", {
+    assigned_to: "33333333-3333-4333-8333-333333333333",
+    collaborators: [REP],
+    dnc: true,
+  });
+  const collaboratorDncAccess = await assertMayWorkLead({
+    teamRole: "opener",
+    userId: REP,
+    tenantId: WEBDEV_TENANT_ID,
+    leadId: "lead-dnc-collaborator",
+    accessMode: "owned_oasis_sales",
+  });
+  assert.deepEqual(
+    collaboratorDncAccess,
+    {
+      ok: false,
+      status: 409,
+      error: "do_not_call",
+      message: "This lead is on the do-not-call list and cannot be worked.",
+    },
+    "do-not-call is organization-wide even when the caller is a collaborator rather than the assignee",
+  );
+
+  await insertLead("lead-post-handoff", { stage: "won" });
+  const refusedPostHandoff = await releaseLeads(REP, false, ["lead-post-handoff"]);
+  assert.deepEqual(refusedPostHandoff.released, []);
+  assert.deepEqual(refusedPostHandoff.refused, ["lead-post-handoff"]);
+  const refusedAdminPostHandoff = await releaseLeads(
+    "44444444-4444-4444-8444-444444444444",
+    true,
+    ["lead-post-handoff"],
+  );
+  assert.deepEqual(refusedAdminPostHandoff.released, []);
+  assert.deepEqual(
+    refusedAdminPostHandoff.refused,
+    ["lead-post-handoff"],
+    "admin access does not turn the prospect release operation into a paid-workflow repair tool",
+  );
+  const postHandoffRow = await db.execute({
+    sql: "SELECT data FROM tenant_records WHERE id = ?",
+    args: ["lead-post-handoff"],
+  });
+  const postHandoffData = JSON.parse(String(postHandoffRow.rows[0].data)) as Record<string, unknown>;
+  assert.equal(postHandoffData.assigned_to, REP, "release must not detach a paid workflow record");
+
   await insertLead("lead-release-ok");
-  const { releaseLeads } = await import("../lib/web-leads/claim-ops");
   const first = await releaseLeads(REP, false, ["lead-release-ok"]);
   assert.deepEqual(first.released, ["lead-release-ok"]);
   assert.deepEqual(first.refused, []);

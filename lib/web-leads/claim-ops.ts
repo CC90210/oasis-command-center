@@ -49,7 +49,7 @@ import { invalidate } from "./cache";
 import { WEBDEV_TENANT_ID, LEAD_READ_CAP, assertCompleteRead } from "./tenant";
 import {
   availability, factsFrom, isInBookOf, planClaim, claimPatch, releasePatch,
-  MAX_LEADS_PER_REP, type ClaimPlan,
+  ACTIVE_PROSPECT_CLAIM_STAGES, MAX_LEADS_PER_REP, type ClaimPlan,
 } from "./claim";
 
 /** How many leads a rep currently holds. Counts rows whose assigned_to is this
@@ -307,6 +307,11 @@ export async function releaseLeads(
 
   const allowed = rows.filter((r) => {
     const facts = factsFrom(r.data || {});
+    // A manual release is a prospecting action, not a lifecycle repair tool.
+    // Missing stages remain releasable for legacy pool rows, but founder
+    // handoff, paid, lost, and delivery records keep their durable owner.
+    const stage = facts.stage?.trim().toLowerCase() || "";
+    if (stage && !ACTIVE_PROSPECT_CLAIM_STAGES.has(stage)) return false;
     if (isAdmin) return Boolean(facts.assignedTo);
     return isInBookOf(facts, userId);
   });

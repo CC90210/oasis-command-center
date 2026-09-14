@@ -99,6 +99,10 @@ async function setup() {
       direction TEXT, agent_source TEXT, actor_user_id TEXT, subject TEXT,
       content TEXT, content_preview TEXT, metadata TEXT, created_at TEXT
     );
+    CREATE UNIQUE INDEX website_sales_interaction_request_uidx
+      ON lead_interactions (tenant_id, json_extract(metadata, '$.request_id'))
+      WHERE agent_source = 'website_sales_pipeline'
+        AND json_extract(metadata, '$.request_id') IS NOT NULL;
     CREATE TABLE schema_migrations (filename TEXT PRIMARY KEY, checksum TEXT, applied_at TEXT, statements INTEGER);
   `);
   // The real v3 tables, straight from the migration file — no hand-rewritten
@@ -281,6 +285,79 @@ async function main() {
   );
   assert.equal(roleOf(smallSplit, "opener")?.amount_cents, 7_500, "opening pays 15% of $500");
   assert.equal(roleOf(smallSplit, "closer")?.amount_cents, 12_500, "closing pays 25% of $500");
+  const smallSplitSummary = smallSplit as {
+    commission_id: string;
+    commission_amount: number;
+  };
+  const primaryCommission = await client.execute({
+    sql: "SELECT party_role, amount_cents FROM website_sales_commissions WHERE id = ?",
+    args: [smallSplitSummary.commission_id],
+  });
+  assert.equal(primaryCommission.rows[0].party_role, "closer");
+  assert.equal(
+    Number(primaryCommission.rows[0].amount_cents),
+    smallSplitSummary.commission_amount * 100,
+    "commission_id and commission_amount describe the same primary ledger row",
+  );
+
+  for (const collision of [
+    { type: "audit_completed", action: "complete_audit" },
+    { type: "payment_received", action: "record_payment" },
+  ]) {
+    const leadId = `lead-cross-action-${collision.type}`;
+    const requestId = `request-cross-action-${collision.type}`;
+    await seedLead(leadId, CLOSER);
+    await client.execute({
+      sql: `INSERT INTO lead_interactions
+              (id, tenant_id, lead_id, type, channel, direction, agent_source,
+               actor_user_id, subject, content, content_preview, metadata, created_at)
+            VALUES (?, ?, ?, ?, 'system', 'internal', 'website_sales_pipeline',
+                    ?, 'Existing lifecycle action', '', '', ?, ?)`,
+      args: [
+        `interaction-${collision.type}`,
+        TENANT,
+        leadId,
+        collision.type,
+        FOUNDER,
+        JSON.stringify({ request_id: requestId, action: collision.action }),
+        new Date().toISOString(),
+      ],
+    });
+    await assert.rejects(
+      close_website_deal(client, {
+        p_tenant_id: TENANT,
+        p_lead_id: leadId,
+        p_rep_user_id: CLOSER,
+        p_founder_user_id: FOUNDER,
+        p_package_id: "starter",
+        p_currency: "CAD",
+        p_setup_amount: 500,
+        p_monthly_amount: 150,
+        p_payment_reference: `pay-${collision.type}`,
+        p_closed_by_rep: true,
+        p_lead_source_track: "company",
+        p_request_id: requestId,
+      }),
+      /request_id_reused_for_different_action/,
+      `${collision.type} cannot be mistaken for an idempotent deal close`,
+    );
+    const untouchedLead = await client.execute({
+      sql: "SELECT json_extract(data, '$.stage') AS stage FROM tenant_records WHERE id = ?",
+      args: [leadId],
+    });
+    assert.equal(untouchedLead.rows[0].stage, "qualified");
+    for (const [table, predicate, value] of [
+      ["website_deals", "lead_id", leadId],
+      ["website_sales_commissions", "payment_reference", `pay-${collision.type}`],
+      ["website_onboarding", "lead_id", leadId],
+    ] as const) {
+      const count = await client.execute({
+        sql: `SELECT COUNT(*) AS c FROM ${table} WHERE tenant_id = ? AND ${predicate} = ?`,
+        args: [TENANT, value],
+      });
+      assert.equal(Number(count.rows[0].c), 0, `${collision.type} leaves ${table} untouched`);
+    }
+  }
 
   // A builder is also an explicitly supported selling seat in the OASIS
   // pipeline. If they source/open the relationship and then hand it to a

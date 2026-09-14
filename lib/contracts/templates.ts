@@ -240,8 +240,8 @@ Two tracks, and which one applies is recorded on the deal at the time it closes.
   marketing or inbound channels.
 - **Self-sourced** — the Contractor found the client themselves.
 
-Opening alone earns the same 15% base rate on either track. Finding and closing
-the deal earns the 35% combined rate because the Contractor supplied the lead
+Opening alone earns the same ${pct(COMPANY_TRACK_BPS.opener)} base rate on either track. Finding and closing
+the deal earns the ${pct(SELF_TRACK_BPS.open_close)} combined rate because the Contractor supplied the lead
 and completed the sale. The track is frozen when the deal closes; re-sourcing a
 client later does not re-rate a deal that has already paid.
 `.trim();
@@ -296,7 +296,7 @@ ${SOURCING}
 | Self-sourced, closed, and built it | **${pct(SELF_TRACK_BPS.full_stack)}** |
 
 Closing a company-sourced lead, whether or not a separate opener is credited,
-earns the single closer rate above. The combined 35% rate applies only when the
+earns the single closer rate above. The combined ${pct(SELF_TRACK_BPS.open_close)} rate applies only when the
 Contractor found the client and closed the deal. Where an opener is credited,
 the opener is paid their own share separately; these rates are not a pool to
 divide.

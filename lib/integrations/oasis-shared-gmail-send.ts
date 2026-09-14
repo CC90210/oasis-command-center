@@ -36,6 +36,10 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
 import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
+import {
+  gmailMessageIdForIdempotencyKey,
+  smtpFailureReason,
+} from "@/lib/integrations/email-delivery-safety";
 
 /**
  * `tenant_integration_credentials.service` holding the shared OASIS mailbox.
@@ -53,7 +57,7 @@ export type OasisSharedSendResult =
   | {
       ok: false;
       provider: "oasis_shared_gmail";
-      reason: "not_configured" | "send_failed" | "suppressed" | "suppression_error";
+      reason: "not_configured" | "brand_mismatch" | "send_failed" | "delivery_unknown" | "suppressed" | "suppression_error";
       error: string;
     };
 
@@ -104,12 +108,14 @@ export function composeOasisMessage(args: {
   html?: string | null;
   signer?: EmailSigner | null;
   fromAddress: string;
+  idempotencyKey?: string;
 }): {
   from: string;
   to: string;
   cc?: string;
   replyTo?: string;
   subject: string;
+  messageId?: string;
   headers: Record<string, string>;
   text: string;
   html?: string;
@@ -138,6 +144,9 @@ export function composeOasisMessage(args: {
     ...(ccList.length ? { cc: ccList.join(", ") } : {}),
     ...(replyTo ? { replyTo } : {}),
     subject: args.subject,
+    ...(args.idempotencyKey
+      ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
+      : {}),
     // The opt-out is "reply UNSUBSCRIBE", stated in both parts. Declaring it as
     // a header too lets a mail client offer its own one-click control and keeps
     // filters from treating a branded HTML message as unattributed bulk. It
@@ -182,6 +191,7 @@ export async function sendOasisSharedGmail(args: {
   html?: string | null;
   /** The acting rep, so the sign-off is theirs and not the mailbox owner's. */
   signer?: EmailSigner | null;
+  idempotencyKey?: string;
 }): Promise<OasisSharedSendResult> {
   // OPT-OUT GATE FIRST, before any credential work or send. Fail closed: a
   // suppression lookup that errors must not be read as "not suppressed".
@@ -274,7 +284,7 @@ export async function sendOasisSharedGmail(args: {
     return {
       ok: false,
       provider: "oasis_shared_gmail",
-      reason: "send_failed",
+      reason: "brand_mismatch",
       error: `refusing to send: ${mismatch}. A mailbox may not assert another company's identity.`,
     };
   }
@@ -311,7 +321,7 @@ export async function sendOasisSharedGmail(args: {
     return {
       ok: false,
       provider: "oasis_shared_gmail",
-      reason: "send_failed",
+      reason: smtpFailureReason(e),
       // First line only: SMTP errors carry multi-line server chatter and the
       // useful part is the code. Truncated so a credential can never ride out
       // in an error string.

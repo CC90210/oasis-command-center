@@ -20,7 +20,7 @@ import { Tag } from "@/components/Card";
  *  status on these rows yet). Historical messages render with no status
  *  ladder at all (we genuinely don't know), which is more honest than a
  *  fabricated double-check. */
-export type BubbleStatus = "pending" | "sent" | "failed";
+export type BubbleStatus = "pending" | "sent" | "failed" | "unknown";
 
 function callTitle(m: ConversationMessage): string {
   if (m.channel !== "phone") return "";
@@ -75,6 +75,7 @@ function accentStripeClass(channel: string): string {
 function StatusGlyph({ status }: { status: BubbleStatus }) {
   if (status === "pending") return <Clock className="h-3 w-3 text-fg-dim" />;
   if (status === "failed") return <AlertTriangle className="h-3 w-3 text-status-hot" />;
+  if (status === "unknown") return <AlertTriangle className="h-3 w-3 text-status-warm" />;
   return <CheckCheck className="h-3 w-3 text-status-engaged" />;
 }
 
@@ -95,6 +96,7 @@ export function MessageBubble({
   const title = callTitle(message);
   const pending = status === "pending";
   const failed = status === "failed";
+  const unknown = status === "unknown";
 
   return (
     <div className={`flex ${outbound ? "justify-end" : "justify-start"}`}>
@@ -163,6 +165,12 @@ export function MessageBubble({
                 Retry
               </button>
             )}
+          </div>
+        )}
+
+        {unknown && (
+          <div className="mt-1.5">
+            <Tag tone="warm">Delivery unconfirmed</Tag>
           </div>
         )}
       </div>

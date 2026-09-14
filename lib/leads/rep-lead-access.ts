@@ -130,16 +130,19 @@ export async function assertMayWorkLead(args: {
 
   if (mine && effectiveMode === "owned_oasis_sales" && args.userId) {
     const facts = factsFrom(row.data || {});
+    const now = Date.now();
+    // DNC is organization-wide. A collaborator is allowed to work a shared
+    // lead, but must never bypass the lead-level suppression simply because
+    // isInBookOf only describes the current assignee.
+    if (availability(facts, now).reason === "do_not_call") {
+      return {
+        ok: false,
+        status: 409,
+        error: "do_not_call",
+        message: "This lead is on the do-not-call list and cannot be worked.",
+      };
+    }
     if (isInBookOf(facts, args.userId)) {
-      const now = Date.now();
-      if (availability(facts, now).reason === "do_not_call") {
-        return {
-          ok: false,
-          status: 409,
-          error: "do_not_call",
-          message: "This lead is on the do-not-call list and cannot be worked.",
-        };
-      }
       if (!isActionableBy(facts, args.userId, now)) {
         return {
           ok: false,

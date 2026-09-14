@@ -445,7 +445,7 @@ export function LeadLifecycleActions({
   const nextMeta = nextStage ? findOasisStage("lead", nextStage) : null;
   const mayAdvance =
     mayUseDirectAdvance(currentStage, canManage, canRunDeal) ||
-    (canRunDelivery && ["onboarding", "in_build", "client_review"].includes(currentStage));
+    (canRunDelivery && ["won", "onboarding", "in_build", "client_review"].includes(currentStage));
   const disabled = busy || refreshPending;
   const checkoutHref = safeStripeCheckoutUrl(checkoutUrl);
   const paymentCompletesSetup =
@@ -2305,6 +2305,10 @@ function readableError(code: string): string {
     stage_changed_refresh: "This lead moved in another session. Refresh before continuing.",
     request_id_reused_for_different_lead: "This handoff request belongs to another lead. Refresh and try again.",
     request_id_reused_for_different_action: "This handoff request was already used for another action. Refresh and try again.",
+    payment_request_replay_mismatch: "This payment was already recorded with different details. Refresh the lead before recording another payment.",
+    manager_relationship_invalid: "The closer's manager record is not a valid active manager. Ask an admin to correct it before closing.",
+    manager_relationship_lookup_failed: "The closer's manager record could not be read. Nothing was closed; retry in a moment.",
+    credited_closer_profile_missing: "The credited closer has no profile in this workspace. Ask an admin to restore it before closing.",
   };
   return known[code] || code.replaceAll("_", " ");
 }

@@ -36,6 +36,10 @@ import {
 } from "../lib/booking-link";
 import { buildGmailRawMessage } from "../lib/integrations/gmail-oauth-send";
 import { composeOasisMessage } from "../lib/integrations/oasis-shared-gmail-send";
+import {
+  gmailMessageIdForIdempotencyKey,
+  smtpFailureReason,
+} from "../lib/integrations/email-delivery-safety";
 
 function run(name: string, fn: () => void) {
   fn();
@@ -391,12 +395,48 @@ run("the HTML stays small enough that Gmail will not clip it", () => {
   assert.ok(html.length < 60_000, `html was ${html.length} bytes`);
 });
 
+run("one logical send keeps one deterministic Message-ID across transports", () => {
+  const key = "67f2c273-4729-4f85-bf35-f973e4c8ad18";
+  const messageId = gmailMessageIdForIdempotencyKey(key);
+  assert.equal(messageId, gmailMessageIdForIdempotencyKey(key));
+  assert.match(messageId, /^<oasis-[0-9a-f]{64}@oasisai\.work>$/);
+
+  const shared = composeOasisMessage({
+    to: PROSPECT,
+    subject: "S",
+    body: "B",
+    fromAddress: MAILBOX,
+    idempotencyKey: key,
+  });
+  assert.equal(shared.messageId, messageId);
+
+  const oauth = Buffer.from(
+    buildGmailRawMessage({
+      from: MAILBOX,
+      to: PROSPECT,
+      subject: "S",
+      body: "B",
+      messageId,
+    }),
+    "base64url",
+  ).toString("utf8");
+  assert.match(oauth, new RegExp(`^Message-ID: ${messageId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+});
+
+run("ambiguous SMTP failures never enter an automatic fallback", () => {
+  assert.equal(smtpFailureReason(new Error("socket closed")), "delivery_unknown");
+  assert.equal(smtpFailureReason({ code: "ETIMEDOUT", command: "DATA" }), "delivery_unknown");
+  assert.equal(smtpFailureReason({ code: "EAUTH", command: "AUTH" }), "send_failed");
+  assert.equal(smtpFailureReason({ responseCode: 550, command: "DATA" }), "send_failed");
+});
+
 run("a direct dashboard send cannot be drained by the background worker", () => {
   const route = readFileSync("app/api/leads/[id]/email/route.ts", "utf8");
   const insertAt = route.indexOf('.from("lead_interactions")');
   const insertEnd = route.indexOf('.select("id, created_at")', insertAt);
   const directAttemptAt = route.indexOf("if (await operatorHasAppPassword");
   const queuedBranchAt = route.indexOf('if (brand === "oasis" && sendResult.status === "queued")');
+  const unknownBranchAt = route.indexOf("const terminalStatus = sendResult.status;");
   const sentBranchAt = route.indexOf('if (sendResult.status === "sent")');
   const eventAt = route.indexOf('event_type: "BRAVO_OUTBOUND_QUEUED_FROM_DASHBOARD"');
 
@@ -407,14 +447,29 @@ run("a direct dashboard send cannot be drained by the background worker", () => 
   const reservation = route.slice(insertAt, insertEnd);
   assert.match(
     reservation,
-    /status:\s*brand === "oasis" \? "direct_attempting" : "queued"/,
+    /status:\s*brand === "oasis" \? "direct_reserved" : "queued"/,
     "the private reservation is not bounded to the OASIS portal",
   );
   assert.match(
     reservation,
-    /brand === "oasis" \? \{ direct_attempt_started_at: directAttemptStartedAt \} : \{\}/,
-    "the direct-attempt receipt leaks into another tenant's established queue path",
+    /direct_reserved_at: directReservedAt[\s\S]*?attempt_token: attemptToken[\s\S]*?rfc822_message_id: rfc822MessageId/,
+    "the pre-dispatch reservation lacks its recovery identity",
   );
+
+  const claimAt = route.indexOf('.eq("metadata->>status", "direct_reserved")', insertEnd);
+  assert.ok(claimAt > insertEnd && claimAt < directAttemptAt, "the provider claim is not made before transport selection");
+  const claimBlock = route.slice(insertEnd, directAttemptAt);
+  assert.match(claimBlock, /\.eq\("metadata->>attempt_token", attemptToken\)/);
+  const claimFailureAt = route.indexOf("direct_reservation_transition_failed", directAttemptAt);
+  const firstProviderAt = route.indexOf("sendGmailAppPasswordAsOperator({", directAttemptAt);
+  assert.ok(
+    claimFailureAt > directAttemptAt && firstProviderAt > claimFailureAt,
+    "a failed provider claim does not stop the send",
+  );
+  assert.match(route, /sendGmailAppPasswordAsOperator\(\{[\s\S]*?idempotencyKey: attemptToken/);
+  assert.match(route, /sendGmailAsOperator\(\{[\s\S]*?idempotencyKey: attemptToken/);
+  assert.match(route, /sendOasisSharedGmail\(\{[\s\S]*?idempotencyKey: attemptToken/);
+  assert.match(route, /shared\.reason === "delivery_unknown"[\s\S]*?status: "delivery_unknown"/);
 
   assert.ok(queuedBranchAt > directAttemptAt, "there is no explicit fallback-only queue branch");
   const queuedBranch = route.slice(queuedBranchAt, sentBranchAt > queuedBranchAt ? sentBranchAt : undefined);
@@ -426,7 +481,7 @@ run("a direct dashboard send cannot be drained by the background worker", () => 
   );
   assert.match(
     queuedBranch,
-    /\.eq\("metadata->>status",\s*"direct_attempting"\)/,
+    /\.eq\("metadata->>status",\s*oasisReservationState\)/,
     "the queue transition can overwrite a terminal send status",
   );
   assert.ok(
@@ -440,7 +495,7 @@ run("a direct dashboard send cannot be drained by the background worker", () => 
   );
   assert.match(
     queuedBranch,
-    /try \{[\s\S]*?\.eq\("metadata->>status", "direct_attempting"\)[\s\S]*?\} catch \(err\) \{[\s\S]*?queue transition failed[\s\S]*?status: 503/,
+    /try \{[\s\S]*?\.eq\("metadata->>status", oasisReservationState\)[\s\S]*?\.eq\("metadata->>attempt_token", attemptToken\)[\s\S]*?\} catch \(err\) \{[\s\S]*?queue transition failed[\s\S]*?status: 503/,
     "a thrown queue transition is not reported as an unconfirmed fallback",
   );
   assert.match(
@@ -461,13 +516,22 @@ run("a direct dashboard send cannot be drained by the background worker", () => 
     "an event nudge failure returns an unsafe retryable response after the row is queued",
   );
 
-  assert.ok(sentBranchAt > queuedBranchAt, "the terminal sent branch is missing");
+  assert.ok(unknownBranchAt > queuedBranchAt && sentBranchAt > unknownBranchAt, "the terminal outcome branches are missing");
+  const unknownBranch = route.slice(unknownBranchAt, sentBranchAt);
+  assert.match(route.slice(queuedBranchAt, unknownBranchAt), /sendResult\.status === "delivery_unknown" \|\| sendResult\.status === "blocked"/);
+  assert.match(unknownBranch, /status: terminalStatus/);
+  assert.match(unknownBranch, /needs_operator_review: true/);
+  assert.match(unknownBranch, /\.eq\("metadata->>status", "direct_attempting"\)/);
+  assert.match(unknownBranch, /\.eq\("metadata->>attempt_token", attemptToken\)/);
+  assert.doesNotMatch(unknownBranch, /agent_events|bumpLeadStage/);
+
   const sentBranch = route.slice(sentBranchAt);
   assert.match(
     sentBranch,
     /\.eq\("metadata->>status",\s*"direct_attempting"\)/,
     "the sent transition is not a compare-and-set from the reservation",
   );
+  assert.match(sentBranch, /\.eq\("metadata->>attempt_token", attemptToken\)/);
   assert.match(
     sentBranch,
     /trackingWarnings\.push\("sent_receipt_update_failed"\)/,
@@ -488,7 +552,7 @@ run("a direct dashboard send cannot be drained by the background worker", () => 
   );
 
   const postDeliveryStage = route.slice(sentBranchAt).match(
-    /if \(brand === "oasis"\) \{\s*await bumpLeadStage\(\);/,
+    /if \(brand === "oasis" && \(sendResult\.status === "sent" \|\| sendResult\.status === "queued"\)\) \{\s*await bumpLeadStage\(\);/,
   );
   assert.ok(postDeliveryStage, "the OASIS lead advances before send or fallback is confirmed");
 });
@@ -519,4 +583,25 @@ run("the queue-ordering refinement cannot alter another tenant's mail path", () 
     /The established non-OASIS path[\s\S]*?\.update\(\{ metadata: sentMetadata \}\)[\s\S]*?\.eq\("tenant_id", sess\.tenantId\);/,
     "the non-OASIS terminal update was accidentally put behind the OASIS compare-and-set",
   );
+});
+
+run("an unconfirmed inbox response cannot offer a duplicate-send retry", () => {
+  const inbox = readFileSync("components/conversations/InboxShell.tsx", "utf8");
+  const requestAt = inbox.indexOf("async function handleSendEmail()");
+  const retryAt = inbox.indexOf("function handleRetry", requestAt);
+  assert.ok(requestAt >= 0 && retryAt > requestAt, "the inbox email handler is missing");
+  const handler = inbox.slice(requestAt, retryAt);
+
+  assert.match(handler, /if \(!res\.ok \|\| !data\.ok\)[\s\S]*?setUnconfirmedIds/);
+  assert.match(handler, /catch \{[\s\S]*?setUnconfirmedIds/);
+  assert.match(handler, /It may already be queued or sent/);
+  assert.match(handler, /sendStatus === "delivery_unknown"[\s\S]*?setUnconfirmedIds/);
+
+  const responseFailure = handler.slice(
+    handler.indexOf("if (!res.ok || !data.ok)"),
+    handler.indexOf("setAiSuggestion(null)"),
+  );
+  const networkFailure = handler.slice(handler.lastIndexOf("} catch {"));
+  assert.doesNotMatch(responseFailure, /setFailedIds|setFailedDrafts/);
+  assert.doesNotMatch(networkFailure, /setFailedIds|setFailedDrafts|email not sent/i);
 });

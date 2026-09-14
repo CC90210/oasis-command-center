@@ -516,7 +516,7 @@ export async function close_website_deal(client: Client, args: Record<string, un
     }
     return {
       deal_id: dealId,
-      commission_id: payoutLines[0].commissionId,
+      commission_id: primaryLine.commissionId,
       commission_amount: primaryLine.amount_cents / 100,
       comp_version: persistedCompVersion,
       payout_lines: payoutLines.map(({ commissionId: _commissionId, ...line }) => line),
@@ -532,7 +532,9 @@ export async function close_website_deal(client: Client, args: Record<string, un
   // volume now; recomputing here can cross a band and return numbers that were
   // never written. A replay is a read of frozen ledger facts, not a new quote.
   const replayRs = await tx.execute({
-    sql: `SELECT id, lead_id FROM lead_interactions
+    sql: `SELECT id, lead_id, type,
+                 json_extract(metadata, '$.action') AS action
+          FROM lead_interactions
           WHERE tenant_id = ?
             AND agent_source = 'website_sales_pipeline'
             AND json_extract(metadata, '$.request_id') = ?
@@ -540,8 +542,16 @@ export async function close_website_deal(client: Client, args: Record<string, un
     args: [p_tenant_id, requestId],
   });
   if (replayRs.rows.length > 0) {
-    if (String(replayRs.rows[0].lead_id ?? "") !== p_lead_id) {
+    const replay = replayRs.rows[0] as Record<string, unknown>;
+    if (String(replay.lead_id ?? "") !== p_lead_id) {
       throw new Error("close_website_deal: request_id_reused_for_different_lead");
+    }
+    const replayAction = replay.action == null ? null : String(replay.action);
+    if (
+      String(replay.type ?? "") !== "deal_closed" ||
+      (replayAction !== null && replayAction !== "record_payment")
+    ) {
+      throw new Error("request_id_reused_for_different_action");
     }
     const replayDeal = await tx.execute({
       sql: `SELECT id, rep_user_id, founder_user_id, package_id, automation_ids,

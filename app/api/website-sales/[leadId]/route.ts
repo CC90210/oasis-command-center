@@ -42,7 +42,11 @@ import {
   isWebsiteSalesTenantSlug,
 } from "@/lib/leads/canonical-lead-fields";
 import { normalizeCollaborators } from "@/lib/lead-scope";
-import { mayOperateOasisDeliveryStage, ownsOasisSalesRecord } from "@/lib/oasis-sales-pipeline-policy";
+import {
+  mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
+  ownsOasisSalesRecord,
+} from "@/lib/oasis-sales-pipeline-policy";
 import {
   activateVerifiedFounderMeeting,
   cancelVerifiedFounderMeeting,
@@ -247,7 +251,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     return NextResponse.json({ok:false,error:"lead_not_assigned_to_agent"},{status:403});
   }
   const builderMayRunDelivery = mayOperateOasisDeliveryStage(session.teamRole, currentStage);
-  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisSalesRecord(
+  const builderOwnsDelivery = builderMayRunDelivery && ownsOasisDeliveryRecord(
     { id:row.id, data:current },
     session.userId,
   );
@@ -856,7 +860,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     // Reps get the missing Assigned -> Attempting Contact edge. Later rep
     // edges deliberately stay behind their structured outcome, qualification,
     // and founder-handoff gates. Admins can continue the full lifecycle.
-    if (!mayUseDirectAdvance(currentStage, session.isAdmin, repMayRunDeal) && !builderMayRunDelivery) {
+    if (!mayUseDirectAdvance(currentStage, session.isAdmin, repMayRunDeal) && !builderOwnsDelivery) {
       return NextResponse.json({ok:false,error:"use_structured_lifecycle_action"},{status:409});
     }
     patch = { stage:nextStage };
@@ -1007,8 +1011,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           .eq("tenant_id",session.tenantId)
           .eq("auth_user_id",frozenCloser)
           .maybeSingle();
+        if (closerProfile.error) {
+          return NextResponse.json({
+            ok:false,
+            error:"manager_relationship_lookup_failed",
+            detail:closerProfile.error.message,
+          },{status:503});
+        }
+        if (!closerProfile.data) {
+          return NextResponse.json({ok:false,error:"credited_closer_profile_missing"},{status:409});
+        }
         if (
-          closerProfile.data &&
           mayCreditAdminVerifiedCloser({
             candidateUserId:frozenCloser,
             frozenOpenerUserId:frozenOpener,

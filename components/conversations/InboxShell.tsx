@@ -128,6 +128,7 @@ export function InboxShell({
   // why historical rows never get a status ladder).
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [failedIds, setFailedIds] = useState<Set<string>>(new Set());
+  const [unconfirmedIds, setUnconfirmedIds] = useState<Set<string>>(new Set());
   const [failedDrafts, setFailedDrafts] = useState<Record<string, FailedDraft>>({});
 
   // Deal-summary cache lifted from ContextPanel, used for {{funding_amount}}
@@ -302,18 +303,24 @@ export function InboxShell({
     const m: MessageStatusMap = {};
     for (const id of pendingIds) m[id] = "pending";
     for (const id of failedIds) m[id] = "failed";
+    for (const id of unconfirmedIds) m[id] = "unknown";
     // Optimistic messages that succeeded (local- id, not pending/failed) get
     // a "sent" single-tick — historical DB rows are left with no status at
     // all (see MessageBubble doc comment on why).
     if (selected) {
       for (const msg of selected.messages) {
-        if (msg.id.startsWith("local-") && !pendingIds.has(msg.id) && !failedIds.has(msg.id)) {
+        if (
+          msg.id.startsWith("local-") &&
+          !pendingIds.has(msg.id) &&
+          !failedIds.has(msg.id) &&
+          !unconfirmedIds.has(msg.id)
+        ) {
           m[msg.id] = "sent";
         }
       }
     }
     return m;
-  }, [pendingIds, failedIds, selected]);
+  }, [pendingIds, failedIds, unconfirmedIds, selected]);
 
   const templateVars = useMemo(() => {
     const dealSummary = selected?.lead_id ? dealSummaryByLead[selected.lead_id] : undefined;
@@ -609,22 +616,46 @@ export function InboxShell({
         return n;
       });
       if (!res.ok || !data.ok) {
-        setFailedIds((f) => new Set(f).add(localId));
-        setFailedDrafts((d) => ({ ...d, [localId]: { channel: "email", body, subject } }));
-        setNotice(data?.message || data?.error || "Send failed.");
+        setUnconfirmedIds((ids) => new Set(ids).add(localId));
+        setNotice(
+          data?.message ||
+            "Couldn't confirm this email. It may already be queued or sent. Check the timeline or recipient mailbox before composing a new send.",
+        );
         return;
       }
       setAiSuggestion(null);
-      setNotice(data.status === "queued" ? "Queued — will send shortly." : null);
+      const sendStatus = data?.send_status?.status;
+      if (sendStatus === "delivery_unknown") {
+        setUnconfirmedIds((ids) => new Set(ids).add(localId));
+      } else if (sendStatus === "blocked") {
+        setFailedIds((ids) => new Set(ids).add(localId));
+        setFailedDrafts((drafts) => ({ ...drafts, [localId]: { channel: "email", body, subject } }));
+      } else {
+        setUnconfirmedIds((ids) => {
+          const next = new Set(ids);
+          next.delete(localId);
+          return next;
+        });
+      }
+      setNotice(
+        sendStatus === "delivery_unknown"
+          ? "Delivery could not be confirmed. Do not resend yet; check the timeline or recipient mailbox first."
+          : sendStatus === "blocked"
+            ? `Send blocked: ${data?.send_status?.reason || "review the mailbox configuration or recipient consent."}`
+          : sendStatus === "queued"
+            ? "Queued — will send shortly."
+            : null,
+      );
     } catch {
       setPendingIds((p) => {
         const n = new Set(p);
         n.delete(localId);
         return n;
       });
-      setFailedIds((f) => new Set(f).add(localId));
-      setFailedDrafts((d) => ({ ...d, [localId]: { channel: "email", body, subject } }));
-      setNotice("Network error — email not sent.");
+      setUnconfirmedIds((ids) => new Set(ids).add(localId));
+      setNotice(
+        "Couldn't confirm this email. It may already be queued or sent. Check the timeline or recipient mailbox before composing a new send.",
+      );
     } finally {
       setSending(false);
     }

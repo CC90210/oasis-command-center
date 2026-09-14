@@ -224,6 +224,23 @@ for (const file of REP_FACING) {
     `${file} still claims small deals earn nothing — they book and pay in full now`,
   );
 }
+const dealPlaybookSource = src("app/playbook/deals/page.tsx");
+assert.ok(
+  dealPlaybookSource.includes("WEBSITE_PACKAGES.starter.setupFloor") &&
+    dealPlaybookSource.includes("WEBSITE_PACKAGES.starter.monthlyFloor"),
+  "the rep qualification copy must read Starter pricing from the live offer",
+);
+assert.equal(
+  /standard ladder is simple:[^\n]*open 15%/.test(dealPlaybookSource),
+  false,
+  "the rep compensation summary must render rates from the payout engine",
+);
+const contractSource = src("lib/contracts/templates.ts");
+assert.equal(
+  /Opening alone earns the same 15%|combined 35% rate/.test(contractSource),
+  false,
+  "contract prose must render rates from the payout engine instead of restating them",
+);
 
 console.log(
   `contracts-match-engine: OK — ${ROLES.length} agreements + ${REP_FACING.length} rep-facing surfaces, ` +

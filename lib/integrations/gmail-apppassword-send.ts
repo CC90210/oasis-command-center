@@ -21,13 +21,17 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 import { appendSignatureAndFooter, type EmailSigner } from "@/lib/config/email-signature";
 import type { BrandKey } from "@/lib/email/brands";
 import { finalizeCopyList } from "@/lib/leads/lead-copy-recipients";
+import {
+  gmailMessageIdForIdempotencyKey,
+  smtpFailureReason,
+} from "@/lib/integrations/email-delivery-safety";
 
 export type GmailAppPasswordSendResult =
   | { ok: true; provider: "gmail_apppassword"; gmail_message_id: string; from_address: string }
   | {
       ok: false;
       provider: "gmail_apppassword";
-      reason: "not_connected" | "send_failed" | "suppressed" | "suppression_error";
+      reason: "not_connected" | "send_failed" | "delivery_unknown" | "suppressed" | "suppression_error";
       error: string;
     };
 
@@ -64,6 +68,7 @@ export async function sendGmailAppPasswordAsOperator(args: {
    * downstream could have noticed the mismatch.
    */
   brand: BrandKey;
+  idempotencyKey?: string;
 }): Promise<GmailAppPasswordSendResult> {
   // Opt-out gate FIRST — before any credential work or send. Fail closed.
   const supp = await checkEmailSuppressed(args.tenantId, args.to);
@@ -98,6 +103,9 @@ export async function sendGmailAppPasswordAsOperator(args: {
       to: args.to,
       ...(ccList.length ? { cc: ccList.join(", ") } : {}),
       subject: args.subject,
+      ...(args.idempotencyKey
+        ? { messageId: gmailMessageIdForIdempotencyKey(args.idempotencyKey) }
+        : {}),
       text: appendSignatureAndFooter(args.body, {
         signer: args.signer,
         fromAddress,
@@ -109,7 +117,7 @@ export async function sendGmailAppPasswordAsOperator(args: {
     return {
       ok: false,
       provider: "gmail_apppassword",
-      reason: "send_failed",
+      reason: smtpFailureReason(e),
       error: e instanceof Error ? e.message.split("\n")[0].slice(0, 200) : "smtp_error",
     };
   }

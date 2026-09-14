@@ -2,18 +2,17 @@
  * POST /api/leads/[id]/email — send an outbound email to a lead from
  * the dashboard, with the background consumer as the final fallback.
  *
- * On OASIS, the route first writes a private `direct_attempting` reservation,
- * then tries the available direct transports. A successful direct delivery
- * makes that reservation terminal. Only when every direct path declines or
- * fails is the same row atomically exposed as `queued` and the worker event
- * published. This prevents the portal and background consumer from sending the
- * same interaction at the same time. Other tenants retain their established
- * queue-first path.
+ * On OASIS, the route first writes a private `direct_reserved` row. Immediately
+ * before the first provider call it atomically becomes `direct_attempting`.
+ * Confirmed delivery is terminal, confirmed pre-delivery failure may become
+ * queued, and an ambiguous provider result becomes `delivery_unknown` and is
+ * never retried automatically. Other tenants retain their established path.
  *
  * Auth: session-cookie → tenant.
  * Body: { to_email: string, subject: string, body: string }
  */
 
+import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
@@ -33,6 +32,7 @@ import { assertMayWorkLead } from "@/lib/leads/rep-lead-access";
 import { buildCopyList, leadEmailCopiesReps, pickReplyTo } from "@/lib/leads/lead-copy-recipients";
 import { resolveAssigneeEmail } from "@/lib/leads/assignee-email";
 import { renderQuickEmailHtml } from "@/lib/leads/quick-email-html";
+import { gmailMessageIdForIdempotencyKey } from "@/lib/integrations/email-delivery-safety";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -223,7 +223,6 @@ export async function POST(
   const db = getServiceSupabase();
   const truncatedBody = text.slice(0, MAX_BODY);
   const truncatedSubject = subject.slice(0, MAX_SUBJECT);
-  const directAttemptStartedAt = new Date().toISOString();
 
   // ---- RESOLVE THE SENDING IDENTITY BEFORE QUEUEING ANYTHING ------------
   //
@@ -260,13 +259,15 @@ export async function POST(
       { status: 409 },
     );
   }
+  const directReservedAt = new Date().toISOString();
+  const attemptToken = randomUUID();
+  const rfc822MessageId = gmailMessageIdForIdempotencyKey(attemptToken);
 
   // Reserve the interaction before attempting any transport, but do NOT make
-  // it drainable yet. The background consumer selects only
-  // metadata.status='queued'. Inserting that status before the direct send
-  // created a double-send race: the consumer could deliver this row while
-  // this request was delivering the same message. The reservation becomes
-  // queued only after every direct path returns a fallback outcome.
+  // it drainable and do not yet claim that a provider call began. A terminated
+  // request in `direct_reserved` is safely queueable by the cron reconciler; a
+  // terminated request in `direct_attempting` is not, because delivery may have
+  // succeeded before its response was lost.
   const ins = await db
     .from("lead_interactions")
     .insert({
@@ -296,8 +297,14 @@ export async function POST(
         // their personal Gmail via Settings → Personal, sends from
         // THEIR address instead of the tenant-shared submissions@.
         acted_by_user_id: sess.userId,
-        status: brand === "oasis" ? "direct_attempting" : "queued",
-        ...(brand === "oasis" ? { direct_attempt_started_at: directAttemptStartedAt } : {}),
+        status: brand === "oasis" ? "direct_reserved" : "queued",
+        ...(brand === "oasis"
+          ? {
+              direct_reserved_at: directReservedAt,
+              attempt_token: attemptToken,
+              rfc822_message_id: rfc822MessageId,
+            }
+          : {}),
       },
     })
     .select("id, created_at")
@@ -412,6 +419,7 @@ export async function POST(
   // it never had. Before #405 this route copied nobody on SunBiz. There the
   // list stays empty, which every transport below already sends with no Cc
   // header. See leadEmailCopiesReps.
+  let oasisMailboxFrom: string | null = null;
   let copyList: string[] = [];
   if (leadEmailCopiesReps(brand)) {
     // The route never loaded the lead before now. `assigned_to` was read in only
@@ -444,7 +452,7 @@ export async function POST(
     // so a send that fell through to the bridge could still copy the From address
     // onto its own message. Excluding once, at the point the list is built, closes
     // every transport at the same place.
-    const oasisMailboxFrom = brand === "oasis" ? await resolveOasisMailboxFrom(sess.tenantId) : null;
+    oasisMailboxFrom = brand === "oasis" ? await resolveOasisMailboxFrom(sess.tenantId) : null;
     copyList = buildCopyList({
       assignedRepEmail,
       senderEmail: sess.email,
@@ -493,10 +501,58 @@ export async function POST(
   //      operator hasn't connected Gmail, or their token is dead/send fails.
   type SendOutcome =
     | { status: "sent"; agent_source?: string; via?: string; from_address?: string }
-    | { status: "queued"; reason: string };
+    | { status: "queued"; reason: string }
+    | { status: "delivery_unknown"; reason: string }
+    | { status: "blocked"; reason: string }
+    | { status: "reservation_failed"; reason: string };
   let sendResult: SendOutcome;
   let gmailFrom: string | null = null;
   let gmailMsgId: string | null = null;
+  let oasisReservationState: "direct_reserved" | "direct_attempting" = "direct_reserved";
+  let directAttemptStartedAt: string | null = null;
+
+  // Move the private reservation to `direct_attempting` immediately before the
+  // first provider call. A compare-and-set failure stops the send: proceeding
+  // without a durable marker would let the stale reconciler queue the same row.
+  const beginOasisDirectAttempt = async (): Promise<string | null> => {
+    if (brand !== "oasis" || oasisReservationState === "direct_attempting") return null;
+    const startedAt = new Date().toISOString();
+    try {
+      const started = await db
+        .from("lead_interactions")
+        .update({
+          metadata: {
+            requested_by_profile_id: sess.profileId,
+            requested_by_email: sess.email,
+            acted_by_user_id: sess.userId,
+            status: "direct_attempting",
+            direct_reserved_at: directReservedAt,
+            direct_attempt_started_at: startedAt,
+            attempt_token: attemptToken,
+            rfc822_message_id: rfc822MessageId,
+          },
+        })
+        .eq("id", ins.data.id)
+        .eq("tenant_id", sess.tenantId)
+        .eq("metadata->>status", "direct_reserved")
+        .eq("metadata->>attempt_token", attemptToken)
+        .select("id")
+        .maybeSingle();
+      if (started.error || !started.data?.id) {
+        throw started.error || new Error("reservation_state_mismatch");
+      }
+    } catch (err) {
+      console.error("[leads.email] direct attempt transition failed", {
+        interaction_id: ins.data.id,
+        tenant_id: sess.tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return err instanceof Error ? err.message : "reservation_transition_failed";
+    }
+    oasisReservationState = "direct_attempting";
+    directAttemptStartedAt = startedAt;
+    return null;
+  };
 
   // Send preference: operator app-password (our OAuth-free working path — sends
   // FROM the operator's own address) → operator OAuth → submissions@ queue. Each
@@ -541,7 +597,15 @@ export async function POST(
     // behaviour before the credential is stored is byte-for-byte what shipped
     // today. Nothing to roll back if it is never set.
     if (brand === "oasis") {
-
+      // No provider is configured, so no delivery attempt happened. The row
+      // remains `direct_reserved` and is safe to expose to the durable queue.
+      if (!oasisMailboxFrom) {
+        return { status: "queued", reason: "no immediate OASIS mailbox configured" };
+      }
+      const reservationError = await beginOasisDirectAttempt();
+      if (reservationError) {
+        return { status: "reservation_failed", reason: reservationError };
+      }
       const shared = await sendOasisSharedGmail({
         tenantId: sess.tenantId,
         to: toEmail,
@@ -576,6 +640,7 @@ export async function POST(
         // ...and the plain-text alternative signs identically. A prospect whose
         // client blocks HTML must not see a different name from one who does.
         signer: messageSigner,
+        idempotencyKey: attemptToken,
       });
       if (shared.ok) {
         // RECORD THE RECEIPT. Two reasons, and the first one already cost us a
@@ -601,9 +666,23 @@ export async function POST(
       // through to the bridge here would re-attempt a send to someone who has
       // opted out — the gateway would refuse it again, but only by luck of
       // having its own gate. Stop here and say so.
-      if (shared.reason === "suppressed" || shared.reason === "suppression_error") {
-        return { status: "queued", reason: `oasis_shared_gmail: ${shared.error}`.slice(0, 240) };
+      if (
+        shared.reason === "suppressed" ||
+        shared.reason === "suppression_error" ||
+        shared.reason === "brand_mismatch"
+      ) {
+        return { status: "blocked", reason: `oasis_shared_gmail: ${shared.error}`.slice(0, 240) };
       }
+      if (shared.reason === "delivery_unknown") {
+        return {
+          status: "delivery_unknown",
+          reason: `oasis_shared_gmail: ${shared.error}`.slice(0, 240),
+        };
+      }
+      // A confirmed pre-delivery failure is handed to the durable queue. Do
+      // not call the bridge synchronously here: losing its response after a
+      // successful send would make an automatic fallback a duplicate.
+      return { status: "queued", reason: `oasis_shared_gmail: ${shared.error}`.slice(0, 240) };
     }
 
     return triggerImmediateSend(req, {
@@ -625,7 +704,20 @@ export async function POST(
   };
 
   if (await operatorHasAppPassword(sess.tenantId, sess.userId)) {
+    const reservationError = await beginOasisDirectAttempt();
+    if (reservationError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "direct_reservation_transition_failed",
+          interaction_id: ins.data.id,
+          message: "The send could not be confirmed. Check the timeline before trying again.",
+        },
+        { status: 503 },
+      );
+    }
     const g = await sendGmailAppPasswordAsOperator({
+      ...(brand === "oasis" ? { idempotencyKey: attemptToken } : {}),
       tenantId: sess.tenantId,
       userId: sess.userId,
       to: toEmail,
@@ -649,13 +741,36 @@ export async function POST(
       sendResult = { status: "sent", agent_source: "gmail_apppassword", via: "gmail_apppassword", from_address: g.from_address };
       gmailFrom = g.from_address;
       gmailMsgId = g.gmail_message_id;
+    } else if (brand === "oasis" && g.reason === "delivery_unknown") {
+      sendResult = {
+        status: "delivery_unknown",
+        reason: `gmail_apppassword: ${g.error}`.slice(0, 240),
+      };
+    } else if (
+      brand === "oasis" &&
+      (g.reason === "suppressed" || g.reason === "suppression_error")
+    ) {
+      sendResult = { status: "blocked", reason: `gmail_apppassword: ${g.error}`.slice(0, 240) };
     } else {
       // not_connected / send_failed → fall back to the queue (the daemon re-checks
       // suppression, so a suppressed recipient still won't actually go out).
       sendResult = await queueFallback();
     }
   } else if (await operatorHasGmailOAuth(sess.tenantId, sess.userId)) {
+    const reservationError = await beginOasisDirectAttempt();
+    if (reservationError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "direct_reservation_transition_failed",
+          interaction_id: ins.data.id,
+          message: "The send could not be confirmed. Check the timeline before trying again.",
+        },
+        { status: 503 },
+      );
+    }
     const g = await sendGmailAsOperator({
+      ...(brand === "oasis" ? { idempotencyKey: attemptToken } : {}),
       tenantId: sess.tenantId,
       userId: sess.userId,
       to: toEmail,
@@ -674,6 +789,18 @@ export async function POST(
       sendResult = { status: "sent", agent_source: "gmail_oauth", via: "gmail_oauth", from_address: g.from_address };
       gmailFrom = g.from_address;
       gmailMsgId = g.gmail_message_id;
+    } else if (brand === "oasis" && g.reason === "delivery_unknown") {
+      sendResult = {
+        status: "delivery_unknown",
+        reason: `gmail_oauth: ${g.error}`.slice(0, 240),
+      };
+    } else if (
+      brand === "oasis" &&
+      (g.reason === "suppressed" ||
+        g.reason === "suppression_error" ||
+        g.reason === "sender_mismatch")
+    ) {
+      sendResult = { status: "blocked", reason: `gmail_oauth: ${g.error}`.slice(0, 240) };
     } else {
       // not_connected / refresh_failed / send_failed → fall back to the queue so
       // the email still goes out via submissions@.
@@ -681,6 +808,18 @@ export async function POST(
     }
   } else {
     sendResult = await queueFallback();
+  }
+
+  if (sendResult.status === "reservation_failed") {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "direct_reservation_transition_failed",
+        interaction_id: ins.data.id,
+        message: "The send could not be confirmed. Check the timeline before trying again.",
+      },
+      { status: 503 },
+    );
   }
 
   // Only now, after every immediate transport declined or failed, may the OASIS
@@ -697,14 +836,20 @@ export async function POST(
             requested_by_email: sess.email,
             acted_by_user_id: sess.userId,
             status: "queued",
-            direct_attempt_started_at: directAttemptStartedAt,
+            direct_reserved_at: directReservedAt,
+            attempt_token: attemptToken,
+            rfc822_message_id: rfc822MessageId,
+            ...(directAttemptStartedAt
+              ? { direct_attempt_started_at: directAttemptStartedAt }
+              : {}),
             queued_at: queuedAt,
             queue_reason: sendResult.reason,
           },
         })
         .eq("id", ins.data.id)
         .eq("tenant_id", sess.tenantId)
-        .eq("metadata->>status", "direct_attempting")
+        .eq("metadata->>status", oasisReservationState)
+        .eq("metadata->>attempt_token", attemptToken)
         .select("id")
         .maybeSingle();
       if (queueTransition.error || !queueTransition.data?.id) {
@@ -763,6 +908,58 @@ export async function POST(
     }
   }
 
+  // An ambiguous delivery or a policy refusal is terminal. Freeze it for an
+  // operator to review; never expose it to either automatic sender and never
+  // advance the sales stage on an unconfirmed touch.
+  if (
+    brand === "oasis" &&
+    (sendResult.status === "delivery_unknown" || sendResult.status === "blocked")
+  ) {
+    const terminalStatus = sendResult.status;
+    try {
+      const unknownTransition = await db
+        .from("lead_interactions")
+        .update({
+          metadata: {
+            requested_by_profile_id: sess.profileId,
+            requested_by_email: sess.email,
+            acted_by_user_id: sess.userId,
+            status: terminalStatus,
+            direct_reserved_at: directReservedAt,
+            direct_attempt_started_at: directAttemptStartedAt,
+            attempt_token: attemptToken,
+            rfc822_message_id: rfc822MessageId,
+            ...(terminalStatus === "delivery_unknown"
+              ? { delivery_unknown_at: new Date().toISOString() }
+              : { blocked_at: new Date().toISOString() }),
+            send_error: sendResult.reason,
+            needs_operator_review: true,
+          },
+        })
+        .eq("id", ins.data.id)
+        .eq("tenant_id", sess.tenantId)
+        .eq("metadata->>status", "direct_attempting")
+        .eq("metadata->>attempt_token", attemptToken)
+        .select("id")
+        .maybeSingle();
+      if (unknownTransition.error || !unknownTransition.data?.id) {
+        trackingWarnings.push("terminal_send_receipt_update_failed");
+        console.error("[leads.email] terminal send receipt update failed", {
+          interaction_id: ins.data.id,
+          tenant_id: sess.tenantId,
+          error: unknownTransition.error?.message || "reservation_state_mismatch",
+        });
+      }
+    } catch (err) {
+      trackingWarnings.push("terminal_send_receipt_update_failed");
+      console.error("[leads.email] terminal send receipt update failed", {
+        interaction_id: ins.data.id,
+        tenant_id: sess.tenantId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // A confirmed direct delivery becomes terminal from the same private
   // reservation. The queue branch above is mutually exclusive, so this row can
   // never be exposed to the consumer after a successful send.
@@ -772,7 +969,14 @@ export async function POST(
       requested_by_email: sess.email,
       acted_by_user_id: sess.userId,
       status: brand === "oasis" ? "sent" : gmailFrom ? "sent" : "auto_sent",
-      ...(brand === "oasis" ? { direct_attempt_started_at: directAttemptStartedAt } : {}),
+      ...(brand === "oasis"
+        ? {
+            direct_reserved_at: directReservedAt,
+            direct_attempt_started_at: directAttemptStartedAt,
+            attempt_token: attemptToken,
+            rfc822_message_id: rfc822MessageId,
+          }
+        : {}),
       sent_via: sendResult.agent_source,
       ...(gmailFrom ? { from_address: gmailFrom } : {}),
       ...(gmailMsgId ? { gmail_message_id: gmailMsgId } : {}),
@@ -786,6 +990,7 @@ export async function POST(
           .eq("id", ins.data.id)
           .eq("tenant_id", sess.tenantId)
           .eq("metadata->>status", "direct_attempting")
+          .eq("metadata->>attempt_token", attemptToken)
           .select("id")
           .maybeSingle();
         if (statusUpdate.error || !statusUpdate.data?.id) {
@@ -822,7 +1027,7 @@ export async function POST(
   // The OASIS sales stage advances only after the message is confirmed sent or
   // the fallback reservation is confirmed queued. A failed queue transition
   // returns above and therefore cannot move a lead for an email that may vanish.
-  if (brand === "oasis") {
+  if (brand === "oasis" && (sendResult.status === "sent" || sendResult.status === "queued")) {
     await bumpLeadStage();
   }
 

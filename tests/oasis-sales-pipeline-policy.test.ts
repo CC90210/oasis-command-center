@@ -14,6 +14,7 @@ import {
   isReleasedOasisPipelineRow,
   isOasisPipelineAdmin,
   mayOperateOasisDeliveryStage,
+  ownsOasisDeliveryRecord,
   resolveOasisDeliveryQueueScope,
   stagesForOasisRole,
 } from "../lib/oasis-sales-pipeline-policy";
@@ -36,7 +37,7 @@ assert.deepEqual(REP_PIPELINE_STAGE_KEYS, [
 assert.deepEqual(AGENT_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
 assert.deepEqual(OPENER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
 assert.deepEqual(CLOSER_PIPELINE_STAGE_KEYS, REP_PIPELINE_STAGE_KEYS);
-assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["onboarding", "in_build", "client_review"]);
+assert.deepEqual(BUILDER_DELIVERY_STAGE_KEYS, ["won", "onboarding", "in_build", "client_review"]);
 
 assert.deepEqual(stagesForOasisRole("agent").map((s) => s.key), AGENT_PIPELINE_STAGE_KEYS);
 assert.deepEqual(stagesForOasisRole("opener").map((s) => s.key), OPENER_PIPELINE_STAGE_KEYS);
@@ -334,6 +335,16 @@ assert.equal(
   true,
   "a builder named as collaborator can OPEN the row he may MUTATE — since 2026-08-25 he is a sales operator, and read must never sit below write",
 );
+assert.equal(
+  ownsOasisDeliveryRecord(collaboratorOnlyBuild, "builder-1"),
+  false,
+  "sales collaboration does not grant control of another builder's paid fulfillment handoff",
+);
+assert.equal(
+  ownsOasisDeliveryRecord(fulfillmentOwnedBuild, "builder-1"),
+  true,
+  "the explicit fulfillment owner controls delivery even while assigned_to still names the closer",
+);
 assert.deepEqual(
   filterWebsiteSalesRows(
     [assignedBuild, anotherBuildersBuild, fulfillmentOwnedBuild, collaboratorOnlyBuild],
@@ -374,6 +385,11 @@ assert.deepEqual(
   "internal/admin delivery viewers retain the complete tenant queue",
 );
 assert.equal(mayOperateOasisDeliveryStage("builder", "onboarding"), true);
+assert.equal(
+  mayOperateOasisDeliveryStage("builder", "won"),
+  true,
+  "the assigned builder can accept a fully paid deal into onboarding",
+);
 assert.equal(mayOperateOasisDeliveryStage("builder", "launched"), false);
 
 /* ─── CC, 2026-08-25: the builder sells too. The full loop, pinned. ─────────
