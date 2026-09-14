@@ -7,8 +7,41 @@ import {
   matchIndustryAutomationGroup,
   type AutomationBuildType,
 } from "@/lib/industry-automations";
+import { CAPABILITIES } from "@/lib/web-leads/automations";
+import { LADDER_GATE_NOTE, STAGE_HEADING } from "@/components/web-leads/CapabilityRow";
 
 const TYPES: readonly AutomationBuildType[] = ["Website", "Website + workflow", "Custom build"];
+
+/**
+ * THE STAGE GATE FOLLOWS THE PRODUCT ACROSS BOTH LISTS (final review,
+ * 2026-09-14).
+ *
+ * `BattleCard.tsx` renders the capability catalogue and then this menu,
+ * adjacent, on one screen. On a no-website, parked or not-scored lead the
+ * order is facts, presence, build, industry-automations. The catalogue puts
+ * "Missed-call text-back" under "Later, once the first evidence reports have
+ * landed" and tells the rep not to open with it; this menu carried an entry
+ * with the identical title, `defaultOpen`, with an ask-now discovery
+ * question and no gate. Two contradictory instructions about one product,
+ * one section apart, and spec §3.3 makes the gate a product constraint the
+ * operator declined to drop.
+ *
+ * A gated entry therefore renders the capability's OWN gate in place of its
+ * "Ask this" block: the same `STAGE_HEADING`, the same `stageReason`, the
+ * same do-not-open sentence, all resolved from the catalogue's modules at
+ * render time so the two surfaces cannot drift apart. The discovery question
+ * is removed rather than demoted, because "ask this now" is precisely what
+ * the gate countermands.
+ *
+ * It resolves nothing and renders the ordinary card when `gatedBy` names no
+ * live capability, which is a rendering decision, not a silent pass: the
+ * cross-check in `tests/web-leads-automations.test.ts` is what fails on an
+ * unresolvable or missing `gatedBy`, and it fails on the data rather than
+ * waiting for someone to look at a card.
+ */
+const CAPABILITY_BY_ID = new Map(CAPABILITIES.map((c) => [c.id, c]));
+
+const CARD_LABEL = "text-[10px] font-bold uppercase tracking-[0.13em] text-fg-muted";
 
 export function IndustryAutomationGuide({ initialIndustry }: { initialIndustry?: string | null }) {
   const initial = matchIndustryAutomationGroup(initialIndustry);
@@ -78,21 +111,38 @@ export function IndustryAutomationGuide({ initialIndustry }: { initialIndustry?:
         <p className="rounded-lg border border-bg-border p-4 text-sm text-fg-muted">No opportunities match that search.</p>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {visible.map((item) => (
-            <article key={item.name} className="rounded-xl border border-bg-border bg-bg-elev/40 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <h4 className="text-sm font-bold text-fg">{item.name}</h4>
-                <span className="shrink-0 rounded-full border border-bg-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
-                  {item.buildType}
-                </span>
-              </div>
-              <p className="mt-2 text-sm leading-relaxed text-fg-muted">{item.outcome}</p>
-              <div className="mt-3 border-t border-bg-border pt-3">
-                <p className="text-[10px] font-bold uppercase tracking-[0.13em] text-fg-muted">Ask this</p>
-                <p className="mt-1 text-sm font-medium leading-relaxed text-fg">&ldquo;{item.discovery}&rdquo;</p>
-              </div>
-            </article>
-          ))}
+          {visible.map((item) => {
+            const gate = item.gatedBy ? CAPABILITY_BY_ID.get(item.gatedBy) ?? null : null;
+            return (
+              <article key={item.name} className="rounded-xl border border-bg-border bg-bg-elev/40 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="text-sm font-bold text-fg">{item.name}</h4>
+                  <span className="shrink-0 rounded-full border border-bg-border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-fg-muted">
+                    {item.buildType}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm leading-relaxed text-fg-muted">{item.outcome}</p>
+                {gate ? (
+                  // The catalogue's gate, verbatim, for the same product.
+                  // Never a colour: design spec §6 bans colour keyed to a
+                  // stage exactly as it bans colour keyed to a score.
+                  <div className="mt-3 border-t border-bg-border pt-3">
+                    <p className={CARD_LABEL}>When to sell it</p>
+                    <p className="mt-1 text-sm font-semibold leading-relaxed text-fg-dim">{STAGE_HEADING[gate.stage]}</p>
+                    {gate.stageReason && (
+                      <p className="mt-1 text-xs leading-relaxed text-fg-muted">{gate.stageReason}</p>
+                    )}
+                    <p className="mt-1 text-xs leading-relaxed text-fg-muted">{LADDER_GATE_NOTE.single}</p>
+                  </div>
+                ) : (
+                  <div className="mt-3 border-t border-bg-border pt-3">
+                    <p className={CARD_LABEL}>Ask this</p>
+                    <p className="mt-1 text-sm font-medium leading-relaxed text-fg">&ldquo;{item.discovery}&rdquo;</p>
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
       <p className="text-xs leading-relaxed text-fg-muted">

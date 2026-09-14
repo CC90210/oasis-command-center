@@ -32,15 +32,40 @@
  *
  * ═══ THE FIGURE ON THE ROW ═════════════════════════════════════════════════
  *
- * `recoverable` is WEIGHTED composite points (fix round 2, 2026-09-14):
- * `points * weight * 100 / dimensionRawTotal`, summed over the codes this
- * lead actually failed. That is the same unit `recoverablePoints` in
- * `angles.ts` produces and the same unit the retired `FixFirst` printed as
+ * `recoverable` is WEIGHTED composite points, computed in
+ * `automations-match.ts` and never here. Per failing code it is
+ * `Math.max(0, 100 - dimension.score) * dimension.weight * points /
+ * failedRaw`, where `failedRaw` is the summed raw `points` of the FAILING
+ * checks in that code's own dimension, summed over the codes this lead
+ * actually failed. That is `recoverablePoints(dimension)` from `angles.ts`
+ * split across the codes that earned it, in proportion to their raw points.
+ * It is the same unit `recoverablePoints`
+ * produces and the same unit the retired `FixFirst` printed as
  * "+9.8", so the figure is comparable across capabilities and across the
  * rest of the card, and it is printed in that same convention: right
  * aligned, one decimal, tabular numerals, the constant cyan every "+points"
  * figure on this card wears. That cyan is the METRIC's identity, worn
  * identically at every value, not a grade.
+ *
+ * 🚨 THIS DOCBLOCK CARRIED THE WRONG FORMULA until the final review
+ * (2026-09-14), and it is named here rather than quietly swapped because the
+ * direction of the error is the point. It said `points * weight * 100 /
+ * dimensionRawTotal`, which is fix round 2's shape: exactly the expression
+ * fix round 3 REMOVED and which `automations-match.ts:46-70` spends fifty
+ * lines justifying the removal of. It reconstructs an UNROUNDED score where
+ * `quality-model.js`'s `scoreDimension` stores a rounded one, which printed a
+ * different figure at one decimal on 504 of the 1,145 reachable failing
+ * subsets and ordered 1,764 dimension pairs opposite to `recoverablePoints`,
+ * the function that chooses the angle printed higher up the same card.
+ * `CapabilityCatalogue.tsx`'s docblock describes the shipped formula
+ * correctly, so the two sibling components disagreed, inside one branch,
+ * about how the number on this row is computed.
+ *
+ * The derivation, the rounding argument and the measured floating-point
+ * bound all live in `automations-match.ts`'s module docblock, beside the
+ * code. This one states the formula and points there rather than restating
+ * the reasoning, because a second copy of a fifty-line argument is what
+ * drifted.
  *
  * An earlier draft of this component printed no figure at all, on the
  * grounds that a bundle sum mixed scales. That was true of the RAW key it
@@ -98,8 +123,13 @@ import { MeasuredLine, Meter } from "./audit-parts";
  *              includes, but is not limited to, a lead with no audit).
  *              `Matched.recoverable` is `null` in this state and must never
  *              be rendered as a figure.
- *   noWebsite  the lead has no website, so nothing has been or can be
- *              measured. Every website capability is part of one build.
+ *   noWebsite  our record carries no working website for this lead: either
+ *              no address at all, or one that resolved to a parked for-sale
+ *              page. Nothing here has been measured. Every website
+ *              capability is part of one build. Note the asymmetry the copy
+ *              has to honour: `parked` is something we looked at,
+ *              `no_website` is something we simply do not hold. See
+ *              `hasLiveWebsite` in `automations-match.ts`.
  *   ladder     a `stage !== "today"` entry. These carry no codes and are
  *              never matched against an audit at all.
  */
@@ -125,6 +155,31 @@ export const STAGE_HEADING: Record<Stage, string> = {
   month_six_plus: "Later, month six at the earliest",
   year_plus: "Later, about a year in",
 };
+
+/**
+ * The instruction that goes with a later-stage entry, in the two positions a
+ * later-stage entry is rendered in. ONE export with two fields, not two
+ * strings in two files, because the two positions are on the SAME screen and
+ * a rep reading contradictory instructions about one product is the defect
+ * this exists to close (final review, 2026-09-14).
+ *
+ *   `group`   above a stage group in `CapabilityCatalogue.tsx`, where
+ *             several entries share the heading.
+ *   `single`  on one card in `IndustryAutomationGuide.tsx`, whose menu
+ *             carries entries with the same title as a ladder capability.
+ *             That component renders `defaultOpen` on the battle card with
+ *             an ask-now discovery question, directly under the catalogue's
+ *             gated copy for the same product, until it is gated too. See
+ *             `gatedBy` in `lib/industry-automations.ts`.
+ *
+ * `group` is byte-identical to the sentence the catalogue already shipped.
+ * Nothing about the gate is coloured: design spec §6 bans colour keyed to a
+ * stage exactly as it bans colour keyed to a score.
+ */
+export const LADDER_GATE_NOTE = {
+  group: "Read these only if they ask what else we do. Do not open with them.",
+  single: "Read this one only if they ask what else we do. Do not open with it.",
+} as const;
 
 /** "Costs them:" and "We'd fix it:", verbatim from `remedies.ts`, are the
  *  two lines the rest of this card already speaks. They are rendered in two
@@ -309,11 +364,34 @@ export function CapabilityRow({
                   );
                 })}
               </ul>
-              {ranking !== null && hue && (
+              {/* `&& hue` REMOVED (final review, 2026-09-14): it could never
+                  be false, so it read as a live guard over a case that does
+                  not exist. A non-null `ranking` requires `state.kind ===
+                  "scored"`, which requires a non-empty `failedCodes`, which
+                  means those codes were observed in `dimensions`, which means
+                  the catalogue's `primaryDimensionKey` resolved a key, and
+                  `hueFor` in `battle-hud.ts` returns `FALLBACK_HUE` rather
+                  than null for an unknown one. `Meter`'s `hue` is optional
+                  and it draws a plain bar without one, so `?? undefined`
+                  keeps the type honest instead of asserting the
+                  impossibility away.
+
+                  THE CAPTION'S SECOND SENTENCE IS HEDGED, and the hedge is
+                  load bearing. The per-DIMENSION total this splits IS the
+                  number the rest of the card counts in:
+                  `recoverablePoints(d)`, which `selectAngle` and the shape
+                  list both read. The split of that total ACROSS the codes
+                  inside one dimension is proportional to raw points, which
+                  `automations-match.ts:107-112` states plainly is "a choice
+                  this module makes, not a number the scoring model stores".
+                  Unhedged, the caption told a rep that a bundle's share was
+                  something the model records. Two capabilities splitting one
+                  dimension are ordered by our rule, not by the model's. */}
+              {ranking !== null && (
                 <div className="mt-3">
-                  <Meter value={ranking} hue={hue} drawn={drawn} reduced={reduced} />
+                  <Meter value={ranking} hue={hue ?? undefined} drawn={drawn} reduced={reduced} />
                   <p className="mt-1 text-[11px] leading-relaxed text-fg-muted/80">
-                    {"The figure on the row, drawn against the largest one in this list. It is points back on their overall score, which is the same number the rest of this card counts in."}
+                    {"The figure on the row, drawn against the largest one in this list. It is points back on their overall score, counted in the same unit as the rest of this card. How that area's points are split between the pieces inside it is our own working, not something the scoring model stores."}
                   </p>
                 </div>
               )}
@@ -325,11 +403,19 @@ export function CapabilityRow({
               who sees nothing here assumes the panel failed to load, and a
               rep who sees a zero tells an owner something the audit never
               established. */}
+          {/* WHAT THE RECORD SUPPORTS, NOT WHAT THE WORLD CONTAINS (final
+              review, 2026-09-14). This said "There is no live website for
+              this business", an absolute nothing in this branch measured:
+              `no_website` is `fetchAudit`'s `if (!lead.websiteUrl)` line, a
+              fact about a missing field in our own directory record. It now
+              says what we hold. The line arming the rep for an owner who
+              answers with an address lives in the catalogue's intro, which
+              renders once; repeating it on all ten rows would bury it. */}
           {state.kind === "noWebsite" && (
             <div>
               <p className={SECTION_LABEL}>Where this stands today</p>
               <p className={CONTEXT_TEXT}>
-                {"There is no live website for this business, so none of this has been measured and none of it exists to be fixed. Read this as part of what gets built, not as a list of things that are wrong."}
+                {"We have no working website on file for this business, so none of this has been measured and there is nothing here to fix. Read this as part of what gets built, not as a list of things that are wrong."}
               </p>
             </div>
           )}
@@ -389,13 +475,36 @@ export function CapabilityRow({
             )}
           </div>
 
-          {/* Layer 5. */}
+          {/* Layer 5. THE REASON IS NOT REPEATED HERE (final review,
+              2026-09-14). `stageReason` is ~60 words and it already renders
+              above, outside the button, on every open AND closed later-stage
+              row, which is the copy design spec §3.3 actually requires: a
+              rep must be able to read the gate without opening anything. A
+              second verbatim copy inside the detail put the same paragraph
+              on screen twice, a few hundred pixels apart. The heading below
+              is what this layer adds that the always-visible line does
+              not. */}
           <div className="border-t border-bg-border pt-3">
             <p className={SECTION_LABEL}>When to sell it</p>
             <p className="mt-1.5 text-xs font-semibold text-fg-dim">{STAGE_HEADING[capability.stage]}</p>
-            {capability.stageReason && <p className={CONTEXT_TEXT}>{capability.stageReason}</p>}
           </div>
 
+          {/* DEAD TODAY, AND LABELLED RATHER THAN DELETED (final review,
+              2026-09-14). No entry in `automations.ts` sets `source` and its
+              own docblock says none can: spec §7.3's competitor-price
+              exemption is the only thing the field is for, and that
+              exemption "has nowhere to live here" because every `Capability`
+              field is spoken or read off the screen mid-call. So this branch
+              has never rendered and cannot render as the module stands. It
+              is kept, not removed, because the field's own declaration
+              states it is required the moment any copy cites a figure, and a
+              future entry that sets it must not have its attribution
+              silently dropped. No test enforces that requirement today: the
+              money sweep in tests/web-leads-automations.test.ts is a FLAT
+              ban, deliberately not source-gated, and its own comment says
+              why. Same honesty as the unreachable empty-panel
+              sentence in `CapabilityCatalogue.tsx`: an unreachable branch
+              says so. */}
           {capability.source && (
             <p className="text-[11px] leading-relaxed text-fg-muted/70">Source: {capability.source}</p>
           )}

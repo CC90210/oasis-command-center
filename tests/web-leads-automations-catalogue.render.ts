@@ -32,6 +32,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CapabilityCatalogue } from "../components/web-leads/CapabilityCatalogue";
 import { CapabilityRow, type RowState } from "../components/web-leads/CapabilityRow";
 import { CheckEvidenceLine } from "../components/web-leads/audit-parts";
+import { IndustryAutomationGuide } from "../components/playbook/IndustryAutomationGuide";
 import { CAPABILITIES } from "../lib/web-leads/automations";
 import { hasLiveWebsite } from "../lib/web-leads/automations-match";
 import type { CheckResult, DimensionProfile } from "../lib/web-leads/audit";
@@ -210,6 +211,18 @@ const scenarios: Record<string, () => string> = {
   // something for the unmeasurable branch to displace.
   rowEvidenceWithoutUnmeasurable: () =>
     row({ kind: "scored", failedCodes: ["tel_link"] }, { signals: { telLinks: 0 } }),
+
+  // ── THE OTHER SECTION ON THE SAME CARD ─────────────────────────────────
+  //
+  // `BattleCard.tsx` renders `IndustryAutomationGuide` directly under the
+  // catalogue, `defaultOpen`, on every lead. Its menu carries an entry with
+  // the same title as a gated ladder capability, so it is rendered here to
+  // pin that the gate really reaches the screen and the ask-now question
+  // really leaves it. `initialIndustry` is what the card passes
+  // (`lead.industry`); "Restaurant" resolves to the group holding the
+  // collision.
+  industryGuideGated: () =>
+    renderToStaticMarkup(React.createElement(IndustryAutomationGuide, { initialIndustry: "Restaurant" })),
 };
 
 const out: Record<string, string> = {};

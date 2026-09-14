@@ -113,9 +113,32 @@
  * exactly the one-colour-one-area coding three tests protect. No area
  * identified, no identity mark.
  *
- * It does still mean the hue is not a constant per capability across leads
- * the way it is per dimension across surfaces: an unaudited lead's list
- * carries no dots at all.
+ * WHAT IT COSTS, STATED WIDER THAN IT USED TO BE (final review,
+ * 2026-09-14). The hue is not a constant per capability across leads the way
+ * it is per dimension across surfaces, and the limit is not only "an
+ * unaudited lead's list carries no dots at all", which is what this
+ * paragraph said. TWO BUNDLES STRADDLE DIMENSIONS, so on a PARTIAL audit
+ * they can wear the wrong area's colour rather than none:
+ *
+ *   `look-current`               `fresh` (content) among eight design codes.
+ *   `findable-and-safe-to-click` `https` (performance) among five
+ *                                discoverability codes.
+ *
+ * `primaryDimensionKey` counts only the codes actually present in THIS
+ * lead's `dimensions`. On an audit where the minority dimension was scored
+ * and the majority one was not, the minority code is the only one counted,
+ * so it wins the count and the row wears content's or performance's hue
+ * while the bundle belongs to design or discoverability. Nothing is
+ * mislabelled in words and no number moves; the dot points at the wrong
+ * area on the radar beside it.
+ *
+ * This is reachable, not theoretical: the `partial` path is the one this
+ * branch made live, and it is exactly the shape where one dimension carries
+ * checks and the rest carry none. It is not fixed by a typed
+ * capability-to-dimension table, which is the thing this derivation exists
+ * to avoid: that table drifts silently the moment a code moves, on EVERY
+ * lead, which is a worse failure than a wrong dot on a partial audit. It is
+ * recorded rather than papered over.
  *
  * ═══ THE ANGLE ALREADY ON SCREEN ═══════════════════════════════════════════
  *
@@ -157,7 +180,7 @@
 
 import { useMemo, useState } from "react";
 import { hueFor } from "./battle-hud";
-import { CapabilityRow, STAGE_HEADING, type RowState } from "./CapabilityRow";
+import { CapabilityRow, LADDER_GATE_NOTE, STAGE_HEADING, type RowState } from "./CapabilityRow";
 import type { CheckResult, DimensionProfile } from "@/lib/web-leads/audit";
 import { STAGES, type Capability, type Stage } from "@/lib/web-leads/automations";
 import { matchCapabilities, type Matched } from "@/lib/web-leads/automations-match";
@@ -167,8 +190,21 @@ import { matchCapabilities, type Matched } from "@/lib/web-leads/automations-mat
  *  where there is plenty to show, so the panel is never rows with no
  *  explanation. */
 const PRIMARY_INTRO: Record<"noWebsite" | "noAudit" | "partial" | "clean" | "ranked", string> = {
+  // WHAT THE RECORD SUPPORTS, NOT WHAT THE WORLD CONTAINS (final review,
+  // 2026-09-14). This used to open "There is no website for this business",
+  // which is a verified fact about the world that nothing here verified.
+  // `hasWebsite` is false for two audit states and only one of them is a
+  // measurement: `parked` means the domain resolved to a for-sale page, but
+  // `no_website` is `fetchAudit`'s first line, `if (!lead.websiteUrl)`, so it
+  // restates a missing field in our own directory record. `NotScored` renders
+  // directly above this on the same screen and hedges it correctly ("No
+  // website found yet, needs checking"); this sentence then stated it as
+  // settled and built the whole pitch on it, so an owner answering "we do,
+  // it's at acme.ca" ended the call. It now says what we hold, and hands the
+  // rep the line that keeps the pitch alive when the owner says otherwise.
+  // See `hasLiveWebsite` in `automations-match.ts`.
   noWebsite:
-    "There is no website for this business, so there is nothing to pick apart. This is the whole build, as one thing. Talk about what they would get, not about what is wrong.",
+    "We have no working website on file for this business, so there is nothing here to pick apart. This is the whole build, as one thing. Talk about what they would get, not about what is wrong. If they tell you they do have a site, take the address and keep going: what you are selling is the same either way.",
   noAudit:
     "This site has not been checked yet, so nothing below is ranked and no finding here is specific to them. It is the full list of what we build for a website. Ask what they have rather than telling them.",
   partial:
@@ -447,9 +483,11 @@ export function CapabilityCatalogue({
         return (
           <div key={stage} className="mt-5 border-t border-bg-border pt-4">
             <p className={GROUP_HEADING}>{STAGE_HEADING[stage]}</p>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              {"Read these only if they ask what else we do. Do not open with them."}
-            </p>
+            {/* Shared with `IndustryAutomationGuide.tsx`, which renders on
+                the same card and carries entries with the same titles. Two
+                copies of this instruction is how one product ends up gated
+                on one section and open-with-it on the next. */}
+            <p className="mt-1 text-xs leading-relaxed text-fg-muted">{LADDER_GATE_NOTE.group}</p>
             <ul className="mt-2 space-y-1">{entries.map(renderRow)}</ul>
           </div>
         );

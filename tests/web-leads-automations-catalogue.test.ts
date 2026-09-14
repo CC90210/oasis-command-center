@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { spawnSync } from "node:child_process";
 import { CAPABILITIES } from "../lib/web-leads/automations";
+import { INDUSTRY_AUTOMATIONS } from "../lib/industry-automations";
 import { UNMEASURABLE_CHECKS, evidenceStateFor } from "../lib/web-leads/check-evidence";
 import { hasLiveWebsite } from "../lib/web-leads/automations-match";
 
@@ -49,6 +50,22 @@ const html: Record<string, string> = JSON.parse(r.stdout);
 /** Markup with the tags stripped, for asserting on what a rep would read. */
 const text = (key: string) => html[key].replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
 
+/** The same, with the entities React escapes in a text child put back, so an
+ *  assertion can compare against a string taken straight from `automations.ts`
+ *  or `industry-automations.ts`. Without it every sentence containing an
+ *  apostrophe silently fails to match: React writes `you've` as `you&#x27;ve`
+ *  and `text()` strips tags, not entities. `&amp;` is undone last, or an
+ *  escaped `&amp;#x27;` would decode twice. */
+const readable = (key: string) =>
+  text(key)
+    .replace(/&#x27;|&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&ldquo;/g, "“")
+    .replace(/&rdquo;/g, "”")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+
 const TODAY_COUNT = CAPABILITIES.filter((c) => c.stage === "today").length;
 const LADDER_COUNT = CAPABILITIES.filter((c) => c.stage !== "today").length;
 
@@ -65,7 +82,21 @@ const DOT = "h-1.5 w-1.5 shrink-0 rounded-full";
 // ---------------------------------------------------------------------------
 {
   assert.match(text("introNoAudit"), /has not been checked yet/, "no audit must say so");
-  assert.match(text("introNoWebsite"), /no website for this business/, "no website must say so");
+  // RE-AIMED AT THE HEDGED CLAIM (final review, 2026-09-14). This pinned
+  // "no website for this business", an absolute. `hasWebsite` is false for
+  // two audit states and only `parked` is a measurement: `no_website` is
+  // `fetchAudit`'s `if (!lead.websiteUrl)` line, so it restates a missing
+  // field in our own record. The intro now says what the record holds, and
+  // this assertion pins THAT, not the absolute it replaced. It is not a
+  // relaxation: the doesNotMatch half below is re-aimed to the same phrase,
+  // so an unreachable or unchecked lead still may not be told a site is
+  // absent, and section 4b's positive half still requires the sentence.
+  assert.match(text("introNoWebsite"), /no working website on file/, "no website on file must say so, and say whose file");
+  assert.doesNotMatch(
+    text("introNoWebsite"),
+    /There is no website for this business/i,
+    "the intro must never assert the absence of a website as a fact: nothing measured it",
+  );
   assert.match(text("introClean"), /none of the things we look for came back failing/, "a complete clean audit must say so");
   assert.match(text("introRankedFull"), /heaviest first/, "a lead with findings gets the ranked headline");
 
@@ -157,10 +188,18 @@ console.log("web-leads-automations-catalogue: null never renders as a figure OK"
   // Each non-scored state says something instead of nothing.
   assert.match(text("rowClean"), /they all passed/, "a clean row says it is clean");
   assert.match(text("rowUnscored"), /has been checked for this business/, "an unscored row says nothing was checked");
-  // "no LIVE website" rather than "no website ... yet": this row state is
-  // shared by `no_website` and `parked`, and "yet" asserts the first of those.
-  // A lapsed domain listed for sale is not a business that never built one.
-  assert.match(text("rowNoWebsite"), /no live website for this business/, "a no-website row says there is no live site");
+  // "no working website ON FILE" rather than "there is no live website":
+  // this row state is shared by `no_website` and `parked`, and only `parked`
+  // is something we looked at. A lapsed domain listed for sale is not a
+  // business that never built one, and a lead whose URL our record never
+  // carried is not a business without a site. Both are covered by a sentence
+  // about the record; neither is covered by a sentence about the world.
+  assert.match(text("rowNoWebsite"), /no working website on file/, "a no-website row says what the record holds");
+  assert.doesNotMatch(
+    text("rowNoWebsite"),
+    /There is no live website for this business/i,
+    "the row must never assert the absence of a website as a fact: nothing measured it",
+  );
   // And the grounding is really there on the scored one: the failing check's
   // own label and its remedies.ts cost line.
   assert.match(text("rowScored"), /LABEL:tel_link/, "a scored row names the specific failing check");
@@ -196,19 +235,33 @@ console.log("web-leads-automations-catalogue: bundle cost sentence suppressed of
   assert.equal(hasLiveWebsite({ state: "scored" }), true, "a scored lead obviously has a site");
 
   // And what each of those four renders on the card.
-  assert.match(text("cardNoWebsite"), /no website for this business/, "a no-website lead must be told there is no website");
-  assert.match(text("cardParked"), /no website for this business/, "a parked domain is a no-website pitch, not an unchecked one");
+  assert.match(text("cardNoWebsite"), /no working website on file/, "a no-website lead must be told we hold no website for them");
+  assert.match(text("cardParked"), /no working website on file/, "a parked domain is a no-website pitch, not an unchecked one");
   assert.match(text("cardNotScored"), /has not been checked yet/, "an unscored lead must be told nothing has been checked");
   assert.match(text("cardUnreachable"), /has not been checked yet/, "an unreachable site must be told nothing has been checked");
 
   // The half that matters more: neither pair may claim the other's fact.
   // Telling a rep calling a business with no website that "this site has not
   // been checked yet" invents a site; telling a rep whose crawl was blocked
-  // that "there is no website for this business" invents its absence.
+  // that "we have no working website on file" invents its absence.
   assert.doesNotMatch(text("cardNoWebsite"), /has not been checked yet/, "a no-website lead must not be told a site went unchecked");
   assert.doesNotMatch(text("cardParked"), /has not been checked yet/, "a parked lead must not be told its site went unchecked; we looked");
-  assert.doesNotMatch(text("cardUnreachable"), /no website for this business/, "a blocked crawl must never be reported as the absence of a website");
-  assert.doesNotMatch(text("cardNotScored"), /no website for this business/, "an unchecked site must never be reported as the absence of a website");
+  assert.doesNotMatch(text("cardUnreachable"), /no working website on file/, "a blocked crawl must never be reported as a lead we hold no site for");
+  assert.doesNotMatch(text("cardNotScored"), /no working website on file/, "an unchecked site must never be reported as a lead we hold no site for");
+
+  // AND THE ABSOLUTE IS GONE EVERYWHERE, not only where it was replaced. The
+  // sentence a rep reads aloud on the highest-stakes lead this feature
+  // produces must not claim a fact nothing measured, in ANY scenario: the
+  // no-website pitch is the one place the second mount exists for, and
+  // `NotScored` hedges correctly one section above it on the same screen.
+  for (const [key, markup] of Object.entries(html)) {
+    const rendered = text(key);
+    assert.ok(
+      !/there is no (?:live )?website for this business/i.test(rendered),
+      `${key}: an absolute claim that the business has no website. no_website is fetchAudit's "if (!lead.websiteUrl)" line, a fact about our own record, and an owner who answers with an address ends the call`,
+    );
+    assert.ok(markup.length > 0, `${key}: rendered nothing, so the sweep above proves nothing`);
+  }
 
   // The two ROW states, dead until the second mount existed. They live inside
   // an opened detail, so these scenarios open one.
@@ -217,10 +270,17 @@ console.log("web-leads-automations-catalogue: bundle cost sentence suppressed of
     /Nothing this covers has been checked for this business/,
     "the unscored row state must now be reachable from a real card input",
   );
+  // PINNED ON A ROW-ONLY FRAGMENT (final review, 2026-09-14). The obvious
+  // re-aim, `/no working website on file/`, is now satisfied by the INTRO
+  // rendered above these rows: the intro and the row state deliberately open
+  // with the same hedge, so the phrase is on this screen whether or not the
+  // row state renders at all. Verified: with the row sentence replaced
+  // wholesale, that version still passed. This matches the clause only the
+  // row carries.
   assert.match(
     text("cardNoWebsiteOpen"),
-    /no live website for this business/,
-    "the no-website row state must now be reachable from a real card input",
+    /none of this has been measured and there is nothing here to fix/,
+    "the no-website ROW state must now be reachable from a real card input, not merely the intro above it",
   );
   // Neither may print a figure. A `null` recoverable is UNSCORED, and "0
   // points to recover" told to an owner with no website is the exact claim
@@ -355,6 +415,72 @@ console.log("web-leads-automations-catalogue: ranking bar scaled against the rea
   }
 }
 console.log("web-leads-automations-catalogue: no blank panel, ladder always present OK");
+
+// ---------------------------------------------------------------------------
+// 8b. THE STAGE GATE IS NOT CONTRADICTED BY THE SECTION DIRECTLY BELOW IT.
+//
+//    `BattleCard.tsx` renders the catalogue and then `IndustryAutomationGuide`,
+//    adjacent, `defaultOpen`. The catalogue puts `missed-call-text-back` under
+//    a later stage with "Do not open with them"; the industry menu carried an
+//    entry with the identical title, an ask-now discovery question and no
+//    gate. Two contradictory instructions about one product, one screen.
+//
+//    The DATA half (which entries collide, and that each carries `gatedBy`)
+//    is pinned in tests/web-leads-automations.test.ts. This is the RENDER
+//    half: the gate reaches the screen and the ask-now question leaves it.
+//    Everything asserted is derived from the two modules, so a reworded
+//    `stageReason` or a reworded question moves this test with it rather
+//    than breaking it.
+// ---------------------------------------------------------------------------
+{
+  const guide = readable("industryGuideGated");
+  const restaurants = INDUSTRY_AUTOMATIONS.find((g) => g.id === "restaurants-bars")!;
+  const gatedItem = restaurants.automations.find((i) => i.gatedBy)!;
+  const gate = CAPABILITIES.find((c) => c.id === gatedItem.gatedBy)!;
+  assert.notEqual(gate.stage, "today", "the fixture must be a GATED capability, or this pins nothing");
+  assert.ok(gate.stageReason, "the gated capability must carry the reason this test looks for");
+
+  assert.ok(
+    guide.includes(gate.stageReason!.replace(/\s+/g, " ")),
+    "the industry menu must carry the capability's own stage reason, not its own wording of it",
+  );
+  assert.ok(
+    !guide.includes(gatedItem.discovery),
+    `the ask-now question "${gatedItem.discovery}" must NOT render on a gated entry: it is the exact instruction the gate countermands`,
+  );
+
+  // The control, which is what makes the two assertions above a real claim
+  // rather than a component that renders no questions at all: an ungated
+  // sibling in the same group still asks its own.
+  const ungated = restaurants.automations.find((i) => !i.gatedBy)!;
+  assert.ok(
+    guide.includes(ungated.discovery),
+    `control: an ungated entry still asks "${ungated.discovery}", so the gated one lost its question rather than the section losing all of them`,
+  );
+}
+console.log("web-leads-automations-catalogue: the industry menu honours the stage gate OK");
+
+// ---------------------------------------------------------------------------
+// 8c. THE STAGE REASON RENDERS ONCE PER ROW, NOT TWICE.
+//    It is ~60 words. It printed at the always-visible gate outside the
+//    button AND again inside the opened detail's "When to sell it", a few
+//    hundred pixels apart, on every open ladder row. The always-visible one
+//    is the one design spec 3.3 requires; the detail keeps the heading,
+//    which is what that layer adds.
+// ---------------------------------------------------------------------------
+{
+  const ladder = CAPABILITIES.find((c) => c.id === "missed-call-text-back")!;
+  const reason = ladder.stageReason!;
+  assert.ok(reason.trim().length > 0, "the fixture must carry a stage reason, or this counts nothing");
+  const rendered = readable("openLadder");
+  const occurrences = rendered.split(reason.replace(/\s+/g, " ")).length - 1;
+  assert.equal(
+    occurrences,
+    1,
+    `the stage reason renders ${occurrences} times on an open ladder row; a rep reads the same 60 words twice on one screen`,
+  );
+}
+console.log("web-leads-automations-catalogue: stage reason renders once per row OK");
 
 // ---------------------------------------------------------------------------
 // 9. NO VERDICT COLOUR, NO EM DASH, NO DOUBLE HYPHEN, in anything rendered.

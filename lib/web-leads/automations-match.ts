@@ -227,9 +227,36 @@ import type { AuditResult, DimensionProfile } from "./audit";
  * "there is no website for this business", which is why this is a two-state
  * check and not "is the audit scored".
  *
- * It is a function over the audit and never over `lead.websiteUrl`: the audit
- * is the measurement, and a wrong `true` here sends a business with no site
- * down the per-check defect path.
+ * 🚨 IT READS THE AUDIT, BUT ONLY ONE OF ITS TWO STATES IS A MEASUREMENT
+ * (corrected in the final review, 2026-09-14). This used to claim "it is a
+ * function over the audit and never over `lead.websiteUrl`: the audit is the
+ * measurement". The first half is true and load-bearing (a wrong `true` here
+ * sends a business with no site down the per-check defect path). The second
+ * half was true of `parked` and false of `no_website`:
+ *
+ *   parked      IS a measurement. The domain resolved, and what came back
+ *               was a for-sale parking page.
+ *   no_website  is NOT. It is `fetchAudit`'s first line,
+ *               `if (!lead.websiteUrl) return { state: "no_website" }`
+ *               (`lib/web-leads/audit.ts`), so reaching it through
+ *               `audit.state` is `lead.websiteUrl` restated one indirection
+ *               later. Nobody verified that the business has no site. We
+ *               verified that our own directory record holds no address for
+ *               one, which is a different and much weaker claim: the field
+ *               is whatever the lead record carried when it was imported
+ *               (`websiteUrl: str(d.website)` in `data.ts`), so a business
+ *               whose address we never captured is indistinguishable here
+ *               from a business that never built a site.
+ *
+ * So no sentence rendered off a `false` from this function may assert the
+ * absence of a website. Both of them say what the record holds instead ("we
+ * have no working website on file", true of a parked domain too) and the
+ * catalogue's intro hands the rep the line for an owner who answers with an
+ * address: `PRIMARY_INTRO.noWebsite` in `CapabilityCatalogue.tsx` and the
+ * `noWebsite` row state in `CapabilityRow.tsx`. `NotScored` renders directly
+ * above both on the same screen and has always hedged it ("No website found
+ * yet, needs checking"); the two must not contradict each other one section
+ * apart.
  */
 export function hasLiveWebsite(audit: Pick<AuditResult, "state">): boolean {
   return audit.state !== "no_website" && audit.state !== "parked";

@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { CAPABILITIES, codeToCapability, STAGES } from "../lib/web-leads/automations";
+import { INDUSTRY_AUTOMATIONS } from "../lib/industry-automations";
 import { REMEDIES } from "../lib/web-leads/remedies";
 
 // ---------------------------------------------------------------------------
@@ -192,3 +193,79 @@ for (const cap of CAPABILITIES) {
 }
 
 console.log("web-leads-automations copy rules: OK");
+
+// ---------------------------------------------------------------------------
+// THE STAGE GATE MUST FOLLOW THE PRODUCT ACROSS BOTH LISTS.
+//
+// `BattleCard.tsx` renders the capability catalogue and then
+// `IndustryAutomationGuide`, adjacent, on one screen. The catalogue puts
+// `missed-call-text-back` under "Later, once the first evidence reports have
+// landed" with "Do not open with them", because spec 3.3 makes that gate a
+// PRODUCT constraint and the operator was offered the chance to drop it and
+// declined. `lib/industry-automations.ts` carried a literal title collision,
+// rendered `defaultOpen`, with an ask-now discovery question and no gate. A
+// rep therefore had two contradictory instructions about one product, one
+// section apart, and nothing failed.
+//
+// The fix is `gatedBy`: the colliding entry names the capability, and the
+// guide renders that capability's own stage gate instead of its "Ask this"
+// block. This is the assertion that makes a future collision loud. It fires
+// in three directions:
+//   1. a colliding entry with no `gatedBy`, or one pointing at the wrong
+//      capability;
+//   2. a `gatedBy` naming a capability that does not exist, or set on an
+//      entry the catalogue does not also render (which would gate something
+//      that is not duplicated, silently deleting a discovery question);
+//   3. the SET of colliding entries changing at all, in either file. That
+//      last one is deliberately strict rather than "every collision is
+//      gated": a vacuous version of this test passes the day somebody
+//      retitles both entries, and then passes forever while the next
+//      collision is added.
+// ---------------------------------------------------------------------------
+{
+  const normalise = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const capabilityByTitle = new Map(CAPABILITIES.map((c) => [normalise(c.title), c]));
+  assert.equal(capabilityByTitle.size, CAPABILITIES.length, "two capabilities share a title, so this lookup cannot be trusted");
+
+  const collisions: string[] = [];
+  for (const group of INDUSTRY_AUTOMATIONS) {
+    for (const item of group.automations) {
+      const twin = capabilityByTitle.get(normalise(item.name));
+      const where = `${group.id}/${item.name}`;
+
+      if (item.gatedBy !== undefined) {
+        assert.ok(
+          CAPABILITIES.some((c) => c.id === item.gatedBy),
+          `${where}: gatedBy names "${item.gatedBy}", which is not a capability id`,
+        );
+        assert.ok(
+          twin,
+          `${where}: gatedBy is for an entry the catalogue ALSO renders. This one has no title twin, so gating it removes a discovery question a rep would otherwise ask`,
+        );
+      }
+
+      if (!twin) continue;
+      collisions.push(where);
+      assert.equal(
+        item.gatedBy,
+        twin.id,
+        `${where}: the catalogue renders a capability with this exact title at stage "${twin.stage}". Without gatedBy: "${twin.id}" this menu tells the rep to open with it on the same screen`,
+      );
+    }
+  }
+
+  // The known set, pinned. Both entries are the same capability, in the two
+  // industry groups whose owners answer their own phones mid-job.
+  assert.deepEqual(
+    [...collisions].sort(),
+    ["home-services/Missed-call text-back", "restaurants-bars/Missed-call text-back"],
+    "the set of titles rendered by BOTH lists changed. A new one must carry gatedBy; a removed one means this pin is stale. Decide which, do not just update the array",
+  );
+}
+
+// The RENDERING half of this rule (that the guide really does put the gate on
+// screen and really does drop the ask-now question) is pinned in
+// tests/web-leads-automations-catalogue.test.ts, which spawns a plain node
+// process to server-render it. This file runs under --conditions=react-server
+// and cannot render a client component at all.
+console.log("web-leads-automations stage-gate collision: OK");
