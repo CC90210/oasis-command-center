@@ -55,6 +55,9 @@ const TESTS = [
   "tests/web-leads-assign-to-rep.test.ts",
   "tests/web-leads-territory-assign.test.ts",
   "tests/web-leads-owner-verification.test.ts",
+  // Who holds a lead, and who is allowed to be told. The badge everyone sees
+  // and the name only an owner/manager/admin sees are gated separately.
+  "tests/web-leads-owner-badge.test.ts",
   // Call outcomes.
   "tests/web-leads-outcome.test.ts",
   "tests/web-leads-outcome-guards.test.ts",
