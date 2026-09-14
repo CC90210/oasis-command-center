@@ -6,14 +6,14 @@
  * WHAT THIS DOES: a pure partition of the 15 reviewed capabilities into
  * `relevant` (this lead failed at least one code the capability covers),
  * `rest` (it covers no code this lead failed, or the site was never
- * audited), and `ladder` (the four offer-ladder entries, which carry no
+ * audited), and `ladder` (the five offer-ladder entries, which carry no
  * codes and are never matched against an audit at all). `relevant` and
  * `rest` are ordered by the summed `points` of the lead's own failing
  * checks inside that capability's `codes`, descending, with the capability
  * `id` as an explicit secondary key so two calls with the same input
  * produce byte-identical order. `ladder` is ordered by its own stage
  * progression (`today` < `after_evidence` < `month_six_plus` < `year_plus`,
- * `STAGE_ORDER` below), then the same `id` tie-break.
+ * per `automations.ts`'s exported `STAGES`), then the same `id` tie-break.
  *
  * WHAT THIS DOES NOT DO. It does not decide anything about copy, does not
  * touch `automations.ts` (imported read-only), does not re-derive a scoring
@@ -38,22 +38,47 @@
  * narrows to the codes THIS lead actually failed, precisely so a bundle's
  * `costsThem` sentence is never read as true of the whole bundle when only
  * one code inside it failed for this lead -- see the codes-per-capability
- * note two paragraphs down). `recoverable` is pinned to 0 for every entry in
- * this branch, and that 0 does NOT mean "nothing recoverable" -- it means
- * "no audit ran, so there is no scored point value to sum". A caller must
- * not render it as a real score; ordering among these ten falls back
- * entirely to the id tie-break, which is the honest description of "one
- * buildable set" rather than a ranked defect list. `opts.hasWebsite` is
- * authoritative over whatever `dimensions` were passed -- a stale or
+ * note two paragraphs down). `recoverable` is `null` for every entry in
+ * this branch -- UNSCORED, not zero, because no audit ran and there is no
+ * point value to sum. See "THE `recoverable: number | null` DECISION" below
+ * for why this is a type, not a comment. Ordering among these ten falls
+ * back entirely to the id tie-break, which is the honest description of
+ * "one buildable set" rather than a ranked defect list. `opts.hasWebsite`
+ * is authoritative over whatever `dimensions` were passed -- a stale or
  * contradictory audit does not override an explicit "there is no website".
  *
  * THE NO-AUDIT CASE (empty `dimensions`, `hasWebsite: true`) is not a
- * special branch. With no checks to inspect, no capability's codes are ever
- * found failing, so every `today` capability's `failedCodes` comes out
- * empty and it lands in `rest` by the same general rule that handles a
- * fully-scored lead with a clean capability. `ladder` still renders in
- * full, because ladder entries are never matched against an audit at all.
- * The result: the full catalogue renders, unranked, never a blank panel.
+ * special branch either, for the same reason a per-capability "were any of
+ * its codes observed at all" check (below) already covers it: with no
+ * checks anywhere in `dimensions`, no code of any capability is ever
+ * observed, so every `today` capability's `recoverable` comes out `null`
+ * and it lands in `rest` by the same general rule that handles a
+ * fully-audited lead with an unobserved capability. `ladder` still renders
+ * in full, because ladder entries are never matched against an audit at
+ * all. The result: the full catalogue renders, unranked, never a blank
+ * panel.
+ *
+ * THE `recoverable: number | null` DECISION (fix round 1, 2026-09-14).
+ * Originally `recoverable` was `number`, pinned to 0 for both the
+ * `hasWebsite: false` branch and every unscored `rest` entry in the
+ * no-audit case. Both 0s were prose-documented as "unscored, not really
+ * zero" -- but a `0` a capability earns because an audit ran, found its
+ * codes, and confirmed none of them failing (VERIFIED clean) is a
+ * genuinely different fact from a `0` standing in for "we have no idea,
+ * nothing was ever checked" (UNSCORED), and nothing at the type level told
+ * Task 4's renderer which one it was holding. `null` now means UNSCORED,
+ * unconditionally: it appears when NONE of a capability's `codes` were
+ * observed in any `DimensionProfile.checks` passed in (which is what makes
+ * the no-audit case, dimensions === [], fall out of the general rule
+ * without a special branch: zero checks means zero codes observed for
+ * every capability) or when `opts.hasWebsite` is false (no website, so no
+ * observation is possible at all). A real `number` -- including a real `0`
+ * -- appears only when at least one of a capability's codes was actually
+ * present in `dimensions.checks`, whether it passed or failed. This also
+ * means a genuinely PARTIAL audit (some dimensions scored, others missing)
+ * now correctly marks a capability `null` if none of ITS codes happened to
+ * be among the dimensions that were scored, rather than silently reporting
+ * a false "0 recoverable" for a capability nobody actually checked.
  *
  * PER-CAPABILITY FAILED CODES, NOT A BUNDLE-LEVEL BOOLEAN. A capability
  * qualifies for `relevant` when ANY ONE of its codes failed for this lead,
@@ -77,8 +102,8 @@
  * at most once.
  */
 
-import { CAPABILITIES } from "./automations";
-import type { Capability, Stage } from "./automations";
+import { CAPABILITIES, STAGES } from "./automations";
+import type { Capability } from "./automations";
 import type { DimensionProfile } from "./audit";
 
 export type Matched = {
@@ -88,33 +113,44 @@ export type Matched = {
    *  codes at all), and equal to the FULL `codes` list for every entry in
    *  `relevant` when `opts.hasWebsite` is false (see module docblock). */
   failedCodes: string[];
-  /** Sum of `points` across `failedCodes`, from this lead's own audit.
-   *  0 for a `rest` entry (nothing failed), 0 for every ladder entry (no
-   *  codes to sum), and 0 for every `relevant` entry when
-   *  `opts.hasWebsite` is false -- that last 0 means "unscored", not
-   *  "nothing recoverable". Never negative, never re-derives a weight or a
-   *  dimension score; it is exactly the sum of the failing checks' own
-   *  `points` values. */
-  recoverable: number;
+  /** Sum of `points` across `failedCodes`, from this lead's own audit --
+   *  but ONLY when at least one of `capability.codes` was actually observed
+   *  in `dimensions`. `number`, including a real `0`, means an audit
+   *  looked at this capability's codes and that is what it found (`0` =
+   *  verified clean, nothing to recover). `null` means UNSCORED: no code
+   *  this capability covers was ever observed, either because
+   *  `opts.hasWebsite` was false or because `dimensions` carried no check
+   *  for any of them (which includes, but is not limited to, the
+   *  empty-`dimensions` "no audit at all" case). `null` is never a stand-in
+   *  for zero and a caller must not render it as one -- that is the whole
+   *  reason this is a type and not a comment (fix round 1, 2026-09-14: the
+   *  previous `number`-only version pinned both cases to `0` and asked the
+   *  renderer to remember which `0` it was holding). Never negative, never
+   *  re-derives a weight or a dimension score. */
+  recoverable: number | null;
 };
 
 export type MatchedCatalogue = {
   /** `stage === "today"` capabilities with at least one failed code for
    *  this lead, or (when `hasWebsite` is false) every `today` capability,
-   *  treated as one buildable set. Ordered by `recoverable` descending,
+   *  treated as one buildable set. Ordered by `recoverable` descending
+   *  (`null` sorts after every real number -- see `byRecoverableThenId`),
    *  `capability.id` ascending as the tie-break. */
   relevant: Matched[];
   /** `stage === "today"` capabilities with no failed code for this lead --
    *  including every one of them when there was no audit at all. Same
-   *  ordering rule as `relevant`; in practice every entry here ties at 0,
-   *  so the order is the id tie-break alone. Never dropped, never merged
-   *  into `relevant`: a rep asking "what else do you do" reaches this list
-   *  through the same "show all" affordance the objection console uses. */
+   *  ordering rule as `relevant`. A capability that was genuinely audited
+   *  and found clean sorts here with a real `0`; a capability nobody
+   *  observed sorts here with `null`, after every real value including
+   *  that `0`. Never dropped, never merged into `relevant`: a rep asking
+   *  "what else do you do" reaches this list through the same "show all"
+   *  affordance the objection console uses. */
   rest: Matched[];
   /** `stage !== "today"` capabilities, always present, never matched
-   *  against an audit (they carry no codes). Ordered by stage progression
-   *  (`today` < `after_evidence` < `month_six_plus` < `year_plus`), then
-   *  the id tie-break. */
+   *  against an audit (they carry no codes, so `recoverable` is always a
+   *  real `0` here -- structurally, not because anything went unscored).
+   *  Ordered by stage progression (`today` < `after_evidence` <
+   *  `month_six_plus` < `year_plus`), then the id tie-break. */
   ladder: Matched[];
 };
 
@@ -125,10 +161,6 @@ export type MatchOptions = {
   hasWebsite: boolean;
 };
 
-/** The stage-climb order, also the ladder's render order. Re-exported
- *  nowhere; `automations.ts` already exports `STAGES` for that. */
-const STAGE_ORDER: readonly Stage[] = ["today", "after_evidence", "month_six_plus", "year_plus"];
-
 /** Strict, total, and independent of insertion order: two capabilities with
  *  equal `recoverable` never compare equal here, because `id` is unique
  *  (pinned by tests/web-leads-automations.test.ts). Relying on
@@ -136,19 +168,34 @@ const STAGE_ORDER: readonly Stage[] = ["today", "after_evidence", "month_six_plu
  *  this guarantee -- it would still make two calls on the same input agree,
  *  but only by accident of the input array's own order, which is not an
  *  order this module asserts or owns. This comparator makes the total order
- *  explicit instead. */
+ *  explicit instead.
+ *
+ *  WHERE `null` SORTS, DECIDED DELIBERATELY (fix round 1, 2026-09-14):
+ *  after every real number, including a real `0`. This module ranks by
+ *  evidence. A capability an audit actually looked at and confirmed clean
+ *  (`0`) is a stronger, more specific claim than a capability nobody has
+ *  looked at yet (`null`) -- "we checked and it's fine" must never render
+ *  behind "we have no idea", so `null` is the lowest-priority position, not
+ *  a mid-table one. Two `null`s tie-break by `id` exactly like two reals. */
 function byRecoverableThenId(a: Matched, b: Matched): number {
-  if (a.recoverable !== b.recoverable) return b.recoverable - a.recoverable;
+  if (a.recoverable !== b.recoverable) {
+    if (a.recoverable === null) return 1;
+    if (b.recoverable === null) return -1;
+    return b.recoverable - a.recoverable;
+  }
   if (a.capability.id === b.capability.id) return 0;
   return a.capability.id < b.capability.id ? -1 : 1;
 }
 
 /** Same reasoning as `byRecoverableThenId`, keyed on stage progression
  *  instead of points, because ladder entries carry no codes and therefore
- *  no recoverable value to rank by. */
+ *  no recoverable value to rank by. `STAGES` is imported from
+ *  `automations.ts` rather than re-declared here, so a reorder there
+ *  propagates here automatically instead of silently drifting out of
+ *  sync. */
 function byStageThenId(a: Matched, b: Matched): number {
-  const sa = STAGE_ORDER.indexOf(a.capability.stage);
-  const sb = STAGE_ORDER.indexOf(b.capability.stage);
+  const sa = STAGES.indexOf(a.capability.stage);
+  const sb = STAGES.indexOf(b.capability.stage);
   if (sa !== sb) return sa - sb;
   if (a.capability.id === b.capability.id) return 0;
   return a.capability.id < b.capability.id ? -1 : 1;
@@ -164,15 +211,23 @@ export function matchCapabilities(dimensions: DimensionProfile[], opts: MatchOpt
 
   if (!opts.hasWebsite) {
     const relevant: Matched[] = today
-      .map((capability) => ({ capability, failedCodes: [...capability.codes], recoverable: 0 }))
+      .map((capability) => ({ capability, failedCodes: [...capability.codes], recoverable: null }))
       .sort(byRecoverableThenId);
     return { relevant, rest: [], ladder };
   }
 
+  // observedCodes: every code this audit actually reported on, pass or
+  // fail. A capability with none of its codes in this set was never
+  // scored -- that is the ONLY condition that produces `recoverable: null`
+  // below, and it is what makes the empty-`dimensions` "no audit at all"
+  // case fall out of this general loop with no special branch: zero checks
+  // means zero codes observed for every capability.
+  const observedCodes = new Set<string>();
   const pointsByCode = new Map<string, number>();
   const failedCodesSeen = new Set<string>();
   for (const dimension of dimensions) {
     for (const c of dimension.checks) {
+      observedCodes.add(c.code);
       pointsByCode.set(c.code, c.points);
       if (!c.has) failedCodesSeen.add(c.code);
     }
@@ -181,8 +236,11 @@ export function matchCapabilities(dimensions: DimensionProfile[], opts: MatchOpt
   const relevant: Matched[] = [];
   const rest: Matched[] = [];
   for (const capability of today) {
+    const anyCodeObserved = capability.codes.some((code) => observedCodes.has(code));
     const failedCodes = capability.codes.filter((code) => failedCodesSeen.has(code));
-    const recoverable = failedCodes.reduce((sum, code) => sum + (pointsByCode.get(code) ?? 0), 0);
+    const recoverable: number | null = anyCodeObserved
+      ? failedCodes.reduce((sum, code) => sum + (pointsByCode.get(code) ?? 0), 0)
+      : null;
     const matched: Matched = { capability, failedCodes, recoverable };
     (failedCodes.length > 0 ? relevant : rest).push(matched);
   }

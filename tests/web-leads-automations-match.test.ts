@@ -33,9 +33,13 @@ function dims(checks: ReturnType<typeof check>[]): DimensionProfile[] {
 // booking fails inside "book-themselves-in", cta_present fails inside
 // "tell-them-what-to-do-next", fast_ttfb fails inside
 // "load-fast-enough-to-stay". phone_in_header, lean_html and few_blocking
-// pass, so they must not count toward any recoverable total. Every other
-// today capability has none of its codes represented at all, which is the
-// realistic "unscored for this lead" case, not a fabricated one.
+// pass, so they must not count toward any recoverable total. credentials
+// (part of "look-established") also passes, on its own with none of
+// look-established's other seven codes observed, so look-established lands
+// in rest with a REAL 0 (audited, confirmed clean) -- deliberately distinct
+// from the other five rest entries below, which have NONE of their codes
+// represented at all and must come out `null` (never observed, the
+// realistic "unscored for this lead" case, not a fabricated one).
 const MIXED = dims([
   check("tel_link", 10, false),
   check("phone_in_header", 8, true),
@@ -44,6 +48,7 @@ const MIXED = dims([
   check("fast_ttfb", 5, false),
   check("lean_html", 12, true),
   check("few_blocking", 7, true),
+  check("credentials", 6, true),
 ]);
 
 function allIds(m: ReturnType<typeof matchCapabilities>): string[] {
@@ -65,7 +70,7 @@ function allIds(m: ReturnType<typeof matchCapabilities>): string[] {
   const reach = m.rest.find((x) => x.capability.id === "reach-without-phoning");
   assert.ok(reach, "reach-without-phoning has no failing code for this lead and must be in rest, not dropped");
   assert.deepEqual(reach!.failedCodes, []);
-  assert.equal(reach!.recoverable, 0);
+  assert.equal(reach!.recoverable, null, "none of reach-without-phoning's codes were observed, so it is unscored, not a verified 0");
 
   assert.ok(!m.relevant.some((x) => x.capability.id === "reach-without-phoning"), "a clean capability is not also in relevant");
   assert.ok(!m.rest.some((x) => x.capability.id === "easy-to-call"), "a failing capability is not also in rest");
@@ -98,7 +103,44 @@ console.log("web-leads-automations-match: bucketing OK");
 console.log("web-leads-automations-match: ordering + tie-break OK");
 
 // ---------------------------------------------------------------------------
-// 3. Ladder entries (stage !== "today") always land in ladder, regardless of
+// 3. null sorts after every real number, including a real 0 (fix round 1,
+//    2026-09-14). MIXED marks "credentials" (one of look-established's eight
+//    codes) as observed and passing, with none of the bundle's other seven
+//    codes observed at all -- so look-established is genuinely audited and
+//    clean (a real 0), while the other five rest entries have NONE of their
+//    codes observed and must be null. This mix is reached through the
+//    public matchCapabilities() call, not a synthetic call into the
+//    comparator: a real 0 must sort before every null, never after and
+//    never merely tied.
+// ---------------------------------------------------------------------------
+{
+  const m = matchCapabilities(MIXED, { hasWebsite: true });
+
+  const established = m.rest.find((x) => x.capability.id === "look-established");
+  assert.ok(established, "look-established must land in rest: credentials passed, nothing failed");
+  assert.equal(established!.recoverable, 0, "credentials was observed and passed, so this is a real, verified 0");
+
+  assert.deepEqual(
+    m.rest.map((x) => x.capability.id),
+    [
+      "look-established",
+      "findable-and-safe-to-click",
+      "look-current",
+      "reach-without-phoning",
+      "say-what-you-do",
+      "work-on-a-phone",
+    ],
+    "a verified real 0 must sort before every null; nulls tie-break by id",
+  );
+  for (const x of m.rest) {
+    if (x.capability.id === "look-established") continue;
+    assert.equal(x.recoverable, null, `${x.capability.id}: none of its codes were observed by this audit`);
+  }
+}
+console.log("web-leads-automations-match: null sorts after every real number OK");
+
+// ---------------------------------------------------------------------------
+// 4. Ladder entries (stage !== "today") always land in ladder, regardless of
 //    dimensions, and never in relevant or rest.
 // ---------------------------------------------------------------------------
 {
@@ -111,6 +153,7 @@ console.log("web-leads-automations-match: ordering + tie-break OK");
   for (const x of m.ladder) {
     assert.equal(x.capability.stage === "today", false, `${x.capability.id} is in ladder but has stage "today"`);
     assert.deepEqual(x.failedCodes, [], `${x.capability.id} is a ladder entry and carries no codes to fail`);
+    assert.equal(x.recoverable, 0, `${x.capability.id}: a ladder entry has no codes at all, so this is a real, structural 0, not null`);
   }
   assert.ok(
     !m.relevant.some((x) => LADDER_IDS.includes(x.capability.id)),
@@ -128,8 +171,10 @@ console.log("web-leads-automations-match: ordering + tie-break OK");
 console.log("web-leads-automations-match: ladder always present OK");
 
 // ---------------------------------------------------------------------------
-// 4. No audit at all (empty dimensions): every website capability in rest,
+// 5. No audit at all (empty dimensions): every website capability in rest,
 //    none in relevant, the full ladder. Nothing throws, nothing is empty.
+//    recoverable is null throughout rest, not 0: no code of any capability
+//    was ever observed, so nothing here is a verified anything.
 // ---------------------------------------------------------------------------
 {
   const m = matchCapabilities([], { hasWebsite: true });
@@ -139,6 +184,9 @@ console.log("web-leads-automations-match: ladder always present OK");
     [...TODAY_IDS].sort(),
     "every today capability renders, unranked, rather than a blank panel",
   );
+  for (const x of m.rest) {
+    assert.equal(x.recoverable, null, `${x.capability.id}: with no audit at all, nothing was observed, so this is unscored not zero`);
+  }
   assert.equal(m.ladder.length, LADDER_IDS.length);
   assert.ok(m.rest.length > 0, "rest must not be empty when there is no audit");
   assert.ok(m.ladder.length > 0, "ladder must not be empty when there is no audit");
@@ -146,21 +194,20 @@ console.log("web-leads-automations-match: ladder always present OK");
 console.log("web-leads-automations-match: no-audit case OK");
 
 // ---------------------------------------------------------------------------
-// 5. hasWebsite: false. Decision made here, not left implicit: "we would fix
+// 6. hasWebsite: false. Decision made here, not left implicit: "we would fix
 //    your tap-to-call button" is nonsense when there is no site, so the
 //    website group is not defect-ranked at all. Every today capability is
 //    treated as one buildable set and placed in relevant, with failedCodes
 //    equal to the FULL code list it covers (nothing to point to, because
-//    none of it exists yet) and recoverable pinned to 0, because there is no
-//    audit and therefore no scored points to sum -- 0 here does not mean
-//    "nothing recoverable", it means "unscored", and a caller must not
-//    print it as a score.
+//    none of it exists yet) and recoverable set to null, because there is no
+//    audit and therefore no scored points to sum -- null here, not 0, and a
+//    caller must not print it as a score of any kind, including zero.
 //
 //    This is asserted so it cannot be satisfied by a no-op: a matcher that
 //    silently treated hasWebsite:false the same as "no audit at all" would
-//    put everything in rest with relevant empty (case 4, above) instead of
+//    put everything in rest with relevant empty (case 5, above) instead of
 //    everything in relevant. The two assertions below are the same shape as
-//    case 4 with the buckets swapped, which is exactly what would have to
+//    case 5 with the buckets swapped, which is exactly what would have to
 //    change for an accidental pass-through to slip by.
 // ---------------------------------------------------------------------------
 {
@@ -174,7 +221,7 @@ console.log("web-leads-automations-match: no-audit case OK");
   for (const x of m.relevant) {
     const cap = CAPABILITIES.find((c) => c.id === x.capability.id)!;
     assert.deepEqual(x.failedCodes, cap.codes, `${x.capability.id}: with no website every code it covers is undelivered`);
-    assert.equal(x.recoverable, 0, `${x.capability.id}: no audit ran, so recoverable is 0, not a real score`);
+    assert.equal(x.recoverable, null, `${x.capability.id}: no audit ran, so recoverable is null, never a rendered score`);
   }
   assert.equal(m.ladder.length, LADDER_IDS.length);
 
@@ -190,7 +237,7 @@ console.log("web-leads-automations-match: no-audit case OK");
 console.log("web-leads-automations-match: hasWebsite:false OK");
 
 // ---------------------------------------------------------------------------
-// 6. Conservation: every capability appears exactly once across the three
+// 7. Conservation: every capability appears exactly once across the three
 //    buckets, for every scenario above. Nothing is lost, nothing duplicated.
 // ---------------------------------------------------------------------------
 {
