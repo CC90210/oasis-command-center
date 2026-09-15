@@ -323,5 +323,65 @@ export function checkEvidenceFor(code: string, signals: Signals): string | null 
   }
 }
 
-const checkEvidenceModule = { EXPLAINED_CODES, checkEvidenceFor };
+/**
+ * Checks the model scores but cannot currently MEASURE for a prospect. Named
+ * here so every surface that renders a check says so in the same words
+ * instead of letting a rep argue a line we manufactured.
+ *
+ * ONE TABLE, TWO SURFACES (Task 5, 2026-09-14). This lived as two verbatim
+ * module-private copies, one in `BattleCard.tsx` and one in
+ * `CapabilityRow.tsx`, which could not see each other: an entry added to one
+ * changed nothing on the other. It is a fact about the scoring model rather
+ * than about either component, so it lives beside the module that turns a
+ * check code into a sentence, and both surfaces read this one.
+ *
+ * Model v2 (2026-09-02) retired the one entry it carried: `sitemap` failed
+ * 99.5% of the corpus by construction (the crawler never fetched a
+ * prospect's robots file), and v2's answer was to remove the check rather
+ * than keep apologising for it. The table STAYS, empty: the
+ * honest-disclaimer machinery is the feature, and the next unmeasurable
+ * check will need it.
+ *
+ * It is a plain `const` and nothing mutates it. `evidenceStateFor` takes the
+ * table as an optional third argument so the empty branch can be exercised
+ * by passing one, which is how the ordering below is pinned without a test
+ * writing into module state and having to put it back.
+ */
+export const UNMEASURABLE_CHECKS: Record<string, string> = {};
+
+/**
+ * Which of the four honest things a surface can say about one check on one
+ * site. The decision is here, in one pure function, because the ORDER of
+ * these four is the load-bearing part and it used to live twice, inside two
+ * components' JSX, where the only way to test it was to render markup.
+ *
+ *   unmeasurable  a check our own model cannot measure for anybody. Named as
+ *                 OUR flaw, and FIRST: it must displace an evidence line
+ *                 rather than render beside one.
+ *   measured      the crawler's own numbers for THIS site.
+ *   unmeasured    the crawl recorded other things but not what this check
+ *                 needs. Said in words, never guessed.
+ *   silent        no signals blob at all, so nothing renders: there is no
+ *                 way to tell "unrecorded" from "very old row" without one.
+ */
+export type EvidenceState =
+  | { kind: "unmeasurable"; note: string }
+  | { kind: "measured"; line: string }
+  | { kind: "unmeasured" }
+  | { kind: "silent" };
+
+export function evidenceStateFor(
+  code: string,
+  signals: Signals,
+  unmeasurable: Record<string, string> = UNMEASURABLE_CHECKS,
+): EvidenceState {
+  const note = unmeasurable[code];
+  if (note) return { kind: "unmeasurable", note };
+  const line = checkEvidenceFor(code, signals);
+  if (line) return { kind: "measured", line };
+  if (signals) return { kind: "unmeasured" };
+  return { kind: "silent" };
+}
+
+const checkEvidenceModule = { EXPLAINED_CODES, checkEvidenceFor, UNMEASURABLE_CHECKS, evidenceStateFor };
 export default checkEvidenceModule;

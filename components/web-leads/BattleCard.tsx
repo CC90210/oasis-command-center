@@ -182,12 +182,14 @@ import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { remedyFor } from "@/lib/web-leads/remedies";
 import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/web-leads/angles";
 import { evidenceFrom } from "@/lib/web-leads/evidence";
-import { checkEvidenceFor } from "@/lib/web-leads/check-evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
 import { ObjectionConsole } from "./ObjectionConsole";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
+import { Meter, MeasuredLine, RemedyLines } from "./audit-parts";
+import { CapabilityCatalogue } from "./CapabilityCatalogue";
+import { hasLiveWebsite } from "@/lib/web-leads/automations-match";
 import { Radar3D } from "./Radar3D";
 import { CompetitorArena3D } from "./CompetitorArena3D";
 import { sfx } from "./battle-sfx";
@@ -394,80 +396,13 @@ function Panel({ children, className = "" }: { children: React.ReactNode; classN
   );
 }
 
-/** "Costs them:" / "We'd fix it:" — the two lines a rep reads aloud, from the
- *  hand-written table in remedies.ts. Renders nothing when a code has no entry
- *  rather than an empty bullet or the word "undefined". */
-function RemedyLines({ code }: { code: string }) {
-  const remedy = remedyFor(code);
-  if (!remedy) return null;
-  return (
-    <div className="mt-1.5 space-y-1 text-xs leading-relaxed text-fg-dim">
-      <p><span className="font-medium text-fg-muted">Costs them:</span> {remedy.costs}</p>
-      <p><span className="font-medium text-fg-muted">We&apos;d fix it:</span> {remedy.fix}</p>
-    </div>
-  );
-}
-
-/**
- * Checks the model scores but cannot currently MEASURE for prospects. Named
- * here so every surface that renders a check says so in the same words
- * instead of letting the rep argue a line we manufactured.
- *
- * Model v2 (2026-09-02) retired the one entry this carried: `sitemap` failed
- * 99.5% of the corpus by construction (the crawler never fetched a
- * prospect's robots file), and v2's answer was the coordinated
- * MODEL_VERSION bump the previous docblock here called for -- remove the
- * check rather than keep apologising for it. The map STAYS, empty: the
- * honest-disclaimer machinery is the feature, and the next unmeasurable
- * check will need it.
- */
-const UNMEASURABLE_CHECKS: Record<string, string> = {};
-
-/**
- * The pinpointed measurement behind one check (Adon, 2026-09-01: "you have to
- * pinpoint things in the website that are showing that"). Renders the
- * crawler's own numbers for THIS site next to the check they decided --
- * "Server took 2,340 ms to send its first byte; under 800 ms earns the
- * point." -- so a score is never a number a rep has to take on faith.
- *
- * Three states, all honest (Adon, 2026-09-01: "you don't generate
- * information, you just say it"):
- *   - measured   -> "Seen on the site: ..." with the site's own numbers
- *   - unmeasured -> the crawl recorded other things but not what THIS check
- *                   needs: said in words, never guessed
- *   - unmeasurable -> a check our model cannot currently measure for any
- *                   prospect: named as our flaw, with an instruction to
- *                   ignore it
- * Only when there is no signals blob at all does nothing render -- there is
- * nothing to distinguish "unrecorded" from "very old row" without one.
- */
-function MeasuredLine({ code, signals }: { code: string; signals: Record<string, unknown> | null }) {
-  const unmeasurable = UNMEASURABLE_CHECKS[code];
-  if (unmeasurable) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
-        <span className="font-medium text-fg-muted">Not measurable:</span> {unmeasurable}
-      </p>
-    );
-  }
-  const line = checkEvidenceFor(code, signals);
-  if (line) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-muted [font-family:var(--battle-data)]">
-        <span className="font-medium" style={{ color: "#7dd3fc" }}>Seen on the site:</span> {line}
-      </p>
-    );
-  }
-  if (signals) {
-    return (
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-dim [font-family:var(--battle-data)]">
-        <span className="font-medium text-fg-muted">Not recorded:</span> the crawl did not capture what this check
-        needs, so treat this line with caution and verify by eye before quoting it.
-      </p>
-    );
-  }
-  return null;
-}
+/* `RemedyLines`, `UNMEASURABLE_CHECKS` and `MeasuredLine` used to live here,
+   module-private. Task 5 (2026-09-14) moved the two renderers to
+   `./audit-parts` and the table to `lib/web-leads/check-evidence.ts`, because
+   the capability catalogue needed all three and, unable to import them,
+   reimplemented them: three unintended differences appeared between the two
+   copies inside one task. Both surfaces now render the same markup from the
+   same source. Nothing about what this card draws changed. */
 
 /**
  * The honest-sentence panel that replaces the entire scored body when trust
@@ -612,43 +547,9 @@ function earnedPoints(d: DimensionProfile): number {
   return d.checks.reduce((n, c) => n + (c.has ? c.points : 0), 0);
 }
 
-/** The bar's LENGTH is the value; its colour, when a `hue` is given, is the
- *  dimension's fixed identity hue (see battle-hud.ts) -- the same hue at 4 as
- *  at 94, so rule 1 holds. With no hue it stays the neutral fill. The tick
- *  overlay segments the fill into a HUD readout; it is engraved on the track,
- *  identical at every value. */
-function Meter({
-  value, drawn, reduced, hue,
-}: {
-  value: number;
-  drawn: boolean;
-  reduced: boolean;
-  hue?: { from: string; to: string };
-}) {
-  const pct = Math.min(100, Math.max(0, value));
-  return (
-    <span className="relative block h-1.5 w-full overflow-hidden rounded-full bg-bg-border" aria-hidden>
-      {/* Drawn with transform, not width (round 9): width is a layout
-          property and animating it re-lays-out every frame; scaleX from a
-          left origin is the identical picture on the compositor. */}
-      <span
-        className={hue ? "block h-full rounded-full" : "block h-full rounded-full bg-fg-dim"}
-        style={{
-          width: `${pct}%`,
-          transform: drawn ? "scaleX(1)" : "scaleX(0)",
-          transformOrigin: "left",
-          transition: reduced ? "none" : "transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
-          background: hue ? `linear-gradient(90deg, ${hue.from}, ${hue.to})` : undefined,
-          boxShadow: hue ? `0 0 8px ${hue.to}55` : undefined,
-        }}
-      />
-      <span
-        className="absolute inset-0"
-        style={{ background: "repeating-linear-gradient(90deg, transparent 0px, transparent 7px, rgba(6,7,10,0.6) 7px, rgba(6,7,10,0.6) 8px)" }}
-      />
-    </span>
-  );
-}
+/* `Meter` moved to `./audit-parts` with the same two callers it always had
+   plus the capability row, which had grown a near-copy of it without the tick
+   overlay. See that file. */
 
 /**
  * ParticleField — the drifting plexus behind the hero (Adon, 2026-09-01:
@@ -1112,6 +1013,81 @@ function NotScored({ audit }: { audit: AuditResult }) {
   );
 }
 
+/**
+ * THE BUILD SECTION, WHICH THIS CARD MOUNTS TWICE (fix round 1, 2026-09-14).
+ *
+ * WHY TWICE. The catalogue's whole reason for existing is the lead with no
+ * website: that rep has nothing to pick apart and everything to sell. But the
+ * `fixes` section lives inside `ScoredBody`, which renders ONLY for
+ * `audit.state === "scored"` -- so the one mount the spec asked for could
+ * never show the no-website case. It was not one dead branch either: with no
+ * dimensions there is no audit, so the no-website intro, the no-audit intro
+ * and the whole `unscored` row state were unreachable from this card as
+ * shipped. The compiler says the same thing out loud: writing
+ * `audit.state !== "no_website"` inside `ScoredBody` is TS2367, because the
+ * types have no overlap. A lead with no site now gets the catalogue at
+ * container level, which is exactly what `PresenceBlock` already does and for
+ * exactly the same reason -- the lead with no website is the lead that block
+ * exists for too.
+ *
+ * HOW THE TWO MOUNTS ARE KEPT IN STEP. They share everything except the
+ * section id and the props that genuinely differ per lead. The title and the
+ * sub are the two constants below, so neither call site can carry its own
+ * wording; the catalogue itself is invoked in exactly ONE place in this file,
+ * `BuildCatalogue`, so neither call site can pass its own prop set. What is
+ * left at each call site is `id`, `dimensions`, `hasWebsite` and
+ * `selectedAngleKey`, and each of those is different on purpose. Pinned in
+ * tests/web-leads-battlecard.test.ts counts them: the catalogue element is
+ * written once, the wrapper element twice, and both sections read the same
+ * two constants.
+ *
+ * THE TWO MOUNTS ARE MUTUALLY EXCLUSIVE. One is inside the `scored` arm of
+ * the body ternary and the other inside the `not scored` arm, so a rep never
+ * sees two catalogues, and the ids stay distinct so the tab strip and the
+ * per-section collapse memory never have to disambiguate them.
+ */
+const BUILD_TITLE = "What we would build for them";
+
+/** True on EVERY lead, which is the constraint that shaped it. A scored lead
+ *  ranks; a lead with no site has nothing to rank and the catalogue's own
+ *  intro paragraph says so directly underneath. So this promises no audit,
+ *  claims no ranking unconditionally, and does not say "everything" -- the
+ *  clean and verified-clean capabilities sit behind the catalogue's own "show
+ *  all" control and are genuinely not on screen. */
+const BUILD_SUB =
+  "What Oasis would build, own and run for this business. Where their own audit found something, the heaviest items come first. Tap a row for what it is, what it is costing them, and the line to say.";
+
+/** An empty audit, as a module constant so both the identity and the value are
+ *  stable: `CapabilityCatalogue` memoises on `dimensions`, and a fresh `[]`
+ *  per render would invalidate that memo on every render of a card that has
+ *  nothing to memoise in the first place. */
+const NO_DIMENSIONS: DimensionProfile[] = [];
+
+/** The single invocation of `CapabilityCatalogue` in this file. Both mounts
+ *  render this rather than the catalogue directly, so the prop set cannot
+ *  drift between them. */
+function BuildCatalogue({
+  dimensions, hasWebsite, signals, selectedAngleKey, drawn, reduced,
+}: {
+  dimensions: DimensionProfile[];
+  hasWebsite: boolean;
+  signals: Record<string, unknown> | null;
+  selectedAngleKey: string | null;
+  drawn: boolean;
+  reduced: boolean;
+}) {
+  return (
+    <CapabilityCatalogue
+      dimensions={dimensions}
+      hasWebsite={hasWebsite}
+      signals={signals}
+      drawn={drawn}
+      reduced={reduced}
+      selectedAngleKey={selectedAngleKey}
+    />
+  );
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // The card
 // ───────────────────────────────────────────────────────────────────────────
@@ -1342,6 +1318,20 @@ export function BattleCard({
   // never shown wearing a warning label. lib/web-leads/trust.ts.
   const trust = assessTrust({ audit, signals, urlVerification });
   const onlinePresence = state.payload.onlinePresence ?? null;
+  // DOES THIS BUSINESS HAVE A LIVE WEBSITE, from the AUDIT rather than from
+  // the directory's `websiteUrl` field. The two states that mean "no" and why
+  // both of them count are documented on `hasLiveWebsite` in
+  // lib/web-leads/automations-match.ts, which is the one place this is
+  // decided and which is unit-tested against every state of the union.
+  //
+  // It is computed HERE, before the ternary below, because this is the last
+  // scope in which `audit` is still the whole `AuditResult` union. Inside the
+  // scored branch the type has narrowed and the same comparison does not
+  // compile at all (TS2367: '"scored"' and '"no_website"' have no overlap),
+  // which is the type system stating the defect this fix round repaired: down
+  // there the answer is structurally `true`, so the no-website case could
+  // never render. Both mounts below read this one value.
+  const hasWebsite = hasLiveWebsite(audit);
 
   return (
     <div className={`${displayFont.variable} ${numeralFont.variable} ${dataFont.variable} ${embedded ? "" : "min-h-screen bg-bg"}`}>
@@ -1405,13 +1395,44 @@ export function BattleCard({
             // warning. The re-check control is on the honesty panel above.
             <UntrustedPanel hide={trust.hide} />
           ) : audit.state !== "scored" ? (
-            <NotScored audit={audit} />
+            // THE SECOND MOUNT. `NotScored` is the honest sentence about what
+            // we do and do not know; the catalogue underneath it is the
+            // entire pitch for this lead. A business with no website at all
+            // is the best lead this feature produces, and until this mount
+            // existed that rep got one line saying "No website found yet,
+            // needs checking" and nothing to sell.
+            //
+            // `NO_DIMENSIONS` is not a stand-in for an audit: no non-scored
+            // state carries dimensions at all, so this IS the lead's audit
+            // data. With it, `hasWebsite` alone picks the intro, and it is
+            // derived from the audit's own state by `hasLiveWebsite`, so a
+            // no-website or parked lead gets "there is no website for this
+            // business" and an unreachable or unchecked one gets "this site
+            // has not been checked yet". Neither sentence claims a
+            // measurement we did not take.
+            <>
+              <NotScored audit={audit} />
+              <BattleSection id="build" defaultOpen={true} title={BUILD_TITLE} sub={BUILD_SUB}>
+                <BuildCatalogue
+                  dimensions={NO_DIMENSIONS}
+                  hasWebsite={hasWebsite}
+                  signals={signals}
+                  // No dimensions means `selectAngle` has nothing to choose
+                  // from, so no angle renders higher up this card and there
+                  // is nothing for the overlap note to warn about.
+                  selectedAngleKey={null}
+                  drawn={drawn}
+                  reduced={reduced}
+                />
+              </BattleSection>
+            </>
           ) : (
             <ScoredBody
               lead={lead}
               audit={audit}
               competitors={competitors}
               signals={signals}
+              hasWebsite={hasWebsite}
               drawn={drawn}
               reduced={reduced}
             />
@@ -1874,12 +1895,26 @@ function DesignationPlate({
 }
 
 function ScoredBody({
-  lead, audit, competitors, signals, drawn, reduced,
+  lead, audit, competitors, signals, hasWebsite, drawn, reduced,
 }: {
   lead: WebLead;
   audit: Extract<AuditResult, { state: "scored" }>;
   competitors: CompetitorContext | null;
   signals: Record<string, unknown> | null;
+  /** Whether this lead has a website at all, read off the audit's own state
+   *  by the card container (the one scope where `AuditResult` is still the
+   *  whole union) and handed down. `CapabilityCatalogue` branches on it, and
+   *  a wrong `true` sends a lead with no site down the defect path, so the
+   *  MEASUREMENT decides it and never the directory's `websiteUrl` field.
+   *
+   *  WHAT THIS IS NOT, stated rather than implied: it is not a guard for
+   *  this component. `ScoredBody` renders only for `state === "scored"`, so
+   *  every value reaching this prop today is `true`. It is a prop rather
+   *  than a literal `true` at the call site because a literal would be this
+   *  file asserting a fact about the audit instead of reading one, and
+   *  because the derivation then sits at the one place that can still see a
+   *  `no_website` audit. */
+  hasWebsite: boolean;
   drawn: boolean;
   reduced: boolean;
 }) {
@@ -1894,7 +1929,6 @@ function ScoredBody({
   const headline = failed[0] || null;
   const angle = useMemo(() => selectAngle(audit.dimensions), [audit.dimensions]);
   const evidence = useMemo(() => evidenceFrom(signals), [signals]);
-  const maxRecoverable = Math.max(1, ...worstFirst.map(recoverablePoints));
   const totalChecks = audit.dimensions.reduce((n, d) => n + d.checks.length, 0);
   const failingAreas = worstFirst.filter((d) => d.checks.some((c) => !c.has)).length;
   // ONE selection for the whole shape section (round 7): the designation
@@ -2042,18 +2076,32 @@ function ScoredBody({
           />
         </BattleSection>
 
+        {/*
+          THE SECTION IS NOW THE CATALOGUE, NOT THE RANKED DIMENSIONS (Task 5,
+          2026-09-14). `FixFirst` ranked the seven scored DIMENSIONS, which is
+          the scoring model's own vocabulary: nobody buys "discoverability".
+          `CapabilityCatalogue` ranks the fifteen reviewed CAPABILITIES in
+          `lib/web-leads/automations.ts`, which are the same measurements
+          regrouped into things an owner recognises as something they would
+          buy, and it carries the stage ladder the dimension list had nowhere
+          to put. The figure on a row is still weighted composite points, the
+          same unit this card prints everywhere else.
+
+          `id` and `defaultOpen` are unchanged and pinned by
+          tests/web-leads-battlecard.test.ts: this is read mid-call and may
+          not cost a click.
+        */}
         <BattleSection
           id="fixes"
           defaultOpen={true}
-          title="What is worth fixing first"
-          sub="Points back on the total score if that area were brought to full marks. This is the build, in order. Tap a row for the checks behind it."
+          title={BUILD_TITLE}
+          sub={BUILD_SUB}
         >
-          <FixFirst
-            worstFirst={worstFirst}
-            maxRecoverable={maxRecoverable}
-            totalAreas={audit.dimensions.length}
-            totalChecks={totalChecks}
+          <BuildCatalogue
+            dimensions={audit.dimensions}
+            hasWebsite={hasWebsite}
             signals={signals}
+            selectedAngleKey={angle?.key ?? null}
             drawn={drawn}
             reduced={reduced}
           />
@@ -2464,121 +2512,6 @@ function DimensionShape({
           )}
         </div>
       )}
-    </>
-  );
-}
-
-/**
- * The ranked fix list, with the checks behind each rank one tap away.
- *
- * Each row expands IN PLACE to the failing checks it is made of, so "worth
- * +9.8" is never an unexplained number: the rep taps it and reads exactly
- * which checks make up the claim, in the remedy language the rest of the card
- * speaks. No per-check number is printed here on purpose -- a check's raw
- * points and a dimension's weighted recoverable points are different scales,
- * and two numbers on one row that do not sum invite the prospect's next
- * question to be about our arithmetic instead of their website.
- */
-function FixFirst({
-  worstFirst, maxRecoverable, totalAreas, totalChecks, signals, drawn, reduced,
-}: {
-  worstFirst: DimensionProfile[];
-  maxRecoverable: number;
-  totalAreas: number;
-  totalChecks: number;
-  signals: Record<string, unknown> | null;
-  drawn: boolean;
-  reduced: boolean;
-}) {
-  const [openKeys, setOpenKeys] = useState<ReadonlySet<string>>(new Set());
-
-  function toggle(key: string) {
-    setOpenKeys((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-  }
-
-  return (
-    <>
-      <ul className="space-y-1.5">
-        {worstFirst.map((d) => {
-          const points = recoverablePoints(d);
-          const misses = d.checks.filter((c) => !c.has).sort((a, b) => b.points - a.points);
-          const expandable = misses.length > 0;
-          const openRow = openKeys.has(d.key);
-          const hue = hueFor(d.key);
-          const row = (
-            <>
-              <span className="flex items-baseline justify-between gap-3 text-sm">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  {expandable && (
-                    <ChevronDown
-                      aria-hidden
-                      className={`h-3.5 w-3.5 shrink-0 text-fg-dim transition-transform motion-reduce:transition-none ${openRow ? "" : "-rotate-90"}`}
-                    />
-                  )}
-                  {/* The same identity hue this dimension wears on the radar
-                      and in the shape list -- one colour, three surfaces. */}
-                  <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: hue.to, boxShadow: `0 0 6px ${hue.to}` }} />
-                  <span className="truncate text-fg">{d.label}</span>
-                  {expandable && (
-                    <span className="shrink-0 text-[10px] text-fg-faint">
-                      {misses.length} {misses.length === 1 ? "check" : "checks"}
-                    </span>
-                  )}
-                </span>
-                {/* One constant cyan for every "+points" figure -- the metric's
-                    own identity, not a grade. */}
-                <span className="shrink-0 tabular-nums [font-family:var(--battle-data)]" style={{ color: "#7dd3fc" }}>+{points.toFixed(1)}</span>
-              </span>
-              <span className="mt-1.5 block">
-                <Meter value={(points / maxRecoverable) * 100} drawn={drawn} reduced={reduced} hue={hue} />
-              </span>
-            </>
-          );
-          return (
-            <li key={d.key}>
-              {expandable ? (
-                <button
-                  type="button"
-                  onClick={() => toggle(d.key)}
-                  aria-expanded={openRow}
-                  className="block w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-bg-raised/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 motion-reduce:transition-none"
-                >
-                  {row}
-                </button>
-              ) : (
-                // A full-marks area has nothing to expand and says so instead
-                // of rendering a control that does nothing.
-                <div className="px-2 py-1.5">{row}</div>
-              )}
-              {expandable && openRow && (
-                <ul className="mb-1.5 ml-2 mt-1 space-y-2.5 rounded-lg border border-accent/15 bg-bg-raised/50 p-3 backdrop-blur-sm motion-safe:animate-fade-in">
-                  {misses.map((check) => (
-                    <li key={check.code}>
-                      <div className="flex items-baseline justify-between gap-3">
-                        <p className="text-sm font-semibold text-fg">{check.label}</p>
-                        <span className="shrink-0 text-[11px] tabular-nums text-fg-dim [font-family:var(--battle-data)]">
-                          {check.points} of this area&apos;s 100 pts
-                        </span>
-                      </div>
-                      <MeasuredLine code={check.code} signals={signals} />
-                      <RemedyLines code={check.code} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      <p className="mt-4 border-t border-bg-border pt-3 text-xs text-fg-dim">
-        {totalAreas} areas, {totalChecks} individual checks. Everything failing is listed below with what each one
-        costs them.
-      </p>
     </>
   );
 }

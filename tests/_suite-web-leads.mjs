@@ -41,6 +41,14 @@ const TESTS = [
   "tests/web-leads-hours.test.ts",
   "tests/web-leads-audit.test.ts",
   "tests/web-leads-remedies.test.ts",
+  "tests/web-leads-automations.test.ts",
+  "tests/web-leads-automations-match.test.ts",
+  // The catalogue COMPONENTS (2026-09-14). Spawns
+  // web-leads-automations-catalogue.render.ts as a plain node process to
+  // server-render them, because this suite runs under
+  // --conditions=react-server and a client component with hooks cannot be
+  // rendered in that process at all. No credentials, no network.
+  "tests/web-leads-automations-catalogue.test.ts",
   "tests/web-leads-battlecard.test.ts",
   "tests/web-leads-manager-battlecard.test.ts",
   "tests/web-leads-url-safety.test.ts",

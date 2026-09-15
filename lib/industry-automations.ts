@@ -5,6 +5,37 @@ export type IndustryAutomation = {
   outcome: string;
   discovery: string;
   buildType: AutomationBuildType;
+  /**
+   * The `Capability.id` in `lib/web-leads/automations.ts` this entry is the
+   * same product as. Set ONLY when the two lists genuinely collide, and
+   * required whenever they do (final review, 2026-09-14).
+   *
+   * WHY IT EXISTS. `BattleCard.tsx` renders the capability catalogue and
+   * then this menu, adjacent, on the same screen. The catalogue puts
+   * "Missed-call text-back" under "Later, once the first evidence reports
+   * have landed" with "Do not open with them", because spec §3.3 makes that
+   * gate a PRODUCT constraint and the operator was offered the chance to
+   * drop it and declined. This menu carried a literal title collision with
+   * an ask-now discovery question and no gate, so a rep had two
+   * contradictory instructions about one product, one section apart.
+   *
+   * WHAT IT DOES. `IndustryAutomationGuide` looks the capability up and
+   * renders ITS stage gate, from the same `STAGE_HEADING` and the same
+   * `stageReason` the catalogue renders, in place of the "Ask this" block.
+   * The question is not merely demoted, it is removed: "ask this now" is the
+   * instruction the gate exists to countermand.
+   *
+   * WHY A KEY AND NOT A COPY OF THE GATE. A second hand-typed gate is the
+   * same drift one level down. The id is resolved at render time, so a stage
+   * change in `automations.ts` moves both surfaces at once or neither.
+   *
+   * PINNED, so a future entry cannot re-create the collision quietly:
+   * `tests/web-leads-automations.test.ts` cross-checks every name in this
+   * file against every capability title and fails if a collision carries no
+   * `gatedBy`, if a `gatedBy` names a capability that does not exist, or if
+   * the set of colliding entries changes at all.
+   */
+  gatedBy?: string;
 };
 
 export type IndustryAutomationGroup = {
@@ -19,7 +50,8 @@ const a = (
   outcome: string,
   discovery: string,
   buildType: AutomationBuildType,
-): IndustryAutomation => ({ name, outcome, discovery, buildType });
+  gatedBy?: string,
+): IndustryAutomation => (gatedBy ? { name, outcome, discovery, buildType, gatedBy } : { name, outcome, discovery, buildType });
 
 /**
  * The rep-facing automation menu. This is intentionally fixed, reviewed copy:
@@ -33,7 +65,7 @@ export const INDUSTRY_AUTOMATIONS: readonly IndustryAutomationGroup[] = [
     aliases: ["restaurant", "bar", "pub", "cafe", "coffee", "food", "bakery", "catering"],
     automations: [
       a("Reservation capture", "Turn website and Google traffic into confirmed bookings with reminders.", "How are reservations handled when the phone is busy?", "Website + workflow"),
-      a("Missed-call text-back", "Text callers instantly with hours, booking, menu, or catering links.", "What happens when nobody can answer during a rush?", "Website + workflow"),
+      a("Missed-call text-back", "Text callers instantly with hours, booking, menu, or catering links.", "What happens when nobody can answer during a rush?", "Website + workflow", "missed-call-text-back"),
       a("Private-event lead flow", "Qualify party size, date, budget, and menu needs before staff follows up.", "How many event inquiries arrive without enough detail to quote?", "Website + workflow"),
       a("Review recovery", "Ask happy guests for a review and route poor experiences to a manager first.", "Do you consistently ask satisfied guests for reviews?", "Custom build"),
       a("Lapsed-guest reactivation", "Bring past guests back with permission-based offers and occasion campaigns.", "Do you have a guest list you can actually market to?", "Custom build"),
@@ -48,7 +80,7 @@ export const INDUSTRY_AUTOMATIONS: readonly IndustryAutomationGroup[] = [
     aliases: ["hvac", "plumb", "electric", "roof", "landscap", "contractor", "cleaning", "pest", "handyman", "renovation"],
     automations: [
       a("Estimate intake", "Collect job type, address, urgency, photos, and preferred time before dispatch.", "What information does the office chase before it can price or schedule?", "Website + workflow"),
-      a("Missed-call text-back", "Recover after-hours and on-job calls with immediate qualification and booking.", "How many calls hit voicemail while the crew is working?", "Website + workflow"),
+      a("Missed-call text-back", "Recover after-hours and on-job calls with immediate qualification and booking.", "How many calls hit voicemail while the crew is working?", "Website + workflow", "missed-call-text-back"),
       a("Lead-to-estimate follow-up", "Nudge unbooked inquiries and open estimates until the customer decides.", "Who follows every estimate that goes quiet?", "Custom build"),
       a("Appointment reminders", "Reduce no-shows with confirmation, arrival-window, and reschedule messages.", "How often does a crew arrive and nobody is available?", "Custom build"),
       a("Maintenance reminders", "Trigger seasonal service, filter, inspection, or warranty reminders.", "Do past customers reliably return for maintenance?", "Custom build"),
