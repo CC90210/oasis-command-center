@@ -35,10 +35,45 @@ import { hasLiveWebsite } from "../lib/web-leads/automations-match";
 //     web-leads-automations.test.ts pins it.
 // ---------------------------------------------------------------------------
 
+/** The render helper's whole purpose is to be a PLAIN node process: this
+ *  suite runs under `--conditions=react-server`, and a client component with
+ *  hooks cannot be rendered there at all. Omitting the flag from the child's
+ *  argv is not enough to get that, because node also reads `--conditions`
+ *  from the inherited `NODE_OPTIONS`, and `.github/workflows/ci.yml` sets
+ *  `NODE_OPTIONS: --conditions=react-server` for the entire Tests step. A
+ *  child spawned with a bare `{...process.env}` therefore IS an RSC process
+ *  on CI while being a plain one on a developer machine, where NODE_OPTIONS
+ *  is normally unset. `react-dom/server` then resolves to the RSC stub whose
+ *  only job is to throw, and this test failed on CI and passed locally for
+ *  exactly that reason. Only the condition flags are stripped, so an
+ *  unrelated NODE_OPTIONS entry such as --max-old-space-size still reaches
+ *  the child. */
+const childEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  TSX_TSCONFIG_PATH: "tests/tsconfig.render.json",
+};
+// Both spellings are stripped. `--conditions=x` is one token, `--conditions x`
+// is two, and dropping only the first of the pair would leave a bare value
+// that node rejects as an unknown argument.
+const nodeOptionTokens = (process.env.NODE_OPTIONS ?? "").split(/\s+/).filter((t) => t.length > 0);
+const keptNodeOptions: string[] = [];
+for (let i = 0; i < nodeOptionTokens.length; i += 1) {
+  const token = nodeOptionTokens[i];
+  if (token === "--conditions" || token === "-C") {
+    i += 1; // also drop the value that follows
+    continue;
+  }
+  if (/^(--conditions=|-C=)/.test(token)) continue;
+  keptNodeOptions.push(token);
+}
+const strippedNodeOptions = keptNodeOptions.join(" ");
+if (strippedNodeOptions) childEnv.NODE_OPTIONS = strippedNodeOptions;
+else delete childEnv.NODE_OPTIONS;
+
 const r = spawnSync(
   process.execPath,
   ["--import", "tsx", "tests/web-leads-automations-catalogue.render.ts"],
-  { encoding: "utf8", env: { ...process.env, TSX_TSCONFIG_PATH: "tests/tsconfig.render.json" } },
+  { encoding: "utf8", env: childEnv },
 );
 assert.equal(
   r.status,
