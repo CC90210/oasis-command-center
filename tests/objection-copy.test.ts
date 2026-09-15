@@ -8,7 +8,6 @@ import {
   type SeedAnswer,
 } from "@/lib/web-leads/objections/alternate-answers";
 import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
-import type { ObjectionPosture } from "@/lib/web-leads/objections/types";
 
 // ---------------------------------------------------------------------------
 // Copy rules for every sentence a rep says out loud when handling an
