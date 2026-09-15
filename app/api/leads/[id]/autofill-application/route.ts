@@ -24,7 +24,25 @@ export const dynamic = "force-dynamic";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALLOWED = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp", "image/gif"]);
 
+/**
+ * Top-level catch — same contract as /api/leads/new-from-document next door.
+ * The same dropzone posts here in "existing" mode, so both doors must fail the
+ * same legible way rather than handing the rep a bare status code.
+ */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  try {
+    return await handleAutofillApplication(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[leads/autofill-application] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "autofill_application_unhandled_error", detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleAutofillApplication(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   if (!UUID_RE.test(id)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
