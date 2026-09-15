@@ -346,6 +346,18 @@ for (const fn of ["updateObjection", "updateResponse"]) {
   );
 }
 
+// Round 3, and this one was a defect in the round-2 FIX rather than in the
+// original code. The makeDefault sibling-clear used to include the target row,
+// so it stamped updated_at onto the row the conditional write was about to
+// touch. If that write then matched nothing, assertWriteLanded read the
+// timestamp the CLEAR had written and reported success: 200 returned, every
+// default cleared, nothing promoted, objection left with no default. A
+// verification another write can satisfy is not a verification.
+assert.ok(
+  updateResponseSource.includes('.neq("id", responseId)'),
+  "the makeDefault clear must EXCLUDE the target row, or its timestamp can satisfy the write's own landing check",
+);
+
 // A controlled select whose value is not among its options displays one thing
 // and submits another, so the posture is derived rather than held in state.
 assert.ok(

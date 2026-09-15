@@ -749,11 +749,25 @@ export async function updateResponse(
         "Only an approved answer can be the default one a rep sees first.",
       );
     }
+    // EVERY SIBLING, BUT NOT THIS ROW.
+    //
+    // Excluding the target is what keeps the write verifiable. When the clear
+    // included it, the clear stamped `updated_at = now` onto the very row the
+    // conditional update was about to touch; if that update then matched
+    // nothing, because the status moved underneath us, `assertWriteLanded`
+    // read the timestamp the CLEAR had written and reported success. The API
+    // returned 200 having cleared every default and promoted nothing, leaving
+    // the objection with no default at all. A verification that can be
+    // satisfied by a different write is not a verification.
+    //
+    // Excluding it is also simply correct: this row is about to be set to
+    // is_default = 1, so clearing it first was never doing anything.
     const clear = await db
       .from("objection_response")
       .update({ is_default: 0, updated_at: now })
       .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("objection_id", objectionId);
+      .eq("objection_id", objectionId)
+      .neq("id", responseId);
     if (clear.error) {
       throw new ObjectionAdminError(`objection_response_default_clear_failed: ${clear.error.message}`);
     }
