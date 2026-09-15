@@ -274,6 +274,6 @@ run("admin-only powers stay admin-only", () => {
   assert.match(
     view,
     /\{isLeads && variant !== "oasis" && \(\s*<AutofillDropzone mode="new"/,
-    "New from application is offered on the OASIS board again",
+    "New Form Application is offered on the OASIS board again",
   );
 });

@@ -592,7 +592,7 @@ export function LeadPipelineView({
           )}
           {/* Gated on canCreateLead, NOT canManage: every sales role sources
               their own prospects and must be able to enter one. Bulk assign
-              above and "New from application" below stay admin-only. */}
+              above and "New Form Application" below stay admin-only. */}
           {(variant !== "oasis" || (canCreateLead ?? canManage)) && <Link
             href={newHref}
             className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-bg-deep hover:bg-accent/90"
@@ -602,12 +602,12 @@ export function LeadPipelineView({
           </Link>}
           {/* Drop-in autofill — drop a merchant's existing application (any
               company's PDF) to create a NEW SunBiz lead + application from it. */}
-          {/* SunBiz only. "New from application" files a lead at a SunBiz
+          {/* SunBiz only. "New Form Application" files a lead at a SunBiz
               underwriting stage with no OASIS stamp, so on the OASIS board it
               made a lead the board can never draw: the "I added it and it isn't
               there" defect, by a third door. (Verifier, 2026-09-10.) */}
           {isLeads && variant !== "oasis" && (
-            <AutofillDropzone mode="new" tenantSlug={slug} label="New from application" />
+            <AutofillDropzone mode="new" tenantSlug={slug} label="New Form Application" />
           )}
         </div>
       </div>

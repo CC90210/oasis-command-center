@@ -213,7 +213,7 @@ export function AutofillDropzone({
     }
   }
 
-  const text = label || (mode === "existing" ? "Autofill from application" : "New from application");
+  const text = label || (mode === "existing" ? "Autofill from application" : "New Form Application");
   const working = busy || reading;
 
   return (
