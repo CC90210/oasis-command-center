@@ -78,6 +78,11 @@ loadEnv();
 import { OBJECTIONS, ANGLES } from "@/lib/web-leads/angles";
 import type { ObjectionFamily, ObjectionPosture, WebsitePremise } from "@/lib/web-leads/objections/types";
 import { SEEDED_SLUGS } from "@/lib/web-leads/objections/seed-slugs";
+import {
+  ALTERNATE_ANSWERS,
+  mergeAnswers,
+  type SeedAnswer,
+} from "@/lib/web-leads/objections/alternate-answers";
 
 const DRY = process.argv.includes("--dry-run");
 const SEEDED_BY = "seed:angles.ts";
@@ -182,8 +187,13 @@ type SeedRow = {
   slug: string; says: string; meaning: string; prevent: string;
   family: ObjectionFamily; source: string | null; dimension: string | null;
   websitePremise: WebsitePremise | null;
-  answer: { label: string; body: string; posture: ObjectionPosture };
+  /** Element 0 is the PRIMARY and is the only row written with is_default = 1.
+   *  Its body comes from angles.ts, which the battle card also renders, so the
+   *  two surfaces cannot disagree about the standard wording. Elements 1+ are
+   *  the alternates from ALTERNATE_ANSWERS below. */
+  answers: SeedAnswer[];
 };
+
 
 function universalRows(): SeedRow[] {
   return OBJECTIONS.map((o) => {
@@ -203,10 +213,11 @@ function universalRows(): SeedRow[] {
       source: o.source ?? null,
       dimension: null,
       websitePremise: meta.premise ?? null,
-      answer: { label: meta.label, body: o.response, posture: meta.posture },
+      answers: mergeAnswers(meta.slug, { label: meta.label, body: o.response, posture: meta.posture }),
     };
   });
 }
+
 
 /**
  * The seven angle objections. Each belongs to one audit dimension and carries
@@ -338,6 +349,7 @@ const ANGLE_META: Record<string, { slug: string; family: ObjectionFamily; postur
   },
 };
 
+
 function angleRows(): SeedRow[] {
   return Object.entries(ANGLES).map(([key, angle]) => {
     const meta = ANGLE_META[key];
@@ -351,7 +363,11 @@ function angleRows(): SeedRow[] {
       source: null,
       dimension: key,
       websitePremise: meta.premise ?? null,
-      answer: { label: meta.label, body: angle.objection.response, posture: meta.posture },
+      answers: mergeAnswers(meta.slug, {
+        label: meta.label,
+        body: angle.objection.response,
+        posture: meta.posture,
+      }),
     };
   });
 }
@@ -384,12 +400,32 @@ async function main() {
     );
   }
 
-  console.log(`[seed] ${rows.length} objections (${OBJECTIONS.length} universal + ${Object.keys(ANGLES).length} angle)`);
+  // Orphan guard for ALTERNATE_ANSWERS. A key that matches no slug is a typo,
+  // and a typo here is silent in the worst way: the alternates simply never
+  // get written and the card keeps rendering one answer with no picker, which
+  // looks exactly like the state this seed exists to fix. mergeAnswers() already
+  // throws for the opposite direction, a slug with no alternates.
+  const orphanAlternates = Object.keys(ALTERNATE_ANSWERS).filter((s) => !rowSet.has(s));
+  if (orphanAlternates.length) {
+    throw new Error(
+      `ALTERNATE_ANSWERS has keys matching no seeded objection: ${JSON.stringify(orphanAlternates)}. ` +
+        `A mistyped key writes nothing and leaves the card with a single answer and no posture picker.`,
+    );
+  }
+
+  const answerCount = rows.reduce((n, r) => n + r.answers.length, 0);
+  console.log(
+    `[seed] ${rows.length} objections (${OBJECTIONS.length} universal + ${Object.keys(ANGLES).length} angle), ` +
+      `${answerCount} answers`,
+  );
   if (DRY) {
     for (const r of rows) {
       console.log(
         `  ${r.slug.padEnd(34)} ${r.family.padEnd(16)} ${(r.websitePremise ?? "neutral").padEnd(14)} ${r.says.slice(0, 50)}`,
       );
+      for (const [i, a] of r.answers.entries()) {
+        console.log(`      ${i === 0 ? "DEFAULT" : "alt    "} ${a.posture.padEnd(20)} ${a.body.slice(0, 88)}`);
+      }
     }
     return;
   }
@@ -446,38 +482,49 @@ async function main() {
       .eq("tenant_id", WEBDEV_TENANT_ID).eq("objection_id", objectionId);
     if (clear.error) throw new Error(`response_clear_failed ${r.slug}: ${clear.error.message}`);
 
-    const existingResp = await db
-      .from("objection_response")
-      .select("id")
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("objection_id", objectionId)
-      .eq("posture", r.answer.posture)
-      .maybeSingle();
-    if (existingResp.error) throw new Error(`response_lookup_failed ${r.slug}: ${existingResp.error.message}`);
+    // Every answer for this objection, primary first. The is_default flag goes
+    // on index 0 ONLY, which is what keeps the partial unique index on
+    // (tenant_id, objection_id) where is_default = 1 and status = 'approved'
+    // satisfiable: the clear above set every existing row to 0, so exactly one
+    // row comes back up. Posture is the natural key for the lookup, and
+    // mergeAnswers() has already proven the postures within this objection are
+    // distinct, so no two answers can collide on it and overwrite each other.
+    for (const [index, answer] of r.answers.entries()) {
+      const existingResp = await db
+        .from("objection_response")
+        .select("id")
+        .eq("tenant_id", WEBDEV_TENANT_ID)
+        .eq("objection_id", objectionId)
+        .eq("posture", answer.posture)
+        .maybeSingle();
+      if (existingResp.error) {
+        throw new Error(`response_lookup_failed ${r.slug}/${answer.posture}: ${existingResp.error.message}`);
+      }
 
-    const respBase = {
-      tenant_id: WEBDEV_TENANT_ID,
-      objection_id: objectionId,
-      label: r.answer.label,
-      body: r.answer.body,
-      posture: r.answer.posture,
-      is_default: 1,
-      status: "approved",
-      approved_by: SEEDED_BY,
-      approved_at: nowIso,
-      updated_at: nowIso,
-    };
+      const respBase = {
+        tenant_id: WEBDEV_TENANT_ID,
+        objection_id: objectionId,
+        label: answer.label,
+        body: answer.body,
+        posture: answer.posture,
+        is_default: index === 0 ? 1 : 0,
+        status: "approved",
+        approved_by: SEEDED_BY,
+        approved_at: nowIso,
+        updated_at: nowIso,
+      };
 
-    if (existingResp.data) {
-      const upd = await db.from("objection_response").update(respBase)
-        .eq("tenant_id", WEBDEV_TENANT_ID).eq("id", (existingResp.data as { id: string }).id);
-      if (upd.error) throw new Error(`response_update_failed ${r.slug}: ${upd.error.message}`);
-    } else {
-      const ins = await db.from("objection_response").insert({ ...respBase, id: randomUUID(), created_at: nowIso });
-      if (ins.error) throw new Error(`response_insert_failed ${r.slug}: ${ins.error.message}`);
+      if (existingResp.data) {
+        const upd = await db.from("objection_response").update(respBase)
+          .eq("tenant_id", WEBDEV_TENANT_ID).eq("id", (existingResp.data as { id: string }).id);
+        if (upd.error) throw new Error(`response_update_failed ${r.slug}/${answer.posture}: ${upd.error.message}`);
+      } else {
+        const ins = await db.from("objection_response").insert({ ...respBase, id: randomUUID(), created_at: nowIso });
+        if (ins.error) throw new Error(`response_insert_failed ${r.slug}/${answer.posture}: ${ins.error.message}`);
+      }
     }
 
-    console.log(`  seeded ${r.slug}`);
+    console.log(`  seeded ${r.slug} (${r.answers.length} answers: ${r.answers.map((a) => a.posture).join(", ")})`);
   }
 
   console.log("[seed] done");
