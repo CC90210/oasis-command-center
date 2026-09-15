@@ -195,7 +195,14 @@ export function ObjectionLibrary({
           ) : (
             <ul className="space-y-3">
               {visible.map((o) => (
-                <ObjectionRow key={o.id} objection={o} canApprove={canApprove} busy={busy} act={act} />
+                <ObjectionRow
+                  key={o.id}
+                  objection={o}
+                  canApprove={canApprove}
+                  busy={busy}
+                  act={act}
+                  onRefresh={refresh}
+                />
               ))}
             </ul>
           )}
@@ -212,11 +219,13 @@ function ObjectionRow({
   canApprove,
   busy,
   act,
+  onRefresh,
 }: {
   objection: AdminObjection;
   canApprove: boolean;
   busy: string | null;
   act: (key: string, url: string, body: unknown) => Promise<void>;
+  onRefresh: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const url = `/api/objections/catalog/${objection.id}`;
@@ -274,7 +283,8 @@ function ObjectionRow({
         <ul className="mt-3 space-y-2">
           {objection.responses.length === 0 && (
             <li className="text-xs text-fg-dim">
-              No answers yet. A rep opening this card sees the objection and nothing to say.
+              No answers yet, so this objection never reaches a rep: the console only serves objections with at least
+              one approved answer. Add one below.
             </li>
           )}
           {objection.responses.map((r) => (
@@ -325,9 +335,113 @@ function ObjectionRow({
               )}
             </li>
           ))}
+          <li>
+            <AddAnswer objection={objection} onCreated={onRefresh} />
+          </li>
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * Adds one draft answer to an existing objection.
+ *
+ * WITHOUT THIS THE SURFACE COULD NOT FINISH ITS OWN JOB. A newly created
+ * objection has no answers, the console only serves objections with at least
+ * one APPROVED answer, and nothing else here ever posts a response. So an
+ * objection typed into this page could be approved and still never reach a
+ * single rep, which looks from the outside exactly like the feature working.
+ * Found in review before it shipped.
+ *
+ * Only the postures not already taken are offered. A second answer with the
+ * same posture gives a rep two buttons with the same name, and the server
+ * refuses it anyway; offering it would just be a form that fails on submit.
+ */
+function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCreated: () => Promise<void> }) {
+  const taken = new Set(objection.responses.filter((r) => r.status !== "retired").map((r) => r.posture));
+  const available = OBJECTION_POSTURES.filter((p) => !taken.has(p));
+
+  const [open, setOpen] = useState(false);
+  const [posture, setPosture] = useState<ObjectionPosture>(available[0] ?? "agree_and_redirect");
+  const [body, setBody] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const submit = useCallback(async () => {
+    setSaving(true);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/objections/catalog/${objection.id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ posture, body, label: POSTURE_LABEL[posture] }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
+      if (!res.ok) {
+        setMessage(payload.message || payload.error || "That did not save.");
+        return;
+      }
+      setBody("");
+      setOpen(false);
+      await onCreated();
+    } finally {
+      setSaving(false);
+    }
+  }, [objection.id, posture, body, onCreated]);
+
+  if (available.length === 0) {
+    return (
+      <p className="text-[11px] text-fg-dim">
+        All four moves are taken. Retire one before adding another.
+      </p>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button type="button" className={BTN} onClick={() => setOpen(true)}>
+        Add an answer
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-bg-border p-3">
+      <label htmlFor={`posture-${objection.id}`} className="text-xs font-medium text-fg-muted">
+        Which move
+      </label>
+      <select
+        id={`posture-${objection.id}`}
+        className={`${INPUT} mt-1`}
+        value={posture}
+        onChange={(e) => setPosture(e.target.value as ObjectionPosture)}
+      >
+        {available.map((p) => (
+          <option key={p} value={p}>
+            {POSTURE_LABEL[p]}
+          </option>
+        ))}
+      </select>
+      <label htmlFor={`body-${objection.id}`} className="mt-3 block text-xs font-medium text-fg-muted">
+        What the rep says, word for word
+      </label>
+      <textarea
+        id={`body-${objection.id}`}
+        className={`${INPUT} mt-1 min-h-24`}
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button type="button" className={BTN} disabled={saving || body.trim().length === 0} onClick={submit}>
+          {saving ? "Saving" : "Save as draft"}
+        </button>
+        <button type="button" className={BTN} onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+        {message && <span className="text-xs text-fg-muted">{message}</span>}
+      </div>
+    </div>
   );
 }
 

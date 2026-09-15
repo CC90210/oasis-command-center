@@ -23,11 +23,13 @@ import {
   approverName,
   mayApproveObjections,
   mayAuthorObjections,
+  needsApprovalRights,
 } from "@/lib/web-leads/objections/admin-access";
 import {
   ObjectionAdminError,
   ObjectionRejected,
   createDraftResponse,
+  fetchEditTargetStatus,
   updateObjection,
   updateResponse,
   type ObjectionPatch,
@@ -40,22 +42,6 @@ export const dynamic = "force-dynamic";
 const STATUSES = ["draft", "approved", "retired"] as const;
 type Status = (typeof STATUSES)[number];
 const isStatus = (v: unknown): v is Status => typeof v === "string" && (STATUSES as readonly string[]).includes(v);
-
-/**
- * Whether this payload needs the closer bar rather than the author bar.
- *
- * Any status change qualifies, not only an approval. Retiring hides an answer
- * from every rep instantly, and promoting a default changes the sentence a rep
- * reads first; both are decisions about what leaves somebody's mouth on a
- * call, which is the thing `mayQuoteAndClose` exists to gate. Treating retire
- * as a mere edit would let anyone silently empty the console.
- */
-function needsApprovalRights(objection?: ObjectionPatch, response?: ResponsePatch): boolean {
-  if (objection?.status !== undefined) return true;
-  if (response?.status !== undefined) return true;
-  if (response?.makeDefault) return true;
-  return false;
-}
 
 function errorResponse(err: unknown, where: string) {
   if (err instanceof ObjectionRejected) {
@@ -129,11 +115,22 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     return NextResponse.json({ error: "nothing_to_do" }, { status: 400 });
   }
 
-  if (needsApprovalRights(objectionPatch, responsePatch) && !mayApproveObjections(session)) {
+  // Read the stored statuses BEFORE deciding permission. Editing copy that is
+  // already live is a closer act, and only the database knows whether it is.
+  let stored: { objectionStatus: string | null; responseStatus: string | null };
+  try {
+    stored = await fetchEditTargetStatus(id, responseId || undefined);
+  } catch (err) {
+    console.error("[objections/catalog/:id] status read failed", err instanceof Error ? err.message : "unknown");
+    return NextResponse.json({ error: "read_failed" }, { status: 500 });
+  }
+
+  if (needsApprovalRights(objectionPatch, responsePatch, stored) && !mayApproveObjections(session)) {
     return NextResponse.json(
       {
         error: "approval_forbidden",
-        message: "Approving, retiring or changing the default answer needs deal-closing rights.",
+        message:
+          "Approving, retiring, changing the default answer, or editing wording that is already live needs deal-closing rights.",
       },
       { status: 403 },
     );

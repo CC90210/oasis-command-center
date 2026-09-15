@@ -492,6 +492,58 @@ export async function createDraftObjection(
   return { id, slug };
 }
 
+export type EditTargetStatus = { objectionStatus: string | null; responseStatus: string | null };
+
+/**
+ * The CURRENT status of the rows a PATCH is about to touch.
+ *
+ * The route cannot decide who may make an edit from the payload alone. A
+ * payload that carries only `says` or `body` looks like a harmless wording
+ * fix, and it IS one on a draft. On an already-approved row it rewrites a
+ * sentence that is live on reps' screens right now, which is the same act as
+ * approving one and belongs behind the same bar.
+ *
+ * A row that cannot be found reports null, and the caller treats null as
+ * "approved" rather than "draft", so an unreadable or missing row demands the
+ * higher permission instead of the lower one.
+ */
+export async function fetchEditTargetStatus(
+  objectionId: string,
+  responseId?: string,
+): Promise<EditTargetStatus> {
+  const db = getServiceSupabase();
+
+  const objection = await db
+    .from("objection_catalog")
+    .select("status")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("id", objectionId)
+    .maybeSingle();
+  if (objection.error) {
+    throw new ObjectionAdminError(`objection_catalog_status_read_failed: ${objection.error.message}`);
+  }
+
+  let responseStatus: string | null = null;
+  if (responseId) {
+    const response = await db
+      .from("objection_response")
+      .select("status")
+      .eq("tenant_id", WEBDEV_TENANT_ID)
+      .eq("id", responseId)
+      .eq("objection_id", objectionId)
+      .maybeSingle();
+    if (response.error) {
+      throw new ObjectionAdminError(`objection_response_status_read_failed: ${response.error.message}`);
+    }
+    responseStatus = (response.data as { status?: string } | null)?.status ?? null;
+  }
+
+  return {
+    objectionStatus: (objection.data as { status?: string } | null)?.status ?? null,
+    responseStatus,
+  };
+}
+
 export type ObjectionPatch = {
   says?: string;
   meaning?: string;
@@ -618,17 +670,34 @@ export async function updateResponse(
     if (patch.status === "retired") update.is_default = 0;
   }
 
+  // THE RESPONSE MUST BELONG TO THIS OBJECTION, proven before anything is
+  // written. `responseId` comes from the request body and `objectionId` from
+  // the URL, so nothing but this check stops a caller pairing an id from one
+  // objection with another objection's route. Unscoped, `makeDefault` cleared
+  // every default under the URL's objection and then promoted a row parented
+  // elsewhere: the URL objection is left with NO default, and the promoted
+  // row's real parent can end up with two, which is a uniqueness failure on
+  // the partial index. Reported as a rejection rather than a silent no-op,
+  // because a mismatched pair is a caller bug and must be visible as one.
+  const owner = await db
+    .from("objection_response")
+    .select("id,status")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("id", responseId)
+    .eq("objection_id", objectionId)
+    .maybeSingle();
+  if (owner.error) {
+    throw new ObjectionAdminError(`objection_response_read_failed: ${owner.error.message}`);
+  }
+  if (!owner.data) {
+    throw new ObjectionRejected(
+      "response_not_in_objection",
+      "That answer does not belong to this objection.",
+    );
+  }
+
   if (patch.makeDefault) {
-    const current = await db
-      .from("objection_response")
-      .select("status")
-      .eq("tenant_id", WEBDEV_TENANT_ID)
-      .eq("id", responseId)
-      .maybeSingle();
-    if (current.error) {
-      throw new ObjectionAdminError(`objection_response_read_failed: ${current.error.message}`);
-    }
-    const status = becomingApproved ? "approved" : (current.data as { status?: string } | null)?.status;
+    const status = becomingApproved ? "approved" : (owner.data as { status?: string }).status;
     if (status !== "approved") {
       throw new ObjectionRejected(
         "default_not_approved",
@@ -650,7 +719,11 @@ export async function updateResponse(
     .from("objection_response")
     .update(update)
     .eq("tenant_id", WEBDEV_TENANT_ID)
-    .eq("id", responseId);
+    .eq("id", responseId)
+    // Scoped here too, not only in the ownership check above. The check proves
+    // the pair is valid; this makes the write itself unable to reach a row
+    // outside the objection in the URL even if the two ever drift apart.
+    .eq("objection_id", objectionId);
   if (error) throw new ObjectionAdminError(`objection_response_update_failed: ${error.message}`);
 }
 

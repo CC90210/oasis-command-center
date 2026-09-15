@@ -72,3 +72,70 @@ export function approverName(session: SessionLike): string {
   if (email) return email;
   return session.userId ?? "unknown";
 }
+
+/** The lifecycle status of the rows a PATCH is about to touch, as stored.
+ *  Mirrors `EditTargetStatus` in ./admin; declared structurally here so this
+ *  module stays free of anything that opens a database connection. */
+export type StoredStatuses = { objectionStatus: string | null; responseStatus: string | null };
+
+/** The shape of a patch these gates inspect. Structural, for the same reason. */
+type CopyPatch = {
+  says?: unknown; meaning?: unknown; prevent?: unknown; family?: unknown;
+  websitePremise?: unknown; status?: unknown;
+};
+type AnswerPatch = { label?: unknown; body?: unknown; status?: unknown; makeDefault?: unknown };
+
+/** Fields that change what a rep reads, as opposed to the row's lifecycle. */
+export function changesCopy(objection: CopyPatch, response: AnswerPatch): boolean {
+  const objectionCopy =
+    objection.says !== undefined ||
+    objection.meaning !== undefined ||
+    objection.prevent !== undefined ||
+    objection.family !== undefined ||
+    objection.websitePremise !== undefined;
+  const responseCopy = response.label !== undefined || response.body !== undefined;
+  return objectionCopy || responseCopy;
+}
+
+/**
+ * Whether this request needs the closer bar rather than the author bar.
+ *
+ * Any status change qualifies, not only an approval. Retiring hides an answer
+ * from every rep instantly, and promoting a default changes the sentence a rep
+ * reads first; both are decisions about what leaves somebody's mouth on a
+ * call, which is the thing `mayQuoteAndClose` exists to gate.
+ *
+ * 🚨 AND SO DOES EDITING COPY THAT IS ALREADY APPROVED, which is why this
+ * takes the stored statuses and not just the payload. An earlier version of
+ * this function read the payload alone, and a payload carrying only `says` or
+ * `body` looked like a harmless draft fix. On an approved row it is not: it
+ * rewrites a sentence that is live on reps' screens at that moment, with no
+ * closer involved, which silently reopened the exact gate this route exists
+ * to close. Found in review before it shipped.
+ *
+ * A status that could not be read is treated as approved, so an unreadable or
+ * missing row demands the higher permission rather than the lower one.
+ */
+export function needsApprovalRights(
+  objection: CopyPatch,
+  response: AnswerPatch,
+  stored: StoredStatuses,
+): boolean {
+  if (objection.status !== undefined) return true;
+  if (response.status !== undefined) return true;
+  if (response.makeDefault) return true;
+
+  if (!changesCopy(objection, response)) return false;
+
+  const touchesObjectionCopy =
+    objection.says !== undefined ||
+    objection.meaning !== undefined ||
+    objection.prevent !== undefined ||
+    objection.family !== undefined ||
+    objection.websitePremise !== undefined;
+  const touchesResponseCopy = response.label !== undefined || response.body !== undefined;
+
+  if (touchesObjectionCopy && stored.objectionStatus !== "draft") return true;
+  if (touchesResponseCopy && stored.responseStatus !== "draft") return true;
+  return false;
+}
