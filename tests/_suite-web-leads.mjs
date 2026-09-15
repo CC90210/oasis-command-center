@@ -91,6 +91,10 @@ const TESTS = [
   // here deliberately: tests/industry-automations.test.ts is in NO suite and
   // has never run once, which is the failure mode this line avoids.
   "tests/objection-copy.test.ts",
+  // The authoring surface: dedup, batch parsing, write-path copy rules, and
+  // the approval gate. Pure decisions only; the SQL is not covered and the
+  // test says so in its own header.
+  "tests/objection-admin.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data
