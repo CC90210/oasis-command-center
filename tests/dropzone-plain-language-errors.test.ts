@@ -74,7 +74,37 @@ for (const [label, needle] of [
 // did this half-create something I now have to hunt for?
 assert.ok(
   explainer.includes("Nothing was saved."),
-  "every upload failure must say whether anything was saved",
+  "upload failures that truly saved nothing must say so",
+);
+
+// 4b. 🚨 AND IT MUST NOT LIE. The two routes differ: new-from-document removes
+//     its pending blob when the job insert fails; autofill-application has
+//     already committed a real lead_documents row by then and does NOT roll it
+//     back. A blanket "Nothing was saved" on queue_failed sends a rep to
+//     re-drop a file the lead already has. The first version of this fix did
+//     exactly that and a review caught it.
+assert.ok(
+  /queue_failed/.test(explainer),
+  "queue_failed must be handled distinctly — it is the branch where a document IS saved",
+);
+assert.ok(
+  /mode === "existing"/.test(explainer),
+  "the message must branch on mode, because only the existing-lead route keeps the document",
+);
+assert.ok(
+  explainer.includes("already on the Documents tab"),
+  "on the existing-lead queue_failed path the rep must be told the file IS filed",
+);
+// The unknown-5xx branch must hedge, never promise. We cannot know how far an
+// uncaught throw got.
+const unknownBranch = explainer.slice(explainer.indexOf("status >= 500"));
+assert.ok(
+  !unknownBranch.includes("Nothing was saved."),
+  "an unknown server failure must NOT promise that nothing was saved — we do not know",
+);
+assert.ok(
+  unknownBranch.includes("before dropping the file again"),
+  "an unknown server failure must tell the rep to check before re-dropping",
 );
 // ...and the raw code still has to survive, for diagnosing from a screenshot.
 assert.ok(
@@ -91,11 +121,36 @@ assert.ok(
   "a blocked: extraction must be explained in plain language",
 );
 
-// 6. PROVE THE GUARD FIRES. Plant the exact regression and confirm check 1 trips.
-const regressed = "setErr(j.detail || j.error || `failed_${r.status}`)";
+// 6. PROVE THE GUARD FIRES — against a mutated copy of the REAL source, not
+//    against a string literal of the pattern. Asserting that a regex matches a
+//    near-verbatim copy of itself proves only that the regex compiles; it would
+//    still pass if the guard had been pointed at the wrong file entirely.
+const BARE_CODE = /setErr\(\s*j\.detail \|\| j\.error \|\| `failed_\$\{r\.status\}`\s*\)/;
+const BARE_CODE_LINE = "setErr(j.detail || j.error || `failed_${r.status}`);";
+
+// The real file must be clean...
+assert.ok(!BARE_CODE.test(source), "live source must not contain the bare-code fallback");
+
+// ...and the same check, run over the real file with the historical defect
+// spliced back in at the real call site, must reject it.
+// Line endings are CRLF in this repo, so match on the call rather than a
+// literal "setErr(\n".
+const callMatch = /setErr\(\s*[\r\n]+\s*explainUploadFailure\(/.exec(source);
+assert.ok(callMatch, "could not locate the explainUploadFailure call site to mutate");
+const callSite = callMatch.index;
+// Replace the whole multi-line call with the historical one-liner.
+const callEnd = source.indexOf("),", callSite);
+assert.ok(callEnd > callSite, "could not find the end of the explainUploadFailure call");
+const mutated = source.slice(0, callSite) + BARE_CODE_LINE + source.slice(callEnd + 2);
 assert.ok(
-  /setErr\(\s*j\.detail \|\| j\.error \|\| `failed_\$\{r\.status\}`\s*\)/.test(regressed),
-  "the bare-code check must reject the original line it exists to prevent",
+  BARE_CODE.test(mutated),
+  "the bare-code check must FIRE on the real source with the 2026-09-15 defect restored",
+);
+// And the plain-language requirement must fail on that same mutation, otherwise
+// check 2 is decorative.
+assert.ok(
+  !/setErr\(\s*\n?\s*explainUploadFailure\(/.test(mutated),
+  "the explainer requirement must FIRE when the call site regresses",
 );
 
 console.log("dropzone-plain-language-errors: OK — no bare codes, every branch actionable");
