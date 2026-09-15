@@ -127,7 +127,7 @@ export async function GET(req: Request) {
 
   const baseUrl =
     process.env.PUBLIC_APP_URL?.replace(/\/$/, "") ||
-    "https://agent-dashboard-cc90210.vercel.app";
+    "https://oasisai.work";
   const redirectUri = `${baseUrl}/api/auth/google-oauth/callback`;
 
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");

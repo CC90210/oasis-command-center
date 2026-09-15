@@ -78,7 +78,7 @@ export default async function DesktopLinkPage({ searchParams }: { searchParams: 
   // Pull the hostname so the trust copy says "agent-dashboard..." rather
   // than a generic phrase. Helps reassure users on first install.
   const h = await headers();
-  const host = h.get("host") || "agent-dashboard-cc90210.vercel.app";
+  const host = h.get("host") || "oasisai.work";
 
   return (
     <Shell title="Connecting your OASIS Desktop">

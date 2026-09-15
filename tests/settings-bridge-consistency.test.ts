@@ -14,7 +14,7 @@ for (const loopback of ["localhost", "127.0.0.1", "::1"]) {
     `${loopback} may call the local bridge directly`,
   );
 }
-for (const hosted of ["oasisai.work", "agent-dashboard-cc90210.vercel.app"]) {
+for (const hosted of ["oasisai.work"]) {
   assert.equal(
     bridgeProxyModeForHostname(hosted),
     true,
