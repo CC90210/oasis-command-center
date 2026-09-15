@@ -320,7 +320,44 @@ assert.ok(
   "the add-answer control must handle the case where every posture is used",
 );
 
-console.log("objection-admin: parent scoping and the add-answer control are pinned OK");
+// Round 2 findings, same branch.
+//
+// The status the route reads to decide permission and the write it then
+// performs are two separate moments. A closer approving in that gap turns an
+// allowed draft edit into an unapproved edit of live copy, so each write is
+// conditioned on the status the request was authorized against.
+for (const fn of ["updateObjection", "updateResponse"]) {
+  const start = adminSource.indexOf(`export async function ${fn}(`);
+  assert.ok(start > 0, `${fn} must exist`);
+  const next = adminSource.indexOf("\nexport ", start + 1);
+  const body = adminSource.slice(start, next < 0 ? adminSource.length : next);
+  assert.ok(
+    body.includes('expectedStatus'),
+    `${fn} must take the status the caller was authorized against`,
+  );
+  assert.ok(
+    body.includes('.eq("status", expectedStatus)'),
+    `${fn}'s write must be conditional on that status, or a concurrent approval bypasses the closer gate`,
+  );
+  assert.ok(
+    body.includes("assertWriteLanded"),
+    `${fn} must confirm the conditional write landed: a conditional update matching nothing reports success ` +
+      `having changed nothing, which is the silent no-op shape this estate has been bitten by`,
+  );
+}
+
+// A controlled select whose value is not among its options displays one thing
+// and submits another, so the posture is derived rather than held in state.
+assert.ok(
+  librarySource.includes("effectivePosture"),
+  "the add-answer posture must be derived from what is still available, not left in stale state",
+);
+assert.ok(
+  !/body: JSON\.stringify\(\{ posture, /.test(librarySource),
+  "the raw state posture must not be submitted: after the first save it holds a posture already taken",
+);
+
+console.log("objection-admin: parent scoping, the add-answer control and the write races are pinned OK");
 
 console.log("objection-admin: normalisation, similarity and duplicates OK");
 console.log("objection-admin: batch parsing and slugs OK");

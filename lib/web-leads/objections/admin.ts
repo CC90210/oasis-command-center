@@ -565,8 +565,10 @@ export async function updateObjection(
   id: string,
   patch: ObjectionPatch,
   approver: string | null,
+  expectedStatus?: string | null,
 ): Promise<void> {
-  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const update: Record<string, unknown> = { updated_at: now };
 
   if (patch.says !== undefined) {
     const v = copyViolations(patch.says, "The objection", MAX_SAYS_LENGTH);
@@ -605,12 +607,54 @@ export async function updateObjection(
   }
 
   const db = getServiceSupabase();
-  const { error } = await db
+  let write = db
     .from("objection_catalog")
     .update(update)
     .eq("tenant_id", WEBDEV_TENANT_ID)
     .eq("id", id);
+  // COMPARE AND SWAP on the status the CALLER WAS AUTHORIZED AGAINST.
+  //
+  // The route reads the stored status to decide whether this edit needs closer
+  // rights. Between that read and this write, a closer can approve the row, and
+  // an author's wording change would then land on copy that is now live, with
+  // nobody having approved the new wording. Conditioning the write on the
+  // status observed at authorization time means the row simply does not match
+  // any more and the edit does not land.
+  if (expectedStatus !== undefined && expectedStatus !== null) {
+    write = write.eq("status", expectedStatus);
+  }
+  const { error } = await write;
   if (error) throw new ObjectionAdminError(`objection_catalog_update_failed: ${error.message}`);
+  if (expectedStatus !== undefined && expectedStatus !== null) {
+    await assertWriteLanded("objection_catalog", id, now);
+  }
+}
+
+/**
+ * Confirms a compare-and-swap actually wrote, and says so when it did not.
+ *
+ * A conditional update that matches nothing is not an error to this client: it
+ * reports success having changed no rows, which is the silent-no-op shape this
+ * estate has been bitten by before. Re-reading `updated_at` and comparing it to
+ * the exact timestamp just written is what turns "matched nothing" into a
+ * message a person can act on, rather than an edit that appears to save and
+ * then is not there on reload.
+ */
+async function assertWriteLanded(table: string, id: string, writtenAt: string): Promise<void> {
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from(table)
+    .select("updated_at")
+    .eq("tenant_id", WEBDEV_TENANT_ID)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new ObjectionAdminError(`${table}_verify_failed: ${error.message}`);
+  if ((data as { updated_at?: string } | null)?.updated_at !== writtenAt) {
+    throw new ObjectionRejected(
+      "changed_since_read",
+      "Somebody changed this while you were editing, so nothing was saved. Reload and try again.",
+    );
+  }
 }
 
 export type ResponsePatch = {
@@ -640,6 +684,7 @@ export async function updateResponse(
   objectionId: string,
   patch: ResponsePatch,
   approver: string | null,
+  expectedStatus?: string | null,
 ): Promise<void> {
   const db = getServiceSupabase();
   const now = new Date().toISOString();
@@ -715,7 +760,7 @@ export async function updateResponse(
     update.is_default = 1;
   }
 
-  const { error } = await db
+  let write = db
     .from("objection_response")
     .update(update)
     .eq("tenant_id", WEBDEV_TENANT_ID)
@@ -724,7 +769,17 @@ export async function updateResponse(
     // the pair is valid; this makes the write itself unable to reach a row
     // outside the objection in the URL even if the two ever drift apart.
     .eq("objection_id", objectionId);
+  // Same compare-and-swap as updateObjection: a closer can approve this answer
+  // between the route reading its status and this write, and an author's
+  // wording change must not land on copy that became live in the gap.
+  if (expectedStatus !== undefined && expectedStatus !== null) {
+    write = write.eq("status", expectedStatus);
+  }
+  const { error } = await write;
   if (error) throw new ObjectionAdminError(`objection_response_update_failed: ${error.message}`);
+  if (expectedStatus !== undefined && expectedStatus !== null) {
+    await assertWriteLanded("objection_response", responseId, now);
+  }
 }
 
 /** Adds one DRAFT answer to an existing objection. Draft for the same reason

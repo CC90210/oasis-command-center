@@ -140,8 +140,13 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   const approver = mayApproveObjections(session) ? approverName(authed) : null;
 
   try {
-    if (touchesObjection) await updateObjection(id, objectionPatch, approver);
-    if (touchesResponse) await updateResponse(responseId, id, responsePatch, approver);
+    // The status each write is conditioned on is the one this request was
+    // AUTHORIZED against, passed down so the write cannot land on a row that
+    // changed status in between. Without it the permission decision and the
+    // write are two separate moments, and a closer approving in the gap turns
+    // an allowed draft edit into an unapproved edit of live copy.
+    if (touchesObjection) await updateObjection(id, objectionPatch, approver, stored.objectionStatus);
+    if (touchesResponse) await updateResponse(responseId, id, responsePatch, approver, stored.responseStatus);
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err, "patch");

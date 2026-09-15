@@ -368,6 +368,21 @@ function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCrea
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
+  /**
+   * The posture actually submitted.
+   *
+   * `posture` is state and this component stays mounted across a successful
+   * save, so after adding an answer it still holds the posture just used while
+   * `available` has dropped it. A controlled `select` whose value is not among
+   * its options DISPLAYS the first option while the state behind it keeps the
+   * old one, so reopening the form showed a move the rep had not chosen and
+   * submitted the one already taken, which the server then rejected as
+   * `posture_taken`. Deriving it means the displayed value and the submitted
+   * value cannot disagree, with no effect to keep them in sync.
+   */
+  const effectivePosture: ObjectionPosture =
+    available.includes(posture) ? posture : (available[0] ?? "agree_and_redirect");
+
   const submit = useCallback(async () => {
     setSaving(true);
     setMessage(null);
@@ -375,7 +390,7 @@ function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCrea
       const res = await fetch(`/api/objections/catalog/${objection.id}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ posture, body, label: POSTURE_LABEL[posture] }),
+        body: JSON.stringify({ posture: effectivePosture, body, label: POSTURE_LABEL[effectivePosture] }),
       });
       const payload = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
       if (!res.ok) {
@@ -388,7 +403,7 @@ function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCrea
     } finally {
       setSaving(false);
     }
-  }, [objection.id, posture, body, onCreated]);
+  }, [objection.id, effectivePosture, body, onCreated]);
 
   if (available.length === 0) {
     return (
@@ -414,7 +429,7 @@ function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCrea
       <select
         id={`posture-${objection.id}`}
         className={`${INPUT} mt-1`}
-        value={posture}
+        value={effectivePosture}
         onChange={(e) => setPosture(e.target.value as ObjectionPosture)}
       >
         {available.map((p) => (
