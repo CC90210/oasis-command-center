@@ -54,12 +54,24 @@ const ROOT = process.cwd();
  * Each will throw on the live Worker the first time it is exercised, in the
  * same invisible way shop-out did.
  */
+/**
+ * lib/forms/watermark.ts is the one baseline entry that IS on the shop-out
+ * path — the real send calls watermarkAttachmentsForShopOut. It is listed
+ * rather than fixed because it does not fail the way agents.ts did: a failed
+ * watermark is caught and degrades to shopOutCleanFallback, which ships the
+ * verified CLEAN original and records the reason. So on Workers the send still
+ * goes out, with UNBRANDED statements. That is a real consequence and worth
+ * fixing (the logo and font have to be bundled, not read from node_modules and
+ * public/), but it is a branding regression, not an outage, and it is not what
+ * this change is repairing.
+ */
 const BASELINE = new Set([
   "lib/prompts/index.ts",
   "lib/agent-inbox-fs.ts",
   "lib/agent-stats.ts",
   "lib/cloud-knowledge-tools.ts",
   "lib/playbooks.ts",
+  "lib/forms/watermark.ts",
   "app/playbook/onboarding/page.tsx",
 ]);
 
@@ -79,9 +91,17 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-// Node's fs, in every spelling that reaches a real disk. `fs/promises` and the
-// callback forms count: none of them exist on workerd either.
-const FS_IMPORT = /\bfrom\s+["'](?:node:)?fs(?:\/promises)?["']|require\(\s*["'](?:node:)?fs(?:\/promises)?["']\s*\)/;
+/**
+ * Node's fs, in every spelling that reaches a real disk.
+ *
+ * The DYNAMIC form is not optional pedantry. The first version of this guard
+ * only matched `from "node:fs"` and `require("fs")`, and it reported the repo
+ * clean while lib/forms/watermark.ts sat there doing
+ * `const fs = await import("node:fs/promises")` twice. A deferred import is
+ * still a disk read; workerd does not care which syntax asked.
+ */
+const FS_IMPORT =
+  /\bfrom\s+["'](?:node:)?fs(?:\/promises)?["']|(?:require|import)\s*\(\s*["'](?:node:)?fs(?:\/promises)?["']\s*\)/;
 
 const offenders: string[] = [];
 for (const dir of SCAN_DIRS) {
@@ -119,6 +139,9 @@ for (const planted of [
   'import { readFile } from "fs/promises";',
   'const fs = require("fs");',
   'import { readFileSync } from "node:fs/promises";',
+  // The dynamic form the first version of this guard walked straight past.
+  'const fs = await import("node:fs/promises");',
+  'const fs = await import("fs");',
 ]) {
   assert.ok(FS_IMPORT.test(stripComments(planted)), `guard must reject: ${planted}`);
 }
