@@ -49,6 +49,44 @@ function explainFailure(error: string | null): string {
   return `Couldn't read this application. Try dropping it again, or enter the deal manually. (${error})`;
 }
 
+/**
+ * Plain-language message for a failed UPLOAD (the POST that queues the job),
+ * as opposed to explainFailure() above which covers a failed EXTRACTION.
+ *
+ * Adon, 2026-09-15: the drop "kept on getting error-coded". Half of that was a
+ * real outage (Cloudflare's Browser Integrity Check answering the VPS callbacks
+ * with "error code: 1010"); the other half was this screen, which printed
+ * `failed_500` and stopped. A rep cannot act on a status code. Every branch here
+ * says what happened, whether anything was saved, and what to do next — and
+ * still carries the code in parentheses so we can diagnose from a screenshot.
+ *
+ * Nothing is ever saved on a failed upload: the job row is only created once the
+ * route returns ok, so "nothing was saved" is a safe thing to promise.
+ */
+function explainUploadFailure(status: number, detail: string | null, raw: string): string {
+  const code = detail || (raw ? raw.slice(0, 120) : `HTTP ${status}`);
+  const tail = ` Nothing was saved. (${code})`;
+  if (status === 401 || status === 403) {
+    return "Your session expired, so the upload was rejected. Reload the page, sign in again, and drop the file once more." + tail;
+  }
+  if (status === 413) {
+    return "That file is too large to upload. Split it or compress it and try again, or enter the deal manually." + tail;
+  }
+  if (status === 415) {
+    return "That file type can't be read. Drop a PDF of the signed application." + tail;
+  }
+  if (status === 429) {
+    return "Too many uploads at once. Wait a moment and drop the file again." + tail;
+  }
+  if (status >= 500 || !raw) {
+    return (
+      "The application reader couldn't accept this file — the server failed before the job started. " +
+      "Enter the deal manually, and tell APEX if it keeps happening." + tail
+    );
+  }
+  return "Couldn't start reading this application. Try again, or enter the deal manually." + tail;
+}
+
 export function AutofillDropzone({
   mode,
   leadId,
@@ -127,9 +165,28 @@ export function AutofillDropzone({
       const url =
         mode === "existing" ? `/api/leads/${leadId}/autofill-application` : `/api/leads/new-from-document`;
       const r = await fetch(url, { method: "POST", credentials: "include", body: fd });
-      const j = await r.json().catch(() => ({}));
+      // Read as TEXT first. `r.json()` on an empty-bodied 500 rejects, the
+      // `.catch(() => ({}))` swallowed it into `{}`, and the rep was shown the
+      // bare string "failed_500" — a status code with no instruction attached.
+      // Keeping the raw body lets explainUploadFailure say something the rep
+      // can act on, and still print the code for us.
+      const raw = await r.text();
+      let j: Record<string, unknown> = {};
+      try {
+        j = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      } catch {
+        j = {};
+      }
       if (!r.ok || !j.ok || !j.job_id) {
-        setErr(j.detail || j.error || `failed_${r.status}`);
+        setErr(
+          explainUploadFailure(
+            r.status,
+            (typeof j.detail === "string" && j.detail) ||
+              (typeof j.error === "string" && j.error) ||
+              null,
+            raw,
+          ),
+        );
         return;
       }
       jobId = j.job_id as string;

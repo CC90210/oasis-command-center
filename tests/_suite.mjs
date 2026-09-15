@@ -144,6 +144,7 @@ const TESTS = [
   "tests/crm-write-role-gate.test.ts",
   "tests/funmate-integration.test.ts",
   "tests/shopping-out-lender-population.test.ts",
+  "tests/dropzone-plain-language-errors.test.ts",
   "tests/agents-config-runtime-portable.test.ts",
   "tests/shop-out-route-error-envelope.test.ts",
   "tests/workers-no-runtime-fs.test.ts",
