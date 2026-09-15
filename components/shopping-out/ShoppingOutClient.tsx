@@ -485,12 +485,31 @@ export function ShoppingOutClient({
         }).then((response) => response.json());
 
       const planRes = await planRequest;
-      const planJson = await planRes.json();
+      // Read the body as TEXT first, then parse. `response.json()` on an
+      // empty-bodied 500 throws "Unexpected end of JSON input", which names
+      // the parser and hides the fault — that is the only thing the operator
+      // saw during the 2026-09-15 shop-out outage, and it sent two agents
+      // looking at the client instead of the server. The status code and the
+      // first line of whatever the server DID send are the diagnosis.
+      const planText = await planRes.text();
+      let planJson: Record<string, unknown> | null = null;
+      try {
+        planJson = planText ? (JSON.parse(planText) as Record<string, unknown>) : null;
+      } catch {
+        planJson = null;
+      }
+      if (!planJson) {
+        throw new Error(
+          `HTTP ${planRes.status} — server sent ${
+            planText ? `a non-JSON body: ${planText.slice(0, 160)}` : "an empty body"
+          }`,
+        );
+      }
       if (!planRes.ok || !planJson.ok || !Array.isArray(planJson.plan)) {
         throw new Error(String(planJson.message || planJson.error || `HTTP ${planRes.status}`));
       }
 
-      const ranked: PlanRow[] = planJson.plan
+      const ranked: PlanRow[] = (planJson.plan as Array<Record<string, unknown>>)
         .map((p: Record<string, unknown>) => ({
           lender_id: String(p.lender_id || ""),
           lender_name: String(p.lender_name || "(unknown)"),

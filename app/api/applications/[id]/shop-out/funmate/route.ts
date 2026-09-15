@@ -15,7 +15,26 @@ export const maxDuration = 300;
 const UUID_RE = /^[0-9a-f-]{36}$/i;
 const MAX_LENDERS = 12;
 
+/**
+ * Same top-level catch as the SunBiz route next door — an uncaught throw here
+ * returns an empty-bodied 500 and the FundMate lender grid dies with a
+ * "Unexpected end of JSON input" that names the parser instead of the fault.
+ * The two grids share one client; they must fail the same legible way.
+ */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  try {
+    return await handleFunmateShopOut(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[shop-out:funmate] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "shop_out_unhandled_error", message: detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleFunmateShopOut(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   const { id: applicationId } = await ctx.params;
   if (!UUID_RE.test(applicationId)) return NextResponse.json({ ok: false, error: "invalid_application_id" }, { status: 400 });
   const sess = await resolveSessionContext();
