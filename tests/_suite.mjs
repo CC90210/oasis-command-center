@@ -143,6 +143,7 @@ const TESTS = [
   "tests/live-sub-mapping.test.ts",
   "tests/crm-write-role-gate.test.ts",
   "tests/funmate-integration.test.ts",
+  "tests/shopping-out-lender-population.test.ts",
   "tests/agent-events-tenant-scope.test.ts",
   "tests/activity-log-tenant-isolation.test.ts",
   "tests/auth-email-sender.test.ts",

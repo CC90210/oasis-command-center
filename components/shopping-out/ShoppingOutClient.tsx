@@ -25,6 +25,7 @@ import { Card, Tag } from "@/components/Card";
 import { ShoppingBag, Send, RefreshCcw, Loader2 } from "lucide-react";
 import { fuzzyScore } from "@/lib/fuzzy-match";
 import { composeShopOutBody, resolveShopOutPresentation, SHOP_OUT_EMAIL_TEMPLATES } from "@/lib/lenders/shop-out-email-templates";
+import { activeLenderIdsForNetwork, type LenderNetwork } from "@/lib/lenders/lender-network";
 
 type AppRow = {
   id: string;
@@ -309,8 +310,11 @@ export function ShoppingOutClient({
   const [selectedAppId, setSelectedAppId] = useState<string | null>(presetAppId);
   const [plan, setPlan] = useState<PlanRow[] | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
+  const [planLoadError, setPlanLoadError] = useState<string | null>(null);
   const [selectedLenderIds, setSelectedLenderIds] = useState<Set<string>>(new Set());
-  const [lenderNetwork, setLenderNetwork] = useState<"sunbiz" | "funmate">("sunbiz");
+  const [lenderNetwork, setLenderNetwork] = useState<LenderNetwork>("sunbiz");
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [lenderLoadError, setLenderLoadError] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [emailTemplateId, setEmailTemplateId] = useState("classic");
   // Per-deal CC: agent preset checkboxes (Jordan / Alex) + free-text
@@ -339,8 +343,7 @@ export function ShoppingOutClient({
   const [overrideNote, setOverrideNote] = useState("");
   const [pendingConfirmation, setPendingConfirmation] = useState(false);
 
-  // Load active applications + lenders on mount.
-  useEffect(() => {
+  const loadCatalog = useCallback(async () => {
     if (!tenantId) {
       // Preview mode — render the same 4-step scaffold a real Sun Biz
       // operator sees, with empty pickers. No fetches fire for a tenant
@@ -349,26 +352,55 @@ export function ShoppingOutClient({
       setLenders([]);
       return;
     }
-    (async () => {
-      try {
-        const [appsRes, lendersRes] = await Promise.all([
-          fetch(`/api/manifest/${tenantSlug}/records/application?limit=500`, {
+    setCatalogLoading(true);
+    setLenderLoadError(null);
+
+    const loadRecords = async (entity: "application" | "lender") => {
+      let lastError = "request failed";
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await fetch(`/api/manifest/${tenantSlug}/records/${entity}?limit=500`, {
             credentials: "include",
-          }),
-          fetch(`/api/manifest/${tenantSlug}/records/lender?limit=500`, {
-            credentials: "include",
-          }),
-        ]);
-        const appsJson = await appsRes.json();
-        const lendersJson = await lendersRes.json();
-        setApps(((appsJson.records || appsJson.rows || []) as AppRow[]) || []);
-        setLenders(((lendersJson.records || lendersJson.rows || []) as LenderRow[]) || []);
-      } catch {
-        setApps([]);
-        setLenders([]);
+            cache: "no-store",
+          });
+          const json = await response.json();
+          if (!response.ok || json.ok === false) {
+            lastError = String(json.message || json.error || `HTTP ${response.status}`);
+            continue;
+          }
+          const rows = json.records || json.rows;
+          if (!Array.isArray(rows)) throw new Error("invalid records response");
+          return rows;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+        }
       }
-    })();
-  }, [tenantSlug, tenantId]);
+      throw new Error(lastError);
+    };
+
+    const [appsResult, lendersResult] = await Promise.allSettled([
+      loadRecords("application"),
+      loadRecords("lender"),
+    ]);
+    if (appsResult.status === "fulfilled") setApps(appsResult.value as AppRow[]);
+    else setApps([]);
+
+    if (lendersResult.status === "fulfilled") {
+      setLenders(lendersResult.value as LenderRow[]);
+    } else {
+      // A failed request is not an empty lender directory. Preserve an already
+      // loaded catalog and give the operator a visible recovery action.
+      setLenders((current) => current ?? []);
+      setLenderLoadError(`Lender directory could not load: ${lendersResult.reason.message}`);
+    }
+    setCatalogLoading(false);
+  }, [tenantId, tenantSlug]);
+
+  // Each request settles independently, so an application-list problem cannot
+  // blank both the SunBiz and FundMate lender grids.
+  useEffect(() => {
+    void loadCatalog();
+  }, [loadCatalog]);
 
   // Filter to active applications + apply live, case-insensitive, typo-tolerant
   // search (Adon Batch 6.2). A misspelled/partial query ("remmington") still
@@ -415,23 +447,24 @@ export function ShoppingOutClient({
   const refreshPlanAndThreads = useCallback(async () => {
     if (!selectedAppId || !lenders) return;
     setPlanLoading(true);
+    setPlanLoadError(null);
     try {
       // Filter inactive lenders — the Lenders directory's active toggle
       // is the authoritative on/off switch. Inactive lenders should
       // never appear in the shop-out plan (Codex review 2026-05-24).
-      const allLenderIds = lenders
-        .filter(
-          (l) =>
-            l.data.active !== false &&
-            (l.data.lender_network === "funmate" ? "funmate" : "sunbiz") === lenderNetwork,
-        )
-        .map((l) => l.id);
+      const allLenderIds = activeLenderIdsForNetwork(lenders, lenderNetwork);
+      if (allLenderIds.length === 0) {
+        setPlan([]);
+        setSelectedLenderIds(new Set());
+        return;
+      }
       const planEndpoint =
         lenderNetwork === "funmate"
           ? `/api/applications/${selectedAppId}/shop-out/funmate`
           : `/api/applications/${selectedAppId}/shop-out`;
-      const [planRes, threadsRes, docsRes] = await Promise.all([
-        fetch(planEndpoint, {
+      // The lender plan is the critical path. Threads and documents are
+      // ancillary panels and must never be able to blank a valid lender grid.
+      const planRequest = fetch(planEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -441,18 +474,55 @@ export function ShoppingOutClient({
             attachments: [],
             dry_run: true,
           }),
-        }),
-        fetch(`/api/applications/${selectedAppId}/lender-threads`, {
+        });
+      const threadsRequest = fetch(`/api/applications/${selectedAppId}/lender-threads`, {
           credentials: "include",
-        }),
-        fetch(`/api/leads/${selectedAppId}/documents?entity=application`, {
+          cache: "no-store",
+        }).then((response) => response.json());
+      const docsRequest = fetch(`/api/leads/${selectedAppId}/documents?entity=application`, {
           credentials: "include",
-        }),
-      ]);
+          cache: "no-store",
+        }).then((response) => response.json());
+
+      const planRes = await planRequest;
       const planJson = await planRes.json();
-      const threadsJson = await threadsRes.json();
-      const docsJson = await docsRes.json();
-      if (docsJson.ok && Array.isArray(docsJson.documents)) {
+      if (!planRes.ok || !planJson.ok || !Array.isArray(planJson.plan)) {
+        throw new Error(String(planJson.message || planJson.error || `HTTP ${planRes.status}`));
+      }
+
+      const ranked: PlanRow[] = planJson.plan
+        .map((p: Record<string, unknown>) => ({
+          lender_id: String(p.lender_id || ""),
+          lender_name: String(p.lender_name || "(unknown)"),
+          recipient_email: typeof p.recipient_email === "string" ? p.recipient_email : null,
+          match_score: typeof p.match_score === "number" ? p.match_score : 0,
+          blockers: Array.isArray(p.blockers)
+            ? (p.blockers as string[]).filter((b) => typeof b === "string")
+            : [],
+          warnings: Array.isArray(p.warnings)
+            ? (p.warnings as Array<Record<string, unknown>>)
+                .filter((w) =>
+                  w && typeof w === "object" &&
+                  (w.severity === "info" || w.severity === "warning" || w.severity === "high_risk") &&
+                  typeof w.code === "string" && typeof w.detail === "string",
+                )
+                .map((w) => ({
+                  severity: w.severity as WarningSeverity,
+                  code: w.code as string,
+                  detail: w.detail as string,
+                }))
+            : [],
+          rendered_subject: String(p.rendered_subject || ""),
+          rendered_body: String(p.rendered_body || ""),
+          narrative: typeof p.narrative === "string" ? p.narrative : "",
+        }))
+        .sort((a: PlanRow, b: PlanRow) => b.match_score - a.match_score);
+      setPlan(ranked);
+      setSelectedLenderIds(new Set(ranked.filter((row) => row.recipient_email).slice(0, 5).map((row) => row.lender_id)));
+
+      const [threadsResult, docsResult] = await Promise.allSettled([threadsRequest, docsRequest]);
+      const docsJson = docsResult.status === "fulfilled" ? docsResult.value : null;
+      if (docsJson?.ok && Array.isArray(docsJson.documents)) {
         const loaded: DocRow[] = docsJson.documents
           .filter(
             (d: Record<string, unknown>) =>
@@ -474,55 +544,14 @@ export function ShoppingOutClient({
         setDocs([]);
         setSelectedDocIds(new Set());
       }
-      if (planJson.ok && Array.isArray(planJson.plan)) {
-        // Rank by match_score desc; preserve only entries with a real
-        // recipient_email (no point pre-selecting a lender we can't reach).
-        const ranked: PlanRow[] = planJson.plan
-          .map((p: Record<string, unknown>) => ({
-            lender_id: String(p.lender_id || ""),
-            lender_name: String(p.lender_name || "(unknown)"),
-            recipient_email: typeof p.recipient_email === "string" ? p.recipient_email : null,
-            match_score: typeof p.match_score === "number" ? p.match_score : 0,
-            blockers: Array.isArray(p.blockers)
-              ? (p.blockers as string[]).filter((b) => typeof b === "string")
-              : [],
-            warnings: Array.isArray(p.warnings)
-              ? (p.warnings as Array<Record<string, unknown>>)
-                  .filter((w) =>
-                    w && typeof w === "object" &&
-                    (w.severity === "info" || w.severity === "warning" || w.severity === "high_risk") &&
-                    typeof w.code === "string" && typeof w.detail === "string",
-                  )
-                  .map((w) => ({
-                    severity: w.severity as WarningSeverity,
-                    code: w.code as string,
-                    detail: w.detail as string,
-                  }))
-              : [],
-            rendered_subject: String(p.rendered_subject || ""),
-            rendered_body: String(p.rendered_body || ""),
-            narrative: typeof p.narrative === "string" ? p.narrative : "",
-          }))
-          .sort((a: PlanRow, b: PlanRow) => b.match_score - a.match_score);
-        setPlan(ranked);
-        // Default selection: top 5 contactable lenders. High-risk matches stay
-        // selectable and route through the confirmation dialog at send time.
-        const defaults = new Set<string>(
-          ranked
-            .filter((r) => r.recipient_email)
-            .slice(0, 5)
-            .map((r) => r.lender_id),
-        );
-        setSelectedLenderIds(defaults);
-      } else {
-        setPlan([]);
-        setSelectedLenderIds(new Set());
-      }
-      if (threadsJson.ok) {
+      const threadsJson = threadsResult.status === "fulfilled" ? threadsResult.value : null;
+      if (threadsJson?.ok) {
         setThreads(threadsJson.threads || []);
-      } else {
-        setThreads([]);
       }
+    } catch (error) {
+      setPlan([]);
+      setSelectedLenderIds(new Set());
+      setPlanLoadError(`Lender matching could not load: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setPlanLoading(false);
     }
@@ -912,6 +941,24 @@ export function ShoppingOutClient({
                 </button>
               ))}
             </div>
+            {lenderLoadError && (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-[12px] text-rose-100">
+                <span>{lenderLoadError}</span>
+                <button
+                  type="button"
+                  onClick={() => void loadCatalog()}
+                  disabled={catalogLoading}
+                  className="shrink-0 rounded-md border border-rose-300/40 px-2.5 py-1 font-semibold hover:bg-rose-500/20 disabled:opacity-50"
+                >
+                  {catalogLoading ? "Retrying…" : "Retry now"}
+                </button>
+              </div>
+            )}
+            {planLoadError && (
+              <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-[12px] text-rose-100">
+                {planLoadError} Use Refresh to try again.
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-[11px] uppercase tracking-wider text-fg-dim font-semibold">
@@ -1022,7 +1069,9 @@ export function ShoppingOutClient({
               </div>
             ) : (
               <div className="text-xs text-fg-dim italic py-4 text-center">
-                No {lenderNetwork === "sunbiz" ? "SunBiz" : "FundMate"} lenders in this directory. Add one on the Lenders page first.
+                {lenderLoadError || planLoadError
+                  ? "Lenders are temporarily unavailable. Use the retry control above."
+                  : `No ${lenderNetwork === "sunbiz" ? "SunBiz" : "FundMate"} lenders in this directory. Add one on the Lenders page first.`}
               </div>
             )}
           </div>
