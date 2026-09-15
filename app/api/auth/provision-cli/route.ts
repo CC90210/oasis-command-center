@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
   } else {
     // Send invite + set-password email
     const redirectTo =
-      (process.env.PUBLIC_APP_URL?.replace(/\/$/, "") || "https://agent-dashboard-cc90210.vercel.app") +
+      (process.env.PUBLIC_APP_URL?.replace(/\/$/, "") || "https://oasisai.work") +
       "/auth/reset-password";
     const invited = await db.auth.admin.inviteUserByEmail(email, {
       redirectTo,
@@ -166,6 +166,6 @@ export async function POST(req: NextRequest) {
     requested_agent: agentToAdd || null,
     client_profile_slug: client.clientProfileSlug,
     primary_agent: client.primaryAgent,
-    sign_in_url: (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app") + "/login",
+    sign_in_url: (process.env.PUBLIC_APP_URL || "https://oasisai.work") + "/login",
   });
 }

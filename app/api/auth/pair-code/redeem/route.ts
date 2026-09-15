@@ -132,7 +132,7 @@ export async function POST(req: NextRequest) {
     return bad(500, "redeem_returned_empty");
   }
 
-  const baseUrl = publicAppBaseUrl();
+  const baseUrl = process.env.BRAVO_DASHBOARD_URL || publicAppBaseUrl();
 
   // Log the successful redeem against the IP-keyed rate-limit row AND a
   // second row keyed on the resolved profile_id, so the pair endpoint's

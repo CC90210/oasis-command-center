@@ -288,7 +288,7 @@ export function ConfigureFlow() {
                 </Link> with the same email the wizard asked for.
               </li>
               <li>
-                The bridge starts automatically. Open <code className="text-accent">agent-dashboard-cc90210.vercel.app/agents</code> — chat header turns cyan when paired.
+                The bridge starts automatically. Open <code className="text-accent">oasisai.work/agents</code> — chat header turns cyan when paired.
               </li>
               <li>
                 Paste an OpenRouter key (or Anthropic / OpenAI) when the wizard asks. <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline inline-flex items-center gap-0.5">Get OpenRouter key <ExternalLink className="w-3 h-3" /></a>

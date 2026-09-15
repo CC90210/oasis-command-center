@@ -86,7 +86,7 @@ export async function POST() {
 
   // Webhook destination — uses the dashboard's public URL.
   const baseUrl =
-    (process.env.PUBLIC_APP_URL || "https://agent-dashboard-cc90210.vercel.app").replace(/\/$/, "");
+    (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(/\/$/, "");
   const webhookUrl = `${baseUrl}/api/webhooks/kixie`;
 
   // Attach the static auth header Kixie sends back on every delivery — this

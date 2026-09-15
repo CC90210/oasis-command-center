@@ -779,7 +779,7 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 - Surface any key that's blank, surface any key on the OTHER machine's git-tracked \`.env.agents.template\` that's missing here. Don't try to fix — flag them so CC can paste fresh values.
 
 **4. Verify every CLI is still installed + authenticated:**
-- \`curl -s -X POST http://localhost:9100/exec-tool -H "content-type: application/json" -H "Origin: https://agent-dashboard-cc90210.vercel.app" -d '{"tool_name":"cli_status","input":{}}'\` should return all three (claude / codex / gemini) with \`installed=true\` and \`authenticated=true\`.
+- \`curl -s -X POST http://localhost:9100/exec-tool -H "content-type: application/json" -H "Origin: https://oasisai.work" -d '{"tool_name":"cli_status","input":{}}'\` should return all three (claude / codex / gemini) with \`installed=true\` and \`authenticated=true\`.
 - If any CLI is missing: \`npm i -g @anthropic-ai/claude-code\` / \`npm i -g @openai/codex\` / \`npm i -g @google/gemini-cli\` as needed.
 - If any is unauthenticated: tell CC which one + the specific re-auth command (\`claude /login\` / \`codex login\` / \`gemini auth login\`).
 

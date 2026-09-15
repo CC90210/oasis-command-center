@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # OASIS AI install — stable URL, repo-visibility-proof.
 #
-#   curl -fsSL https://agent-dashboard-cc90210.vercel.app/install.sh | bash
-#   OASIS_PROFILE=hermes curl -fsSL https://agent-dashboard-cc90210.vercel.app/install.sh | bash
+#   curl -fsSL https://oasisai.work/install.sh | bash
+#   OASIS_PROFILE=hermes curl -fsSL https://oasisai.work/install.sh | bash
 #
 # This URL is the canonical install entry point. The underlying GitHub
 # repo (CC90210/CEO-Agent) may flip visibility — this script always fetches

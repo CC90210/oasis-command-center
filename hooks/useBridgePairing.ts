@@ -86,7 +86,7 @@ function oneLinerForPair(os: OS, code: string): string {
     `BRAVO_PAIR_CODE="${code}" python3 -c "` +
     "import os,json,platform,socket,urllib.request as u;from pathlib import Path;" +
     "c=os.environ['BRAVO_PAIR_CODE'].strip().upper();" +
-    "b=os.environ.get('BRAVO_DASHBOARD_URL','https://agent-dashboard-cc90210.vercel.app').rstrip('/');" +
+    "b=os.environ.get('BRAVO_DASHBOARD_URL','https://oasisai.work').rstrip('/');" +
     "d=json.dumps({'code':c,'machine':{'label':platform.node() or 'machine','fingerprint':platform.system()+'|'+platform.machine()+'|'+socket.gethostname()}}).encode();" +
     "r=u.Request(b+'/api/auth/pair-code/redeem',data=d,headers={'content-type':'application/json'},method='POST');" +
     "t=json.loads(u.urlopen(r,timeout=20).read())['bridge']['token'];" +
@@ -94,7 +94,7 @@ function oneLinerForPair(os: OS, code: string): string {
     "print('paired ->',str(f))\"";
   const winPair =
     `$env:BRAVO_PAIR_CODE="${code}"; ` +
-    "$b=if($env:BRAVO_DASHBOARD_URL){$env:BRAVO_DASHBOARD_URL.TrimEnd('/')}else{'https://agent-dashboard-cc90210.vercel.app'}; " +
+    "$b=if($env:BRAVO_DASHBOARD_URL){$env:BRAVO_DASHBOARD_URL.TrimEnd('/')}else{'https://oasisai.work'}; " +
     "$body=@{code=$env:BRAVO_PAIR_CODE.ToUpper();machine=@{label=$env:COMPUTERNAME;fingerprint=('windows|'+$env:PROCESSOR_ARCHITECTURE+'|'+$env:COMPUTERNAME)}} | ConvertTo-Json -Compress; " +
     "$r=Invoke-RestMethod -Method Post -Uri ($b+'/api/auth/pair-code/redeem') -ContentType 'application/json' -Body $body; " +
     "$d=Join-Path $HOME '.oasis'; New-Item -ItemType Directory -Force -Path $d | Out-Null; " +

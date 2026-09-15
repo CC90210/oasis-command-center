@@ -1,7 +1,7 @@
 # OASIS AI install - stable URL, repo-visibility-proof.
 #
-#   irm https://agent-dashboard-cc90210.vercel.app/install.ps1 | iex
-#   $env:OASIS_PROFILE='hermes'; irm https://agent-dashboard-cc90210.vercel.app/install.ps1 | iex
+#   irm https://oasisai.work/install.ps1 | iex
+#   $env:OASIS_PROFILE='hermes'; irm https://oasisai.work/install.ps1 | iex
 #
 # This URL is the canonical install entry point. The underlying GitHub
 # repo (CC90210/CEO-Agent) may flip visibility - this script always fetches
@@ -31,7 +31,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Host ""
     Write-Host "GitHub CLI not installed. Install it first:" -ForegroundColor Red
     Write-Host "  winget install GitHub.cli" -ForegroundColor Yellow
-    Write-Host "Then re-run: irm https://agent-dashboard-cc90210.vercel.app/install.ps1 | iex" -ForegroundColor Yellow
+    Write-Host "Then re-run: irm https://oasisai.work/install.ps1 | iex" -ForegroundColor Yellow
     exit 1
 }
 
