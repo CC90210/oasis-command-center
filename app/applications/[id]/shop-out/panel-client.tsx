@@ -92,7 +92,13 @@ export default function ShopOutPanelClient({
           }),
         },
       );
-      const data = (await res.json()) as
+      // Text first, then parse. `res.json()` on an empty-bodied 500 throws
+      // "Unexpected end of JSON input", which names the JSON parser and tells
+      // the operator nothing — and on THIS screen the unanswered question is
+      // "did the lenders get emailed or not". The status code plus whatever the
+      // server actually sent is the only useful answer. (2026-09-15 outage.)
+      const text = await res.text();
+      let data:
         | {
             ok: true;
             dry_run?: boolean;
@@ -102,6 +108,18 @@ export default function ShopOutPanelClient({
             previews?: Array<{ funder: string; subject: string }>;
           }
         | { ok: false; error: string; missing?: string[]; detail?: string };
+      try {
+        data = text ? JSON.parse(text) : null;
+        if (!data) throw new Error("empty");
+      } catch {
+        data = {
+          ok: false,
+          error: `HTTP ${res.status}`,
+          detail: text
+            ? `Server sent a non-JSON body: ${text.slice(0, 160)}`
+            : "Server sent an empty body. The send may or may not have fired — check the lender threads before retrying.",
+        };
+      }
       setResult(data);
     } catch (e) {
       setResult({

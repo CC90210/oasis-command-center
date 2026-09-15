@@ -66,7 +66,33 @@ function jsonError(status: number, error: string, extra: Record<string, unknown>
   return NextResponse.json({ ok: false, error, ...extra }, { status });
 }
 
+/**
+ * Top-level catch, same contract as the two plan routes.
+ *
+ * This route shared the 2026-09-15 outage — it calls getAgents() too, so the
+ * readFileSync that killed the lender grid killed the actual SEND here. It was
+ * missed in the first pass of that fix, which covered only the routes the
+ * Shopping Out screen calls. This one backs the /applications/[id]/shop-out
+ * panel, and it is the highest-stakes surface in the flow: an empty-bodied 500
+ * here leaves the operator unable to tell whether lenders were emailed.
+ */
 export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  try {
+    return await handleShopOutRun(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[shop-out:run] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "shop_out_unhandled_error", message: detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleShopOutRun(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {

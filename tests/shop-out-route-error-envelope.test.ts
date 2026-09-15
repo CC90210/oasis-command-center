@@ -42,9 +42,14 @@ async function main() {
     "precondition: resolveSessionContext must throw here, otherwise this test proves nothing",
   );
 
+  // All three shop-out POST surfaces. `run` backs the
+  // /applications/[id]/shop-out panel and is the one that actually emails
+  // lenders — it shared the outage (it calls getAgents() too) and was missed
+  // in the first pass of the fix, which is exactly why it is pinned here.
   const routes: Array<[string, string]> = [
     ["sunbiz", "@/app/api/applications/[id]/shop-out/route"],
     ["funmate", "@/app/api/applications/[id]/shop-out/funmate/route"],
+    ["run", "@/app/api/applications/[id]/shop-out/run/route"],
   ];
 
   for (const [label, specifier] of routes) {

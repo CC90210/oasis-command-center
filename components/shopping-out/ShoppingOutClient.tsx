@@ -797,7 +797,30 @@ export function ShoppingOutClient({
           acknowledged_warnings: acknowledged.length > 0 ? acknowledged : undefined,
         }),
       });
-      const json = await res.json();
+      // Text first, then parse — same reason as the plan load above, but the
+      // stakes are higher here: this is the REAL send. If the body is empty or
+      // not JSON, `res.json()` would throw "Unexpected end of JSON input" into
+      // the generic catch below and the operator would be told a parser failed
+      // while having no idea whether lenders were emailed. Say that plainly
+      // instead, and tell them where to look before they retry and double-send.
+      const sendText = await res.text();
+      let json: Record<string, unknown> | null = null;
+      try {
+        json = sendText ? (JSON.parse(sendText) as Record<string, unknown>) : null;
+      } catch {
+        json = null;
+      }
+      if (!json) {
+        setSendResult({
+          tone: "error",
+          message:
+            `Send failed to report back (HTTP ${res.status}` +
+            `${sendText ? `: ${sendText.slice(0, 120)}` : ", empty response"}). ` +
+            `The send may or may not have fired — check Existing Lender Threads below before retrying, ` +
+            `so you don't send the same deal twice.`,
+        });
+        return;
+      }
       if (json.ok) {
         if (lenderNetwork === "funmate") {
           setSendResult({
