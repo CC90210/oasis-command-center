@@ -86,6 +86,11 @@ const TESTS = [
   // credentials either -- they exercise validation and projection only.
   "tests/objection-ranking.test.ts",
   "tests/objection-catalog.test.ts",
+  // The copy rules for every sentence a rep says out loud, plus the alternate
+  // coverage that makes ObjectionCard's posture picker render at all. Listed
+  // here deliberately: tests/industry-automations.test.ts is in NO suite and
+  // has never run once, which is the failure mode this line avoids.
+  "tests/objection-copy.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data
