@@ -67,7 +67,38 @@ export const maxDuration = 120;
  * The send now happens in-process (lib/lenders/shop-out-dispatch.ts).
  */
 
+/**
+ * Top-level catch. An uncaught throw in a Next route handler returns a 500
+ * with an EMPTY body, so the browser's `response.json()` fails with
+ * "Unexpected end of JSON input" — a message that names the parser, never the
+ * fault. That is exactly how the 2026-09-15 shop-out outage presented: the real
+ * error (readFileSync on Cloudflare Workers, see lib/config/agents.ts) was
+ * invisible from the client, and the operator saw a JSON-parse complaint.
+ *
+ * Every exit from this route is now a JSON body with an `error` code. The
+ * message is included because this endpoint is operator-only (session-gated,
+ * tenant-scoped, never merchant-facing) and the operator IS the person who has
+ * to act on it. Logged too, so the Worker's observability captures it.
+ *
+ * Pinned by tests/shop-out-route-error-envelope.test.ts.
+ */
 export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> },
+) {
+  try {
+    return await handleShopOut(req, ctx);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("[shop-out] unhandled", error);
+    return NextResponse.json(
+      { ok: false, error: "shop_out_unhandled_error", message: detail },
+      { status: 500 },
+    );
+  }
+}
+
+async function handleShopOut(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ) {

@@ -1,6 +1,6 @@
 /**
- * SunBiz agent roster (Jordan / Alex / Matt) — read at REQUEST time
- * from agents.config.json at the repo root.
+ * SunBiz agent roster (Jordan / Alex / Matt) — BUNDLED from
+ * agents.config.json at the repo root via a static import.
  *
  * This is the source of truth for the shop-out derived-CC list (Adon's
  * 2026-06-10 spec, section 2). When the operator fires a shop-out, the
@@ -9,10 +9,33 @@
  * file is excluded — processors, admins, ops, etc. don't get CC'd on
  * lender outreach.
  *
- * Request-time read (NOT module-scope cache) so editing the config file
- * during a deployment takes effect on the next request without a
- * rebuild. Reads are cheap (sub-millisecond JSON parse on hot filesystem
- * cache); the safety win is worth it.
+ * 🚨 STATIC IMPORT, NOT readFileSync — DO NOT "restore" the fs read.
+ *
+ * This module used to do `readFileSync(join(process.cwd(),
+ * "agents.config.json"))` on every call, documented as a deliberate
+ * request-time read so the roster could be edited without a rebuild.
+ * That premise died when production moved to Cloudflare Workers
+ * (OpenNext; see wrangler.jsonc). workerd has no filesystem, so the read
+ * threw `Error: ENOENT` from `node-internal:internal_fs_sync` on EVERY
+ * authenticated call — and because the shop-out route did not catch it,
+ * Next returned a 500 with an EMPTY body, which the browser surfaced as
+ * "Unexpected end of JSON input". Shop-out was dead for every deal:
+ * the lender grid, the attachment step and the send step all gate on
+ * that response.
+ *
+ * Confirmed from the production Worker's own logs, 2026-09-15:
+ *   at readFileSync (node-internal:internal_fs_sync:366:7)
+ *   at getAgents -> findAgentByEmail -> resolveSignerForOperator
+ *   at POST /api/applications/[id]/shop-out
+ *
+ * The "edit without a rebuild" win was already fiction — Vercel's
+ * filesystem is read-only too, so nothing could edit the deployed file
+ * there either. A static import bundles the roster at build time and
+ * works identically under Node, Vercel and workerd. The roster changes
+ * the way every other config in this repo changes: commit + deploy.
+ *
+ * Pinned by tests/agents-config-runtime-portable.test.ts, which fails if
+ * a runtime `fs` read comes back to this module.
  *
  * Signer rule (Adon spec 2.4):
  *   - Exactly one agent on CC after operator finalization → THAT agent
@@ -20,8 +43,7 @@
  *   - Zero or multiple → signer is "SunBiz Submissions", phone omitted
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import agentsConfig from "@/agents.config.json";
 import { deriveSignerName } from "@/lib/lenders/derive-signer-label";
 import type { BrandKey } from "@/lib/email/brands";
 
@@ -40,18 +62,17 @@ export type AgentEntry = {
 };
 
 /**
- * Returns the current agent roster. Reads agents.config.json fresh on
- * every call — a quirk Adon's spec relies on for runtime config flips.
- * If the file is missing or malformed the function throws; the caller
- * should treat that as a deployment defect (the build never ships
- * without this file).
+ * Returns the current agent roster from the bundled agents.config.json.
+ * If the config is malformed the function throws; the caller should
+ * treat that as a deployment defect (the build never ships without this
+ * file, and a static import makes a missing file a BUILD failure rather
+ * than a runtime 500 — which is the point).
+ *
+ * Still validated at runtime rather than trusted: the import only proves
+ * the JSON parsed, not that its entries have the required fields.
  */
 export function getAgents(): AgentEntry[] {
-  // process.cwd() is the project root in Next.js (server runtime + dev).
-  // agents.config.json sits at the repo root per Adon's spec.
-  const path = join(process.cwd(), "agents.config.json");
-  const raw = readFileSync(path, "utf8");
-  const parsed = JSON.parse(raw) as { agents?: unknown };
+  const parsed = agentsConfig as { agents?: unknown };
   if (!parsed || !Array.isArray(parsed.agents)) {
     throw new Error("agents.config.json malformed: expected { agents: [...] }");
   }
