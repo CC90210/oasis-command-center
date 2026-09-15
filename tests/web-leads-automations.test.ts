@@ -106,16 +106,27 @@ const repFacing = (c: (typeof CAPABILITIES)[number]) => [
   c.howYouSayIt,
   c.costsThem ?? "",
   c.stageReason ?? "",
-  ...c.whatWeDeliver,
+  ...(c.whatWeDeliver ?? []),
 ];
 
 for (const cap of CAPABILITIES) {
   for (const layer of ["title", "summary", "whatItIs", "howYouSayIt"] as const) {
     assert.ok(cap[layer] && String(cap[layer]).trim().length > 0, `${cap.id}.${layer} must not be empty`);
   }
-  assert.ok(cap.whatWeDeliver.length > 0, `${cap.id}.whatWeDeliver must list something`);
-  for (const line of cap.whatWeDeliver) {
-    assert.ok(line.trim().length > 0, `${cap.id}.whatWeDeliver must not carry an empty line`);
+  // `whatWeDeliver` is optional, because a rep reads each bullet aloud as a
+  // commitment and some capabilities deliberately make no scope promise. What
+  // is NOT allowed is the layer being present and saying nothing: an empty
+  // array reads to the UI as "there is a scope list" while carrying none, and
+  // it is the shape a half-finished removal leaves behind. Absent is a
+  // decision; empty is a mistake. This asserts exactly that distinction.
+  if (cap.whatWeDeliver !== undefined) {
+    assert.ok(
+      cap.whatWeDeliver.length > 0,
+      `${cap.id}.whatWeDeliver is present but empty: omit the field entirely instead`,
+    );
+    for (const line of cap.whatWeDeliver) {
+      assert.ok(line.trim().length > 0, `${cap.id}.whatWeDeliver must not carry an empty line`);
+    }
   }
 
   // Website bundles are defect-driven, so they must say how a customer is lost

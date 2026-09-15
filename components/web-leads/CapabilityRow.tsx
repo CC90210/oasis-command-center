@@ -9,8 +9,10 @@
  * reads this list mid-sentence with a stranger on the line, so the scan
  * target is titles. Everything else is behind the tap. When open, the
  * detail renders `whatItIs`, then the cost layer, then `howYouSayIt` as the
- * visually dominant block, then `whatWeDeliver`, then the stage gate, in
- * that order.
+ * visually dominant block, then `whatWeDeliver` WHEN THE CAPABILITY CARRIES
+ * ANY, then the stage gate, in that order. `whatWeDeliver` is optional: a
+ * capability whose scope we have not verified carries no bullets, and that
+ * layer is then omitted entirely rather than shown empty or hedged.
  *
  * WHAT THIS DOES NOT DO: it holds no state of its own. `open` and
  * `onToggle` are owned by `CapabilityCatalogue`, which is what enforces one
@@ -190,7 +192,12 @@ export const LADDER_GATE_NOTE = {
  *  and the `fix` line belongs under `whatWeDeliver`, which is the scope
  *  block it adds per-code detail to. Rendering the pair together under the
  *  cost sentence put a second block of scope copy directly above the scope
- *  block. Neither string is reworded. */
+ *  block. Neither string is reworded.
+ *
+ *  When a capability carries no `whatWeDeliver` bullets, the fix lines still
+ *  render, without the heading: they are per-code statements about checks
+ *  that actually failed, they label themselves "We'd fix it", and they do
+ *  not depend on the bundle scope list being present. */
 function costLineFor(code: string): string | null {
   return remedyFor(code)?.costs ?? null;
 }
@@ -272,6 +279,17 @@ export function CapabilityRow({
 }) {
   const failedCodes = state.kind === "scored" ? state.failedCodes : [];
   const detailId = `capability-detail-${capability.id}`;
+
+  // Layer 4 has two independent sources: the bundle's own scope bullets,
+  // which some capabilities deliberately do not carry, and the per-code fix
+  // lines for the checks that failed. `fixLineFor` returns null for a code it
+  // has no line for, so the fix lines are resolved here rather than counted
+  // from `failedCodes`: a non-empty `failedCodes` that resolves to no lines
+  // would otherwise render an empty list.
+  const deliverables = capability.whatWeDeliver ?? [];
+  const fixLines = failedCodes
+    .map((code) => ({ code, fix: fixLineFor(code) }))
+    .filter((entry): entry is { code: string; fix: string } => entry.fix !== null);
 
   return (
     <li>
@@ -450,30 +468,41 @@ export function CapabilityRow({
           {/* Layer 4. The bundle's scope, then the per-code fix lines for
               the checks that actually failed, which are the specific half
               of the same answer. */}
-          <div>
-            <p className={SECTION_LABEL}>What we deliver</p>
-            <ul className="mt-1.5 space-y-1">
-              {capability.whatWeDeliver.map((item) => (
-                <li key={item} className="flex gap-2 text-xs leading-relaxed text-fg-muted">
-                  <span aria-hidden className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-fg-dim" />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-            {failedCodes.length > 0 && (
-              <ul className="mt-2.5 space-y-1 border-l border-bg-border pl-3">
-                {failedCodes.map((code) => {
-                  const fix = fixLineFor(code);
-                  if (!fix) return null;
-                  return (
+          {(deliverables.length > 0 || fixLines.length > 0) && (
+            <div>
+              {/* The heading belongs to the scope bullets. A capability that
+                  carries none omits it, so nothing announces a scope list
+                  that is not there. The fix lines below label themselves. */}
+              {deliverables.length > 0 && (
+                <>
+                  <p className={SECTION_LABEL}>What we deliver</p>
+                  <ul className="mt-1.5 space-y-1">
+                    {deliverables.map((item) => (
+                      <li key={item} className="flex gap-2 text-xs leading-relaxed text-fg-muted">
+                        <span aria-hidden className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-fg-dim" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {fixLines.length > 0 && (
+                <ul
+                  className={
+                    deliverables.length > 0
+                      ? "mt-2.5 space-y-1 border-l border-bg-border pl-3"
+                      : "space-y-1 border-l border-bg-border pl-3"
+                  }
+                >
+                  {fixLines.map(({ code, fix }) => (
                     <li key={code} className="text-xs leading-relaxed text-fg-dim">
                       <span className="font-medium text-fg-muted">We&apos;d fix it:</span> {fix}
                     </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
 
           {/* Layer 5. THE REASON IS NOT REPEATED HERE (final review,
               2026-09-14). `stageReason` is ~60 words and it already renders

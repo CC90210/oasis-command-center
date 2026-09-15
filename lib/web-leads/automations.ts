@@ -139,8 +139,14 @@ export type Capability = {
   costsThem?: string;
   /** Layer 3. The rep's spoken words, verbatim. Task 2. */
   howYouSayIt: string;
-  /** Layer 4. What we actually deliver. Task 2. */
-  whatWeDeliver: string[];
+  /** Layer 4. What we actually deliver. Task 2.
+   *  Optional. A rep reads these aloud to an owner, so each one is a
+   *  commitment. A capability whose scope has not been verified carries no
+   *  bullets at all rather than a hedged or vaguer version, and the detail
+   *  panel then omits the layer. Absent and empty are not the same: absent
+   *  means "we make no scope promise here", and an empty array is a
+   *  mistake the test rejects. */
+  whatWeDeliver?: string[];
   /** Layer 5. */
   stage: Stage;
   /** Why this stage, shown when stage !== "today". */
@@ -202,7 +208,6 @@ export const CAPABILITIES: Capability[] = [
       "landed in your inbox than on somebody else's page.",
     whatWeDeliver: [
       "A short contact form on every page: name, number, and the job. Nothing else.",
-      "A working email address, so a message reaches you outside business hours.",
       "A chat box on the page, so a quick question reaches you instead of going to somebody else.",
       "At least three ways to reach you, so a phone call is never the only option.",
       "Every message routed to an inbox you actually read, and tested before launch.",
@@ -228,12 +233,10 @@ export const CAPABILITIES: Capability[] = [
       "all evening. If the only thing your page can tell them is to ring in the morning, you are asking " +
       "them to still care in the morning. A good share of them will have sorted it by then, with " +
       "whoever let them pick a time there and then.",
-    whatWeDeliver: [
-      "A booking calendar on your site, showing only the slots you want filled.",
-      "Your hours, your days off and your job lengths set up as the rules it books by.",
-      "A text or an email to you the moment something is taken.",
-      "A confirmation to the customer, so nobody turns up on the wrong day.",
-    ],
+    // No whatWeDeliver. Every bullet here committed us to a booking tool per
+    // client and a notification channel per client, neither of which is
+    // verified as covered. Removed rather than reworded, because a vaguer
+    // promise is still a promise.
     stage: "today",
     codes: ["booking"],
   },
@@ -387,9 +390,7 @@ export const CAPABILITIES: Capability[] = [
       "work harder on yours than on the other two.",
     whatWeDeliver: [
       "A homepage that answers what you do, where you work and roughly what it costs, before anybody scrolls.",
-      "A separate page for each service, in the words a customer would use for it.",
       "Section headings all the way down, so somebody skimming finds their own problem in seconds.",
-      "Your service area named town by town, so nobody has to guess whether you cover them.",
       "A starting price, a range, or a plain free-quote line, whichever you are comfortable with.",
     ],
     stage: "today",
@@ -414,11 +415,9 @@ export const CAPABILITIES: Capability[] = [
       "gets the slow version, and they are not invested in you yet, so they do not wait it out. You " +
       "will never get a complaint about this one. You just get fewer calls.",
     whatWeDeliver: [
-      "Faster hosting, so the page appears almost immediately.",
       "Images and page weight cut right down, so it opens on a weak signal.",
       "The page rebuilt to show up first and load the extras quietly after, so something is there " +
         "straight away.",
-      "The speed measured before and after, so you can see it rather than take our word for it.",
     ],
     stage: "today",
     codes: ["fast_ttfb", "lean_html", "few_blocking"],
@@ -472,13 +471,11 @@ export const CAPABILITIES: Capability[] = [
       "somebody standing there with the next number already open. If a text from you lands on their " +
       "phone before they dial it, most people will just answer the text. It is not doing anything " +
       "clever. It is answering somebody who already chose to ring you.",
-    whatWeDeliver: [
-      "An automatic text to any caller you did not get to, sent within seconds.",
-      "The wording written with you, in your voice, signed with your business name.",
-      "Their replies landing in one place you can work through at the end of the day.",
-      "Hours you set and an off switch, so nothing goes out at two in the morning.",
-      "A count of the calls it caught, in the monthly report you already get.",
-    ],
+    // No whatWeDeliver. Every bullet here presumed an SMS provider, a number
+    // attached to the owner's business line, a shared reply inbox, and the
+    // monthly evidence report, none of which is verified as shipped. The
+    // outbound ones also described sends that CASL governs, and no bullet
+    // stated a STOP or unsubscribe route. Removed rather than reworded.
     stage: "after_evidence",
     stageReason:
       "This is a plan change on a website you already trust, not a new sale from a stranger, so we wait until two monthly evidence reports have landed and you've seen the site working before offering it.",
@@ -501,8 +498,6 @@ export const CAPABILITIES: Capability[] = [
     whatWeDeliver: [
       "An instant reply to anybody who fills in a form, saying you have it and what happens next.",
       "An alert to your phone the second it arrives, so a warm one never sits in an inbox.",
-      "A second nudge later the same day if nobody has got back to them yet.",
-      "Every enquiry in one list, so nothing gets lost between a text and an inbox.",
     ],
     stage: "after_evidence",
     stageReason:
@@ -529,7 +524,6 @@ export const CAPABILITIES: Capability[] = [
       "A line that answers in your business name and handles the routine questions.",
       "The answers written with you first, so it never guesses at your prices or your area.",
       "Anything outside what it was given handed to you, with what the caller wanted.",
-      "Every call logged and readable, so you can check what it said.",
       "Nothing switched on until where the data sits, who can see it and how to turn it off has been " +
         "answered for you in writing.",
     ],
