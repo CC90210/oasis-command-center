@@ -69,7 +69,10 @@ export function DrillRunner({
       if (picked !== null || !drill) return;
       setPicked(optionId);
       setScore((s) => ({ right: s.right + (correct ? 1 : 0), wrong: s.wrong + (correct ? 0 : 1) }));
-      void post({ itemId: drill.itemId, sectionSlug: drill.section, correct });
+      // The server decides whether this was right. Sending a `correct` flag
+      // would let a modified client award itself a perfect record, and a
+      // manager reads these numbers.
+      void post({ itemId: drill.itemId, sectionSlug: drill.section, chosenOptionId: optionId });
     },
     [picked, drill, post],
   );

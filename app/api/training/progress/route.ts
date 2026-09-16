@@ -22,6 +22,7 @@ import {
   recordAnswer,
   recordCompletion,
 } from "@/lib/training/progress";
+import { gradeAnswer } from "@/lib/training/session";
 import { isSectionSlug } from "@/lib/training/types";
 
 export const dynamic = "force-dynamic";
@@ -81,19 +82,35 @@ export async function POST(req: NextRequest) {
 
     const itemId = typeof payload.itemId === "string" ? payload.itemId : "";
     const sectionSlug = payload.sectionSlug;
+    const chosenOptionId = typeof payload.chosenOptionId === "string" ? payload.chosenOptionId : "";
     if (!itemId.trim()) return NextResponse.json({ error: "missing_item_id" }, { status: 400 });
+    if (!chosenOptionId.trim()) {
+      return NextResponse.json({ error: "missing_choice" }, { status: 400 });
+    }
     if (!isSectionSlug(sectionSlug)) {
       return NextResponse.json({ error: "bad_section" }, { status: 400 });
     }
-    // Anything other than an explicit true is recorded as wrong. A malformed
-    // flag must not be able to award a correct answer.
+
+    // 🚨 CORRECTNESS IS DERIVED HERE, NEVER TAKEN FROM THE BODY.
+    //
+    // This route used to accept a `correct: boolean`, which meant a modified
+    // client or a plain curl could award itself a perfect record without
+    // answering a single question. Managers read this progress, so a forgeable
+    // record is worse than no record: it would let somebody sign off onboarding
+    // against a number that means nothing. The client now sends which option it
+    // chose, and the curriculum decides.
+    const grade = gradeAnswer(itemId, sectionSlug, chosenOptionId);
+    if (!grade.ok) {
+      return NextResponse.json({ error: grade.reason }, { status: 400 });
+    }
+
     await recordAnswer({
       repUserId,
       itemId,
-      sectionSlug,
-      correct: payload.correct === true,
+      sectionSlug: grade.sectionSlug,
+      correct: grade.correct,
     });
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, correct: grade.correct });
   } catch (err) {
     if (err instanceof TrainingProgressError) {
       console.error("[training/progress] write refused", err.message);

@@ -56,6 +56,37 @@ export function buildTrainingSession(section: SectionSlug | "all", seed: number)
   return shuffle(pool, next).map((item) => buildTrainingDrill(item, next));
 }
 
+export type Grade =
+  | { ok: true; correct: boolean; sectionSlug: SectionSlug }
+  | { ok: false; reason: "unknown_item" | "section_mismatch" };
+
+/**
+ * Whether a chosen option was the right one, decided from the CURRICULUM.
+ *
+ * 🚨 THE CLIENT DOES NOT GET TO SAY. An earlier version of the progress
+ * endpoint took a `correct: boolean` from the request body, which meant a
+ * modified client or a plain curl could award itself a perfect record without
+ * answering anything. That is not a theoretical problem here: managers read
+ * this progress, so a forged record is worse than no record, and a manager
+ * signing off onboarding against it would be signing off nothing.
+ *
+ * The option ids ARE item ids. `buildTrainingDrill` labels the correct option
+ * with the item's own id and every decoy with a peer item's id, so comparing
+ * the chosen id to the item id is the whole check, and it needs nothing the
+ * server does not already have.
+ *
+ * An unknown item is REFUSED rather than recorded. The read side still
+ * tolerates rows whose item was later reworded or removed, because a rep's
+ * history is worth keeping; but a write that cannot be checked is a write
+ * nobody can trust, and the only thing it could add is a forged one.
+ */
+export function gradeAnswer(itemId: string, sectionSlug: string, chosenOptionId: string): Grade {
+  const item = ITEMS.find((i) => i.id === itemId);
+  if (!item) return { ok: false, reason: "unknown_item" };
+  if (item.section !== sectionSlug) return { ok: false, reason: "section_mismatch" };
+  return { ok: true, correct: chosenOptionId === item.id, sectionSlug: item.section };
+}
+
 /** Items whose group is too small to make a real question. Surfaced by a test
  *  rather than left to be noticed by a rep answering a one-option drill. */
 export function underpoweredGroups(minPeers = 2): string[] {

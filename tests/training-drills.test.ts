@@ -1,9 +1,16 @@
 import assert from "node:assert";
+import fs from "node:fs";
+import path from "node:path";
 
 import { OPTION_COUNT, buildOptions, rng, shuffle } from "@/lib/training/drills";
 import { SECTIONS, sectionBySlug } from "@/lib/training/curriculum";
 import { ITEMS, groupPeers, itemsForSection } from "@/lib/training/items";
-import { buildTrainingDrill, buildTrainingSession, underpoweredGroups } from "@/lib/training/session";
+import {
+  buildTrainingDrill,
+  buildTrainingSession,
+  gradeAnswer,
+  underpoweredGroups,
+} from "@/lib/training/session";
 import { SECTION_SLUGS, isSectionSlug } from "@/lib/training/types";
 import { copyViolations } from "@/lib/web-leads/objections/copy-rules";
 
@@ -190,4 +197,60 @@ assert.notDeepEqual(
 );
 
 console.log("training-drills: sessions cover every item, reproducibly OK");
+// --- correctness is decided by the server, never by the client -------------
+//
+// Review finding on this branch. The progress endpoint took a `correct:
+// boolean` from the request body, so a modified client or a plain curl could
+// award itself a perfect record without answering anything. Adon chose for
+// MANAGERS to read this progress, which makes a forgeable record worse than no
+// record: somebody would sign off onboarding against a number that means
+// nothing.
+
+for (const item of ITEMS) {
+  const right = gradeAnswer(item.id, item.section, item.id);
+  assert.ok(right.ok && right.correct, `${item.id}: choosing the item's own id must grade correct`);
+
+  const peer = groupPeers(item).find((p) => p.id !== item.id);
+  if (peer) {
+    const wrong = gradeAnswer(item.id, item.section, peer.id);
+    assert.ok(wrong.ok && !wrong.correct, `${item.id}: choosing a peer must grade wrong`);
+  }
+}
+
+// An item that does not exist cannot be graded, so it is refused rather than
+// recorded. A write that cannot be checked is a write nobody can trust.
+assert.deepEqual(
+  gradeAnswer("no-such-item", "opening", "no-such-item"),
+  { ok: false, reason: "unknown_item" },
+  "an unknown item must be refused, not silently recorded as correct",
+);
+
+// The section is checked too, so a caller cannot file a right answer under a
+// section it does not belong to and inflate that section's total.
+{
+  const item = ITEMS[0];
+  const otherSection = SECTION_SLUGS.find((s) => s !== item.section)!;
+  assert.deepEqual(
+    gradeAnswer(item.id, otherSection, item.id),
+    { ok: false, reason: "section_mismatch" },
+    "an item filed under the wrong section must be refused",
+  );
+}
+
+// The route must not read a correctness flag off the body at all.
+const routeSource = fs.readFileSync(
+  path.join(process.cwd(), "app/api/training/progress/route.ts"),
+  "utf8",
+);
+assert.ok(
+  /gradeAnswer\(/.test(routeSource),
+  "the progress route must derive correctness from the curriculum",
+);
+assert.ok(
+  !/payload\.correct/.test(routeSource),
+  "the progress route must never read a correctness flag from the request body",
+);
+
+console.log("training-drills: correctness is derived on the server, not claimed by the client OK");
+
 console.log("training-drills: ALL OK");
