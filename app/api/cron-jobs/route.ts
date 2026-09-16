@@ -30,13 +30,18 @@ import {
   normalizeTenantCronRow,
   type EmpireCronRow,
 } from "@/lib/cron-empire-row";
+import {
+  AutomationInventoryError,
+  buildAutomationInventoryMetadata,
+  type CronInventoryJob,
+} from "@/lib/automations/cron-inventory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Action types we accept on create. Discriminator + payload-shape validation
 // done in code (vs JSON-schema) because the shapes are small and clear.
-const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "agent_prompt", "webhook_post"] as const;
+const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "webhook_post"] as const;
 type ActionType = (typeof VALID_ACTION_TYPES)[number];
 
 /**
@@ -109,7 +114,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   }
   const tenantJobs = (tenantQuery.data || []).map((j) =>
     normalizeTenantCronRow(j as Record<string, unknown>),
-  );
+  ) as CronInventoryJob[];
 
   // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
   // 084), so the operator's tenantId is the canonical filter. Pre-084 we
@@ -182,12 +187,34 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
   }
 
-  return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs] });
+  try {
+    const inventory = buildAutomationInventoryMetadata({
+      tenantJobs,
+      empireJobs,
+      empireQueried: isOperatorEmail(user.email),
+      requireEmpireRows: isOperatorEmail(user.email),
+    });
+    return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
+  } catch (error) {
+    if (error instanceof AutomationInventoryError) {
+      console.error("[api/cron-jobs GET] inventory contract failed", {
+        error: error.code,
+        message: error.message,
+        tenantCount: tenantJobs.length,
+        empireCount: empireJobs.length,
+      });
+      return NextResponse.json(
+        { ok: false, error: error.code, message: error.message },
+        { status: error.status },
+      );
+    }
+    throw error;
+  }
 });
 
 export async function POST(req: NextRequest) {
-  // Admin-only: creating a scheduled job (script_run / agent_prompt /
-  // webhook_post / snapshot_run). Non-admin members can view (GET) only.
+  // Admin-only: creating a scheduled job (script_run / webhook_post /
+  // snapshot_run). Non-admin members can view (GET) only.
   const ctx = await getSessionContext();
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
@@ -363,11 +390,6 @@ function validateActionPayload(type: ActionType, payload: Record<string, unknown
     case "snapshot_run":
       if (typeof payload.snapshot !== "string" || !payload.snapshot.trim()) {
         return "snapshot_run requires action_payload.snapshot (string)";
-      }
-      return null;
-    case "agent_prompt":
-      if (typeof payload.prompt !== "string" || !payload.prompt.trim()) {
-        return "agent_prompt requires action_payload.prompt (string)";
       }
       return null;
     case "webhook_post": {

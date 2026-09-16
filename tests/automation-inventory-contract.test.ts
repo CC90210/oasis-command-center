@@ -34,6 +34,12 @@ assert.match(
   /if \(empireQuery\.error\)[\s\S]{0,500}status: 500/,
   "an Empire read failure must fail the inventory instead of returning tenant-only success",
 );
+assert.match(listRoute, /buildAutomationInventoryMetadata/,
+  "GET must return a counted inventory receipt and reject duplicates/partial operator reads");
+assert.match(listRoute, /inventory[^}]*\}/,
+  "GET success must include inventory metadata alongside jobs");
+assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,
+  "create API must not advertise agent_prompt until a runner supports it");
 const patchRoute = readFileSync("app/api/cron-jobs/[id]/route.ts", "utf8");
 assert.match(patchRoute, /body\.source/, "PATCH must dispatch the exact row source");
 assert.match(patchRoute, /toggleCronWithAudit/, "toggles must use the atomic state+audit transaction");
@@ -69,7 +75,7 @@ assert.ok(
 const legacyMigration = readFileSync("database/174_cron_owner_atomic_toggle.sql", "utf8");
 assert.match(legacyMigration, /ADD COLUMN IF NOT EXISTS owner_agent_key text/);
 assert.match(legacyMigration, /CREATE OR REPLACE FUNCTION public\.toggle_cron_job_with_audit_v1/);
-assert.match(legacyMigration, /SECURITY DEFINER\nSET search_path = public, pg_temp/);
+assert.match(legacyMigration, /SECURITY DEFINER\r?\nSET search_path = public, pg_temp/);
 assert.match(legacyMigration, /REVOKE ALL ON TABLE public\.cron_jobs FROM anon, authenticated/);
 assert.doesNotMatch(legacyMigration, /\bRETURNING\b/i,
   "guarded exec_sql must not misclassify the migration as a result query");
@@ -106,6 +112,17 @@ assert.match(manager, /JSON\.stringify\(\{ enabled: next, source: job\.source \}
 assert.match(manager, /persisted[\s\S]{0,300}enabled[\s\S]{0,300}next/,
   "client success must validate the authoritative state");
 assert.match(manager, /next_run_at/, "cards must carry and render the scheduler's next run");
+assert.match(manager, /parseAutomationInventorySuccess/,
+  "the client must runtime-validate jobs and inventory metadata before rendering");
+assert.match(manager, /partitionCronJobsByOwner/,
+  "owner groups must use the exact-owner partition helper");
+assert.match(manager, /cronJobKey/,
+  "row, edit, and pending identity must include source:id");
+assert.match(manager, /Retry/, "load failures must provide an in-place retry");
+assert.match(manager, /Last refreshed/, "operators must see when the inventory was last confirmed");
+assert.match(manager, /Couldn't delete/, "delete failures must be visible to the operator");
+assert.doesNotMatch(manager, /agent_prompt/,
+  "the create UI must not offer an action the runner cannot execute");
 
 const catalog = readFileSync("lib/agent-catalog.ts", "utf8");
 assert.doesNotMatch(catalog, /name: "content_pipeline"[\s\S]{0,120}schedule: "0 9 \* \* \*"/);
