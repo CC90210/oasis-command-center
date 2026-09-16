@@ -101,6 +101,10 @@ const TESTS = [
   // The rep practice trainer: drill construction and what a typed answer is
   // checked against. The invariant that matters is exactly one right answer.
   "tests/objection-practice.test.ts",
+  // The Training curriculum and its drills. The invariant that matters is
+  // exactly one right answer, plus: no drill answer states a price, because the
+  // source documents disagree and one says no approved price exists.
+  "tests/training-drills.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data

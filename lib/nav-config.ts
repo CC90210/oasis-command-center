@@ -208,6 +208,15 @@ export const WEBDEV_NAV: NavItem[] = [
   ...CC_NAV,
   { group: "Leads", href: "/web-leads", label: "Leads", icon: "Users" },
   { group: "Leads", href: "/commissions", label: "Commissions", icon: "DollarSign" },
+  // Training, and the objection library underneath it.
+  //
+  // A nav row is only half of being reachable: `lib/role-surfaces.ts` narrows
+  // this list per persona, so a route absent from SALES_NAV_ALLOWLIST is
+  // filtered straight back out for a rep no matter what is written here. Both
+  // files were changed together, and the objection surfaces are in this commit
+  // because they shipped without either one and no rep could find them.
+  { group: "Training", href: "/training", label: "Training", icon: "BookOpen" },
+  { group: "Training", href: "/objections", label: "Objections", icon: "MessageSquare" },
   // CC's existing WEBSITE_SALES_STAGES pipeline (lib/website-sales.ts),
   // filtered to this engine's leads -- a VIEW over the fourteen-stage
   // lifecycle CC already runs, never a second one (2026-08-21, Build D).

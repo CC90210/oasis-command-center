@@ -581,6 +581,22 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // which pays 35% for finding and closing; company-supplied work pays 15%
   // for opening or 25% for closing (70% is the separate build-it-too special).
   "/web-leads",
+  // Training, and the objection library and trainer it leans on.
+  //
+  // `/objections` is listed as a FIX, not a new grant. The library and the
+  // practice trainer shipped on 2026-09-15 and 2026-09-16 with no nav entry and
+  // no allowlist row, which meant no rep could reach either one: the feature
+  // was live, correct, and invisible. A surface a rep cannot navigate to may as
+  // well not have been built.
+  //
+  // Prefix matching (see `matchesAllowlist` below) means "/training" also
+  // covers "/training/opening" and "/objections" covers "/objections/practice",
+  // so each surface needs one row rather than one per page.
+  //
+  // Both routes still prove their own permission server-side. This file's own
+  // header says it: HIDING IS NOT ENFORCING.
+  "/training",
+  "/objections",
 ];
 
 /**
@@ -604,6 +620,11 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   "/settings",
   // Managers assign from the same pool their reps source from.
   "/web-leads",
+  // A manager coaches against the same material a rep trains on, so they need
+  // to have seen it. `/objections` also carries the APPROVAL gate: approving an
+  // answer needs deal-closing rights, which a manager has.
+  "/training",
+  "/objections",
 ];
 
 /**
