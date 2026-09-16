@@ -1,4 +1,6 @@
 import assert from "node:assert";
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   DRILL_KINDS,
@@ -213,4 +215,32 @@ assert.ok(
 );
 
 console.log("objection-practice: typed answers are checked mechanically and never scored OK");
+// --- both ways into a round must reset it --------------------------------
+//
+// Review finding on this branch. "Change what I drill" only hid the end
+// screen, so the Start button resumed with the FINISHED index and the previous
+// score: picking the same or a shorter set dropped the rep straight back on
+// "Done", and a longer set began partway through with stale numbers. Two
+// buttons that both begin a round cannot each own a private idea of what
+// beginning means, so both now go through one reset.
+const trainerSource = fs.readFileSync(
+  path.join(process.cwd(), "components/objections/PracticeTrainer.tsx"),
+  "utf8",
+);
+assert.ok(
+  /const begin = useCallback\(/.test(trainerSource),
+  "there must be ONE function that starts a round",
+);
+assert.ok(
+  !/onClick=\{\(\) => setStarted\(true\)\}/.test(trainerSource),
+  "no button may start a round by flipping `started` alone, which leaves the finished index in place",
+);
+assert.equal(
+  (trainerSource.match(/begin\((?:true|false)\)/g) || []).length,
+  2,
+  "both the Start button and Go again must route through begin()",
+);
+
+console.log("objection-practice: both entry points reset the round OK");
+
 console.log("objection-practice: ALL OK");

@@ -120,8 +120,22 @@ export function PracticeTrainer({
     setIndex((i) => i + 1);
   }, []);
 
-  const restart = useCallback(() => {
-    setSeed((s) => s + 1);
+  /**
+   * Starts a round from zero.
+   *
+   * EVERY entry into a round goes through this, which is the fix for a defect
+   * found in review: "Change what I drill" only hid the end screen, so the
+   * Start button below it resumed with the finished index and the previous
+   * score. Picking the same or a shorter set dropped the rep straight back on
+   * "Done", and a longer set began partway through with numbers from the last
+   * round. Two buttons that both begin a round cannot each own a private idea
+   * of what beginning means.
+   *
+   * `reshuffle` advances the seed. A rep going again wants different order;
+   * a rep changing what they drill is already getting a different session.
+   */
+  const begin = useCallback((reshuffle: boolean) => {
+    if (reshuffle) setSeed((s) => s + 1);
     setIndex(0);
     setPicked(null);
     setTyped("");
@@ -181,7 +195,7 @@ export function PracticeTrainer({
             ))}
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            <button type="button" className={BTN_ON} disabled={kinds.length === 0} onClick={() => setStarted(true)}>
+            <button type="button" className={BTN_ON} disabled={kinds.length === 0} onClick={() => begin(false)}>
               Start {pool.length * kinds.length} questions
             </button>
             <span className="text-xs text-fg-dim">Nobody sees your answers. This stays in your browser.</span>
@@ -221,7 +235,7 @@ export function PracticeTrainer({
           checker. Read yours back out loud before you decide it was good.
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
-          <button type="button" className={BTN_ON} onClick={restart}>
+          <button type="button" className={BTN_ON} onClick={() => begin(true)}>
             Go again, reshuffled
           </button>
           <button type="button" className={BTN} onClick={() => setStarted(false)}>
