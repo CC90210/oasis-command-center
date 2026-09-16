@@ -195,20 +195,26 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
       requireEmpireRows: isOperatorEmail(user.email),
     });
     return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
-  } catch (error) {
-    if (error instanceof AutomationInventoryError) {
+    // Bound as `cause`, not `error`: this is the catch binding for a contract
+    // violation, never a destructured driver error. tests/db-error-contract
+    // counts every bare `throw error` in a file that destructures `error` off a
+    // query result anywhere (POST does, below), so reusing the name here would
+    // report debt that does not exist -- and set this file's ratchet to 1, so a
+    // genuine bare driver throw appearing later would pass unnoticed.
+  } catch (cause) {
+    if (cause instanceof AutomationInventoryError) {
       console.error("[api/cron-jobs GET] inventory contract failed", {
-        error: error.code,
-        message: error.message,
+        error: cause.code,
+        message: cause.message,
         tenantCount: tenantJobs.length,
         empireCount: empireJobs.length,
       });
       return NextResponse.json(
-        { ok: false, error: error.code, message: error.message },
-        { status: error.status },
+        { ok: false, error: cause.code, message: cause.message },
+        { status: cause.status },
       );
     }
-    throw error;
+    throw cause;
   }
 });
 
