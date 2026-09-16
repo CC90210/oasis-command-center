@@ -1,7 +1,7 @@
 /**
- * Per-agent operational catalog: cron jobs, backend processes, workflows
- * each agent owns. Static for v1 — every client deploy gets the same
- * catalog. Phase 2: bridge daemon ships per-tenant overrides.
+ * Per-agent operational catalog: highlighted cron jobs, backend processes,
+ * and workflows each agent owns. `/automations` remains the complete live
+ * schedule and control source; every cron highlight here must name a real row.
  *
  * The Agents page renders one card per enabled agent so the operator sees
  * exactly what's running for them, not a generic "AI agents page."
@@ -34,18 +34,25 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
   bravo: {
     crons: [
       {
-        name: "materialize-plans",
+        name: "Daily Bravo Brief",
         kind: "cron",
-        description: "Builds tomorrow's daily_plan from the weekday/weekend templates.",
-        location: "vercel",
-        schedule: "0 3 * * *",
+        description: "AI-narrated pipeline, follow-up, and client-health brief for CC.",
+        location: "local",
+        schedule: "0 6 * * *",
       },
       {
-        name: "snapshot-mrr",
+        name: "Inbound Email Sweep",
         kind: "cron",
-        description: "Writes today's MRR row to mrr_snapshots so the trajectory chart is real.",
-        location: "vercel",
-        schedule: "0 4 * * *",
+        description: "Classifies unread Gmail and routes support, opportunity, and financial work.",
+        location: "local",
+        schedule: "*/5 * * * *",
+      },
+      {
+        name: "Bravo — Hourly Cron Health Check",
+        kind: "cron",
+        description: "Alerts CC when any registered scheduled job reports an error.",
+        location: "local",
+        schedule: "0 * * * *",
       },
     ],
     processes: [
@@ -77,9 +84,10 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
 
   atlas: {
     crons: [
-      { name: "trade_loop", kind: "cron", description: "Strategy evaluation across 12+ rule sets.", location: "local", schedule: "*/15 * * * *" },
-      { name: "tax_recompute", kind: "cron", description: "Re-runs CRA-accurate tax projection on transaction changes.", location: "local", schedule: "0 5 * * *" },
-      { name: "spend_gate_refresh", kind: "cron", description: "Updates cfo_pulse.json with current spend ceilings for Maven.", location: "local", schedule: "*/30 * * * *" },
+      { name: "Atlas — Inbound Financial Email", kind: "cron", description: "Consumes financial-email handoffs and books verified receipts/invoices.", location: "local", schedule: "*/15 * * * *" },
+      { name: "Atlas — Daily Tax Deadline Scan", kind: "cron", description: "Checks critical filing deadlines and alerts inside the configured lead window.", location: "local", schedule: "0 7 * * *" },
+      { name: "Atlas — Pulse Refresh", kind: "cron", description: "Refreshes the CFO pulse from connected finance sources.", location: "local", schedule: "0 */4 * * *" },
+      { name: "Atlas — Wealthsimple Balance Nudge", kind: "cron", description: "Prompts CC when a registered-account balance is stale.", location: "local", schedule: "0 18 * * SUN" },
     ],
     processes: [
       { name: "trade_engine", kind: "process", description: "12+ strategies, conviction scoring, stop-loss enforcement.", location: "local" },
@@ -95,9 +103,12 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
 
   maven: {
     crons: [
-      { name: "content_pipeline", kind: "cron", description: "End-to-end content production: research → draft → edit → schedule.", location: "local", schedule: "0 9 * * *" },
-      { name: "ad_optimizer", kind: "cron", description: "ROAS check + ad-set rebalance for active Meta/Google campaigns.", location: "local", schedule: "0 */4 * * *" },
-      { name: "social_publisher", kind: "cron", description: "Pushes scheduled posts via Zernio.", location: "local", schedule: "*/15 * * * *" },
+      { name: "Marketing Publish Drain", kind: "cron", description: "Publishes approved Library intents through Maven's guarded send path.", location: "local", schedule: "* * * * *" },
+      { name: "Training Corpus Ingest", kind: "cron", description: "Turns Train Maven links into brand-style exemplars.", location: "local", schedule: "*/5 * * * *" },
+      { name: "Library Post Linker", kind: "cron", description: "Links Library assets to the posts that actually published.", location: "local", schedule: "17 * * * *" },
+      { name: "Post Analytics Sync", kind: "cron", description: "Pulls real per-platform post performance into the founders Library.", location: "local", schedule: "17 * * * *" },
+      { name: "Maven — Carousel Post", kind: "cron", description: "Runs the complete GEN-10 author, render, plan, delivery, and Library chain.", location: "local", schedule: "0 8 * * *" },
+      { name: "Carousel Media Retention", kind: "cron", description: "Safely prunes old unbooked carousel renders after the 60-day retention window.", location: "local", schedule: "50 3 * * *" },
     ],
     processes: [
       { name: "content_pipeline", kind: "process", description: "Video pipeline (Remotion + FFmpeg + Whisper + ElevenLabs).", location: "local" },
@@ -112,10 +123,9 @@ export const AGENT_CATALOG: Record<string, AgentCatalog> = {
   },
 
   aura: {
-    crons: [
-      { name: "habit_streak_compute", kind: "cron", description: "Recomputes streaks + small-wins surface.", location: "local", schedule: "0 6 * * *" },
-      { name: "sleep_sync", kind: "cron", description: "Pulls sleep data, surfaces tomorrow's recovery target.", location: "local", schedule: "30 6 * * *" },
-    ],
+    // No registered Aura schedule exists in either cron table today. Keep
+    // capabilities below, but do not invent runnable cards.
+    crons: [],
     processes: [
       { name: "home_assistant_bridge", kind: "process", description: "ESP32 + Pi 5 hub, scenes, automations.", location: "local" },
       { name: "voice_agent", kind: "process", description: "Local-first voice loop, no cloud audio leave-the-device.", location: "local" },

@@ -1,7 +1,8 @@
 /**
- * /api/cron-jobs — operator-facing CRUD for tenant cron jobs (Phase I).
+ * /api/cron-jobs — tenant-scoped scheduled-job inventory and creation.
  *
- * GET  → list this tenant's jobs (RLS-scoped via the authed user).
+ * GET  → list tenant jobs plus the operator-only Empire lane. Service-role
+ *        reads are explicitly constrained by the session tenant ID.
  * POST → create a new job. Body: { agent_key, name, description?, schedule,
  *        action_type, action_payload, enabled? }
  *
@@ -24,7 +25,11 @@ import {
   type DaemonHealthRow,
   type DaemonState,
 } from "@/lib/automations/daemon-backed-crons";
-import { normalizeEmpireRow, type EmpireCronRow } from "@/lib/cron-empire-row";
+import {
+  normalizeEmpireRow,
+  normalizeTenantCronRow,
+  type EmpireCronRow,
+} from "@/lib/cron-empire-row";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,8 +48,8 @@ type ActionType = (typeof VALID_ACTION_TYPES)[number];
  * bridge daemon polls. Operators (CC) need visibility into BOTH on the
  * Automations page; client tenants only see their own tenant_cron_jobs.
  *
- * The two schemas differ — empire uses is_active + action_config + no
- * agent_key, tenant uses enabled + action_payload + agent_key. The GET
+ * The two schemas differ — empire uses is_active + action_config +
+ * owner_agent_key, tenant uses enabled + action_payload + agent_key. The GET
  * normalizes both to a single shape with a `source` discriminator and the
  * UI surfaces an "Empire" tag on cron_jobs rows.
  */
@@ -102,7 +107,9 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
     return NextResponse.json({ ok: false, error: tenantQuery.error.message }, { status: 500 });
   }
-  const tenantJobs = (tenantQuery.data || []).map((j) => ({ ...j, source: "tenant" as const }));
+  const tenantJobs = (tenantQuery.data || []).map((j) =>
+    normalizeTenantCronRow(j as Record<string, unknown>),
+  );
 
   // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
   // 084), so the operator's tenantId is the canonical filter. Pre-084 we
@@ -114,20 +121,27 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
-        "id, name, description, schedule, action_type, action_config, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
+        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
       )
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });
-    if (!empireQuery.error && empireQuery.data) {
-      // The daemon field is decorated HERE, not in lib/cron-empire-row.ts —
-      // the shared normalizer stays daemon-agnostic; only this route knows
-      // which parked rows a PM2 daemon has taken over. Null for the ordinary
-      // rows the shared scheduler still runs; filled in below.
-      empireJobs = (empireQuery.data as EmpireCronRow[]).map((row) => ({
-        ...normalizeEmpireRow(row),
-        daemon: null as DaemonState | null,
-      }));
+    if (empireQuery.error) {
+      // A tenant-only list is plausible but dangerously incomplete for the
+      // operator. The previous silent fallback produced the exact 4/1 outage:
+      // the page looked healthy while hiding every Empire schedule.
+      return NextResponse.json(
+        { ok: false, error: "empire_inventory_unavailable", message: empireQuery.error.message },
+        { status: 500 },
+      );
     }
+    // The daemon field is decorated HERE, not in lib/cron-empire-row.ts —
+    // the shared normalizer stays daemon-agnostic; only this route knows
+    // which parked rows a PM2 daemon has taken over. Null for the ordinary
+    // rows the shared scheduler still runs; filled in below.
+    empireJobs = ((empireQuery.data || []) as EmpireCronRow[]).map((row) => ({
+      ...normalizeEmpireRow(row),
+      daemon: null as DaemonState | null,
+    }));
   }
 
   // Daemon-backed rows: attach what the process is ACTUALLY doing.
@@ -171,31 +185,6 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs] });
 });
 
-/**
- * Map a public.cron_jobs row to the UI's CronJob shape with `source: "empire"`.
- *
- * Column translation:
- *   is_active     → enabled
- *   action_config → action_payload
- *   last_result   → last_run_status + last_run_output (best-effort parse)
- *   (no agent_key) → "bravo-scheduler" so the UI's per-row tag is honest
- *
- * Empire rows are read-only from the UI — the SEED_JOBS array in
- * scripts/cron_engine.py is the source of truth, edits there are how CC
- * adds/removes empire automations. The UI gates edit/delete on the source
- * tag.
- */
-/**
- * Empire cron_jobs has no agent_key column — every row was historically
- * "Bravo's empire scheduler". Infer the owning agent from the job name
- * for UI grouping (CEO/CFO/CMO sections). Tenant scoping is handled by
- * the .eq("tenant_id", ...) filter on the query, not by this function.
- *
- *   - "Atlas *" name OR action_type starting with "atlas_" → atlas (CFO)
- *   - "Maven *" name OR action_type starting with "maven_" → maven (CMO)
- *   - "Aura *" / "Morning Pow Wow" → aura (life-coach)
- *   - everything else → bravo (CEO — business ops)
- */
 export async function POST(req: NextRequest) {
   // Admin-only: creating a scheduled job (script_run / agent_prompt /
   // webhook_post / snapshot_run). Non-admin members can view (GET) only.

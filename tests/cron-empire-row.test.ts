@@ -15,6 +15,7 @@ import {
   classifyLastResult,
   inferEmpireAgentKey,
   normalizeEmpireRow,
+  normalizeTenantCronRow,
   type EmpireCronRow,
 } from "../lib/cron-empire-row";
 
@@ -26,6 +27,7 @@ function row(over: Partial<Record<string, unknown>> = {}): EmpireCronRow {
     schedule: "*/5 * * * *",
     action_type: "script_run",
     action_config: null,
+    owner_agent_key: null,
     is_active: true,
     last_run_at: null,
     last_result: null,
@@ -104,6 +106,7 @@ assert.equal(inferEmpireAgentKey({ a: 1 }, null), "bravo", "an object name must 
 // agent prefix, so all four filed under Bravo and the board credited the CEO
 // lane with the CMO's automations.
 for (const jobName of [
+  "Carousel Media Retention",
   "Marketing Publish Drain",
   "Post Analytics Sync",
   "Library Post Linker",
@@ -125,8 +128,39 @@ assert.equal(inferEmpireAgentKey("Inbound Email Sweep", "script_run"), "bravo");
 assert.equal(inferEmpireAgentKey("Daily State DB Backup", "script_run"), "bravo");
 assert.equal(inferEmpireAgentKey("Bravo — Review Harvest", "script_run"), "bravo");
 
+// Durable ownership wins. Inference remains only for rows written before the
+// owner column was installed.
+assert.equal(
+  normalizeEmpireRow(row({ name: "Inbound Email Sweep", owner_agent_key: "maven" })).agent_key,
+  "maven",
+);
+assert.equal(
+  normalizeEmpireRow(row({ name: "Marketing Publish Drain", owner_agent_key: null })).agent_key,
+  "maven",
+);
+
+// The card promises the scheduler's next fire, so normalization must not drop it.
+assert.equal(
+  normalizeEmpireRow(row({ next_run_at: "2026-09-17T12:00:00Z" })).next_run_at,
+  "2026-09-17T12:00:00Z",
+);
+
 // run_count arrives as INTEGER; a missing one must read 0, never NaN.
 assert.equal(normalizeEmpireRow(row({ run_count: null })).run_count, 0);
 assert.equal(normalizeEmpireRow(row({ run_count: 42 })).run_count, 42);
+
+// SQLite keeps tenant_cron_jobs.enabled as INTEGER; both read and mutation
+// responses must honor the UI's boolean contract.
+assert.equal(normalizeTenantCronRow({ id: "tenant-on", enabled: 1 }).enabled, true);
+assert.equal(normalizeTenantCronRow({ id: "tenant-off", enabled: 0 }).enabled, false);
+assert.equal(normalizeTenantCronRow({ id: "tenant", enabled: "1" }).source, "tenant");
+assert.equal(
+  normalizeTenantCronRow({ enabled: 1, last_run_output: { published: 2 } }).last_run_output,
+  '{"published":2}',
+);
+assert.equal(
+  normalizeTenantCronRow({ enabled: 1, last_run_error: ["failed"] }).last_run_error,
+  '["failed"]',
+);
 
 console.log("cron-empire-row ok — JSON-valued last_result no longer crashes the board");

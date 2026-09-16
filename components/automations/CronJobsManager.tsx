@@ -54,6 +54,7 @@ type CronJob = {
   action_payload: Record<string, unknown>;
   enabled: boolean;
   last_run_at: string | null;
+  next_run_at?: string | null;
   last_run_status: "success" | "error" | null;
   last_run_output: string | null;
   last_run_error: string | null;
@@ -202,6 +203,19 @@ function relativeTimeShort(iso: string | null | undefined): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
+function formatNextRun(iso: string | null | undefined): string {
+  if (!iso) return "Not scheduled";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export function CronJobsManager({ agentKeys }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -341,39 +355,42 @@ export function CronJobsManager({ agentKeys }: Props) {
       return;
     }
     const next = !job.enabled;
-    // Optimistic update — paint the new state instantly so the operator
-    // sees a click → state-change cause-and-effect even when the network
-    // round-trip takes a beat. Track the pending id so the row can show a
-    // spinner over the toggle until the PATCH returns.
     setPendingId(job.id);
     setToggleError(null);
-    setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: next } : j)) ?? null);
     try {
       const res = await fetch(`/api/cron-jobs/${job.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
+        body: JSON.stringify({ enabled: next, source: job.source }),
       });
-      if (!res.ok) {
-        // Revert on failure + surface the error so the operator knows the
-        // toggle didn't stick. Reading the response body for the error
-        // message makes the toast actionable instead of a generic "failed".
-        const body = await res.json().catch(() => ({}));
-        setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: !next } : j)) ?? null);
-        setToggleError(`Couldn't ${next ? "enable" : "disable"} "${job.name}": ${body?.error || `http_${res.status}`}`);
-      } else {
-        // Success — show a transient "Takes effect within 60s" hint on
-        // this row so the operator understands the local bridge poll
-        // cadence and doesn't think the toggle is broken when the cron
-        // fires one last time before the bridge picks up the new state.
-        setRecentlyToggled({ id: job.id, ts: Date.now() });
-        setTimeout(() => {
-          setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
-        }, 6_000);
+      const body = await res.json().catch(() => null) as
+        | { ok?: boolean; error?: string; job?: CronJob }
+        | null;
+      const persisted = body?.job;
+      if (!res.ok || !body?.ok || !persisted) {
+        throw new Error(body?.error || `http_${res.status}`);
       }
+      if (persisted.source !== job.source || persisted.id !== job.id || persisted.enabled !== next) {
+        throw new Error("authoritative_state_mismatch");
+      }
+      // The server has performed a separate scheduler-facing readback and
+      // returned that normalized row. Only now does the UI claim success.
+      setJobs((prev) =>
+        prev?.map((current) =>
+          current.id === job.id ? { ...current, ...persisted, daemon: current.daemon } : current,
+        ) ?? null,
+      );
+      setRecentlyToggled({ id: job.id, ts: Date.now() });
+      setTimeout(() => {
+        setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
+      }, 6_000);
     } catch (err) {
-      setJobs((prev) => prev?.map((j) => (j.id === job.id ? { ...j, enabled: !next } : j)) ?? null);
-      setToggleError(`Couldn't reach the dashboard API (${(err as Error).message || "unknown"}).`);
+      // A network failure can happen after the server committed. Re-read the
+      // source of truth instead of guessing whether the old or new state won.
+      await refresh();
+      setToggleError(
+        `Couldn't ${next ? "enable" : "disable"} "${job.name}": ${(err as Error).message || "unknown"}.`,
+      );
     } finally {
       setPendingId((cur) => (cur === job.id ? null : cur));
     }
@@ -710,8 +727,8 @@ function JobRow({
                   ? `${daemon.process_name} started — it picks up its queue on the next tick.`
                   : `${daemon.process_name} stopped. Nothing else was changed.`
                 : job.enabled
-                  ? "Enabled — first fire within ~60 seconds (next bridge poll)."
-                  : "Disabled — stops firing within ~60 seconds (next bridge poll)."}
+                  ? "Enabled — saved. It will run at the next scheduled time shown."
+                  : "Disabled — saved. Future scheduled runs are paused."}
             </div>
           )}
 
@@ -762,6 +779,16 @@ function JobRow({
             ) : (
               <span className="text-fg-faint">Not run yet</span>
             )}
+            {!daemon && job.next_run_at && (
+              <span className="inline-flex items-center gap-1.5 text-fg-muted">
+                <Clock className="w-3.5 h-3.5 text-fg-dim" />
+                <span>
+                  {job.enabled
+                    ? `Next ${formatNextRun(job.next_run_at)}`
+                    : `Stored next ${formatNextRun(job.next_run_at)} (paused)`}
+                </span>
+              </span>
+            )}
           </div>
         </div>
 
@@ -803,6 +830,12 @@ function JobRow({
             {daemon ? "Last scheduler run error: " : "Error: "}
           </span>
           {job.last_run_error.slice(0, 240)}
+        </div>
+      )}
+      {!job.last_run_error && job.last_run_output && (
+        <div className="mt-3 text-[11px] rounded px-2.5 py-1.5 font-mono break-words text-fg-muted bg-bg-deep/50 border border-bg-border">
+          <span className="font-bold text-fg-muted">Last result: </span>
+          {job.last_run_output.slice(0, 240)}
         </div>
       )}
     </div>
@@ -919,6 +952,8 @@ function JobEditor({
     if (mode === "create") {
       body.action_type = actionType;
       body.action_payload = actionPayload;
+    } else {
+      body.source = job!.source;
     }
     try {
       const url = mode === "create" ? "/api/cron-jobs" : `/api/cron-jobs/${job!.id}`;

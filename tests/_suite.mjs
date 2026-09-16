@@ -213,6 +213,10 @@ const TESTS = [
   // registered cron has something driving it, this one proves the one cron
   // that must NOT be driven can't be armed from the dashboard.
   "tests/daemon-backed-crons.test.ts",
+  "tests/automation-inventory-contract.test.ts",
+  "tests/cron-owner-migration.test.ts",
+  "tests/atomic-cron-toggle.test.ts",
+  "tests/legacy-cron-toggle.test.ts",
   "tests/merchant-email-wiring.test.ts",
   "tests/bulk-email-dispatch.test.ts",
   "tests/bulk-email-compose.test.ts",
