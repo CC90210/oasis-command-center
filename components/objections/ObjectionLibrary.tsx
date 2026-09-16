@@ -335,8 +335,9 @@ function ObjectionRow({
               )}
             </li>
           ))}
-          <li>
+          <li className="flex flex-wrap items-start gap-2">
             <AddAnswer objection={objection} onCreated={onRefresh} />
+            <DraftAnswers objection={objection} onCreated={onRefresh} />
           </li>
         </ul>
       )}
@@ -456,6 +457,79 @@ function AddAnswer({ objection, onCreated }: { objection: AdminObjection; onCrea
         </button>
         {message && <span className="text-xs text-fg-muted">{message}</span>}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Asks a model for candidate answers.
+ *
+ * The button says what it produces, not what it is. "Draft answers" rather
+ * than anything mentioning a model: the operator's decision is whether they
+ * want suggestions to edit, and every one lands as a draft nobody has blessed,
+ * which the result line says in those words. The rejection path is the
+ * important one and it is rendered in full: when the model breaks a rule the
+ * operator is told exactly which rule, because the alternative is a generic
+ * failure that teaches them to stop trusting the button.
+ */
+function DraftAnswers({ objection, onCreated }: { objection: AdminObjection; onCreated: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [violations, setViolations] = useState<string[]>([]);
+
+  const free = OBJECTION_POSTURES.filter(
+    (p) => !objection.responses.some((r) => r.posture === p && r.status !== "retired"),
+  );
+
+  const draft = useCallback(async () => {
+    setBusy(true);
+    setMessage(null);
+    setViolations([]);
+    try {
+      const res = await fetch(`/api/objections/catalog/${objection.id}/draft-answers`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limit: Math.min(2, free.length) }),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        error?: string;
+        created?: number;
+        violations?: string[];
+      };
+      if (!res.ok) {
+        setMessage(payload.message || payload.error || "That did not work.");
+        setViolations(Array.isArray(payload.violations) ? payload.violations : []);
+        return;
+      }
+      setMessage(
+        `${payload.created} saved as drafts. Read them, then approve the ones you would actually say.`,
+      );
+      await onCreated();
+    } catch {
+      setMessage("That did not work. Nothing was saved.");
+    } finally {
+      setBusy(false);
+    }
+  }, [objection.id, free.length, onCreated]);
+
+  if (free.length === 0) return null;
+
+  return (
+    <div className="min-w-0 flex-1">
+      <button type="button" className={BTN} disabled={busy} onClick={draft}>
+        {busy ? "Drafting" : "Draft answers for me"}
+      </button>
+      {message && <p className="mt-1.5 text-xs text-fg-muted">{message}</p>}
+      {violations.length > 0 && (
+        <ul className="mt-1 space-y-0.5">
+          {violations.map((v) => (
+            <li key={v} className="text-[11px] text-fg-dim">
+              {v}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

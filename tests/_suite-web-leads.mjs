@@ -95,6 +95,9 @@ const TESTS = [
   // the approval gate. Pure decisions only; the SQL is not covered and the
   // test says so in its own header.
   "tests/objection-admin.test.ts",
+  // Model-drafted answers: every rejection path, and the structural proof that
+  // nothing generated can reach a rep without a human approving it.
+  "tests/objection-draft-answers.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data
