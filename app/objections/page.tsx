@@ -13,6 +13,7 @@
  * server, because a hidden button is not a permission.
  */
 
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { PageHeader } from "@/components/Card";
@@ -63,6 +64,14 @@ export default async function ObjectionsPage() {
           readError
             ? "The library could not be read. Nothing below is the real state."
             : `${approved} live, ${drafts} waiting to be approved, ${draftAnswers} draft answers. Nothing reaches a rep until it is approved here.`
+        }
+        action={
+          <Link
+            href="/objections/practice"
+            className="inline-block rounded-md border border-bg-border px-3 py-1.5 text-sm font-medium text-fg-muted transition hover:border-accent/50 hover:text-fg"
+          >
+            Practise these
+          </Link>
         }
       />
       <ObjectionLibrary

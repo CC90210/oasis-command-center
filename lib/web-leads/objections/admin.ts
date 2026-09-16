@@ -27,6 +27,11 @@ import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import {
+  MAX_BODY_LENGTH,
+  MAX_SAYS_LENGTH,
+  copyViolations,
+} from "@/lib/web-leads/objections/copy-rules";
+import {
   isObjectionFamily,
   isObjectionPosture,
   isWebsitePremise,
@@ -52,54 +57,6 @@ export class ObjectionRejected extends Error {
     this.name = "ObjectionRejected";
     this.reason = reason;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Copy rules on the WRITE path.
-//
-// tests/objection-copy.test.ts pins the same rules over the SEED source, which
-// is the only door that existed when it was written. This surface is a second
-// door into the same table, and a guard that covers one of two doors is
-// decorative. These run before any insert or update, so a sentence typed into
-// the UI faces exactly what a seeded one faces.
-// ---------------------------------------------------------------------------
-
-/** Em dash and en dash. Both are the standing tell of generated text in
- *  customer-facing copy, and both render as a dash a rep stumbles over. */
-const DASH = /[—–]/;
-/** A double hyphen renders literally on the card rather than as a dash. */
-const DOUBLE_HYPHEN = /--/;
-/** A currency symbol, or a figure attached to a money word. A rep reading a
- *  number off a script is quoting a price nobody scoped to that business. */
-const MONEY = /[$£€]|\b\d[\d,.]*\s*(?:dollars?|bucks|grand|cents?|k)\b/i;
-
-/** The longest a single spoken answer may be. Not a style preference: past
- *  this a rep stops reading it and starts paraphrasing, and a paraphrased
- *  answer is not the one the scoreboard thinks was used. */
-export const MAX_BODY_LENGTH = 1200;
-/** The longest an objection itself may be. It is a sentence a customer said. */
-export const MAX_SAYS_LENGTH = 400;
-
-/**
- * Every copy rule violated by `text`, as human-readable sentences. Empty means
- * it passes. Returns ALL of them rather than the first, so somebody pasting a
- * batch fixes their wording once instead of discovering the rules one at a
- * time.
- */
-export function copyViolations(text: string, field: string, maxLength: number): string[] {
-  const out: string[] = [];
-  const trimmed = text.trim();
-  if (trimmed.length === 0) {
-    out.push(`${field} is empty.`);
-    return out;
-  }
-  if (trimmed.length > maxLength) {
-    out.push(`${field} is ${trimmed.length} characters, over the ${maxLength} limit.`);
-  }
-  if (DASH.test(trimmed)) out.push(`${field} contains an em or en dash. Use a comma, a period or a hyphen.`);
-  if (DOUBLE_HYPHEN.test(trimmed)) out.push(`${field} contains a double hyphen, which renders literally on the card.`);
-  if (MONEY.test(trimmed)) out.push(`${field} states a money figure. A spoken line must never quote an unscoped price.`);
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -897,3 +854,7 @@ export async function createDraftResponses(
   if (error) throw new ObjectionAdminError(`objection_response_insert_failed: ${error.message}`);
   return rows.map((r) => ({ id: r.id }));
 }
+
+/** Re-exported so callers that already reach for the authoring module keep
+ *  working; the rules themselves live in ./copy-rules, which is pure. */
+export { copyViolations, MAX_BODY_LENGTH, MAX_SAYS_LENGTH };

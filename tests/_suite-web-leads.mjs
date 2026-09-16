@@ -98,6 +98,9 @@ const TESTS = [
   // Model-drafted answers: every rejection path, and the structural proof that
   // nothing generated can reach a rep without a human approving it.
   "tests/objection-draft-answers.test.ts",
+  // The rep practice trainer: drill construction and what a typed answer is
+  // checked against. The invariant that matters is exactly one right answer.
+  "tests/objection-practice.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data
