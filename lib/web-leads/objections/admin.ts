@@ -807,13 +807,48 @@ export async function createDraftResponse(
   objectionId: string,
   input: { label: string; body: string; posture: ObjectionPosture },
 ): Promise<{ id: string }> {
-  const violations = [
-    ...copyViolations(input.label, "The label", 60),
-    ...copyViolations(input.body, "The answer", MAX_BODY_LENGTH),
-  ];
+  const [created] = await createDraftResponses(objectionId, [input]);
+  return created;
+}
+
+/**
+ * Adds SEVERAL draft answers to one objection, all of them or none.
+ *
+ * Every answer is validated, and every posture checked against both the
+ * existing rows and the rest of this batch, BEFORE anything is written. The
+ * rows then go in as a single insert.
+ *
+ * WHY THAT MATTERS RATHER THAN LOOPING. Writing them one at a time means a
+ * failure on the second, whether a database error or another request taking
+ * that posture first, leaves the first one committed. The caller reports
+ * failure while the objection now carries half a set, and a retry then
+ * collides with the half that landed. The drafting flow promises all or
+ * nothing, and a loop cannot honour that promise.
+ */
+export async function createDraftResponses(
+  objectionId: string,
+  inputs: { label: string; body: string; posture: ObjectionPosture }[],
+): Promise<{ id: string }[]> {
+  if (inputs.length === 0) return [];
+
+  const violations: string[] = [];
+  for (const [i, input] of inputs.entries()) {
+    const which = inputs.length > 1 ? ` (answer ${i + 1})` : "";
+    violations.push(...copyViolations(input.label, `The label${which}`, 60));
+    violations.push(...copyViolations(input.body, `The answer${which}`, MAX_BODY_LENGTH));
+    if (!isObjectionPosture(input.posture)) {
+      violations.push(`"${String(input.posture)}" is not one of the four postures.`);
+    }
+  }
   if (violations.length) throw new ObjectionRejected("copy_rules", violations.join(" "));
-  if (!isObjectionPosture(input.posture)) {
-    throw new ObjectionRejected("posture", `"${String(input.posture)}" is not one of the four postures.`);
+
+  const withinBatch = inputs.map((i) => i.posture);
+  const dupeInBatch = withinBatch.find((p, i) => withinBatch.indexOf(p) !== i);
+  if (dupeInBatch) {
+    throw new ObjectionRejected(
+      "posture_taken",
+      `Two of these answers use the same move, "${dupeInBatch}". Each has to be a different one.`,
+    );
   }
 
   const db = getServiceSupabase();
@@ -829,20 +864,22 @@ export async function createDraftResponse(
   // A second "question it back" gives a rep two buttons with the same name and
   // makes recovery-by-posture compare a posture against itself. A RETIRED row
   // does not block, because its posture is free again.
-  const clash = ((siblings.data || []) as { posture: string; status: string }[]).some(
-    (s) => s.posture === input.posture && s.status !== "retired",
+  const taken = new Set(
+    ((siblings.data || []) as { posture: string; status: string }[])
+      .filter((s) => s.status !== "retired")
+      .map((s) => s.posture),
   );
+  const clash = inputs.find((i) => taken.has(i.posture));
   if (clash) {
     throw new ObjectionRejected(
       "posture_taken",
-      `This objection already has a live "${input.posture}" answer. Retire it first, or pick a different move.`,
+      `This objection already has a live "${clash.posture}" answer. Retire it first, or pick a different move.`,
     );
   }
 
   const now = new Date().toISOString();
-  const id = randomUUID();
-  const { error } = await db.from("objection_response").insert({
-    id,
+  const rows = inputs.map((input) => ({
+    id: randomUUID(),
     tenant_id: WEBDEV_TENANT_ID,
     objection_id: objectionId,
     label: input.label.trim(),
@@ -854,7 +891,9 @@ export async function createDraftResponse(
     approved_at: null,
     created_at: now,
     updated_at: now,
-  });
+  }));
+
+  const { error } = await db.from("objection_response").insert(rows);
   if (error) throw new ObjectionAdminError(`objection_response_insert_failed: ${error.message}`);
-  return { id };
+  return rows.map((r) => ({ id: r.id }));
 }

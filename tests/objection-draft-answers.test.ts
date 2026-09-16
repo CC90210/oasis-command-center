@@ -238,8 +238,8 @@ const draftSource = stripComments(
   fs.readFileSync(path.join(process.cwd(), "lib/web-leads/objections/draft-answers.ts"), "utf8"),
 );
 assert.ok(
-  draftSource.includes("createDraftResponse("),
-  "the only write path must be createDraftResponse",
+  /createDraftResponses?\(/.test(draftSource),
+  "the only write path must be the draft-only writer in admin.ts",
 );
 assert.ok(
   !/["']approved["']/.test(draftSource),
@@ -271,6 +271,36 @@ assert.ok(
   !routeSource.includes("mayApproveObjections"),
   "the route must not approve anything, so it has no reason to consult the closer gate",
 );
+
+// Review round 2 on this branch.
+//
+// The module promises all or nothing. A loop of single inserts cannot honour
+// that: a failure on the second answer leaves the first committed, the caller
+// reports failure, and the objection carries half a set that the obvious retry
+// then collides with. The write must be one batch.
+assert.ok(
+  draftSource.includes("createDraftResponses("),
+  "answers must be written in ONE batch, or a mid-loop failure leaves a partial draft set",
+);
+assert.ok(
+  !/for\s*\([\s\S]{0,120}\)\s*\{[\s\S]{0,300}await\s+createDraftResponse\s*\(/.test(draftSource),
+  "no loop of single inserts: that is the shape that breaks the all-or-nothing promise",
+);
+
+const draftClientSource = fs.readFileSync(
+  path.join(process.cwd(), "components/objections/ObjectionLibrary.tsx"),
+  "utf8",
+);
+// The route answers 202 while inference is still queued, and fetch counts 202
+// as successful. A client checking only res.ok fell through to the success
+// branch and rendered "undefined saved as drafts" over the retry message the
+// route had actually supplied.
+assert.ok(
+  /if\s*\(\s*!res\.ok\s*\|\|\s*payload\.error\s*\)/.test(draftClientSource),
+  "the drafting client must treat a payload error as failure even on a 2xx, because 202 means still working",
+);
+
+console.log("objection-draft-answers: batched write and the queued-inference path OK");
 
 console.log("objection-draft-answers: drafts only, no path to an approved row OK");
 console.log("objection-draft-answers: ALL OK");

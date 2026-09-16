@@ -497,13 +497,19 @@ function DraftAnswers({ objection, onCreated }: { objection: AdminObjection; onC
         created?: number;
         violations?: string[];
       };
-      if (!res.ok) {
+      // `payload.error`, not just `!res.ok`. When the model is still working
+      // the route answers 202, which fetch counts as successful, so a check on
+      // res.ok alone fell through to the success branch and rendered
+      // "undefined saved as drafts" over the retry message the route had
+      // actually supplied. 202 is the right status for queued work, so the
+      // client is what has to stop treating every 2xx as a result.
+      if (!res.ok || payload.error) {
         setMessage(payload.message || payload.error || "That did not work.");
         setViolations(Array.isArray(payload.violations) ? payload.violations : []);
         return;
       }
       setMessage(
-        `${payload.created} saved as drafts. Read them, then approve the ones you would actually say.`,
+        `${payload.created ?? 0} saved as drafts. Read them, then approve the ones you would actually say.`,
       );
       await onCreated();
     } catch {

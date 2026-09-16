@@ -48,7 +48,7 @@ import {
   ObjectionAdminError,
   ObjectionRejected,
   copyViolations,
-  createDraftResponse,
+  createDraftResponses,
 } from "@/lib/web-leads/objections/admin";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
@@ -298,17 +298,24 @@ export async function draftAnswersFor(
 
   const answers = parseDraftAnswers(inf.text, wanted);
 
-  // Written only after every answer has passed. createDraftResponse hardcodes
-  // status 'draft', so none of this is visible to a rep until a human approves
-  // it at /objections.
-  const created: DraftedAnswer[] = [];
-  for (const answer of answers) {
-    await createDraftResponse(objectionId, {
+  // Written only after every answer has passed, and written as ONE batch.
+  //
+  // A loop of single inserts cannot honour the all-or-nothing contract this
+  // module promises: a failure on the second answer, whether a database error
+  // or another request taking that posture first, would leave the first one
+  // committed. The caller would report failure while the objection carried
+  // half a set, and the obvious retry would then collide with the half that
+  // landed. createDraftResponses validates everything and inserts once.
+  //
+  // It hardcodes status 'draft', so none of this is visible to a rep until a
+  // human approves it at /objections.
+  await createDraftResponses(
+    objectionId,
+    answers.map((answer) => ({
       label: POSTURE_LABEL[answer.posture],
       body: answer.body,
       posture: answer.posture,
-    });
-    created.push(answer);
-  }
-  return { created };
+    })),
+  );
+  return { created: answers };
 }
