@@ -24,6 +24,13 @@
 
 import { copyViolations } from "@/lib/web-leads/objections/copy-rules";
 import {
+  OPTION_COUNT,
+  buildOptions,
+  rng,
+  shuffle,
+  type DrillOption,
+} from "@/lib/training/drills";
+import {
   OBJECTION_POSTURES,
   POSTURE_LABEL,
   type ObjectionPosture,
@@ -59,34 +66,6 @@ export const DRILL_TEACHES: Record<DrillKind, string> = {
   your_words: "Producing it yourself, which is the only part that survives a real call.",
 };
 
-/**
- * Deterministic PRNG (mulberry32).
- *
- * Seeded rather than Math.random so a drill is reproducible: a test can assert
- * the shape of round 7 of seed 42, and a rep who reloads gets the same
- * question rather than a reshuffle that hides whether they had learned it.
- */
-export function rng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** Fisher-Yates with the supplied generator. Returns a new array. */
-export function shuffle<T>(items: readonly T[], next: () => number): T[] {
-  const out = items.slice();
-  for (let i = out.length - 1; i > 0; i--) {
-    const j = Math.floor(next() * (i + 1));
-    [out[i], out[j]] = [out[j], out[i]];
-  }
-  return out;
-}
-
-export type DrillOption = { id: string; text: string; correct: boolean };
 
 export type Drill = {
   kind: DrillKind;
@@ -98,8 +77,6 @@ export type Drill = {
   reveal: { label: string; text: string }[];
 };
 
-/** How many options a multiple-choice drill offers, including the right one. */
-export const OPTION_COUNT = 4;
 
 /**
  * One drill for one objection.
@@ -155,23 +132,15 @@ export function buildDrill(
 
   const field = kind === "meaning" ? "meaning" : "prevent";
   const correctText = target[field];
-  const seen = new Set([correctText.trim()]);
-  const decoys: PracticeObjection[] = [];
-  for (const candidate of shuffle(pool, next)) {
-    if (decoys.length >= OPTION_COUNT - 1) break;
-    if (candidate.slug === target.slug) continue;
-    const text = candidate[field].trim();
-    if (seen.has(text)) continue;
-    seen.add(text);
-    decoys.push(candidate);
-  }
-
-  const options = shuffle(
-    [
-      { id: target.slug, text: correctText, correct: true },
-      ...decoys.map((d) => ({ id: d.slug, text: d[field], correct: false })),
-    ],
+  // Shared with the Training drills. `buildOptions` owns the guarantee that
+  // exactly one option is correct, that decoys come from real content rather
+  // than being invented, and that two items carrying almost the same sentence
+  // cannot both appear.
+  const options = buildOptions(
+    { id: target.slug, text: correctText },
+    pool.map((p) => ({ id: p.slug, text: p[field] })),
     next,
+    OPTION_COUNT,
   );
 
   return {
@@ -261,3 +230,10 @@ export const SELF_CHECKS: { id: string; ask: string }[] = [
   { id: "room", ask: "Did you leave them room to answer, instead of talking to the end?" },
   { id: "named_move", ask: "Can you name which of the four moves you just made?" },
 ];
+
+/** Re-exported so the objection trainer's own callers and tests keep one
+ *  import site. The implementations live in ./training/drills, shared with
+ *  the Training drills, because two copies of this logic are two places a
+ *  drill can grow two right answers. */
+export { rng, shuffle, buildOptions, OPTION_COUNT };
+export type { DrillOption };
