@@ -197,14 +197,20 @@ assert.notDeepEqual(
 );
 
 console.log("training-drills: sessions cover every item, reproducibly OK");
-// --- correctness is decided by the server, never by the client -------------
+// --- correctness is derived from the curriculum, not read off the body -----
 //
-// Review finding on this branch. The progress endpoint took a `correct:
-// boolean` from the request body, so a modified client or a plain curl could
-// award itself a perfect record without answering anything. Adon chose for
-// MANAGERS to read this progress, which makes a forgeable record worse than no
-// record: somebody would sign off onboarding against a number that means
-// nothing.
+// Review finding on this branch, and then a SECOND finding on the fix. The
+// endpoint first took a `correct: boolean` from the request body, so any
+// client bug could record a wrong answer as right. That is fixed and these
+// assertions pin it.
+//
+// What is NOT fixed, asserted nowhere because it is not true: this does not
+// stop a determined rep faking their own record. Both ids come from the client
+// and the browser knows all of them. Nothing grading a CLIENT-BUILT drill can
+// prevent that; it needs the server to issue each question. Recorded in
+// `gradeAnswer` and in ACTIVE_WORK rather than papered over here, because a
+// test named "the client cannot forge this" would be a lie in a place people
+// trust.
 
 for (const item of ITEMS) {
   const right = gradeAnswer(item.id, item.section, item.id);
@@ -251,6 +257,6 @@ assert.ok(
   "the progress route must never read a correctness flag from the request body",
 );
 
-console.log("training-drills: correctness is derived on the server, not claimed by the client OK");
+console.log("training-drills: correctness comes from the curriculum, not the request body OK");
 
 console.log("training-drills: ALL OK");

@@ -61,24 +61,38 @@ export type Grade =
   | { ok: false; reason: "unknown_item" | "section_mismatch" };
 
 /**
- * Whether a chosen option was the right one, decided from the CURRICULUM.
+ * Whether a chosen option was the right one, decided from the CURRICULUM
+ * rather than from a flag in the request body.
  *
- * 🚨 THE CLIENT DOES NOT GET TO SAY. An earlier version of the progress
- * endpoint took a `correct: boolean` from the request body, which meant a
- * modified client or a plain curl could award itself a perfect record without
- * answering anything. That is not a theoretical problem here: managers read
- * this progress, so a forged record is worse than no record, and a manager
- * signing off onboarding against it would be signing off nothing.
+ * 🚨 WHAT THIS IS NOT: a security boundary. Stated plainly because an earlier
+ * version of this comment claimed it was, and that claim was wrong.
  *
- * The option ids ARE item ids. `buildTrainingDrill` labels the correct option
- * with the item's own id and every decoy with a peer item's id, so comparing
- * the chosen id to the item id is the whole check, and it needs nothing the
- * server does not already have.
+ * Both `itemId` and `chosenOptionId` come from the client, and the browser
+ * already knows every option id, so anyone willing to open devtools can post
+ * the same id as both and be graded correct. This check cannot establish that
+ * a human answered a question that was actually put to them, and nothing that
+ * grades a CLIENT-BUILT drill can: the questions are generated in the browser
+ * from static curriculum, so there is no server-issued challenge to bind an
+ * answer to. Making it unforgeable means the server issuing each question,
+ * which is a request per question and a different design.
+ *
+ * WHAT IT DOES BUY, which is why it is still here rather than being dropped as
+ * theatre: the previous version took `correct: boolean` from the body, so any
+ * bug in the client, any retry, any reordered state update could silently
+ * record a wrong answer as right. Correctness now has exactly one definition
+ * and it lives next to the curriculum. That is an integrity property, not an
+ * anti-cheat one.
+ *
+ * THE THREAT IT DOES NOT ADDRESS, so nobody is surprised by it: an
+ * authenticated rep deliberately faking their own practice record. Managers
+ * read these numbers, so that matters, and the decision about whether it is
+ * worth a per-question round trip is recorded in ACTIVE_WORK rather than
+ * quietly answered here.
  *
  * An unknown item is REFUSED rather than recorded. The read side still
  * tolerates rows whose item was later reworded or removed, because a rep's
- * history is worth keeping; but a write that cannot be checked is a write
- * nobody can trust, and the only thing it could add is a forged one.
+ * history is worth keeping; but a write that cannot be checked at all is one
+ * nobody can trust.
  */
 export function gradeAnswer(itemId: string, sectionSlug: string, chosenOptionId: string): Grade {
   const item = ITEMS.find((i) => i.id === itemId);

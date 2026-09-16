@@ -91,14 +91,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "bad_section" }, { status: 400 });
     }
 
-    // 🚨 CORRECTNESS IS DERIVED HERE, NEVER TAKEN FROM THE BODY.
+    // Correctness is derived from the curriculum, never taken from the body.
     //
-    // This route used to accept a `correct: boolean`, which meant a modified
-    // client or a plain curl could award itself a perfect record without
-    // answering a single question. Managers read this progress, so a forgeable
-    // record is worse than no record: it would let somebody sign off onboarding
-    // against a number that means nothing. The client now sends which option it
-    // chose, and the curriculum decides.
+    // This is an INTEGRITY property, not an anti-cheat one, and the difference
+    // is worth stating because the first version of this comment got it wrong.
+    // It means correctness has one definition, living beside the curriculum, so
+    // no client bug or retry can record a wrong answer as right. It does NOT
+    // mean a determined rep cannot fake their own record: both ids come from
+    // the client and the browser knows all of them. See `gradeAnswer` for why
+    // nothing grading a client-built drill can prevent that, and what it would
+    // cost to.
     const grade = gradeAnswer(itemId, sectionSlug, chosenOptionId);
     if (!grade.ok) {
       return NextResponse.json({ error: grade.reason }, { status: 400 });
