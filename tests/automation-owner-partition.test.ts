@@ -3,6 +3,7 @@ import {
   AutomationInventoryError,
   buildAutomationInventoryMetadata,
   cronJobKey,
+  isDaemonTransitionConfirmed,
   parseAutomationInventorySuccess,
   partitionCronJobsByOwner,
   type CronInventoryJob,
@@ -103,6 +104,68 @@ assert.deepEqual(
   }).ok,
   false,
   "metadata that disagrees with the rows must fail closed",
+);
+
+const daemonJob: CronInventoryJob = {
+  ...job("empire", "daemon-1", "bravo"),
+  daemon: {
+    service: "pm2.bravo-ig-dm",
+    process_name: "bravo-ig-dm",
+    label: "Instagram DM setter",
+    why: "Dedicated low-latency worker",
+    stop_warning: "Stops replies",
+    state: "stopped",
+    reported_status: "down",
+    last_ping_at: "2026-09-16T12:01:00.000Z",
+    stale: false,
+  },
+};
+const baseline = {
+  key: "empire:daemon-1",
+  state: "running" as const,
+  last_ping_at: "2026-09-16T12:00:00.000Z",
+};
+assert.equal(isDaemonTransitionConfirmed(daemonJob, "stopped", baseline), true);
+assert.equal(
+  isDaemonTransitionConfirmed(daemonJob, "stopped", { ...baseline, last_ping_at: null }),
+  true,
+  "the first valid heartbeat confirms a transition when no baseline heartbeat existed",
+);
+assert.equal(
+  isDaemonTransitionConfirmed(
+    { ...daemonJob, daemon: { ...daemonJob.daemon!, last_ping_at: baseline.last_ping_at } },
+    "stopped",
+    baseline,
+  ),
+  false,
+  "the requested state on the old heartbeat is not authoritative confirmation",
+);
+assert.equal(
+  isDaemonTransitionConfirmed(
+    { ...daemonJob, source: "tenant" },
+    "stopped",
+    baseline,
+  ),
+  false,
+  "a different source:id can never confirm the control action",
+);
+assert.equal(
+  isDaemonTransitionConfirmed(
+    { ...daemonJob, daemon: { ...daemonJob.daemon!, state: "running" } },
+    "stopped",
+    baseline,
+  ),
+  false,
+  "a newer heartbeat in the wrong state cannot confirm success",
+);
+assert.equal(
+  isDaemonTransitionConfirmed(
+    { ...daemonJob, daemon: { ...daemonJob.daemon!, state: "running" } },
+    "running",
+    baseline,
+  ),
+  false,
+  "a readback that never changed from the baseline state is not a transition",
 );
 
 console.log("automation-owner-partition: all assertions passed");

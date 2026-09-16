@@ -28,6 +28,7 @@ try {
 
 const listRoute = readFileSync("app/api/cron-jobs/route.ts", "utf8");
 assert.match(listRoute, /owner_agent_key/, "GET must read durable Empire ownership");
+assert.match(listRoute, /fail_count/, "GET must read unresolved Empire failure state");
 assert.match(listRoute, /normalizeTenantCronRow/, "GET must return tenant enabled state as a boolean");
 assert.match(
   listRoute,
@@ -121,8 +122,22 @@ assert.match(manager, /cronJobKey/,
 assert.match(manager, /Retry/, "load failures must provide an in-place retry");
 assert.match(manager, /Last refreshed/, "operators must see when the inventory was last confirmed");
 assert.match(manager, /Couldn't delete/, "delete failures must be visible to the operator");
+assert.match(manager, /unresolved_failures/,
+  "Empire failure counters must remain visibly red until a successful run clears them");
 assert.doesNotMatch(manager, /agent_prompt/,
   "the create UI must not offer an action the runner cannot execute");
+assert.match(manager, /isDaemonTransitionConfirmed/,
+  "daemon controls must wait for an authoritative state+heartbeat readback");
+assert.match(manager, /DAEMON_CONFIRM_TIMEOUT_MS = 75_000/,
+  "daemon confirmation must stop waiting and fail visibly after about 75 seconds");
+assert.match(manager, /last_ping_at: daemon\.last_ping_at/,
+  "daemon control must capture the pre-action heartbeat baseline");
+assert.match(manager, /while \(!controller\.signal\.aborted/,
+  "daemon confirmation must poll without allowing an unmounted operation to win a race");
+assert.doesNotMatch(manager, /Optimistic flip/,
+  "command acceptance must never optimistically flip the displayed daemon state");
+assert.doesNotMatch(manager, /setTimeout\(\(\) => \{ void refresh\(\); \}, 5_000\)/,
+  "a single delayed refresh is not sufficient runtime confirmation");
 
 const catalog = readFileSync("lib/agent-catalog.ts", "utf8");
 assert.doesNotMatch(catalog, /name: "content_pipeline"[\s\S]{0,120}schedule: "0 9 \* \* \*"/);

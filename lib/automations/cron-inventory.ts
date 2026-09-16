@@ -17,6 +17,7 @@ export type CronInventoryJob = {
   last_run_output: string | null;
   last_run_error: string | null;
   run_count: number;
+  unresolved_failures?: number;
   created_at: string;
   updated_at: string;
   source: CronInventorySource;
@@ -126,6 +127,35 @@ export function partitionCronJobsByOwner<T extends OwnedInventoryIdentity>(
   return groups;
 }
 
+export type DaemonConfirmationBaseline = {
+  key: string;
+  state: DaemonState["state"];
+  last_ping_at: string | null;
+};
+
+/**
+ * A supervisor command is only confirmed when the same source:id reports the
+ * requested state on a heartbeat newer than the one visible before the click.
+ * The command response itself is merely acceptance, not proof of runtime state.
+ */
+export function isDaemonTransitionConfirmed(
+  job: CronInventoryJob,
+  requestedState: "running" | "stopped",
+  baseline: DaemonConfirmationBaseline,
+): boolean {
+  if (cronJobKey(job) !== baseline.key || !job.daemon) return false;
+  if (job.daemon.state !== requestedState || job.daemon.state === baseline.state) return false;
+  const readbackPing = job.daemon.last_ping_at;
+  if (!readbackPing) return false;
+  const readbackTime = Date.parse(readbackPing);
+  if (!Number.isFinite(readbackTime)) return false;
+  if (!baseline.last_ping_at) return true;
+  const baselineTime = Date.parse(baseline.last_ping_at);
+  return Number.isFinite(baselineTime)
+    ? readbackTime > baselineTime
+    : readbackPing !== baseline.last_ping_at;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -152,6 +182,10 @@ function isCronInventoryJob(value: unknown): value is CronInventoryJob {
     isNullableString(value.last_run_output) &&
     isNullableString(value.last_run_error) &&
     typeof value.run_count === "number" && Number.isFinite(value.run_count) &&
+    (value.unresolved_failures === undefined ||
+      (typeof value.unresolved_failures === "number" &&
+        Number.isInteger(value.unresolved_failures) &&
+        value.unresolved_failures >= 0)) &&
     typeof value.created_at === "string" &&
     typeof value.updated_at === "string" &&
     (value.daemon === undefined || value.daemon === null || isDaemonState(value.daemon))

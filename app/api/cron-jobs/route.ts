@@ -126,7 +126,7 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
-        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
+        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, fail_count, created_at",
       )
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });

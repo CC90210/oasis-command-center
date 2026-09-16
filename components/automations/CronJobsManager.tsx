@@ -13,7 +13,7 @@
  *   - Inline "New automation" form with action-type-aware payload editor
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -38,8 +38,10 @@ import { runWorkerAction } from "@/lib/automations/worker-control";
 import type { DaemonState } from "@/lib/automations/daemon-backed-crons";
 import {
   cronJobKey,
+  isDaemonTransitionConfirmed,
   parseAutomationInventorySuccess,
   partitionCronJobsByOwner,
+  type DaemonConfirmationBaseline,
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
 
@@ -56,6 +58,50 @@ function isRunning(job: CronJob): boolean {
 }
 
 type Props = { agentKeys: string[] };
+
+const DAEMON_CONFIRM_TIMEOUT_MS = 75_000;
+const DAEMON_CONFIRM_POLL_MS = 4_000;
+
+function waitForDaemonPoll(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Daemon confirmation cancelled", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Daemon confirmation cancelled", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchAutomationInventoryReadback(signal: AbortSignal): Promise<
+  | { ok: true; jobs: CronJob[] }
+  | { ok: false; error: string }
+> {
+  const result = await fetchJson<unknown>(
+    "/api/cron-jobs",
+    { cache: "no-store", signal },
+  );
+  if (!result.ok) return { ok: false, error: result.error };
+  if (result.status < 200 || result.status >= 300) {
+    const body = result.data;
+    const message = body && typeof body === "object" && !Array.isArray(body)
+      && typeof (body as { error?: unknown }).error === "string"
+      ? String((body as { error: string }).error)
+      : `http_${result.status}`;
+    return { ok: false, error: message };
+  }
+  const parsed = parseAutomationInventorySuccess(result.data);
+  return parsed.ok
+    ? { ok: true, jobs: parsed.jobs }
+    : { ok: false, error: `invalid_inventory_response:${parsed.error}` };
+}
 
 /**
  * Per-agent display copy. Tenants whose agent palette doesn't include
@@ -208,6 +254,8 @@ export function CronJobsManager({ agentKeys }: Props) {
   const [recentlyToggled, setRecentlyToggled] = useState<{ key: string; ts: number } | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const mountedRef = useRef(false);
+  const activeDaemonControlRef = useRef<AbortController | null>(null);
 
   async function refresh() {
     setRefreshing(true);
@@ -287,7 +335,12 @@ export function CronJobsManager({ agentKeys }: Props) {
   }
 
   useEffect(() => {
-    refresh();
+    mountedRef.current = true;
+    void refresh();
+    return () => {
+      mountedRef.current = false;
+      activeDaemonControlRef.current?.abort();
+    };
   }, []);
 
   /**
@@ -309,36 +362,89 @@ export function CronJobsManager({ agentKeys }: Props) {
     if (!daemon) return;
     const running = daemon.state === "running";
     const action = running ? "stop" : "start";
+    const requestedState = running ? "stopped" : "running";
     // Stopping is the destructive direction and there is no undo fast enough
     // for someone mid-conversation, so it asks. Starting doesn't.
     if (running && !confirm(`${daemon.stop_warning}\n\nStop ${daemon.process_name}?`)) return;
 
     const key = cronJobKey(job);
+    const baseline: DaemonConfirmationBaseline = {
+      key,
+      state: daemon.state,
+      last_ping_at: daemon.last_ping_at,
+    };
+    activeDaemonControlRef.current?.abort();
+    const controller = new AbortController();
+    activeDaemonControlRef.current = controller;
     setPendingKey(key);
     setToggleError(null);
-    const result = await runWorkerAction(daemon.service, action, false);
-    setPendingKey((cur) => (cur === key ? null : cur));
-    if (!result.ok) {
-      setToggleError(
-        `Couldn't ${action} ${daemon.process_name}: ${result.output.slice(0, 120)}`,
-      );
-      return;
+    let lastObserved: CronJob | null = null;
+    let lastReadError: string | null = null;
+    try {
+      const result = await runWorkerAction(daemon.service, action, false);
+      if (controller.signal.aborted || !mountedRef.current) return;
+      if (!result.ok) {
+        setToggleError(
+          `Couldn't ${action} ${daemon.process_name}: ${result.output.slice(0, 120)}`,
+        );
+        return;
+      }
+
+      // Command acceptance is not runtime proof. Keep the row pending until a
+      // newer integrations_health heartbeat reports the requested state.
+      const deadline = Date.now() + DAEMON_CONFIRM_TIMEOUT_MS;
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        const readback = await fetchAutomationInventoryReadback(controller.signal);
+        if (controller.signal.aborted || !mountedRef.current) return;
+        if (readback.ok) {
+          const candidate = readback.jobs.find((entry) => cronJobKey(entry) === key) ?? null;
+          lastObserved = candidate;
+          lastReadError = candidate?.daemon ? null : "daemon row missing from inventory readback";
+          if (candidate && isDaemonTransitionConfirmed(candidate, requestedState, baseline)) {
+            setJobs(readback.jobs);
+            setLastRefreshedAt(new Date());
+            setRecentlyToggled({ key, ts: Date.now() });
+            window.setTimeout(() => {
+              if (mountedRef.current) {
+                setRecentlyToggled((current) => (current?.key === key ? null : current));
+              }
+            }, 6_000);
+            return;
+          }
+        } else {
+          lastReadError = readback.error;
+        }
+        await waitForDaemonPoll(DAEMON_CONFIRM_POLL_MS, controller.signal);
+      }
+
+      if (!controller.signal.aborted && mountedRef.current) {
+        // The command may have succeeded, but without a new heartbeat the UI
+        // cannot know. Render Unknown and say exactly what was not confirmed.
+        const observedDaemon = lastObserved?.daemon ?? daemon;
+        setJobs((previous) => previous?.map((entry) =>
+          cronJobKey(entry) === key
+            ? { ...entry, daemon: { ...observedDaemon, state: "unknown" } }
+            : entry
+        ) ?? null);
+        const detail = lastReadError
+          ? ` Last readback: ${lastReadError}.`
+          : ` Last heartbeat remained ${observedDaemon.last_ping_at ?? "missing"}.`;
+        setToggleError(
+          `${daemon.process_name} accepted ${action}, but a newer ${requestedState} heartbeat was not confirmed within 75 seconds.${detail}`,
+        );
+      }
+    } catch (error) {
+      if (!controller.signal.aborted && mountedRef.current) {
+        setToggleError(
+          `Couldn't confirm ${daemon.process_name}: ${(error as Error).message || "unknown"}.`,
+        );
+      }
+    } finally {
+      if (activeDaemonControlRef.current === controller) {
+        activeDaemonControlRef.current = null;
+        if (mountedRef.current) setPendingKey((current) => (current === key ? null : current));
+      }
     }
-    // Optimistic flip so the click reads as cause-and-effect. The bridge's
-    // next 60s heartbeat replaces this with a measured value; the refresh
-    // below pulls it as soon as one lands.
-    setJobs((prev) =>
-      prev?.map((j) =>
-        cronJobKey(j) === key
-          ? { ...j, daemon: { ...daemon, state: running ? "stopped" : "running", stale: false } }
-          : j,
-      ) ?? null,
-    );
-    setRecentlyToggled({ key, ts: Date.now() });
-    setTimeout(() => {
-      setRecentlyToggled((cur) => (cur?.key === key ? null : cur));
-    }, 6_000);
-    setTimeout(() => { void refresh(); }, 5_000);
   }
 
   async function toggleEnabled(job: CronJob) {
@@ -685,7 +791,7 @@ function JobRow({
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
             <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : daemonUnknown ? "text-fg-dim" : running ? "text-status-engaged" : "text-fg-faint"}`}>
-              {isPending ? (daemon ? "Working" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
+              {isPending ? (daemon ? "Confirming" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
             </span>
           </button>
         </div>
@@ -717,6 +823,11 @@ function JobRow({
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
               {job.action_type.replace(/_/g, " ")}
             </span>
+            {typeof job.unresolved_failures === "number" && job.unresolved_failures > 0 && (
+              <span className="text-[10px] font-bold text-status-warm border border-status-warm/40 bg-status-warm/10 rounded-full px-1.5 py-0.5">
+                {job.unresolved_failures} unresolved failure{job.unresolved_failures === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
           {daemon && <DaemonBanner daemon={daemon} />}
           {/* Prefer operator-friendly copy from lib/cron-descriptions

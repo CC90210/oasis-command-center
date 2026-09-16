@@ -42,6 +42,7 @@ export type EmpireCronRow = {
   last_result: string | null;
   next_run_at: string | null;
   run_count: number | null;
+  fail_count: number | null;
   created_at: string;
 };
 
@@ -137,7 +138,13 @@ export function classifyLastResult(raw: unknown): {
 }
 
 export function normalizeEmpireRow(row: EmpireCronRow) {
-  const { text: lastResult, status } = classifyLastResult(row.last_result);
+  const { text: lastResult, status: classifiedStatus } = classifyLastResult(row.last_result);
+  const unresolvedFailures = Math.max(0, asCount(row.fail_count));
+  const status = unresolvedFailures > 0 ? "error" as const : classifiedStatus;
+  const unresolvedError = unresolvedFailures > 0
+    ? `${unresolvedFailures} unresolved failure${unresolvedFailures === 1 ? "" : "s"}.` +
+      (lastResult ? ` Latest scheduler result: ${lastResult}` : " No later successful run has cleared the counter.")
+    : null;
   const storedOwner = asText(row.owner_agent_key).trim().toLowerCase();
   return {
     id: row.id,
@@ -152,8 +159,9 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     next_run_at: row.next_run_at,
     last_run_status: status,
     last_run_output: status === "success" ? lastResult : null,
-    last_run_error: status === "error" ? lastResult : null,
+    last_run_error: unresolvedError ?? (status === "error" ? lastResult : null),
     run_count: asCount(row.run_count),
+    unresolved_failures: unresolvedFailures,
     created_at: row.created_at,
     updated_at: row.created_at,
     source: "empire" as const,
