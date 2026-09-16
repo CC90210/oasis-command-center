@@ -36,6 +36,7 @@ export type EmpireCronRow = {
   schedule: string;
   action_type: string | null;
   action_config: Record<string, unknown> | null;
+  owner_agent_key?: string | null;
   is_active: boolean;
   last_run_at: string | null;
   last_result: string | null;
@@ -93,6 +94,7 @@ function asCount(v: unknown): number {
  */
 const MAVEN_MARKERS = [
   "marketing",
+  "carousel media retention",
   "post analytics",
   "library post",
   "training corpus",
@@ -136,9 +138,10 @@ export function classifyLastResult(raw: unknown): {
 
 export function normalizeEmpireRow(row: EmpireCronRow) {
   const { text: lastResult, status } = classifyLastResult(row.last_result);
+  const storedOwner = asText(row.owner_agent_key).trim().toLowerCase();
   return {
     id: row.id,
-    agent_key: inferEmpireAgentKey(row.name, row.action_type),
+    agent_key: storedOwner || inferEmpireAgentKey(row.name, row.action_type),
     name: asText(row.name),
     description: row.description,
     schedule: asText(row.schedule),
@@ -146,6 +149,7 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     action_payload: row.action_config || {},
     enabled: asBool(row.is_active),
     last_run_at: row.last_run_at,
+    next_run_at: row.next_run_at,
     last_run_status: status,
     last_run_output: status === "success" ? lastResult : null,
     last_run_error: status === "error" ? lastResult : null,
@@ -153,5 +157,17 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     created_at: row.created_at,
     updated_at: row.created_at,
     source: "empire" as const,
+  };
+}
+
+/** Normalize the SQLite-backed tenant lane to the same UI contract. */
+export function normalizeTenantCronRow<T extends Record<string, unknown>>(row: T) {
+  return {
+    ...row,
+    enabled: asBool(row.enabled),
+    last_run_output: row.last_run_output == null ? null : asText(row.last_run_output),
+    last_run_error: row.last_run_error == null ? null : asText(row.last_run_error),
+    run_count: asCount(row.run_count),
+    source: "tenant" as const,
   };
 }

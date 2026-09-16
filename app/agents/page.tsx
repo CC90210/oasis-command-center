@@ -252,13 +252,13 @@ export default async function AgentsPage() {
 
       <Card
         title="Your agent family"
-        subtitle={`The autonomous workers running on your behalf. Primary: ${profile?.primary_agent || "—"}. Each tile shows what the agent does and what's running for it right now.`}
+        subtitle={`The autonomous workers registered for your workspace. Primary: ${profile?.primary_agent || "—"}. Each tile highlights what the agent owns; live schedule state stays in Automations.`}
       >
         <div className="space-y-5">
           <div className="rounded-lg border border-bg-border bg-bg p-4 text-sm text-fg-muted leading-relaxed">
             <div className="text-fg font-medium mb-1">How to read each tile</div>
-            Every agent has up to three kinds of automation running for you:{" "}
-            <span className="text-fg">Scheduled tasks</span> (fire on a clock — e.g. 7am daily briefing),{" "}
+            Every agent can own up to three kinds of automation:{" "}
+            <span className="text-fg">Registered schedules</span> (clock definitions; current on/off state is in Automations),{" "}
             <span className="text-fg">Always-on processes</span> (running locally on your machine — e.g. the inbox listener),{" "}
             <span className="text-fg">Workflows</span> (event-triggered — e.g. lead opens email → drip step fires).
             <div className="mt-2 text-fg-dim text-[11px]">
@@ -339,8 +339,8 @@ export default async function AgentsPage() {
                 {total > 0 && (
                   <div className="grid sm:grid-cols-3 gap-3">
                     <CatalogColumn
-                      title="Scheduled tasks"
-                      hint="on a clock"
+                      title="Registered schedules"
+                      hint="status in Automations"
                       icon={<Clock className="w-3.5 h-3.5" />}
                       entries={cat.crons.map((c) => ({
                         name: c.name,

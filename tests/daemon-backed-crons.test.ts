@@ -91,22 +91,23 @@ assert.equal(daemonToggleRefusal({ ok: true, name: null }), null);
 // ever writes first and checks second, every test above passes while the flag
 // still lands.
 {
-  const route = readFileSync("app/api/cron-jobs/[id]/route.ts", "utf8");
-  const patchBody = route.slice(route.indexOf("export async function PATCH"));
-  const guardAt = patchBody.indexOf("refuseDaemonBackedToggle(db");
-  const firstUpdateAt = patchBody.indexOf(".update(");
-  assert.ok(guardAt > -1, "PATCH must call refuseDaemonBackedToggle");
+  const transaction = readFileSync("lib/automations/cron-toggle-transaction.ts", "utf8");
+  const exactRowReadAt = transaction.indexOf("SELECT * FROM ${table}");
+  const guardAt = transaction.indexOf("daemonToggleRefusal(");
+  const firstUpdateAt = transaction.indexOf("UPDATE ${table}");
+  assert.ok(exactRowReadAt > -1, "transaction must read the exact source row before guarding it");
+  assert.ok(guardAt > -1, "transaction must call daemonToggleRefusal");
   assert.ok(firstUpdateAt > -1, "PATCH must still perform an update");
   assert.ok(
-    guardAt < firstUpdateAt,
-    "the daemon guard must run BEFORE the first .update() in PATCH — checking after the " +
+    exactRowReadAt < guardAt && guardAt < firstUpdateAt,
+    "the exact scoped read and daemon guard must run BEFORE the first .update() in PATCH — checking after the " +
       "write has already landed protects nothing",
   );
-  // Both lanes are covered: the empire fallback further down writes is_active
-  // on cron_jobs, and one guard call before both is what makes that safe.
+  // Both lanes are covered: source chooses the table and active column before
+  // the shared guard, all inside the same write transaction.
   assert.ok(
-    patchBody.includes("is_active: body.enabled"),
-    "sanity: the empire fallback still writes is_active, so the guard above it is load-bearing",
+    transaction.includes('input.source === "empire" ? "is_active" : "enabled"'),
+    "the shared transaction must map Empire toggles onto is_active",
   );
 }
 

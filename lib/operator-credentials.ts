@@ -31,17 +31,16 @@ const DEFAULT_OPERATOR_EMAIL = "conaugh@oasisai.work";
 export function isOperatorEmail(email: string | null | undefined): boolean {
   const e = (email || "").trim().toLowerCase();
   if (!e) return false;
-  const operator = (
-    process.env.OPERATOR_EMAIL || DEFAULT_OPERATOR_EMAIL
-  )
-    .trim()
-    .toLowerCase();
-  if (operator && e === operator) return true;
-  const admins = (process.env.ADMIN_EMAILS || "")
-    .split(",")
-    .map((x) => x.trim().toLowerCase())
-    .filter(Boolean);
-  return admins.includes(e);
+  // Environment configuration augments the canonical operator identity; it
+  // must never replace it. A legacy alias was configured in production and
+  // `OPERATOR_EMAIL || DEFAULT_OPERATOR_EMAIL` consequently locked CC's
+  // current oasisai.work login out of every operator-only Empire surface.
+  const accepted = new Set(
+    [DEFAULT_OPERATOR_EMAIL, process.env.OPERATOR_EMAIL, ...(process.env.ADMIN_EMAILS || "").split(",")]
+      .map((x) => (x || "").trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return accepted.has(e);
 }
 
 export type OperatorFallback = { provider: Provider; model: string; apiKey: string };
