@@ -108,6 +108,22 @@ export default async function TrainingPage() {
       </ul>
 
       <div className="mt-6">
+        <Card
+          title="Practice calls"
+          subtitle="When you have read a few sections, ring somebody who pushes back."
+        >
+          <p className="text-sm leading-relaxed text-fg-muted">
+            An owner who behaves like one, on an invented business, who will end the call if you give them a
+            reason to. Nothing is scored and nobody sees it.{" "}
+            <Link href="/training/roleplay" className="text-accent underline">
+              Take a call
+            </Link>
+            .
+          </p>
+        </Card>
+      </div>
+
+      <div className="mt-4">
         <Card title="Where the objection work lives" subtitle="Section 6 uses it, and it is a tab of its own.">
           <p className="text-sm leading-relaxed text-fg-muted">
             The fifteen objections, what each one really means, and the practice trainer are under{" "}
