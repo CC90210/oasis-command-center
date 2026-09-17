@@ -88,6 +88,35 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     [],
   );
 
+  /**
+   * What happens when a turn does not produce an answer.
+   *
+   * ONE function for both `send` and `retry`, and that is the point rather
+   * than tidiness. These two paths used to implement the same state
+   * transitions separately, so every fix landed in one and not the other:
+   * four rounds of review each found the same defect in whichever branch had
+   * not been touched. Duplicated state logic is the actual bug; this is the
+   * fix for it.
+   *
+   * `pending` is the transcript ENDING in the rep line that went unanswered.
+   */
+  const turnFailed = useCallback((reason: string, pending: Turn[]) => {
+    if (reason === "owner_thinking") {
+      // A queued job exists and the identical transcript will collect it. The
+      // line stays on screen, the call locks, the retry is the only way on.
+      setRetryable(pending);
+      return;
+    }
+    // Terminal. Nothing is coming, so take the line back out and hand the rep
+    // their words. Leaving it in poisons the call: past the turn cap every
+    // later submission carries the same over-long transcript and is refused
+    // again, and an unusable reply would produce two rep turns in a row.
+    const last = pending[pending.length - 1];
+    setTranscript(pending.slice(0, -1));
+    setTyped(last?.text ?? "");
+    setRetryable(null);
+  }, []);
+
   const send = useCallback(async () => {
     const said = typed.trim();
     // `retryable` blocks a new line, and that is the whole point of it. Adding
@@ -106,29 +135,14 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
         if (out.payload.ended) setEnded(true);
-      } else if (!out.ok && out.reason === "owner_thinking") {
-        // ONLY a queued reply locks the call. The rep's line stays on screen,
-        // because they did say it, and collecting the answer needs this exact
-        // transcript.
-        setRetryable(next);
-      } else {
-        // TERMINAL FAILURE: take the line back out and hand the rep their words.
-        //
-        // Leaving it in poisons the call. Past the turn cap, every later
-        // submission carries the same over-long transcript and is refused
-        // again, so the call cannot continue at all. An unusable reply asks the
-        // rep to say their line again, which with the old line still there
-        // produces two rep turns in a row and a transcript no owner would
-        // answer sensibly. Rolling back is what makes "try that again"
-        // literally true.
-        setTranscript(transcript);
-        setTyped(said);
+      } else if (!out.ok) {
+        turnFailed(out.reason, next);
       }
     } finally {
       setBusy(false);
       requestAnimationFrame(() => bottom.current?.scrollIntoView({ behavior: "smooth" }));
     }
-  }, [typed, busy, ended, retryable, transcript, call, scenario.id]);
+  }, [typed, busy, ended, retryable, transcript, call, scenario.id, turnFailed]);
 
   const retry = useCallback(async () => {
     if (!retryable || busy) return;
@@ -139,15 +153,16 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
         if (out.payload.ended) setEnded(true);
-      } else if (!out.ok && out.reason !== "owner_thinking") {
-        // It is not coming. Release the call so the rep can carry on or start
-        // again, rather than leaving them stuck on a retry that never resolves.
-        setRetryable(null);
+      } else if (!out.ok) {
+        // The same handler as `send`. A terminal failure HERE used to only
+        // clear the lock and leave the unanswered line in the transcript,
+        // which is the identical poisoned call by a different route.
+        turnFailed(out.reason, retryable);
       }
     } finally {
       setBusy(false);
     }
-  }, [retryable, busy, call, scenario.id]);
+  }, [retryable, busy, call, scenario.id, turnFailed]);
 
   const getReview = useCallback(async () => {
     setBusy(true);

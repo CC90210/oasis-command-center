@@ -283,8 +283,8 @@ assert.ok(
   "the retry must resend the SAME transcript, not a rebuilt one, or it will not collect the queued reply",
 );
 assert.ok(
-  /setRetryable\(next\)/.test(callSource),
-  "a failed turn must record what to retry",
+  /setRetryable\(pending\)/.test(callSource),
+  "a pending turn must record what to retry, inside the one shared handler",
 );
 
 // Asking for the review ends the call. Leaving it open left the input live
@@ -312,29 +312,45 @@ assert.ok(
   "the TEXTAREA must be disabled while a turn is pending, so the only way forward is the retry",
 );
 
-// Round 3, and this one was a REGRESSION I introduced. Locking on ANY failure
-// meant a terminal error, a 500 or a call that had already run too long,
-// disabled the input forever with no queued reply to collect and no way to
-// continue or to abandon. Worse than the bug it was fixing. Only a genuinely
-// pending turn locks the call, and the retry releases it when nothing is coming.
+// Round 3, and that one was a REGRESSION I introduced. Locking on ANY failure
+// meant a terminal error, a 500 or a call already past its turn cap, disabled
+// the input forever with no queued reply to collect and no way to continue or
+// to abandon. Worse than the bug it was fixing. Only a genuinely pending turn
+// locks the call.
 assert.ok(
-  /out\.reason === "owner_thinking"/.test(callSource),
+  /reason === "owner_thinking"/.test(callSource),
   "only a genuinely pending turn may lock the call: a terminal failure has nothing to protect",
 );
-assert.ok(
-  /out\.reason !== "owner_thinking"/.test(callSource),
-  "the retry must release the lock when the reply is never coming, or the rep is stranded",
-);
 
-// Round 4. A terminal failure left the rep's line in the transcript while
-// re-enabling the input, which POISONED the call: past the turn cap every
-// later submission carried the same over-long transcript and was refused
-// again, and an unusable reply produced two rep turns in a row. The line is
-// rolled back and the words handed back, which is what makes "try that
-// again" literally true.
+// Rounds 4 and 5. A terminal failure left the rep's line in the transcript
+// while re-enabling the input, which POISONED the call: past the turn cap
+// every later submission carried the same over-long transcript and was refused
+// again, and an unusable reply produced two rep turns in a row. Round 5 found
+// the identical defect in the RETRY path, because send and retry each
+// implemented these transitions separately.
+//
+// The fix is one handler used by both. That is what these assertions pin: not
+// that the rollback exists somewhere, but that neither path has its own copy
+// of the logic to drift.
 assert.ok(
-  /setTranscript\(transcript\);[\s\S]{0,80}setTyped\(said\)/.test(callSource),
-  "a terminal failure must roll the rep turn back and return their words, or the call is poisoned",
+  /const turnFailed = useCallback/.test(callSource),
+  "there must be ONE handler for a turn that produced no answer, or the two paths drift apart again",
+);
+assert.ok(
+  /turnFailed\(out\.reason, next\)/.test(callSource),
+  "send must delegate its failure handling",
+);
+assert.ok(
+  /turnFailed\(out\.reason, retryable\)/.test(callSource),
+  "retry must delegate to the SAME handler: a terminal failure there poisons the call exactly as it did in send",
+);
+assert.ok(
+  /setTranscript\(pending\.slice\(0, -1\)\)/.test(callSource),
+  "a terminal failure must roll the unanswered rep turn back out of the transcript",
+);
+assert.ok(
+  /setTyped\(last\?\.text \?\? ""\)/.test(callSource),
+  "and hand the rep their words back, which is what makes trying again literally possible",
 );
 
 // The review button is the other door to the same bypass: reviewing a
