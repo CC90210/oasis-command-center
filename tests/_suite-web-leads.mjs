@@ -105,6 +105,10 @@ const TESTS = [
   // exactly one right answer, plus: no drill answer states a price, because the
   // source documents disagree and one says no approved price exists.
   "tests/training-drills.test.ts",
+  // The practice call. The two rules that matter: the model plays a CUSTOMER
+  // so its turns are NOT copy-rule checked, while the debrief IS; and the
+  // persona never leaves the server.
+  "tests/training-roleplay.test.ts",
   "tests/objection-events.test.ts",
   "tests/objection-facts.test.ts",
   // The auth gate and the tenant pins on both objection routes and both data
