@@ -135,8 +135,12 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
         if (out.payload.ended) setEnded(true);
-      } else if (!out.ok) {
-        turnFailed(out.reason, next);
+      } else {
+        // EXHAUSTIVE on purpose. Narrowing this to `else if (!out.ok)` left a
+        // gap: a 2xx whose body carried no reply fell through both branches,
+        // and the unanswered line stayed while the input was re-enabled. A
+        // success without an answer is a terminal failure, not a third state.
+        turnFailed(out.ok ? "owner_unusable" : out.reason, next);
       }
     } finally {
       setBusy(false);
@@ -153,11 +157,12 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
         if (out.payload.ended) setEnded(true);
-      } else if (!out.ok) {
-        // The same handler as `send`. A terminal failure HERE used to only
-        // clear the lock and leave the unanswered line in the transcript,
-        // which is the identical poisoned call by a different route.
-        turnFailed(out.reason, retryable);
+      } else {
+        // The same handler as `send`, and exhaustive for the same reason. A
+        // terminal failure HERE used to only clear the lock and leave the
+        // unanswered line in the transcript, which is the identical poisoned
+        // call by a different route.
+        turnFailed(out.ok ? "owner_unusable" : out.reason, retryable);
       }
     } finally {
       setBusy(false);

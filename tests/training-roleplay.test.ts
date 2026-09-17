@@ -336,12 +336,20 @@ assert.ok(
   /const turnFailed = useCallback/.test(callSource),
   "there must be ONE handler for a turn that produced no answer, or the two paths drift apart again",
 );
+// EXHAUSTIVE, not merely present. Narrowing the fallback to `!out.ok` left a
+// 2xx-with-no-reply falling through both branches, so the unanswered line
+// stayed while the input reopened. A success without an answer is a terminal
+// failure, not a third state.
 assert.ok(
-  /turnFailed\(out\.reason, next\)/.test(callSource),
-  "send must delegate its failure handling",
+  /turnFailed\(out\.ok \? "owner_unusable" : out\.reason, next\)/.test(callSource),
+  "send must route a success-without-a-reply through the same handler",
 );
 assert.ok(
-  /turnFailed\(out\.reason, retryable\)/.test(callSource),
+  !/\} else if \(!out\.ok\) \{/.test(callSource),
+  "no branch may be left unhandled: `else if (!out.ok)` is the shape that let a 2xx with no reply through",
+);
+assert.ok(
+  /turnFailed\(out\.ok \? "owner_unusable" : out\.reason, retryable\)/.test(callSource),
   "retry must delegate to the SAME handler: a terminal failure there poisons the call exactly as it did in send",
 );
 assert.ok(
