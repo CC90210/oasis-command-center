@@ -104,6 +104,7 @@ const TESTS = [
   // The Training curriculum and its drills. The invariant that matters is
   // exactly one right answer, plus: no drill answer states a price, because the
   // source documents disagree and one says no approved price exists.
+  "tests/training-authoring.test.ts",
   "tests/training-drills.test.ts",
   // The practice call. The two rules that matter: the model plays a CUSTOMER
   // so its turns are NOT copy-rule checked, while the debrief IS; and the
