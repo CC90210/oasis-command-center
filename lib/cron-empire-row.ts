@@ -119,32 +119,206 @@ export function inferEmpireAgentKey(name: unknown, actionType: unknown): string 
 }
 
 /**
- * last_result is free-form text written by scripts/scheduler.py. Observed:
- *   "ok" / "<stdout snippet>" / "stripe sync ok: ..."   → success
- *   "ERROR: <reason>" / "FAILED (exit N): <stderr>"     → error
- * Matched case-insensitively, prefix-only, so the UI tag mirrors what the
- * scheduler actually wrote. A JSON document (the shim hands us an object) is
- * serialized back to its stored form and treated as output, not as an error.
+ * FAILURE IS A SHAPE, NOT A PREFIX.
+ *
+ * This classifier used to be `upper.startsWith("ERROR") || startsWith("FAILED")`
+ * and nothing else, which made the tab strictly weaker than the watchdog that
+ * pages CC. scripts/core/cron_health_check.py:classify_last_result learned the
+ * shapes on 2026-08-21 after eight SunBiz crons sat enabled-and-dead for fifteen
+ * days; the dashboard never learned them. The gap is not academic: Inbound Email
+ * Sweep runs every five minutes and writes `{"errors": 3, "sent": 0}`, which has
+ * no "ERROR" anywhere in it. Python flagged that row and Telegrammed CC; the tab
+ * drew it with a green tick and a neutral border. CC opened the tab to confirm
+ * the alert and the tab told him the fleet was fine — which is worse than having
+ * no tab, because it actively contradicts a correct page.
+ *
+ * Ported from the Python, detector for detector, so the two cannot drift:
+ *
+ *   1. A PRE-DECODED object/array, handled FIRST. lib/turso-postgrest.ts fromSql
+ *      JSON-parses any TEXT starting with `{` or `[`, so `last_result` arrives
+ *      here as a real object for exactly the rows this function exists to catch.
+ *      The Python had this same bug and its hand-written string fixtures never
+ *      saw it — only a live delivery probe did.
+ *   2. The legacy ERROR/FAILED prefix, still what scheduler.run_script stamps on
+ *      a non-zero exit.
+ *   3. A JSON summary reporting its own errors/failures count, `ok: false`, or
+ *      `status: error|failed`.
+ *   4. A plain-text counter, "failed: 3". Anchored so "synced: 157 · failed: 0"
+ *      reads as zero and stays green.
+ *
+ * An OPAQUE result is a third verdict, not a green one. script_run keeps only
+ * the last stdout line, so a handler that pretty-prints JSON stores a lone "}".
+ * That is not a failure — flagging it would paint three healthy jobs red — but
+ * it is not evidence of health either, so it renders un-verdicted instead of
+ * earning the success tick it used to get by default.
+ *
+ * Parity fixtures live in tests/cron-result-shape-parity.test.ts, taken verbatim
+ * from scripts/tests/test_cron_health_shape_detection.py.
  */
-export function classifyLastResult(raw: unknown): {
+
+/**
+ * Keys whose non-zero value means the run reported its own failures. Read off
+ * the shapes actually stored in cron_jobs.last_result, not guessed — same list
+ * as the Python's _FAILURE_COUNT_KEYS.
+ */
+const FAILURE_COUNT_KEYS = new Set([
+  "errors", "error", "error_count", "errors_count",
+  "failures", "failure", "failure_count", "failures_count",
+  "failed", "failed_count", "exceptions", "dead_lettered",
+]);
+
+/** `status`/`state`/`result` values that mean the run did not succeed. */
+const FAILURE_STATUS_VALUES = new Set([
+  "error", "errored", "failed", "failure", "fatal", "crash", "crashed",
+]);
+
+/**
+ * Plain-text counters: "failed: 3", "errors = 12". The separator is required and
+ * the word boundary anchored, so "no failures" prose cannot trip it and the very
+ * common healthy shape "synced: 157 · failed: 0" reads as the zero it is.
+ */
+const TEXT_COUNT_RE = /\b(errors?|failures?|failed)\s*[:=]\s*(\d+)\b/gi;
+
+/** The stored tails that carry no verdict either way. */
+const OPAQUE_RESULTS = new Set(["}", "]", "})", "}]"]);
+
+/**
+ * How many failures does this JSON value represent? Null = not a counter at all.
+ *
+ * `{"errors": 2}` is 2. `{"errors": []}` is 0 and `{"errors": ["boom"]}` is 1 —
+ * a list of errors is a count of errors. `{"error": "timeout"}` is 1, because a
+ * populated error string is a failure even though it carries no number, while
+ * `{"error": null}` and `{"error": ""}` are 0.
+ */
+function coerceFailureCount(value: unknown): number | null {
+  if (value === null || value === undefined || value === false) return 0;
+  if (value === true) return 1;
+  if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : 0;
+  if (Array.isArray(value)) return value.length;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return 0;
+    if (/^\d+$/.test(s)) return Number(s);
+    return ["none", "null", "0", "false", "ok"].includes(s.toLowerCase()) ? 0 : 1;
+  }
+  return null;
+}
+
+/**
+ * Walk a decoded JSON summary for self-reported failure; returns the reason, or
+ * null when the payload looks clean. Bounded at three levels because handlers
+ * wrap their counts (`{"summary": {"errors": 2}}`) — unbounded recursion over
+ * data we did not write is how a health check becomes the outage.
+ */
+function scanJsonForFailure(value: unknown, depth = 0): string | null {
+  if (depth > 3) return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const hit = scanJsonForFailure(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (value === null || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+
+  for (const [rawKey, entry] of Object.entries(record)) {
+    const key = String(rawKey).trim().toLowerCase();
+    if (key === "ok" && entry === false) return "reported ok=false";
+    if ((key === "status" || key === "state" || key === "result") && typeof entry === "string") {
+      if (FAILURE_STATUS_VALUES.has(entry.trim().toLowerCase())) {
+        return `reported ${key}=${entry.trim()}`;
+      }
+    }
+    if (FAILURE_COUNT_KEYS.has(key)) {
+      const count = coerceFailureCount(entry);
+      if (count !== null && count > 0) {
+        return `reported ${key}=${typeof entry === "string" ? entry.slice(0, 60) : count}`;
+      }
+    }
+  }
+
+  for (const entry of Object.values(record)) {
+    if (entry !== null && typeof entry === "object") {
+      const hit = scanJsonForFailure(entry, depth + 1);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+export type LastResultVerdict = {
   text: string;
-  status: "success" | "error" | null;
-} {
+  /** `unknown` means the stored tail cannot carry a verdict — never a green tick. */
+  status: "success" | "error" | "unknown" | null;
+  /** Why the shape scan called it a failure. Null when the text says so itself. */
+  reason: string | null;
+};
+
+export function classifyLastResult(raw: unknown): LastResultVerdict {
+  // The shim already decoded it. Scan the object we were handed rather than its
+  // serialized form — round-tripping is what let the Python's detector pass
+  // every unit test while being dead against every production row.
+  if (raw !== null && typeof raw === "object") {
+    const text = asText(raw);
+    const hit = scanJsonForFailure(raw);
+    if (hit) return { text, status: "error", reason: hit };
+    return { text, status: "success", reason: null };
+  }
+
   const text = asText(raw);
-  if (!text) return { text, status: null };
+  if (!text.trim()) return { text, status: null, reason: null };
+
   const upper = text.toUpperCase();
-  const status = upper.startsWith("ERROR") || upper.startsWith("FAILED") ? "error" : "success";
-  return { text, status };
+  if (upper.startsWith("ERROR") || upper.startsWith("FAILED")) {
+    return { text, status: "error", reason: null };
+  }
+
+  if (OPAQUE_RESULTS.has(text.trim())) {
+    return { text, status: "unknown", reason: "last_result is a truncated JSON tail" };
+  }
+
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    let decoded: unknown = undefined;
+    try {
+      decoded = JSON.parse(trimmed);
+    } catch {
+      decoded = undefined;
+    }
+    if (decoded !== undefined) {
+      const hit = scanJsonForFailure(decoded);
+      if (hit) return { text, status: "error", reason: hit };
+    }
+  }
+
+  TEXT_COUNT_RE.lastIndex = 0;
+  for (const match of text.matchAll(TEXT_COUNT_RE)) {
+    if (Number(match[2]) > 0) return { text, status: "error", reason: `reported ${match[1]}=${match[2]}` };
+  }
+  return { text, status: "success", reason: null };
 }
 
 export function normalizeEmpireRow(row: EmpireCronRow) {
-  const { text: lastResult, status: classifiedStatus } = classifyLastResult(row.last_result);
+  const {
+    text: lastResult,
+    status: classifiedStatus,
+    reason: failureReason,
+  } = classifyLastResult(row.last_result);
   const unresolvedFailures = Math.max(0, asCount(row.fail_count));
   const status = unresolvedFailures > 0 ? "error" as const : classifiedStatus;
   const unresolvedError = unresolvedFailures > 0
     ? `${unresolvedFailures} unresolved failure${unresolvedFailures === 1 ? "" : "s"}.` +
       (lastResult ? ` Latest scheduler result: ${lastResult}` : " No later successful run has cleared the counter.")
     : null;
+  // A shape-detected failure needs to say WHICH shape. `{"errors":3,"sent":0}`
+  // in a red box with no explanation reads as a debugging puzzle; "reported
+  // errors=3" reads as the verdict the watchdog already texted CC. The legacy
+  // ERROR/FAILED prefix carries no reason because the text already is one.
+  const shapeError = failureReason && status === "error"
+    ? `${failureReason} — ${lastResult}`
+    : lastResult;
   const storedOwner = asText(row.owner_agent_key).trim().toLowerCase();
   return {
     id: row.id,
@@ -158,8 +332,10 @@ export function normalizeEmpireRow(row: EmpireCronRow) {
     last_run_at: row.last_run_at,
     next_run_at: row.next_run_at,
     last_run_status: status,
-    last_run_output: status === "success" ? lastResult : null,
-    last_run_error: unresolvedError ?? (status === "error" ? lastResult : null),
+    // `unknown` still shows its text — un-verdicted output, not a hidden row.
+    // Hiding an opaque tail is how the blind spot stops being visible at all.
+    last_run_output: status === "success" || status === "unknown" ? lastResult : null,
+    last_run_error: unresolvedError ?? (status === "error" ? shapeError : null),
     run_count: asCount(row.run_count),
     unresolved_failures: unresolvedFailures,
     created_at: row.created_at,

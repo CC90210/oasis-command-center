@@ -39,6 +39,19 @@ assert.match(listRoute, /buildAutomationInventoryMetadata/,
   "GET must return a counted inventory receipt and reject duplicates/partial operator reads");
 assert.match(listRoute, /inventory[^}]*\}/,
   "GET success must include inventory metadata alongside jobs");
+// The Empire query, the fail-loud read error and the non-empty contract are all
+// armed by one predicate, so an identity it does not cover disarms all three at
+// once and returns a plausible tenant-only 200. Evaluated once, and the verdict
+// travels on the wire so the omission cannot be read as an inventory.
+assert.match(listRoute, /const isOperator = isOperatorEmail\(user\.email\)/,
+  "the operator verdict must be bound once, not re-derived per use");
+assert.equal(
+  (listRoute.match(/isOperatorEmail\(/g) || []).length,
+  1,
+  "one call site only — three copies of the predicate are three chances to drift apart",
+);
+assert.match(listRoute, /requireEmpireRows: isOperator,\s*\n\s*isOperator,/,
+  "GET must report the operator verdict alongside the lane counts");
 assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,
   "create API must not advertise agent_prompt until a runner supports it");
 const patchRoute = readFileSync("app/api/cron-jobs/[id]/route.ts", "utf8");
@@ -124,6 +137,19 @@ assert.match(manager, /Last refreshed/, "operators must see when the inventory w
 assert.match(manager, /Couldn't delete/, "delete failures must be visible to the operator");
 assert.match(manager, /unresolved_failures/,
   "Empire failure counters must remain visibly red until a successful run clears them");
+assert.match(manager, /!inventory\.empire_included/,
+  "a hidden Empire lane must be stated on the page, never inferred from an absence of rows");
+assert.match(manager, /Empire schedules are not shown/,
+  "the omission line must be words the operator can act on, not a missing section");
+// A stored next_run_at in the past is not a plan. When the scheduler host stops,
+// nothing writes a row, nothing goes red, and every card advertises a fire date
+// that has already been missed as though it were still coming.
+assert.match(manager, /describeNextRun/,
+  "the next-run line must be derived from the clock, not formatted blind");
+assert.match(manager, /<span>\{nextRun\.text\}<\/span>/,
+  "and the card must render that verdict — a computed one it does not show is no fix at all");
+assert.doesNotMatch(manager, /`Next \$\{formatNextRun/,
+  "a past timestamp must never be rendered under the word 'Next'");
 assert.doesNotMatch(manager, /agent_prompt/,
   "the create UI must not offer an action the runner cannot execute");
 assert.match(manager, /isDaemonTransitionConfirmed/,

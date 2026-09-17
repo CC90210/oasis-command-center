@@ -13,7 +13,11 @@ export type CronInventoryJob = {
   enabled: boolean;
   last_run_at: string | null;
   next_run_at?: string | null;
-  last_run_status: "success" | "error" | null;
+  // `unknown` is the third verdict lib/cron-empire-row.ts returns for a stored
+  // result that cannot carry one (a truncated `}` tail). It must survive the
+  // wire, because collapsing it into `success` is exactly the green tick the
+  // row has not earned.
+  last_run_status: "success" | "error" | "unknown" | null;
   last_run_output: string | null;
   last_run_error: string | null;
   run_count: number;
@@ -31,6 +35,22 @@ export type AutomationInventoryMetadata = {
   };
   total_count: number;
   distinct_source_id_count: number;
+  /**
+   * Was this session recognized as the platform operator, and therefore entitled
+   * to the Empire lane at all?
+   *
+   * This is NOT the same question as `lanes.empire.queried`, even though one
+   * predicate answers both today. `queried` is about what the route did;
+   * `empire_included` is about who the route decided the caller is. The 4/1
+   * outage turned on that distinction: every Empire guarantee in this file —
+   * the non-empty requirement, the fail-loud 500 — is armed by
+   * isOperatorEmail(), so an identity the predicate does not cover disarms all
+   * of them at once and the tab returns a perfectly valid, perfectly plausible
+   * tenant-only 200. CC cannot tell that apart from "the Empire schedules were
+   * deleted". Stating the verdict on the wire is what lets the client say which
+   * one it is instead of rendering an omission as an inventory.
+   */
+  empire_included: boolean;
 };
 
 type InventoryIdentity = Pick<CronInventoryJob, "id" | "source">;
@@ -64,6 +84,7 @@ export function buildAutomationInventoryMetadata(input: {
   empireJobs: InventoryIdentity[];
   empireQueried: boolean;
   requireEmpireRows: boolean;
+  isOperator: boolean;
 }): AutomationInventoryMetadata {
   if (input.requireEmpireRows && (!input.empireQueried || input.empireJobs.length === 0)) {
     throw new AutomationInventoryError(
@@ -93,6 +114,7 @@ export function buildAutomationInventoryMetadata(input: {
     },
     total_count: allJobs.length,
     distinct_source_id_count: distinctKeys.size,
+    empire_included: input.isOperator,
   };
 }
 
@@ -178,7 +200,8 @@ function isCronInventoryJob(value: unknown): value is CronInventoryJob {
     typeof value.enabled === "boolean" &&
     isNullableString(value.last_run_at) &&
     (value.next_run_at === undefined || isNullableString(value.next_run_at)) &&
-    (value.last_run_status === null || value.last_run_status === "success" || value.last_run_status === "error") &&
+    (value.last_run_status === null || value.last_run_status === "success" ||
+      value.last_run_status === "error" || value.last_run_status === "unknown") &&
     isNullableString(value.last_run_output) &&
     isNullableString(value.last_run_error) &&
     typeof value.run_count === "number" && Number.isFinite(value.run_count) &&
@@ -216,6 +239,11 @@ function parseInventoryMetadata(value: unknown): AutomationInventoryMetadata | n
   if (typeof empire.queried !== "boolean" || typeof empire.count !== "number" || !Number.isInteger(empire.count) || empire.count < 0) return null;
   if (typeof value.total_count !== "number" || !Number.isInteger(value.total_count) || value.total_count < 0) return null;
   if (typeof value.distinct_source_id_count !== "number" || !Number.isInteger(value.distinct_source_id_count) || value.distinct_source_id_count < 0) return null;
+  // Required, not optional-with-a-default. A missing field defaulted to `true`
+  // would re-create the silence; defaulted to `false` it would cry operator on
+  // every tenant. An older server that does not send it is a server whose
+  // Empire verdict this client cannot state, so the read fails and says so.
+  if (typeof value.empire_included !== "boolean") return null;
   return value as AutomationInventoryMetadata;
 }
 
@@ -241,7 +269,12 @@ export function parseAutomationInventorySuccess(value: unknown):
     inventory.distinct_source_id_count !== distinctCount ||
     inventory.lanes.tenant.count !== tenantCount ||
     inventory.lanes.empire.count !== empireCount ||
-    (!inventory.lanes.empire.queried && empireCount !== 0)
+    (!inventory.lanes.empire.queried && empireCount !== 0) ||
+    // Empire rows arriving under a non-operator verdict is incoherent in either
+    // direction: either the route leaked rows the caller is not entitled to, or
+    // it mislabeled a caller who is. Both are the kind of contradiction that
+    // should stop the render, not decorate it.
+    (!inventory.empire_included && empireCount !== 0)
   ) {
     return { ok: false, error: "inventory metadata does not match the returned rows" };
   }

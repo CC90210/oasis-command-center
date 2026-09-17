@@ -56,6 +56,7 @@ const inventory = buildAutomationInventoryMetadata({
   empireJobs: jobs.filter((entry) => entry.source === "empire"),
   empireQueried: true,
   requireEmpireRows: true,
+  isOperator: true,
 });
 assert.deepEqual(inventory, {
   lanes: {
@@ -64,6 +65,7 @@ assert.deepEqual(inventory, {
   },
   total_count: 3,
   distinct_source_id_count: 3,
+  empire_included: true,
 });
 
 assert.throws(
@@ -72,6 +74,7 @@ assert.throws(
     empireJobs: [],
     empireQueried: true,
     requireEmpireRows: true,
+    isOperator: true,
   }),
   (error) => error instanceof AutomationInventoryError
     && error.code === "incomplete_automation_inventory"
@@ -83,10 +86,56 @@ assert.throws(
     empireJobs: [],
     empireQueried: false,
     requireEmpireRows: false,
+    isOperator: false,
   }),
   (error) => error instanceof AutomationInventoryError
     && error.code === "duplicate_automation_inventory_key"
     && error.status === 500,
+);
+
+// ── an omission must be stated, not inferred ───────────────────────────────
+// The 4-of-41 outage returned a complete, valid, entirely plausible tenant-only
+// 200 because a non-matching operator identity disarmed the Empire query, the
+// fail-loud read error AND the non-empty contract in one move. Nothing on the
+// wire distinguished "you weren't shown the Empire lane" from "the Empire lane
+// is empty", so the tab rendered the omission as an inventory. The verdict is
+// now a field, and a client that cannot read it must not render at all.
+const tenantOnly = buildAutomationInventoryMetadata({
+  tenantJobs: jobs.filter((entry) => entry.source === "tenant"),
+  empireJobs: [],
+  empireQueried: false,
+  requireEmpireRows: false,
+  isOperator: false,
+});
+assert.equal(
+  tenantOnly.empire_included,
+  false,
+  "a non-operator read must SAY the Empire lane was left out",
+);
+
+const tenantJobsOnly = jobs.filter((entry) => entry.source === "tenant");
+assert.equal(
+  parseAutomationInventorySuccess({ ok: true, jobs: tenantJobsOnly, inventory: tenantOnly }).ok,
+  true,
+  "a declared tenant-only read is coherent and must still render",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs: tenantJobsOnly,
+    inventory: { ...tenantOnly, empire_included: undefined },
+  }).ok,
+  false,
+  "a server that cannot state its Empire verdict leaves the client unable to state it either",
+);
+assert.equal(
+  parseAutomationInventorySuccess({
+    ok: true,
+    jobs,
+    inventory: { ...inventory, empire_included: false },
+  }).ok,
+  false,
+  "Empire rows under a non-operator verdict is a contradiction, not a page to render",
 );
 
 const valid = parseAutomationInventorySuccess({ ok: true, jobs, inventory });

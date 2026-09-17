@@ -41,9 +41,11 @@ import {
   isDaemonTransitionConfirmed,
   parseAutomationInventorySuccess,
   partitionCronJobsByOwner,
+  type AutomationInventoryMetadata,
   type DaemonConfirmationBaseline,
   type CronInventoryJob,
 } from "@/lib/automations/cron-inventory";
+import { describeNextRun } from "@/lib/automations/cron-schedule";
 
 type ActionType = "script_run" | "snapshot_run" | "webhook_post";
 type CronJob = CronInventoryJob;
@@ -81,7 +83,7 @@ function waitForDaemonPoll(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function fetchAutomationInventoryReadback(signal: AbortSignal): Promise<
-  | { ok: true; jobs: CronJob[] }
+  | { ok: true; jobs: CronJob[]; inventory: AutomationInventoryMetadata }
   | { ok: false; error: string }
 > {
   const result = await fetchJson<unknown>(
@@ -98,8 +100,12 @@ async function fetchAutomationInventoryReadback(signal: AbortSignal): Promise<
     return { ok: false, error: message };
   }
   const parsed = parseAutomationInventorySuccess(result.data);
+  // The receipt travels with the rows it describes. The daemon-confirmation loop
+  // replaces `jobs` wholesale, so handing back only half of a validated pair
+  // would leave the board rendering fresh rows under a receipt from an earlier
+  // read — the two cannot be allowed to come from different responses.
   return parsed.ok
-    ? { ok: true, jobs: parsed.jobs }
+    ? { ok: true, jobs: parsed.jobs, inventory: parsed.inventory }
     : { ok: false, error: `invalid_inventory_response:${parsed.error}` };
 }
 
@@ -223,21 +229,18 @@ function relativeTimeShort(iso: string | null | undefined): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-function formatNextRun(iso: string | null | undefined): string {
-  if (!iso) return "Not scheduled";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Unknown";
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
-}
-
 export function CronJobsManager({ agentKeys }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
+  // Kept, not discarded, because the receipt answers a question the rows cannot:
+  // whether the Empire lane was left out on purpose. See the empire_included
+  // banner below.
+  //
+  // Read it ONLY for that verdict. The lane counts are a snapshot of the read
+  // they arrived on, and the local mutations below (toggle readback, delete,
+  // daemon state) change `jobs` without re-fetching — so a count taken from here
+  // would drift from what is on screen. The header line counts `jobs` directly
+  // for exactly that reason.
+  const [inventory, setInventory] = useState<AutomationInventoryMetadata | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [migrationGap, setMigrationGap] = useState<null | {
     migration: string;
@@ -293,6 +296,10 @@ export function CronJobsManager({ agentKeys }: Props) {
           });
           setLoadError(null);
           setJobs([]);
+          // The previous read's receipt describes rows that are now gone, and a
+          // stale "Empire schedules are not shown" under a migration banner is
+          // two unrelated explanations for one blank board.
+          setInventory(null);
           return;
         }
         // Show the MESSAGE, not just the code. jsonRoute already sends the real
@@ -320,6 +327,7 @@ export function CronJobsManager({ agentKeys }: Props) {
         return;
       }
       setJobs(parsed.jobs);
+      setInventory(parsed.inventory);
       setLoadError(null);
       setMigrationGap(null);
       setLastRefreshedAt(new Date());
@@ -402,6 +410,7 @@ export function CronJobsManager({ agentKeys }: Props) {
           lastReadError = candidate?.daemon ? null : "daemon row missing from inventory readback";
           if (candidate && isDaemonTransitionConfirmed(candidate, requestedState, baseline)) {
             setJobs(readback.jobs);
+            setInventory(readback.inventory);
             setLastRefreshedAt(new Date());
             setRecentlyToggled({ key, ts: Date.now() });
             window.setTimeout(() => {
@@ -552,6 +561,31 @@ export function CronJobsManager({ agentKeys }: Props) {
           >
             {refreshing ? "Retrying…" : "Retry"}
           </button>
+        </div>
+      )}
+      {/*
+        An omission must never read as an inventory.
+
+        When the Empire lane is left out, the rows that remain are a complete,
+        valid, entirely plausible tenant list — which is precisely why the 4-of-41
+        outage was invisible for as long as it was. Nothing on the page said
+        "some of this is missing"; it said "this is all of it", and CC could not
+        tell that apart from every Empire schedule having been deleted. So the
+        server states its verdict and the page repeats it out loud. Deliberately
+        not styled as an error: for a client-tenant operator this is simply the
+        true scope of their workspace, and crying wolf at Matt on SunBiz every
+        load is how a real warning gets tuned out.
+      */}
+      {inventory && !inventory.empire_included && (
+        <div className="rounded-lg border border-dashed border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted flex items-start gap-2">
+          <HelpCircle className="w-4 h-4 mt-0.5 shrink-0 text-fg-dim" />
+          <span className="flex-1 leading-relaxed">
+            <span className="font-bold text-fg">Empire schedules are not shown.</span>{" "}
+            This session isn&apos;t recognized as the platform operator, so the list below
+            covers this workspace only — it is not the full automation inventory. If you
+            expected the Empire lane here, the signed-in address isn&apos;t the one
+            configured as the operator.
+          </span>
         </div>
       )}
       {toggleError && (
@@ -737,8 +771,23 @@ function JobRow({
   const daemonUnknown = daemon !== null && daemon.state === "unknown";
   const ranOk = job.last_run_status === "success";
   const ranBad = job.last_run_status === "error";
-  // Card border telegraphs status at a glance: green if last run succeeded,
-  // warm if it errored, muted if disabled, neutral otherwise. Daemon-backed
+  // The stored result cannot say either way — a truncated `}` tail. Rendered
+  // without a verdict rather than inheriting the success tick it used to get by
+  // falling through the else.
+  const ranUnclear = job.last_run_status === "unknown";
+  // What the promised next fire actually means now that the clock has passed it.
+  // Daemon-backed rows are excluded by construction: their cron twin is parked,
+  // so its next_run_at is not a promise anyone made.
+  const nextRun = daemon
+    ? null
+    : describeNextRun({
+        nextRunAt: job.next_run_at,
+        schedule: job.schedule,
+        enabled: job.enabled,
+      });
+  const overdue = nextRun?.overdue === true;
+  // Card border telegraphs status at a glance: warm if it errored OR if it has
+  // silently stopped firing, muted if disabled, neutral otherwise. Daemon-backed
   // rows answer from the process instead — a stale scheduler-era error must
   // not paint a running setter red, and a parked flag must not grey it out.
   const borderClass = daemon
@@ -749,7 +798,7 @@ function JobRow({
         : "border-bg-border bg-bg-deep/40"
     : !job.enabled
       ? "border-bg-border bg-bg-deep/40 opacity-60"
-      : ranBad
+      : ranBad || overdue
         ? "border-status-warm/30 bg-status-warm/5"
         : ranOk
           ? "border-bg-border bg-bg-elev/30"
@@ -879,6 +928,8 @@ function JobRow({
                   <Check className="w-3.5 h-3.5 text-status-engaged" />
                 ) : ranBad ? (
                   <XCircle className="w-3.5 h-3.5 text-status-warm" />
+                ) : ranUnclear ? (
+                  <HelpCircle className="w-3.5 h-3.5 text-fg-dim" />
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
@@ -892,7 +943,9 @@ function JobRow({
                       ? "Ran"
                       : ranBad
                         ? "Failed"
-                        : "Ran"}{" "}
+                        : ranUnclear
+                          ? "Ran, result unclear"
+                          : "Ran"}{" "}
                   {relativeTimeShort(job.last_run_at)}
                 </span>
                 <span className="text-fg-faint">·</span>
@@ -901,14 +954,16 @@ function JobRow({
             ) : (
               <span className="text-fg-faint">Not run yet</span>
             )}
-            {!daemon && job.next_run_at && (
-              <span className="inline-flex items-center gap-1.5 text-fg-muted">
-                <Clock className="w-3.5 h-3.5 text-fg-dim" />
-                <span>
-                  {job.enabled
-                    ? `Next ${formatNextRun(job.next_run_at)}`
-                    : `Stored next ${formatNextRun(job.next_run_at)} (paused)`}
-                </span>
+            {nextRun && job.next_run_at && (
+              <span
+                className={`inline-flex items-center gap-1.5 ${overdue ? "text-status-warm font-medium" : "text-fg-muted"}`}
+              >
+                {overdue ? (
+                  <AlertCircle className="w-3.5 h-3.5 text-status-warm" />
+                ) : (
+                  <Clock className="w-3.5 h-3.5 text-fg-dim" />
+                )}
+                <span>{nextRun.text}</span>
               </span>
             )}
           </div>

@@ -121,8 +121,20 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
   // to suppress tenant-scoped rows that leaked in; the column makes both
   // unnecessary.
+  //
+  // Evaluated ONCE and reported on the wire, because every Empire guarantee in
+  // this route is armed by this one predicate: the query itself, the fail-loud
+  // 500 on an Empire read error, and the non-empty contract in
+  // buildAutomationInventoryMetadata. An identity the predicate does not cover
+  // — a new @oasisai.work alias, a Google-linked session whose email differs, an
+  // OPERATOR_EMAIL regression in the environment — does not trip any of them. It
+  // disarms all three at once and returns a tenant-only 200 that is
+  // indistinguishable from "every Empire schedule was deleted", which is the
+  // exact shape of the 4-of-41 outage. Three separate calls to the predicate
+  // could also drift apart under an edit; one binding cannot.
+  const isOperator = isOperatorEmail(user.email);
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
-  if (isOperatorEmail(user.email)) {
+  if (isOperator) {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
@@ -191,8 +203,9 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     const inventory = buildAutomationInventoryMetadata({
       tenantJobs,
       empireJobs,
-      empireQueried: isOperatorEmail(user.email),
-      requireEmpireRows: isOperatorEmail(user.email),
+      empireQueried: isOperator,
+      requireEmpireRows: isOperator,
+      isOperator,
     });
     return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
     // Bound as `cause`, not `error`: this is the catch binding for a contract
