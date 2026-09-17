@@ -17,6 +17,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { mayViewTraining, repIdFor } from "@/lib/training/access";
 import { SECTIONS } from "@/lib/training/curriculum";
 import { ITEMS } from "@/lib/training/items";
+import { finishedCount, sectionStandings } from "@/lib/training/standing";
 import { fetchCompletions, fetchProgress } from "@/lib/training/progress";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +30,7 @@ export default async function TrainingPage() {
   const repUserId = repIdFor(session);
 
   let completedSlugs = new Set<string>();
-  let rightBySection = new Map<string, number>();
+  let progressRows: { itemId: string; sectionSlug: string; rightCount: number }[] = [];
   let readError: string | null = null;
 
   if (repUserId) {
@@ -39,17 +40,23 @@ export default async function TrainingPage() {
         fetchCompletions(repUserId),
       ]);
       completedSlugs = new Set(completions.map((c) => c.sectionSlug));
-      rightBySection = progress.reduce((m, p) => {
-        if (p.rightCount > 0) m.set(p.sectionSlug, (m.get(p.sectionSlug) ?? 0) + 1);
-        return m;
-      }, new Map<string, number>());
+      progressRows = progress;
     } catch (err) {
       readError = err instanceof Error ? err.message : "unknown";
       console.error("[training] progress read failed", readError);
     }
   }
 
-  const done = completedSlugs.size;
+  // Counted against the CURRENT curriculum rather than against whatever the
+  // rep practised months ago. The item bank was rewritten on 2026-09-17 and
+  // every id changed; without this the page shows a numerator from the old
+  // curriculum over a denominator from the new one.
+  const standings = sectionStandings({
+    items: ITEMS,
+    progress: progressRows,
+    completedSlugs,
+  });
+  const done = finishedCount(standings);
 
   return (
     <div className="p-4 sm:p-6 lg:p-8">
@@ -75,9 +82,10 @@ export default async function TrainingPage() {
 
       <ul className="mt-4 space-y-3">
         {SECTIONS.map((section, i) => {
-          const itemCount = ITEMS.filter((it) => it.section === section.slug).length;
-          const finished = completedSlugs.has(section.slug);
-          const known = rightBySection.get(section.slug) ?? 0;
+          const standing = standings.get(section.slug);
+          const itemCount = standing?.total ?? 0;
+          const finished = standing?.finished ?? false;
+          const known = standing?.known ?? 0;
           return (
             <li key={section.slug}>
               <Link
