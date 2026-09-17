@@ -326,6 +326,17 @@ assert.ok(
   "the retry must release the lock when the reply is never coming, or the rep is stranded",
 );
 
+// Round 4. A terminal failure left the rep's line in the transcript while
+// re-enabling the input, which POISONED the call: past the turn cap every
+// later submission carried the same over-long transcript and was refused
+// again, and an unusable reply produced two rep turns in a row. The line is
+// rolled back and the words handed back, which is what makes "try that
+// again" literally true.
+assert.ok(
+  /setTranscript\(transcript\);[\s\S]{0,80}setTyped\(said\)/.test(callSource),
+  "a terminal failure must roll the rep turn back and return their words, or the call is poisoned",
+);
+
 // The review button is the other door to the same bypass: reviewing a
 // transcript that ends on an unanswered line clears the retry and orphans the
 // queued reply.

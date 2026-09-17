@@ -109,9 +109,20 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
       } else if (!out.ok && out.reason === "owner_thinking") {
         // ONLY a queued reply locks the call. The rep's line stays on screen,
         // because they did say it, and collecting the answer needs this exact
-        // transcript. Every other failure leaves the call usable: nothing is
-        // coming, so there is nothing to protect.
+        // transcript.
         setRetryable(next);
+      } else {
+        // TERMINAL FAILURE: take the line back out and hand the rep their words.
+        //
+        // Leaving it in poisons the call. Past the turn cap, every later
+        // submission carries the same over-long transcript and is refused
+        // again, so the call cannot continue at all. An unusable reply asks the
+        // rep to say their line again, which with the old line still there
+        // produces two rep turns in a row and a transcript no owner would
+        // answer sensibly. Rolling back is what makes "try that again"
+        // literally true.
+        setTranscript(transcript);
+        setTyped(said);
       }
     } finally {
       setBusy(false);
