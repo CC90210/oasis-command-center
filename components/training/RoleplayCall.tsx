@@ -25,6 +25,11 @@ const BTN = "rounded-md bg-accent px-3 py-1.5 text-sm font-semibold text-white t
 const GHOST =
   "rounded-md border border-bg-border px-3 py-1.5 text-sm font-medium text-fg-muted transition hover:border-accent/50 hover:text-fg disabled:opacity-40";
 
+/** The reason the CLIENT invents when a request succeeded but carried no
+ *  reply. Distinct from any server reason so the shared failure handler can
+ *  tell "the server told us why" from "we worked it out ourselves". */
+const EMPTY_REPLY = "empty_reply";
+
 type Turn = { role: "rep" | "owner"; text: string };
 type Debrief = { verdict: string; didWell: string[]; missed: string[]; nextTime: string };
 
@@ -101,6 +106,18 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
    * `pending` is the transcript ENDING in the rep line that went unanswered.
    */
   const turnFailed = useCallback((reason: string, pending: Turn[]) => {
+    // The one case the CLIENT synthesizes rather than the server reporting it:
+    // a 2xx whose body carried no reply. `call` has already cleared the notice
+    // by then, because as far as it could tell the request succeeded, so
+    // without this the rep's line rewinds into the box with no explanation and
+    // nothing on screen changes. Set here rather than at the two call sites,
+    // because duplicated state handling in this component is what produced
+    // three consecutive rounds of the same defect in whichever branch had not
+    // been touched.
+    if (reason === EMPTY_REPLY) {
+      setNotice("Nothing came back from them. Say your line again.");
+      setViolations([]);
+    }
     if (reason === "owner_thinking") {
       // A queued job exists and the identical transcript will collect it. The
       // line stays on screen, the call locks, the retry is the only way on.
@@ -140,7 +157,7 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         // gap: a 2xx whose body carried no reply fell through both branches,
         // and the unanswered line stayed while the input was re-enabled. A
         // success without an answer is a terminal failure, not a third state.
-        turnFailed(out.ok ? "owner_unusable" : out.reason, next);
+        turnFailed(out.ok ? EMPTY_REPLY : out.reason, next);
       }
     } finally {
       setBusy(false);
@@ -162,7 +179,7 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
         // terminal failure HERE used to only clear the lock and leave the
         // unanswered line in the transcript, which is the identical poisoned
         // call by a different route.
-        turnFailed(out.ok ? "owner_unusable" : out.reason, retryable);
+        turnFailed(out.ok ? EMPTY_REPLY : out.reason, retryable);
       }
     } finally {
       setBusy(false);

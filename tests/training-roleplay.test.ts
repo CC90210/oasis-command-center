@@ -341,15 +341,28 @@ assert.ok(
 // stayed while the input reopened. A success without an answer is a terminal
 // failure, not a third state.
 assert.ok(
-  /turnFailed\(out\.ok \? "owner_unusable" : out\.reason, next\)/.test(callSource),
+  /turnFailed\(out\.ok \? EMPTY_REPLY : out\.reason, next\)/.test(callSource),
   "send must route a success-without-a-reply through the same handler",
+);
+// Round 7. The synthesized case rewound the rep's line with NOTHING on screen:
+// `call` had already cleared the notice, because as far as it could tell the
+// request had succeeded. The explanation is set inside the one shared handler
+// rather than at the two call sites, because duplicated state handling here is
+// what produced three consecutive rounds of the same defect.
+assert.ok(
+  /const EMPTY_REPLY = "empty_reply";/.test(callSource),
+  "the client-synthesized failure needs its own name, or the handler cannot tell it from a server reason",
+);
+assert.ok(
+  /if \(reason === EMPTY_REPLY\) \{[\s\S]{0,200}setNotice\(/.test(callSource),
+  "a silently rewound turn must say why: the rep watches their line vanish with nothing else changing",
 );
 assert.ok(
   !/\} else if \(!out\.ok\) \{/.test(callSource),
   "no branch may be left unhandled: `else if (!out.ok)` is the shape that let a 2xx with no reply through",
 );
 assert.ok(
-  /turnFailed\(out\.ok \? "owner_unusable" : out\.reason, retryable\)/.test(callSource),
+  /turnFailed\(out\.ok \? EMPTY_REPLY : out\.reason, retryable\)/.test(callSource),
   "retry must delegate to the SAME handler: a terminal failure there poisons the call exactly as it did in send",
 );
 assert.ok(
