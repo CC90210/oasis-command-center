@@ -36,6 +36,17 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [review, setReview] = useState<Debrief | null>(null);
   const [violations, setViolations] = useState<string[]>([]);
+  /**
+   * The transcript whose owner turn did not arrive.
+   *
+   * The inference seam queues and polls, and reports "still thinking" when it
+   * runs past its window. The queued job is keyed on the EXACT prompt, so the
+   * only way to collect it is to resend the identical transcript. Without this
+   * the rep's next line made a different transcript, a different key, and the
+   * finished reply was orphaned: on a slow model the call simply broke with no
+   * way forward.
+   */
+  const [retryable, setRetryable] = useState<Turn[] | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
   const call = useCallback(
@@ -79,7 +90,12 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
       const out = await call({ scenarioId: scenario.id, transcript: next });
       if (out?.reply) {
         setTranscript((t) => [...t, { role: "owner", text: out.reply as string }]);
+        setRetryable(null);
         if (out.ended) setEnded(true);
+      } else {
+        // The rep's line stays on screen, because they did say it. What is
+        // missing is the answer, and collecting it needs this exact transcript.
+        setRetryable(next);
       }
     } finally {
       setBusy(false);
@@ -87,11 +103,34 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     }
   }, [typed, busy, ended, transcript, call, scenario.id]);
 
+  const retry = useCallback(async () => {
+    if (!retryable || busy) return;
+    setBusy(true);
+    try {
+      const out = await call({ scenarioId: scenario.id, transcript: retryable });
+      if (out?.reply) {
+        setTranscript((t) => [...t, { role: "owner", text: out.reply as string }]);
+        setRetryable(null);
+        if (out.ended) setEnded(true);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [retryable, busy, call, scenario.id]);
+
   const getReview = useCallback(async () => {
     setBusy(true);
     try {
       const out = await call({ scenarioId: scenario.id, transcript, kind: "debrief" });
-      if (out?.debrief) setReview(out.debrief);
+      if (out?.debrief) {
+        setReview(out.debrief);
+        // Asking for the review ENDS the call. Leaving it open left the box
+        // live while a now-stale review sat underneath it, and the button to
+        // regenerate had disappeared, so a rep could keep talking to a review
+        // that no longer described the conversation.
+        setEnded(true);
+        setRetryable(null);
+      }
     } finally {
       setBusy(false);
     }
@@ -104,6 +143,7 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     setReview(null);
     setNotice(null);
     setViolations([]);
+    setRetryable(null);
   }, []);
 
   return (
@@ -157,6 +197,11 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
                 </li>
               ))}
             </ul>
+          )}
+          {retryable && (
+            <button type="button" className={`${GHOST} mt-2`} disabled={busy} onClick={retry}>
+              Try that again
+            </button>
           )}
         </div>
       )}

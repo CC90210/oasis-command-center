@@ -254,4 +254,47 @@ assert.ok(
 );
 
 console.log("training-roleplay: the persona never leaves the server OK");
+// --- review round 2 on this branch ----------------------------------------
+
+// The cap applies to EVERY turn. The whole transcript arrives from the client,
+// including the lines labelled as the owner's, so capping only the rep's left
+// it trivially bypassable: relabel the text and send twenty-four of them. The
+// role is a claim, not a fact.
+assert.throws(
+  () => assertTranscriptSane([{ role: "owner", text: "x".repeat(MAX_REP_CHARS + 1) }]),
+  /longer than anybody says/,
+  "an oversized OWNER turn must be refused too: the role is client-supplied",
+);
+
+const callSource = fs.readFileSync(
+  path.join(process.cwd(), "components/training/RoleplayCall.tsx"),
+  "utf8",
+);
+
+// A queued reply is keyed on the exact prompt, so collecting it needs the
+// identical transcript resent. Without a retry the rep's next line built a
+// different transcript, a different key, and the finished reply was orphaned.
+assert.ok(
+  /const retry = useCallback/.test(callSource),
+  "there must be a retry that resends the unchanged transcript, or a slow model breaks the call with no way forward",
+);
+assert.ok(
+  /transcript: retryable/.test(callSource),
+  "the retry must resend the SAME transcript, not a rebuilt one, or it will not collect the queued reply",
+);
+assert.ok(
+  /setRetryable\(next\)/.test(callSource),
+  "a failed turn must record what to retry",
+);
+
+// Asking for the review ends the call. Leaving it open left the input live
+// under a review that no longer described the conversation, with no way to
+// regenerate it.
+assert.ok(
+  /setReview\(out\.debrief\);[\s\S]{0,400}setEnded\(true\)/.test(callSource),
+  "a successful review must end the call, or the rep keeps talking to a stale review",
+);
+
+console.log("training-roleplay: a stalled turn is retryable and a review ends the call OK");
+
 console.log("training-roleplay: ALL OK");

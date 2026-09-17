@@ -62,7 +62,12 @@ export function assertTranscriptSane(transcript: Turn[]): void {
     );
   }
   for (const turn of transcript) {
-    if (turn.role === "rep" && turn.text.length > MAX_REP_CHARS) {
+    // EVERY turn, not just the rep's. The whole transcript arrives from the
+    // client, including the lines labelled as the owner's, so capping only the
+    // rep's left the cap trivially bypassable: relabel the text as an owner
+    // turn and send twenty-four of them. The role is a claim, not a fact, and
+    // a limit that trusts it is not a limit.
+    if (turn.text.length > MAX_REP_CHARS) {
       throw new RoleplayRejected(
         "turn_too_long",
         "That is longer than anybody says in one go on a phone. Shorten it.",
