@@ -43,8 +43,22 @@ export function shuffle<T>(items: readonly T[], next: () => number): T[] {
 
 export type DrillOption = { id: string; text: string; correct: boolean };
 
-/** How many options a multiple-choice drill offers, including the right one. */
-export const OPTION_COUNT = 4;
+/**
+ * How many options a multiple-choice drill offers, including the right one.
+ *
+ * THREE, not four, and this changed on 2026-09-17. Rodriguez's meta-analysis of
+ * eighty years of item-writing research finds three optimal: reliability and
+ * discrimination do not degrade, and the time saved buys more questions, which
+ * buys more content coverage. Tarrant's analysis of 1,542 distractors found
+ * only 13.8% of four-option items had all three distractors functioning, so
+ * most four-option items were already three-option items wearing a costume.
+ *
+ * THIS ALSO CHANGES THE OBJECTION TRAINER, which imports the same constant.
+ * That is deliberate rather than overlooked: it has the identical defect, it is
+ * folded into Training as its objections section, and leaving two standards in
+ * one codebase means the next person has to guess which one is current.
+ */
+export const OPTION_COUNT = 3;
 
 /**
  * One correct option plus decoys drawn from `candidates`, shuffled.

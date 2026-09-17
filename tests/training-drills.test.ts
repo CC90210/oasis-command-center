@@ -4,14 +4,16 @@ import path from "node:path";
 
 import { OPTION_COUNT, buildOptions, rng, shuffle } from "@/lib/training/drills";
 import { SECTIONS, sectionBySlug } from "@/lib/training/curriculum";
-import { ITEMS, groupPeers, itemsForSection } from "@/lib/training/items";
+import { ITEMS, groupPeers, itemsForSection, itemsForUnit, unitsForSection } from "@/lib/training/items";
 import {
+  DISTRACTOR_MARK,
   buildTrainingDrill,
   buildTrainingSession,
   gradeAnswer,
-  underpoweredGroups,
+  underpoweredItems,
 } from "@/lib/training/session";
 import { SECTION_SLUGS, isSectionSlug } from "@/lib/training/types";
+import { authoringViolations } from "@/lib/training/authoring-rules";
 import { copyViolations } from "@/lib/web-leads/objections/copy-rules";
 
 // ---------------------------------------------------------------------------
@@ -104,9 +106,30 @@ const ids = ITEMS.map((i) => i.id);
 assert.equal(new Set(ids).size, ids.length, "duplicate drill item id");
 for (const item of ITEMS) {
   assert.ok(isSectionSlug(item.section), `${item.id} sits in an unknown section`);
-  assert.ok(item.prompt.trim().length > 0, `${item.id} has no prompt`);
+  assert.ok(item.stem.trim().length > 0, `${item.id} has no stem`);
   assert.ok(item.answer.trim().length > 0, `${item.id} has no answer`);
-  assert.ok(item.because.trim().length > 0, `${item.id} explains nothing, so being wrong teaches nothing`);
+  assert.ok(item.whyRight.trim().length > 0, `${item.id} explains nothing, so being wrong teaches nothing`);
+  assert.ok(item.unit.trim().length > 0, `${item.id} belongs to no unit`);
+  assert.ok(item.source.trim().length > 0, `${item.id} names no source`);
+  // An id containing the distractor separator would make a wrong option's id
+  // parse back to a different item, which grades a wrong answer as right.
+  assert.ok(
+    !item.id.includes(DISTRACTOR_MARK),
+    `${item.id} contains the distractor marker, which collides with option ids`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// EVERY ITEM PASSES THE AUTHORING LINT.
+//
+// This is what makes "the questions are vague" a build failure rather than an
+// opinion. The lint caught 8 of the 32 items in this file while they were being
+// written, including three clang clues and a length giveaway that nobody would
+// have found by reading.
+// ---------------------------------------------------------------------------
+for (const item of ITEMS) {
+  const violations = authoringViolations(item);
+  assert.deepEqual(violations, [], `${item.id} breaks an authoring rule: ${violations.join(" | ")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +143,20 @@ for (const item of ITEMS) {
 // rules that bind every spoken objection line bind these.
 // ---------------------------------------------------------------------------
 for (const item of ITEMS) {
-  for (const [field, text] of [["prompt", item.prompt], ["answer", item.answer], ["because", item.because]] as const) {
+  const fields: (readonly [string, string])[] = [
+    ["stem", item.stem],
+    ["answer", item.answer],
+    ["whyRight", item.whyRight],
+    // Distractors are rep-facing text too. They did not exist when this check
+    // was written, and an unapproved number in a WRONG answer is read by
+    // exactly the same eyes as one in a right answer.
+    ...item.distractors.flatMap((d, i) => [
+      [`distractor${i}.text`, d.text] as const,
+      [`distractor${i}.whyWrong`, d.whyWrong] as const,
+      [`distractor${i}.realError`, d.realError] as const,
+    ]),
+  ];
+  for (const [field, text] of fields) {
     const violations = copyViolations(text, `${item.id}.${field}`, 600);
     assert.deepEqual(
       violations,
@@ -142,24 +178,76 @@ console.log("training-drills: the curriculum is complete and states no price OK"
 
 // --- decoys must be hard ---------------------------------------------------
 
-// Every group needs at least two members or its question has one option, which
-// is not a question. Surfaced here rather than left for a rep to meet.
+// Every item needs at least two authored wrong answers, or its question is a
+// coin flip. This used to count GROUP members, because a group supplied the
+// decoys; since 2026-09-17 distractors are authored per item, so the thing that
+// can go wrong moved and the assertion moved with it.
 assert.deepEqual(
-  underpoweredGroups(2),
+  underpoweredItems(2),
   [],
-  "a drill group with fewer than two items produces a one-option question",
+  "an item with fewer than two authored distractors is a coin flip, not a question",
 );
 
+// `group` survives for a different job: items in one group are CONFUSABLE with
+// each other, which is what the scheduler interleaves on. A group spanning two
+// sections would interleave unrelated subjects.
 for (const item of ITEMS) {
   const peers = groupPeers(item);
   assert.ok(peers.some((p) => p.id === item.id), `${item.id} is not in its own group`);
   assert.ok(
     peers.every((p) => p.section === item.section),
-    `${item.id}'s group spans sections, so its decoys come from a different subject`,
+    `${item.id} has a group spanning sections, so interleaving would mix subjects`,
   );
 }
 
-console.log("training-drills: every group can produce a real question OK");
+// Every unit sits in exactly one section, or "finish this unit" spans two
+// places in the navigation and can be completed in neither.
+{
+  const unitSection = new Map<string, string>();
+  for (const item of ITEMS) {
+    const seen = unitSection.get(item.unit);
+    assert.ok(
+      seen === undefined || seen === item.section,
+      `unit ${item.unit} appears in two sections at once`,
+    );
+    unitSection.set(item.unit, item.section);
+  }
+  for (const section of SECTIONS) {
+    for (const unit of unitsForSection(section.slug)) {
+      assert.ok(itemsForUnit(unit).length > 0, `${unit} is listed but has no items`);
+    }
+  }
+}
+
+console.log("training-drills: every item can produce a real question OK");
+
+// --- the chosen wrong answer explains ITSELF -------------------------------
+//
+// Asserted rather than trusted because the failure is invisible: a drill that
+// renders its options but loses the per-option explanation looks completely
+// normal on screen, and multiple choice WITHOUT that feedback installs the
+// distractors as false knowledge rather than correcting them (Roediger & Marsh
+// 2005). That is worse than not drilling at all.
+for (const item of ITEMS) {
+  const drill = buildTrainingDrill(item, rng(3));
+  for (const option of drill.options) {
+    if (option.correct) {
+      assert.equal(option.whyWrong, undefined, `${item.id}: the right answer must carry no whyWrong`);
+      continue;
+    }
+    assert.ok(option.whyWrong?.trim(), `${item.id}: a wrong option reached the drill unexplained`);
+    assert.ok(option.realError?.trim(), `${item.id}: a wrong option names no mistake`);
+    // And it must be THIS option's explanation, not another option's.
+    const authored = item.distractors.find((d) => d.text === option.text);
+    assert.equal(
+      option.whyWrong,
+      authored?.whyWrong,
+      `${item.id}: an option shows another option's explanation, which teaches the wrong lesson`,
+    );
+  }
+}
+
+console.log("training-drills: each wrong option carries its own explanation OK");
 
 // --- drills and sessions ---------------------------------------------------
 
@@ -216,11 +304,11 @@ for (const item of ITEMS) {
   const right = gradeAnswer(item.id, item.section, item.id);
   assert.ok(right.ok && right.correct, `${item.id}: choosing the item's own id must grade correct`);
 
-  const peer = groupPeers(item).find((p) => p.id !== item.id);
-  if (peer) {
-    const wrong = gradeAnswer(item.id, item.section, peer.id);
-    assert.ok(wrong.ok && !wrong.correct, `${item.id}: choosing a peer must grade wrong`);
-  }
+  // A distractor id is the item id plus a marker. Grading it wrong also pins
+  // that the marker cannot be mistaken for the item id itself.
+  const distractorId = `${item.id}${DISTRACTOR_MARK}0`;
+  const wrong = gradeAnswer(item.id, item.section, distractorId);
+  assert.ok(wrong.ok && !wrong.correct, `${item.id}: choosing a distractor must grade wrong`);
 }
 
 // An item that does not exist cannot be graded, so it is refused rather than

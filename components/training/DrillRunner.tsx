@@ -15,9 +15,20 @@
  * Colour marks right and wrong, which the battle card bans for LEADS and which
  * is correct here: a quiz answer being right is a fact about the answer, not a
  * verdict on a business.
+ *
+ * 🚨 THE FEEDBACK IS NOT DECORATION. Multiple choice WITHOUT per-option feedback
+ * installs the distractors as false knowledge rather than correcting them: this
+ * is the negative suggestion effect (Roediger & Marsh 2005), and it gets worse
+ * the more options there are. Feedback is what reverses it (Butler & Roediger
+ * 2008). So when a rep picks a wrong answer they are told why THAT one is
+ * wrong, not only what the right one was. Removing that panel to tidy the
+ * layout would make this screen worse than not drilling at all.
+ *
+ * KEYBOARD FIRST. 1/2/3 answers, Enter advances. It is the fastest way through
+ * a drill and it is also WCAG 2.1.1, which is not optional.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Card } from "@/components/Card";
 import { buildTrainingSession, type TrainingDrill } from "@/lib/training/session";
@@ -99,6 +110,41 @@ export function DrillRunner({
     setScore({ right: 0, wrong: 0 });
   }, []);
 
+  /** The option the rep actually chose, which is what the feedback is about. */
+  const chosen = drill?.options.find((o) => o.id === picked) ?? null;
+
+  /**
+   * 1/2/3 to answer, Enter to move on.
+   *
+   * WCAG 2.1.1 requires every action be reachable from the keyboard, and the
+   * buttons already satisfy that through tab order. This is the speed path on
+   * top of it: a rep running a unit daily should not have to move a mouse.
+   *
+   * Digits are IGNORED once an answer is in, so a fast second keypress cannot
+   * overwrite the choice, and Enter does nothing before one is made, so it
+   * cannot skip a question unanswered.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!drill) return;
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      if (e.key === "Enter" && picked !== null) {
+        e.preventDefault();
+        next();
+        return;
+      }
+      if (picked !== null) return;
+      const n = Number(e.key);
+      if (!Number.isInteger(n) || n < 1 || n > drill.options.length) return;
+      e.preventDefault();
+      const option = drill.options[n - 1];
+      answer(option.id, option.correct);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drill, picked, next, answer]);
+
   if (session.length === 0) {
     return (
       <Card title="Nothing to drill yet">
@@ -152,10 +198,10 @@ export function DrillRunner({
       )}
 
       <Card title={sectionTitle}>
-        <p className="text-base font-semibold leading-snug text-fg">{drill.prompt}</p>
+        <p className="text-base font-semibold leading-snug text-fg">{drill.stem}</p>
 
         <ul className="mt-4 space-y-2">
-          {drill.options.map((o) => {
+          {drill.options.map((o, i) => {
             const show = picked !== null;
             const tone = !show
               ? "border-bg-border bg-bg-raised text-fg hover:border-accent/50"
@@ -172,6 +218,17 @@ export function DrillRunner({
                   className={`${OPTION} ${tone}`}
                   onClick={() => answer(o.id, o.correct)}
                 >
+                  {/* The number is the keyboard shortcut, shown so it can be
+                      discovered rather than documented somewhere nobody reads.
+                      aria-hidden because a screen reader user reaches these by
+                      tab order, where a spoken "1" before every option is
+                      noise rather than help. */}
+                  <span
+                    aria-hidden="true"
+                    className="mr-2 inline-block min-w-[1.25rem] rounded border border-bg-border px-1 text-center font-mono text-xs text-fg-dim"
+                  >
+                    {i + 1}
+                  </span>
                   {o.text}
                   {show && o.correct && (
                     <span className="ml-2 text-xs font-semibold text-emerald-500">correct</span>
@@ -183,10 +240,46 @@ export function DrillRunner({
         </ul>
 
         {picked !== null && (
-          <div className="mt-4 border-t border-bg-border pt-3">
-            <p className="text-[11px] font-medium uppercase tracking-wider text-accent">Why</p>
-            <p className="mt-1 text-sm leading-relaxed text-fg-muted">{drill.because}</p>
-            <button type="button" className={`${BTN} mt-3`} onClick={next}>
+          <div className="mt-4 space-y-3 border-t border-bg-border pt-3">
+            {/* The chosen wrong answer, explained. This block is the reason the
+                drill teaches instead of merely testing, so it comes FIRST:
+                a rep who got it wrong reads one thing, and it should be the
+                thing about the mistake they just made. */}
+            {chosen && !chosen.correct && chosen.whyWrong && (
+              <div className="rounded-md border border-rose-500/40 bg-rose-500/5 px-3 py-2.5">
+                <p className="text-[11px] font-medium uppercase tracking-wider text-rose-400">
+                  Why that one is wrong
+                </p>
+                <p className="mt-1 text-sm leading-relaxed text-fg">{chosen.whyWrong}</p>
+                {chosen.realError && (
+                  <p className="mt-2 text-xs leading-relaxed text-fg-dim">
+                    The mistake: {chosen.realError}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-accent">
+                {chosen && !chosen.correct ? "The right answer" : "Why"}
+              </p>
+              {chosen && !chosen.correct && (
+                <p className="mt-1 text-sm font-medium leading-relaxed text-fg">{drill.answer}</p>
+              )}
+              <p className="mt-1 text-sm leading-relaxed text-fg-muted">{drill.whyRight}</p>
+            </div>
+
+            {/* Where it came from, and how much weight it carries. A rep who
+                wants depth should know which document to open, and an item
+                whose source is "ours" is Oasis policy rather than a finding
+                from a book, which is a difference worth seeing. */}
+            <p className="text-xs text-fg-dim">
+              {drill.source}
+              {drill.provenance === "directional" && " · treat the direction, not the figure"}
+              {drill.provenance === "ours" && " · Oasis policy, not from a book"}
+            </p>
+
+            <button type="button" className={BTN} onClick={next}>
               {index + 1 === session.length ? "Finish" : "Next"}
             </button>
           </div>

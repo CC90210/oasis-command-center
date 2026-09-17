@@ -6,40 +6,80 @@
  * they had learned it, and a test can assert the shape of a specific round.
  */
 
-import { ITEMS, groupPeers } from "@/lib/training/items";
-import { buildOptions, rng, shuffle, type DrillOption } from "@/lib/training/drills";
-import type { DrillItem, SectionSlug } from "@/lib/training/types";
+import { ITEMS } from "@/lib/training/items";
+import { buildOptions, rng, shuffle } from "@/lib/training/drills";
+import type { DrillItem, Provenance, SectionSlug } from "@/lib/training/types";
+
+/** An option, carrying the sentence shown when a rep picks it. */
+export type TrainingOption = {
+  id: string;
+  text: string;
+  correct: boolean;
+  /** Why THIS option is wrong. Absent on the right one, which carries
+   *  `whyRight` on the drill instead. */
+  whyWrong?: string;
+  /** The rep mistake this option embodies, for the manager view later. */
+  realError?: string;
+};
 
 export type TrainingDrill = {
   itemId: string;
   section: SectionSlug;
-  prompt: string;
-  options: DrillOption[];
-  /** Shown after answering. */
-  because: string;
+  unit: string;
+  stem: string;
+  options: TrainingOption[];
+  /** Shown after answering, whichever option was picked. */
+  whyRight: string;
   answer: string;
+  source: string;
+  provenance: Provenance;
 };
+
+/** Separates an item id from its distractor index. Chosen because no item id
+ *  contains it, which `tests/training-drills.test.ts` asserts rather than
+ *  assumes: a collision would make a wrong option grade as the right one. */
+export const DISTRACTOR_MARK = "::d";
 
 /**
  * One question for one item.
  *
- * Decoys come from the item's OWN group, which is what makes the question worth
- * asking: the four offer labels compete with each other rather than with a
- * buyer level.
+ * DECOYS ARE THE ITEM'S OWN, AUTHORED ONES. Until 2026-09-17 they were drawn
+ * from other items in the same group, which is cheap and produces the quiz Adon
+ * rejected: four offer labels competing with each other tests whether a rep
+ * memorised four labels. It also cannot say why a chosen wrong answer is wrong,
+ * because nobody had written that sentence. Both are fixed by authoring them.
  *
- * An item whose group has no peers yields a single-option question rather than
- * being padded with unrelated text. That is visible and fixable; a question
- * quietly padded with a wrong answer from another subject is neither.
+ * The limit is the item's own distractor count rather than OPTION_COUNT, so an
+ * author who wrote three genuine wrong answers gets three. The lint enforces
+ * the ceiling at authoring time (`authoring-rules.ts`, A1), which is where a
+ * padded question should be caught, rather than silently here.
  */
 export function buildTrainingDrill(item: DrillItem, next: () => number): TrainingDrill {
-  const peers = groupPeers(item).map((p) => ({ id: p.id, text: p.answer }));
+  const candidates = item.distractors.map((d, i) => ({
+    id: `${item.id}${DISTRACTOR_MARK}${i}`,
+    text: d.text,
+  }));
+  const options = buildOptions(
+    { id: item.id, text: item.answer },
+    candidates,
+    next,
+    candidates.length + 1,
+  ).map<TrainingOption>((o) => {
+    if (o.correct) return { id: o.id, text: o.text, correct: true };
+    const index = Number(o.id.slice(o.id.lastIndexOf(DISTRACTOR_MARK) + DISTRACTOR_MARK.length));
+    const d = item.distractors[index];
+    return { id: o.id, text: o.text, correct: false, whyWrong: d?.whyWrong, realError: d?.realError };
+  });
   return {
     itemId: item.id,
     section: item.section,
-    prompt: item.prompt,
-    options: buildOptions({ id: item.id, text: item.answer }, peers, next),
-    because: item.because,
+    unit: item.unit,
+    stem: item.stem,
+    options,
+    whyRight: item.whyRight,
     answer: item.answer,
+    source: item.source,
+    provenance: item.provenance,
   };
 }
 
@@ -50,10 +90,21 @@ export function buildTrainingDrill(item: DrillItem, next: () => number): Trainin
  * are the ones they are worst at, and a sampling drill lets them never meet
  * those. A fixed set also means "I finished it" is a fact rather than a feeling.
  */
-export function buildTrainingSession(section: SectionSlug | "all", seed: number): TrainingDrill[] {
-  const pool = section === "all" ? ITEMS : ITEMS.filter((i) => i.section === section);
+export function buildTrainingSession(
+  scope: SectionSlug | "all",
+  seed: number,
+): TrainingDrill[] {
+  const pool = scope === "all" ? ITEMS : ITEMS.filter((i) => i.section === scope);
   const next = rng(seed);
   return shuffle(pool, next).map((item) => buildTrainingDrill(item, next));
+}
+
+/** A run over one unit, which is the size a rep is meant to finish in a sitting. */
+export function buildUnitSession(unit: string, seed: number): TrainingDrill[] {
+  const next = rng(seed);
+  return shuffle(ITEMS.filter((i) => i.unit === unit), next).map((item) =>
+    buildTrainingDrill(item, next),
+  );
 }
 
 export type Grade =
@@ -101,10 +152,16 @@ export function gradeAnswer(itemId: string, sectionSlug: string, chosenOptionId:
   return { ok: true, correct: chosenOptionId === item.id, sectionSlug: item.section };
 }
 
-/** Items whose group is too small to make a real question. Surfaced by a test
- *  rather than left to be noticed by a rep answering a one-option drill. */
-export function underpoweredGroups(minPeers = 2): string[] {
-  const counts = new Map<string, number>();
-  for (const i of ITEMS) counts.set(i.group, (counts.get(i.group) ?? 0) + 1);
-  return [...counts.entries()].filter(([, n]) => n < minPeers).map(([g]) => g).sort();
+/**
+ * Items that cannot make a real question, surfaced by a test rather than left
+ * for a rep to meet.
+ *
+ * This used to count GROUP members, because a group supplied the decoys. Now
+ * that distractors are authored per item, the thing that can go wrong is an
+ * item written without enough of them, so that is what this counts.
+ */
+export function underpoweredItems(minDistractors = 2): string[] {
+  return ITEMS.filter((i) => i.distractors.length < minDistractors)
+    .map((i) => i.id)
+    .sort();
 }
