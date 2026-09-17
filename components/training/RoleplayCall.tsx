@@ -81,7 +81,12 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
 
   const send = useCallback(async () => {
     const said = typed.trim();
-    if (!said || busy || ended) return;
+    // `retryable` blocks a new line, and that is the whole point of it. Adding
+    // a retry button was not enough on its own: a rep who typed again instead
+    // of retrying built a different transcript, which replaced the one key that
+    // could collect the queued reply, and the stalled turn was orphaned anyway.
+    // The pending turn has to resolve before the call can move.
+    if (!said || busy || ended || retryable) return;
     const next: Turn[] = [...transcript, { role: "rep", text: said }];
     setTranscript(next);
     setTyped("");
@@ -101,7 +106,7 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
       setBusy(false);
       requestAnimationFrame(() => bottom.current?.scrollIntoView({ behavior: "smooth" }));
     }
-  }, [typed, busy, ended, transcript, call, scenario.id]);
+  }, [typed, busy, ended, retryable, transcript, call, scenario.id]);
 
   const retry = useCallback(async () => {
     if (!retryable || busy) return;
@@ -224,13 +229,22 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
                 void send();
               }
             }}
-            disabled={busy}
+            disabled={busy || Boolean(retryable)}
           />
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button type="button" className={BTN} disabled={busy || typed.trim().length === 0} onClick={send}>
+            <button
+              type="button"
+              className={BTN}
+              disabled={busy || Boolean(retryable) || typed.trim().length === 0}
+              onClick={send}
+            >
               {busy ? "..." : "Say it"}
             </button>
-            <span className="text-xs text-fg-dim">Cmd or Ctrl and Enter</span>
+            <span className="text-xs text-fg-dim">
+              {retryable
+                ? "They have not answered yet. Try that again before you say anything else."
+                : "Cmd or Ctrl and Enter"}
+            </span>
           </div>
         </div>
       )}

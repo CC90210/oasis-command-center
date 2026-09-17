@@ -295,6 +295,19 @@ assert.ok(
   "a successful review must end the call, or the rep keeps talking to a stale review",
 );
 
+// A retry button alone was not enough. A rep who typed again instead of
+// retrying built a different transcript, which replaced the one key that could
+// collect the queued reply, and orphaned the stalled turn anyway. The pending
+// turn has to resolve before the call can move.
+assert.ok(
+  /\|\| retryable\) return;/.test(callSource),
+  "send must refuse while a turn is waiting to be retried, or the retry it just added is bypassable",
+);
+assert.ok(
+  /disabled=\{busy \|\| Boolean\(retryable\)\}/.test(callSource),
+  "the input must be disabled while a turn is pending, so the only way forward is the retry",
+);
+
 console.log("training-roleplay: a stalled turn is retryable and a review ends the call OK");
 
 console.log("training-roleplay: ALL OK");
