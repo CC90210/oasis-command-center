@@ -291,7 +291,7 @@ assert.ok(
 // under a review that no longer described the conversation, with no way to
 // regenerate it.
 assert.ok(
-  /setReview\(out\.debrief\);[\s\S]{0,400}setEnded\(true\)/.test(callSource),
+  /setReview\(out\.payload\.debrief\);[\s\S]{0,400}setEnded\(true\)/.test(callSource),
   "a successful review must end the call, or the rep keeps talking to a stale review",
 );
 
@@ -303,9 +303,35 @@ assert.ok(
   /\|\| retryable\) return;/.test(callSource),
   "send must refuse while a turn is waiting to be retried, or the retry it just added is bypassable",
 );
+// Anchored to the TEXTAREA. The loose version matched anywhere, and once the
+// review button gained the same guard it passed with the textarea's deleted:
+// a check that any one of several places has a property proves nothing about
+// the place that matters.
 assert.ok(
-  /disabled=\{busy \|\| Boolean\(retryable\)\}/.test(callSource),
-  "the input must be disabled while a turn is pending, so the only way forward is the retry",
+  /<textarea[\s\S]{0,900}disabled=\{busy \|\| Boolean\(retryable\)\}/.test(callSource),
+  "the TEXTAREA must be disabled while a turn is pending, so the only way forward is the retry",
+);
+
+// Round 3, and this one was a REGRESSION I introduced. Locking on ANY failure
+// meant a terminal error, a 500 or a call that had already run too long,
+// disabled the input forever with no queued reply to collect and no way to
+// continue or to abandon. Worse than the bug it was fixing. Only a genuinely
+// pending turn locks the call, and the retry releases it when nothing is coming.
+assert.ok(
+  /out\.reason === "owner_thinking"/.test(callSource),
+  "only a genuinely pending turn may lock the call: a terminal failure has nothing to protect",
+);
+assert.ok(
+  /out\.reason !== "owner_thinking"/.test(callSource),
+  "the retry must release the lock when the reply is never coming, or the rep is stranded",
+);
+
+// The review button is the other door to the same bypass: reviewing a
+// transcript that ends on an unanswered line clears the retry and orphans the
+// queued reply.
+assert.ok(
+  /disabled=\{busy \|\| Boolean\(retryable\)\}[\s\S]{0,60}onClick=\{getReview\}/.test(callSource),
+  "review must be disabled while a turn is pending, or it bypasses the lock by another button",
 );
 
 console.log("training-roleplay: a stalled turn is retryable and a review ends the call OK");

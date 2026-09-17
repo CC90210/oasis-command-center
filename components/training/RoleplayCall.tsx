@@ -49,6 +49,15 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
   const [retryable, setRetryable] = useState<Turn[] | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
+  /**
+   * One request, with the reason it failed when it did.
+   *
+   * The reason matters: "still thinking" means a queued job exists and the
+   * identical transcript will collect it, while every other failure means
+   * nothing is coming. An earlier version returned null for both and locked the
+   * input on either, which turned an ordinary error into a call the rep could
+   * not continue OR abandon. That was worse than the bug it was fixing.
+   */
   const call = useCallback(
     async (body: Record<string, unknown>) => {
       const res = await fetch("/api/training/roleplay", {
@@ -70,11 +79,11 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
       if (!res.ok || payload.error) {
         setNotice(payload.message || "That did not go through.");
         setViolations(Array.isArray(payload.violations) ? payload.violations : []);
-        return null;
+        return { ok: false as const, reason: payload.error ?? "failed" };
       }
       setNotice(null);
       setViolations([]);
-      return payload;
+      return { ok: true as const, payload };
     },
     [],
   );
@@ -93,13 +102,15 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     setBusy(true);
     try {
       const out = await call({ scenarioId: scenario.id, transcript: next });
-      if (out?.reply) {
-        setTranscript((t) => [...t, { role: "owner", text: out.reply as string }]);
+      if (out.ok && out.payload.reply) {
+        setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
-        if (out.ended) setEnded(true);
-      } else {
-        // The rep's line stays on screen, because they did say it. What is
-        // missing is the answer, and collecting it needs this exact transcript.
+        if (out.payload.ended) setEnded(true);
+      } else if (!out.ok && out.reason === "owner_thinking") {
+        // ONLY a queued reply locks the call. The rep's line stays on screen,
+        // because they did say it, and collecting the answer needs this exact
+        // transcript. Every other failure leaves the call usable: nothing is
+        // coming, so there is nothing to protect.
         setRetryable(next);
       }
     } finally {
@@ -113,10 +124,14 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     setBusy(true);
     try {
       const out = await call({ scenarioId: scenario.id, transcript: retryable });
-      if (out?.reply) {
-        setTranscript((t) => [...t, { role: "owner", text: out.reply as string }]);
+      if (out.ok && out.payload.reply) {
+        setTranscript((t) => [...t, { role: "owner", text: out.payload.reply as string }]);
         setRetryable(null);
-        if (out.ended) setEnded(true);
+        if (out.payload.ended) setEnded(true);
+      } else if (!out.ok && out.reason !== "owner_thinking") {
+        // It is not coming. Release the call so the rep can carry on or start
+        // again, rather than leaving them stuck on a retry that never resolves.
+        setRetryable(null);
       }
     } finally {
       setBusy(false);
@@ -127,8 +142,8 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
     setBusy(true);
     try {
       const out = await call({ scenarioId: scenario.id, transcript, kind: "debrief" });
-      if (out?.debrief) {
-        setReview(out.debrief);
+      if (out.ok && out.payload.debrief) {
+        setReview(out.payload.debrief);
         // Asking for the review ENDS the call. Leaving it open left the box
         // live while a now-stale review sat underneath it, and the button to
         // regenerate had disappeared, so a rep could keep talking to a review
@@ -251,7 +266,16 @@ export function RoleplayCall({ scenario }: { scenario: RoleplayScenario }) {
 
       <div className="flex flex-wrap gap-2">
         {transcript.some((t) => t.role === "rep") && !review && (
-          <button type="button" className={GHOST} disabled={busy} onClick={getReview}>
+          // Disabled while a turn is pending. Reviewing would build a debrief
+          // from a transcript ending on an unanswered line, clear the retry,
+          // and orphan the queued reply, which is the same bypass by a
+          // different button.
+          <button
+            type="button"
+            className={GHOST}
+            disabled={busy || Boolean(retryable)}
+            onClick={getReview}
+          >
             {ended ? "How did that go?" : "End the call and review it"}
           </button>
         )}
