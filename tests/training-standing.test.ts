@@ -109,6 +109,44 @@ const CURRENT = [
   );
 }
 
+// --- an item that MOVED section is credited where it lives now ------------
+//
+// Second review finding, one round after the first, and the same mistake in a
+// smaller place: trusting a stored value over the live curriculum.
+// `training_progress.section_slug` is written once on insert and the update
+// path never changes it, so an item that keeps its id and moves section leaves
+// its row pointing at the old one. Every later correct answer kept accruing
+// there: the section the rep had left crept toward Finished while the one they
+// were actually practising gained nothing.
+
+{
+  const standings = sectionStandings({
+    items: CURRENT, // a1 and a2 live in "opening" today
+    progress: [
+      // The row still carries the section this item was in when it was created.
+      { itemId: "a1", sectionSlug: "guardrails", rightCount: 5 },
+      { itemId: "a2", sectionSlug: "opening", rightCount: 1 },
+    ],
+    completedSlugs: new Set(["opening"]),
+  });
+
+  assert.equal(
+    standings.get("opening")!.known,
+    2,
+    "a moved item must be credited to the section it is in NOW",
+  );
+  assert.equal(
+    standings.get("opening")!.finished,
+    true,
+    "and that credit must be able to complete the section it moved into",
+  );
+  assert.equal(
+    standings.get("guardrails"),
+    undefined,
+    "the stale section must gain nothing from a row that no longer belongs to it",
+  );
+}
+
 // --- a wrong-only row is history, not knowledge ---------------------------
 
 {

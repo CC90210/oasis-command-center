@@ -58,7 +58,20 @@ export function sectionStandings(args: {
 }): Map<string, SectionStanding> {
   const { items, progress, completedSlugs } = args;
 
-  const liveIds = new Set(items.map((i) => i.id));
+  // 🚨 THE CURRICULUM DECIDES WHICH SECTION AN ITEM IS IN, not the stored row.
+  //
+  // `training_progress.section_slug` is written once, on insert, and the update
+  // path in `recordAnswer` never touches it. So an item that keeps its id and
+  // moves to another section leaves its row pointing at the old one forever,
+  // and every later correct answer is still counted there. The rep would see a
+  // section they had left behind creeping toward Finished while the section
+  // they were actually practising never gained credit.
+  //
+  // Found by review on 1db0c511, one round after the removed-item fix, and it
+  // is the same mistake in a smaller place: trusting stored shape over the live
+  // curriculum. Reading the section from `items` makes the stored value purely
+  // historical, which is all it can honestly be.
+  const sectionOf = new Map(items.map((i) => [i.id, i.section]));
   const totals = new Map<string, number>();
   for (const item of items) totals.set(item.section, (totals.get(item.section) ?? 0) + 1);
 
@@ -67,10 +80,11 @@ export function sectionStandings(args: {
   const knownIds = new Map<string, Set<string>>();
   for (const row of progress) {
     if (row.rightCount <= 0) continue;
-    if (!liveIds.has(row.itemId)) continue; // history for an item nobody can be asked
-    const set = knownIds.get(row.sectionSlug) ?? new Set<string>();
+    const section = sectionOf.get(row.itemId);
+    if (section === undefined) continue; // history for an item nobody can be asked
+    const set = knownIds.get(section) ?? new Set<string>();
     set.add(row.itemId);
-    knownIds.set(row.sectionSlug, set);
+    knownIds.set(section, set);
   }
 
   const out = new Map<string, SectionStanding>();
