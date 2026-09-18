@@ -22,6 +22,7 @@
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendTelegram } from "@/lib/notify/telegram";
+import { notifyLanesForTenant } from "@/lib/tenant/public-identity";
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 
@@ -96,8 +97,12 @@ export function cappedJson(value: unknown): string | null {
 }
 
 /**
- * Persist the dead-letter row and page the sunbiz-ops lane on the ONE decay
- * ladder (lib/notify/alert-decay.ts, state in health_alert_state).
+ * Persist the dead-letter row and page THE LANE THAT OWNS THIS TENANT on the
+ * ONE decay ladder (lib/notify/alert-decay.ts, state in health_alert_state).
+ *
+ * The lane is resolved from the tenant, not hardcoded — see
+ * notifyLanesForTenant. An unmapped tenant reaches both lanes rather than
+ * defaulting to one.
  *
  * The ladder key is COARSE — tenant/form/source, never the message — so a
  * burst of failing submissions pages once and escalates instead of storming.
@@ -170,7 +175,21 @@ export async function captureSubmitFailure(input: SubmitFailureInput): Promise<{
         },
         { onConflict: "alert_key" },
       );
-      await sendTelegram(text, { lane: "sunbiz-ops" }).catch(() => undefined);
+      // Page the lane that OWNS this tenant, not a hardcoded one.
+      //
+      // This was `lane: "sunbiz-ops"` unconditionally. A blocked submission on
+      // an OASIS funnel stored its dead-letter row correctly under
+      // tenant_slug='oasis-ai-cc' and then paged Adon, who cannot action a form
+      // he does not own — while CC, who could recover the prospect from the
+      // stored payload in minutes, was never told. The 15-minute health check
+      // then re-asserted the same alert into the same wrong lane.
+      //
+      // An UNMAPPED tenant fans to both lanes rather than defaulting to one:
+      // two dead-letter rows in production carry tenant_slug NULL, and a lost
+      // merchant nobody is paged about is worse than one two teams see.
+      for (const lane of notifyLanesForTenant({ tenantSlug })) {
+        await sendTelegram(text, { lane }).catch(() => undefined);
+      }
     }
   } catch (err) {
     // The alert path must never take the request down with it. The open

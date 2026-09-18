@@ -220,6 +220,10 @@ const TESTS = [
   // next_run_at in the past rendered as a future commitment. Unlisted, they run
   // nowhere and prove nothing.
   "tests/automation-owner-partition.test.ts",
+  // Six public surfaces each picked a company from a module-level constant
+  // instead of from the tenant in front of them, and the constant was always
+  // the client's. Unlisted, this proves nothing.
+  "tests/tenant-public-identity.test.ts",
   "tests/cron-result-shape-parity.test.ts",
   "tests/automation-overdue-schedule.test.ts",
   "tests/cron-owner-migration.test.ts",

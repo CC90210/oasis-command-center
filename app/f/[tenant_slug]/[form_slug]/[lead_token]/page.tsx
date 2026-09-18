@@ -17,6 +17,7 @@ import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
+import { publicMarkForTenant } from "@/lib/tenant/public-identity";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -183,6 +184,19 @@ async function loadAndVerify(params: RouteParams): Promise<LoadResult> {
   // the logo for this form) and won't be overridden.
   if (branding.logo_url == null && tenantRow.logo_url) {
     branding = { ...branding, logo_url: tenantRow.logo_url };
+  }
+  // Rung 3 of the chain, identical to the anonymous route: the tenant -> brand
+  // registry. Both routes render the same FormPublicClient, so both fell
+  // through to the same hardcoded SunBiz glyph. Fixing one and not the other
+  // would leave the leak alive on every personalised merchant link.
+  // Fails closed — an unmapped tenant gets a brandless header, never someone
+  // else's mark.
+  if (branding.logo_url == null) {
+    const mark = publicMarkForTenant({
+      tenantId: form.tenant_id,
+      tenantSlug: tenantRow.slug,
+    });
+    if (mark) branding = { ...branding, logo_url: mark };
   }
 
   // Cross-form pre-fill (2026-06-20): load the lead's existing data so the full

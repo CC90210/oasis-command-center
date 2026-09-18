@@ -861,14 +861,7 @@ export function FormPublicClient({
           {branding.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={branding.logo_url} alt={headline} className="mx-auto h-12" />
-          ) : (
-            <div
-              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl"
-              style={{ background: `${primary}1f`, border: `1px solid ${primary}55` }}
-            >
-              <SunMark color={primary} />
-            </div>
-          )}
+          ) : null}
           <div className="space-y-2">
             <h1 className="text-2xl font-black tracking-tight text-fg">{headline}</h1>
             <div
@@ -1057,29 +1050,20 @@ export function FormPublicClient({
   );
 }
 
-/** Gold SunBiz sun glyph — rendered in the form header when the tenant
- *  hasn't uploaded a logo, so the form still reads as the brand. */
-function SunMark({ color }: { color: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="30"
-      height="30"
-      fill="none"
-      stroke={color}
-      strokeWidth="2"
-      strokeLinecap="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="4" fill={color} stroke="none" />
-      <line x1="12" y1="2.5" x2="12" y2="5" />
-      <line x1="12" y1="19" x2="12" y2="21.5" />
-      <line x1="2.5" y1="12" x2="5" y2="12" />
-      <line x1="19" y1="12" x2="21.5" y2="12" />
-      <line x1="5.4" y1="5.4" x2="7" y2="7" />
-      <line x1="17" y1="17" x2="18.6" y2="18.6" />
-      <line x1="5.4" y1="18.6" x2="7" y2="17" />
-      <line x1="17" y1="7" x2="18.6" y2="5.4" />
-    </svg>
-  );
-}
+/* REMOVED 2026-09-18: SunMark, "Gold SunBiz sun glyph".
+ *
+ * It was the header mark for ANY tenant whose form had no logo_url, on a
+ * multi-tenant public route. One company's brand asset as the universal
+ * default is a tenant decision sitting in a field check.
+ *
+ * The asymmetry is what hid it: all four SunBiz forms set branding.logo_url,
+ * so SunBiz took the <img> branch and never rendered the glyph. Only tenants
+ * WITHOUT a logo reached it — and those were exactly the two OASIS funnels.
+ * The mark was visible only to the company it did not belong to.
+ *
+ * The header now renders the tenant's own mark or NO mark. The fallback chain
+ * lives server-side in app/f/[tenant_slug]/[form_slug]/page.tsx, which resolves
+ * through lib/tenant/public-identity.ts and fails closed. A blank header looks
+ * like a bug and the wrong logo does not, which is precisely why the wrong logo
+ * survived from commit 1ee47b6e until CC noticed it on his own funnel.
+ */
