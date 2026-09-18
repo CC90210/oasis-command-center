@@ -28,12 +28,32 @@ try {
 
 const listRoute = readFileSync("app/api/cron-jobs/route.ts", "utf8");
 assert.match(listRoute, /owner_agent_key/, "GET must read durable Empire ownership");
+assert.match(listRoute, /fail_count/, "GET must read unresolved Empire failure state");
 assert.match(listRoute, /normalizeTenantCronRow/, "GET must return tenant enabled state as a boolean");
 assert.match(
   listRoute,
   /if \(empireQuery\.error\)[\s\S]{0,500}status: 500/,
   "an Empire read failure must fail the inventory instead of returning tenant-only success",
 );
+assert.match(listRoute, /buildAutomationInventoryMetadata/,
+  "GET must return a counted inventory receipt and reject duplicates/partial operator reads");
+assert.match(listRoute, /inventory[^}]*\}/,
+  "GET success must include inventory metadata alongside jobs");
+// The Empire query, the fail-loud read error and the non-empty contract are all
+// armed by one predicate, so an identity it does not cover disarms all three at
+// once and returns a plausible tenant-only 200. Evaluated once, and the verdict
+// travels on the wire so the omission cannot be read as an inventory.
+assert.match(listRoute, /const isOperator = isOperatorEmail\(user\.email\)/,
+  "the operator verdict must be bound once, not re-derived per use");
+assert.equal(
+  (listRoute.match(/isOperatorEmail\(/g) || []).length,
+  1,
+  "one call site only — three copies of the predicate are three chances to drift apart",
+);
+assert.match(listRoute, /requireEmpireRows: isOperator,\s*\n\s*isOperator,/,
+  "GET must report the operator verdict alongside the lane counts");
+assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,
+  "create API must not advertise agent_prompt until a runner supports it");
 const patchRoute = readFileSync("app/api/cron-jobs/[id]/route.ts", "utf8");
 assert.match(patchRoute, /body\.source/, "PATCH must dispatch the exact row source");
 assert.match(patchRoute, /toggleCronWithAudit/, "toggles must use the atomic state+audit transaction");
@@ -69,7 +89,7 @@ assert.ok(
 const legacyMigration = readFileSync("database/174_cron_owner_atomic_toggle.sql", "utf8");
 assert.match(legacyMigration, /ADD COLUMN IF NOT EXISTS owner_agent_key text/);
 assert.match(legacyMigration, /CREATE OR REPLACE FUNCTION public\.toggle_cron_job_with_audit_v1/);
-assert.match(legacyMigration, /SECURITY DEFINER\nSET search_path = public, pg_temp/);
+assert.match(legacyMigration, /SECURITY DEFINER\r?\nSET search_path = public, pg_temp/);
 assert.match(legacyMigration, /REVOKE ALL ON TABLE public\.cron_jobs FROM anon, authenticated/);
 assert.doesNotMatch(legacyMigration, /\bRETURNING\b/i,
   "guarded exec_sql must not misclassify the migration as a result query");
@@ -106,6 +126,44 @@ assert.match(manager, /JSON\.stringify\(\{ enabled: next, source: job\.source \}
 assert.match(manager, /persisted[\s\S]{0,300}enabled[\s\S]{0,300}next/,
   "client success must validate the authoritative state");
 assert.match(manager, /next_run_at/, "cards must carry and render the scheduler's next run");
+assert.match(manager, /parseAutomationInventorySuccess/,
+  "the client must runtime-validate jobs and inventory metadata before rendering");
+assert.match(manager, /partitionCronJobsByOwner/,
+  "owner groups must use the exact-owner partition helper");
+assert.match(manager, /cronJobKey/,
+  "row, edit, and pending identity must include source:id");
+assert.match(manager, /Retry/, "load failures must provide an in-place retry");
+assert.match(manager, /Last refreshed/, "operators must see when the inventory was last confirmed");
+assert.match(manager, /Couldn't delete/, "delete failures must be visible to the operator");
+assert.match(manager, /unresolved_failures/,
+  "Empire failure counters must remain visibly red until a successful run clears them");
+assert.match(manager, /!inventory\.empire_included/,
+  "a hidden Empire lane must be stated on the page, never inferred from an absence of rows");
+assert.match(manager, /Empire schedules are not shown/,
+  "the omission line must be words the operator can act on, not a missing section");
+// A stored next_run_at in the past is not a plan. When the scheduler host stops,
+// nothing writes a row, nothing goes red, and every card advertises a fire date
+// that has already been missed as though it were still coming.
+assert.match(manager, /describeNextRun/,
+  "the next-run line must be derived from the clock, not formatted blind");
+assert.match(manager, /<span>\{nextRun\.text\}<\/span>/,
+  "and the card must render that verdict — a computed one it does not show is no fix at all");
+assert.doesNotMatch(manager, /`Next \$\{formatNextRun/,
+  "a past timestamp must never be rendered under the word 'Next'");
+assert.doesNotMatch(manager, /agent_prompt/,
+  "the create UI must not offer an action the runner cannot execute");
+assert.match(manager, /isDaemonTransitionConfirmed/,
+  "daemon controls must wait for an authoritative state+heartbeat readback");
+assert.match(manager, /DAEMON_CONFIRM_TIMEOUT_MS = 75_000/,
+  "daemon confirmation must stop waiting and fail visibly after about 75 seconds");
+assert.match(manager, /last_ping_at: daemon\.last_ping_at/,
+  "daemon control must capture the pre-action heartbeat baseline");
+assert.match(manager, /while \(!controller\.signal\.aborted/,
+  "daemon confirmation must poll without allowing an unmounted operation to win a race");
+assert.doesNotMatch(manager, /Optimistic flip/,
+  "command acceptance must never optimistically flip the displayed daemon state");
+assert.doesNotMatch(manager, /setTimeout\(\(\) => \{ void refresh\(\); \}, 5_000\)/,
+  "a single delayed refresh is not sufficient runtime confirmation");
 
 const catalog = readFileSync("lib/agent-catalog.ts", "utf8");
 assert.doesNotMatch(catalog, /name: "content_pipeline"[\s\S]{0,120}schedule: "0 9 \* \* \*"/);

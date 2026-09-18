@@ -30,13 +30,18 @@ import {
   normalizeTenantCronRow,
   type EmpireCronRow,
 } from "@/lib/cron-empire-row";
+import {
+  AutomationInventoryError,
+  buildAutomationInventoryMetadata,
+  type CronInventoryJob,
+} from "@/lib/automations/cron-inventory";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // Action types we accept on create. Discriminator + payload-shape validation
 // done in code (vs JSON-schema) because the shapes are small and clear.
-const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "agent_prompt", "webhook_post"] as const;
+const VALID_ACTION_TYPES = ["script_run", "snapshot_run", "webhook_post"] as const;
 type ActionType = (typeof VALID_ACTION_TYPES)[number];
 
 /**
@@ -109,19 +114,31 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   }
   const tenantJobs = (tenantQuery.data || []).map((j) =>
     normalizeTenantCronRow(j as Record<string, unknown>),
-  );
+  ) as CronInventoryJob[];
 
   // Empire lane — operator-only. cron_jobs is now tenant-scoped (migration
   // 084), so the operator's tenantId is the canonical filter. Pre-084 we
   // ran an inferEmpireAgentKey heuristic + EMPIRE_AGENT_ALLOWLIST defense
   // to suppress tenant-scoped rows that leaked in; the column makes both
   // unnecessary.
+  //
+  // Evaluated ONCE and reported on the wire, because every Empire guarantee in
+  // this route is armed by this one predicate: the query itself, the fail-loud
+  // 500 on an Empire read error, and the non-empty contract in
+  // buildAutomationInventoryMetadata. An identity the predicate does not cover
+  // — a new @oasisai.work alias, a Google-linked session whose email differs, an
+  // OPERATOR_EMAIL regression in the environment — does not trip any of them. It
+  // disarms all three at once and returns a tenant-only 200 that is
+  // indistinguishable from "every Empire schedule was deleted", which is the
+  // exact shape of the 4-of-41 outage. Three separate calls to the predicate
+  // could also drift apart under an edit; one binding cannot.
+  const isOperator = isOperatorEmail(user.email);
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
-  if (isOperatorEmail(user.email)) {
+  if (isOperator) {
     const empireQuery = await db
       .from("cron_jobs")
       .select(
-        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, created_at",
+        "id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, fail_count, created_at",
       )
       .eq("tenant_id", tenantId)
       .order("created_at", { ascending: false });
@@ -182,12 +199,41 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
     }
   }
 
-  return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs] });
+  try {
+    const inventory = buildAutomationInventoryMetadata({
+      tenantJobs,
+      empireJobs,
+      empireQueried: isOperator,
+      requireEmpireRows: isOperator,
+      isOperator,
+    });
+    return NextResponse.json({ ok: true, jobs: [...tenantJobs, ...empireJobs], inventory });
+    // Bound as `cause`, not `error`: this is the catch binding for a contract
+    // violation, never a destructured driver error. tests/db-error-contract
+    // counts every bare `throw error` in a file that destructures `error` off a
+    // query result anywhere (POST does, below), so reusing the name here would
+    // report debt that does not exist -- and set this file's ratchet to 1, so a
+    // genuine bare driver throw appearing later would pass unnoticed.
+  } catch (cause) {
+    if (cause instanceof AutomationInventoryError) {
+      console.error("[api/cron-jobs GET] inventory contract failed", {
+        error: cause.code,
+        message: cause.message,
+        tenantCount: tenantJobs.length,
+        empireCount: empireJobs.length,
+      });
+      return NextResponse.json(
+        { ok: false, error: cause.code, message: cause.message },
+        { status: cause.status },
+      );
+    }
+    throw cause;
+  }
 });
 
 export async function POST(req: NextRequest) {
-  // Admin-only: creating a scheduled job (script_run / agent_prompt /
-  // webhook_post / snapshot_run). Non-admin members can view (GET) only.
+  // Admin-only: creating a scheduled job (script_run / webhook_post /
+  // snapshot_run). Non-admin members can view (GET) only.
   const ctx = await getSessionContext();
   if (!ctx) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   if (!canManageTeam(ctx.teamRole, ctx.adminAccess)) {
@@ -363,11 +409,6 @@ function validateActionPayload(type: ActionType, payload: Record<string, unknown
     case "snapshot_run":
       if (typeof payload.snapshot !== "string" || !payload.snapshot.trim()) {
         return "snapshot_run requires action_payload.snapshot (string)";
-      }
-      return null;
-    case "agent_prompt":
-      if (typeof payload.prompt !== "string" || !payload.prompt.trim()) {
-        return "agent_prompt requires action_payload.prompt (string)";
       }
       return null;
     case "webhook_post": {

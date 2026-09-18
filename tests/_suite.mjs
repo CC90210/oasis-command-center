@@ -214,6 +214,14 @@ const TESTS = [
   // that must NOT be driven can't be armed from the dashboard.
   "tests/daemon-backed-crons.test.ts",
   "tests/automation-inventory-contract.test.ts",
+  // The three reliability gates for that tab, each pinning a way it reported
+  // health it could not see: an Empire lane omitted without saying so, a
+  // failure shape the Python watchdog flags and the tab drew green, and a
+  // next_run_at in the past rendered as a future commitment. Unlisted, they run
+  // nowhere and prove nothing.
+  "tests/automation-owner-partition.test.ts",
+  "tests/cron-result-shape-parity.test.ts",
+  "tests/automation-overdue-schedule.test.ts",
   "tests/cron-owner-migration.test.ts",
   "tests/atomic-cron-toggle.test.ts",
   "tests/legacy-cron-toggle.test.ts",

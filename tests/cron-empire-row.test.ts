@@ -33,6 +33,7 @@ function row(over: Partial<Record<string, unknown>> = {}): EmpireCronRow {
     last_result: null,
     next_run_at: null,
     run_count: 0,
+    fail_count: 0,
     created_at: "2026-08-20T00:00:00Z",
     ...over,
   } as EmpireCronRow;
@@ -74,6 +75,27 @@ assert.equal(classifyLastResult("error: lowercase still counts").status, "error"
 assert.equal(classifyLastResult("FAILED (exit 1): stderr").status, "error");
 assert.equal(normalizeEmpireRow(row({ last_result: "ERROR: x" })).last_run_error, "ERROR: x");
 assert.equal(normalizeEmpireRow(row({ last_result: "ERROR: x" })).last_run_output, null);
+
+// A later scheduler skip must not paint over unresolved failures. The live
+// Maven row had exactly this shape: fail_count=2 plus a skipped-stale result.
+const unresolvedMaven = normalizeEmpireRow(row({
+  name: "Maven — Carousel Post",
+  owner_agent_key: "maven",
+  fail_count: 2,
+  last_result: "skipped-stale: outside publish window",
+}));
+assert.equal(unresolvedMaven.last_run_status, "error");
+assert.equal(unresolvedMaven.unresolved_failures, 2);
+assert.equal(unresolvedMaven.last_run_output, null);
+assert.match(String(unresolvedMaven.last_run_error), /2 unresolved failures/);
+assert.match(String(unresolvedMaven.last_run_error), /skipped-stale/);
+const recoveredMaven = normalizeEmpireRow(row({
+  name: "Maven — Carousel Post",
+  fail_count: 0,
+  last_result: "published successfully",
+}));
+assert.equal(recoveredMaven.last_run_status, "success");
+assert.equal(recoveredMaven.unresolved_failures, 0);
 
 // ── Booleans survived the transpiler as INTEGER ────────────────────────────
 // cron_jobs.is_active is INTEGER in SQLite and fromSql never restores it, so the

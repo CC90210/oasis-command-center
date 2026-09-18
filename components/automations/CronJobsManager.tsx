@@ -13,7 +13,7 @@
  *   - Inline "New automation" form with action-type-aware payload editor
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -36,41 +36,19 @@ import { friendlyDescription } from "@/lib/cron-descriptions";
 import { fetchJson } from "@/lib/fetch-json";
 import { runWorkerAction } from "@/lib/automations/worker-control";
 import type { DaemonState } from "@/lib/automations/daemon-backed-crons";
+import {
+  cronJobKey,
+  isDaemonTransitionConfirmed,
+  parseAutomationInventorySuccess,
+  partitionCronJobsByOwner,
+  type AutomationInventoryMetadata,
+  type DaemonConfirmationBaseline,
+  type CronInventoryJob,
+} from "@/lib/automations/cron-inventory";
+import { describeNextRun } from "@/lib/automations/cron-schedule";
 
-type ActionType = "script_run" | "snapshot_run" | "agent_prompt" | "webhook_post";
-
-type CronJob = {
-  id: string;
-  agent_key: string;
-  name: string;
-  description: string | null;
-  schedule: string;
-  // Empire rows (source: "empire") carry action_type values from
-  // cron_engine.py SEED_JOBS that aren't in the tenant ActionType union
-  // (e.g. "stripe_sync", "funnel_sync"). UI just shows the string; the
-  // editor never opens for empire rows so the type narrowing on
-  // ActionType only matters for tenant rows.
-  action_type: ActionType | string;
-  action_payload: Record<string, unknown>;
-  enabled: boolean;
-  last_run_at: string | null;
-  next_run_at?: string | null;
-  last_run_status: "success" | "error" | null;
-  last_run_output: string | null;
-  last_run_error: string | null;
-  run_count: number;
-  created_at: string;
-  updated_at: string;
-  source: "tenant" | "empire";
-  /**
-   * Present when a dedicated PM2 process does this row's work and the cron
-   * twin is parked at is_active=0 on purpose. When it's here, `enabled` is
-   * the parked DB flag and says nothing about whether the automation is
-   * running — `daemon.state` is the answer, and the toggle drives the
-   * process rather than the row. See lib/automations/daemon-backed-crons.ts.
-   */
-  daemon?: DaemonState | null;
-};
+type ActionType = "script_run" | "snapshot_run" | "webhook_post";
+type CronJob = CronInventoryJob;
 
 /**
  * Is this automation on? For a daemon-backed row that is a question about the
@@ -82,6 +60,54 @@ function isRunning(job: CronJob): boolean {
 }
 
 type Props = { agentKeys: string[] };
+
+const DAEMON_CONFIRM_TIMEOUT_MS = 75_000;
+const DAEMON_CONFIRM_POLL_MS = 4_000;
+
+function waitForDaemonPoll(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Daemon confirmation cancelled", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Daemon confirmation cancelled", "AbortError"));
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function fetchAutomationInventoryReadback(signal: AbortSignal): Promise<
+  | { ok: true; jobs: CronJob[]; inventory: AutomationInventoryMetadata }
+  | { ok: false; error: string }
+> {
+  const result = await fetchJson<unknown>(
+    "/api/cron-jobs",
+    { cache: "no-store", signal },
+  );
+  if (!result.ok) return { ok: false, error: result.error };
+  if (result.status < 200 || result.status >= 300) {
+    const body = result.data;
+    const message = body && typeof body === "object" && !Array.isArray(body)
+      && typeof (body as { error?: unknown }).error === "string"
+      ? String((body as { error: string }).error)
+      : `http_${result.status}`;
+    return { ok: false, error: message };
+  }
+  const parsed = parseAutomationInventorySuccess(result.data);
+  // The receipt travels with the rows it describes. The daemon-confirmation loop
+  // replaces `jobs` wholesale, so handing back only half of a validated pair
+  // would leave the board rendering fresh rows under a receipt from an earlier
+  // read — the two cannot be allowed to come from different responses.
+  return parsed.ok
+    ? { ok: true, jobs: parsed.jobs, inventory: parsed.inventory }
+    : { ok: false, error: `invalid_inventory_response:${parsed.error}` };
+}
 
 /**
  * Per-agent display copy. Tenants whose agent palette doesn't include
@@ -203,21 +229,18 @@ function relativeTimeShort(iso: string | null | undefined): string {
   return `${Math.round(diff / 86_400_000)}d ago`;
 }
 
-function formatNextRun(iso: string | null | undefined): string {
-  if (!iso) return "Not scheduled";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Unknown";
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZoneName: "short",
-  });
-}
-
 export function CronJobsManager({ agentKeys }: Props) {
   const [jobs, setJobs] = useState<CronJob[] | null>(null);
+  // Kept, not discarded, because the receipt answers a question the rows cannot:
+  // whether the Empire lane was left out on purpose. See the empire_included
+  // banner below.
+  //
+  // Read it ONLY for that verdict. The lane counts are a snapshot of the read
+  // they arrived on, and the local mutations below (toggle readback, delete,
+  // daemon state) change `jobs` without re-fetching — so a count taken from here
+  // would drift from what is on screen. The header line counts `jobs` directly
+  // for exactly that reason.
+  const [inventory, setInventory] = useState<AutomationInventoryMetadata | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [migrationGap, setMigrationGap] = useState<null | {
     migration: string;
@@ -225,28 +248,25 @@ export function CronJobsManager({ agentKeys }: Props) {
     hint: string;
   }>(null);
   const [creating, setCreating] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
   // Toggle-UX state — Phase 1.5/4.2: real feedback on click so the toggle
   // doesn't look broken when the network round-trip takes a beat or the
   // local cron daemon's 60s poll is the actual gate.
-  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
-  const [recentlyToggled, setRecentlyToggled] = useState<{ id: string; ts: number } | null>(null);
+  const [recentlyToggled, setRecentlyToggled] = useState<{ key: string; ts: number } | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const mountedRef = useRef(false);
+  const activeDaemonControlRef = useRef<AbortController | null>(null);
 
   async function refresh() {
+    setRefreshing(true);
     try {
       // fetchJson reads the body as text before parsing, so a dead route
       // surfaces its HTTP status instead of "Unexpected end of JSON input" —
       // the parser error that stood in for every real failure on this tab.
-      const result = await fetchJson<{
-        ok?: boolean;
-        error?: string;
-        message?: string;
-        jobs?: CronJob[];
-        migration?: string;
-        how_to_apply?: string;
-        hint?: string;
-      }>("/api/cron-jobs", undefined, { retries: 2 });
+      const result = await fetchJson<unknown>("/api/cron-jobs", undefined, { retries: 2 });
       if (!result.ok) {
         // Three attempts have failed, so this is not a blip. Keep whatever jobs
         // are already on screen rather than blanking the board — a stale list
@@ -257,19 +277,29 @@ export function CronJobsManager({ agentKeys }: Props) {
         return;
       }
       const j = result.data;
-      if (!j.ok) {
+      if (!j || typeof j !== "object" || Array.isArray(j) || !("ok" in j)) {
+        setLoadError("invalid_inventory_response: response is missing an ok status");
+        setMigrationGap(null);
+        return;
+      }
+      const envelope = j as Record<string, unknown>;
+      if (envelope.ok !== true) {
         // Special-case the "migration not applied" 503 — the route emits
         // structured fields the UI uses to render an actionable message
         // (with the actual apply_migration.py command) instead of a generic
         // "couldn't load" red banner.
-        if (j.error === "migration_not_applied") {
+        if (envelope.error === "migration_not_applied") {
           setMigrationGap({
-            migration: j.migration || "database/041_tenant_cron_jobs.sql",
-            command: j.how_to_apply || "python scripts/apply_migration.py database/041_tenant_cron_jobs.sql",
-            hint: j.hint || "Apply the migration to enable Automations.",
+            migration: typeof envelope.migration === "string" ? envelope.migration : "database/041_tenant_cron_jobs.sql",
+            command: typeof envelope.how_to_apply === "string" ? envelope.how_to_apply : "python scripts/apply_migration.py database/041_tenant_cron_jobs.sql",
+            hint: typeof envelope.hint === "string" ? envelope.hint : "Apply the migration to enable Automations.",
           });
           setLoadError(null);
           setJobs([]);
+          // The previous read's receipt describes rows that are now gone, and a
+          // stale "Empire schedules are not shown" under a migration banner is
+          // two unrelated explanations for one blank board.
+          setInventory(null);
           return;
         }
         // Show the MESSAGE, not just the code. jsonRoute already sends the real
@@ -277,25 +307,48 @@ export function CronJobsManager({ agentKeys }: Props) {
         // the bare token "handler_threw" — which is a category, not a cause, and
         // leaves the operator exactly as stuck as the parser error it replaced.
         setLoadError(
-          [j.error || `http_${result.status}`, j.message].filter(Boolean).join(": "),
+          [
+            typeof envelope.error === "string" ? envelope.error : `http_${result.status}`,
+            typeof envelope.message === "string" ? envelope.message : null,
+          ].filter(Boolean).join(": "),
         );
         setMigrationGap(null);
         return;
       }
-      setJobs(j.jobs || []);
+      if (result.status < 200 || result.status >= 300) {
+        setLoadError(`invalid_inventory_response: ok:true arrived with HTTP ${result.status}`);
+        setMigrationGap(null);
+        return;
+      }
+      const parsed = parseAutomationInventorySuccess(j);
+      if (!parsed.ok) {
+        setLoadError(`invalid_inventory_response: ${parsed.error}`);
+        setMigrationGap(null);
+        return;
+      }
+      setJobs(parsed.jobs);
+      setInventory(parsed.inventory);
       setLoadError(null);
       setMigrationGap(null);
+      setLastRefreshedAt(new Date());
     } catch (e) {
       // Network error / fetch threw — clear the migration banner too so
       // the operator doesn't see "One-time setup required" + "Load failed"
       // stacked from a previous load while the new state is unknown.
       setLoadError(e instanceof Error ? e.message : "load_failed");
       setMigrationGap(null);
+    } finally {
+      setRefreshing(false);
     }
   }
 
   useEffect(() => {
-    refresh();
+    mountedRef.current = true;
+    void refresh();
+    return () => {
+      mountedRef.current = false;
+      activeDaemonControlRef.current?.abort();
+    };
   }, []);
 
   /**
@@ -317,35 +370,90 @@ export function CronJobsManager({ agentKeys }: Props) {
     if (!daemon) return;
     const running = daemon.state === "running";
     const action = running ? "stop" : "start";
+    const requestedState = running ? "stopped" : "running";
     // Stopping is the destructive direction and there is no undo fast enough
     // for someone mid-conversation, so it asks. Starting doesn't.
     if (running && !confirm(`${daemon.stop_warning}\n\nStop ${daemon.process_name}?`)) return;
 
-    setPendingId(job.id);
+    const key = cronJobKey(job);
+    const baseline: DaemonConfirmationBaseline = {
+      key,
+      state: daemon.state,
+      last_ping_at: daemon.last_ping_at,
+    };
+    activeDaemonControlRef.current?.abort();
+    const controller = new AbortController();
+    activeDaemonControlRef.current = controller;
+    setPendingKey(key);
     setToggleError(null);
-    const result = await runWorkerAction(daemon.service, action, false);
-    setPendingId((cur) => (cur === job.id ? null : cur));
-    if (!result.ok) {
-      setToggleError(
-        `Couldn't ${action} ${daemon.process_name}: ${result.output.slice(0, 120)}`,
-      );
-      return;
+    let lastObserved: CronJob | null = null;
+    let lastReadError: string | null = null;
+    try {
+      const result = await runWorkerAction(daemon.service, action, false);
+      if (controller.signal.aborted || !mountedRef.current) return;
+      if (!result.ok) {
+        setToggleError(
+          `Couldn't ${action} ${daemon.process_name}: ${result.output.slice(0, 120)}`,
+        );
+        return;
+      }
+
+      // Command acceptance is not runtime proof. Keep the row pending until a
+      // newer integrations_health heartbeat reports the requested state.
+      const deadline = Date.now() + DAEMON_CONFIRM_TIMEOUT_MS;
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        const readback = await fetchAutomationInventoryReadback(controller.signal);
+        if (controller.signal.aborted || !mountedRef.current) return;
+        if (readback.ok) {
+          const candidate = readback.jobs.find((entry) => cronJobKey(entry) === key) ?? null;
+          lastObserved = candidate;
+          lastReadError = candidate?.daemon ? null : "daemon row missing from inventory readback";
+          if (candidate && isDaemonTransitionConfirmed(candidate, requestedState, baseline)) {
+            setJobs(readback.jobs);
+            setInventory(readback.inventory);
+            setLastRefreshedAt(new Date());
+            setRecentlyToggled({ key, ts: Date.now() });
+            window.setTimeout(() => {
+              if (mountedRef.current) {
+                setRecentlyToggled((current) => (current?.key === key ? null : current));
+              }
+            }, 6_000);
+            return;
+          }
+        } else {
+          lastReadError = readback.error;
+        }
+        await waitForDaemonPoll(DAEMON_CONFIRM_POLL_MS, controller.signal);
+      }
+
+      if (!controller.signal.aborted && mountedRef.current) {
+        // The command may have succeeded, but without a new heartbeat the UI
+        // cannot know. Render Unknown and say exactly what was not confirmed.
+        const observedDaemon = lastObserved?.daemon ?? daemon;
+        setJobs((previous) => previous?.map((entry) =>
+          cronJobKey(entry) === key
+            ? { ...entry, daemon: { ...observedDaemon, state: "unknown" } }
+            : entry
+        ) ?? null);
+        const detail = lastReadError
+          ? ` Last readback: ${lastReadError}.`
+          : ` Last heartbeat remained ${observedDaemon.last_ping_at ?? "missing"}.`;
+        setToggleError(
+          `${daemon.process_name} accepted ${action}, but a newer ${requestedState} heartbeat was not confirmed within 75 seconds.${detail}`,
+        );
+      }
+    } catch (error) {
+      if (!controller.signal.aborted && mountedRef.current) {
+        setToggleError(
+          `Couldn't confirm ${daemon.process_name}: ${(error as Error).message || "unknown"}.`,
+        );
+      }
+    } finally {
+      if (activeDaemonControlRef.current === controller) {
+        activeDaemonControlRef.current = null;
+        if (mountedRef.current) setPendingKey((current) => (current === key ? null : current));
+      }
     }
-    // Optimistic flip so the click reads as cause-and-effect. The bridge's
-    // next 60s heartbeat replaces this with a measured value; the refresh
-    // below pulls it as soon as one lands.
-    setJobs((prev) =>
-      prev?.map((j) =>
-        j.id === job.id
-          ? { ...j, daemon: { ...daemon, state: running ? "stopped" : "running", stale: false } }
-          : j,
-      ) ?? null,
-    );
-    setRecentlyToggled({ id: job.id, ts: Date.now() });
-    setTimeout(() => {
-      setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
-    }, 6_000);
-    setTimeout(() => { void refresh(); }, 5_000);
   }
 
   async function toggleEnabled(job: CronJob) {
@@ -355,7 +463,8 @@ export function CronJobsManager({ agentKeys }: Props) {
       return;
     }
     const next = !job.enabled;
-    setPendingId(job.id);
+    const key = cronJobKey(job);
+    setPendingKey(key);
     setToggleError(null);
     try {
       const res = await fetch(`/api/cron-jobs/${job.id}`, {
@@ -377,12 +486,12 @@ export function CronJobsManager({ agentKeys }: Props) {
       // returned that normalized row. Only now does the UI claim success.
       setJobs((prev) =>
         prev?.map((current) =>
-          current.id === job.id ? { ...current, ...persisted, daemon: current.daemon } : current,
+          cronJobKey(current) === key ? { ...current, ...persisted, daemon: current.daemon } : current,
         ) ?? null,
       );
-      setRecentlyToggled({ id: job.id, ts: Date.now() });
+      setRecentlyToggled({ key, ts: Date.now() });
       setTimeout(() => {
-        setRecentlyToggled((cur) => (cur?.id === job.id ? null : cur));
+        setRecentlyToggled((cur) => (cur?.key === key ? null : cur));
       }, 6_000);
     } catch (err) {
       // A network failure can happen after the server committed. Re-read the
@@ -392,15 +501,32 @@ export function CronJobsManager({ agentKeys }: Props) {
         `Couldn't ${next ? "enable" : "disable"} "${job.name}": ${(err as Error).message || "unknown"}.`,
       );
     } finally {
-      setPendingId((cur) => (cur === job.id ? null : cur));
+      setPendingKey((cur) => (cur === key ? null : cur));
     }
   }
 
-  async function deleteJob(id: string) {
+  async function deleteJob(job: CronJob) {
     if (!confirm("Delete this automation? This can't be undone.")) return;
-    const res = await fetch(`/api/cron-jobs/${id}`, { method: "DELETE" });
-    if (res.ok) {
-      setJobs((prev) => prev?.filter((j) => j.id !== id) ?? null);
+    const key = cronJobKey(job);
+    setPendingKey(key);
+    setToggleError(null);
+    try {
+      const result = await fetchJson<unknown>(`/api/cron-jobs/${job.id}`, { method: "DELETE" });
+      if (!result.ok) throw new Error(result.error);
+      if (result.status < 200 || result.status >= 300) throw new Error(`http_${result.status}`);
+      const body = result.data;
+      if (!body || typeof body !== "object" || Array.isArray(body) || (body as { ok?: unknown }).ok !== true) {
+        const error = body && typeof body === "object" && !Array.isArray(body)
+          && typeof (body as { error?: unknown }).error === "string"
+          ? String((body as { error: string }).error)
+          : `http_${result.status}`;
+        throw new Error(error);
+      }
+      setJobs((prev) => prev?.filter((current) => cronJobKey(current) !== key) ?? null);
+    } catch (error) {
+      setToggleError(`Couldn't delete "${job.name}": ${(error as Error).message || "unknown"}.`);
+    } finally {
+      setPendingKey((cur) => (cur === key ? null : cur));
     }
   }
 
@@ -426,7 +552,40 @@ export function CronJobsManager({ agentKeys }: Props) {
       {loadError && (
         <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-sm text-status-warm flex items-start gap-2">
           <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-          <span>Couldn&apos;t load automations: {loadError}</span>
+          <span className="flex-1">Couldn&apos;t load automations: {loadError}</span>
+          <button
+            type="button"
+            onClick={() => { void refresh(); }}
+            disabled={refreshing}
+            className="btn-secondary text-xs shrink-0"
+          >
+            {refreshing ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
+      {/*
+        An omission must never read as an inventory.
+
+        When the Empire lane is left out, the rows that remain are a complete,
+        valid, entirely plausible tenant list — which is precisely why the 4-of-41
+        outage was invisible for as long as it was. Nothing on the page said
+        "some of this is missing"; it said "this is all of it", and CC could not
+        tell that apart from every Empire schedule having been deleted. So the
+        server states its verdict and the page repeats it out loud. Deliberately
+        not styled as an error: for a client-tenant operator this is simply the
+        true scope of their workspace, and crying wolf at Matt on SunBiz every
+        load is how a real warning gets tuned out.
+      */}
+      {inventory && !inventory.empire_included && (
+        <div className="rounded-lg border border-dashed border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted flex items-start gap-2">
+          <HelpCircle className="w-4 h-4 mt-0.5 shrink-0 text-fg-dim" />
+          <span className="flex-1 leading-relaxed">
+            <span className="font-bold text-fg">Empire schedules are not shown.</span>{" "}
+            This session isn&apos;t recognized as the platform operator, so the list below
+            covers this workspace only — it is not the full automation inventory. If you
+            expected the Empire lane here, the signed-in address isn&apos;t the one
+            configured as the operator.
+          </span>
         </div>
       )}
       {toggleError && (
@@ -444,8 +603,8 @@ export function CronJobsManager({ agentKeys }: Props) {
         </div>
       )}
 
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-fg-muted">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs text-fg-muted space-y-0.5">
           {(() => {
             if (jobs === null) return "Loading…";
             if (jobs.length === 0) return "No automations yet.";
@@ -470,6 +629,11 @@ export function CronJobsManager({ agentKeys }: Props) {
             }
             return parts.join(" · ");
           })()}
+          {lastRefreshedAt && (
+            <div className="text-[10px] text-fg-dim">
+              Last refreshed {lastRefreshedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+            </div>
+          )}
         </div>
         <button
           type="button"
@@ -505,38 +669,24 @@ export function CronJobsManager({ agentKeys }: Props) {
         // Display copy comes from AGENT_GROUP_COPY for known agents;
         // unknown agent_keys get a title-cased fallback so the UI
         // doesn't silently swallow a typo.
-        const orderedKeys = (agentKeys || []).map((k) => k.toLowerCase());
-
-        const groups: Array<{
-          key: string;
-          label: string;
-          subLabel: string;
-          jobs: typeof jobs;
-        }> = orderedKeys.map((k) => {
-          const copy = AGENT_GROUP_COPY[k] || {
-            label: titleCase(k),
-            subLabel: "Tenant automations for this agent.",
-          };
+        const partitions = partitionCronJobsByOwner(jobs, agentKeys || []);
+        const groups = partitions.map((partition) => {
+          const copy = partition.key === "other"
+            ? {
+                label: "Other",
+                subLabel: "Automations not yet mapped to an agent",
+              }
+            : AGENT_GROUP_COPY[partition.key] || {
+                label: titleCase(partition.key),
+                subLabel: "Tenant automations for this agent.",
+              };
           return {
-            key: k,
+            key: partition.key,
             label: copy.label,
             subLabel: copy.subLabel,
-            jobs: jobs.filter((j) => (j.agent_key || "").toLowerCase().startsWith(k)),
+            jobs: partition.jobs,
           };
         });
-
-        const knownPrefixes = orderedKeys;
-        const orphanJobs = jobs.filter(
-          (j) => !knownPrefixes.some((k) => (j.agent_key || "").toLowerCase().startsWith(k)),
-        );
-        if (orphanJobs.length > 0) {
-          groups.push({
-            key: "other",
-            label: "Other",
-            subLabel: "Automations not yet mapped to an agent",
-            jobs: orphanJobs,
-          });
-        }
 
         return (
           <div className="space-y-6">
@@ -553,31 +703,32 @@ export function CronJobsManager({ agentKeys }: Props) {
                     No automations yet for this agent.
                   </div>
                 ) : (
-                  g.jobs.map((job) =>
-                    editingId === job.id ? (
+                  g.jobs.map((job) => {
+                    const key = cronJobKey(job);
+                    return editingKey === key ? (
                       <JobEditor
-                        key={job.id}
+                        key={key}
                         mode="edit"
                         job={job}
                         agentKeys={agentKeys}
-                        onCancel={() => setEditingId(null)}
+                        onCancel={() => setEditingKey(null)}
                         onSaved={() => {
-                          setEditingId(null);
+                          setEditingKey(null);
                           refresh();
                         }}
                       />
                     ) : (
                       <JobRow
-                        key={job.id}
+                        key={key}
                         job={job}
                         onToggle={() => toggleEnabled(job)}
-                        onEdit={() => job.source === "empire" ? undefined : setEditingId(job.id)}
-                        onDelete={() => job.source === "empire" ? undefined : deleteJob(job.id)}
-                        isPending={pendingId === job.id}
-                        justToggled={recentlyToggled?.id === job.id}
+                        onEdit={() => job.source === "empire" ? undefined : setEditingKey(key)}
+                        onDelete={() => job.source === "empire" ? undefined : deleteJob(job)}
+                        isPending={pendingKey === key}
+                        justToggled={recentlyToggled?.key === key}
                       />
-                    ),
-                  )
+                    );
+                  })
                 )}
               </div>
             ))}
@@ -620,8 +771,23 @@ function JobRow({
   const daemonUnknown = daemon !== null && daemon.state === "unknown";
   const ranOk = job.last_run_status === "success";
   const ranBad = job.last_run_status === "error";
-  // Card border telegraphs status at a glance: green if last run succeeded,
-  // warm if it errored, muted if disabled, neutral otherwise. Daemon-backed
+  // The stored result cannot say either way — a truncated `}` tail. Rendered
+  // without a verdict rather than inheriting the success tick it used to get by
+  // falling through the else.
+  const ranUnclear = job.last_run_status === "unknown";
+  // What the promised next fire actually means now that the clock has passed it.
+  // Daemon-backed rows are excluded by construction: their cron twin is parked,
+  // so its next_run_at is not a promise anyone made.
+  const nextRun = daemon
+    ? null
+    : describeNextRun({
+        nextRunAt: job.next_run_at,
+        schedule: job.schedule,
+        enabled: job.enabled,
+      });
+  const overdue = nextRun?.overdue === true;
+  // Card border telegraphs status at a glance: warm if it errored OR if it has
+  // silently stopped firing, muted if disabled, neutral otherwise. Daemon-backed
   // rows answer from the process instead — a stale scheduler-era error must
   // not paint a running setter red, and a parked flag must not grey it out.
   const borderClass = daemon
@@ -632,7 +798,7 @@ function JobRow({
         : "border-bg-border bg-bg-deep/40"
     : !job.enabled
       ? "border-bg-border bg-bg-deep/40 opacity-60"
-      : ranBad
+      : ranBad || overdue
         ? "border-status-warm/30 bg-status-warm/5"
         : ranOk
           ? "border-bg-border bg-bg-elev/30"
@@ -674,7 +840,7 @@ function JobRow({
               <ToggleLeft className="w-7 h-7 text-fg-dim group-hover:text-fg group-hover:scale-110 transition-all" />
             )}
             <span className={`text-[9px] uppercase tracking-wider font-bold ${isPending ? "text-accent" : daemonUnknown ? "text-fg-dim" : running ? "text-status-engaged" : "text-fg-faint"}`}>
-              {isPending ? (daemon ? "Working" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
+              {isPending ? (daemon ? "Confirming" : "Saving") : daemonUnknown ? "Unknown" : running ? "On" : "Off"}
             </span>
           </button>
         </div>
@@ -706,6 +872,11 @@ function JobRow({
             <span className="text-[10px] uppercase tracking-wider text-fg-dim">
               {job.action_type.replace(/_/g, " ")}
             </span>
+            {typeof job.unresolved_failures === "number" && job.unresolved_failures > 0 && (
+              <span className="text-[10px] font-bold text-status-warm border border-status-warm/40 bg-status-warm/10 rounded-full px-1.5 py-0.5">
+                {job.unresolved_failures} unresolved failure{job.unresolved_failures === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
           {daemon && <DaemonBanner daemon={daemon} />}
           {/* Prefer operator-friendly copy from lib/cron-descriptions
@@ -757,6 +928,8 @@ function JobRow({
                   <Check className="w-3.5 h-3.5 text-status-engaged" />
                 ) : ranBad ? (
                   <XCircle className="w-3.5 h-3.5 text-status-warm" />
+                ) : ranUnclear ? (
+                  <HelpCircle className="w-3.5 h-3.5 text-fg-dim" />
                 ) : (
                   <PlayCircle className="w-3.5 h-3.5 text-fg-dim" />
                 )}
@@ -770,7 +943,9 @@ function JobRow({
                       ? "Ran"
                       : ranBad
                         ? "Failed"
-                        : "Ran"}{" "}
+                        : ranUnclear
+                          ? "Ran, result unclear"
+                          : "Ran"}{" "}
                   {relativeTimeShort(job.last_run_at)}
                 </span>
                 <span className="text-fg-faint">·</span>
@@ -779,14 +954,16 @@ function JobRow({
             ) : (
               <span className="text-fg-faint">Not run yet</span>
             )}
-            {!daemon && job.next_run_at && (
-              <span className="inline-flex items-center gap-1.5 text-fg-muted">
-                <Clock className="w-3.5 h-3.5 text-fg-dim" />
-                <span>
-                  {job.enabled
-                    ? `Next ${formatNextRun(job.next_run_at)}`
-                    : `Stored next ${formatNextRun(job.next_run_at)} (paused)`}
-                </span>
+            {nextRun && job.next_run_at && (
+              <span
+                className={`inline-flex items-center gap-1.5 ${overdue ? "text-status-warm font-medium" : "text-fg-muted"}`}
+              >
+                {overdue ? (
+                  <AlertCircle className="w-3.5 h-3.5 text-status-warm" />
+                ) : (
+                  <Clock className="w-3.5 h-3.5 text-fg-dim" />
+                )}
+                <span>{nextRun.text}</span>
               </span>
             )}
           </div>
@@ -798,6 +975,7 @@ function JobRow({
             <button
               type="button"
               onClick={onEdit}
+              disabled={isPending}
               className="text-fg-dim hover:text-fg p-1.5 rounded hover:bg-bg-deep transition-colors"
               title="Edit"
             >
@@ -806,6 +984,7 @@ function JobRow({
             <button
               type="button"
               onClick={onDelete}
+              disabled={isPending}
               className="text-fg-dim hover:text-status-warm p-1.5 rounded hover:bg-bg-deep transition-colors"
               title="Delete"
             >
@@ -925,7 +1104,7 @@ function JobEditor({
   });
   const [schedule, setSchedule] = useState(job?.schedule || SCHEDULE_PRESETS[4].value);
   // JobEditor is only opened for tenant rows (gated in JobRow above), so
-  // job.action_type is always one of the four ActionType values here. Cast
+  // job.action_type is always one of the supported ActionType values here. Cast
   // is safe — empire rows never reach this code path.
   const [actionType, setActionType] = useState<ActionType>(
     (job?.action_type as ActionType) || "script_run",
@@ -1096,14 +1275,12 @@ function JobEditor({
               if (t === "script_run") setActionPayload({ script: "", args: [] });
               else if (t === "snapshot_run") setActionPayload({ snapshot: "" });
               else if (t === "webhook_post") setActionPayload({ url: "", body: {} });
-              else if (t === "agent_prompt") setActionPayload({ prompt: "" });
             }}
             className="input w-full text-sm"
           >
             <option value="script_run">Run a Python script (scripts/X.py)</option>
             <option value="snapshot_run">Run a snapshot (scripts/snapshots/X.py)</option>
             <option value="webhook_post">POST to a webhook URL</option>
-            <option value="agent_prompt">Fire an agent prompt (coming soon)</option>
           </select>
 
           {actionType === "script_run" && (
@@ -1167,13 +1344,6 @@ function JobEditor({
             </label>
           )}
 
-          {actionType === "agent_prompt" && (
-            <div className="text-[11px] text-status-warm bg-status-warm/5 border border-status-warm/30 rounded p-2">
-              Agent prompts from cron aren&apos;t wired yet (v1 limitation —
-              chat is an interactive surface). Use script_run with a Python
-              wrapper if you need a scheduled agent invocation.
-            </div>
-          )}
         </div>
       )}
 
