@@ -32,7 +32,19 @@ export type DripCheck = {
    * product they do not operate. Wrong-audience alerts are ignored alerts, and
    * an ignored alert is the same as no alert.
    */
-  lane?: TelegramLane;
+  /**
+   * One lane, or SEVERAL for a check that genuinely spans both companies.
+   *
+   * An ESTATE-WIDE check has no single owner. forms.submit_failures_open
+   * watches the dead-letter table, which its own comment calls estate-wide —
+   * "a blocked application is a blocked application" — and it deliberately
+   * ignores the tenantId the runner passes. Left undeclared it fell to the
+   * default lane, so an OASIS merchant's blocked submission re-asserted into
+   * SunBiz's channel every 15 minutes: Adon could not action it and CC, who
+   * could have recovered the prospect from the stored payload, never heard.
+   * Naming both lanes is the honest answer for a check that is honestly both.
+   */
+  lane?: TelegramLane | TelegramLane[];
   /** Observed value for a window ending at `endMs`. Returns null if the query
    *  itself failed — which evaluate() reports as check_broken, never as ok. */
   observe: (db: Db, tenantId: string, endMs: number) => Promise<number | null>;

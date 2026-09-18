@@ -57,8 +57,9 @@ type Db = ReturnType<typeof getServiceSupabase>;
  * Defaulting rather than requiring the field keeps every existing check on the
  * lane it already used, so this is additive: nothing reroutes by accident.
  */
-function laneFor(check: { lane?: TelegramLane }): TelegramLane {
-  return check.lane ?? "sunbiz-ops";
+function lanesFor(check: { lane?: TelegramLane | TelegramLane[] }): TelegramLane[] {
+  if (Array.isArray(check.lane)) return check.lane;
+  return [check.lane ?? "sunbiz-ops"];
 }
 
 const SEV_ICON: Record<string, string> = {
@@ -140,10 +141,15 @@ export async function runHealthChecks(
       // starts a fresh ladder rather than inheriting a 24h window.
       if (state?.first_failed_at) {
         recovered.push(result.id);
-        await sendTelegram(
-          `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
-          { lane: laneFor(check) },
-        ).catch(() => undefined);
+        // Recovery is announced to every lane that was told about the failure.
+        // Telling one team it is fixed while the other is still watching a red
+        // alert is how a resolved incident stays open.
+        for (const lane of lanesFor(check)) {
+          await sendTelegram(
+            `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
+            { lane },
+          ).catch(() => undefined);
+        }
         await db.from("health_alert_state").upsert({
           alert_key: key, tenant_id: tenantId, last_signature: null,
           last_alerted_at: state.last_alerted_at, repeat_n: 0, first_failed_at: null,
@@ -165,7 +171,14 @@ export async function runHealthChecks(
       `${SEV_ICON[result.verdict]} <b>${esc(result.verdict.toUpperCase())}</b> — ${esc(result.id)}\n` +
       `${esc(check.describe(result))}\n` +
       `<i>next check in 15 min · re-alerts in ${decision.windowH}h if still bad</i>`;
-    const sent = await sendTelegram(body, { lane: laneFor(check) }).catch(() => ({ ok: false }));
+    // Delivery counts as successful if ANY lane took it. The ladder exists to
+    // stop re-sending every 15 minutes; one reachable audience is enough for
+    // that, and the delivery self-test is what catches a dead channel.
+    let sent: { ok: boolean } = { ok: false };
+    for (const lane of lanesFor(check)) {
+      const r = await sendTelegram(body, { lane }).catch(() => ({ ok: false }));
+      if (r.ok) sent = { ok: true };
+    }
 
     // Record the alert attempt regardless of delivery. If Telegram is down we
     // must not spin re-sending every 15 minutes; the delivery self-test is the

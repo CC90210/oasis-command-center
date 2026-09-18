@@ -23,6 +23,14 @@ export const FORM_CHECKS: DripCheck[] = [
     // until recovered_at is set on every row.
     id: "forms.submit_failures_open",
     severity: "critical",
+    // BOTH lanes, because this check is estate-wide by design (see observe()
+    // below — it deliberately ignores tenantId). Undeclared it fell to the
+    // runner's default, SunBiz's lane, so an OASIS merchant's blocked
+    // submission re-asserted into the client's channel every 15 minutes while
+    // the person who could recover them never heard. The instant page from
+    // captureSubmitFailure now resolves its lane from the tenant; this is the
+    // re-assertion that has no tenant to resolve, so it tells everyone.
+    lane: ["operator", "sunbiz-ops"],
     rule: { kind: "must_be_zero" },
     // The dead-letter table is estate-wide (tenant_slug is advisory text from
     // the failure itself), so this check deliberately ignores the tenantId the

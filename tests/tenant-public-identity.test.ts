@@ -25,6 +25,7 @@ import {
 } from "@/lib/tenant/public-identity";
 import { TENANT_ID_BRAND, TENANT_SLUG_BRAND } from "@/lib/email/brand-for-tenant";
 import { DEFAULT_PRIMARY_COLOR, DEFAULT_ACCENT_COLOR } from "@/lib/forms/themes";
+import { FORM_CHECKS } from "@/lib/health/form-checks";
 
 const OASIS_TENANT = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const SUNBIZ_TENANT = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
@@ -159,5 +160,23 @@ for (const slug of Object.keys(TENANT_SLUG_BRAND)) {
 for (const tid of Object.keys(TENANT_ID_BRAND)) {
   assert.ok(publicIdentityForTenant({ tenantId: tid }), `mapped tenant ${tid} resolved to nothing`);
 }
+
+
+// ── an estate-wide health check may not page one company ───────────────────
+
+// forms.submit_failures_open watches the dead-letter table and DELIBERATELY
+// ignores tenantId ("a blocked application is a blocked application"). With no
+// lane declared it fell to the runner default — SunBiz's — so an OASIS
+// merchant's blocked submission re-asserted into the client's channel every 15
+// minutes. The instant page resolves its lane from the tenant; this re-assertion
+// has no tenant to resolve, so it must tell everyone.
+const openCheck = FORM_CHECKS.find((c) => c.id === "forms.submit_failures_open");
+assert.ok(openCheck, "forms.submit_failures_open is gone");
+assert.ok(
+  Array.isArray(openCheck.lane) &&
+    openCheck.lane.includes("operator") &&
+    openCheck.lane.includes("sunbiz-ops"),
+  "the estate-wide blocked-submission check pages only one company again",
+);
 
 console.log("tenant-public-identity: all assertions passed");
