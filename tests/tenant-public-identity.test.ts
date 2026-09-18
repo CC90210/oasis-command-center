@@ -179,4 +179,22 @@ assert.ok(
   "the estate-wide blocked-submission check pages only one company again",
 );
 
+
+// ── BOTH funnel routes resolve identity, not just one ──────────────────────
+
+// The anonymous route is what an operator pastes into Slack. The [lead_token]
+// route is the personalised link Solara mints and texts a merchant, and it is
+// where the full application and the bank-statement upload live. Fixing one and
+// not the other leaves the wrong mark on the more sensitive page — which is
+// exactly what happened on the first pass of this change.
+for (const route of [
+  "app/f/[tenant_slug]/[form_slug]/page.tsx",
+  "app/f/[tenant_slug]/[form_slug]/[lead_token]/page.tsx",
+]) {
+  const src = readFileSync(route, "utf8");
+  assert.match(src, /publicMarkForTenant\(/, route + " does not resolve the tenant logo");
+  assert.match(src, /faviconForTenant\(/, route + " does not resolve the tenant favicon");
+  assert.match(src, /icons: \{ icon \}/, route + " resolves a favicon but never emits it");
+}
+
 console.log("tenant-public-identity: all assertions passed");

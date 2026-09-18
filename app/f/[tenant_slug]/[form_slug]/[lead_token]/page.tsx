@@ -17,7 +17,7 @@ import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { verifyFormLink } from "@/lib/form-links";
 import { FormPublicClient } from "@/components/forms/FormPublicClient";
-import { publicMarkForTenant } from "@/lib/tenant/public-identity";
+import { publicMarkForTenant, faviconForTenant } from "@/lib/tenant/public-identity";
 import { consentBrandForTenant } from "@/lib/consent/brand-for-tenant";
 import {
   parseFormSteps,
@@ -43,9 +43,21 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { tenant_slug, form_slug } = await params;
   const title = decodeURIComponent(form_slug).replace(/-/g, " ");
+  // The tab belongs to the tenant here too — and this is the route that matters
+  // most for it. The anonymous link is what an operator pastes into Slack; THIS
+  // is the personalised link Solara mints and texts a merchant, and it is where
+  // the full application and the bank-statement upload live. Resolving the icon
+  // on the other route and not this one would have left the wrong mark on the
+  // most sensitive page in the flow, which is the page CC was worried about.
+  //
+  // Slug only: generateMetadata does not do the DB lookup that loadAndVerify
+  // does, and the slug map covers both of SunBiz's ("submissions" and the "sun"
+  // profile alias). Unmapped tenants keep the platform default.
+  const icon = faviconForTenant({ tenantSlug: tenant_slug });
   return {
     title: tenant_slug ? `${title} · ${tenant_slug}` : title,
     robots: { index: false, follow: false },
+    ...(icon ? { icons: { icon } } : {}),
   };
 }
 
