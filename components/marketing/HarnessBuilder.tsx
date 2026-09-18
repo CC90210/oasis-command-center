@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BODIES, ENGINES, PLATFORM } from "@/lib/marketing/harness";
 import { HOTSPOTS } from "@/lib/marketing/hotspots";
 import { AUDIT_FUNNEL } from "@/lib/marketing/routes";
@@ -79,6 +79,37 @@ export function HarnessBuilder() {
   const [pins, setPins] = useState<Pin[]>([]);
   const [focus, setFocus] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
+  /** The 3D stage can never run here — no WebGL, or the chunk 404'd. */
+  const [stageFailed, setStageFailed] = useState(false);
+  /**
+   * Can this client run the 3D stage at all? null until the probe runs, which
+   * is also the SSR value.
+   *
+   * Without this, EVERY visitor watched the old 2D blueprint cross-fade into a
+   * different-looking finished car: ~800ms on a fast desktop, 5.6 SECONDS on a
+   * mid-range phone. Long enough that most people formed their impression of
+   * the product from the placeholder. The SVG has to stay in the SSR output —
+   * it is the real artwork for no-JS and no-WebGL visitors — so the fix is not
+   * to delete it but to stop showing it to a client that is about to get the
+   * car.
+   */
+  const [webglOk, setWebglOk] = useState<boolean | null>(null);
+  /** Wall-clock guarantee that Ignite reaches the funnel. See the onClick. */
+  const launchGuard = useRef<number | null>(null);
+
+  useEffect(() => {
+    // Same probe CarStage uses, run once here so the placeholder can be hidden
+    // before three.js has even been requested.
+    try {
+      const probe = document.createElement("canvas");
+      setWebglOk(!!(probe.getContext("webgl2") || probe.getContext("webgl")));
+    } catch {
+      setWebglOk(false);
+    }
+    return () => {
+      if (launchGuard.current) window.clearTimeout(launchGuard.current);
+    };
+  }, []);
   const activeSpot = HOTSPOTS.find((h) => h.id === focus) ?? null;
 
   // setPins is called on every animation frame, so it must be referentially
@@ -116,8 +147,17 @@ export function HarnessBuilder() {
         <div className="relative mx-auto aspect-[5/4] w-full max-w-3xl sm:aspect-[16/9] lg:aspect-[2/1]">
           <svg
             viewBox="0 0 420 150"
-            className={`absolute inset-0 h-full w-full transition-opacity duration-700 ${
-              stageReady ? "opacity-0" : "opacity-70"
+            className={`absolute inset-0 h-full w-full transition-opacity duration-200 ${
+              // FINAL ARTWORK for anyone who will never get the car — full
+              // opacity, not a 70% ghost, because for them this IS the picture.
+              stageFailed || webglOk === false
+                ? "opacity-100"
+                : // Getting the car: never show the old drawing at all.
+                  webglOk === true || stageReady
+                  ? "opacity-0"
+                  : // SSR / probe not yet run. Visible so a no-JS visitor is
+                    // served something; this lasts one client render.
+                    "opacity-70"
             }`}
             role="img"
             aria-label={`The ${body.name} harness running the ${engine.name} engine on the OASIS platform`}
@@ -231,8 +271,11 @@ export function HarnessBuilder() {
             focus={focus}
             launch={launching}
             onLaunchComplete={() => {
+              // Beat the watchdog to it; both routes lead to the same place.
+              if (launchGuard.current) window.clearTimeout(launchGuard.current);
               window.location.href = AUDIT_FUNNEL.path;
             }}
+            onFail={() => setStageFailed(true)}
           />
 
           {/* Fade to black as the car leaves, so the hand-off to the funnel
@@ -400,7 +443,32 @@ export function HarnessBuilder() {
       <div className="border-t border-ops-line bg-ops-void/60 px-6 py-7 text-center sm:px-8">
         <button
           type="button"
-          onClick={() => setLaunching(true)}
+          onClick={() => {
+            // NAVIGATION MUST NOT DEPEND ON THE RENDER LOOP.
+            //
+            // onLaunchComplete fires from inside the animation frame counter.
+            // Anything that stops that loop — the stage scrolled off-screen, a
+            // device rendering below 60fps, a failed three chunk, a tab
+            // throttled in the background — means the callback never fires and
+            // the visitor sits on a black curtain with a 10px Skip link.
+            //
+            // The curtain is wall-clocked; the car is frame-counted. On a
+            // 22fps phone the screen is black 8.4s before the sequence is
+            // anywhere near done. This watchdog bounds the whole thing in real
+            // time: whatever happens to the animation, the funnel is reached.
+            // onLaunchComplete clears it, so a normal launch navigates once,
+            // and reduced-motion (which fires launchDone on the first frame)
+            // is not double-navigated.
+            if (stageFailed) {
+              window.location.href = AUDIT_FUNNEL.path;
+              return;
+            }
+            setLaunching(true);
+            if (launchGuard.current) window.clearTimeout(launchGuard.current);
+            launchGuard.current = window.setTimeout(() => {
+              window.location.href = AUDIT_FUNNEL.path;
+            }, LAUNCH_MS.total + 1000);
+          }}
           disabled={launching}
           className="group relative inline-flex items-center gap-3 border border-signal bg-signal/10 px-7 py-3.5 font-data text-[12px] uppercase tracking-[0.2em] text-fg transition-all duration-200 hover:bg-signal/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal disabled:cursor-wait"
         >

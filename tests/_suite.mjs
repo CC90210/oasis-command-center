@@ -224,6 +224,9 @@ const TESTS = [
   // instead of from the tenant in front of them, and the constant was always
   // the client's. Unlisted, this proves nothing.
   "tests/tenant-public-identity.test.ts",
+  // Ignite must reach the funnel whatever the frame loop does, and nobody
+  // should meet the product through the old 2D placeholder.
+  "tests/marketing-car-launch.test.ts",
   "tests/cron-result-shape-parity.test.ts",
   "tests/automation-overdue-schedule.test.ts",
   "tests/cron-owner-migration.test.ts",

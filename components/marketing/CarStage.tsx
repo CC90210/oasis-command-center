@@ -88,6 +88,14 @@ type Props = {
   launch?: boolean;
   /** Fires when the car has left frame, so the caller can navigate. */
   onLaunchComplete?: () => void;
+  /**
+   * Fires once when the 3D stage can never run — no WebGL, or the three chunk
+   * 404'd after a deploy. Distinct from "still loading": the caller should stop
+   * waiting, show the 2D diagram as the FINAL artwork rather than a ghosted
+   * placeholder, and navigate directly on Ignite instead of playing a curtain
+   * that has nothing behind it to finish.
+   */
+  onFail?: () => void;
 };
 
 /**
@@ -163,6 +171,7 @@ export function CarStage({
   focus,
   launch,
   onLaunchComplete,
+  onFail,
 }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const readyRef = useRef(onReady);
@@ -176,6 +185,12 @@ export function CarStage({
   launchRef.current = !!launch;
   const launchDoneRef = useRef(onLaunchComplete);
   launchDoneRef.current = onLaunchComplete;
+  // Called once when the 3D stage cannot run at all — no WebGL, or the three
+  // chunk failed to load. The caller needs to know, because the difference
+  // between "the car is still loading" and "there will never be a car" changes
+  // what it should show and whether Ignite can use the curtain.
+  const onFailRef = useRef(onFail);
+  onFailRef.current = onFail;
   // Latest selection, readable from inside the animation loop without
   // tearing it down and rebuilding on every click.
   const sel = useRef({ bodyId, engineId, engineColor, dirtyBody: true, dirtyEngine: false });
@@ -196,15 +211,37 @@ export function CarStage({
     let cleanup: (() => void) | undefined;
 
     (async () => {
-      // WebGL check before paying for the import.
+      // WebGL check before paying for the import. A miss is reported, not
+      // swallowed: the caller keeps the 2D diagram at full opacity (it is the
+      // final artwork for this visitor, not a placeholder) and makes Ignite a
+      // plain navigation with no curtain to get stuck behind.
       try {
         const probe = document.createElement("canvas");
-        if (!probe.getContext("webgl2") && !probe.getContext("webgl")) return;
+        if (!probe.getContext("webgl2") && !probe.getContext("webgl")) {
+          onFailRef.current?.();
+          return;
+        }
       } catch {
+        onFailRef.current?.();
         return;
       }
 
-      const THREE = await import("three");
+      // A failed chunk must not strand the page. After a deploy, a browser
+      // holding the previous build's HTML requests a hashed chunk that no
+      // longer exists and gets a 404 — with a bare `await import` that
+      // rejection escaped into an unhandled promise, the scene never built,
+      // the 2D blueprint stayed up for the whole session, and pressing Ignite
+      // went to a permanent black curtain because nothing was left running to
+      // finish it. Same shape as the no-WebGL early return above, which is why
+      // both now report through onFail rather than returning silently.
+      let THREE: typeof import("three");
+      try {
+        THREE = await import("three");
+      } catch (err) {
+        console.error("[CarStage] three.js chunk failed to load", err);
+        if (!disposed) onFailRef.current?.();
+        return;
+      }
       if (disposed) return;
 
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -2146,7 +2183,21 @@ export function CarStage({
       let announced = false;
       const tick = () => {
         raf = requestAnimationFrame(tick);
-        if (!visible) return;
+        // Idle when off-screen — EXCEPT while a launch is in flight.
+        //
+        // This was `if (!visible) return`. Reaching the Ignite button means
+        // scrolling down, which pushes the stage off-screen, so the launch
+        // sequence stopped advancing the moment it was started. The curtain is
+        // wall-clocked and the car is frame-counted, so the screen went fully
+        // black after ~5.35s and stayed black forever: no car, no navigation,
+        // no error, just a 10px "Skip" link on black. That is CC's first
+        // screenshot, and it is the default outcome for anyone who scrolls to
+        // the button rather than clicking it from the top of the section.
+        //
+        // The battery saving is the reason the gate exists and it is kept: at
+        // rest, off-screen, nothing renders. A launch is the one state where
+        // finishing matters more than idling, and it lasts six seconds.
+        if (!visible && launchFrame === 0 && !launchRef.current) return;
 
         if (sel.current.dirtyBody) {
           sel.current.dirtyBody = false;
