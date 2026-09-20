@@ -30,6 +30,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { pendingRecoveryLanes } from "../lib/health/runner";
+import { DEPLOY_CHECKS } from "../lib/health/deploy-checks";
+import { evaluate } from "../lib/health/checks-core";
 
 const RUNNER = readFileSync("lib/health/runner.ts", "utf8");
 
@@ -177,6 +179,94 @@ assert.match(
   /\.eq\("check_id", "alerting\.telegram_delivery"\)/,
   "the alerting check no longer reads the rows it exists to read",
 );
+
+// ── and the reader is exercised, not merely declared ───────────────────────
+
+// The assertions above are greps: they prove the check EXISTS. That is exactly
+// the weak form that let the favicon fix ship inert — every assertion about it
+// was true and the thing still did nothing. So drive the real observe() and
+// assert the query it actually builds.
+//
+// (A second copy of this stub lives in tests/extraction-queue-stalled.test.ts.
+// Two copies is not yet a shared helper; a third use is when to extract it.)
+function recordingDb(result: { count?: number; error?: { message: string } }) {
+  const calls: { fn: string; args: unknown[] }[] = [];
+  const builder: Record<string, unknown> = {};
+  for (const fn of ["select", "eq", "in", "lt", "gte", "gt", "lte", "order", "limit"]) {
+    builder[fn] = (...args: unknown[]) => {
+      calls.push({ fn, args });
+      return builder;
+    };
+  }
+  builder.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result).then(resolve);
+  return {
+    db: {
+      from: (table: string) => {
+        calls.push({ fn: "from", args: [table] });
+        return builder;
+      },
+    },
+    calls,
+  };
+}
+
+const TENANT = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+const NOW = Date.parse("2026-09-19T12:00:00.000Z");
+
+async function main() {
+  const alerting = DEPLOY_CHECKS.find((c) => c.id === "alerting.delivery_failures");
+  assert.ok(alerting, "alerting.delivery_failures is not in DEPLOY_CHECKS — it runs nowhere");
+
+  {
+    const { db, calls } = recordingDb({ count: 0 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const observed = await alerting!.observe(db as any, TENANT, NOW);
+    assert.equal(observed, 0, "a clean window must read as zero, not null");
+
+    assert.deepEqual(
+      calls.find((c) => c.fn === "from")?.args,
+      ["health_check_runs"],
+      "the alerting check reads the wrong table",
+    );
+    assert.ok(
+      calls.some((c) => c.fn === "eq" && c.args[0] === "check_id" && c.args[1] === "alerting.telegram_delivery"),
+      "the check no longer filters to the delivery-failure rows — it would count every health row ever written",
+    );
+    assert.ok(
+      calls.some((c) => c.fn === "eq" && c.args[0] === "tenant_id" && c.args[1] === TENANT),
+      "the alerting check is not scoped to the tenant it was given",
+    );
+    // Bounded, unlike the stall check. A delivery failure from last month is
+    // history; this one must be able to go green once the channel is repaired,
+    // or nobody will believe it when it goes red.
+    const since = calls.find((c) => c.fn === "gte" && c.args[0] === "ran_at");
+    assert.ok(since, "the alerting check looks back forever — it can never recover to green");
+    assert.equal(
+      NOW - Date.parse(since!.args[1] as string),
+      6 * 3_600_000,
+      "the alerting window moved off 6h",
+    );
+  }
+
+  {
+    const { db } = recordingDb({ error: { message: "turso unreachable" } });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const observed = await alerting!.observe(db as any, TENANT, NOW);
+    assert.equal(observed, null, "a failed query must not read as 'no delivery failures'");
+    assert.equal(
+      evaluate(alerting!.id, alerting!.rule, observed, []).verdict,
+      "check_broken",
+      "a check that could not run must never read as ok",
+    );
+  }
+
+  assert.equal(evaluate(alerting!.id, alerting!.rule, 0, []).verdict, "ok");
+  assert.equal(
+    evaluate(alerting!.id, alerting!.rule, 1, []).verdict,
+    "failing",
+    "one undelivered page is already an audience hearing nothing",
+  );
+}
 assert.match(
   DEPLOY_CHECKS_SRC,
   /id: "alerting\.delivery_failures"[\s\S]{0,900}lane: \["operator", "sunbiz-ops"\]/,
@@ -191,4 +281,10 @@ assert.match(
   "deploy.prod_serves_main inherits the default lane again — an estate-wide fault paging one company",
 );
 
-console.log("health-recovery-delivery: all assertions passed");
+main().then(
+  () => console.log("health-recovery-delivery: all assertions passed"),
+  (err) => {
+    console.error(err);
+    process.exit(1);
+  },
+);
