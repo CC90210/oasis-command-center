@@ -130,8 +130,65 @@ assert.doesNotMatch(
 );
 assert.match(
   RUNNER,
-  /reason: `could not deliver the \$\{result\.id\} alert to \$\{rejected\.join\(", "\)\}`/,
+  /could not deliver the \$\{result\.id\} alert to \$\{rejected\.join\(", "\)\}/,
   "the delivery-failure row no longer names the lanes that rejected it",
+);
+
+// ── a refused lane is recorded even when another lane accepted ──────────────
+
+// This was `if (!sent.ok)`. With ONE lane the two conditions are the same
+// sentence; with two they are not. The 2026-08-07 outage was exactly one dead
+// lane while the other kept working, so `sent.ok` stayed true and the dead lane
+// left no trace anywhere. The audience that heard nothing is the audience whose
+// silence needs recording.
+assert.doesNotMatch(
+  RUNNER,
+  /if \(!sent\.ok\) \{/,
+  "a lane that refused is recorded again only when EVERY lane refused — a single dead lane goes untraced",
+);
+assert.match(
+  RUNNER,
+  /if \(rejected\.length\) \{/,
+  "the delivery-failure row is no longer written whenever a lane refuses",
+);
+// "one of two lanes is down" and "the alert reached nobody" are different
+// incidents with different urgency. A reader at 2am must not have to infer it.
+assert.match(
+  RUNNER,
+  /sent\.ok[\s\S]{0,200}another lane took it[\s\S]{0,200}NO lane took it/,
+  "the row no longer says whether ANY lane heard the alert",
+);
+
+// ── and something actually READS those rows ────────────────────────────────
+
+// Three comments in runner.ts call this row the backstop that turns a dead
+// channel into an alert of its own. It was not: `alerting.telegram_delivery`
+// appeared in no check list, so the rows piled up in a table nobody graded. A
+// guarantee asserted in a comment and enforced by nothing is worse than no
+// guarantee, because it gets believed.
+const DEPLOY_CHECKS_SRC = readFileSync("lib/health/deploy-checks.ts", "utf8");
+assert.match(
+  DEPLOY_CHECKS_SRC,
+  /id: "alerting\.delivery_failures"/,
+  "nothing grades the telegram_delivery rows again — the documented backstop does not exist",
+);
+assert.match(
+  DEPLOY_CHECKS_SRC,
+  /\.eq\("check_id", "alerting\.telegram_delivery"\)/,
+  "the alerting check no longer reads the rows it exists to read",
+);
+assert.match(
+  DEPLOY_CHECKS_SRC,
+  /id: "alerting\.delivery_failures"[\s\S]{0,900}lane: \["operator", "sunbiz-ops"\]/,
+  "the alerting check no longer names both lanes — whichever audience can still be reached must hear it",
+);
+// Production serving the wrong commit is estate-wide; it had been inheriting
+// the runner's sunbiz-ops default, so an OASIS-only regression would have
+// paged the client's ops channel and nobody else.
+assert.match(
+  DEPLOY_CHECKS_SRC,
+  /id: "deploy\.prod_serves_main"[\s\S]{0,700}lane: \["operator", "sunbiz-ops"\]/,
+  "deploy.prod_serves_main inherits the default lane again — an estate-wide fault paging one company",
 );
 
 console.log("health-recovery-delivery: all assertions passed");

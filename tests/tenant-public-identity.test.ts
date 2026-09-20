@@ -13,7 +13,7 @@
  * rather than naming brands.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   publicIdentityForTenant,
@@ -155,7 +155,18 @@ for (const slug of Object.keys(TENANT_SLUG_BRAND)) {
   assert.ok(id.displayName, `${slug} has no display name`);
   assert.ok(id.accent, `${slug} has no accent colour`);
   assert.ok(notifyLanesForTenant({ tenantSlug: slug }).length === 1, `${slug} is ambiguous`);
-  assert.ok(safeLandingForTenant({ tenantSlug: slug }), `${slug} has no landing page`);
+  // A landing page is required of every brand that HAS a public funnel, and
+  // Bluerise does not — it is an email brand. The rule being pinned is not
+  // "everyone gets a door" but "nobody gets SOMEBODY ELSE'S door": a brand with
+  // no funnel resolves to null and the caller sends the visitor to the neutral
+  // page. Asserting a landing for every slug is what would push bluerise back
+  // onto SunBiz Funding's intake form.
+  const landing = safeLandingForTenant({ tenantSlug: slug });
+  if (id.brand === "bluerise") {
+    assert.equal(landing, null, `${slug} is a Bluerise tenant and was given a funnel that is not its own`);
+  } else {
+    assert.ok(landing, `${slug} has no landing page`);
+  }
 }
 for (const tid of Object.keys(TENANT_ID_BRAND)) {
   assert.ok(publicIdentityForTenant({ tenantId: tid }), `mapped tenant ${tid} resolved to nothing`);
@@ -195,6 +206,85 @@ for (const route of [
   assert.match(src, /publicMarkForTenant\(/, route + " does not resolve the tenant logo");
   assert.match(src, /faviconForTenant\(/, route + " does not resolve the tenant favicon");
   assert.match(src, /icons: \{ icon \}/, route + " resolves a favicon but never emits it");
+}
+
+// ── the per-tenant icon must actually be able to win ───────────────────────
+
+// A FILE-BASED ICON IS NOT OVERRIDABLE. Next discovers app/favicon.ico and
+// unshifts it ahead of whatever a route's generateMetadata returns, so the
+// per-tenant icon loses: production emitted OASIS's favicon first, with the
+// more specific sizes/type, then SunBiz's, and the browser took the first.
+// Every assertion above passed the whole time. Declared as layout config it is
+// a DEFAULT a route can replace; the file moves to public/, same URL.
+assert.ok(
+  !existsSync("app/favicon.ico"),
+  "app/favicon.ico is back — a file-based icon outranks every per-tenant icon and silently reverts all of the above",
+);
+assert.ok(existsSync("public/favicon.ico"), "public/favicon.ico is missing — /favicon.ico now 404s estate-wide");
+assert.match(
+  readFileSync("app/layout.tsx", "utf8"),
+  /icons: \{ icon: "\/favicon\.ico" \}/,
+  "the default icon is no longer declared in the root layout — pages with no tenant lost their favicon",
+);
+
+// ── brand, not company ─────────────────────────────────────────────────────
+
+// BRAND_COMPANY maps bluerise -> sunbiz, which is right for "whose ops lane
+// owns this incident" and wrong for "whose front door is this". Branching on
+// company put a Bluerise prospect in SunBiz Funding's tab and on SunBiz
+// Funding's intake form: the same hand-off to another company this module
+// exists to prevent, one level up the map.
+{
+  const bluerise = Object.entries(TENANT_ID_BRAND)
+    .filter(([, brand]) => brand === "bluerise")
+    .map(([tenantId]) => tenantId);
+  for (const tenantId of bluerise) {
+    assert.equal(
+      faviconForTenant({ tenantId }),
+      null,
+      "a Bluerise tenant wears SunBiz Funding's mark in the browser tab",
+    );
+    assert.equal(
+      safeLandingForTenant({ tenantId }),
+      null,
+      "a Bluerise prospect is handed to SunBiz Funding's intake form",
+    );
+  }
+}
+const IDENTITY_SRC = readFileSync("lib/tenant/public-identity.ts", "utf8");
+for (const fn of ["safeLandingForTenant", "faviconForTenant"]) {
+  const body = IDENTITY_SRC.split(`export function ${fn}`)[1]?.split("\n}")[0] ?? "";
+  assert.doesNotMatch(
+    body,
+    /companyForTenant\(/,
+    `${fn} branches on company again — bluerise collapses into sunbiz and wears its identity`,
+  );
+}
+
+// ── the neutral landing belongs to nobody ──────────────────────────────────
+
+// The first fix pointed this at APP_BASE. oasisai.work IS OASIS AI's marketing
+// site, so a SunBiz merchant with a dead link landed on another company's
+// pitch — the same leak, pointing the other way.
+const CLICK_SRC = readFileSync("app/api/track/click/[id]/route.ts", "utf8");
+assert.match(
+  CLICK_SRC,
+  /const NEUTRAL_LANDING = `\$\{APP_BASE\}\/link-expired`/,
+  "the unresolvable click lands on a company's own site again",
+);
+assert.ok(
+  existsSync("app/link-expired/page.tsx"),
+  "the neutral landing page does not exist — every unresolvable click 404s",
+);
+// Only what RENDERS. The file's own comment explains which company's site the
+// old target belonged to, and that explanation is the reason the page exists.
+const EXPIRED_SRC = readFileSync("app/link-expired/page.tsx", "utf8");
+const EXPIRED_RENDERED = EXPIRED_SRC.slice(EXPIRED_SRC.indexOf("return ("));
+for (const forbidden of ["OASIS", "SunBiz", "Blue Rise", "oasis-logo", "sunbiz-logo", "<img"]) {
+  assert.ok(
+    !EXPIRED_RENDERED.includes(forbidden),
+    `the neutral landing page renders ${forbidden} — it belongs to neither company`,
+  );
 }
 
 console.log("tenant-public-identity: all assertions passed");
