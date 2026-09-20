@@ -258,6 +258,7 @@ const TESTS = [
   "tests/form-submit-failure-capture.test.ts",
   "tests/deploy-serves-main.test.ts",
   "tests/telegram-lane-fallback.test.ts",
+  "tests/health-recovery-delivery.test.ts",
   "tests/rep-line-isolation.test.ts",
   "tests/email-drip-health.test.ts",
   "tests/ai-wire.test.ts",

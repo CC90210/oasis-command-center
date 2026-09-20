@@ -110,6 +110,20 @@ export function HarnessBuilder() {
       if (launchGuard.current) window.clearTimeout(launchGuard.current);
     };
   }, []);
+
+  // A STAGE THAT DIES AFTER IGNITE WAS PRESSED.
+  //
+  // The click reads stageFailed once, at click time. If the three.js chunk
+  // 404s while the curtain is already falling, that read happened seconds ago
+  // and nothing re-checks it: the visitor waits out the entire watchdog behind
+  // a black screen for a car that is never going to arrive. The watchdog does
+  // bound it, but bounding a pointless wait is not the same as not serving it.
+  useEffect(() => {
+    if (!launching || !stageFailed) return;
+    if (launchGuard.current) window.clearTimeout(launchGuard.current);
+    window.location.href = AUDIT_FUNNEL.path;
+  }, [launching, stageFailed]);
+
   const activeSpot = HOTSPOTS.find((h) => h.id === focus) ?? null;
 
   // setPins is called on every animation frame, so it must be referentially

@@ -81,6 +81,15 @@ assert.match(
   /if \(stageFailed\) \{\s*window\.location\.href = AUDIT_FUNNEL\.path;/,
   "a failed stage still runs the curtain on Ignite",
 );
+// The click reads stageFailed ONCE. A chunk that 404s after the curtain is
+// already falling leaves that read seconds stale, and the visitor waits out the
+// whole watchdog behind a black screen for a car that is never coming. The
+// watchdog bounds that wait; it does not make serving it correct.
+assert.match(
+  builder,
+  /if \(!launching \|\| !stageFailed\) return;[\s\S]{0,160}window\.location\.href = AUDIT_FUNNEL\.path;/,
+  "a stage that dies mid-launch no longer short-circuits — the visitor sits out the full watchdog on a black screen",
+);
 
 // ── the old 2D car is not shown to someone about to get the real one ───────
 
