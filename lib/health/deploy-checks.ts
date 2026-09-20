@@ -27,10 +27,64 @@ import {
   isProductionRuntime,
 } from "./runtime-environment";
 
+/** How far back the alerting check looks for undelivered pages. */
+const DELIVERY_WINDOW_MS = 6 * 3_600_000;
+
 export const DEPLOY_CHECKS: DripCheck[] = [
+  {
+    /**
+     * Somebody has to read the rows that say the alert channel is broken.
+     *
+     * `runner.ts` writes an `alerting.telegram_delivery` row every time a lane
+     * refuses a page, on the DATABASE path, precisely so a dead channel cannot
+     * hide behind itself. Three separate comments in that file describe this as
+     * the backstop that turns a dead lane into an alert of its own.
+     *
+     * It was not. Nothing read those rows. `alerting.telegram_delivery`
+     * appeared in no check list, so the rows accumulated in a table nobody
+     * graded — a guarantee asserted in a comment and enforced by nothing,
+     * which is worse than no guarantee, because it was believed.
+     *
+     * This is the reader. It is not circular: one lane dying is caught by the
+     * other, and the run summary is in the database either way.
+     */
+    id: "alerting.delivery_failures",
+    severity: "critical",
+    rule: { kind: "must_be_zero" },
+    // Both lanes. A delivery failure is about the alerting system itself, and
+    // whichever audience CAN still be reached is the one that must hear it.
+    lane: ["operator", "sunbiz-ops"],
+    observe: async (db, tenantId, endMs) => {
+      try {
+        const r = await db
+          .from("health_check_runs")
+          .select("id", { count: "exact", head: true })
+          .eq("tenant_id", tenantId)
+          .eq("check_id", "alerting.telegram_delivery")
+          .gte("ran_at", new Date(endMs - DELIVERY_WINDOW_MS).toISOString())
+          .lt("ran_at", new Date(endMs).toISOString());
+        if (r.error) return null;
+        return r.count ?? 0;
+      } catch {
+        return null;
+      }
+    },
+    describe: (r) =>
+      `${r.observed} page(s) in the last 6h could not be delivered to at least one lane. ` +
+      `Read the \`reason\` column of health_check_runs where check_id = ` +
+      `'alerting.telegram_delivery': it names the lanes that refused and says whether ` +
+      `ANY lane took the message. A lane that keeps refusing is usually the bot removed ` +
+      `from that chat — Telegram gives a bot no way to re-add itself, so a human must. ` +
+      `Until then every alert for that audience is being written to a table and to nobody.`,
+  },
   {
     id: "deploy.prod_serves_main",
     severity: "critical",
+    // Estate-wide: production serving the wrong commit affects every company
+    // on the platform, not the one whose tenant happened to be graded. It had
+    // been inheriting the runner's sunbiz-ops default, so an OASIS-only
+    // regression would have paged the client's ops channel and nobody else.
+    lane: ["operator", "sunbiz-ops"],
     rule: { kind: "must_be_zero" },
     // Env is read at OBSERVE time, not module load, so tests can vary it and
     // a long-lived process cannot capture a stale value.

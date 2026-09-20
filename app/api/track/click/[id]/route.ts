@@ -43,15 +43,22 @@ const APP_BASE = (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(
 /**
  * Where an untrusted click lands when we cannot tell whose it was.
  *
- * The platform's own front door — nobody's intake form. This replaced
+ * Nobody's intake form and nobody's sales page. This replaced
  * `SAFE_DEFAULT = ${APP_BASE}/f/submissions/initial-lead-capture`, which sent
  * EVERY tenant's unresolvable click to SunBiz. "Safe" meant "a first-party page
  * that exists", and on a single-tenant platform that was true; once a second
  * company shared the platform it meant "hand this visitor to the other
- * company". A tenant-owned landing is resolved per click below; this constant
- * is only for the case where even the tenant is unknown.
+ * company".
+ *
+ * The first replacement was `APP_BASE` itself, and that was still wrong:
+ * oasisai.work IS OASIS AI's marketing site, so a SunBiz merchant with a dead
+ * link landed on another company's pitch. The same leak, pointing the other
+ * way. /link-expired belongs to neither company and sells nothing.
+ *
+ * A tenant-owned landing is resolved per click below; this constant is only
+ * for the case where even the tenant is unknown.
  */
-const NEUTRAL_LANDING = APP_BASE;
+const NEUTRAL_LANDING = `${APP_BASE}/link-expired`;
 // Hosts we redirect to WITHOUT a valid signature (first-party surfaces only).
 //
 // The configured drip tracking host is included (2026-07-29) because drip mail

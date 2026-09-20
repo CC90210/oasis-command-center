@@ -258,7 +258,15 @@ export async function runHealthChecks(
       updated_at: new Date(nowMs).toISOString(),
     }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
 
-    if (!sent.ok) {
+    // RECORDED WHENEVER A LANE REFUSED, not only when EVERY lane refused.
+    //
+    // This used to be `if (!sent.ok)`. With one lane the two conditions were
+    // the same sentence. With two they are not: the 2026-08-07 outage was
+    // exactly one dead lane (@KnutRPEbot kicked from the sunbiz-ops group)
+    // while the other kept working, so `sent.ok` stayed true and the dead lane
+    // left no trace at all. The audience that heard nothing is the audience
+    // whose silence needs recording.
+    if (rejected.length) {
       // THE ALERT CHANNEL IS A SINGLE POINT OF FAILURE (2026-06-30 audit,
       // finding #1) and on 2026-08-07 it was genuinely down: @KnutRPEbot had
       // been kicked from the sunbiz-ops group, so every alert returned 403 and
@@ -286,7 +294,15 @@ export async function runHealthChecks(
         // "the sunbiz-ops lane" unconditionally — the same defect as the rest
         // of this branch: a lane constant standing in for a lane decision. It
         // sent whoever read the row looking at the wrong chat.
-        reason: `could not deliver the ${result.id} alert to ${rejected.join(", ")}`.slice(0, 500),
+        // Name the lanes, and say whether ANYONE heard it. "one of two lanes
+        // is down" and "the alert reached nobody" are different incidents with
+        // different urgency, and a reader at 2am should not have to infer
+        // which one this row is.
+        reason: (
+          sent.ok
+            ? `could not deliver the ${result.id} alert to ${rejected.join(", ")} (another lane took it)`
+            : `could not deliver the ${result.id} alert to ${rejected.join(", ")} — NO lane took it`
+        ).slice(0, 500),
         ran_at: new Date(nowMs).toISOString(),
       }).then(() => undefined, () => undefined);
     }

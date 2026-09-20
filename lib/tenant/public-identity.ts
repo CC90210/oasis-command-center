@@ -158,9 +158,16 @@ export function notifyLanesForTenant(ref: TenantRef): TelegramLane[] {
  * company, and the row they create pollutes that company's pipeline.
  */
 export function safeLandingForTenant(ref: TenantRef): string | null {
-  const company = companyForTenant(ref);
-  if (company === "sunbiz") return "/f/submissions/initial-lead-capture";
-  if (company === "oasis") return "/f/oasis-ai-cc/ai-audit";
+  // BRAND, not company. BRAND_COMPANY maps bluerise -> sunbiz, which is right
+  // for "whose ops lane owns this incident" and wrong for "whose front door is
+  // this". Branching on company here lands a Bluerise prospect on SunBiz
+  // Funding's intake form — the same hand-off to another company this function
+  // exists to prevent, one level up the map.
+  const brand = publicIdentityForTenant(ref)?.brand;
+  if (brand === "sunbiz") return "/f/submissions/initial-lead-capture";
+  if (brand === "oasis") return "/f/oasis-ai-cc/ai-audit";
+  // bluerise has no public funnel of its own. Null sends the visitor to the
+  // neutral page, which is correct: no door is better than the wrong door.
   return null;
 }
 
@@ -171,12 +178,16 @@ export function safeLandingForTenant(ref: TenantRef): string | null {
  * OASIS AI's mark in the browser tab, and vice versa.
  */
 export function faviconForTenant(ref: TenantRef): string | null {
-  const company = companyForTenant(ref);
+  // BRAND, not company — see safeLandingForTenant. bluerise maps to company
+  // sunbiz, and a Bluerise prospect wearing SunBiz Funding's mark in the tab
+  // is the leak this module exists to close, not an acceptable approximation.
+  const brand = publicIdentityForTenant(ref)?.brand;
   // Both assets are verified present in public/ — a favicon that 404s is worse
   // than the platform default, because the browser shows a broken-page glyph
   // rather than falling back. sunbiz-logo.png is the square brand mark and
   // works as an icon; when SunBiz ships a dedicated .ico, point this at it.
-  if (company === "sunbiz") return "/brand/sunbiz-logo.png";
-  if (company === "oasis") return "/favicon.ico";
+  if (brand === "sunbiz") return "/brand/sunbiz-logo.png";
+  if (brand === "oasis") return "/favicon.ico";
+  // bluerise has no icon asset. Null means the platform default, not sunbiz's.
   return null;
 }

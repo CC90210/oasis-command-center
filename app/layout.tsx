@@ -47,6 +47,19 @@ export const metadata: Metadata = {
   title: "Command Center",
   description:
     "The operating system for your AI agents. Outbound, inbound, decisions, pipeline, and the daily ops plan — all in one place.",
+  // THE DEFAULT ICON IS DECLARED HERE, NOT AS app/favicon.ico.
+  //
+  // A file-based icon is not overridable. Next discovers app/favicon.ico and
+  // UNSHIFTS it ahead of whatever a route's generateMetadata returns, so a
+  // per-tenant icon loses to it: SunBiz's bank-statement upload emitted
+  // OASIS's favicon first, with the more specific sizes/type, and then
+  // SunBiz's — and the browser took the first. #454 added the per-tenant icon
+  // and this is why it did nothing in production.
+  //
+  // Declared as config it is a DEFAULT: a route that returns its own `icons`
+  // replaces it outright. Moving the file to public/ keeps the same URL, so
+  // nothing that links /favicon.ico changes.
+  icons: { icon: "/favicon.ico" },
 };
 
 export default async function RootLayout({
