@@ -29,6 +29,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { safeLandingForTenant } from "@/lib/tenant/public-identity";
 import { getClientIp } from "@/lib/api-helpers";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
@@ -39,8 +40,18 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const APP_BASE = (process.env.PUBLIC_APP_URL || "https://oasisai.work").replace(/\/+$/, "");
-// Where an untrusted / missing target lands — a safe first-party page.
-const SAFE_DEFAULT = `${APP_BASE}/f/submissions/initial-lead-capture`;
+/**
+ * Where an untrusted click lands when we cannot tell whose it was.
+ *
+ * The platform's own front door — nobody's intake form. This replaced
+ * `SAFE_DEFAULT = ${APP_BASE}/f/submissions/initial-lead-capture`, which sent
+ * EVERY tenant's unresolvable click to SunBiz. "Safe" meant "a first-party page
+ * that exists", and on a single-tenant platform that was true; once a second
+ * company shared the platform it meant "hand this visitor to the other
+ * company". A tenant-owned landing is resolved per click below; this constant
+ * is only for the case where even the tenant is unknown.
+ */
+const NEUTRAL_LANDING = APP_BASE;
 // Hosts we redirect to WITHOUT a valid signature (first-party surfaces only).
 //
 // The configured drip tracking host is included (2026-07-29) because drip mail
@@ -67,29 +78,40 @@ function hashIp(ip: string | null): string | null {
   return "h" + (h >>> 0).toString(16);
 }
 
-/** Resolve + validate the redirect target. Fail-closed to SAFE_DEFAULT. */
-function resolveTarget(req: NextRequest): string {
+/**
+ * Resolve + validate the redirect target, or null when it cannot be trusted.
+ *
+ * Returns null rather than a landing page. Choosing WHERE an untrusted click
+ * lands is a tenant decision and this function does not know the tenant — it
+ * only knows whether the URL is trustworthy. It used to answer SAFE_DEFAULT,
+ * which was hardcoded to SunBiz's intake form, so any tenant's unresolvable
+ * click was handed to SunBiz: an OASIS prospect landed on a funding
+ * application, saw a company they had never contacted, and any row they created
+ * polluted the client's pipeline with OASIS's audience. The caller resolves the
+ * landing from the tenant on the lead_interactions row it already looks up.
+ */
+function resolveTarget(req: NextRequest): string | null {
   const u = req.nextUrl.searchParams.get("u") || "";
   const s = req.nextUrl.searchParams.get("s") || "";
-  if (!u) return SAFE_DEFAULT;
+  if (!u) return null;
   let decoded: string;
   try {
     decoded = b64urlDecode(u);
   } catch {
-    return SAFE_DEFAULT;
+    return null;
   }
   let parsed: URL;
   try {
     parsed = new URL(decoded);
   } catch {
-    return SAFE_DEFAULT;
+    return null;
   }
   // No javascript:/data:/file: — only real web schemes.
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return SAFE_DEFAULT;
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
   // Signed target → trust it. Otherwise only first-party hosts.
   if (verifyClickTarget(u, s)) return parsed.toString();
   if (allowedHosts().has(parsed.hostname.toLowerCase())) return parsed.toString();
-  return SAFE_DEFAULT;
+  return null;
 }
 
 export async function GET(
@@ -98,13 +120,20 @@ export async function GET(
 ) {
   const { id: rawId } = await params;
   const id = (rawId || "").trim();
-  const target = resolveTarget(req);
+  const trusted = resolveTarget(req);
+  // The tenant is looked up for LOGGING below, and an untrusted click needs it
+  // to pick a landing page. One lookup, two consumers — so `target` is settled
+  // inside this block, where the tenant is known, and read again at the
+  // redirect. It is never null by the time anything uses it: `trusted` when the
+  // URL verified, the tenant's own page when it did not, and the platform's
+  // neutral front door when even the tenant is unknown.
+  let tenantId: string | null = null;
+  let target = trusted ?? NEUTRAL_LANDING;
 
   // Log best-effort; never let it block the redirect.
   if (id && id.length >= 8) {
     try {
       const sb = getServiceSupabase();
-      let tenantId: string | null = null;
       let leadId: string | null = null;
       for (const table of ["lead_interactions", "interactions"]) {
         const { data, error } = await sb
@@ -118,6 +147,16 @@ export async function GET(
           leadId = row.lead_id || null;
           break;
         }
+      }
+
+      // Now that the tenant is known, an untrusted click gets THAT tenant's
+      // landing page. SunBiz (aa04fa1f) resolves to
+      // /f/submissions/initial-lead-capture — byte-identical to the old
+      // hardcoded SAFE_DEFAULT, so the 13 live redirects in production are
+      // unchanged. Everyone else stops being handed to SunBiz.
+      if (!trusted) {
+        const landing = safeLandingForTenant({ tenantId });
+        if (landing) target = `${APP_BASE}${landing}`;
       }
 
       if (tenantId) {

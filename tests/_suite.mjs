@@ -220,6 +220,13 @@ const TESTS = [
   // next_run_at in the past rendered as a future commitment. Unlisted, they run
   // nowhere and prove nothing.
   "tests/automation-owner-partition.test.ts",
+  // Six public surfaces each picked a company from a module-level constant
+  // instead of from the tenant in front of them, and the constant was always
+  // the client's. Unlisted, this proves nothing.
+  "tests/tenant-public-identity.test.ts",
+  // Ignite must reach the funnel whatever the frame loop does, and nobody
+  // should meet the product through the old 2D placeholder.
+  "tests/marketing-car-launch.test.ts",
   "tests/cron-result-shape-parity.test.ts",
   "tests/automation-overdue-schedule.test.ts",
   "tests/cron-owner-migration.test.ts",
@@ -251,6 +258,8 @@ const TESTS = [
   "tests/form-submit-failure-capture.test.ts",
   "tests/deploy-serves-main.test.ts",
   "tests/telegram-lane-fallback.test.ts",
+  "tests/health-recovery-delivery.test.ts",
+  "tests/extraction-queue-stalled.test.ts",
   "tests/rep-line-isolation.test.ts",
   "tests/email-drip-health.test.ts",
   "tests/ai-wire.test.ts",

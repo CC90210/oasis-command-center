@@ -57,8 +57,40 @@ type Db = ReturnType<typeof getServiceSupabase>;
  * Defaulting rather than requiring the field keeps every existing check on the
  * lane it already used, so this is additive: nothing reroutes by accident.
  */
-function laneFor(check: { lane?: TelegramLane }): TelegramLane {
-  return check.lane ?? "sunbiz-ops";
+function lanesFor(check: { lane?: TelegramLane | TelegramLane[] }): TelegramLane[] {
+  if (Array.isArray(check.lane)) return check.lane;
+  return [check.lane ?? "sunbiz-ops"];
+}
+
+/**
+ * Lanes still owed a RECOVERED message, parked in `last_signature`.
+ *
+ * A failure alert can afford to lose a lane: the ladder re-sends it, and
+ * `alerting.telegram_delivery` catches a channel that is dead outright. A
+ * recovery cannot. Clearing `first_failed_at` is terminal — there is no second
+ * chance — so a lane that rejects the one recovery message keeps its red alert
+ * until a human notices, which is the whole failure mode this file exists to
+ * prevent.
+ *
+ * Retrying the message wholesale would be worse: a lane that is dead for days
+ * (2026-08-07: @KnutRPEbot kicked from the sunbiz-ops group) would re-tell the
+ * REACHABLE audience "RECOVERED" every 15 minutes. So only the lanes that did
+ * not accept are carried forward, and only they are retried.
+ *
+ * `last_signature` is the carrier because it is dead space during an ok run —
+ * it only means anything while a failure is active. A real signature can never
+ * collide with this marker, so a NEW failure arriving mid-retry reads as a new
+ * signature and alerts immediately, which is exactly right.
+ */
+const RECOVERY_PENDING = "recovery-pending:";
+
+export function pendingRecoveryLanes(signature: string | null | undefined): TelegramLane[] | null {
+  if (!signature || !signature.startsWith(RECOVERY_PENDING)) return null;
+  const lanes = signature
+    .slice(RECOVERY_PENDING.length)
+    .split(",")
+    .filter(Boolean) as TelegramLane[];
+  return lanes.length ? lanes : null;
 }
 
 const SEV_ICON: Record<string, string> = {
@@ -140,15 +172,51 @@ export async function runHealthChecks(
       // starts a fresh ladder rather than inheriting a 24h window.
       if (state?.first_failed_at) {
         recovered.push(result.id);
-        await sendTelegram(
-          `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
-          { lane: laneFor(check) },
-        ).catch(() => undefined);
+        // Recovery is announced to every lane that was told about the failure.
+        // Telling one team it is fixed while the other is still watching a red
+        // alert is how a resolved incident stays open.
+        //
+        // On a retry run, only the lanes that did not accept it last time.
+        const owed = pendingRecoveryLanes(state.last_signature) ?? lanesFor(check);
+        const stillOwed: TelegramLane[] = [];
+        for (const lane of owed) {
+          const r = await sendTelegram(
+            `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
+            { lane },
+          ).catch(() => ({ ok: false }));
+          if (!r.ok) stillOwed.push(lane);
+        }
+        // The episode stays OPEN while a lane is still owed the news, so the
+        // next run retries it. Closing it here would strand that lane's
+        // operators on a red alert with nothing left to resolve it.
         await db.from("health_alert_state").upsert({
-          alert_key: key, tenant_id: tenantId, last_signature: null,
-          last_alerted_at: state.last_alerted_at, repeat_n: 0, first_failed_at: null,
+          alert_key: key, tenant_id: tenantId,
+          last_signature: stillOwed.length ? `${RECOVERY_PENDING}${stillOwed.join(",")}` : null,
+          last_alerted_at: state.last_alerted_at, repeat_n: 0,
+          first_failed_at: stillOwed.length ? state.first_failed_at : null,
           updated_at: new Date(nowMs).toISOString(),
         }, { onConflict: "alert_key" }).then(() => undefined, () => undefined);
+
+        if (stillOwed.length) {
+          // Same principle as an undeliverable alert: record it in the
+          // DATABASE, on a path that does not depend on the channel that just
+          // failed. `alerting.telegram_delivery` is itself a check, so a lane
+          // that stays dead becomes an alert of its own rather than silence.
+          console.error("[health] telegram recovery delivery failed", {
+            check: result.id, lanes: stillOwed,
+          });
+          telegramFailures += 1;
+          await db.from("health_check_runs").insert({
+            tenant_id: tenantId,
+            check_id: "alerting.telegram_delivery",
+            surface: "oasis",
+            verdict: "failing",
+            observed: 0,
+            baseline: 1,
+            reason: `could not deliver the ${result.id} recovery to ${stillOwed.join(", ")}`.slice(0, 500),
+            ran_at: new Date(nowMs).toISOString(),
+          }).then(() => undefined, () => undefined);
+        }
       }
       continue;
     }
@@ -165,7 +233,16 @@ export async function runHealthChecks(
       `${SEV_ICON[result.verdict]} <b>${esc(result.verdict.toUpperCase())}</b> — ${esc(result.id)}\n` +
       `${esc(check.describe(result))}\n` +
       `<i>next check in 15 min · re-alerts in ${decision.windowH}h if still bad</i>`;
-    const sent = await sendTelegram(body, { lane: laneFor(check) }).catch(() => ({ ok: false }));
+    // Delivery counts as successful if ANY lane took it. The ladder exists to
+    // stop re-sending every 15 minutes; one reachable audience is enough for
+    // that, and the delivery self-test is what catches a dead channel.
+    let sent: { ok: boolean } = { ok: false };
+    const rejected: TelegramLane[] = [];
+    for (const lane of lanesFor(check)) {
+      const r = await sendTelegram(body, { lane }).catch(() => ({ ok: false }));
+      if (r.ok) sent = { ok: true };
+      else rejected.push(lane);
+    }
 
     // Record the alert attempt regardless of delivery. If Telegram is down we
     // must not spin re-sending every 15 minutes; the delivery self-test is the
@@ -196,7 +273,7 @@ export async function runHealthChecks(
       // Note also: Telegram's getChat returns ok for a group the bot has been
       // kicked from. Only a real send proves deliverability, so any future
       // self-test must SEND, not probe.
-      console.error("[health] telegram delivery failed", { check: result.id });
+      console.error("[health] telegram delivery failed", { check: result.id, lanes: rejected });
       telegramFailures += 1;
       await db.from("health_check_runs").insert({
         tenant_id: tenantId,
@@ -205,7 +282,11 @@ export async function runHealthChecks(
         verdict: "failing",
         observed: 0,
         baseline: 1,
-        reason: `could not deliver the ${result.id} alert to the sunbiz-ops lane`.slice(0, 500),
+        // Name the lanes that actually rejected it. This line used to read
+        // "the sunbiz-ops lane" unconditionally — the same defect as the rest
+        // of this branch: a lane constant standing in for a lane decision. It
+        // sent whoever read the row looking at the wrong chat.
+        reason: `could not deliver the ${result.id} alert to ${rejected.join(", ")}`.slice(0, 500),
         ran_at: new Date(nowMs).toISOString(),
       }).then(() => undefined, () => undefined);
     }
