@@ -102,4 +102,35 @@ assert.doesNotMatch(
   "the 700ms cross-fade is back — the ghosted overlap is a wobble, not a blink",
 );
 
+// ── three.js is not on the critical path of every homepage visit ───────────
+
+// The file's own docstring claimed the runtime loaded on scroll. It did not:
+// the import ran on mount, so every visitor paid 193KB gzip / 734KB raw — 43%
+// of the page's JavaScript — parsed on the main thread while they read the
+// hero, for a feature most of them never scrolled to.
+assert.match(
+  stage,
+  /await nearViewport\(\);/,
+  "the three.js import no longer waits for the stage to approach the viewport",
+);
+assert.match(
+  stage,
+  /new IntersectionObserver\(/,
+  "the fetch is no longer gated on intersection",
+);
+// Degrade to the OLD behaviour where the API is missing. A feature detection
+// that failed closed here would cost the car entirely, which is worse than the
+// bug it guards against.
+assert.match(
+  stage,
+  /typeof IntersectionObserver === "undefined"\) return resolve\(\);/,
+  "a browser without IntersectionObserver would now never load the car",
+);
+// A visitor who leaves before scrolling must not strand an observer on the node.
+assert.match(
+  stage,
+  /observerRef\.current\?\.disconnect\(\)/,
+  "the observer is never disconnected on unmount",
+);
+
 console.log("marketing-car-launch: all assertions passed");
