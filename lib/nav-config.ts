@@ -194,9 +194,6 @@ export const SUN_NAV: NavItem[] = [
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
   { group: "System", href: "/embed", label: "Embed", icon: "Code2" },
-  { group: "Insights", href: "/client-portal", label: "ROI Dashboard", icon: "BarChart3" },
-  { group: "Insights", href: "/projects", label: "Project Status", icon: "ClipboardCheck" },
-  { group: "Support", href: "/tickets", label: "Support", icon: "FileSearch" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
 ];
 
