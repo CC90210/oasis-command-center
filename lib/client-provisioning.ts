@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getClientProfileSlugForBrand } from "./client-profiles";
+import { getTursoClient, tursoConfigured } from "./turso";
 
 type ProvisioningInput = {
   db: SupabaseClient;
@@ -99,4 +100,58 @@ export async function applyClientProvisioningProfile({
   }
 
   return { clientProfileSlug, primaryAgent: null };
+}
+
+export async function startProvisioningRun(tenantId: string, stripeInvoice?: string) {
+  if (!tursoConfigured()) return;
+  const db = getTursoClient();
+  await db.execute({
+    sql: `INSERT INTO provisioning_runs (tenant_id, stripe_invoice, status, started_at, steps_json)
+          VALUES (?, ?, 'pending', datetime('now'), '[]')`,
+    args: [tenantId, stripeInvoice || null],
+  });
+}
+
+export async function updateProvisioningRun(
+  tenantId: string,
+  status: "pending" | "provisioning" | "complete" | "failed",
+  stepTitle?: string,
+  errorMessage?: string
+) {
+  if (!tursoConfigured()) return;
+  const db = getTursoClient();
+
+  if (stepTitle) {
+    const r = await db.execute({
+      sql: `SELECT steps_json FROM provisioning_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1`,
+      args: [tenantId],
+    });
+    const run = r.rows[0];
+    if (run) {
+      const steps = JSON.parse(String(run.steps_json || "[]"));
+      steps.push({ title: stepTitle, time: new Date().toISOString() });
+      await db.execute({
+        sql: `UPDATE provisioning_runs SET steps_json = ?, status = ? WHERE tenant_id = ? AND created_at = (SELECT MAX(created_at) FROM provisioning_runs WHERE tenant_id = ?)`,
+        args: [JSON.stringify(steps), status, tenantId, tenantId],
+      });
+    }
+  } else {
+    await db.execute({
+      sql: `UPDATE provisioning_runs SET status = ? WHERE tenant_id = ? AND created_at = (SELECT MAX(created_at) FROM provisioning_runs WHERE tenant_id = ?)`,
+      args: [status, tenantId, tenantId],
+    });
+  }
+
+  if (status === "complete") {
+    await db.execute({
+      sql: `UPDATE provisioning_runs SET completed_at = datetime('now') WHERE tenant_id = ? AND created_at = (SELECT MAX(created_at) FROM provisioning_runs WHERE tenant_id = ?)`,
+      args: [tenantId, tenantId],
+    });
+  }
+  if (errorMessage) {
+    await db.execute({
+      sql: `UPDATE provisioning_runs SET error_message = ? WHERE tenant_id = ? AND created_at = (SELECT MAX(created_at) FROM provisioning_runs WHERE tenant_id = ?)`,
+      args: [errorMessage, tenantId, tenantId],
+    });
+  }
 }

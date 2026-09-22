@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { OnboardingWizardClient } from "@/components/onboarding/OnboardingWizardClient";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { ProvisioningProgress } from "@/components/onboarding/ProvisioningProgress";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +34,26 @@ export default async function OnboardingWizardPage() {
       .eq("auth_user_id", user.id)
       .maybeSingle();
     if (data?.onboarding_completed_at) {
+      // Before redirecting to dashboard, check if there's an active automated provisioning run
+      if (tursoConfigured()) {
+        const { data: profile } = await db
+          .from("user_profiles")
+          .select("tenant_id")
+          .eq("auth_user_id", user.id)
+          .maybeSingle();
+
+        if (profile?.tenant_id) {
+          const turso = getTursoClient();
+          const r = await turso.execute({
+            sql: `SELECT * FROM provisioning_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1`,
+            args: [profile.tenant_id],
+          });
+          const run = r.rows[0];
+          if (run && run.status !== "complete" && run.status !== "failed") {
+            return <ProvisioningProgress run={run as any} />;
+          }
+        }
+      }
       redirect("/");
     }
   } catch (err) {
