@@ -485,6 +485,7 @@ export async function importRowsForTenant(input: {
           stage: "assigned",
           stage_entered_at: importedAt,
           ...pipelineCycleAssignmentFacts(oasisAssigneeUserId!, importedAt),
+          claimed_at: importedAt,
         });
       } else if (data.sales_program) {
         data.stage = stageForWebsiteSalesLead(typeof data.stage === "string" ? data.stage : null);

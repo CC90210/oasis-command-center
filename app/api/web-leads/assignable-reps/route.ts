@@ -50,7 +50,15 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: "assign_requires_manager" }, { status: 403 });
   }
 
-  const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+  let roster;
+  try {
+    roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "sales_roster_unavailable" },
+      { status: 503 },
+    );
+  }
   // auth_user_id is what the claim route compares against, so it is the id the
   // picker must submit. Rows without one are already excluded by the roster
   // function; the guard here is so a future change there cannot put an

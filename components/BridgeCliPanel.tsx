@@ -135,7 +135,10 @@ export function BridgeCliPanel({
     }
 
     const recovery = bridgeRecoveryGuidance(
-      bridgeHostOSFromPlatform(typeof navigator === "undefined" ? null : navigator.platform),
+      bridgeHostOSFromPlatform(
+        typeof navigator === "undefined" ? null : navigator.platform,
+        typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints,
+      ),
     );
     return (
       <div className="rounded-lg border border-status-warm/40 bg-status-warm/5 px-3 py-2.5 text-sm flex items-start gap-2">

@@ -11,9 +11,15 @@
 export type BridgeHostOS = "windows" | "macos" | "linux";
 
 /** Resolve the viewer's machine family without guessing for mobile/unknown UAs. */
-export function bridgeHostOSFromPlatform(platform: string | null | undefined): BridgeHostOS | null {
+export function bridgeHostOSFromPlatform(
+  platform: string | null | undefined,
+  maxTouchPoints = 0,
+): BridgeHostOS | null {
   const value = (platform || "").trim().toLowerCase();
   if (value.startsWith("win")) return "windows";
+  // iPadOS desktop-mode Safari reports MacIntel. A touch-capable MacIntel
+  // browser cannot host the desktop bridge, so keep the Devices-page fallback.
+  if (value === "macintel" && maxTouchPoints > 0) return null;
   if (value.startsWith("mac")) return "macos";
   if (value.includes("linux")) return "linux";
   return null;

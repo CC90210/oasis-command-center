@@ -67,8 +67,11 @@ function rejectedObservation(code: GoogleProbeErrorCode | null): number {
   return TOKEN_REJECTED;
 }
 
-export const CALENDAR_CHECKS: DripCheck[] = [
-  {
+/** Dependency injection keeps the readiness behavior testable without real polling sleeps. */
+export function createCalendarChecks(
+  probe: typeof probeCalendarWriteRoundTrip = probeCalendarWriteRoundTrip,
+): DripCheck[] {
+  return [{
     id: "calendar.workspace_credential_usable",
     severity: "critical",
     // OASIS's booking chain, so CC's lane -- not the SunBiz ops channel every
@@ -88,9 +91,10 @@ export const CALENDAR_CHECKS: DripCheck[] = [
       // Not a degraded state: with no workspace credential, EVERY host whose
       // personal Google is missing, wrong-scoped or revoked is unbookable, and
       // the fallback that exists to cover them cannot run at all.
-      if (!config) return UNCONFIGURED;
+      const configuredCalendarId = (process.env.GOOGLE_CALENDAR_ID || "").trim();
+      if (!config || !config.organizerEmail || !configuredCalendarId) return UNCONFIGURED;
 
-      const result = await probeCalendarWriteRoundTrip({
+      const result = await probe({
         refreshToken: config.refreshToken,
         clientId: config.clientId,
         clientSecret: config.clientSecret,
@@ -109,7 +113,8 @@ export const CALENDAR_CHECKS: DripCheck[] = [
       if (r.observed === UNCONFIGURED) {
         return (
           "THE SHARED OASIS CALENDAR IS NOT CONFIGURED — GOOGLE_SYSTEM_CALENDAR_CLIENT_ID, " +
-          "_CLIENT_SECRET and _REFRESH_TOKEN must all be set in the production runtime. " +
+          "GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET, GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN, " +
+          "GOOGLE_SYSTEM_CALENDAR_ADDRESS and GOOGLE_CALENDAR_ID must all be set in the production runtime. " +
           "Until they are, any host without a working personal Google connection cannot be " +
           "booked at all, because the fallback that covers them has nothing to run on."
         );
@@ -162,5 +167,7 @@ export const CALENDAR_CHECKS: DripCheck[] = [
         "configured client pair and mint a fresh Calendar-scoped workspace credential."
       );
     },
-  },
-];
+  }];
+}
+
+export const CALENDAR_CHECKS: DripCheck[] = createCalendarChecks();

@@ -78,7 +78,19 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // Audited before the change: 1 assigned territory, owner valid. The hole was
   // latent, not exploited.
   if (assignedTo) {
-    const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+    } catch (error) {
+      console.error("[web-leads.territory-assign] pipeline assignment roster unavailable", {
+        tenantId: session.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "sales_roster_unavailable" },
+        { status: 503 },
+      );
+    }
     // Take the id FROM THE ROSTER, not from the request. Matching leniently and
     // then persisting what the client sent is how a lenient comparison becomes
     // a data-integrity bug: " 8f3a-REP-ariel " passes the check and is stored

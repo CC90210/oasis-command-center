@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { CALENDAR_CHECKS } from "../lib/health/calendar-checks";
+import { CALENDAR_CHECKS, createCalendarChecks } from "../lib/health/calendar-checks";
 import {
   CALENDAR_WRITE_PROBE_CLEANUP_RESERVE_MS,
   CALENDAR_WRITE_PROBE_TOTAL_BUDGET_MS,
+  probeCalendarWriteRoundTrip,
 } from "../lib/integrations/google-token-probe";
 
 /**
@@ -109,6 +110,12 @@ async function run() {
 
     configure();
     let missingMeetCleanupAttempted = false;
+    let missingMeetSleepCalls = 0;
+    const noPollingCheck = createCalendarChecks((args) => probeCalendarWriteRoundTrip({
+      ...args,
+      meetPollAttempts: 0,
+      sleepImpl: async () => { missingMeetSleepCalls += 1; },
+    }))[0];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).includes("oauth2.googleapis.com/token")) {
         return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
@@ -116,11 +123,19 @@ async function run() {
       if (init?.method === "POST") {
         return new Response(JSON.stringify({ id: "oasishc0123456789abcdef" }), { status: 200 });
       }
-      missingMeetCleanupAttempted = true;
-      return new Response(null, { status: 204 });
+      if (init?.method === "DELETE") {
+        missingMeetCleanupAttempted = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected ${String(init?.method || "GET")} request`);
     }) as typeof globalThis.fetch;
-    assert.notEqual(await observe(), 0, "an insert without a returned Meet entry point must not be green");
+    assert.notEqual(
+      await noPollingCheck.observe(null as never, "tenant", Date.now()),
+      0,
+      "an insert without a returned Meet entry point must not be green",
+    );
     assert.equal(missingMeetCleanupAttempted, true, "a no-Meet probe event must still be cleaned up");
+    assert.equal(missingMeetSleepCalls, 0, "the no-Meet cleanup unit test must not wait on real poll timers");
 
     // ─── 2. A revoked credential is a critical failure ──────────────────────
     configure();
@@ -147,6 +162,37 @@ async function run() {
     assert.equal(await observe(), 1, "no workspace credential at all means no fallback exists (1 = unconfigured)");
     const unconfigured = check.describe({ id: check.id, verdict: "failing", observed: 1, baseline: 0, reason: "" });
     assert.match(unconfigured, /NOT CONFIGURED/i, "the two failures must read differently");
+    assert.match(unconfigured, /GOOGLE_CALENDAR_ID/, "the setup remedy must name the target calendar setting");
+
+    configure();
+    process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS = "   ";
+    globalThis.fetch = (async () => {
+      throw new Error("an incomplete organizer identity must fail before calling Google");
+    }) as typeof globalThis.fetch;
+    assert.equal(await observe(), 1, "a blank organizer identity is unconfigured, not a rejected write");
+
+    configure();
+    process.env.GOOGLE_CALENDAR_ID = "   ";
+    globalThis.fetch = (async () => {
+      throw new Error("an implicit primary calendar must not replace the configured shared target");
+    }) as typeof globalThis.fetch;
+    assert.equal(await observe(), 1, "a blank shared-calendar ID is unconfigured, not an implicit primary");
+
+    configure();
+    let rejectedWriteCleanupAttempts = 0;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
+      }
+      if (init?.method === "POST") return new Response("{}", { status: 403 });
+      if (init?.method === "DELETE") {
+        rejectedWriteCleanupAttempts += 1;
+        return new Response("{}", { status: 403 });
+      }
+      throw new Error(`unexpected ${String(init?.method || "GET")} request`);
+    }) as typeof globalThis.fetch;
+    assert.equal(await observe(), 4, "a definitive write rejection must retain its actionable diagnosis");
+    assert.equal(rejectedWriteCleanupAttempts, 1, "a rejected write must still attempt cleanup exactly once");
 
     // ─── 4. UNKNOWN IS NOT BROKEN ───────────────────────────────────────────
     // The check claims founder audits can be booked. If Google never answers,

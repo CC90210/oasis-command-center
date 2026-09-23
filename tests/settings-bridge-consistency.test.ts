@@ -183,6 +183,11 @@ assert.match(bridgeSupervisorLabel("macos"), /launchd/i);
 assert.match(bridgeSupervisorLabel("linux"), /systemd/i);
 assert.equal(bridgeHostOSFromPlatform("Win32"), "windows");
 assert.equal(bridgeHostOSFromPlatform("MacIntel"), "macos");
+assert.equal(
+  bridgeHostOSFromPlatform("MacIntel", 5),
+  null,
+  "touch-enabled MacIntel is iPadOS desktop mode, not a bridge-capable Mac",
+);
 assert.equal(bridgeHostOSFromPlatform("Linux x86_64"), "linux");
 assert.equal(bridgeHostOSFromPlatform("iPhone"), null);
 for (const os of ["windows", "macos", "linux"] as const) {

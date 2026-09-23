@@ -1851,7 +1851,10 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         );
       } else {
         const recovery = bridgeRecoveryGuidance(
-          bridgeHostOSFromPlatform(typeof navigator === "undefined" ? null : navigator.platform),
+          bridgeHostOSFromPlatform(
+            typeof navigator === "undefined" ? null : navigator.platform,
+            typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints,
+          ),
         );
         setError(
           "Pinned to CLI (local bridge), but no bridge is online. " +

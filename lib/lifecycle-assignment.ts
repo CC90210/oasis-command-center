@@ -50,14 +50,17 @@ export async function assignLifecycleOwner(input: {
   const ownershipChangedAt = input.occurredAt ?? new Date().toISOString();
   for (const row of rows.values()) {
     const previousOwner =
-      typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : null;
+      typeof row.data.assigned_to === "string"
+        ? row.data.assigned_to.trim().toLowerCase() || null
+        : null;
+    const nextOwner = input.assignedTo?.trim().toLowerCase() || null;
+    const ownerChanged = previousOwner !== nextOwner;
     previousOwners.push(previousOwner);
     const cycleOwnershipPatch = input.resetClaimClock
       ? input.assignedTo
         ? {
             ...pipelineCycleAssignmentFacts(input.assignedTo, ownershipChangedAt),
-            claimed_at: ownershipChangedAt,
-            last_call_at: null,
+            ...(ownerChanged ? { claimed_at: ownershipChangedAt, last_call_at: null } : {}),
           }
         : {
             assigned_to: null,

@@ -382,6 +382,7 @@ export async function POST(req: NextRequest) {
       }
       assignmentFacts = {
         ...pipelineCycleAssignmentFacts(resolved, importedAt),
+        claimed_at: importedAt,
         ...(rowEntityType === "lead"
           ? {
               sales_program: OASIS_WEBSITE_SALES_PROGRAM,

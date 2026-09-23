@@ -232,9 +232,11 @@ async function main() {
       calls.some((c) => c.fn === "eq" && c.args[0] === "check_id" && c.args[1] === "alerting.telegram_delivery"),
       "the check no longer filters to the delivery-failure rows — it would count every health row ever written",
     );
-    assert.ok(
-      calls.some((c) => c.fn === "eq" && c.args[0] === "tenant_id" && c.args[1] === TENANT),
-      "the alerting check is not scoped to the tenant it was given",
+    assert.equal(
+      calls.some((c) => c.fn === "eq" && c.args[0] === "tenant_id"),
+      false,
+      "delivery is estate-wide: an OASIS Calendar page rejected by Telegram must not disappear " +
+        "because the scheduler also grades SunBiz outcomes",
     );
     // Bounded, unlike the stall check. A delivery failure from last month is
     // history; this one must be able to go green once the channel is repaired,

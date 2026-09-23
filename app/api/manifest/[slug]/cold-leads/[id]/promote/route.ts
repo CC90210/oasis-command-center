@@ -25,6 +25,7 @@ import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
 import {
   OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
   isWebsiteSalesTenantSlug,
   pickWebsiteSalesFields,
   stampSalesProgramForTenant,
@@ -204,6 +205,7 @@ export async function POST(
     // legacy key stays for anything still reading it.
     if (isOasisPromotion) {
       Object.assign(leadData, pipelineCycleAssignmentFacts(assigneeUserId, promotedAt), {
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM,
         claimed_at: promotedAt,
         stage: "assigned",
         stage_entered_at: promotedAt,

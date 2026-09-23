@@ -11,7 +11,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { loadEnvConfig } from "@next/env";
-import { getDataBackendMode } from "../lib/backend-mode";
 import { createTursoPostgrest } from "../lib/turso-postgrest";
 import { getTursoClient, tursoConfigured } from "../lib/turso";
 import { WEBDEV_TENANT_ID } from "../lib/web-leads/tenant";
@@ -31,9 +30,9 @@ function plannerDataClient() {
   // and never prints a credential value.
   if (!tursoConfigured()) loadEnvConfig(process.cwd());
 
-  if (getDataBackendMode() !== "turso") {
+  if (process.env.EMPIRE_DATA_BACKEND?.trim().toLowerCase() !== "turso_cloud") {
     throw new Error(
-      "pipeline_cycle_requires_turso: refusing the retired Supabase data path",
+      "pipeline_cycle_requires_turso_cloud: set EMPIRE_DATA_BACKEND=turso_cloud so lead and roster reads share one Turso client",
     );
   }
   if (!tursoConfigured()) {

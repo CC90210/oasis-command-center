@@ -253,6 +253,7 @@ export async function importLeadsForTenant(input: {
         sales_program: OASIS_WEBSITE_SALES_PROGRAM,
         sales_motion: OASIS_COLD_OUTBOUND_MOTION,
         stage_entered_at: importedAt,
+        claimed_at: importedAt,
       });
     }
 

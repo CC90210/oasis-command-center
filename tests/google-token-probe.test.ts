@@ -226,6 +226,8 @@ async function run() {
     calendarId: "target",
     attendeeEmail: "operator@oasisai.work",
     eventId: "oasishc1111111111111111",
+    meetPollAttempts: 0,
+    sleepImpl: async () => undefined,
     fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).includes("oauth2.googleapis.com/token")) {
         return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
@@ -233,8 +235,11 @@ async function run() {
       if (init?.method === "POST") {
         return new Response(JSON.stringify({ id: "oasishc1111111111111111" }), { status: 200 });
       }
-      missingMeetCleanupAttempted = true;
-      return new Response(null, { status: 204 });
+      if (init?.method === "DELETE") {
+        missingMeetCleanupAttempted = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected ${String(init?.method || "GET")} request`);
     }) as typeof fetch,
   });
   assert.equal(missingMeetCleanupAttempted, true, "a no-Meet insert must still be removed");
@@ -306,6 +311,33 @@ async function run() {
   assert.equal(rejectedCleanupAttempted, true, "even an ambiguous/refused write gets an idempotent cleanup attempt");
   assert.deepEqual(rejectedWrite, { verdict: "dead", errorCode: "calendar_write_rejected" });
   assert.equal(JSON.stringify(rejectedWrite).includes("private write detail"), false);
+
+  for (const status of [400, 401, 403, 404]) {
+    let deleteAttempts = 0;
+    const definitiveWriteRejection = await probeCalendarWriteRoundTrip({
+      ...CREDS,
+      calendarId: "target",
+      attendeeEmail: "operator@oasisai.work",
+      eventId: `oasishcrejected${status}`,
+      fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes("oauth2.googleapis.com/token")) {
+          return new Response(JSON.stringify({ access_token: "a" }), { status: 200 });
+        }
+        if (init?.method === "POST") return new Response("{}", { status });
+        if (init?.method === "DELETE") {
+          deleteAttempts += 1;
+          return new Response("{}", { status: 403 });
+        }
+        throw new Error(`unexpected ${String(init?.method || "GET")} request`);
+      }) as typeof fetch,
+    });
+    assert.equal(deleteAttempts, 1, `${status} insert rejection must still attempt one cleanup`);
+    assert.deepEqual(
+      definitiveWriteRejection,
+      { verdict: "dead", errorCode: "calendar_write_rejected" },
+      `${status} insert rejection must not be masked by a denied cleanup`,
+    );
+  }
 
   // The write proof owns one deadline, rather than multiplying an 8 second
   // timeout by token + create + four polls + cleanup. Advance a fake monotonic

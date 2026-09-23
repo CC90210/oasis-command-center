@@ -402,7 +402,9 @@ export async function probeCalendarWriteRoundTrip(args: {
     }
     // A response that arrived after the work window is not allowed to spend
     // the cleanup reserve or certify readiness. The delete below still runs.
-    if (clock() > workDeadlineMs) createVerdict = "calendar_write_unverified";
+    if (clock() > workDeadlineMs && createVerdict !== "calendar_write_rejected") {
+      createVerdict = "calendar_write_unverified";
+    }
   } catch {
     createVerdict = "calendar_write_unverified";
   }
@@ -425,6 +427,14 @@ export async function probeCalendarWriteRoundTrip(args: {
     }
   }
 
+  // Preserve the definitive create diagnosis even when the best-effort,
+  // idempotent DELETE is also denied. A 400/401/403/404 from events.insert
+  // tells the operator to fix calendar access; reporting only the later
+  // cleanup refusal sends them toward the wrong remedy. Cleanup is still
+  // attempted above after every insert response.
+  if (createVerdict === "calendar_write_rejected") {
+    return { verdict: "dead", errorCode: createVerdict };
+  }
   if (!cleanupConfirmed) {
     return { verdict: "dead", errorCode: "calendar_cleanup_failed" };
   }

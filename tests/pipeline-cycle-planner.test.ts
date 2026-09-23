@@ -227,6 +227,24 @@ async function main(): Promise<void> {
       "a missing Turso connection must not fall through to Supabase",
     );
 
+    const implicitBackend = spawnSync(
+      process.execPath,
+      ["--conditions=react-server", "--import", "tsx", SCRIPT, "--json"],
+      {
+        cwd: ROOT,
+        env: { ...env, EMPIRE_DATA_BACKEND: "" },
+        encoding: "utf8",
+        timeout: 30_000,
+      },
+    );
+    assert.notEqual(implicitBackend.status, 0, "an implicit/local Turso mode can split lead and roster reads");
+    assert.match(implicitBackend.stderr, /pipeline_cycle_requires_turso_cloud/);
+    assert.doesNotMatch(
+      implicitBackend.stderr,
+      /Service Supabase misconfigured|supabase\..*unavailable/i,
+      "the planner must reject a mixed backend before either data read",
+    );
+
     console.log("pipeline-cycle-planner.test.ts: OK");
   } finally {
     for (const name of readdirSync(tempRoot)) unlinkSync(join(tempRoot, name));

@@ -83,6 +83,7 @@ const BULK_POOL = "0c0c0c0c-0000-4000-8000-000000000004";
 const SINGLE_ELIGIBLE = "0c0c0c0c-0000-4000-8000-000000000005";
 const SINGLE_POOL = "0c0c0c0c-0000-4000-8000-000000000006";
 const EXPIRED_CLAIM = "0c0c0c0c-0000-4000-8000-000000000007";
+const SAME_OWNER = "0c0c0c0c-0000-4000-8000-000000000008";
 const OLD_ASSIGNMENT_AT = "2026-09-01T00:00:00.000Z";
 const SUN_TENANT = "5a5a5a5a-0000-4000-8000-00000000005a";
 
@@ -468,7 +469,9 @@ async function main() {
         sql: `INSERT INTO cold_leads
           (id, tenant_id, list_id, business_name, contact_name, phone, email, stage, raw)
           VALUES (?, ?, ?, 'Cold Prospect Co', 'Casey Prospect', '4165550198', 'casey@cold.test', 'imported', ?)` ,
-        args: [COLD_LEAD_ID, WEBDEV_TENANT_ID, COLD_LIST_ID, JSON.stringify({ website: "https://cold.test" })],
+        // Deliberately no website fields: OASIS promotion policy, not scraped
+        // enrichment, is what must make this row visible in Pipeline.
+        args: [COLD_LEAD_ID, WEBDEV_TENANT_ID, COLD_LIST_ID, JSON.stringify({})],
       },
       // The prospect pool: unassigned, territory, phone. Belongs in no book.
       lead("pool-1", WEBDEV_TENANT_ID, {
@@ -501,6 +504,8 @@ async function main() {
   const genericImport = await import("../app/api/import/[entity]/route");
   const { importLeadsForTenant } = await import("../lib/leads-import-service");
   const coldPromotion = await import("../app/api/manifest/[slug]/cold-leads/[id]/promote/route");
+  const assignableReps = await import("../app/api/web-leads/assignable-reps/route");
+  const territoryAssign = await import("../app/api/web-leads/territories/[id]/assign/route");
   const { CURRENT_OASIS_PIPELINE_CYCLE, isInPipelineCycle } = await import("../lib/pipeline-cycle");
   const { listOasisPipelineWindow, resolveOasisPipelineAssigneeScope } = await import(
     "../lib/oasis-pipeline-query"
@@ -684,6 +689,26 @@ async function main() {
   login(OWNER, "conaugh@oasisai.work");
   const created: Record<string, string> = {};
 
+  // A partial founder roster is an availability failure, not an uncaught 500.
+  // Exercise both routes against the real roster query by removing Adon for
+  // exactly these requests, then restore the fixture before pipeline writes.
+  await seed.execute({ sql: "DELETE FROM user_profiles WHERE id = ?", args: ["p-closer"] });
+  const unavailableReps = await assignableReps.GET();
+  assert.equal(unavailableReps.status, 503);
+  assert.equal((await unavailableReps.json() as ApiBody).error, "sales_roster_unavailable");
+  const unavailableTerritory = await territoryAssign.PATCH(
+    new NextRequest("http://localhost/api/web-leads/territories/0d0d0d0d-0000-4000-8000-000000000099/assign", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assignedTo: OTHER_REP }),
+    }),
+    { params: Promise.resolve({ id: "0d0d0d0d-0000-4000-8000-000000000099" }) },
+  );
+  assert.equal(unavailableTerritory.status, 503);
+  assert.equal((await unavailableTerritory.json() as ApiBody).error, "sales_roster_unavailable");
+  await seed.execute(profile("p-closer", OTHER_REP, "adon@oasisai.work", WEBDEV_TENANT_ID, "closer"));
+  run("(c) assignment surfaces report an unavailable CC+Adon roster explicitly");
+
   const beforeColdPromotion = await leadCount();
   const ownerlessColdPromotion = await postColdPromotion({});
   assert.equal(ownerlessColdPromotion.status, 422);
@@ -703,6 +728,7 @@ async function main() {
   const promotedColdRow = await storedLead(assignedColdPromotion.body.promoted_lead_id!);
   assert.equal(promotedColdRow.data.assigned_to, OTHER_REP);
   assert.equal(promotedColdRow.data.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
+  assert.equal(promotedColdRow.data.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
   assert.equal(promotedColdRow.data.stage, "assigned");
   await seed.execute({ sql: "DELETE FROM tenant_records WHERE id = ?", args: [assignedColdPromotion.body.promoted_lead_id!] });
   await seed.execute({
@@ -740,6 +766,7 @@ async function main() {
   assert.equal(importedData.assigned_to, OTHER_REP);
   assert.equal(importedData.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
   assert.equal(typeof importedData.assigned_at, "string");
+  assert.equal(importedData.claimed_at, importedData.assigned_at);
   assert.equal(importedData.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
   assert.equal(importedData.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
   assert.equal(importedData.stage, "assigned");
@@ -804,6 +831,7 @@ async function main() {
   const genericData = JSON.parse(String(genericStored.rows[0].data)) as Record<string, unknown>;
   assert.equal(genericData.assigned_to, OTHER_REP);
   assert.equal(genericData.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
+  assert.equal(genericData.claimed_at, genericData.assigned_at);
   assert.equal(genericData.sales_program, OASIS_WEBSITE_SALES_PROGRAM);
   assert.equal(genericData.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
   assert.equal(genericData.stage, "assigned");
@@ -841,6 +869,7 @@ async function main() {
   const chatData = JSON.parse(String(chatStored.rows[0].data)) as Record<string, unknown>;
   assert.equal(chatData.assigned_to, OTHER_REP);
   assert.equal(chatData.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
+  assert.equal(chatData.claimed_at, chatData.assigned_at);
   assert.equal(chatData.sales_motion, OASIS_COLD_OUTBOUND_MOTION);
   assert.equal(chatData.stage, "assigned");
   assert.ok(
@@ -1158,6 +1187,21 @@ async function main() {
   assert.equal(singleExpired.status, 409, "generic single assignment bypassed the Leads claim path for an expired claim");
   assert.equal(singleExpired.body.error, "use_web_leads_claim");
   assert.equal((await storedLead(EXPIRED_CLAIM)).data.assigned_to, OPENER);
+
+  await seed.execute(lead(SAME_OWNER, WEBDEV_TENANT_ID, {
+    name: "Same owner active lead", state: "ON", stage: "assigned", assigned_to: OTHER_REP,
+    claimed_at: OLD_ASSIGNMENT_AT, assigned_at: OLD_ASSIGNMENT_AT, last_call_at: OLD_ASSIGNMENT_AT,
+    pipeline_cycle: "prior-cycle",
+    sales_program: OASIS_WEBSITE_SALES_PROGRAM, sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+  }));
+  const sameOwnerAssignment = await postSingleAssign(SAME_OWNER, OTHER_REP.toUpperCase());
+  assert.equal(sameOwnerAssignment.status, 200, JSON.stringify(sameOwnerAssignment.body));
+  const sameOwnerAfter = await storedLead(SAME_OWNER);
+  assert.equal(sameOwnerAfter.data.assigned_to, OTHER_REP);
+  assert.equal(sameOwnerAfter.data.claimed_at, OLD_ASSIGNMENT_AT, "same-owner assignment restarted the claim clock");
+  assert.equal(sameOwnerAfter.data.last_call_at, OLD_ASSIGNMENT_AT, "same-owner assignment erased the call clock");
+  assert.notEqual(sameOwnerAfter.data.assigned_at, OLD_ASSIGNMENT_AT, "same-owner assignment did not join the active cycle");
+  assert.equal(sameOwnerAfter.data.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
 
   const validSingle = await postSingleAssign(SINGLE_ELIGIBLE, OTHER_REP);
   assert.equal(validSingle.status, 200, validSingle.body.message);
