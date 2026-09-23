@@ -27,7 +27,44 @@ export type OutcomeCheckData = {
   signalCount: number;
 };
 
-export async function loadOutcomeChecks(tenantId: string | null, nowMs: number): Promise<OutcomeCheckData> {
+type OutcomeCheckFilter = {
+  includeCheckIds?: readonly string[];
+  excludeCheckIds?: readonly string[];
+};
+
+function allowsCheck(checkId: string, filter: OutcomeCheckFilter): boolean {
+  const include = filter.includeCheckIds ? new Set(filter.includeCheckIds) : null;
+  const exclude = filter.excludeCheckIds ? new Set(filter.excludeCheckIds) : null;
+  return (!include || include.has(checkId)) && (!exclude || !exclude.has(checkId));
+}
+
+/** Materialize required checks that have never produced a persisted run. */
+export function ensureExpectedChecks(
+  checks: readonly PanelCheck[],
+  expectedCheckIds: readonly string[] = [],
+): PanelCheck[] {
+  const result = [...checks];
+  const seen = new Set(result.map((check) => check.checkId));
+  for (const checkId of expectedCheckIds) {
+    if (!checkId || seen.has(checkId)) continue;
+    result.push({
+      checkId,
+      verdict: "never_run",
+      observed: null,
+      baseline: null,
+      reason: "No run has been recorded for this required check.",
+      ranAt: null,
+    });
+    seen.add(checkId);
+  }
+  return result;
+}
+
+export async function loadOutcomeChecks(
+  tenantId: string | null,
+  nowMs: number,
+  filter: OutcomeCheckFilter = {},
+): Promise<OutcomeCheckData> {
   const empty: OutcomeCheckData = { rows: [], openAlerts: [], readFailed: false, readError: null, signalCount: 0 };
   if (!tenantId) return empty;
 
@@ -45,6 +82,7 @@ export async function loadOutcomeChecks(tenantId: string | null, nowMs: number):
   const latest = new Map<string, PanelCheck>();
   for (const r of runsRes.data || []) {
     const id = String(r.check_id);
+    if (!allowsCheck(id, filter)) continue;
     if (latest.has(id)) continue; // list is desc, so the first is newest
     latest.set(id, {
       checkId: id,
@@ -55,7 +93,10 @@ export async function loadOutcomeChecks(tenantId: string | null, nowMs: number):
       ranAt: r.ran_at ?? null,
     });
   }
-  const rows = toPanelRows([...latest.values()], nowMs);
+  const rows = toPanelRows(
+    ensureExpectedChecks([...latest.values()], filter.includeCheckIds),
+    nowMs,
+  );
 
   const alertsRes = await db
     .from("health_alert_state")
@@ -64,12 +105,18 @@ export async function loadOutcomeChecks(tenantId: string | null, nowMs: number):
     .not("first_failed_at", "is", null)
     .order("first_failed_at", { ascending: true })
     .limit(50);
-  const openAlerts: OpenAlert[] = (alertsRes.data || []).map((a) => ({
-    alertKey: String(a.alert_key),
-    firstFailedAt: a.first_failed_at ?? null,
-    lastAlertedAt: a.last_alerted_at ?? null,
-    repeatN: Number(a.repeat_n ?? 0),
-  }));
+  const openAlerts: OpenAlert[] = (alertsRes.data || [])
+    .filter((a) => {
+      const alertKey = String(a.alert_key);
+      const checkId = alertKey.startsWith("health:") ? alertKey.slice("health:".length) : alertKey;
+      return allowsCheck(checkId, filter);
+    })
+    .map((a) => ({
+      alertKey: String(a.alert_key),
+      firstFailedAt: a.first_failed_at ?? null,
+      lastAlertedAt: a.last_alerted_at ?? null,
+      repeatN: Number(a.repeat_n ?? 0),
+    }));
 
   // BOTH reads. If only the alert query fails, openAlerts is empty and the card
   // would show a clean board while alert visibility is actually gone.

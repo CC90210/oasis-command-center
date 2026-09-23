@@ -4,6 +4,13 @@ import { join } from "node:path";
 
 import { bridgeProxyModeForHostname } from "../lib/bridge-client-routing";
 import { deriveDropdownState } from "../lib/bridge-dropdown-state";
+import {
+  bridgeHostOSFromPlatform,
+  bridgeInstallCommands,
+  bridgeRecoveryGuidance,
+  bridgeRestartCommand,
+  bridgeSupervisorLabel,
+} from "../lib/bridge-install-guidance";
 
 const ROOT = process.cwd();
 
@@ -111,5 +118,93 @@ assert.ok(
   workerControl.includes("is the local bridge running on this machine?"),
   "a non-JSON answer must be named as 'no bridge here', not surfaced as a JSON parse error",
 );
+
+// Windows retired PM2 as the operator-machine supervisor on 2026-08-27. Every
+// generic recovery surface must remain portable: the hosted dashboard serves
+// Windows, macOS, and Linux bridge hosts, and the same source still ships on
+// both the legacy Vercel and current Cloudflare deployments.
+const recoverySurfaces = [
+  join("app", "agents", "page.tsx"),
+  join("components", "BridgeCliPanel.tsx"),
+  join("components", "ChatWidget.tsx"),
+  join("app", "api", "chat", "route.ts"),
+  join("app", "api", "bridge", "health", "route.ts"),
+  join("lib", "cloud-tool-runner.ts"),
+  join("components", "settings", "InstallBridgeModal.tsx"),
+  join("app", "settings", "devices", "install", "InstallBridgeWizard.tsx"),
+  join("lib", "prompts-library.ts"),
+];
+for (const rel of recoverySurfaces) {
+  const src = readFileSync(join(ROOT, rel), "utf8");
+  assert.doesNotMatch(src, /pm2 (?:start|restart|logs) (?:bravo-autonomous|claude-bridge(?:-ping)?)/i, `${rel} still gives retired PM2 recovery guidance`);
+  assert.doesNotMatch(src, /Vercel function logs|on Vercel|through the dashboard's \/api\/chat path on Vercel/i, `${rel} still points operators at the retired dashboard runtime`);
+}
+for (const rel of recoverySurfaces) {
+  const src = readFileSync(join(ROOT, rel), "utf8");
+  assert.doesNotMatch(src, /fleet_watchdog\.py/i, `${rel} still gives a repo-relative Windows-only recovery command`);
+}
+const bridgePanel = readFileSync(join(ROOT, "components", "BridgeCliPanel.tsx"), "utf8");
+assert.match(bridgePanel, /bridgeRecoveryGuidance/, "client recovery must use the OS-aware installed launcher helper");
+const bridgeHealth = readFileSync(join(ROOT, "app", "api", "bridge", "health", "route.ts"), "utf8");
+assert.match(bridgeHealth, /deploymentRuntimeLabel/, "hosted bridge diagnostics must derive their runtime label centrally");
+assert.match(bridgeHealth, /Settings[^\n]*Devices|oasis bridge/i, "generic diagnostics must give a portable recovery path");
+
+const prompts = readFileSync(join(ROOT, "lib", "prompts-library.ts"), "utf8");
+assert.doesNotMatch(
+  prompts,
+  /\bpm2\b/i,
+  "active Command Center prompts must not resurrect the retired PM2 supervisor",
+);
+assert.doesNotMatch(
+  prompts,
+  /Vercel-watched|on Vercel/i,
+  "active Command Center prompts must not route operators to the retired host",
+);
+assert.doesNotMatch(
+  prompts,
+  /\b(?:Cloudflare|Vercel)-deployed\b/i,
+  "active Command Center prompts must not hardcode a deployment provider",
+);
+
+assert.equal(
+  bridgeRestartCommand("windows"),
+  '& "$HOME\\.oasis\\bin\\oasis.cmd" bridge restart',
+  "Windows recovery must be independent of the current working directory",
+);
+for (const os of ["macos", "linux"] as const) {
+  assert.equal(
+    bridgeRestartCommand(os),
+    '"$HOME/.oasis/bin/oasis" bridge restart',
+    `${os} recovery must use the installed OASIS launcher`,
+  );
+}
+assert.match(bridgeSupervisorLabel("windows"), /Task Scheduler|Startup/i);
+assert.match(bridgeSupervisorLabel("macos"), /launchd/i);
+assert.match(bridgeSupervisorLabel("linux"), /systemd/i);
+assert.equal(bridgeHostOSFromPlatform("Win32"), "windows");
+assert.equal(bridgeHostOSFromPlatform("MacIntel"), "macos");
+assert.equal(bridgeHostOSFromPlatform("Linux x86_64"), "linux");
+assert.equal(bridgeHostOSFromPlatform("iPhone"), null);
+for (const os of ["windows", "macos", "linux"] as const) {
+  const commands = bridgeInstallCommands(os);
+  assert.match(commands, /bridge install/);
+  assert.match(commands, /bridge restart/);
+  assert.match(commands, /bridge status/);
+  assert.doesNotMatch(commands, /fleet_watchdog|pm2/i);
+  const recovery = bridgeRecoveryGuidance(os);
+  assert.match(recovery, /bridge status/);
+  assert.match(recovery, /bridge restart/);
+  assert.doesNotMatch(recovery, /fleet_watchdog|pm2/i);
+}
+assert.match(bridgeRecoveryGuidance(null), /Settings[^.]*Devices/i);
+assert.match(bridgeRecoveryGuidance(null), /oasis bridge (?:status|restart)/i);
+
+const installWizard = readFileSync(
+  join(ROOT, "app", "settings", "devices", "install", "InstallBridgeWizard.tsx"),
+  "utf8",
+);
+assert.match(installWizard, /bridgeInstallCommands\(os\)/);
+assert.match(installWizard, /bridgeSupervisorLabel\(os\)/);
+assert.doesNotMatch(installWizard, /install-task/);
 
 console.log("settings-bridge-consistency.test.ts: OK");

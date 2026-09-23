@@ -53,6 +53,7 @@ import {
   OASIS_WEBSITE_SALES_PROGRAM,
 } from "@/lib/leads/canonical-lead-fields";
 import { OASIS_PRE_HANDOFF_STAGE_KEYS } from "@/lib/oasis-stage-meta";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
 
 export type ClaimFacts = {
   /** Auth user id of the owning rep, or null when nobody holds it. */
@@ -299,11 +300,10 @@ export function claimPatch(
   nowIso: string,
 ): Record<string, unknown> {
   return {
-    assigned_to: userId,
+    ...pipelineCycleAssignmentFacts(userId, nowIso),
     // Collaboration is scoped to the previous owner's active book. A recycled
     // lead must not carry those write grants into the next rep's claim.
     collaborators: [],
-    assigned_at: nowIso,
     claimed_at: nowIso,
     sales_program: OASIS_WEBSITE_SALES_PROGRAM,
     sales_motion: OASIS_COLD_OUTBOUND_MOTION,
@@ -322,7 +322,13 @@ export function releasePatch(): Record<string, unknown> {
   // Releasing ownership also releases every delegated write grant. Keeping
   // collaborators here would leave the former team able to mutate a lead that
   // is back in the shared pool or has since been claimed by somebody else.
-  return { assigned_to: null, claimed_at: null, collaborators: [] };
+  return {
+    assigned_to: null,
+    assigned_at: null,
+    claimed_at: null,
+    pipeline_cycle: null,
+    collaborators: [],
+  };
 }
 
 /** Read the ownership facts off a raw stored `data` blob. Tolerant of missing

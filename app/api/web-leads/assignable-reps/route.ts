@@ -3,17 +3,13 @@
  *
  * EXISTS BECAUSE THE PICKER AND THE SERVER DISAGREED. The Assign tab built its
  * rep dropdown from /api/team/members, which returns every profile on the
- * tenant. The claim route validates the target against getOasisSalesRepRoster,
- * which deliberately excludes owners, admin_access holders, and any role
- * outside OASIS_PIPELINE_REP_ROLES — a founder's assigned records are founder
- * work, not a rep's sales book, and that exclusion is what keeps a manager's
- * cross-rep read boundary honest.
+ * tenant. The current cycle deliberately uses a separate assignment roster:
+ * CC and Adon only. The manager read roster remains role-based and unchanged,
+ * so assignment policy cannot accidentally widen cross-rep visibility.
  *
- * So the dropdown offered names the server would refuse. Measured on the live
- * webdev tenant (2026-09-02): 8 members listed, 6 assignable — picking CC
- * (is_owner) or Adon (team_role "admin") returned 400 target_not_on_sales_roster.
- * The operator's only clue was a failed assignment on a name the UI had just
- * offered them.
+ * The dropdown and every assignment write now resolve through that same
+ * founder-only function, so they cannot offer one destination and accept
+ * another.
  *
  * This route serves the SAME function the claim route validates against, so the
  * two cannot drift. Not a filter re-implemented on the client: a client-side
@@ -30,7 +26,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
-import { getOasisSalesRepRoster, tenantSlugFor } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster, tenantSlugFor } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -54,7 +50,7 @@ export async function GET() {
     return NextResponse.json({ ok: false, error: "assign_requires_manager" }, { status: 403 });
   }
 
-  const roster = await getOasisSalesRepRoster(session.tenantId);
+  const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
   // auth_user_id is what the claim route compares against, so it is the id the
   // picker must submit. Rows without one are already excluded by the roster
   // function; the guard here is so a future change there cannot put an

@@ -2,22 +2,38 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  deploymentRuntimeLabel,
   deploymentSurface,
   externalTenantSurfacesBlocked,
 } from "../lib/deployment-surface";
 
 const saved = {
   DEPLOY_SURFACE: process.env.DEPLOY_SURFACE,
+  DEPLOY_PLATFORM: process.env.DEPLOY_PLATFORM,
   DEPLOY_ENV: process.env.DEPLOY_ENV,
+  VERCEL: process.env.VERCEL,
   VERCEL_ENV: process.env.VERCEL_ENV,
 };
 
 try {
   delete process.env.DEPLOY_SURFACE;
+  delete process.env.DEPLOY_PLATFORM;
   delete process.env.DEPLOY_ENV;
+  delete process.env.VERCEL;
   delete process.env.VERCEL_ENV;
   assert.equal(deploymentSurface(), "unclassified");
   assert.equal(externalTenantSurfacesBlocked(), false, "local development keeps shared-code testing available");
+  assert.equal(deploymentRuntimeLabel(), "hosted runtime");
+
+  process.env.DEPLOY_PLATFORM = "cloudflare";
+  assert.equal(deploymentRuntimeLabel(), "Cloudflare runtime");
+  delete process.env.DEPLOY_PLATFORM;
+
+  process.env.VERCEL = "1";
+  process.env.VERCEL_ENV = "production";
+  assert.equal(deploymentRuntimeLabel(), "Vercel runtime");
+  delete process.env.VERCEL;
+  delete process.env.VERCEL_ENV;
 
   process.env.DEPLOY_SURFACE = "oasis";
   assert.equal(externalTenantSurfacesBlocked(), true);

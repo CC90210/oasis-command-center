@@ -329,6 +329,50 @@ export async function getOasisSalesRepRoster(
   );
 }
 
+/**
+ * Pipeline ownership for the current revenue cycle is intentionally narrower
+ * than the sales-team/read roster. Owners/admins are normally excluded from
+ * getOasisSalesRepRoster because that function is a manager authorization
+ * boundary; CC and Adon are exactly the two legal assignment destinations for
+ * this cycle, so they need a separate allowlist rather than a dangerous role
+ * exception in the manager roster.
+ */
+export const OASIS_PIPELINE_ASSIGNMENT_EMAILS = [
+  "conaugh@oasisai.work",
+  "adon@oasisai.work",
+] as const;
+
+export function isOasisPipelineAssignmentMember(member: { email?: string | null }): boolean {
+  const email = (member.email || "").trim().toLowerCase();
+  return (OASIS_PIPELINE_ASSIGNMENT_EMAILS as readonly string[]).includes(email);
+}
+
+export async function getOasisPipelineAssignmentRoster(tenantId: string): Promise<MemberRow[]> {
+  const supa = getServiceSupabase();
+  const { data, error } = await supa
+    .from("user_profiles")
+    .select(
+      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id",
+    )
+    .eq("tenant_id", tenantId)
+    .order("joined_at", { ascending: true });
+  if (error) throw dbError("getOasisPipelineAssignmentRoster", error);
+
+  const byEmail = new Map(
+    canonicalizeTenantMembers((data || []) as MemberRow[])
+      .filter((member) => Boolean(member.auth_user_id?.trim()) && isOasisPipelineAssignmentMember(member))
+      .map((member) => [member.email.trim().toLowerCase(), member]),
+  );
+  const roster = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
+    const member = byEmail.get(email);
+    return member ? [member] : [];
+  });
+  if (roster.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
+    throw new Error("oasis_pipeline_assignment_roster_incomplete");
+  }
+  return roster;
+}
+
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa

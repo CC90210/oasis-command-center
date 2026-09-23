@@ -63,6 +63,9 @@ import {
   SMS_CONSENT_DISCLOSURE,
   SMS_CONSENT_DISCLOSURE_VERSION,
 } from "@/lib/sms/auto-responses";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -573,6 +576,20 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     if (!UUID.test(founderUserId) || !meetingAt || !promisedDemo || !requestId) return NextResponse.json({ok:false,error:"invalid_handoff"},{status:400});
     if (!Number.isFinite(Date.parse(meetingAt)) || Date.parse(meetingAt) <= Date.now()) return NextResponse.json({ok:false,error:"meeting_must_be_in_future"},{status:400});
     if (promisedDemo.length > 500) return NextResponse.json({ok:false,error:"promised_demo_too_long"},{status:400});
+    let currentCycleHost: string | null = null;
+    try {
+      const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+      currentCycleHost = resolveAssignableTarget(roster, founderUserId);
+    } catch (error) {
+      console.error("[website-sales.book-founder] assignment roster unavailable", {
+        tenantId: session.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json({ok:false,error:"sales_roster_unavailable"},{status:503});
+    }
+    if (!currentCycleHost) {
+      return NextResponse.json({ok:false,error:"audit_host_not_on_cycle_roster"},{status:422});
+    }
     const auditHost = await db.from("user_profiles").select("id,is_owner,team_role,email").eq("tenant_id",session.tenantId).eq("auth_user_id",founderUserId).maybeSingle();
     if (auditHost.error) {
       return NextResponse.json({ok:false,error:"audit_host_lookup_failed"},{status:503});
@@ -684,7 +701,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       founder_booking_confirmed_by:session.userId,
       attributed_rep_user_id:existingRep,
       attribution_frozen_at:current.attribution_frozen_at || occurredAt,
-      assigned_to:founderUserId,
+      ...pipelineCycleAssignmentFacts(founderUserId, occurredAt),
+      claimed_at:occurredAt,
       collaborators,
     };
   } else if (body.action === "complete_audit") {
@@ -1387,7 +1405,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       quoted_monthly_amount:monthlyAmount,
       payment_provider:verifiedPayment.provider,
       verified_payment_id:verifiedPaymentId,
-      assigned_to:builderUserId,
+      ...pipelineCycleAssignmentFacts(builderUserId, occurredAt),
+      claimed_at:occurredAt,
       fulfillment_owner_id:builderUserId,
       build_handoff_status:"assigned_to_builder",
       collaborators,

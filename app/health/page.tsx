@@ -41,6 +41,8 @@ import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getTenant } from "@/lib/queries";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
+import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
+import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { AlertCircle, AlertTriangle, Clock, Activity, CheckCircle2 } from "lucide-react";
@@ -221,6 +223,7 @@ export default async function HealthPage() {
   // on the SunBiz tenant. A failed tenant lookup resolves to null → the
   // SunBiz sections stay hidden (fail closed, never another tenant's copy).
   const isSunbizTenant = profileSlug === "sun";
+  const isOasisTenant = tenantId === WEBDEV_TENANT_ID;
   // Link base for the shop-outs card (sun-only, so the fallback matters only
   // while standing in the SunBiz workspace).
   const tenantSlug = profileSlug || "sun";
@@ -233,11 +236,19 @@ export default async function HealthPage() {
   // The outcome checks count toward the HEADER, not just their own card.
   // Otherwise the page renders "All clear" directly above a failing check, a
   // stale one, an open alert, or a blind read — and the header is the part
-  // people actually read. SunBiz only: the checks are the SunBiz outcome
-  // system (app/api/cron/health-check runs them for SUNBIZ_TENANT_ID alone),
-  // so on any other tenant the panel could only ever render an alarming
-  // empty state about a checker that was never meant to run there.
-  const outcome = isSunbizTenant ? await loadOutcomeChecks(tenantId, Date.now()) : null;
+  // people actually read. SunBiz sees its delivery outcomes; OASIS sees the
+  // global founder-booking/calendar check persisted against the OASIS tenant.
+  // Other tenants stay hidden rather than inheriting another company's health.
+  const calendarCheckIds = CALENDAR_CHECKS.map((check) => check.id);
+  const outcome = isSunbizTenant || isOasisTenant
+    ? await loadOutcomeChecks(
+        tenantId,
+        Date.now(),
+        isOasisTenant
+          ? { includeCheckIds: calendarCheckIds }
+          : { excludeCheckIds: calendarCheckIds },
+      )
+    : null;
 
   const totalSignals =
     recentErrors.length +
@@ -302,13 +313,11 @@ export default async function HealthPage() {
 
       {/* ── Error events ────────────────────────────────────────── */}
 
-      {/* Outcome checks first. They answer "did a merchant actually receive
-          anything", which outranks "were there errors": during the ten-day SMS
-          outage there were no errors to show, and every tile below was green.
-          SunBiz only — the checks run for SUNBIZ_TENANT_ID alone, and the
-          merchant/lender vocabulary belongs to that tenant. */}
+      {/* Outcome checks first. SunBiz gets merchant-delivery outcomes; OASIS
+          gets the shared founder-booking/calendar outcome. Both are stored and
+          rendered under the tenant that actually owns the workflow. */}
       {outcome && (
-        <Card title="Are merchants actually being reached?">
+        <Card title={isOasisTenant ? "OASIS founder-booking health" : "Are merchants actually being reached?"}>
           <OutcomeChecksPanel
             rows={outcome.rows}
             openAlerts={outcome.openAlerts}

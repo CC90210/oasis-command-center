@@ -74,6 +74,8 @@ import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { oasisLeadCreateRedirect } from "@/lib/oasis-lead-create";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -644,7 +646,25 @@ async function PageBody({
       if (slug === "sun") {
         return <ImportClient tenantSlug={slug} />;
       }
-      return <LeadsImportClient />;
+      if (isWebsiteSalesTenantSlug(slug)) {
+        let assignmentOptions: Array<{ id: string; name: string }> = [];
+        if (tenantId) {
+          try {
+            const roster = await getOasisPipelineAssignmentRoster(tenantId);
+            assignmentOptions = roster.map((member) => ({
+              id: member.auth_user_id!,
+              name: member.display_name || member.full_name || member.email,
+            }));
+          } catch (error) {
+            console.error("[manifest.import] OASIS assignment roster unavailable", {
+              tenantId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        return <LeadsImportClient assignmentOptions={assignmentOptions} />;
+      }
+      return <LeadsImportClient assignmentOptions={null} />;
     case "shopping_out":
       // Phase 4 (Jordan/Oasis 2026-05-23). Multi-lender outreach UI;
       // ranks lenders via lib/lenders/match-fitness, attaches docs,

@@ -22,7 +22,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/data";
 import { assignTerritory } from "@/lib/web-leads/assign";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -65,9 +65,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // who may assign and then accepted any non-empty string as the destination,
   // so a whole city+industry sheet could be parked on:
   //
-  //   - a founder, whom getOasisSalesRepRoster deliberately excludes (their
-  //     assigned records are founder work, not a rep's book, and that exclusion
-  //     is what keeps a manager's cross-rep read boundary honest), or
+  //   - anyone outside the separate CC+Adon assignment roster, or
   //   - an id belonging to no profile at all. That is the bad one: the write
   //     SUCCEEDS, the sheet's leads propagate to an owner who does not exist,
   //     and they are then out of the pool and invisible to every rep. Nothing
@@ -80,7 +78,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   // Audited before the change: 1 assigned territory, owner valid. The hole was
   // latent, not exploited.
   if (assignedTo) {
-    const roster = await getOasisSalesRepRoster(session.tenantId);
+    const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
     // Take the id FROM THE ROSTER, not from the request. Matching leniently and
     // then persisting what the client sent is how a lenient comparison becomes
     // a data-integrity bug: " 8f3a-REP-ariel " passes the check and is stored

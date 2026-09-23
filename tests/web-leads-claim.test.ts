@@ -20,8 +20,10 @@ import {
   availability, isActionableBy, isInBookOf, isReleasedFromBook, planClaim, claimPatch, releasePatch, factsFrom,
   CLAIM_STALE_DAYS, LOST_RECYCLE_DAYS, MAX_LEADS_PER_REP, type ClaimFacts,
 } from "../lib/web-leads/claim";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "../lib/pipeline-cycle";
 
 const NOW = Date.parse("2026-08-23T12:00:00Z");
+const ACTIVE_CYCLE_ASSIGNMENT_AT = "2026-09-23T12:00:00.000Z";
 const DAY = 24 * 60 * 60 * 1000;
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 
@@ -56,27 +58,27 @@ assert.equal(
   "releasing a lead must never write the dnc field -- opting back in is not ours to do",
 );
 assert.equal(
-  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", "2026-08-23T12:00:00Z"), "dnc"),
+  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", ACTIVE_CYCLE_ASSIGNMENT_AT), "dnc"),
   false,
   "claiming a lead must never write the dnc field",
 );
 assert.equal(
-  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", "2026-08-23T12:00:00Z"), "lead_source_track"),
+  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", ACTIVE_CYCLE_ASSIGNMENT_AT), "lead_source_track"),
   false,
   "claiming must not rewrite frozen source provenance",
 );
 assert.equal(
-  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", "2026-08-23T12:00:00Z"), "sourced_by_user_id"),
+  Object.prototype.hasOwnProperty.call(claimPatch("rep-a", ACTIVE_CYCLE_ASSIGNMENT_AT), "sourced_by_user_id"),
   false,
   "claiming must preserve the immutable sourcing identity",
 );
 assert.equal(
-  ({ lead_source_track: "self", sourced_by_user_id: "rep-original", ...claimPatch("rep-a", "2026-08-23T12:00:00Z") }).lead_source_track,
+  ({ lead_source_track: "self", sourced_by_user_id: "rep-original", ...claimPatch("rep-a", ACTIVE_CYCLE_ASSIGNMENT_AT) }).lead_source_track,
   "self",
   "a reassignment must retain its frozen source track; payout checks the durable source identity",
 );
 assert.equal(
-  ({ sourced_by_user_id: "rep-original", ...claimPatch("rep-a", "2026-08-23T12:00:00Z") }).sourced_by_user_id,
+  ({ sourced_by_user_id: "rep-original", ...claimPatch("rep-a", ACTIVE_CYCLE_ASSIGNMENT_AT) }).sourced_by_user_id,
   "rep-original",
 );
 
@@ -287,12 +289,14 @@ assert.equal(
 // ---------------------------------------------------------------------------
 
 {
-  const patch = claimPatch("rep-b", "2026-08-23T12:00:00Z");
+  const patch = claimPatch("rep-b", ACTIVE_CYCLE_ASSIGNMENT_AT);
   assert.equal(patch.assigned_to, "rep-b");
   assert.deepEqual(patch.collaborators, [], "a new claim must clear the previous owner's collaborators");
-  assert.equal(patch.claimed_at, "2026-08-23T12:00:00Z");
-  assert.equal(patch.stage_entered_at, "2026-08-23T12:00:00Z");
-  assert.equal(patch.last_contacted_at, "2026-08-23T12:00:00Z", "claiming into Assigned counts as a lifecycle touch");
+  assert.equal(patch.assigned_at, ACTIVE_CYCLE_ASSIGNMENT_AT);
+  assert.equal(patch.claimed_at, ACTIVE_CYCLE_ASSIGNMENT_AT);
+  assert.equal(patch.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
+  assert.equal(patch.stage_entered_at, ACTIVE_CYCLE_ASSIGNMENT_AT);
+  assert.equal(patch.last_contacted_at, ACTIVE_CYCLE_ASSIGNMENT_AT, "claiming into Assigned counts as a lifecycle touch");
   assert.equal(patch.last_call_at, null, "the previous owner's call stamp must be cleared");
   assert.equal(patch.lost_at, null, "the previous owner's lost stamp must be cleared");
   assert.equal(patch.stage, "assigned", "a claimed lead enters the pipeline at 'assigned'");

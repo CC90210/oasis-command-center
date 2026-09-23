@@ -195,7 +195,10 @@ assert(
     workflowRoute.includes("google_calendar_event_id") &&
     workflowRoute.includes("google_meet_link") &&
     workflowRoute.includes("next_action_at:meetingAt") &&
-    workflowRoute.includes("assigned_to:founderUserId"),
+    workflowRoute.includes("pipelineCycleAssignmentFacts(founderUserId, occurredAt)") &&
+    workflowRoute.includes("getOasisPipelineAssignmentRoster(session.tenantId)") &&
+    workflowRoute.includes("resolveAssignableTarget(roster, founderUserId)") &&
+    workflowRoute.includes('error:"audit_host_not_on_cycle_roster"'),
   "the pre-Founder handoff requires explicit qualification/context and transfers ownership only after a retry-safe provider-verified event and Meet receipt",
 );
 assert(

@@ -20,7 +20,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
-import { DRIP_CHECKS, runCheck } from "./drip-checks";
+import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
@@ -37,7 +37,12 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS];
+  return [...tenantOutcomeChecks(), ...CALENDAR_CHECKS];
+}
+
+/** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */
+export function tenantOutcomeChecks(): DripCheck[] {
+  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS];
 }
 
 
@@ -120,7 +125,7 @@ export type RunSummary = {
  */
 export async function runHealthChecks(
   tenantId: string,
-  opts: { nowMs?: number; notify?: boolean } = {},
+  opts: { nowMs?: number; notify?: boolean; checks?: readonly DripCheck[] } = {},
 ): Promise<RunSummary> {
   const db = getServiceSupabase();
   const nowMs = opts.nowMs ?? Date.now();
@@ -130,7 +135,7 @@ export async function runHealthChecks(
   const recovered: string[] = [];
   let telegramFailures = 0;
 
-  const checks = allChecks();
+  const checks = opts.checks ? [...opts.checks] : allChecks();
   for (const check of checks) {
     let result: CheckResult;
     try {

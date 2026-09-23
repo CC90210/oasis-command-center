@@ -46,6 +46,7 @@ import { CA_REGIONS, countryOf } from "@/lib/web-leads/filters";
 import { US_STATE_CODES } from "@/lib/address/us-address";
 import { humanize } from "@/lib/manifest/humanize";
 import type { ManifestEntityDef, ManifestEntityField } from "@/lib/manifest/schema";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
 
 /**
  * The unclaimed prospect pool. Not a pipeline stage: the board hides it
@@ -163,17 +164,17 @@ export function oasisLeadCreateStamp(input: {
   now: Date;
 }): Record<string, unknown> {
   const at = input.now.toISOString();
+  const ownerUserId = input.ownerUserId.trim().toLowerCase();
   return {
     stage: input.stage,
     stage_entered_at: at,
     sales_program: OASIS_WEBSITE_SALES_PROGRAM,
     sales_motion: OASIS_COLD_OUTBOUND_MOTION,
-    assigned_to: input.ownerUserId.trim().toLowerCase(),
-    assigned_at: at,
+    ...pipelineCycleAssignmentFacts(ownerUserId, at),
     claimed_at: at,
     lead_source_track: input.sourceTrack,
     sourced_by_user_id:
-      input.sourceTrack === "self" ? input.ownerUserId.trim().toLowerCase() : null,
+      input.sourceTrack === "self" ? ownerUserId : null,
     ...(input.stage === "lost" ? { lost_at: at } : {}),
   };
 }

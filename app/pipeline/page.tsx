@@ -49,6 +49,7 @@ import {
   listOasisPipelineWindow,
   resolveOasisPipelineAssigneeScope,
 } from "@/lib/oasis-pipeline-query";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 
 export const dynamic = "force-dynamic";
 
@@ -284,6 +285,7 @@ export default async function PipelinePage({
           session.ok && session.teamRole.trim().toLowerCase() === "builder"
             ? session.userId
             : null,
+        cycle: CURRENT_OASIS_PIPELINE_CYCLE,
         query,
       }),
       memberNameMapPromise,

@@ -55,20 +55,17 @@ describe('assigning a lead to another rep', () => {
     assert.match(code, /assign_requires_manager[\s\S]{0,120}status:\s*403/);
   });
 
-  it('refuses a target who is not on the sales roster', () => {
-    // Without this, an id typed into a request could park a lead on a founder,
-    // a builder, or nobody at all -- and the lead would vanish from every
-    // board that scopes by roster.
-    assert.match(code, /getOasisSalesRepRoster\(/);
+  it('refuses a target who is not on the current-cycle assignment roster', () => {
+    // Current-cycle work belongs to CC or Adon. This is deliberately distinct
+    // from the role-based manager read roster.
+    assert.match(code, /getOasisPipelineAssignmentRoster\(/);
     assert.match(code, /target_not_on_sales_roster/);
     assert.match(code, /target_not_on_sales_roster[\s\S]{0,120}status:\s*400/);
   });
 
-  it('lets a manager assign to themselves without a roster round-trip', () => {
-    // A manager is deliberately NOT on the sales roster (getOasisSalesRepRoster
-    // excludes owners and admins), so self-assignment has to short-circuit or
-    // it would be refused by the check meant to protect it.
-    assert.match(code, /target !== session\.userId\.trim\(\)\.toLowerCase\(\)/);
+  it('validates self-claims against the same CC+Adon roster', () => {
+    assert.doesNotMatch(code, /target !== session\.userId\.trim\(\)\.toLowerCase\(\)/);
+    assert.match(code, /resolveAssignableTarget\(roster, claimFor\)/);
   });
 
   it('still refuses anyone without a sales role at all', () => {
@@ -235,11 +232,8 @@ describe('assigning a lead to another rep', () => {
 
   it('offers only reps the server will actually accept', () => {
     // The picker read /api/team/members -- EVERY profile on the tenant -- while
-    // the claim route validates the target against getOasisSalesRepRoster,
-    // which excludes owners, admin_access holders and non-rep roles. Measured
-    // on the live tenant 2026-09-02: 8 names offered, 6 accepted. Choosing CC
-    // (is_owner) or Adon (team_role 'admin') returned 400
-    // target_not_on_sales_roster -- on a name the UI had just offered.
+    // the claim route validates against the separate founder assignment
+    // roster. The picker must expose the same CC+Adon set.
     const browser = readFileSync('components/web-leads/WebLeadsBrowser.tsx', 'utf8');
     assert.match(browser, /fetch\("\/api\/web-leads\/assignable-reps"/);
     assert.ok(
@@ -253,7 +247,7 @@ describe('assigning a lead to another rep', () => {
     const route = readFileSync('app/api/web-leads/assignable-reps/route.ts', 'utf8');
     const claim = readFileSync('app/api/web-leads/claim/route.ts', 'utf8');
     for (const src of [route, claim]) {
-      assert.match(src, /getOasisSalesRepRoster/);
+      assert.match(src, /getOasisPipelineAssignmentRoster/);
       assert.match(src, /isOasisPipelineAdmin\(/);
       assert.match(src, /canReadOasisSalesTeamPipeline\(/);
     }
@@ -267,8 +261,8 @@ describe('assigning a lead to another rep', () => {
     // The bulk control sits on the same Assign tab as the per-lead picker and
     // had the opposite posture: it gated who may assign (admin/manager) and
     // then accepted ANY non-empty string as the destination. So a whole
-    // city+industry sheet could be parked on a founder -- whom the roster
-    // deliberately excludes -- or on an id belonging to no profile at all.
+    // city+industry sheet could be parked outside the CC+Adon cycle roster or
+    // on an id belonging to no profile at all.
     //
     // The second one is the dangerous case: the write SUCCEEDS, the sheet's
     // leads propagate to an owner who does not exist, and they are then out of
@@ -276,7 +270,7 @@ describe('assigning a lead to another rep', () => {
     // nothing ever asked. Audited before the fix: 1 assigned territory, owner
     // valid -- latent, not exploited.
     const route = readFileSync('app/api/web-leads/territories/[id]/assign/route.ts', 'utf8');
-    assert.match(route, /getOasisSalesRepRoster/, 'the sheet route must check the roster');
+    assert.match(route, /getOasisPipelineAssignmentRoster/, 'the sheet route must check the founder roster');
     assert.match(route, /target_not_on_sales_roster/);
     // The check must sit BEFORE the write, or it is decoration.
     assert.ok(
