@@ -13,6 +13,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { findOrphanedVerificationLeadIds } from "@/lib/drips/phone-lookup-repair";
 import { evaluate, type CheckResult, type CheckRule } from "./checks-core";
 import type { TelegramLane } from "@/lib/notify/telegram";
 
@@ -360,6 +361,31 @@ export const DRIP_CHECKS: DripCheck[] = [
     describe: (r) =>
       `${r.observed} drip texts in 24h against a target of ${smsTargetPerDay()}. ` +
       `The cap is a ceiling, not a source: check working lines, enrolment, and the deal gate before raising it.`,
+  },
+  {
+    /**
+     * THE LOOKUP QUEUE CAN BE EMPTY BECAUSE NOTHING ENQUEUED THE WORK.
+     *
+     * Measured 2026-09-23: 343 distinct leads were held at
+     * sms_awaiting_verification and all 343 had zero phone_lookup_jobs. They
+     * were legacy June/July leads outside the post-2026-08-07 Live-Sub auto
+     * enrollment policy. `leads.phone_lookup_stalled` returned 0/green because
+     * it only asks how old the oldest PENDING job is; no jobs meant no age.
+     *
+     * This check watches the missing handoff separately from the drainer. One
+     * says "work was never queued"; the next says "queued work is not moving".
+     */
+    id: "leads.phone_lookup_unenqueued",
+    severity: "high",
+    rule: { kind: "must_be_zero" },
+    observe: async (db, tenantId) => {
+      const scan = await findOrphanedVerificationLeadIds(db, tenantId);
+      return scan.ok ? scan.orphanLeadIds.length : null;
+    },
+    describe: (r) =>
+      `${r.observed} SMS-held lead(s) have no phone lookup job. ` +
+      `An empty lookup queue is not healthy when verification holds exist; preview the ` +
+      `bounded orphan-repair enrollment before authorizing any queue writes.`,
   },
   {
     /**

@@ -26,10 +26,15 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { getEntityDefinition } from "@/lib/import/entities";
 import { importRowsForTenant } from "@/lib/import/service";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -40,6 +45,7 @@ type Body = {
   dedup_by?: unknown;
   default_source?: unknown;
   dry_run?: unknown;
+  assignee_user_id?: unknown;
 };
 
 export async function POST(
@@ -55,29 +61,18 @@ export async function POST(
     );
   }
 
-  const user = await getSessionUser();
-  if (!user) {
+  const session = await resolveSessionContext();
+  if (!session.ok) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  const db = getServiceSupabase();
-  const profileRes = await db
-    .from("user_profiles")
-    .select("tenant_id, team_role")
-    .eq("auth_user_id", user.id)
-    .maybeSingle();
-  const profile = profileRes.data as { tenant_id: string | null; team_role: string | null } | null;
-  if (!profile?.tenant_id) {
-    return NextResponse.json({ ok: false, error: "no_tenant" }, { status: 401 });
-  }
-
-  // Read-only members cannot import — same gate as elsewhere in the dashboard.
-  if (profile.team_role === "read_only") {
+  if (!canWriteCrm(session.teamRole)) {
     return NextResponse.json(
-      { ok: false, error: "forbidden", message: "Read-only members can't run imports." },
+      { ok: false, error: "forbidden_role", message: "Read-only members can't run imports." },
       { status: 403 },
     );
   }
+  const db = getServiceSupabase();
 
   let body: Body;
   try {
@@ -92,10 +87,62 @@ export async function POST(
     : undefined;
   const defaultSource = typeof body.default_source === "string" ? body.default_source : undefined;
   const dryRun = body.dry_run === true;
+  const tenantSlug = await resolveOwnedSlug(session.tenantId);
+  if (entity.entity_type === "lead" && !tenantSlug) {
+    return NextResponse.json(
+      { ok: false, error: "tenant_scope_unresolved" },
+      { status: 503 },
+    );
+  }
+  const isOasisLeadImport =
+    entity.entity_type === "lead" && isWebsiteSalesTenantSlug(tenantSlug);
+  let oasisAssigneeUserId: string | null = null;
+  if (isOasisLeadImport) {
+    const requestedAssignee =
+      typeof body.assignee_user_id === "string" ? body.assignee_user_id.trim() : "";
+    if (!requestedAssignee) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "assignee_required",
+          message: "Choose CC or Adon before importing OASIS leads.",
+        },
+        { status: 422 },
+      );
+    }
+
+    try {
+      const roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+      oasisAssigneeUserId = resolveAssignableTarget(roster, requestedAssignee);
+    } catch (error) {
+      console.error("[import] OASIS assignment roster could not be verified", {
+        tenantId: session.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "sales_roster_unavailable",
+          message: "The CC + Adon assignment roster could not be verified.",
+        },
+        { status: 503 },
+      );
+    }
+    if (!oasisAssigneeUserId) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "target_not_on_sales_roster",
+          message: "OASIS leads can only be assigned to CC or Adon this cycle.",
+        },
+        { status: 422 },
+      );
+    }
+  }
 
   const result = await importRowsForTenant({
     db,
-    tenantId: profile.tenant_id,
+    tenantId: session.tenantId,
     entity,
     rows,
     dedupBy,
@@ -103,13 +150,16 @@ export async function POST(
     dryRun,
     // Decides whether website columns classify the lead onto the
     // website-sales board, or are just detail on a funding application.
-    tenantSlug: await resolveOwnedSlug(profile.tenant_id),
+    tenantSlug,
+    oasisAssigneeUserId,
   });
 
   if (!result.ok) {
     const status =
       result.error === "no_rows" ? 400
       : result.error === "too_many_rows" ? 413
+      : result.error === "assignee_required" ? 422
+      : result.error === "tenant_scope_unresolved" ? 503
       : result.error === "dedup_lookup_failed" ? 500
       : result.error === "insert_failed" ? 500
       : 400;

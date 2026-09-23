@@ -16,18 +16,32 @@
  *
  * Auth: Bearer SCAN_TRIGGER_SECRET | CRON_SECRET (Vercel sends the latter).
  * DRY unless ?write=1 — a dry run reports the set it WOULD enqueue, writing nothing.
+ *
+ * `?repair-orphan-holds=1` is an explicit, bounded repair lane for active drip
+ * leads stuck at sms_awaiting_verification with no phone_lookup_jobs row. It is
+ * NOT part of the scheduled URL and still requires `write=1`; without both
+ * switches it only previews. The repair inserts lookup jobs only — it neither
+ * sends SMS nor updates lead/drip records.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import {
+  buildVerificationRepairJob,
+  findOrphanedVerificationLeadIds,
+  type VerificationRepairJob,
+} from "@/lib/drips/phone-lookup-repair";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const CANDIDATE_TABLE = "scrub_candidates";
 const JOBS_TABLE = "phone_lookup_jobs";
+const REPAIR_TENANT_ID =
+  process.env.TEXTTORRENT_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
+const MAX_REPAIR_BATCH = 25;
 
 const ENROLL_BATCH = Number(process.env.TPS_ENROLL_BATCH || 25);
 const MAX_AUTO_ATTEMPTS = Number(process.env.TPS_MAX_AUTO_ATTEMPTS || 3);
@@ -132,12 +146,130 @@ function enrollDecision(jobs: PriorJob[]): { enroll: boolean; reason: string } {
   return { enroll: true, reason: "eligible" };
 }
 
+function repairBatchSize(): number {
+  const configured = Number(process.env.TPS_REPAIR_BATCH || MAX_REPAIR_BATCH);
+  if (!Number.isFinite(configured)) return MAX_REPAIR_BATCH;
+  return Math.max(1, Math.min(MAX_REPAIR_BATCH, Math.floor(configured)));
+}
+
+/**
+ * Explicit recovery for verification holds the normal Live-Sub enrollment
+ * policy never owned. This path is deliberately absent from the scheduled URL:
+ * the affected cohort predates Adon's 2026-08-07 automatic-spend cutoff, so a
+ * human must opt into each bounded batch by adding BOTH query switches.
+ *
+ * The only write below is an INSERT into phone_lookup_jobs. Lead data is read
+ * to construct the lookup query but never changed, and no sending code is
+ * imported or invoked.
+ */
+async function repairOrphanVerificationHolds(
+  db: ReturnType<typeof getServiceSupabase>,
+  write: boolean,
+): Promise<NextResponse> {
+  const scan = await findOrphanedVerificationLeadIds(db, REPAIR_TENANT_ID);
+  if (!scan.ok) {
+    return NextResponse.json(
+      { ok: false, mode: "orphan_verification_repair", write, error: scan.error },
+      { status: 503 },
+    );
+  }
+
+  const records = new Map<string, Record<string, unknown>>();
+  for (let i = 0; i < scan.orphanLeadIds.length; i += 200) {
+    const ids = scan.orphanLeadIds.slice(i, i + 200);
+    const r = await db
+      .from("tenant_records")
+      .select("id, data")
+      .eq("tenant_id", REPAIR_TENANT_ID)
+      .eq("entity_type", "lead")
+      .in("id", ids);
+    if (r.error) {
+      return NextResponse.json(
+        { ok: false, mode: "orphan_verification_repair", write, error: "lead_scan_failed" },
+        { status: 503 },
+      );
+    }
+    for (const row of (r.data || []) as Array<{ id: string; data: Record<string, unknown> | null }>) {
+      records.set(row.id, row.data || {});
+    }
+  }
+
+  const skipped: Record<string, number> = {};
+  const bump = (reason: string) => {
+    skipped[reason] = (skipped[reason] || 0) + 1;
+  };
+  const eligible: VerificationRepairJob[] = [];
+  for (const leadId of scan.orphanLeadIds) {
+    const data = records.get(leadId);
+    if (!data) {
+      bump("lead_missing");
+      continue;
+    }
+    const built = buildVerificationRepairJob(REPAIR_TENANT_ID, leadId, data);
+    if (!built.ok) {
+      bump(built.reason);
+      continue;
+    }
+    eligible.push(built.job);
+  }
+
+  const batch = eligible.slice(0, repairBatchSize());
+  let enqueued = 0;
+  let deduped = 0;
+  if (write) {
+    for (const job of batch) {
+      const { error } = await db.from(JOBS_TABLE).insert(job);
+      if (!error) {
+        enqueued++;
+      } else if (isUniqueViolationError(error) || /duplicate/i.test(error.message)) {
+        // A concurrent repair/enrollment won the one-in-flight race. That is a
+        // successful dedupe, not another scrape and not an error to retry.
+        deduped++;
+      } else {
+        return NextResponse.json(
+          {
+            ok: false,
+            mode: "orphan_verification_repair",
+            write,
+            error: "enqueue_failed",
+            heldLeads: scan.heldLeadCount,
+            orphanLeads: scan.orphanLeadIds.length,
+            enqueued,
+            deduped,
+          },
+          { status: 500 },
+        );
+      }
+    }
+  }
+
+  const completedThisBatch = write ? enqueued + deduped : batch.length;
+  return NextResponse.json({
+    ok: true,
+    mode: "orphan_verification_repair",
+    write,
+    heldLeads: scan.heldLeadCount,
+    orphanLeads: scan.orphanLeadIds.length,
+    eligible: eligible.length,
+    batchLimit: repairBatchSize(),
+    wouldEnqueue: batch.length,
+    enqueued,
+    deduped,
+    remainingEligible: Math.max(0, eligible.length - completedThisBatch),
+    skipped,
+  });
+}
+
 export async function GET(req: NextRequest) {
   if (!checkAuth(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
-  const write = new URL(req.url).searchParams.get("write") === "1";
+  const url = new URL(req.url);
+  const write = url.searchParams.get("write") === "1";
   const db = getServiceSupabase();
+  if (url.searchParams.get("repair-orphan-holds") === "1") {
+    return repairOrphanVerificationHolds(db, write);
+  }
 
   const summary = {
     ok: true,

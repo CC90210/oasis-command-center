@@ -14,6 +14,10 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { toPanelRows, type PanelCheck, type OpenAlert, type PanelRow } from "./panel-core";
+import {
+  checkIdFromHealthAlertStateKey,
+  healthAlertStateKeys,
+} from "./alert-state-key";
 
 export type OutcomeCheckData = {
   rows: PanelRow[];
@@ -27,7 +31,44 @@ export type OutcomeCheckData = {
   signalCount: number;
 };
 
-export async function loadOutcomeChecks(tenantId: string | null, nowMs: number): Promise<OutcomeCheckData> {
+type OutcomeCheckFilter = {
+  includeCheckIds?: readonly string[];
+  excludeCheckIds?: readonly string[];
+};
+
+function allowsCheck(checkId: string, filter: OutcomeCheckFilter): boolean {
+  const include = filter.includeCheckIds ? new Set(filter.includeCheckIds) : null;
+  const exclude = filter.excludeCheckIds ? new Set(filter.excludeCheckIds) : null;
+  return (!include || include.has(checkId)) && (!exclude || !exclude.has(checkId));
+}
+
+/** Materialize required checks that have never produced a persisted run. */
+export function ensureExpectedChecks(
+  checks: readonly PanelCheck[],
+  expectedCheckIds: readonly string[] = [],
+): PanelCheck[] {
+  const result = [...checks];
+  const seen = new Set(result.map((check) => check.checkId));
+  for (const checkId of expectedCheckIds) {
+    if (!checkId || seen.has(checkId)) continue;
+    result.push({
+      checkId,
+      verdict: "never_run",
+      observed: null,
+      baseline: null,
+      reason: "No run has been recorded for this required check.",
+      ranAt: null,
+    });
+    seen.add(checkId);
+  }
+  return result;
+}
+
+export async function loadOutcomeChecks(
+  tenantId: string | null,
+  nowMs: number,
+  filter: OutcomeCheckFilter = {},
+): Promise<OutcomeCheckData> {
   const empty: OutcomeCheckData = { rows: [], openAlerts: [], readFailed: false, readError: null, signalCount: 0 };
   if (!tenantId) return empty;
 
@@ -45,6 +86,7 @@ export async function loadOutcomeChecks(tenantId: string | null, nowMs: number):
   const latest = new Map<string, PanelCheck>();
   for (const r of runsRes.data || []) {
     const id = String(r.check_id);
+    if (!allowsCheck(id, filter)) continue;
     if (latest.has(id)) continue; // list is desc, so the first is newest
     latest.set(id, {
       checkId: id,
@@ -55,21 +97,49 @@ export async function loadOutcomeChecks(tenantId: string | null, nowMs: number):
       ranAt: r.ran_at ?? null,
     });
   }
-  const rows = toPanelRows([...latest.values()], nowMs);
+  const rows = toPanelRows(
+    ensureExpectedChecks([...latest.values()], filter.includeCheckIds),
+    nowMs,
+  );
 
-  const alertsRes = await db
+  let alertsQuery = db
     .from("health_alert_state")
     .select("alert_key, first_failed_at, last_alerted_at, repeat_n")
     .eq("tenant_id", tenantId)
-    .not("first_failed_at", "is", null)
+    .not("first_failed_at", "is", null);
+
+  // Filtering after LIMIT can hide the one included global check behind 50
+  // unrelated alerts. Push include ids into the database query so Calendar's
+  // open incident is visible regardless of tenant alert volume. Legacy keys
+  // remain readable while newly written state is tenant-qualified.
+  if (filter.includeCheckIds) {
+    const includedAlertKeys = filter.includeCheckIds.flatMap((checkId) =>
+      healthAlertStateKeys(tenantId, checkId)
+    );
+    alertsQuery = alertsQuery.in(
+      "alert_key",
+      includedAlertKeys.length ? includedAlertKeys : ["__no_matching_health_check__"],
+    );
+  }
+
+  const alertsRes = await alertsQuery
     .order("first_failed_at", { ascending: true })
     .limit(50);
-  const openAlerts: OpenAlert[] = (alertsRes.data || []).map((a) => ({
-    alertKey: String(a.alert_key),
-    firstFailedAt: a.first_failed_at ?? null,
-    lastAlertedAt: a.last_alerted_at ?? null,
-    repeatN: Number(a.repeat_n ?? 0),
-  }));
+  const openAlertMap = new Map<string, OpenAlert>();
+  for (const alert of alertsRes.data || []) {
+    const rawAlertKey = String(alert.alert_key);
+    const checkId = checkIdFromHealthAlertStateKey(rawAlertKey, tenantId);
+    if (!allowsCheck(checkId, filter)) continue;
+    const displayKey = rawAlertKey.startsWith("health:") ? `health:${checkId}` : rawAlertKey;
+    if (openAlertMap.has(displayKey)) continue;
+    openAlertMap.set(displayKey, {
+      alertKey: displayKey,
+      firstFailedAt: alert.first_failed_at ?? null,
+      lastAlertedAt: alert.last_alerted_at ?? null,
+      repeatN: Number(alert.repeat_n ?? 0),
+    });
+  }
+  const openAlerts = [...openAlertMap.values()];
 
   // BOTH reads. If only the alert query fails, openAlerts is empty and the card
   // would show a clean board while alert visibility is actually gone.

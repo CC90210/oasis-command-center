@@ -47,7 +47,7 @@ export function OutcomeChecksPanel({
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-bold text-fg">Outcome checks</h2>
         <span className="text-[11px] text-fg-dim">
-          Do merchants actually receive things, measured in the data. Runs every 15 minutes.
+          Do the workflows people depend on actually work, measured in the data. Runs every 15 minutes.
         </span>
       </div>
 

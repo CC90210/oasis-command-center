@@ -25,7 +25,7 @@ import { safe } from "@/lib/api-helpers";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import {
   creatableOasisStages,
   oasisLeadCreateForm,
@@ -107,8 +107,8 @@ export default async function PipelineNewLeadPage({
   }
 
   const roster = session.isAdmin
-    ? await getOasisSalesRepRoster(tenantId).catch((error) => {
-        console.error("[pipeline.new] OASIS sales roster could not be loaded", {
+    ? await getOasisPipelineAssignmentRoster(tenantId).catch((error) => {
+        console.error("[pipeline.new] OASIS assignment roster could not be loaded", {
           tenantId,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -118,7 +118,7 @@ export default async function PipelineNewLeadPage({
   if (roster === null) {
     return (
       <Unavailable
-        subtitle="The sales roster could not be verified."
+        subtitle="The CC + Adon assignment roster could not be verified."
         detail="Refresh and try again. No lead was saved without a verified owner."
       />
     );
@@ -126,8 +126,8 @@ export default async function PipelineNewLeadPage({
   if (session.isAdmin && roster.length === 0) {
     return (
       <Unavailable
-        subtitle="Add an active sales rep before creating a Pipeline lead."
-        detail="Every Pipeline lead needs a named sales owner."
+        subtitle="CC and Adon are not both available in this workspace."
+        detail="Every Pipeline lead in this cycle needs one of those named owners."
       />
     );
   }

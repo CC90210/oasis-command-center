@@ -2,13 +2,10 @@
  * POST /api/web-leads/claim    — take leads into the caller's own book
  * POST /api/web-leads/claim?release=1 — put them back in the pool
  *
- * SELF-SERVICE ON PURPOSE. A sales-capable member of this tenant may claim a
- * lead for THEMSELVES. Read-only and non-sales accounts may still browse but
- * cannot mutate ownership. There is no `userId` in the request body and no way
- * to claim on someone else's behalf through this route -- the owner is always
- * the resolved session. Admin bulk-assignment to a named rep is a separate,
- * admin-gated route; keeping the two apart means a compromised or
- * misunderstood client cannot quietly move leads between reps' books.
+ * CURRENT CYCLE: only CC or Adon may receive a claim. A sales-capable account
+ * may still browse, but assignment resolves against the separate founder
+ * destination roster below. Managers/admins can name one of those destinations;
+ * every other target fails closed before the claim operation runs.
  *
  * Auth, in the same order every other route in this feature uses: unresolved
  * caller -> 401 before any read. Caller in a different tenant -> 403. libSQL
@@ -22,7 +19,7 @@ import { claimLeads, releaseLeads } from "@/lib/web-leads/claim-ops";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
-import { getOasisSalesRepRoster, tenantSlugFor } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster, tenantSlugFor } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -71,6 +68,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Releasing historical work must remain possible even when the new-cycle
+  // assignment roster is unavailable. It is a cleanup of existing ownership,
+  // not a new assignment.
+  if (req.nextUrl.searchParams.get("release") === "1") {
+    try {
+      const result = await releaseLeads(session.userId, session.isAdmin, leadIds);
+      return NextResponse.json({ ok: true, ...result });
+    } catch (err) {
+      return NextResponse.json(
+        { ok: false, error: err instanceof Error ? err.message : "release_failed" },
+        { status: 500 },
+      );
+    }
+  }
+
   // ASSIGNING TO SOMEONE ELSE (2026-09-02).
   //
   // The Assign surface handed out whole territories -- a rep got every lead in
@@ -87,8 +99,8 @@ export async function POST(req: NextRequest) {
   // Two gates, because assignment moves commission:
   //   - only an admin or a manager may name someone else. A rep must not be
   //     able to push work onto a colleague, or quietly take a lead off one.
-  //   - the target must be on the server-resolved sales roster, so this cannot
-  //     park a lead on a founder, a builder, or an id someone typed.
+  //   - the target must be on the server-resolved CC + Adon assignment roster,
+  //     so this cannot park a lead on an arbitrary id someone typed.
   const assignToRaw = (body as { assignTo?: unknown })?.assignTo;
   let claimFor = session.userId;
   if (typeof assignToRaw === "string" && assignToRaw.trim()) {
@@ -102,25 +114,33 @@ export async function POST(req: NextRequest) {
     if (!mayAssignOthers) {
       return NextResponse.json({ ok: false, error: "assign_requires_manager" }, { status: 403 });
     }
-    if (target !== session.userId.trim().toLowerCase()) {
-      const roster = await getOasisSalesRepRoster(session.tenantId);
-      // The roster's own id, so what is stored is byte-identical to the
-      // identity it was checked against. See assign-target.ts.
-      const resolved = resolveAssignableTarget(roster, target);
-      if (!resolved) {
-        return NextResponse.json({ ok: false, error: "target_not_on_sales_roster" }, { status: 400 });
-      }
-      claimFor = resolved;
-    } else {
-      claimFor = target;
-    }
+    claimFor = target;
   }
 
+  // Current-cycle ownership is deliberately founder-only. This is separate
+  // from the manager read roster: adding founders to that roster would widen
+  // cross-rep visibility, while skipping this check would let any sales seat
+  // self-claim outside the CC+Adon boundary.
+  let roster;
   try {
-    if (req.nextUrl.searchParams.get("release") === "1") {
-      const result = await releaseLeads(session.userId, session.isAdmin, leadIds);
-      return NextResponse.json({ ok: true, ...result });
-    }
+    roster = await getOasisPipelineAssignmentRoster(session.tenantId);
+  } catch (error) {
+    console.error("[web-leads.claim] pipeline assignment roster unavailable", {
+      tenantId: session.tenantId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json({ ok: false, error: "sales_roster_unavailable" }, { status: 503 });
+  }
+  const resolved = resolveAssignableTarget(roster, claimFor);
+  if (!resolved) {
+    return NextResponse.json(
+      { ok: false, error: "target_not_on_sales_roster", message: "This cycle assigns pipeline work only to CC or Adon." },
+      { status: 400 },
+    );
+  }
+  claimFor = resolved;
+
+  try {
     // One clock for the whole request: the expiry rules must not see time move
     // between deciding a lead is claimable and writing the claim.
     const result = await claimLeads(claimFor, leadIds, Date.now());

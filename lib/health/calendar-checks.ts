@@ -15,14 +15,17 @@
  * a confident yes over a dead credential, which is exactly what the handoff
  * banner did for two days (#322, then again at the workspace level in #331).
  *
- * So this check spends it, through the same probe the readiness banner uses.
- * That shared probe is deliberate: the incident this exists to prevent was two
- * surfaces asking Google different questions and getting different answers.
+ * So this check spends it and proves the target calendar accepts both event
+ * creation and cleanup. The token exchange and redacted diagnostics stay in
+ * the shared probe module so every surface classifies Google the same way.
  */
 
 import "server-only";
 import { systemCalendarConfig } from "@/lib/integrations/google-calendar";
-import { probeRefreshToken } from "@/lib/integrations/google-token-probe";
+import {
+  probeCalendarWriteRoundTrip,
+  type GoogleProbeErrorCode,
+} from "@/lib/integrations/google-token-probe";
 import type { DripCheck } from "./drip-checks";
 import { isProductionRuntime } from "./runtime-environment";
 
@@ -44,10 +47,31 @@ import { isProductionRuntime } from "./runtime-environment";
  */
 const OK = 0;
 const UNCONFIGURED = 1;
-const REJECTED = 2;
+const INVALID_GRANT = 2;
+const INVALID_CLIENT = 3;
+const CALENDAR_WRITE_REJECTED = 4;
+const CALENDAR_CLEANUP_FAILED = 5;
+const CALENDAR_PROBE_UNVERIFIED = 6;
+const TOKEN_REJECTED = 7;
 
-export const CALENDAR_CHECKS: DripCheck[] = [
-  {
+function rejectedObservation(code: GoogleProbeErrorCode | null): number {
+  if (code === "invalid_grant") return INVALID_GRANT;
+  if (code === "invalid_client") return INVALID_CLIENT;
+  if (code === "calendar_write_rejected" || code === "calendar_access_rejected") {
+    return CALENDAR_WRITE_REJECTED;
+  }
+  if (code === "calendar_cleanup_failed") return CALENDAR_CLEANUP_FAILED;
+  if (code === "calendar_write_unverified" || code === "google_token_response_invalid" || code === null) {
+    return CALENDAR_PROBE_UNVERIFIED;
+  }
+  return TOKEN_REJECTED;
+}
+
+/** Dependency injection keeps the readiness behavior testable without real polling sleeps. */
+export function createCalendarChecks(
+  probe: typeof probeCalendarWriteRoundTrip = probeCalendarWriteRoundTrip,
+): DripCheck[] {
+  return [{
     id: "calendar.workspace_credential_usable",
     severity: "critical",
     // OASIS's booking chain, so CC's lane -- not the SunBiz ops channel every
@@ -67,43 +91,85 @@ export const CALENDAR_CHECKS: DripCheck[] = [
       // Not a degraded state: with no workspace credential, EVERY host whose
       // personal Google is missing, wrong-scoped or revoked is unbookable, and
       // the fallback that exists to cover them cannot run at all.
-      if (!config) return UNCONFIGURED;
+      const configuredCalendarId = (process.env.GOOGLE_CALENDAR_ID || "").trim();
+      if (!config || !config.organizerEmail || !configuredCalendarId) return UNCONFIGURED;
 
-      const verdict = await probeRefreshToken({
+      const result = await probe({
         refreshToken: config.refreshToken,
         clientId: config.clientId,
         clientSecret: config.clientSecret,
+        calendarId: config.calendarId,
+        attendeeEmail: config.organizerEmail,
       });
-      // POLICY ON THE THIRD ANSWER, stated where it applies: `unknown` scores
-      // healthy. Paging an operator every time Google has a bad minute is how a
-      // channel gets muted, and a muted monitor is worse than none. This
-      // credential fails permanently, not intermittently, so a real outage is
-      // delayed by one 15-minute tick at worst — a far better trade than a
-      // recurring false alarm. The readiness banner takes `unknown` differently
-      // and says so at its own call site; that divergence is intentional.
-      return verdict === "dead" ? REJECTED : OK;
+      // This check makes a positive booking-readiness claim. Anything short of
+      // a confirmed create/delete round trip is therefore non-green; an
+      // upstream timeout is uncertainty, not evidence that booking works.
+      return result.verdict === "live" ? OK : rejectedObservation(result.errorCode);
     },
     describe: (r) => {
       if (r.observed === OK) {
-        return "the shared OASIS calendar credential is live — founder audits can be booked.";
+        return "the shared OASIS calendar is live — its create/Meet/delete check passed and founder audits can be booked.";
       }
       if (r.observed === UNCONFIGURED) {
         return (
           "THE SHARED OASIS CALENDAR IS NOT CONFIGURED — GOOGLE_SYSTEM_CALENDAR_CLIENT_ID, " +
-          "_CLIENT_SECRET and _REFRESH_TOKEN must all be set in the production runtime. " +
+          "GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET, GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN, " +
+          "GOOGLE_SYSTEM_CALENDAR_ADDRESS and GOOGLE_CALENDAR_ID must all be set in the production runtime. " +
           "Until they are, any host without a working personal Google connection cannot be " +
           "booked at all, because the fallback that covers them has nothing to run on."
         );
       }
+      if (r.observed === INVALID_GRANT) {
+        return (
+          "THE SHARED OASIS CALENDAR CREDENTIAL WAS REJECTED BY GOOGLE [invalid_grant] — " +
+          "nobody can book a founder audit through the shared calendar right now. Asking a " +
+          "host to reconnect will NOT fix this: it is the workspace credential, not theirs. " +
+          "First securely sync the already-authorized workspace credential bundle from the canonical " +
+          "secure store into the GOOGLE_SYSTEM_CALENDAR_* deployment slots, then verify it with " +
+          "scripts/verify-workspace-calendar-live.ts. Rotate only if that canonical credential also " +
+          "fails direct provider verification."
+        );
+      }
+      if (r.observed === INVALID_CLIENT) {
+        return (
+          "THE SHARED OASIS CALENDAR CREDENTIAL WAS REJECTED BY GOOGLE [invalid_client] — " +
+          "the configured OAuth client ID/secret cannot spend this refresh credential. Pair " +
+          "GOOGLE_SYSTEM_CALENDAR_CLIENT_ID and _CLIENT_SECRET with the SAME OAuth client that " +
+          "minted GOOGLE_SYSTEM_CALENDAR_REFRESH_TOKEN; rotating only the token or reconnecting " +
+          "a host will not repair a mismatched client pair."
+        );
+      }
+      if (r.observed === CALENDAR_WRITE_REJECTED) {
+        return (
+          "THE SHARED OASIS CALENDAR WRITE CHECK FAILED [calendar_write_rejected] — the refresh " +
+          "grant worked, but Google denied creating an event on the target calendar. Grant Calendar " +
+          "events write scope and confirm GOOGLE_SYSTEM_CALENDAR_ADDRESS can edit " +
+          "GOOGLE_CALENDAR_ID before attempting another booking."
+        );
+      }
+      if (r.observed === CALENDAR_CLEANUP_FAILED) {
+        return (
+          "THE SHARED OASIS CALENDAR CLEANUP CHECK FAILED [calendar_cleanup_failed] — the probe " +
+          "could not confirm its private synthetic event was removed. Booking readiness is blocked " +
+          "until Google accepts event deletion; inspect the target calendar for an OASIS calendar " +
+          "readiness check event and verify Calendar events write scope."
+        );
+      }
+      if (r.observed === CALENDAR_PROBE_UNVERIFIED) {
+        return (
+          "THE SHARED OASIS CALENDAR COULD NOT BE VERIFIED [calendar_write_unverified] — Google " +
+          "did not complete the create/delete proof, so the system will not claim bookings are ready. " +
+          "The monitor will retry on its next scheduled run."
+        );
+      }
       return (
-        "THE SHARED OASIS CALENDAR CREDENTIAL WAS REJECTED BY GOOGLE — nobody can book a " +
-        "founder audit through the shared calendar right now. Asking a host to reconnect " +
-        "will NOT fix this: it is the workspace credential, not theirs. An administrator " +
-        "must mint a new one with Calendar scope for the account in " +
-        "GOOGLE_SYSTEM_CALENDAR_ADDRESS, minted by the SAME OAuth client as " +
-        "GOOGLE_SYSTEM_CALENDAR_CLIENT_ID — a credential from a different client is " +
-        "rejected however new it is. Verify with scripts/verify-workspace-calendar-live.ts."
+        "THE SHARED OASIS CALENDAR TOKEN WAS REJECTED [google_token_rejected] — Google returned " +
+        "a definitive client error that was not safe or useful to persist verbatim. Securely sync " +
+        "the existing verified workspace bundle from the canonical secret store and re-run the live " +
+        "verifier. Rotate only if the canonical bundle itself fails direct provider verification."
       );
     },
-  },
-];
+  }];
+}
+
+export const CALENDAR_CHECKS: DripCheck[] = createCalendarChecks();

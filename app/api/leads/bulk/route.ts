@@ -41,7 +41,7 @@ import { classifyBulkRecipients, summarizeClassification, redactForResponse } fr
 import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
 import { sanitizeBlastMessage, getTenantLenderNames } from "@/lib/integrations/blast-safety";
 import { stripDashes, matchPositioningPhrases, matchLenderNames } from "@/lib/integrations/blast-safety-core";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 import {
   OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
@@ -147,7 +147,7 @@ export async function POST(req: NextRequest) {
       );
     }
     // Validate the assignee once before touching a record. OASIS destinations
-    // are limited to the active tenant sales roster for admins too; legacy
+    // are limited to the current CC + Adon assignment roster for admins too; legacy
     // workspaces retain their broader tenant-member assignment model.
     const raw = body.assigned_to;
     let nextAssignedTo: string | null = null;
@@ -160,28 +160,28 @@ export async function POST(req: NextRequest) {
     }
     if (isOasisBulkWorkspace && !nextAssignedTo) {
       return NextResponse.json(
-        { ok: false, error: "assignee_required", message: "Choose an active sales rep for these leads." },
+        { ok: false, error: "assignee_required", message: "Choose CC or Adon for these leads." },
         { status: 422 },
       );
     }
     if (nextAssignedTo && isOasisBulkWorkspace) {
       let roster;
       try {
-        roster = await getOasisSalesRepRoster(tenantId);
+        roster = await getOasisPipelineAssignmentRoster(tenantId);
       } catch (error) {
-        console.error("[leads.bulk] OASIS sales roster could not be verified", {
+        console.error("[leads.bulk] OASIS assignment roster could not be verified", {
           tenantId,
           error: error instanceof Error ? error.message : String(error),
         });
         return NextResponse.json(
-          { ok: false, error: "sales_roster_unavailable", message: "The sales roster could not be verified." },
+          { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
           { status: 503 },
         );
       }
       const resolved = resolveAssignableTarget(roster, nextAssignedTo);
       if (!resolved) {
         return NextResponse.json(
-          { ok: false, error: "target_not_on_sales_roster", message: "Choose an active sales rep from this workspace." },
+          { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or Adon for this pipeline cycle." },
           { status: 422 },
         );
       }
@@ -681,13 +681,17 @@ export async function POST(req: NextRequest) {
       { status: 403 },
     );
   }
-  // Bulk remains useful for intake (researched -> assigned), but every later
-  // OASIS edge requires per-lead facts: disposition, qualification, meeting
-  // context, quote terms, or payment attribution. Do not let a batch operation
-  // skip those closed-loop gates.
-  if (isOasisBulkLead && (!sess.isAdmin || stage !== "assigned")) {
+  // OASIS ownership and stage are one lifecycle transition. A raw bulk stage
+  // patch cannot choose/verify CC or Adon, stamp the revenue cycle, or retain
+  // claim provenance, so even researched -> assigned must use the canonical
+  // Leads claim flow. SunBiz keeps its existing bulk-stage behavior.
+  if (isOasisBulkLead) {
     return NextResponse.json(
-      { ok: false, error: "use_individual_sales_workflow" },
+      {
+        ok: false,
+        error: "use_web_leads_claim",
+        message: "Claim OASIS leads from Leads so owner, cycle, and sales motion stay together.",
+      },
       { status: 409 },
     );
   }

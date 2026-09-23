@@ -45,8 +45,8 @@ export type GoogleCalendarErrorCode =
   | "google_meet_link_missing"
   // The host's token AND the shared workspace token both rejected. Distinct
   // from token_refresh_failed on purpose: that one means "this host must
-  // reconnect", this one means "nobody can book until an administrator mints a
-  // new workspace token with Calendar scope". Different people, different fix.
+  // reconnect", this one means "the deployed workspace credential bundle must
+  // be securely synchronized and verified". Different people, different fix.
   | "workspace_calendar_token_invalid";
 
 export class GoogleCalendarIntegrationError extends Error {
@@ -102,7 +102,7 @@ export type FounderMeetingCalendarRequest = {
  * every audit. When these variables are present, a host without a usable
  * personal connection books on the WORKSPACE identity instead:
  *
- *   GOOGLE_SYSTEM_CALENDAR_CLIENT_ID /         the OAuth client that MINTED the
+ *   GOOGLE_SYSTEM_CALENDAR_CLIENT_ID /         the OAuth client paired with the
  *   GOOGLE_SYSTEM_CALENDAR_CLIENT_SECRET      refresh token below. Falls back to
  *                                             GOOGLE_CLIENT_ID/SECRET when unset.
  *                                             These used to be the SAME client as
@@ -129,7 +129,7 @@ export type FounderMeetingCalendarRequest = {
  */
 export type SystemCalendarConfig = {
   refreshToken: string;
-  /** OAuth client that MINTED refreshToken. A refresh grant is only valid with its own client. */
+  /** OAuth client paired with refreshToken. A refresh grant is only valid with its own client. */
   clientId: string;
   clientSecret: string;
   organizerEmail: string;
@@ -139,12 +139,12 @@ export type SystemCalendarConfig = {
 export function systemCalendarConfig(): SystemCalendarConfig | null {
   // ═══ THE WORKSPACE CALENDAR IS ITS OWN IDENTITY ═════════════════════════
   //
-  // A Google refresh token can ONLY be exchanged by the OAuth client that
-  // minted it. Until now this function returned no client at all and the
+  // A Google refresh token can ONLY be exchanged by its paired OAuth client.
+  // Until now this function returned no client at all and the
   // workspace token was refreshed with `dependencies.oauthClientId` -- the
   // REP-FACING client from GOOGLE_CLIENT_ID. That silently imposed a
   // requirement nobody wrote down: the shared workspace token had to be
-  // minted by the same client the "Connect Google" button uses, or every
+  // paired with the same client the "Connect Google" button uses, or every
   // fallback booking died with `token_refresh_failed` from inside a code
   // path whose whole job was to be the thing that still works.
   //
@@ -520,7 +520,7 @@ function validateRequest(args: FounderMeetingCalendarRequest): {
  * shape and would have been refused here on its way in.
  *
  * Not reachable from the in-app connect flow, which requests the exact narrow
- * string -- but it is reachable by any credential minted anywhere else, which
+ * string -- but it is reachable by any credential provisioned elsewhere, which
  * now includes the workspace identity, and "we happen not to hit it today" is
  * the reason it would have stayed wrong until it cost another afternoon.
  */
@@ -560,7 +560,7 @@ async function refreshAccessToken(args: {
   dependencies: GoogleCalendarDependencies;
   /**
    * OAuth client to spend `refreshToken` with. Omitted for a host's personal
-   * token (the rep-facing client minted it). Supplied on the workspace-calendar
+   * token (it is paired with the rep-facing client). Supplied on the workspace-calendar
    * path, whose token may come from an entirely different client -- see
    * systemCalendarConfig(). Google rejects a refresh grant presented by any
    * client other than the one that issued it, so this is not a preference.
@@ -814,7 +814,7 @@ async function openAuthorizedCalendarSession(args: {
   let calendarId = PRIMARY_CALENDAR_ID;
   let sessionBundle = bundle;
   // Undefined while the session is on the host's own token: refreshAccessToken
-  // then falls through to the rep-facing client that minted it. Set only when
+  // then falls through to the rep-facing client paired with it. Set only when
   // the workspace identity takes over, so its token is spent with ITS client.
   let sessionClientId: string | undefined;
   let sessionClientSecret: string | undefined;
@@ -934,10 +934,10 @@ async function openAuthorizedCalendarSession(args: {
        * failed for a completely different reason and nothing said so.
        *
        * A distinct code makes the difference visible in one glance, and the two
-       * remedies are genuinely different: one is a host clicking reconnect, the
-       * other is an administrator minting a new workspace token with Calendar
-       * scope. Telling someone to do the first when they need the second is
-       * worse than telling them nothing.
+       * remedies are genuinely different: one is a host clicking reconnect;
+       * the other is securely synchronizing the existing workspace credential
+       * bundle from the canonical secret store and verifying it, with rotation
+       * reserved for a bundle that fails direct provider verification.
        */
       try {
         accessToken = await refreshAccessToken({

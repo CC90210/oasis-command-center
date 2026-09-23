@@ -20,6 +20,7 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   "create_record",
   "update_record",
   "delete_record",
+  "import_leads_from_attachment",
   "send_email",
   "send_sms",
   "write_file",

@@ -27,6 +27,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2, Check, Copy, X, Clock, AlertCircle, Apple, Monitor, Terminal } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import { bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 
 export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
   // All pairing state + side effects (mint, countdown, polling, retry)
@@ -216,7 +217,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                       <>
                         Token issued and written to{" "}
                         <span className="font-mono">~/.oasis/bridge_token</span>. Start (or restart) your bridge daemon —
-                        e.g. <span className="font-mono">pm2 restart claude-bridge-ping</span> — and it&apos;ll connect with the new token.
+                        e.g. <span className="font-mono">{bridgeRestartCommand(os)}</span> — and it&apos;ll connect with the new token.
                       </>
                     ) : (
                       <>

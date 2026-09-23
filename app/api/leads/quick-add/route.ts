@@ -15,8 +15,9 @@
  * lead into the stage's sequence (a phone-less lead simply skips the SMS-only
  * step 0 as no_contact_method — chosen behavior 2026-07-20).
  *
- * Auth: any non-read-only tenant member (canWriteCrm) — the same role gate the
- * one-click set-stage action uses. Fail closed. Audited to lead_interactions.
+ * Auth: any non-read-only tenant member (canWriteCrm), with OASIS creates
+ * further restricted to the current CC + Adon assignment roster. Fail closed.
+ * Audited to lead_interactions.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -36,6 +37,8 @@ import {
   oasisForbiddenRoleRefusal,
   planOasisLeadCreate,
 } from "@/lib/oasis-lead-create";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -89,6 +92,12 @@ export async function POST(req: NextRequest) {
   // the OASIS board — so the fallback has to follow the tenant too, or an
   // OASIS quick-add with no explicit stage would fail its own validation.
   const quickAddSlug = await resolveOwnedSlug(sess.tenantId);
+  if (!quickAddSlug) {
+    return NextResponse.json(
+      { ok: false, error: "tenant_scope_unresolved" },
+      { status: 503 },
+    );
+  }
   const isWebsiteSalesWorkspace = isWebsiteSalesTenantSlug(quickAddSlug);
   if (isWebsiteSalesWorkspace && sess.isAdmin) {
     return NextResponse.json(
@@ -112,6 +121,30 @@ export async function POST(req: NextRequest) {
       { ok: false, error: refusal.error, message: refusal.message },
       { status: refusal.status },
     );
+  }
+  let oasisAssigneeUserId = sess.userId;
+  if (isWebsiteSalesWorkspace && !sess.isAdmin) {
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(sess.tenantId);
+    } catch (error) {
+      console.error("[leads.quick-add] OASIS assignment roster could not be verified", {
+        tenantId: sess.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
+        { status: 503 },
+      );
+    }
+    const resolved = resolveAssignableTarget(roster, sess.userId);
+    if (!resolved) {
+      return NextResponse.json(
+        { ok: false, error: "target_not_on_sales_roster", message: "This pipeline cycle assigns new work only to CC or Adon." },
+        { status: 403 },
+      );
+    }
+    oasisAssigneeUserId = resolved;
   }
   const defaultStage = isWebsiteSalesWorkspace ? OASIS_INTAKE_STAGE : DEFAULT_STAGE;
   const requestedStage = typeof body.stage === "string" && body.stage.trim() ? body.stage.trim() : null;
@@ -249,7 +282,7 @@ export async function POST(req: NextRequest) {
         creatorUserId: sess.userId,
         // This door is rep-only on OASIS; admins use /pipeline/new so the
         // destination is selected from the verified sales roster.
-        resolvedAssigneeUserId: sess.userId,
+        resolvedAssigneeUserId: oasisAssigneeUserId,
         data: {
           business_name: businessName,
           ...(contactName ? { contact_name: contactName } : {}),

@@ -41,7 +41,7 @@ import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -203,18 +203,17 @@ export async function POST(
 
   const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
   /**
-   * A SALES REP MAY CREATE THEIR OWN OASIS LEAD.
+   * A SALES ROLE MAY REQUEST AN OASIS LEAD CREATE.
    *
    * Creation used to be admin-only everywhere, so a rep who found a business
    * themselves had nowhere to put it: /pipeline/new redirected them away and
    * this route answered 403. CC, 2026-09-08: reps have their own way of
    * sourcing leads and need to enter them, assigned to whoever found them.
    *
-   * Deliberately NARROW. It widens creation for OASIS leads only, and only for
-   * roles that already work this pipeline — every other entity and every other
-   * workspace still requires an admin, because this is the generic record
-   * endpoint and a blanket relaxation would let any member create any record
-   * type in any tenant.
+   * Deliberately NARROW. This first gate admits only roles that already work
+   * the OASIS pipeline; the assignment-roster gate below then limits the
+   * current cycle to CC and Adon. Every other entity and workspace still
+   * requires an admin because this is the generic record endpoint.
    */
   const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
   if (!r.is_admin && !repMayCreateOwnLead) {
@@ -246,8 +245,8 @@ export async function POST(
    * planOasisLeadCreate (lib/oasis-lead-create.ts) is the one rule both create
    * doors share -- this route and rep-only /api/leads/quick-add. Every new lead
    * starts in Assigned, lifecycle fields remain server-owned, and the planner
-   * stamps the motion/program/ownership fields both boards read. An admin picks
-   * a verified sales-roster owner; a rep-created lead is self-owned.
+   * stamps the motion/program/ownership fields both boards read. Every owner is
+   * resolved against the current CC + Adon assignment roster before planning.
    *
    * Before 2026-09-10 this route accepted only `researched` -- a stage the board
    * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
@@ -258,11 +257,13 @@ export async function POST(
    */
   let data: Record<string, unknown> = { ...body.data };
   if (isOasisSalesLead) {
-    let resolvedAssigneeUserId = user.id;
     const plannerData: Record<string, unknown> = { ...body.data };
+    const requestedAssignee = r.is_admin
+      ? typeof body.data.assigned_to === "string"
+        ? body.data.assigned_to.trim()
+        : ""
+      : user.id;
     if (r.is_admin) {
-      const requestedAssignee =
-        typeof body.data.assigned_to === "string" ? body.data.assigned_to.trim() : "";
       if (!requestedAssignee) {
         return NextResponse.json(
           {
@@ -275,40 +276,44 @@ export async function POST(
         );
       }
 
-      let roster;
-      try {
-        roster = await getOasisSalesRepRoster(r.tenant_id);
-      } catch (error) {
-        console.error("[manifest.records] OASIS sales roster could not be verified", {
-          tenantId: r.tenant_id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "sales_roster_unavailable",
-            message: "The sales roster could not be verified, so the lead was not saved. Try again in a moment.",
-          },
-          { status: 503 },
-        );
-      }
-      const resolved = resolveAssignableTarget(roster, requestedAssignee);
-      if (!resolved) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "target_not_on_sales_roster",
-            message: "Choose an active sales rep from this workspace.",
-            fields: ["assigned_to"],
-          },
-          { status: 422 },
-        );
-      }
-      resolvedAssigneeUserId = resolved;
       // The browser value proved intent only. The planner receives the
       // canonical roster id separately and continues treating assigned_to as
       // a protected lifecycle field in every other caller.
       delete plannerData.assigned_to;
+    }
+
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(r.tenant_id);
+    } catch (error) {
+      console.error("[manifest.records] OASIS assignment roster could not be verified", {
+        tenantId: r.tenant_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "sales_roster_unavailable",
+          message: "The CC + Adon assignment roster could not be verified, so the lead was not saved. Try again in a moment.",
+        },
+        { status: 503 },
+      );
+    }
+    const resolvedAssigneeUserId = r.is_admin
+      ? resolveAssignableTarget(roster, requestedAssignee)
+      : resolveAssignableTarget(roster, user.id);
+    if (!resolvedAssigneeUserId) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "target_not_on_sales_roster",
+          message: r.is_admin
+            ? "Choose CC or Adon for this pipeline cycle."
+            : "This pipeline cycle assigns new work only to CC or Adon.",
+          ...(r.is_admin ? { fields: ["assigned_to"] } : {}),
+        },
+        { status: r.is_admin ? 422 : 403 },
+      );
     }
 
     const plan = planOasisLeadCreate({

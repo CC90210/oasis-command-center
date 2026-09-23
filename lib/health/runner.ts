@@ -20,11 +20,12 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { sendTelegram, type TelegramLane } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { alertSignature, worstVerdict, type CheckResult } from "./checks-core";
-import { DRIP_CHECKS, runCheck } from "./drip-checks";
+import { DRIP_CHECKS, runCheck, type DripCheck } from "./drip-checks";
 import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
+import { healthAlertStateKey } from "./alert-state-key";
 
 import { computeCoverage } from "./coverage";
 
@@ -37,7 +38,12 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS, ...CALENDAR_CHECKS];
+  return [...tenantOutcomeChecks(), ...CALENDAR_CHECKS];
+}
+
+/** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */
+export function tenantOutcomeChecks(): DripCheck[] {
+  return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS];
 }
 
 
@@ -120,9 +126,18 @@ export type RunSummary = {
  */
 export async function runHealthChecks(
   tenantId: string,
-  opts: { nowMs?: number; notify?: boolean } = {},
+  opts: {
+    nowMs?: number;
+    notify?: boolean;
+    checks?: readonly DripCheck[];
+    /** Test seam for exercising the real state machine without production data. */
+    db?: Db;
+    /** Test seam for proving delivery decisions without sending Telegram messages. */
+    sendTelegramImpl?: typeof sendTelegram;
+  } = {},
 ): Promise<RunSummary> {
-  const db = getServiceSupabase();
+  const db = opts.db ?? getServiceSupabase();
+  const send = opts.sendTelegramImpl ?? sendTelegram;
   const nowMs = opts.nowMs ?? Date.now();
   const notify = opts.notify !== false;
   const results: CheckResult[] = [];
@@ -130,7 +145,7 @@ export async function runHealthChecks(
   const recovered: string[] = [];
   let telegramFailures = 0;
 
-  const checks = allChecks();
+  const checks = opts.checks ? [...opts.checks] : allChecks();
   for (const check of checks) {
     let result: CheckResult;
     try {
@@ -161,8 +176,16 @@ export async function runHealthChecks(
 
     if (!notify) continue;
 
-    const key = `health:${result.id}`;
-    const stateRow = await db.from("health_alert_state").select("*").eq("alert_key", key).maybeSingle();
+    // `alert_key` is globally unique in the deployed schema. Qualifying it as
+    // well as filtering by tenant keeps two workspaces running the same check
+    // on independent decay/recovery ladders.
+    const key = healthAlertStateKey(tenantId, result.id);
+    const stateRow = await db
+      .from("health_alert_state")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("alert_key", key)
+      .maybeSingle();
     const state = stateRow.data as
       | { last_signature: string | null; last_alerted_at: string | null; repeat_n: number | null; first_failed_at: string | null }
       | null;
@@ -180,7 +203,7 @@ export async function runHealthChecks(
         const owed = pendingRecoveryLanes(state.last_signature) ?? lanesFor(check);
         const stillOwed: TelegramLane[] = [];
         for (const lane of owed) {
-          const r = await sendTelegram(
+          const r = await send(
             `🟢 <b>RECOVERED</b> — ${esc(result.id)}\n${esc(result.reason)}`,
             { lane },
           ).catch(() => ({ ok: false }));
@@ -239,7 +262,7 @@ export async function runHealthChecks(
     let sent: { ok: boolean } = { ok: false };
     const rejected: TelegramLane[] = [];
     for (const lane of lanesFor(check)) {
-      const r = await sendTelegram(body, { lane }).catch(() => ({ ok: false }));
+      const r = await send(body, { lane }).catch(() => ({ ok: false }));
       if (r.ok) sent = { ok: true };
       else rejected.push(lane);
     }

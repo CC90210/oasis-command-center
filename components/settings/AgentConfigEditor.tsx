@@ -656,7 +656,7 @@ export function AgentConfigEditor({
                   </div>
                 </div>
               </div>
-              {/* Local bridge tools — needs `bravo bridge serve` running. */}
+              {/* Local bridge tools — needs `oasis bridge serve` running through the installed launcher. */}
               <div
                 className={`rounded-lg border p-3 flex items-start gap-2.5 ${
                   bridgeOnline

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { canWriteCrm } from "../lib/role-gates";
+import { readFileSync } from "node:fs";
+import { canWriteCrm, READ_ONLY_DENIED_TOOLS } from "../lib/role-gates";
 
 /**
  * CC directive 2026-07-07 (the "Alex can't be assigned / can't self-assign"
@@ -43,5 +44,36 @@ for (const role of DENIED_ROLES) {
     `role ${JSON.stringify(role)} MUST be denied CRM write (read_only = read-only; unresolved = fail-closed)`,
   );
 }
+
+assert.equal(
+  READ_ONLY_DENIED_TOOLS.has("import_leads_from_attachment"),
+  true,
+  "a read-only chat user must not receive the lead-import mutation tool",
+);
+
+const importRoute = readFileSync("app/api/leads/import/route.ts", "utf8");
+const chatRoute = readFileSync("app/api/chat/route.ts", "utf8");
+assert.match(importRoute, /resolveSessionContext\(\)/, "the import route must resolve the caller's role");
+assert.match(
+  importRoute,
+  /!canWriteCrm\(sess\.teamRole\)/,
+  "the import route must fail closed for read-only or unknown roles before parsing rows",
+);
+assert.match(importRoute, /error:\s*"forbidden_role"[\s\S]*status:\s*403/);
+assert.match(
+  chatRoute,
+  /const crmWritesAllowed = canWriteCrm\(operatorRole\)/,
+  "chat must apply the same fail-closed role allowlist before exposing mutation tools",
+);
+assert.match(
+  chatRoute,
+  /!crmWritesAllowed && READ_ONLY_DENIED_TOOLS\.has\(spec\.name\)/,
+  "legacy cloud-tool markers need a dispatcher gate, not only prompt/palette filtering",
+);
+assert.match(
+  chatRoute,
+  /!crmWritesAllowed && READ_ONLY_DENIED_MARKERS\.has\(spec\.type\)/,
+  "dashboard markers must reject unknown/typo roles as well as exact read_only",
+);
 
 console.log("crm-write-role-gate.test.ts: OK");

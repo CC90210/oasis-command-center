@@ -19,7 +19,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { evaluate, median } from "../lib/health/checks-core";
-import { isBenignSendFailure } from "../lib/health/email-drip-checks";
+import {
+  countDispatchableOverdueRows,
+  isBenignSendFailure,
+  isIntentionalScheduledHold,
+} from "../lib/health/email-drip-checks";
 
 // ── must_be_below: the ceiling rule the silence check needs ───────────────
 // Added for this monitor. Hours-of-silence is an observation where BIGGER IS
@@ -102,6 +106,40 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
     "rows overdue by more than an hour is the 2026-08-06 cron outage signature");
 }
 
+// ── Deliberate holds are not a dead email dispatcher ──────────────────────
+// Production held 72 policy/window/verification rows and one genuinely
+// dispatchable row. status=scheduled + channel=email alone counted all 73 and
+// paged the operators; the health check must preserve the one real signal.
+{
+  for (const held of [
+    "sms_awaiting_verification: no verified number for this lead yet (no email for this lead either)",
+    "email_window (outside 8:00-20:00 America/New_York)",
+    "email_volume_gate (sunbiz/viewed_application: sequence_daily_cap)",
+    "quiet_hours (local 03:00 America/New_York)",
+  ]) {
+    assert.equal(isIntentionalScheduledHold(held), true, `intentional hold leaked into outage count: ${held}`);
+  }
+  for (const dispatchable of [null, undefined, "", "ETIMEDOUT", "lead_not_found"]) {
+    assert.equal(
+      isIntentionalScheduledHold(dispatchable),
+      false,
+      `a real dispatcher/error row was hidden: ${String(dispatchable)}`,
+    );
+  }
+
+  const rows = [
+    { last_error: null }, // the one genuinely dispatchable overdue row
+    { last_error: "sms_awaiting_verification: no verified number for this lead yet" },
+    { last_error: "email_window (outside 8:00-20:00 America/New_York)" },
+    { last_error: "email_volume_gate (sunbiz/viewed_application: sequence_daily_cap)" },
+  ];
+  assert.equal(
+    countDispatchableOverdueRows(rows),
+    1,
+    "only the genuinely dispatchable overdue row should page",
+  );
+}
+
 // ── Bluerise silence is invisible to an all-brand total ───────────────────
 // The brand had a warm domain, working credentials and 512 leads pointed at it,
 // and had sent zero emails in its lifetime — hidden because every aggregate
@@ -149,6 +187,17 @@ import { isBenignSendFailure } from "../lib/health/email-drip-checks";
   const failureFn = src.slice(src.indexOf("async function countRealFailures"), src.indexOf("const CHECKS"));
   assert.ok(failureFn.length > 100, "countRealFailures must exist — the failure check cannot be inlined back");
   assert.ok(failureFn.includes('.eq("status", "failed")'), "still scoped to failed rows");
+
+  const dueFn = src.slice(
+    src.indexOf("async function countDispatchableOverdueEmails"),
+    src.indexOf("async function countRealFailures"),
+  );
+  assert.ok(dueFn.includes('.select("last_error")'), "the due check must read the hold reason");
+  assert.ok(dueFn.includes('.eq("tenant_id", tenantId)'), "the due check must retain its tenant boundary");
+  assert.ok(
+    dueFn.includes("countDispatchableOverdueRows(rows)"),
+    "the database read must apply the tested hold classifier",
+  );
 
   // Two sequence engines write to this database. Every check in this file must
   // read the OASIS drip engine (drip_runs / lead_interactions), never the

@@ -54,6 +54,7 @@ import { asSSEArray, asSSERecord, parseSSE, safeText } from "./sse-parser";
 import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
+import { deploymentRuntimeLabel } from "./deployment-surface";
 import {
   type ChatPlanMode,
   composeSystemPrompt as composePlanSystemPrompt,
@@ -434,7 +435,7 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   // ──────────────────────────────────────────────────────────────────
   // SunBiz comms tools (Phase 3d, 2026-06-02) — Kixie click-to-call/SMS +
   // TextTorrent SMS / blasts / list management. defer:false — they run
-  // server-side on Vercel via the typed clients (lib/integrations/*), same
+  // server-side on Cloudflare via the typed clients (lib/integrations/*), same
   // as the drawer Call button. Every send respects the dashboard dry-run
   // gate (lib/integrations/send-mode.ts). Send-capable tools are in
   // READ_ONLY_DENIED_TOOLS and only reach Helios via HELIOS_TOOL_PALETTE.
@@ -2168,7 +2169,7 @@ export type ToolLoopRequest = {
    * used here — null is the "no filter" signal.
    *
    * Only narrows defer:true tools. Cloud tools (defer:false) are
-   * unaffected — they execute server-side on Vercel, not the bridge.
+   * unaffected — they execute server-side on Cloudflare, not the bridge.
    */
   bridgeAdvertisedTools?: string[] | null;
   /**
@@ -2579,7 +2580,7 @@ async function* runIterationLoop(
   //      Undefined = no filter; empty array = chat-only.
   //
   //   4. Cloud tools (defer:false) are unaffected by 1+2 — they
-  //      execute server-side on Vercel, not the bridge.
+  //      execute server-side on Cloudflare, not the bridge.
   let activeTools: ToolDef[] = TOOL_DEFINITIONS;
   if (args.excludeDeferredTools) {
     activeTools = activeTools.filter((t) => !t.defer);
@@ -2895,7 +2896,7 @@ export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): 
     "You're running in cloud mode with a real tool_use loop. The runtime exposes two tiers of tools — call them like any native Claude tool. All are tenant-scoped to the current operator and audit-logged."
   );
   lines.push("");
-  lines.push("Cloud tools (always available, execute server-side on Vercel):");
+  lines.push(`Cloud tools (always available, execute server-side on the ${deploymentRuntimeLabel()}):`);
   for (const t of cloudTools) {
     lines.push(`- ${t.name} — ${t.description}`);
   }
@@ -2911,7 +2912,7 @@ export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): 
   lines.push("- Prefer get_record over list_records once you have an ID.");
   lines.push("- Confirm with the operator before delete_record (no undo).");
   lines.push("- Don't use http_get/http_post for the operator's own integrations — that needs a connector.");
-  lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to start it (pm2 restart claude-bridge) instead of retrying.");
+  lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to open Settings → Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the paired machine, instead of retrying.");
   lines.push("- For send_email / send_sms: always confirm content with the operator before sending. Include opt-out language on first-touch SMS.");
   lines.push("- Tool results return JSON; quote relevant fields in your reply.");
   if (bridgeTools.length > 0) {

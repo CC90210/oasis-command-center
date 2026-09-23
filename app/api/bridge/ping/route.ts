@@ -1,7 +1,7 @@
 /**
  * POST /api/bridge/ping — local bridge daemon heartbeat + integrations report.
  *
- * Called every 60s by `bravo bridge start` running on the operator's machine.
+ * Called every 60s by `oasis bridge start` running through the installed launcher.
  * Authenticated with the bearer token issued at /api/auth/pair.
  *
  * Body:
