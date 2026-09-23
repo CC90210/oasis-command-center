@@ -193,6 +193,15 @@ async function run() {
     }) as typeof globalThis.fetch;
     assert.equal(await observe(), 4, "a definitive write rejection must retain its actionable diagnosis");
     assert.equal(rejectedWriteCleanupAttempts, 1, "a rejected write must still attempt cleanup exactly once");
+    const rejectedWriteDescription = check.describe({
+      id: check.id,
+      verdict: "failing",
+      observed: 4,
+      baseline: 0,
+      reason: "",
+    });
+    assert.match(rejectedWriteDescription, /GOOGLE_CALENDAR_ID/, "the write remedy must name the configured calendar ID");
+    assert.doesNotMatch(rejectedWriteDescription, /GOOGLE_SYSTEM_CALENDAR_ID/, "the write remedy must not name a nonexistent setting");
 
     // ─── 4. UNKNOWN IS NOT BROKEN ───────────────────────────────────────────
     // The check claims founder audits can be booked. If Google never answers,

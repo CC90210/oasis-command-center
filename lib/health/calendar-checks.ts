@@ -143,7 +143,7 @@ export function createCalendarChecks(
           "THE SHARED OASIS CALENDAR WRITE CHECK FAILED [calendar_write_rejected] — the refresh " +
           "grant worked, but Google denied creating an event on the target calendar. Grant Calendar " +
           "events write scope and confirm GOOGLE_SYSTEM_CALENDAR_ADDRESS can edit " +
-          "GOOGLE_SYSTEM_CALENDAR_ID before attempting another booking."
+          "GOOGLE_CALENDAR_ID before attempting another booking."
         );
       }
       if (r.observed === CALENDAR_CLEANUP_FAILED) {
