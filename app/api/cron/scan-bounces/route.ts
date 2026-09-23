@@ -39,6 +39,10 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import { resolveBrandKey, getBrand } from "@/lib/email/brands";
 import { sendTelegram, escapeTelegramHtml } from "@/lib/notify/telegram";
+import {
+  bounceAlertKey,
+  decideBounceAlert,
+} from "@/lib/notify/bounce-alert-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -104,9 +108,87 @@ function originalMessageId(raw: string): string | null {
 }
 
 /** Watchdog alert — soft-fail wrapper so a bad token never affects the run. */
-async function watchdogAlert(text: string): Promise<void> {
-  // sunbiz-ops: IMAP/bounce-reader health on the SunBiz submissions mailbox.
-  try { await sendTelegram(text, { lane: "sunbiz-ops" }); } catch { /* sendTelegram already soft-fails; belt-and-suspenders */ }
+type ServiceDb = ReturnType<typeof getServiceSupabase>;
+
+async function watchdogAlert(
+  db: ServiceDb,
+  brand: string,
+  errorClass: string,
+  text: string,
+): Promise<void> {
+  const alertKey = bounceAlertKey(brand);
+  let alertState: {
+    condition_signature?: string | null;
+    last_alerted_at?: string | null;
+    repeat_n?: number | null;
+  } | null = null;
+  try {
+    const stateResult = await db
+      .from("ops_alert_state")
+      .select("condition_signature, last_alerted_at, repeat_n")
+      .eq("tenant_id", SUNBIZ_TENANT_ID)
+      .eq("alert_key", alertKey)
+      .maybeSingle();
+    if (!stateResult.error) alertState = stateResult.data;
+  } catch (error) {
+    // Suppression state fails open: a real outage must not disappear because
+    // its alert bookkeeping store is temporarily unavailable.
+    console.error("[scan-bounces] alert state read failed", { brand, errorClass, error });
+  }
+
+  const decision = decideBounceAlert(errorClass, text, {
+    lastSignature: alertState?.condition_signature,
+    lastAlertedAt: alertState?.last_alerted_at,
+    repeatN: alertState?.repeat_n,
+  });
+  if (!decision.send) return;
+
+  const sent = await sendTelegram(text, { lane: "sunbiz-ops" }).catch((error) => ({
+    ok: false,
+    reason: error instanceof Error ? error.message : "telegram_exception",
+  }));
+  if (!sent.ok) {
+    console.error("[scan-bounces] watchdog Telegram delivery failed", {
+      brand,
+      errorClass,
+      reason: sent.reason,
+    });
+    return;
+  }
+
+  // Stamp only after confirmed delivery. A rejected Telegram send must not
+  // start a quiet window for a page nobody received.
+  const now = new Date().toISOString();
+  const { error: stateWriteError } = await db.from("ops_alert_state").upsert({
+    tenant_id: SUNBIZ_TENANT_ID,
+    alert_key: alertKey,
+    condition_signature: decision.signature,
+    last_alerted_at: now,
+    repeat_n: decision.nextRepeatN,
+    updated_at: now,
+  }, { onConflict: "tenant_id,alert_key" });
+  if (stateWriteError) {
+    console.error("[scan-bounces] alert state write failed", {
+      brand,
+      errorClass,
+      message: stateWriteError.message,
+    });
+  }
+}
+
+async function resetBounceAlert(db: ServiceDb, brand: string): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await db.from("ops_alert_state").upsert({
+    tenant_id: SUNBIZ_TENANT_ID,
+    alert_key: bounceAlertKey(brand),
+    condition_signature: "healthy",
+    last_alerted_at: now,
+    repeat_n: 0,
+    updated_at: now,
+  }, { onConflict: "tenant_id,alert_key" });
+  if (error) {
+    console.error("[scan-bounces] alert reset failed", { brand, message: error.message });
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -147,7 +229,7 @@ export async function GET(req: NextRequest) {
     creds = await getSubmissionsCreds(SUNBIZ_TENANT_ID, brand);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
-    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — ${escapeTelegramHtml(mailboxLabel)} credentials error: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running for this mailbox until fixed.`);
+    await watchdogAlert(db, brand, "creds", `🔴 <b>Bounce reader DOWN</b> — ${escapeTelegramHtml(mailboxLabel)} credentials error: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running for this mailbox until fixed.`);
     return NextResponse.json({ ok: false, brand, error: "creds_" + msg, error_class: "creds" }, { status: 500 });
   }
 
@@ -162,7 +244,7 @@ export async function GET(req: NextRequest) {
   } catch {
     // If we can't load lenders, fail closed on suppression: better to suppress
     // nothing this run than risk poisoning a lender contact.
-    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — could not load the lender exclusion list (DB error). Skipped this run to avoid poisoning a lender contact.`);
+    await watchdogAlert(db, brand, "lender_db", `🔴 <b>Bounce reader DOWN</b> — ${escapeTelegramHtml(mailboxLabel)} could not load the lender exclusion list (DB error). Skipped this run to avoid poisoning a lender contact.`);
     return NextResponse.json({ ok: false, error: "lender_load_failed", error_class: "db" }, { status: 500 });
   }
 
@@ -177,7 +259,7 @@ export async function GET(req: NextRequest) {
     await client.connect();
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
-    await watchdogAlert(`🔴 <b>Bounce reader DOWN</b> — IMAP connect to submissions@ failed: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
+    await watchdogAlert(db, brand, "imap", `🔴 <b>Bounce reader DOWN</b> — IMAP connect to ${escapeTelegramHtml(mailboxLabel)} failed: ${escapeTelegramHtml(msg)}. Bounce suppression is NOT running until fixed.`);
     return NextResponse.json({ ok: false, error: "imap_connect_" + msg, error_class: "imap" }, { status: 502 });
   }
 
@@ -268,7 +350,7 @@ export async function GET(req: NextRequest) {
     }));
     const up = await db.from("email_suppressions").upsert(rows, { onConflict: "email,tenant_id,brand" });
     if (up.error) {
-      await watchdogAlert(`🔴 <b>Bounce reader</b> — suppression write FAILED: ${escapeTelegramHtml(up.error.message)}. ${toSuppress.size} bounced addresses were NOT suppressed; the drip may keep hitting them.`);
+      await watchdogAlert(db, brand, "suppression_db", `🔴 <b>Bounce reader</b> — ${escapeTelegramHtml(mailboxLabel)} suppression write FAILED: ${escapeTelegramHtml(up.error.message)}. ${toSuppress.size} bounced addresses were NOT suppressed; the drip may keep hitting them.`);
       return NextResponse.json({ ok: false, error: "suppress_write:" + up.error.message, error_class: "db", scanned, results }, { status: 500 });
     }
     suppressed = rows.length;
@@ -278,15 +360,18 @@ export async function GET(req: NextRequest) {
   const SPIKE = Number(process.env.BOUNCE_SPIKE_ALERT) || 5;
   if (write && newlySuppressed >= SPIKE) {
     const sample = [...toSuppress].slice(0, 8).map((e) => escapeTelegramHtml(e)).join(", ");
-    await watchdogAlert(
+    await sendTelegram(
       `⚠️ <b>Bounce spike</b> — ${newlySuppressed} NEW hard bounces suppressed from ${escapeTelegramHtml(mailboxLabel)} this run ` +
       `(threshold ${SPIKE}). Sample: ${sample}. Check drip list hygiene / sending volume before reputation drops.`,
-    );
+      { lane: "sunbiz-ops" },
+    ).catch(() => ({ ok: false }));
   }
 
   const hard = results.filter((r) => r.class === "hard").length;
   const soft = results.filter((r) => r.class === "soft").length;
   const unparsed = results.filter((r) => r.action === "unparsed").length;
+
+  if (write) await resetBounceAlert(db, brand);
 
   return NextResponse.json({
     ok: true,
