@@ -54,12 +54,11 @@ export const DEPLOY_CHECKS: DripCheck[] = [
     // Both lanes. A delivery failure is about the alerting system itself, and
     // whichever audience CAN still be reached is the one that must hear it.
     lane: ["operator", "sunbiz-ops"],
-    observe: async (db, tenantId, endMs) => {
+    observe: async (db, _tenantId, endMs) => {
       try {
         const r = await db
           .from("health_check_runs")
           .select("id", { count: "exact", head: true })
-          .eq("tenant_id", tenantId)
           .eq("check_id", "alerting.telegram_delivery")
           .gte("ran_at", new Date(endMs - DELIVERY_WINDOW_MS).toISOString())
           .lt("ran_at", new Date(endMs).toISOString());

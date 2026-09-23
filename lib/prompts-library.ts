@@ -289,7 +289,7 @@ Acknowledge by saying: "Vibe-to-Execution Translator V9.1 online. Drop your brai
     foundational: true,
     tags: ["client", "setup", "bridge", "multi-tenant", "admin"],
     prompt:
-      "I'm setting up a new client tenant. The client's owner/admin will run one always-on machine that powers the bridge daemon for every employee. Walk me through: (1) confirm the admin's machine is suitable (idle CPU + memory headroom; stable network; can run 24/7 without sleep). (2) Install the OASIS Desktop app on the admin's machine + pair it as the tenant's primary bridge. Verify the launchd / pm2 service is set to auto-start on boot. (3) Confirm the admin's Claude / Codex / Gemini CLI subscriptions are signed in on that machine — every employee on this tenant will chat against those subscriptions by default. (4) Set the tenant's workspace-default API key in Settings → Agents (the fallback when the bridge isn't reachable from an employee's browser, e.g. quota exceeded). (5) Onboard each employee with their own dashboard account — they inherit the admin's bridge automatically. Walk them through where to paste their PERSONAL API key (Settings → My Agents) if they ever want to override — that key is private to them via RLS (migration 063), no other tenant member can read or use it. Confirm step-by-step with the admin in chat. Report what's done + what's pending.",
+      "I'm setting up a new client tenant. The client's owner/admin will run one always-on machine that powers the bridge daemon for every employee. Walk me through: (1) confirm the admin's machine is suitable (idle CPU + memory headroom; stable network; can run 24/7 without sleep). (2) Install the OASIS Desktop app on the admin's machine + pair it as the tenant's primary bridge. Run the installed `oasis bridge install` command and verify its native supervisor is set to auto-start on boot (Windows Task Scheduler/Startup, macOS launchd, or the Linux systemd user service). (3) Confirm the admin's Claude / Codex / Gemini CLI subscriptions are signed in on that machine — every employee on this tenant will chat against those subscriptions by default. (4) Set the tenant's workspace-default API key in Settings → Agents (the fallback when the bridge isn't reachable from an employee's browser, e.g. quota exceeded). (5) Onboard each employee with their own dashboard account — they inherit the admin's bridge automatically. Walk them through where to paste their PERSONAL API key (Settings → My Agents) if they ever want to override — that key is private to them via RLS (migration 063), no other tenant member can read or use it. Confirm step-by-step with the admin in chat. Report what's done + what's pending.",
   },
   {
     id: "client-fresh-machine-bootstrap",
@@ -641,10 +641,10 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
     title: "Bridge status",
     description:
       "Traces the full chain — process, port, pairing, heartbeat, CLI auth — and names the first broken link. Checks the running daemon, not just the repo.",
-    tags: ["health", "bridge", "pm2"],
+    tags: ["health", "bridge", "fleet-watchdog"],
     prompt: `Diagnose the bridge end to end. Follow the chain in order and stop at the first genuinely broken link — everything downstream of a break reports failure for the same reason and that's misleading.
 
-**1. Process.** Is the daemon actually running? \`pm2 status\` on Windows, \`launchctl list | grep bravo-bridge\` on Mac. Note its start time.
+**1. Process.** Is the daemon actually running? On Windows run \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge status\`. On macOS run \`launchctl list | grep bravo-bridge\`; on Linux run \`systemctl --user status bravo-bridge\`. Note its start time.
 
 **2. Port + health.** \`curl -s http://127.0.0.1:9100/warm-status\` — expect \`{"ok": true, ...}\`. If the port doesn't answer but the process is up, the process is wedged, not absent; those need different fixes.
 
@@ -654,9 +654,9 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
 
 **5. CLI auth.** Verify claude / codex / gemini each report installed AND authenticated. An expired login degrades chat to API-key mode, which is banned here — we're subscription-CLI only, never \`ANTHROPIC_API_KEY\`.
 
-**Critical — check the RUNNING daemon, not the repo.** PM2 holds the source and environment captured at spawn time. If the process start time predates the last relevant commit, it is running stale code and every check above can pass while the behaviour is still wrong. Compare the two explicitly and say so.
+**Critical — check the RUNNING daemon, not the repo.** The active supervisor holds the source and environment captured at spawn time. If the process start time predates the last relevant commit, it is running stale code and every check above can pass while the behaviour is still wrong. Compare the two explicitly and say so.
 
-**Report:** the chain with a pass/fail per link, the first genuine break, and the exact command to fix it. Canonical restart is \`bravo bridge restart\` — it cycles both the heartbeat daemon and the chat-server and waits for :9100 to free. If a restart needs new env values, use \`pm2 restart --update-env\`, but flag that it copies the calling shell's environment.`,
+**Report:** the chain with a pass/fail per link, the first genuine break, and the exact command to fix it. Canonical cross-platform restart is \`$HOME/.oasis/bin/oasis bridge restart\` (PowerShell: \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge restart\`). It cycles both the heartbeat and chat server and waits for :9100 to free. Restart from the canonical launcher so the installed environment is used.`,
   },
   {
     id: "health-metric-audit",
@@ -762,14 +762,14 @@ Do not silently rewrite shared substrate — \`scripts/\`, \`database/\`, templa
 - CEO-Agent (\`~/CEO-Agent\` on Mac / \`C:\\Users\\User\\CEO-Agent\` on Windows — was \`Business-Empire-Agent\` pre-rename, check both) — Bravo brain
 - CMO-Agent (\`~/CMO-Agent\`) — Maven content/brand
 - CFO-Agent (\`~/CFO-Agent\` or \`~/APPS/CFO-Agent\`) — Atlas finance (branch may be \`master\`, not \`main\`)
-- oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (Vercel-watched)
+- oasis-command-center (\`~/oasis-command-center\` or \`~/APPS/oasis-command-center\`) — Next.js dashboard (deployment target is environment-specific; verify the live surface)
 - hermes (\`~/hermes\` or \`~/APPS/hermes\`) — community manager (optional, skip if missing)
 
 For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on tracking/state files (AGENTS.md, brain/STATE.md, memory/*.md), \`git stash push -m "machine-sync stale state"\` then re-pull. Report any conflict that wasn't trivially stash-resolvable.
 
 **2. Refresh the bridge daemon so it loads new code:**
 - macOS: \`launchctl kickstart -k gui/$(id -u)/work.oasisai.bravo-bridge\`
-- Windows: \`pm2 restart claude-bridge\` (or \`bravo bridge restart\`)
+- Windows: \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge restart\`
 - Confirm: \`curl -s http://localhost:9100/health\` returns ok=true.
 - Confirm: \`~/.oasis/bridge_chat.last_heartbeat\` mtime is <2 min old (Mac) or the equivalent freshness check on Windows.
 
@@ -793,8 +793,9 @@ For each repo: \`git pull --rebase origin <branch>\`. If pull conflicts on track
 - If \`bravo_cli/requirements.txt\` changed, \`pip install -r bravo_cli/requirements.txt\` inside the venv.
 - If there are new database migrations under \`database/\` or \`supabase/migrations/\`, surface them for CC to apply via the Supabase dashboard or migration tool.
 
-**6. Restart any per-machine daemons that should be running:**
-- PM2 daemons (Mac): \`pm2 resurrect\` to bring back saved daemons after reboot. Check \`pm2 status\` shows event-router online.
+**6. Restart only the per-machine daemons this host owns:**
+- Windows: run \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge install\` and \`& "$HOME\\.oasis\\bin\\oasis.cmd" bridge status\`. The installed launcher is independent of the current repo checkout; the Bravo Fleet Watchdog scheduled task reconciles the rest of the declared workstation services.
+- macOS/Linux: run \`$HOME/.oasis/bin/oasis bridge install\` and \`$HOME/.oasis/bin/oasis bridge status\`; the installer selects launchd or the systemd user service.
 - Telegram bridge: skip if Windows is the bridge-owner; only start here if Windows is offline and the bridge lock at \`~/.oasis/bridge_locks/bravo.json\` has a stale heartbeat (>60s).
 
 **7. Final report — surface ONLY these in this exact order, one per line:**

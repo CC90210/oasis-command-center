@@ -49,6 +49,7 @@ import {
 } from "@/lib/cli-runtime";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 import { isProxyModeRuntime } from "@/lib/bridge-client-routing";
+import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
 import { computeEffectiveBridgeOnline } from "@/lib/bridge-effective-online";
 import {
   deriveDropdownState,
@@ -1067,7 +1068,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   }, []);
 
   // Probe the local bridge on mount + every 30s. When the operator runs
-  // `pm2 restart claude-bridge`, this flips true and desktop-enabled runtimes can
+  // `oasis bridge restart`, this flips true and desktop-enabled runtimes can
   // target their machine instead of /api/chat.
   useEffect(() => {
     // Hidden persistent instance (active=false off /agent): skip the 30s poll
@@ -1108,7 +1109,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
         setBridgeOnline(r.ok);
         if (!r.ok) {
           setBridgeProbeReason("vps_unreachable");
-          setBridgeProbeDetail("Probe failed without a structured reason. Tail the Vercel function logs for the actual error.");
+          setBridgeProbeDetail("Probe failed without a structured reason. Check the hosted runtime logs for the actual error.");
         } else {
           setBridgeProbeReason(null);
           setBridgeProbeDetail(null);
@@ -1849,9 +1850,15 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
           "Switch the chat mode to API key for this session, or open the dashboard on the machine that owns the bridge."
         );
       } else {
+        const recovery = bridgeRecoveryGuidance(
+          bridgeHostOSFromPlatform(
+            typeof navigator === "undefined" ? null : navigator.platform,
+            typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints,
+          ),
+        );
         setError(
           "Pinned to CLI (local bridge), but no bridge is online. " +
-          "Start the bridge on your machine (`pm2 restart claude-bridge` / `bravo bridge serve`), " +
+          `${recovery}, ` +
           "or switch the mode to API key."
         );
       }
@@ -3231,7 +3238,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
                   <code className="bg-bg-elev px-1 py-0.5 rounded text-accent">bravo bridge seed-keys</code>{" "}
                   on your machine to push your local Anthropic / OpenAI / OpenRouter key into the dashboard, or (2) add{" "}
                   <code className="bg-bg-elev px-1 py-0.5 rounded text-accent">PLATFORM_DEFAULT_OPENROUTER_API_KEY</code>{" "}
-                  in Vercel env vars.
+                  in the hosted runtime secrets.
                 </div>
               )}
               {error === "agent_not_configured" && (

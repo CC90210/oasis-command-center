@@ -40,7 +40,7 @@ import {
   isReleasedOasisPipelineRow,
   roleMayOperateOasisSalesLead,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -112,21 +112,21 @@ export async function POST(
     if (isOasisWorkspace) {
       let roster;
       try {
-        roster = await getOasisSalesRepRoster(tenantId);
+        roster = await getOasisPipelineAssignmentRoster(tenantId);
       } catch (error) {
-        console.error("[leads.assign] OASIS sales roster could not be verified", {
+        console.error("[leads.assign] OASIS assignment roster could not be verified", {
           tenantId,
           error: error instanceof Error ? error.message : String(error),
         });
         return NextResponse.json(
-          { ok: false, error: "sales_roster_unavailable", message: "The sales roster could not be verified." },
+          { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
           { status: 503 },
         );
       }
       const resolved = resolveAssignableTarget(roster, nextAssignedTo);
       if (!resolved) {
         return NextResponse.json(
-          { ok: false, error: "target_not_on_sales_roster", message: "Choose an active sales rep from this workspace." },
+          { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or Adon for this pipeline cycle." },
           { status: 422 },
         );
       }
@@ -187,7 +187,7 @@ export async function POST(
       {
         ok: false,
         error: "assignee_required",
-        message: "OASIS leads need an active sales rep. Use Leads and its Release action to return work to the shared pool.",
+        message: "OASIS leads need CC or Adon as owner. Use Leads and its Release action to return work to the shared pool.",
       },
       { status: 422 },
     );

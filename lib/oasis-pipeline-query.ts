@@ -7,6 +7,7 @@ import {
   type TenantRecord,
 } from "@/lib/manifest/data";
 import { isReleasedOasisPipelineRow } from "@/lib/oasis-sales-pipeline-policy";
+import { isInPipelineCycle, type PipelineCycleBoundary } from "@/lib/pipeline-cycle";
 
 export const OASIS_PIPELINE_OVERVIEW_LIMIT = 40;
 export const OASIS_PIPELINE_STAGE_PAGE_SIZE = 100;
@@ -130,6 +131,18 @@ type ViewerRecordLister = (input: {
   offset?: number;
 }) => Promise<ListRecordsResult>;
 
+function activeCycleRows(
+  rows: TenantRecord[],
+  now: number,
+  cycle?: PipelineCycleBoundary,
+): TenantRecord[] {
+  return rows.filter(
+    (row) =>
+      !isReleasedOasisPipelineRow(row, now) &&
+      (!cycle || isInPipelineCycle(row, cycle)),
+  );
+}
+
 function normalizedSearchTerms(rawQuery: string | null | undefined): string[] {
   return (rawQuery || "")
     .normalize("NFKC")
@@ -240,6 +253,8 @@ export async function listOasisPipelineWindow(
     viewerUserId?: string | null;
     /** Builder delivery allocation stored outside assigned_to. */
     fulfillmentOwnerId?: string | null;
+    /** Optional reversible board boundary. Historical rows remain stored. */
+    cycle?: PipelineCycleBoundary;
     query?: string | null;
   },
   deps: { list: RecordLister; listForViewer?: ViewerRecordLister } = {
@@ -303,7 +318,7 @@ export async function listOasisPipelineWindow(
     }
     const now = Date.now();
     return scopedWindowFromRows({
-      rows: scoped.rows.filter((row) => !isReleasedOasisPipelineRow(row, now)),
+      rows: activeCycleRows(scoped.rows, now, input.cycle),
       stageKeys,
       activeStage,
       requestedPage,
@@ -345,11 +360,9 @@ export async function listOasisPipelineWindow(
       throw new Error("oasis_pipeline_rep_scope_exceeds_safe_window");
     }
     const now = Date.now();
-    const activeScopedRows = scoped.rows.filter(
-      (row) => !isReleasedOasisPipelineRow(row, now),
-    );
+    const activeScopedRows = activeCycleRows(scoped.rows, now, input.cycle);
     const byId = new Map(activeScopedRows.map((row) => [row.id, row]));
-    for (const row of fulfillment.rows) byId.set(row.id, row);
+    for (const row of activeCycleRows(fulfillment.rows, now, input.cycle)) byId.set(row.id, row);
     return scopedWindowFromRows({
       rows: [...byId.values()].sort((left, right) =>
         String(right.updated_at || "").localeCompare(String(left.updated_at || "")),
@@ -395,7 +408,7 @@ export async function listOasisPipelineWindow(
     }
     const now = Date.now();
     return scopedWindowFromRows({
-      rows: scoped.rows.filter((row) => !isReleasedOasisPipelineRow(row, now)),
+      rows: activeCycleRows(scoped.rows, now, input.cycle),
       stageKeys,
       activeStage,
       requestedPage,

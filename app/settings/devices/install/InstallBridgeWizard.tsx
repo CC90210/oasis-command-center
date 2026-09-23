@@ -24,6 +24,11 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import {
+  bridgeInstallCommands,
+  bridgeRestartCommand,
+  bridgeSupervisorLabel,
+} from "@/lib/bridge-install-guidance";
 
 export function InstallBridgeWizard() {
   const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
@@ -198,7 +203,7 @@ export function InstallBridgeWizard() {
                   <>
                     Token issued and written to{" "}
                     <span className="font-mono">~/.oasis/bridge_token</span>. Start (or restart) your bridge daemon —
-                    e.g. <span className="font-mono">pm2 restart claude-bridge-ping</span> — and it&apos;ll connect with the new token.
+                    e.g. <span className="font-mono">{bridgeRestartCommand(os)}</span> — and it&apos;ll connect with the new token.
                   </>
                 ) : (
                   <>
@@ -212,30 +217,24 @@ export function InstallBridgeWizard() {
 
           {/*
             Self-sufficiency follow-up. The pair-code one-liner above starts
-            the bridge for THIS session but doesn't survive a reboot. Three
-            one-time commands wire it into PM2 so it (and the V6 + cron
-            daemons) auto-start on login. Optional — operators who shut down
-            their machine nightly should run them; always-on desktops can
-            skip.
+            the bridge for THIS session but doesn't survive a reboot. The
+            installed OASIS launcher selects the native supervisor for the OS.
           */}
           <div className="rounded-lg border border-bg-border bg-bg-elev/40 p-4 space-y-2">
             <div className="text-xs uppercase tracking-wider font-bold text-fg-dim">
               Optional · Make this survive reboots
             </div>
             <p className="text-xs text-fg-muted leading-relaxed">
-              The bridge is running in this session. To have it (plus the cron
-              poller, event-bus router, and override consumer) auto-start at
-              login, run these three one-time commands from the repo root:
+              The bridge is running in this session. To have it auto-start at
+              login under {bridgeSupervisorLabel(os)}, run these commands from
+              any directory:
             </p>
             <pre className="text-[11px] font-mono text-accent bg-bg-deep border border-bg-border rounded p-2.5 overflow-x-auto select-all">
-{`pm2 start ecosystem.config.js
-pm2 save
-pm2 startup    # follow the platform-specific line PM2 prints`}
+{bridgeInstallCommands(os)}
             </pre>
             <div className="text-[11px] text-fg-dim">
-              After this, your operator daemons (claude-bridge, claude-bridge-ping,
-              event-router, override-consumer) survive shutdowns and PM2 will
-              auto-restart any of them that crash.
+              The launcher uses its installed absolute path, so this works even
+              when the repo is elsewhere or your current terminal has not refreshed PATH.
             </div>
           </div>
 

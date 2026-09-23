@@ -42,10 +42,22 @@ import {
   GoogleCalendarIntegrationError,
   type GoogleCalendarDependencies,
 } from "../lib/integrations/google-calendar";
+import { probeCalendarEventsList } from "../lib/integrations/google-token-probe";
+import {
+  cleanupWorkspaceCalendarFailure,
+  finishWorkspaceCalendarVerification,
+  WorkspaceCalendarVerificationFailure,
+} from "./verify-workspace-calendar-live-core";
 
 const OPERATOR = (process.env.GOOGLE_SYSTEM_CALENDAR_ADDRESS || "conaugh@oasisai.work").toLowerCase();
 const TENANT = "verify-tenant";
 const HOST = "verify-host";
+const VERIFICATION_OVERRIDES = {
+  getBundle: async () => ({}) as Record<string, string>,
+  // Never persist during a verification run. Returns the real result shape
+  // rather than void, so this stays honest against the dependency contract.
+  setValue: async () => ({ ok: true as const, id: "verification-noop" }),
+} satisfies Partial<GoogleCalendarDependencies>;
 /**
  * UNIQUE PER RUN, DELIBERATELY.
  *
@@ -82,21 +94,30 @@ async function main() {
   console.log(`      calendarId : ${config.calendarId}`);
   console.log(`      client     : ${config.clientId.split("-")[0]} (project number)`);
 
+  // Read before write. A token can refresh successfully while lacking Calendar
+  // scope or access to this exact calendar. Prove both with events.list before
+  // the verifier creates anything; only the redacted error code crosses the
+  // probe boundary.
+  console.log(`[2] checking non-mutating read access to the target calendar…`);
+  const preflight = await probeCalendarEventsList({
+    refreshToken: config.refreshToken,
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+    calendarId: config.calendarId,
+  });
+  if (preflight.verdict !== "live") {
+    fail(`[${preflight.errorCode || "calendar_probe_unknown"}] target calendar read probe did not pass`);
+  }
+  console.log(`      readable`);
+
   // An EMPTY bundle: the host has no personal Google connection at all, so the
   // workspace identity is the only thing that can book. That is the path the
   // whole fallback exists for and the one that was dying in production.
-  const overrides = {
-    getBundle: async () => ({}) as Record<string, string>,
-    // Never persist during a verification run. Returns the real result shape
-    // rather than void, so this stays honest against the dependency contract.
-    setValue: async () => ({ ok: true as const, id: "verification-noop" }),
-  } satisfies Partial<GoogleCalendarDependencies>;
-
   // 09:00 UTC three days out — a real future slot, cancelled moments later.
   const meetingAt = new Date(Date.now() + 3 * 86_400_000);
   meetingAt.setUTCHours(9, 0, 0, 0);
 
-  console.log(`[2] booking as the workspace identity (host has NO personal connection)…`);
+  console.log(`[3] booking as the workspace identity (host has NO personal connection)…`);
   const receipt = await createGoogleFounderMeeting(
     {
       tenantId: TENANT,
@@ -111,10 +132,10 @@ async function main() {
       company: "OASIS internal verification",
       clientAgenda: "Automated verification of the OASIS booking chain. Safe to ignore.",
     },
-    overrides,
+    VERIFICATION_OVERRIDES,
   );
 
-  console.log(`[3] booked`);
+  console.log(`[4] booked`);
   console.log(`      eventId   : ${receipt.eventId}`);
   console.log(`      organizer : ${receipt.organizerEmail}`);
   console.log(`      meet      : ${receipt.meetLink}`);
@@ -132,36 +153,51 @@ async function main() {
     );
   }
 
-  console.log(`[4] cancelling the verification event…`);
-  try {
-    await cancelGoogleFounderMeeting(
-      {
-        tenantId: TENANT,
-        hostUserId: HOST,
-        expectedOrganizerEmail: OPERATOR,
-        eventId: receipt.eventId,
-      } as Parameters<typeof cancelGoogleFounderMeeting>[0],
-      overrides,
-    );
-    console.log(`      cancelled`);
-  } catch (error) {
-    // Cleanup failure is worth reporting but must not mask a successful booking.
-    console.log(`      cleanup failed (remove ${receipt.eventId} by hand): ${String(error)}`);
-  }
-
-  if (problems.length) fail(problems.join("\n      "));
-  console.log(`\nPASS — the workspace calendar booked, provisioned Meet, and invited attendees.`);
+  console.log(`[5] cancelling the verification event…`);
+  await finishWorkspaceCalendarVerification({
+    eventId: receipt.eventId,
+    problems,
+    cancel: async () => {
+      await cancelGoogleFounderMeeting(
+        {
+          tenantId: TENANT,
+          hostUserId: HOST,
+          expectedOrganizerEmail: OPERATOR,
+          eventId: receipt.eventId,
+        } as Parameters<typeof cancelGoogleFounderMeeting>[0],
+        VERIFICATION_OVERRIDES,
+      );
+    },
+  });
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   if (error instanceof GoogleCalendarIntegrationError) {
     console.error(`\nFAIL: [${error.code}] ${error.message}`);
+    await cleanupWorkspaceCalendarFailure({
+      eventId: error.eventId,
+      cancel: async (eventId) => {
+        await cancelGoogleFounderMeeting(
+          {
+            tenantId: TENANT,
+            hostUserId: HOST,
+            expectedOrganizerEmail: OPERATOR,
+            eventId,
+          } as Parameters<typeof cancelGoogleFounderMeeting>[0],
+          VERIFICATION_OVERRIDES,
+        );
+      },
+    });
     if (error.code === "workspace_calendar_token_invalid") {
       console.error(
         "      The shared workspace credential was rejected. A host reconnecting will NOT help — " +
           "an administrator must mint a workspace credential with Calendar scope.",
       );
     }
+    process.exit(1);
+  }
+  if (error instanceof WorkspaceCalendarVerificationFailure) {
+    console.error(`\nFAIL: ${error.message}`);
     process.exit(1);
   }
   console.error(error);

@@ -8,6 +8,16 @@ import {
   resolveOasisPipelineAssigneeScope,
 } from "../lib/oasis-pipeline-query";
 import { OPENER_PIPELINE_STAGE_KEYS } from "../lib/oasis-sales-pipeline-policy";
+import {
+  CURRENT_OASIS_PIPELINE_CYCLE,
+  isInPipelineCycle,
+  pipelineCycleAssignmentFacts,
+  planPipelineCycleArchive,
+} from "../lib/pipeline-cycle";
+import {
+  OASIS_PIPELINE_ASSIGNMENT_EMAILS,
+  isOasisPipelineAssignmentMember,
+} from "../lib/team";
 
 const pipelinePageSource = readFileSync("app/pipeline/page.tsx", "utf8");
 const pipelineViewSource = readFileSync("components/manifest/LeadPipelineView.tsx", "utf8");
@@ -27,6 +37,143 @@ assert(
 assert.equal(normalizeOasisPipelinePage("3"), 3);
 assert.equal(normalizeOasisPipelinePage("-4"), 1);
 assert.equal(normalizeOasisPipelinePage("not-a-page"), 1);
+
+assert.match(
+  pipelinePageSource,
+  /cycle:\s*CURRENT_OASIS_PIPELINE_CYCLE/,
+  "the live Pipeline board must activate the non-destructive current-cycle boundary",
+);
+
+assert.deepEqual(
+  OASIS_PIPELINE_ASSIGNMENT_EMAILS,
+  ["conaugh@oasisai.work", "adon@oasisai.work"],
+  "the assignment roster is a separate founder-only boundary seeded to CC and Adon",
+);
+assert.equal(isOasisPipelineAssignmentMember({ email: " CONAUGH@OASISAI.WORK " }), true);
+assert.equal(isOasisPipelineAssignmentMember({ email: "adon@oasisai.work" }), true);
+assert.equal(isOasisPipelineAssignmentMember({ email: "rep@oasisai.work" }), false);
+
+const cycle = CURRENT_OASIS_PIPELINE_CYCLE;
+assert.equal(
+  isInPipelineCycle({ data: { pipeline_cycle: cycle.id }, updated_at: "2000-01-01T00:00:00Z" }, cycle),
+  true,
+  "an explicit current-cycle stamp is authoritative",
+);
+assert.equal(
+  isInPipelineCycle({ data: { pipeline_cycle: "previous", assigned_at: "2099-01-01T00:00:00Z" }, updated_at: "2099-01-01T00:00:00Z" }, cycle),
+  false,
+  "a prior explicit cycle cannot leak in through a newer timestamp",
+);
+assert.equal(
+  isInPipelineCycle({ data: { assigned_at: cycle.startedAt }, updated_at: cycle.startedAt }, cycle),
+  true,
+  "new untagged assignments remain compatible at the cycle boundary",
+);
+assert.equal(
+  isInPipelineCycle({ data: { assigned_at: "2026-09-22T23:59:59.999Z" }, updated_at: "2026-09-22T23:59:59.999Z" }, cycle),
+  false,
+  "the current board starts from the declared boundary instead of deleting history",
+);
+
+const importedAssignment = pipelineCycleAssignmentFacts(
+  " CC-AUTH-ID ",
+  "2026-09-23T09:15:00.000Z",
+  cycle,
+);
+assert.deepEqual(importedAssignment, {
+  assigned_to: "CC-AUTH-ID",
+  assigned_at: "2026-09-23T09:15:00.000Z",
+  pipeline_cycle: cycle.id,
+});
+assert.equal(
+  isInPipelineCycle({ data: { stage: "assigned", ...importedAssignment } }, cycle),
+  true,
+  "a newly imported CC/Adon assignment must be visible in the active cycle",
+);
+assert.throws(
+  () => pipelineCycleAssignmentFacts("", "2026-09-23T09:15:00.000Z", cycle),
+  /pipeline_assignment_owner_required/,
+  "an OASIS import cannot create unowned work",
+);
+assert.throws(
+  () => pipelineCycleAssignmentFacts("cc", "2026-09-22T09:15:00.000Z", cycle),
+  /pipeline_assignment_before_cycle/,
+  "a current-cycle stamp cannot carry an assignment clock from a prior cycle",
+);
+
+const archivePlan = planPipelineCycleArchive(
+  [
+    { id: "old", data: { stage: "assigned", assigned_to: "former", assigned_at: "2026-09-01T00:00:00Z" }, updated_at: "2026-09-01T00:00:00Z" },
+    { id: "current-cc", data: { stage: "connected", assigned_to: "cc", pipeline_cycle: cycle.id }, updated_at: cycle.startedAt },
+    { id: "current-other", data: { stage: "qualified", assigned_to: "other", assigned_at: cycle.startedAt }, updated_at: cycle.startedAt },
+  ],
+  cycle,
+  ["cc", "adon"],
+);
+assert.deepEqual(archivePlan.archive.map((row) => row.id), ["old"]);
+assert.deepEqual(archivePlan.current.map((row) => row.id), ["current-cc", "current-other"]);
+assert.deepEqual(archivePlan.outsideAssignmentRoster, ["current-other"]);
+assert.deepEqual(
+  archivePlan.archive[0],
+  {
+    id: "old",
+    priorStage: "assigned",
+    priorAssignedTo: "former",
+    priorAssignedAt: "2026-09-01T00:00:00Z",
+    priorUpdatedAt: "2026-09-01T00:00:00Z",
+  },
+  "the archive manifest carries the exact facts needed to restore a hidden row",
+);
+
+for (const path of [
+  "app/api/web-leads/claim/route.ts",
+  "app/api/web-leads/assignable-reps/route.ts",
+  "app/api/web-leads/territories/[id]/assign/route.ts",
+  "app/api/leads/[id]/assign/route.ts",
+  "app/api/leads/bulk/route.ts",
+  "app/api/manifest/[slug]/records/[entity]/route.ts",
+  "app/pipeline/new/page.tsx",
+  "app/api/leads/quick-add/route.ts",
+  "app/api/leads/import/route.ts",
+]) {
+  assert.match(
+    readFileSync(path, "utf8"),
+    /getOasisPipelineAssignmentRoster/,
+    `${path} must use the founder-only assignment roster rather than the manager read roster`,
+  );
+}
+const manifestCreateRoute = readFileSync("app/api/manifest/[slug]/records/[entity]/route.ts", "utf8");
+assert.match(
+  manifestCreateRoute,
+  /resolveAssignableTarget\(roster,\s*user\.id\)/,
+  "a non-admin OASIS creator must also resolve through the CC+Adon roster",
+);
+const quickAddRoute = readFileSync("app/api/leads/quick-add/route.ts", "utf8");
+assert.match(
+  quickAddRoute,
+  /resolveAssignableTarget\(roster,\s*sess\.userId\)/,
+  "OASIS quick-add must refuse self-assignment outside CC+Adon",
+);
+const importRoute = readFileSync("app/api/leads/import/route.ts", "utf8");
+assert.match(
+  importRoute,
+  /resolveAssignableTarget\(assignmentRoster,\s*assignedTo\)/,
+  "an imported OASIS owner must resolve through the same CC+Adon roster",
+);
+assert.match(
+  importRoute,
+  /error:\s*"assignee_required"/,
+  "an OASIS import must reject a row without a CC/Adon owner",
+);
+assert.match(
+  importRoute,
+  /pipelineCycleAssignmentFacts\(/,
+  "an OASIS import must stamp the assignment clock and current cycle together",
+);
+const cycleScript = readFileSync("scripts/plan-oasis-pipeline-cycle.ts", "utf8");
+assert.match(cycleScript, /DRY RUN/i);
+assert.match(cycleScript, /pipeline-cycle/);
+assert.doesNotMatch(cycleScript, /\.update\(|\.delete\(|\.upsert\(|\.rpc\(/, "the cycle tool is read/archive-only");
 
 assert.deepEqual(
   resolveOasisPipelineAssigneeScope({ isAdmin: true, userId: "admin", repFilter: null }),
@@ -479,6 +626,30 @@ const conflicting = await listOasisPipelineWindow(
   { list: teamList },
 );
 assert.equal(conflicting.total, 0, "conflicting assignee scopes fail closed");
+
+const boundedCycle = { id: "cycle-now", startedAt: "2026-09-23T06:00:00.000Z", focus: ["sales"] };
+const cycleWindow = await listOasisPipelineWindow(
+  {
+    tenantId: "tenant-1",
+    stageKeys: ["assigned"],
+    cycle: boundedCycle,
+  },
+  {
+    list: async () => ({
+      total: 3,
+      rows: [
+        { id: "old", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "cc", assigned_at: "2026-09-01T00:00:00Z" }, created_at: "", updated_at: "2026-09-01T00:00:00Z" },
+        { id: "explicit-current", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "cc", pipeline_cycle: "cycle-now" }, created_at: "", updated_at: "2026-09-01T00:00:00Z" },
+        { id: "new-assignment", tenant_id: "tenant-1", entity_type: "lead", data: { stage: "assigned", assigned_to: "adon", assigned_at: "2026-09-23T06:00:00.000Z" }, created_at: "", updated_at: "2026-09-23T06:00:00.000Z" },
+      ],
+    }),
+  },
+);
+assert.deepEqual(
+  cycleWindow.rows.map((row) => row.id),
+  ["explicit-current", "new-assignment"],
+  "the working board starts at the reversible cycle boundary while prior rows stay stored",
+);
 
 // ── The admin single-read must ask for the stages it will render ───────────
 //

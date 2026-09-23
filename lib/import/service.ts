@@ -16,7 +16,14 @@
  */
 
 import { type EntityDefinition } from "./entities";
-import { stampSalesProgramForTenant, stageForWebsiteSalesLead } from "@/lib/leads/canonical-lead-fields";
+import {
+  isWebsiteSalesTenantSlug,
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+  stampSalesProgramForTenant,
+  stageForWebsiteSalesLead,
+} from "@/lib/leads/canonical-lead-fields";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const MAX_ROWS = 5_000;
@@ -365,8 +372,18 @@ export async function importRowsForTenant(input: {
    * every caller that hasn't been taught to pass it.
    */
   tenantSlug?: string | null;
+  /** Canonical auth user id, already resolved against the CC + Adon roster. */
+  oasisAssigneeUserId?: string | null;
 }): Promise<ImportResult | ImportFailure> {
-  const { db, tenantId, entity, rows, dryRun = false, tenantSlug = null } = input;
+  const {
+    db,
+    tenantId,
+    entity,
+    rows,
+    dryRun = false,
+    tenantSlug = null,
+    oasisAssigneeUserId = null,
+  } = input;
   if (!Array.isArray(rows) || rows.length === 0) {
     return { ok: false, error: "no_rows" };
   }
@@ -383,6 +400,16 @@ export async function importRowsForTenant(input: {
       ? input.dedupBy
       : entity.defaultDedupBy;
   const defaultSource = input.defaultSource || "csv_import";
+  const isOasisLeadImport =
+    entity.entity_type === "lead" && isWebsiteSalesTenantSlug(tenantSlug);
+  if (isOasisLeadImport && !oasisAssigneeUserId?.trim()) {
+    return {
+      ok: false,
+      error: "assignee_required",
+      message: "Choose CC or Adon before importing OASIS leads.",
+    };
+  }
+  const importedAt = new Date().toISOString();
 
   // ----- 1. Pull existing tenant_records of this entity_type for dedup -----
   const existingRes = await db
@@ -451,7 +478,16 @@ export async function importRowsForTenant(input: {
     // the row in a column that doesn't exist.
     if (entity.entity_type === "lead") {
       Object.assign(data, stampSalesProgramForTenant(data, tenantSlug));
-      if (data.sales_program) {
+      if (isOasisLeadImport) {
+        Object.assign(data, {
+          sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+          sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+          stage: "assigned",
+          stage_entered_at: importedAt,
+          ...pipelineCycleAssignmentFacts(oasisAssigneeUserId!, importedAt),
+          claimed_at: importedAt,
+        });
+      } else if (data.sales_program) {
         data.stage = stageForWebsiteSalesLead(typeof data.stage === "string" ? data.stage : null);
       }
     }
@@ -509,7 +545,7 @@ export async function importRowsForTenant(input: {
       entity_type: entity.entity_type,
       data: {
         ...data,
-        imported_at: new Date().toISOString(),
+        imported_at: importedAt,
       },
     });
   }

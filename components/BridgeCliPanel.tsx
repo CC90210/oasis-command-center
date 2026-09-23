@@ -3,7 +3,7 @@
 /**
  * BridgeCliPanel — live status of the per-CLI install on the operator's
  * local bridge. Polls the bridge at http://localhost:9100/diagnostics/cli
- * directly from the browser (the dashboard is on Vercel and can't reach
+ * directly from the browser (the hosted dashboard can't reach
  * localhost itself, but the user's browser CAN — same pattern the chat
  * widget uses for /exec-tool).
  *
@@ -25,6 +25,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, XCircle, AlertTriangle, Info, Loader2 } from "lucide-react";
 import { LOCAL_BRIDGE_DEFAULT } from "@/lib/bridge-client-routing";
+import { bridgeHostOSFromPlatform, bridgeRecoveryGuidance } from "@/lib/bridge-install-guidance";
 
 // This panel diagnoses the CLIs on the viewer's OWN machine, so it asks the
 // viewer's own loopback bridge — never NEXT_PUBLIC_BRIDGE_CHAT_BASE, which is
@@ -120,7 +121,7 @@ export function BridgeCliPanel({
     //   - server bridge ONLINE → just a quiet one-liner. The sidebar already
     //     shows BRIDGE ONLINE; no need to confuse the operator with a
     //     warning. Per-CLI status simply isn't visible from this browser
-    //     (Vercel-hosted dashboard can't reach the operator's localhost —
+    //     (the hosted dashboard can't reach the operator's localhost —
     //     fundamental mixed-content + cross-origin constraint, NOT a bug).
     //   - server bridge OFFLINE → the actual red state. Daemon isn't
     //     heartbeating; something is wrong.
@@ -133,6 +134,12 @@ export function BridgeCliPanel({
       );
     }
 
+    const recovery = bridgeRecoveryGuidance(
+      bridgeHostOSFromPlatform(
+        typeof navigator === "undefined" ? null : navigator.platform,
+        typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints,
+      ),
+    );
     return (
       <div className="rounded-lg border border-status-warm/40 bg-status-warm/5 px-3 py-2.5 text-sm flex items-start gap-2">
         <AlertTriangle className="w-4 h-4 mt-0.5 text-status-warm flex-shrink-0" />
@@ -142,7 +149,7 @@ export function BridgeCliPanel({
             The dashboard couldn&apos;t reach <code className="text-accent">{BRIDGE_BASE}/diagnostics/cli</code> and
             no recent heartbeat is on file in <code className="text-accent">bridge_pairings</code>.
             Either the bridge daemon isn&apos;t running or your browser blocked the localhost call.
-            Install the desktop app to host the bridge, or run <code className="text-accent">pm2 logs claude-bridge</code> in Terminal.
+            Install the desktop app to host the bridge, or open Terminal and {recovery}.
           </div>
         </div>
       </div>

@@ -16,6 +16,9 @@ import { PageHeader } from "@/components/Card";
 import { ImportWizard } from "@/components/import/ImportWizard";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
+import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +26,25 @@ export const dynamic = "force-dynamic";
 export default async function ImportPage() {
   const profile = await safe("import.profile", getActiveProfile(), null);
   const hasTenant = !!profile?.tenant_id;
+  let leadAssignmentOptions: Array<{ id: string; name: string }> | null = null;
+  if (profile?.tenant_id) {
+    const tenantSlug = await safe(
+      "import.tenant_slug",
+      resolveOwnedSlug(profile.tenant_id),
+      null,
+    );
+    if (isWebsiteSalesTenantSlug(tenantSlug)) {
+      const roster = await safe(
+        "import.pipeline_assignment_roster",
+        getOasisPipelineAssignmentRoster(profile.tenant_id),
+        [],
+      );
+      leadAssignmentOptions = roster.map((member) => ({
+        id: member.auth_user_id!,
+        name: member.display_name || member.full_name || member.email,
+      }));
+    }
+  }
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -32,7 +54,7 @@ export default async function ImportPage() {
       />
 
       {hasTenant ? (
-        <ImportWizard />
+        <ImportWizard leadAssignmentOptions={leadAssignmentOptions} />
       ) : (
         <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-8 text-center text-fg-muted text-sm">
           <p>Finish onboarding to connect this workspace before importing.</p>

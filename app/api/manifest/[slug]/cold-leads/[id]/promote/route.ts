@@ -9,7 +9,8 @@
  * Idempotent: if the cold lead is already promoted (promoted_lead_id IS NOT
  * NULL), the existing promoted_lead_id is returned without double-creating.
  *
- * Body: { assignee_user_id?: string }   (optional — sets the lead's assignee)
+ * Body: { assignee_user_id?: string } (required for an OASIS promotion; must
+ * resolve to the current CC + Adon assignment roster)
  *
  * Response: { ok: true, promoted_lead_id: string, was_already_promoted: boolean }
  *
@@ -17,14 +18,22 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { resolveSessionContext } from "@/lib/api-auth";
+import { canWriteCrm } from "@/lib/role-gates";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
 import { manifestExists } from "@/lib/manifest/loader";
 import {
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+  isWebsiteSalesTenantSlug,
   pickWebsiteSalesFields,
   stampSalesProgramForTenant,
   stageForWebsiteSalesLead,
 } from "@/lib/leads/canonical-lead-fields";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +54,7 @@ type ColdLeadDbRow = {
 };
 
 async function resolveContext(
-  userId: string,
+  userTenantId: string,
   slug: string,
 ): Promise<
   | { ok: true; tenantId: string }
@@ -53,15 +62,6 @@ async function resolveContext(
 > {
   if (!SLUG_RE.test(slug)) return { ok: false, status: 400, error: "invalid_slug" };
   if (!(await manifestExists(slug))) return { ok: false, status: 404, error: "unknown_tenant" };
-
-  const db = getServiceSupabase();
-  const profileRes = await db
-    .from("user_profiles")
-    .select("tenant_id")
-    .eq("auth_user_id", userId)
-    .maybeSingle();
-  const userTenantId =
-    (profileRes.data as { tenant_id: string | null } | null)?.tenant_id ?? null;
 
   const dataTenantId = await resolveDataTenant(slug, userTenantId);
   if (!dataTenantId) {
@@ -75,14 +75,22 @@ export async function POST(
   ctx: { params: Promise<{ slug: string; id: string }> },
 ) {
   const { slug, id } = await ctx.params;
-  const user = await getSessionUser();
-  if (!user) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  const session = await resolveSessionContext();
+  if (!session.ok) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+  if (!canWriteCrm(session.teamRole)) {
+    return NextResponse.json(
+      { ok: false, error: "forbidden_role", message: "Read-only members can't promote cold leads." },
+      { status: 403 },
+    );
+  }
 
   if (!UUID_RE.test(id)) {
     return NextResponse.json({ ok: false, error: "invalid_id" }, { status: 400 });
   }
 
-  const context = await resolveContext(user.id, slug);
+  const context = await resolveContext(session.tenantId, slug);
   if (!context.ok) {
     return NextResponse.json({ ok: false, error: context.error }, { status: context.status });
   }
@@ -94,10 +102,40 @@ export async function POST(
     // Body is optional for this route.
   }
 
-  const assigneeUserId =
+  let assigneeUserId =
     typeof body.assignee_user_id === "string" && UUID_RE.test(body.assignee_user_id)
-      ? body.assignee_user_id
+      ? body.assignee_user_id.trim().toLowerCase()
       : null;
+
+  const isOasisPromotion = isWebsiteSalesTenantSlug(slug);
+  if (isOasisPromotion && !assigneeUserId) {
+    return NextResponse.json(
+      { ok: false, error: "assignee_required", message: "Choose CC or Adon before promoting this lead." },
+      { status: 422 },
+    );
+  }
+  if (isOasisPromotion && assigneeUserId) {
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(context.tenantId);
+    } catch (error) {
+      console.error("[cold-leads.promote] OASIS assignment roster could not be verified", {
+        tenantId: context.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "sales_roster_unavailable" },
+        { status: 503 },
+      );
+    }
+    assigneeUserId = resolveAssignableTarget(roster, assigneeUserId);
+    if (!assigneeUserId) {
+      return NextResponse.json(
+        { ok: false, error: "target_not_on_sales_roster", message: "Choose CC or Adon for this pipeline cycle." },
+        { status: 422 },
+      );
+    }
+  }
 
   const db = getServiceSupabase();
 
@@ -131,6 +169,7 @@ export async function POST(
   // research that was captured on the way in is still here — it just never
   // made it onto the promoted lead, and the rep opened a deal with no site.
   const carried = pickWebsiteSalesFields((lead.raw || {}) as Record<string, unknown>);
+  const promotedAt = new Date().toISOString();
 
   const leadData: Record<string, unknown> = {
     business_name: lead.business_name ?? "",
@@ -147,6 +186,7 @@ export async function POST(
     // screen shows it. Gated on the tenant: a website in a SunBiz cold list is
     // ordinary merchant detail, not a program signal.
     ...stampSalesProgramForTenant(carried, slug),
+    ...(isOasisPromotion ? { sales_motion: OASIS_COLD_OUTBOUND_MOTION } : {}),
   };
 
   // Stage vocabularies don't overlap: "imported" is SunBiz intake and has no
@@ -163,7 +203,16 @@ export async function POST(
     // a promoted lead was assigned in the database and unassigned on every
     // screen, including to the rep it was handed to. Both are written: the
     // legacy key stays for anything still reading it.
-    leadData.assigned_to = assigneeUserId;
+    if (isOasisPromotion) {
+      Object.assign(leadData, pipelineCycleAssignmentFacts(assigneeUserId, promotedAt), {
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+        claimed_at: promotedAt,
+        stage: "assigned",
+        stage_entered_at: promotedAt,
+      });
+    } else {
+      leadData.assigned_to = assigneeUserId;
+    }
     leadData.assignee_user_id = assigneeUserId;
   }
 
@@ -173,7 +222,7 @@ export async function POST(
       tenant_id: context.tenantId,
       entity_type: "lead",
       data: leadData,
-      created_by: user.id,
+      created_by: session.userId,
     })
     .select("id")
     .single();
