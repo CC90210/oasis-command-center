@@ -23,7 +23,7 @@ import { Card, Stat, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { GoalPaceChart } from "@/components/charts/GoalPaceChart";
 import { LiveClock } from "@/components/LiveClock";
 import { GoalCountdownCard } from "@/components/GoalCountdownCard";
-import { timeAgo, truncate } from "@/lib/fmt";
+import { formatMoney, timeAgo, truncate } from "@/lib/fmt";
 import { operatorDateKey, operatorIsWeekend } from "@/lib/dates";
 import {
   todayCounts,
@@ -43,7 +43,7 @@ import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { founderBoardSummary } from "@/lib/oasis-board-summary";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 
-const dollars = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+const dollars = (cents: number) => formatMoney(cents / 100);
 
 export async function FounderToday({
   profile,

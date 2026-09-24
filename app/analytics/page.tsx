@@ -9,6 +9,7 @@ import {
   getActiveProfile,
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
+import { formatMoney } from "@/lib/fmt";
 import { requireSystemSurface, resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 
@@ -37,7 +38,7 @@ export default async function AnalyticsPage() {
       : safe("analytics.mrr_history", mrrHistory(60), [] as Array<{ date: string; mrr: number; synthetic: boolean }>),
     safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
   ]);
-  const dollars = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+  const dollars = (cents: number) => formatMoney(cents / 100);
 
   const totalLeads = pipeline.total;
   const won = pipeline.stages["won"] || 0;
