@@ -34,7 +34,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getTenant } from "@/lib/queries";
 import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
-import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
+import { buildMemberDirectory, withAssignedName } from "@/lib/assigned-names";
 import { getOasisSalesRepRoster } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
@@ -241,9 +241,12 @@ export default async function PipelinePage({
   // Resolve the directory once. The former path fetched it once to label rows
   // and again to build the rep chips, after resolving the same session/profile
   // three times above. Start this read alongside the pipeline query instead.
-  const memberNameMapPromise = managerTeamRead
-    ? Promise.resolve(managerRepRoster)
-    : buildMemberNameMap(tenantId);
+  // Names cover every teammate (old rows keep a deactivated rep's name); the
+  // active set decides who gets a filter chip. See buildMemberDirectory.
+  const memberDirectoryPromise = managerTeamRead
+    ? Promise.resolve({ names: managerRepRoster, activeIds: new Set(managerRepRoster.keys()) })
+    : buildMemberDirectory(tenantId);
+  const memberNameMapPromise = memberDirectoryPromise.then((directory) => directory.names);
   // The manager's default roster and an explicit rep chip use the same bounded
   // one-read path. Treating ?rep= as a scalar scope fell back to one query per
   // lifecycle stage even though it is simply a one-member roster.
@@ -339,9 +342,10 @@ export default async function PipelinePage({
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.
+  const { activeIds: activeMemberIds } = await memberDirectoryPromise;
   const repRoster =
     session.ok && pipelineAdmin
-      ? memberNameMap
+      ? new Map([...memberNameMap].filter(([id]) => activeMemberIds.has(id)))
       : managerRepRoster;
 
   // A manager who also carries a book had to spot their own name in a row of

@@ -87,12 +87,17 @@ export async function GET(req: NextRequest) {
   let userId: string | null = null;
   let sessionVersion: number | null = null;
   let email = payload.email.toLowerCase();
+  // A banned account (a deactivated teammate, lib/team-activation.ts) gets no
+  // cookie here. The session check would reject it on the next request anyway;
+  // refusing at the door keeps the same answer password login already gives.
+  const nowIso = new Date().toISOString();
   const bySub = await db.execute({
     sql: `SELECT u.id, u.email, u.session_version FROM "_supabase_auth_identities" i
           JOIN "_supabase_auth_users" u ON u.id = i.user_id
           WHERE i.provider = 'google' AND i.provider_id = ?
-            AND u.deleted_at IS NULL LIMIT 1`,
-    args: [payload.sub],
+            AND u.deleted_at IS NULL
+            AND (u.banned_until IS NULL OR unixepoch(u.banned_until) < unixepoch(?)) LIMIT 1`,
+    args: [payload.sub, nowIso],
   });
   if (bySub.rows.length) {
     userId = String(bySub.rows[0].id);
@@ -101,8 +106,9 @@ export async function GET(req: NextRequest) {
   } else {
     const byEmail = await db.execute({
       sql: `SELECT id, session_version FROM "_supabase_auth_users"
-            WHERE lower(email) = ? AND deleted_at IS NULL LIMIT 1`,
-      args: [email],
+            WHERE lower(email) = ? AND deleted_at IS NULL
+              AND (banned_until IS NULL OR unixepoch(banned_until) < unixepoch(?)) LIMIT 1`,
+      args: [email, nowIso],
     });
     if (byEmail.rows.length) {
       userId = String(byEmail.rows[0].id);

@@ -38,7 +38,7 @@ export default async function AuditLogPage({
   const actorFilter = typeof params.actor === "string" ? params.actor.trim() : "";
   let salesRosterError: string | null = null;
   const salesRoster = salesTeamScope
-    ? await getOasisSalesRepRoster(profile.tenant_id).catch((error) => {
+    ? await getOasisSalesRepRoster(profile.tenant_id, undefined, { includeInactive: true }).catch((error) => {
         console.error("[settings.audit-log.sales-roster]", error);
         salesRosterError = "sales_roster_unavailable";
         return [];

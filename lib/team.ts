@@ -93,7 +93,28 @@ export type MemberRow = {
   invited_by: string | null;
   joined_at: string;
   manager_user_id?: string | null;
+  /** Set when a founder deactivated this teammate (migration 179). NULL = active. */
+  deactivated_at?: string | null;
+  deactivated_by?: string | null;
+  deactivation_reason?: string | null;
 };
+
+/**
+ * Active = not deactivated. Deactivated teammates keep their history but must
+ * never appear in a LIVE list — assign menus, rep chips, the scorecard, form
+ * routing. Every roster read below defaults to active-only, so a caller that
+ * forgets to ask hides a retired rep rather than handing them new work; only
+ * history views (name lookups for old records, the activity feed, the Team
+ * admin page) opt in with `includeInactive`.
+ */
+export function isActiveMember(member: { deactivated_at?: string | null }): boolean {
+  return !member.deactivated_at;
+}
+
+export type RosterOptions = { includeInactive?: boolean };
+
+const MEMBER_COLUMNS =
+  "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id, deactivated_at, deactivated_by, deactivation_reason";
 
 function cleanMemberName(value: string | null | undefined): string | null {
   const normalized = String(value || "").trim();
@@ -275,18 +296,22 @@ export async function getSessionContext(): Promise<SessionContext | null> {
   };
 }
 
-export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
+export async function getTenantMembers(
+  tenantId: string,
+  options: RosterOptions = {},
+): Promise<MemberRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at"
-    )
+    .select(MEMBER_COLUMNS)
     .eq("tenant_id", tenantId)
     .order("is_owner", { ascending: false })
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getTenantMembers", error);
-  return canonicalizeTenantMembers((data ?? []) as MemberRow[]);
+  // Canonicalize before filtering, for the same reason the sales roster does:
+  // a deactivated duplicate must not knock out the authoritative row.
+  const members = canonicalizeTenantMembers((data ?? []) as MemberRow[]);
+  return options.includeInactive ? members : members.filter(isActiveMember);
 }
 
 /**
@@ -298,13 +323,12 @@ export async function getTenantMembers(tenantId: string): Promise<MemberRow[]> {
 export async function getOasisSalesRepRoster(
   tenantId: string,
   managerUserId?: string,
+  options: RosterOptions = {},
 ): Promise<MemberRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id",
-    )
+    .select(MEMBER_COLUMNS)
     .eq("tenant_id", tenantId)
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getOasisSalesRepRoster", error);
@@ -318,7 +342,9 @@ export async function getOasisSalesRepRoster(
       Boolean(member.auth_user_id?.trim()) &&
       member.is_owner !== true &&
       member.admin_access !== true &&
-      isOasisPipelineRepRole(member.team_role),
+      isOasisPipelineRepRole(member.team_role) &&
+      // A deactivated manager also loses their cross-rep read boundary here.
+      (options.includeInactive === true || isActiveMember(member)),
   );
   if (managerUserId === undefined) return roster;
   const managerId = managerUserId.trim().toLowerCase();
@@ -330,12 +356,10 @@ export async function getOasisSalesRepRoster(
 }
 
 /**
- * Pipeline ownership for the current revenue cycle is intentionally narrower
- * than the sales-team/read roster. Owners/admins are normally excluded from
- * getOasisSalesRepRoster because that function is a manager authorization
- * boundary; CC and Adon are exactly the two legal assignment destinations for
- * this cycle, so they need a separate allowlist rather than a dangerous role
- * exception in the manager roster.
+ * The founders — the two people who must always be assignable. Owners/admins
+ * are excluded from getOasisSalesRepRoster because that function is a manager
+ * authorization boundary, so they are named here rather than smuggled into it
+ * through a role exception.
  */
 export const OASIS_PIPELINE_ASSIGNMENT_EMAILS = [
   "conaugh@oasisai.work",
@@ -347,30 +371,47 @@ export function isOasisPipelineAssignmentMember(member: { email?: string | null 
   return (OASIS_PIPELINE_ASSIGNMENT_EMAILS as readonly string[]).includes(email);
 }
 
+/**
+ * Everyone a lead may be assigned to: the founders first, then every ACTIVE
+ * rep (2026-09-24). CC and Adon run sales; Schneur (builder) and David (opener)
+ * are the reps who stay. This one list feeds the assign menus AND the server
+ * checks behind them, so the menu can never offer a person the API refuses —
+ * and deactivating a rep removes them from both at once.
+ *
+ * Until 2026-09-24 this was the founders only, which also meant the two reps
+ * who remained could not claim from the pool at all.
+ */
 export async function getOasisPipelineAssignmentRoster(tenantId: string): Promise<MemberRow[]> {
   const supa = getServiceSupabase();
   const { data, error } = await supa
     .from("user_profiles")
-    .select(
-      "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id",
-    )
+    .select(MEMBER_COLUMNS)
     .eq("tenant_id", tenantId)
     .order("joined_at", { ascending: true });
   if (error) throw dbError("getOasisPipelineAssignmentRoster", error);
 
+  const members = canonicalizeTenantMembers((data || []) as MemberRow[]).filter(
+    (member) => Boolean(member.auth_user_id?.trim()) && isActiveMember(member),
+  );
   const byEmail = new Map(
-    canonicalizeTenantMembers((data || []) as MemberRow[])
-      .filter((member) => Boolean(member.auth_user_id?.trim()) && isOasisPipelineAssignmentMember(member))
+    members
+      .filter((member) => isOasisPipelineAssignmentMember(member))
       .map((member) => [member.email.trim().toLowerCase(), member]),
   );
-  const roster = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
+  const founders = OASIS_PIPELINE_ASSIGNMENT_EMAILS.flatMap((email) => {
     const member = byEmail.get(email);
     return member ? [member] : [];
   });
-  if (roster.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
+  if (founders.length !== OASIS_PIPELINE_ASSIGNMENT_EMAILS.length) {
     throw new Error("oasis_pipeline_assignment_roster_incomplete");
   }
-  return roster;
+  const reps = members.filter(
+    (member) =>
+      !isOasisPipelineAssignmentMember(member) &&
+      member.is_owner !== true &&
+      isOasisPipelineRepRole(member.team_role),
+  );
+  return [...founders, ...reps];
 }
 
 export async function listActiveInvites(tenantId: string): Promise<InviteRow[]> {

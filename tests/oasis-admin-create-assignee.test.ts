@@ -11,7 +11,7 @@ const ADMIN = "11111111-1111-4111-8111-111111111111";
 const REP = "22222222-2222-4222-8222-222222222222";
 const NOW = new Date("2026-09-23T12:00:00.000Z");
 const seedLead = OASIS_SEED.data_model!.find((entity) => entity.name === "lead")!;
-const assignees = [{ userId: REP, label: "Ariel Rep" }];
+const assignees = [{ userId: REP, label: "Active Rep" }];
 
 const adminForm = oasisLeadCreateForm(
   seedLead,
@@ -23,7 +23,7 @@ assert.ok(assigneeField, "an admin create form must require a sales rep destinat
 assert.equal(assigneeField!.type, "enum");
 assert.equal(assigneeField!.required, true);
 assert.deepEqual(assigneeField!.enum_values, [REP]);
-assert.equal(adminForm.optionLabels.assigned_to[REP], "Ariel Rep");
+assert.equal(adminForm.optionLabels.assigned_to[REP], "Active Rep");
 assert.equal(adminForm.fieldLabels.assigned_to, "Sales rep");
 
 const repForm = oasisLeadCreateForm(

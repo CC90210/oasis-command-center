@@ -269,7 +269,8 @@ export async function getActivityFeed(
   let loadedMembers = opts.members;
   if (!loadedMembers) {
     try {
-      loadedMembers = await getTenantMembers(tenantId);
+      // Past actions by a deactivated teammate still need their name.
+      loadedMembers = await getTenantMembers(tenantId, { includeInactive: true });
     } catch (error) {
       console.error("[activity-feed.members]", { tenantId, error });
       return {

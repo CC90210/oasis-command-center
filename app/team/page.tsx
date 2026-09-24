@@ -5,6 +5,7 @@ import {
   getSessionContext,
   getTenantMembers,
   INVITE_TTL_DAYS,
+  isActiveMember,
   isTrueAdminRole,
   listActiveInvites,
   tenantSlugFor,
@@ -16,6 +17,7 @@ import {
   TeamInviteActions,
   RemoveMemberClientButton,
   AdminAccessToggle,
+  MemberActivationToggle,
 } from "./TeamInviteActions";
 import { redirect } from "next/navigation";
 
@@ -31,8 +33,9 @@ export default async function TeamPage() {
   // may grant/revoke the admin-access switch. Mirrors the endpoint's escalation
   // guard so the control never renders for someone the API would 403.
   const canGrantAdmin = isTrueAdminRole(ctx.teamRole, ctx.isOwner);
-  const [members, invites, seatWarning, tenantSlug] = await Promise.all([
-    getTenantMembers(ctx.tenantId),
+  const [allMembers, invites, seatWarning, tenantSlug] = await Promise.all([
+    // Managers see deactivated teammates too, so they can reactivate them.
+    getTenantMembers(ctx.tenantId, { includeInactive: canManage }),
     canManage ? listActiveInvites(ctx.tenantId) : Promise.resolve([]),
     canManage ? computeSeatWarning(ctx.tenantId) : Promise.resolve(null),
     canManage ? tenantSlugFor(ctx.tenantId) : Promise.resolve(null),
@@ -41,12 +44,18 @@ export default async function TeamPage() {
   // the server, so the client component never carries the tenant rules — and so
   // the menu cannot offer a role the invite API would reject.
   const roleOptions = invitableRoleOptionsForActor(tenantSlug, canGrantAdmin);
+  const members = allMembers.filter(isActiveMember);
+  const inactiveMembers = allMembers.filter((m) => !isActiveMember(m));
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Team"
-        subtitle={canManage ? "Invite, manage, and remove team members." : "Members on this tenant."}
+        subtitle={
+          canManage
+            ? "Invite, manage, deactivate, and reactivate team members."
+            : "Members on this tenant."
+        }
       />
 
       {canManage && seatWarning && seatWarning.status !== "ok" && (
@@ -125,6 +134,13 @@ export default async function TeamPage() {
                   {canGrantAdmin && !m.is_owner && (
                     <AdminAccessToggle profileId={m.id} initialGranted={m.admin_access} />
                   )}
+                  {canGrantAdmin && !m.is_owner && m.id !== ctx.profileId && (
+                    <MemberActivationToggle
+                      profileId={m.id}
+                      name={m.display_name || m.full_name || m.email}
+                      active
+                    />
+                  )}
                   {/* Removal is a true-admin action (not conferred by admin_access), matching the server gate. */}
                   {canGrantAdmin && !m.is_owner && m.id !== ctx.profileId && (
                     <RemoveMemberClientButton profileId={m.id} />
@@ -135,6 +151,37 @@ export default async function TeamPage() {
           </ul>
         )}
       </Card>
+
+      {canManage && inactiveMembers.length > 0 && (
+        <Card
+          title="Inactive"
+          subtitle={`${inactiveMembers.length} deactivated — hidden from the pipeline, assign lists, and reports, and unable to sign in. History is kept.`}
+        >
+          <ul className="divide-y divide-bg-border">
+            {inactiveMembers.map((m) => (
+              <li key={m.id} className="grid grid-cols-[1fr_7rem_11rem] gap-4 py-3 items-center opacity-80">
+                <div>
+                  <div className="font-semibold text-fg-muted">{m.display_name || m.full_name || m.email}</div>
+                  <div className="text-xs text-fg-dim font-mono mt-0.5">
+                    {m.email}
+                    {m.deactivated_at && ` · off since ${new Date(m.deactivated_at).toLocaleDateString()}`}
+                  </div>
+                </div>
+                <div className="text-sm text-fg-dim">{teamRoleLabel(m.team_role)}</div>
+                <div className="flex items-center justify-end gap-2 text-xs text-fg-dim">
+                  {canGrantAdmin && (
+                    <MemberActivationToggle
+                      profileId={m.id}
+                      name={m.display_name || m.full_name || m.email}
+                      active={false}
+                    />
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       {!canManage && (
         <Card title="Want to invite teammates?" subtitle="Ask an admin or the tenant owner.">

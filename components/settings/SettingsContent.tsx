@@ -317,13 +317,13 @@ export async function SettingsContent({
           {canManageTenant && (
             <SettingsSection
               title="Team"
-              subtitle="Invite teammates by work email. OASIS sends each person a one-time, 7-day link for the role you choose."
+              subtitle="Invite teammates by work email, and switch anyone Active or Inactive. Inactive people disappear from the pipeline, assign lists, and reports and can't sign in; their history is kept and they can be reactivated."
               action={
                 <a
                   href="/team"
                   className="inline-flex items-center gap-1 text-xs text-accent hover:text-accent-bright"
                 >
-                  Manage team & invites →
+                  Manage team, invites & active status →
                 </a>
               }
             >
