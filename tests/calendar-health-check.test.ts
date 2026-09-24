@@ -289,7 +289,12 @@ run().catch((error) => {
   const verifier = readFileSync("scripts/verify-workspace-calendar-live.ts", "utf8");
 
   assert.match(route, /WEBDEV_TENANT_ID/, "the global OASIS check must be persisted against the OASIS tenant");
-  assert.match(route, /checks:\s*CALENDAR_CHECKS/, "the OASIS run must contain only the global calendar checks");
+  assert.match(route, /checks:\s*OASIS_GLOBAL_CHECKS/, "the OASIS run must contain only the OASIS-global checks");
+  assert.match(
+    runner,
+    /OASIS_GLOBAL_CHECKS: DripCheck\[\] = \[\.\.\.CALENDAR_CHECKS, \.\.\.WORKER_REPORTER_CHECKS\]/,
+    "the OASIS-global run is the calendar proof (first) plus the worker-status reporter check",
+  );
   assert.match(route, /checks:\s*tenantOutcomeChecks\(\)/, "SunBiz's run must exclude the OASIS-global calendar check");
   assert.match(route, /Promise\.all\(\[/, "the Calendar proof must start alongside independent route checks");
   assert.ok(

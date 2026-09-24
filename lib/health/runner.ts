@@ -25,6 +25,7 @@ import { emailDripChecks } from "./email-drip-checks";
 import { FORM_CHECKS } from "./form-checks";
 import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
+import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
 import { healthAlertStateKey } from "./alert-state-key";
 
 import { computeCoverage } from "./coverage";
@@ -38,8 +39,16 @@ import { computeCoverage } from "./coverage";
  * target while reporting green.
  */
 export function allChecks() {
-  return [...tenantOutcomeChecks(), ...CALENDAR_CHECKS];
+  return [...tenantOutcomeChecks(), ...OASIS_GLOBAL_CHECKS];
 }
+
+/**
+ * OASIS-global infrastructure checks, persisted under the OASIS tenant and
+ * paged to CC's lane: the shared calendar, and (2026-09-24) whether worker
+ * status still reaches the dashboard. Calendar stays FIRST — its probe owns a
+ * wall-clock budget the route depends on.
+ */
+export const OASIS_GLOBAL_CHECKS: DripCheck[] = [...CALENDAR_CHECKS, ...WORKER_REPORTER_CHECKS];
 
 /** Tenant-scoped merchant/delivery checks; excludes OASIS-global infrastructure. */
 export function tenantOutcomeChecks(): DripCheck[] {

@@ -125,6 +125,11 @@ jobs:
           # through. It needs --conditions=react-server because the renderer
           # imports server-only.
           npm run test:watermark
+          # ADDED 2026-09-24 (OASIS fresh start): teammate deactivation and the
+          # rosters that must hide inactive people, the revenue-goal arithmetic,
+          # Today's board-summary congruency, and the worker-status reporter
+          # (panel rule + Health check) behind the 2026-09-23 false "11/12 down".
+          npm run test:fresh-start
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.

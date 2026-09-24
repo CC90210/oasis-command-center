@@ -20,8 +20,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { runHealthChecks, checkFleetHeartbeat, tenantOutcomeChecks } from "@/lib/health/runner";
-import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
+import { runHealthChecks, checkFleetHeartbeat, tenantOutcomeChecks, OASIS_GLOBAL_CHECKS } from "@/lib/health/runner";
 import { worstVerdict } from "@/lib/health/checks-core";
 import { runGuardAudit, announceGuardAudit } from "@/lib/health/guard-audit";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
@@ -50,7 +49,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const [calendarSummary, summary, heartbeat, guards] = await Promise.all([
       runHealthChecks(WEBDEV_TENANT_ID, {
         notify,
-        checks: CALENDAR_CHECKS,
+        checks: OASIS_GLOBAL_CHECKS,
       }),
       runHealthChecks(SUNBIZ_TENANT_ID, {
         notify,
