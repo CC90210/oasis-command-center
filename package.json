@@ -2,7 +2,7 @@
   "name": "oasis-command-center",
   "version": "1.0.0",
   "private": true,
-  "description": "OASIS AI Agent Command Center — the operating system for AI agents. Multi-agent, profile-driven, real-time.",
+  "description": "OASIS AI Agent Command Center \u2014 the operating system for AI agents. Multi-agent, profile-driven, real-time.",
   "scripts": {
     "test:website-sales-contract": "node --conditions=react-server --import tsx tests/website-sales-contract.test.ts && node --conditions=react-server --import tsx tests/contracts-match-engine.test.ts",
     "dev": "next dev --port 3100",
