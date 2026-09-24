@@ -148,6 +148,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       const m = await loadOasisMoney(ctx.tenantId, "agent.mrr_today");
       return {
         source: "stripe_live",
+        stripe_connected: m.stripeConnected,
         mrr: m.mrr
           ? {
               cents: m.mrr.mrr_cents,

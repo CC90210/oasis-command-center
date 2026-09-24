@@ -36,6 +36,7 @@ export function GoalCountdownCard({
   progress,
   collectedCadCents,
   fxMissingDays,
+  stripeConnected = true,
 }: {
   goal: { label: string; target_cents: number; period_start: string; period_end: string } | null;
   progress: GoalProgress | null;
@@ -43,6 +44,8 @@ export function GoalCountdownCard({
   collectedCadCents: number | null;
   /** Days whose payments had no FX rate on file — shown so a USD figure is never silently short. */
   fxMissingDays: string[];
+  /** False: card payments are not synced yet, so "collected" is manual payments only. */
+  stripeConnected?: boolean | null;
 }) {
   if (!goal || !progress) {
     return (
@@ -119,6 +122,13 @@ export function GoalCountdownCard({
           />
         </div>
       </div>
+      {stripeConnected !== true && (
+        <p className="mt-3 text-[11px] text-status-warm">
+          {stripeConnected === false
+            ? "Stripe is not connected to Finances yet, so card payments are not counted — only payments recorded by hand. Connect it in Founders → Finances → Settings → Stripe."
+            : "Could not confirm the Stripe connection just now, so card payments may be missing from this figure."}
+        </p>
+      )}
       {fxMissingDays.length > 0 && (
         <p className="mt-3 text-[11px] text-status-warm">
           No Bank of Canada rate on file for {fxMissingDays.join(", ")} — those payments are not yet

@@ -60,7 +60,9 @@ export default async function AnalyticsPage() {
             hint={
               money.mrr
                 ? `live Stripe${money.mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? ` · ≈ ${dollars(money.mrrUsdCents)} USD` : ""}`
-                : "Stripe unavailable"
+                : money.stripeConnected === false
+                  ? "Stripe not connected yet — Finances → Settings"
+                  : "Stripe unavailable"
             }
             accent
           />

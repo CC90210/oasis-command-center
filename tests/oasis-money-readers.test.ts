@@ -21,6 +21,9 @@ const loader = read("lib/goals/oasis-money.ts");
 assert.doesNotMatch(loader, /mrr_current_usd|mrr_target_usd/, "the OASIS money loader must not read the retired profile MRR");
 assert.match(loader, /stripeMrr\(\)/, "Net MRR must come from live Stripe");
 assert.match(loader, /revenueCollected\(range\)/, "goal progress must be money collected in the goal period");
+// Before a founder pins OASIS's Stripe account nothing syncs, so fin_subscriptions
+// is empty. That must read as "not connected", never as a confident CA$0.
+assert.match(loader, /mrr: pinned === true \? mrr : null,/, "an unconnected Stripe account must not render as $0 MRR");
 
 const founderToday = read("components/today/FounderToday.tsx");
 assert.match(founderToday, /showFinancials \? await loadOasisMoney\(tenantId, "today"\) : null/);

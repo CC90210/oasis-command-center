@@ -69,7 +69,9 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
       lines.push(
         mrr
           ? `- Net MRR (live Stripe): ${mrr.currency} ${fmtUSD(mrr.cents / 100)}${mrr.usd_cents !== null && mrr.currency !== "USD" ? ` (≈ USD ${fmtUSD(mrr.usd_cents / 100)})` : ""}, ${mrr.active_subscriptions} active subscription(s)`
-          : "- Net MRR: Stripe unavailable right now — say so, do not estimate",
+          : r.stripe_connected === false
+            ? "- Net MRR: unknown — Stripe is not connected to Finances yet (Founders → Finances → Settings → Stripe); card payments are not in 'collected'. Say so, do not estimate"
+            : "- Net MRR: Stripe unavailable right now — say so, do not estimate",
       );
       if (goal) {
         lines.push(

@@ -144,6 +144,7 @@ export async function FounderToday({
           progress={progress}
           collectedCadCents={money.collected?.cad_cents ?? null}
           fxMissingDays={money.collected?.fx_missing_days ?? []}
+          stripeConnected={money.stripeConnected}
         />
       )}
 
@@ -163,7 +164,9 @@ export async function FounderToday({
                 ? `${money.mrr.active_subscriptions} live Stripe sub${money.mrr.active_subscriptions === 1 ? "" : "s"}${
                     mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? ` · ≈ ${dollars(mrrUsdCents)} USD` : ""
                   }`
-                : "Stripe unavailable — not guessed"
+                : money.stripeConnected === false
+                  ? "Stripe not connected yet — Finances → Settings"
+                  : "Stripe unavailable — not guessed"
             }
           />
           <Stat

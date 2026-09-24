@@ -28,6 +28,7 @@ import {
   stripeMrr,
   usdPerCad,
 } from "@/lib/founders-finances/metrics";
+import { pinnedStripeAccount } from "@/lib/founders-finances/stripe-io";
 import type { GoalPacePoint } from "@/components/charts/GoalPaceChart";
 
 export type OasisMoney = {
@@ -35,6 +36,12 @@ export type OasisMoney = {
   collected: Awaited<ReturnType<typeof revenueCollected>> | null;
   last7: Awaited<ReturnType<typeof revenueCollected>> | null;
   mrr: Awaited<ReturnType<typeof stripeMrr>> | null;
+  /**
+   * False until a founder pins OASIS's Stripe account in Finances > Settings.
+   * Until then nothing syncs from Stripe, so MRR is unknown (not zero) and
+   * "collected" holds only manually recorded payments. Null = the check failed.
+   */
+  stripeConnected: boolean | null;
   /** Live Stripe MRR in USD cents at today's rate; null when it cannot be converted. */
   mrrUsdCents: number | null;
   topCustomer: { customer: string; share_pct: number } | null;
@@ -46,7 +53,7 @@ export async function loadOasisMoney(tenantId: string, label: string): Promise<O
   const todayKey = operatorDateKey();
   const goal = await safe(`${label}.revenue_goal`, getActiveRevenueGoal(tenantId), null);
   const range = goal ? { from: goal.period_start, to: nextDay(goal.period_end) } : null;
-  const [collected, byDay, last7, mrr, rate, customers] = await Promise.all([
+  const [collected, byDay, last7, mrr, rate, customers, pinned] = await Promise.all([
     range ? safe(`${label}.revenue_collected`, revenueCollected(range), null) : Promise.resolve(null),
     range ? safe(`${label}.revenue_by_day`, revenueCollectedByDay(range), []) : Promise.resolve([]),
     safe(
@@ -57,6 +64,7 @@ export async function loadOasisMoney(tenantId: string, label: string): Promise<O
     safe(`${label}.stripe_mrr`, stripeMrr(), null),
     safe(`${label}.fx`, usdPerCad(todayKey), null),
     range ? safe(`${label}.revenue_by_customer`, revenueByCustomer(range), []) : Promise.resolve([]),
+    safe(`${label}.stripe_pin`, pinnedStripeAccount().then((id) => id !== null), null),
   ]);
   const total = customers.reduce((sum, c) => sum + c.usd_cents, 0);
   const currency = mrr?.currency.toUpperCase();
@@ -64,13 +72,18 @@ export async function loadOasisMoney(tenantId: string, label: string): Promise<O
     goal,
     collected,
     last7,
-    mrr,
+    // An unconnected account has no subscription rows, which would read as a
+    // confident CA$0. Unknown is not zero.
+    mrr: pinned === true ? mrr : null,
+    stripeConnected: pinned,
     mrrUsdCents:
-      mrr && currency === "USD"
-        ? mrr.mrr_cents
-        : mrr && currency === "CAD" && rate
-          ? Math.round(mrr.mrr_cents * rate)
-          : null,
+      pinned !== true || !mrr
+        ? null
+        : currency === "USD"
+          ? mrr.mrr_cents
+          : currency === "CAD" && rate
+            ? Math.round(mrr.mrr_cents * rate)
+            : null,
     topCustomer:
       customers.length > 0 && total > 0
         ? { customer: customers[0].customer, share_pct: Math.round((customers[0].usd_cents / total) * 1000) / 10 }
