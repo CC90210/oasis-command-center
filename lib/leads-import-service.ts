@@ -1,5 +1,6 @@
 import { routeSunBizImportStage } from "./sunbiz-stage-routing";
 import { getServiceSupabase } from "./supabase-server";
+import { dbError } from "./db-error";
 import {
   isWebsiteSalesTenantSlug,
   OASIS_COLD_OUTBOUND_MOTION,
@@ -7,7 +8,12 @@ import {
 } from "./leads/canonical-lead-fields";
 import { resolveOwnedSlug } from "./manifest/tenant-scope";
 import { pipelineCycleAssignmentFacts } from "./pipeline-cycle";
-import { getOasisPipelineAssignmentRoster } from "./team";
+import {
+  getOasisPipelineAssignmentRoster,
+  MEMBER_DEACTIVATED_MESSAGE,
+  memberStanding,
+  type MemberStanding,
+} from "./team";
 import { resolveAssignableTarget } from "./web-leads/assign-target";
 
 const MAX_ROWS = 5_000;
@@ -69,7 +75,97 @@ export type LeadImportFailure = {
   would_have_inserted?: number;
   skipped_duplicate?: number;
   skipped_malformed?: number;
+  /** 1-based row that stopped the batch, when one row did. */
+  row?: number;
 };
+
+export type ImportAssigneeCheck =
+  | { ok: true; authUserId: string }
+  | {
+      ok: false;
+      error: "member_deactivated" | "not_a_tenant_member";
+      message: string;
+      row: number;
+    };
+
+/**
+ * Owner check for NON-OASIS imports (SunBiz and the other legacy workspaces),
+ * which take each row's owner from its assigned_to cell. Until 2026-09-24 that
+ * cell was stored verbatim, so a CSV could hand new leads to a deactivated
+ * teammate, or to someone who was never on the team. OASIS imports do not come
+ * through here: their assignment roster is active-only already.
+ *
+ * The cell may hold an auth user id or a teammate's email; either resolves to
+ * the auth id, because assigned_to is compared against auth_user_id everywhere
+ * downstream (see lib/leads/assignee-email.ts). Standing is cached per id and
+ * the email lookup reads the tenant's profiles once, so a 5,000-row file that
+ * names the same three reps costs a handful of reads.
+ *
+ * A read error THROWS. An import creates ownership, so the caller refuses the
+ * whole batch rather than guess who the owner is.
+ */
+export function createImportAssigneeCheck(tenantId: string) {
+  const standingById = new Map<string, Promise<MemberStanding>>();
+  let authIdsByEmail: Promise<Map<string, string[]>> | null = null;
+
+  const standingOf = (authUserId: string) => {
+    let pending = standingById.get(authUserId);
+    if (!pending) {
+      pending = memberStanding(tenantId, authUserId).then((r) => r.standing);
+      standingById.set(authUserId, pending);
+    }
+    return pending;
+  };
+
+  const loadEmails = async () => {
+    const { data, error } = await getServiceSupabase()
+      .from("user_profiles")
+      .select("auth_user_id, email")
+      .eq("tenant_id", tenantId);
+    if (error) throw dbError("leads.import.assignee_emails", error);
+    const byEmail = new Map<string, string[]>();
+    for (const row of (data ?? []) as Array<{ auth_user_id: string | null; email: string | null }>) {
+      const email = (row.email || "").trim().toLowerCase();
+      const authUserId = (row.auth_user_id || "").trim().toLowerCase();
+      if (!email || !authUserId) continue;
+      const ids = byEmail.get(email) ?? [];
+      if (!ids.includes(authUserId)) ids.push(authUserId);
+      byEmail.set(email, ids);
+    }
+    return byEmail;
+  };
+
+  return async (assignedTo: string, row: number): Promise<ImportAssigneeCheck> => {
+    const value = assignedTo.trim().toLowerCase();
+    let candidates: string[];
+    if (value.includes("@")) {
+      authIdsByEmail ??= loadEmails();
+      candidates = (await authIdsByEmail).get(value) ?? [];
+    } else {
+      candidates = [value];
+    }
+
+    let deactivated = false;
+    for (const authUserId of candidates) {
+      const standing = await standingOf(authUserId);
+      if (standing === "active") return { ok: true, authUserId };
+      if (standing === "deactivated") deactivated = true;
+    }
+    return deactivated
+      ? {
+          ok: false,
+          error: "member_deactivated",
+          message: `Row ${row}: ${MEMBER_DEACTIVATED_MESSAGE} No rows were imported.`,
+          row,
+        }
+      : {
+          ok: false,
+          error: "not_a_tenant_member",
+          message: `Row ${row} names an owner who isn't on this team. Use a teammate's email or user id. No rows were imported.`,
+          row,
+        };
+  };
+}
 
 export async function importLeadsForTenant(input: {
   tenantId: string;
@@ -160,6 +256,7 @@ export async function importLeadsForTenant(input: {
   const seenEmails = new Set<string>();
   const seenPhones = new Set<string>();
   const seenBusinesses = new Set<string>();
+  const checkAssignee = createImportAssigneeCheck(input.tenantId);
 
   for (const [i, raw] of rows.entries()) {
     const name = cleanString(raw.name, 200);
@@ -208,6 +305,21 @@ export async function importLeadsForTenant(input: {
         };
       }
       assignmentFacts = pipelineCycleAssignmentFacts(resolved, importedAt);
+    } else if (assignedTo) {
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(assignedTo, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new leads.
+        return {
+          ok: false,
+          error: "member_check_failed",
+          detail: error instanceof Error ? error.message : "Unable to verify the row's owner",
+          row: i + 1,
+        };
+      }
+      if (!owner.ok) return owner;
+      assignmentFacts = { assigned_to: owner.authUserId };
     }
     const businessKey = normBusiness(businessName);
 

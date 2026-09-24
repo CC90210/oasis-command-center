@@ -65,7 +65,7 @@ import { isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { stageDripsOffBoard } from "@/lib/drips/offboard-stages-core";
 import { poolFor, resolveCopy, type PoolTemplate } from "@/lib/drips/template-pool";
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
-import { wasShoppedRecently } from "@/lib/drips/enroller";
+import { assignedRepDeactivated, wasShoppedRecently } from "@/lib/drips/enroller";
 import { SUNBIZ_BRAND, dripTrackingBase, platformTrackingBase, buildDripHtml, listUnsubscribeHeader, pixelUrl, unsubscribeUrl } from "@/lib/drips/html-email";
 import { resolveDripSmsIdentity, staticRegistryNumbers, type DripSmsIdentity } from "@/lib/drips/rep-sms-identity";
 import { ACCELERATED_FLAG, acceleratedSystemLive, hasActiveAcceleratedRun } from "@/lib/drips/accelerated";
@@ -292,6 +292,9 @@ type RunState = {
    *  query per text and, worse, would race itself into overshooting the cap —
    *  none of this batch's in-flight sends are visible to a fresh read yet. */
   smsCountsByTenant: Map<string, PacingCounts>;
+  /** Whether each lead's assigned rep is deactivated, keyed (tenant, rep), so a
+   *  batch of one rep's leads costs one standing read. See signingData. */
+  repDeactivated: Map<string, boolean>;
 };
 
 /**
@@ -738,7 +741,8 @@ function isOptedOutOrDead(data: LeadData): boolean {
  *     (company is the alias several seeded templates use for business_name).
  *   - rep_name / assigned_agent_name → the lead's rep (the enroller backfills
  *     rep_name from assigned_to, so this is populated for all but the rare
- *     fully-unassigned lead), else a brand-safe "your funding specialist".
+ *     fully-unassigned lead, and signingData clears it for a deactivated rep),
+ *     else a brand-safe "your funding specialist".
  *     Exposed under BOTH names the seeded sequences reference. */
 export function buildContext(
   data: LeadData,
@@ -781,6 +785,25 @@ export function buildContext(
       application_url: applyUrl,
     },
   };
+}
+
+/**
+ * The lead as a drip step should SIGN it — what buildContext and
+ * resolveDripSmsIdentity read.
+ *
+ * A deactivated rep keeps the lead: assigned_to and the stored rep_name are
+ * history, and every write-back in this file keeps using the untouched row. But
+ * a NEW step must not be signed by them, sent from their line, or land replies
+ * in their inbox, so they get a COPY with the two rep fields cleared. That is
+ * the existing no-rep lane, unchanged: buildContext's "your funding specialist"
+ * signer and apply-link slug, and classifyRep's admin wire, the tenant's shared
+ * line. An active rep gets `data` itself back.
+ *
+ * A failed standing read keeps today's behaviour; see assignedRepDeactivated.
+ */
+async function signingData(row: ClaimedRow, data: LeadData, run: RunState): Promise<LeadData> {
+  if (!(await assignedRepDeactivated(row.tenant_id, data.assigned_to, run.repDeactivated))) return data;
+  return { ...data, rep_name: null, assigned_agent_name: null };
 }
 
 // The deterministic per-(lead, step) variant hash moved to
@@ -1138,7 +1161,10 @@ async function processSmsStep(
     stage: typeof data.stage === "string" ? data.stage : undefined,
     pool: run.templatePoolByTenant.get(row.tenant_id) ?? [],
   });
-  const rendered = renderTemplate(copy.body, buildContext(data, "sms"));
+  // Who signs AND which wire it leaves on come from the same row, so a retired
+  // rep's lead is neither signed by them nor texted from their line.
+  const signer = await signingData(row, data, run);
+  const rendered = renderTemplate(copy.body, buildContext(signer, "sms"));
   const clean = await sanitizeBlastMessage(row.tenant_id, rendered, { checkPositioning: true });
   if (!clean.ok) return handleGuardBlock(db, row, steps, clean, "sms");
 
@@ -1193,7 +1219,7 @@ async function processSmsStep(
   if (pinned) {
     identity = { actAsEmail: null, senderId: pinned, repKey: "accel" };
   } else {
-    const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, data);
+    const resolved = await resolveDripSmsIdentity(row.tenant_id, row.lead_id, signer);
     if ("error" in resolved) {
       // "This rep owns no usable number" is BLOCKED, not FAILED. Retrying
       // cannot buy a number, so burning the attempt budget only converts a
@@ -1613,7 +1639,7 @@ async function processEmailStep(
     }
   }
 
-  const ctx = buildContext(data, "email");
+  const ctx = buildContext(await signingData(row, data, run), "email");
   const subjectRaw = renderTemplate(copy.subject, ctx) || "Following up";
   const rendered = renderTemplate(copy.body, ctx);
   const renderedCustomHtml = copy.bodyHtml ? renderTemplate(copy.bodyHtml, ctx) : "";
@@ -2245,6 +2271,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     availabilityByTenant,
     linesByWire: new Map<string, string[]>(),
     smsCountsByTenant: new Map<string, PacingCounts>(),
+    repDeactivated: new Map<string, boolean>(),
   };
   if (run.emailBudget?.degraded) {
     // The global counts are best-effort this run; the per-lead cap still holds

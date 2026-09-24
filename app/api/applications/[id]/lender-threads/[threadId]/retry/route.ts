@@ -31,6 +31,7 @@ import { ensureApplicationThreadsWatermarked } from "@/lib/lead-documents";
 import { sendFunmateMail } from "@/lib/integrations/funmate-mail-send";
 import { verifyFunmateSmtp } from "@/lib/integrations/funmate-mail";
 import type { ShopOutAttachment } from "@/lib/lenders/shop-out";
+import { dropDeactivatedEmails } from "@/lib/lenders/derive-agent-ccs";
 import {
   physicalSendFailed,
   dispatchFailureReason,
@@ -120,6 +121,15 @@ export async function POST(
     });
   }
 
+  // The CC list was frozen at the original shop-out. Both send paths below
+  // pass it through dropDeactivatedEmails, so a teammate deactivated here
+  // since then is not copied on the retry.
+  const storedCc = Array.isArray(thread.cc_emails)
+    ? thread.cc_emails.filter(
+        (value): value is string => typeof value === "string" && value.includes("@"),
+      )
+    : [];
+
   if (String(thread.email_identity || "sunbiz") === "funmate") {
     const lenderRes = await db
       .from("tenant_records")
@@ -159,6 +169,9 @@ export async function POST(
       );
     }
 
+    // Resolved before the claim, so nothing between the claim and the send can
+    // leave the row stuck in 'sending'.
+    const cc = await dropDeactivatedEmails(db, tenantId, storedCc);
     const claim = await db
       .from("application_lender_threads")
       .update({ status: "sending", last_error: null, updated_at: new Date().toISOString() })
@@ -178,11 +191,6 @@ export async function POST(
 
     const attachments = Array.isArray(thread.attachments)
       ? (thread.attachments as ShopOutAttachment[])
-      : [];
-    const cc = Array.isArray(thread.cc_emails)
-      ? thread.cc_emails.filter(
-          (value): value is string => typeof value === "string" && value.includes("@"),
-        )
       : [];
     const sent = await sendFunmateMail({
       to: recipient,
@@ -246,12 +254,17 @@ export async function POST(
   const wmGuard = await ensureApplicationThreadsWatermarked(tenantId, applicationId);
 
   const fromStatus = thread.status; // "error" or stale "sending"
+  // The bridge sender reads cc_emails off the pending row, so the trimmed list
+  // is written there, in the same flip. Only when something was dropped: an
+  // all-active thread's update stays exactly what it was.
+  const liveCc = await dropDeactivatedEmails(db, tenantId, storedCc);
   const updateRes = await db
     .from("application_lender_threads")
     .update({
       status: "pending",
       last_error: null,
       updated_at: new Date().toISOString(),
+      ...(liveCc.length < storedCc.length ? { cc_emails: liveCc } : {}),
     })
     .eq("id", thread.id)
     .eq("tenant_id", tenantId)

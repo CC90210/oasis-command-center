@@ -520,7 +520,43 @@ export async function finalize_texttorrent_inbound(
   const convId = (w.provider_conversation_id as string) ?? (w.provider_message_id as string);
   const leadId = conv.lead_id ? String(conv.lead_id) : null;
   const intent = decision.intent == null ? null : String(decision.intent);
-  const humanOwner = status === "escalated" ? (a.handoff_user_id ?? null) : null;
+  let humanOwner = status === "escalated" ? (a.handoff_user_id ?? null) : null;
+
+  // An escalation is NEW inbound work, so it must not land on a deactivated
+  // teammate (user_profiles.deactivated_at, 2026-09-24). A person with several
+  // profile rows is active if any row is; no row at all means they are not on
+  // this tenant. Either way the escalation goes out unowned -- the event below
+  // still fires -- and the COALESCE keeps any owner the thread already has, so
+  // history is untouched. This is a SunBiz automation that runs for active reps
+  // all day: a failed read keeps today's behaviour (the configured owner) and
+  // warns, rather than stalling the SMS runtime on a standing hiccup.
+  if (humanOwner) {
+    try {
+      const pq = await client.execute({
+        sql: `SELECT deactivated_at FROM user_profiles
+               WHERE tenant_id = :tid AND lower(auth_user_id) = lower(:uid)`,
+        args: { tid: w.tenant_id as string, uid: String(humanOwner) } as InArgs,
+      });
+      if (!pq.rows.some((r) => !(r as Record<string, unknown>).deactivated_at)) {
+        console.warn("[texttorrent-rpc] handoff user deactivated", {
+          tenant_id: w.tenant_id,
+          account_id: w.account_id,
+          work_id: w.id,
+          handoff_user_id: humanOwner,
+          standing: pq.rows.length > 0 ? "deactivated" : "not_member",
+        });
+        humanOwner = null;
+      }
+    } catch (err) {
+      console.warn("[texttorrent-rpc] handoff user check failed", {
+        tenant_id: w.tenant_id,
+        account_id: w.account_id,
+        work_id: w.id,
+        handoff_user_id: humanOwner,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // qualification_state = existing || excluded. Read the existing value so the
   // merge can be done with JS spread semantics (see note 2 above).

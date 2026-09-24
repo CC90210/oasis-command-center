@@ -23,6 +23,7 @@ import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { createImportAssigneeCheck, type ImportAssigneeCheck } from "@/lib/leads-import-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -238,6 +239,7 @@ export async function POST(req: NextRequest) {
   const seenPhones = new Set<string>();
   const seenBusinesses = new Set<string>();
   const importedAt = new Date().toISOString();
+  const checkAssignee = createImportAssigneeCheck(tenantId);
 
   for (const [i, raw] of rows.entries()) {
     const name = cleanString(raw.name, 200);
@@ -391,6 +393,31 @@ export async function POST(req: NextRequest) {
             }
           : {}),
       };
+    } else if (assignedTo) {
+      // Non-OASIS: the row's owner must be an ACTIVE member of this tenant,
+      // checked before anything is written so a refusal imports nothing.
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(assignedTo, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new leads.
+        console.error("[leads.import] row owner could not be verified", {
+          tenantId,
+          row: i + 1,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "member_check_failed",
+            message: `Row ${i + 1}'s owner couldn't be verified right now. No rows were imported. Try again in a moment.`,
+            row: i + 1,
+          },
+          { status: 503 },
+        );
+      }
+      if (!owner.ok) return NextResponse.json(owner, { status: 422 });
+      assignmentFacts = { assigned_to: owner.authUserId };
     }
 
     toInsert.push({

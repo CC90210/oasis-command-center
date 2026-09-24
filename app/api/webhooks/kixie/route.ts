@@ -510,6 +510,22 @@ export async function POST(req: NextRequest) {
   // 3. Pipeline automations (2026-07-21) — AFTER the fail-closed persist so
   //    an automation failure can never make Kixie re-deliver a stored event.
   //    Handlers are best-effort and report per-action results.
+  //
+  //    The persist above keeps a deactivated rep (call attribution is
+  //    history). The automations hand out NEW work in the rep's name — a
+  //    callback appointment assigned to them, an SMS signed "it's <rep>" from
+  //    their line — and a retired rep's Kixie line can still ring, so they get
+  //    only an active rep; a deactivated one takes the handlers' existing
+  //    no-rep path. A failed lookup already arrives here as rep = null.
+  const liveRep = rep && rep.isActive ? rep : null;
+  if (rep && !liveRep) {
+    console.warn("[webhooks.kixie] rep deactivated; automation skipped", {
+      tenantId,
+      userId: rep.userId,
+      eventname,
+      callId: evt.callid || null,
+    });
+  }
   const automations: AutomationResult[] = [];
   try {
     const cfg = await getAutomationConfig(db, tenantId);
@@ -519,7 +535,7 @@ export async function POST(req: NextRequest) {
 
     if (eventname === "voicemail" && callId) {
       const r = await handleVoicemailFollowup(db, {
-        tenantId, leadId, leadData, rep, merchantPhone, isInbound, callId, cfg,
+        tenantId, leadId, leadData, rep: liveRep, merchantPhone, isInbound, callId, cfg,
       });
       if (r) automations.push(r);
     }
@@ -535,13 +551,13 @@ export async function POST(req: NextRequest) {
           email: evt.email,
           occurredAt: kixieOccurredAt(evt, new Date().toISOString()),
         },
-        leadId, leadData, rep, merchantPhone, isInbound, callId, cfg,
+        leadId, leadData, rep: liveRep, merchantPhone, isInbound, callId, cfg,
       });
       if (r) automations.push(r);
     }
     if (eventname === "dispositioncall") {
       const r = await handleDispositionActions(db, {
-        tenantId, leadId, rep, disposition: evt.disposition, cfg,
+        tenantId, leadId, rep: liveRep, disposition: evt.disposition, cfg,
       });
       if (r) automations.push(r);
     }
