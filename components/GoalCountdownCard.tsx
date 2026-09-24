@@ -1,106 +1,130 @@
 /**
- * Gamified countdown card for the operator's north-star MRR goal.
+ * The revenue-goal countdown on Today (rebuilt 2026-09-24).
  *
- * Two layers of motivation:
- *   1. The HARD numbers — gap to goal in dollars, days left, dollars/day
- *      needed (the math). No spin, just truth.
- *   2. A progress ring that fills with current/target so the operator
- *      sees the climb visually. Color shifts from amber (gap > 50%) to
- *      cyan (closing) to engaged-green (within 10%).
+ * The goal is money COLLECTED in a period (a revenue_goals row), not an MRR
+ * target — the old card read a hand-typed profile MRR against a hand-typed
+ * target. Everything here is computed from the Finances ledger by the caller
+ * and passed in; the card only presents it.
  *
- * Renders nothing if mrr.target is 0 (no goal set yet) so a fresh
- * tenant doesn't see a misleading "0 / 0" widget.
+ *   1. The hard numbers — collected, remaining, days left (deadline day
+ *      included), and the daily amount still needed. No spin.
+ *   2. A ring coloured by PACE, not by raw percentage: 30% on day 3 of 31 is
+ *      ahead, 30% on day 25 is not, and a colour that ignores the calendar
+ *      would call them the same.
+ *
+ * Renders an explicit "no goal set" state rather than nothing, so an empty
+ * card never reads as "no target and nothing to do".
  */
 
 import { Card } from "./Card";
-import { Flame, Target, TrendingUp } from "lucide-react";
+import { CalendarClock, Flame, Target, TrendingUp } from "lucide-react";
+import type { GoalProgress } from "@/lib/goals/goal-math";
+
+const usd = (cents: number) =>
+  `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+
+const STATUS_STYLE: Record<GoalProgress["status"], { ring: string; text: string; label: string }> = {
+  met: { ring: "stroke-status-engaged", text: "text-status-engaged", label: "Goal met" },
+  on_track: { ring: "stroke-accent", text: "text-accent", label: "On pace" },
+  behind: { ring: "stroke-status-warm", text: "text-status-warm", label: "Behind pace" },
+  missed: { ring: "stroke-status-hot", text: "text-status-hot", label: "Deadline passed" },
+  upcoming: { ring: "stroke-bg-border", text: "text-fg-muted", label: "Not started" },
+};
 
 export function GoalCountdownCard({
-  current,
-  target,
-  daysLeft,
-  targetDate,
+  goal,
+  progress,
+  collectedCadCents,
+  fxMissingDays,
 }: {
-  current: number;
-  target: number;
-  daysLeft: number | null;
-  targetDate: string | null;
+  goal: { label: string; target_cents: number; period_start: string; period_end: string } | null;
+  progress: GoalProgress | null;
+  /** The same collected money in CAD, as Stripe settled it. */
+  collectedCadCents: number | null;
+  /** Days whose payments had no FX rate on file — shown so a USD figure is never silently short. */
+  fxMissingDays: string[];
 }) {
-  if (!target || target <= 0) return null;
+  if (!goal || !progress) {
+    return (
+      <Card title="Revenue goal" subtitle="No active goal">
+        <p className="text-sm text-fg-muted">
+          No revenue goal is set for this period. Set one in Settings → Revenue goal so Today can
+          count down to it.
+        </p>
+      </Card>
+    );
+  }
 
-  const pct = Math.max(0, Math.min(100, (current / target) * 100));
-  const gap = Math.max(0, target - current);
-  const dailyNeeded = daysLeft && daysLeft > 0 ? gap / daysLeft : null;
-
-  // Color tier — the more behind, the warmer the color.
-  const tier =
-    pct >= 90
-      ? { ring: "stroke-status-engaged", text: "text-status-engaged", glow: "0 0 16px rgba(16,185,129,0.45)" }
-      : pct >= 60
-        ? { ring: "stroke-accent", text: "text-accent", glow: "0 0 16px rgba(0,212,255,0.45)" }
-        : pct >= 30
-          ? { ring: "stroke-status-warm", text: "text-status-warm", glow: "0 0 16px rgba(245,158,11,0.45)" }
-          : { ring: "stroke-status-hot", text: "text-status-hot", glow: "0 0 16px rgba(239,68,68,0.45)" };
-
+  const style = STATUS_STYLE[progress.status];
+  const pct = Math.max(0, Math.min(100, progress.pct));
   const radius = 52;
   const circ = 2 * Math.PI * radius;
   const dash = (pct / 100) * circ;
 
   return (
-    <Card title="Goal countdown" subtitle="The climb to your north-star MRR — visible every day until it's done.">
+    <Card
+      title={goal.label}
+      subtitle={`${usd(goal.target_cents)} USD collected between ${goal.period_start} and ${goal.period_end} — money in the bank, net of refunds.`}
+    >
       <div className="flex flex-col sm:flex-row items-center sm:items-stretch gap-6">
-        {/* Progress ring */}
         <div className="relative flex-shrink-0" style={{ width: 140, height: 140 }}>
-          <svg width="140" height="140" className="-rotate-90">
+          <svg width="140" height="140" className="-rotate-90" aria-hidden>
+            <circle cx="70" cy="70" r={radius} fill="none" className="stroke-bg-border" strokeWidth="8" />
             <circle
               cx="70"
               cy="70"
               r={radius}
               fill="none"
-              className="stroke-bg-border"
-              strokeWidth="8"
-            />
-            <circle
-              cx="70"
-              cy="70"
-              r={radius}
-              fill="none"
-              className={`${tier.ring} transition-all duration-700`}
+              className={`${style.ring} transition-all duration-700`}
               strokeWidth="8"
               strokeLinecap="round"
               strokeDasharray={`${dash} ${circ - dash}`}
-              style={{ filter: `drop-shadow(${tier.glow})` }}
             />
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
-            <span className={`text-2xl font-black ${tier.text}`}>{pct.toFixed(0)}%</span>
-            <span className="text-[10px] uppercase tracking-wider text-fg-muted mt-0.5">of goal</span>
+            <span className={`text-2xl font-black ${style.text}`}>{progress.pct.toFixed(0)}%</span>
+            <span className={`text-[10px] uppercase tracking-wider mt-0.5 ${style.text}`}>{style.label}</span>
           </div>
         </div>
 
-        {/* Stats grid */}
-        <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="flex-1 grid grid-cols-2 lg:grid-cols-4 gap-3">
           <Tile
             icon={<Target className="w-4 h-4" />}
-            label="Gap to goal"
-            value={`$${Math.round(gap).toLocaleString()}`}
-            hint={`of $${Math.round(target).toLocaleString()} target`}
+            label="Collected"
+            value={usd(progress.collected_cents)}
+            hint={
+              collectedCadCents === null
+                ? "USD"
+                : `≈ CA$${Math.round(collectedCadCents / 100).toLocaleString("en-US")} as settled`
+            }
+          />
+          <Tile
+            icon={<TrendingUp className="w-4 h-4" />}
+            label="Still needed"
+            value={usd(progress.remaining_cents)}
+            hint={`of ${usd(goal.target_cents)} USD`}
           />
           <Tile
             icon={<Flame className="w-4 h-4" />}
             label="Days left"
-            value={daysLeft !== null ? `${daysLeft}` : "—"}
-            hint={targetDate ? `until ${targetDate.slice(5, 10)}` : "no deadline set"}
-            urgent={!!daysLeft && daysLeft <= 14}
+            value={`${progress.days_left}`}
+            hint={`deadline ${goal.period_end} (counts)`}
+            urgent={progress.days_left > 0 && progress.days_left <= 7 && progress.status !== "met"}
           />
           <Tile
-            icon={<TrendingUp className="w-4 h-4" />}
+            icon={<CalendarClock className="w-4 h-4" />}
             label="Daily need"
-            value={dailyNeeded !== null && Number.isFinite(dailyNeeded) ? `$${Math.round(dailyNeeded).toLocaleString()}` : "—"}
-            hint={dailyNeeded !== null ? "to hit on time" : "set a deadline"}
+            value={progress.daily_need_cents > 0 ? usd(progress.daily_need_cents) : "—"}
+            hint={progress.status === "met" ? "target reached" : "per remaining day"}
           />
         </div>
       </div>
+      {fxMissingDays.length > 0 && (
+        <p className="mt-3 text-[11px] text-status-warm">
+          No Bank of Canada rate on file for {fxMissingDays.join(", ")} — those payments are not yet
+          counted in USD. The Finances FX refresh fills this in.
+        </p>
+      )}
     </Card>
   );
 }
@@ -119,23 +143,13 @@ function Tile({
   urgent?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-lg border p-3 ${
-        urgent
-          ? "border-status-hot/40 bg-status-hot/5"
-          : "border-bg-border bg-bg-elev"
-      }`}
-    >
+    <div className={`rounded-lg border p-3 ${urgent ? "border-status-hot/40 bg-status-hot/5" : "border-bg-border bg-bg-elev"}`}>
       <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-fg-muted">
         {icon}
         {label}
       </div>
-      <div className={`text-xl font-black mt-1.5 ${urgent ? "text-status-hot" : "text-fg"}`}>
-        {value}
-      </div>
-      {hint && (
-        <div className="text-[11px] text-fg-dim mt-0.5">{hint}</div>
-      )}
+      <div className={`text-xl font-black mt-1.5 ${urgent ? "text-status-hot" : "text-fg"}`}>{value}</div>
+      {hint && <div className="text-[11px] text-fg-dim mt-0.5">{hint}</div>}
     </div>
   );
 }

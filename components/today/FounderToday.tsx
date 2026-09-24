@@ -20,7 +20,7 @@
 
 import Link from "next/link";
 import { Card, Stat, EmptyState, PageHeader, Tag } from "@/components/Card";
-import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
+import { GoalPaceChart } from "@/components/charts/GoalPaceChart";
 import { LiveClock } from "@/components/LiveClock";
 import { GoalCountdownCard } from "@/components/GoalCountdownCard";
 import { timeAgo, truncate } from "@/lib/fmt";
@@ -30,10 +30,7 @@ import {
   pipelineBreakdown,
   getTodayPlan,
   getLeadById,
-  mrrSnapshot,
-  mrrHistory,
   priorityInbound,
-  topClientConcentration,
   outreachReplyRate,
   activePipeline,
   topOpenLead,
@@ -41,10 +38,20 @@ import {
 } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import type { UserProfile } from "@/lib/supabase";
+import { tenantSlugFor } from "@/lib/team";
+import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
+import { founderBoardSummary } from "@/lib/oasis-board-summary";
+import { getActiveRevenueGoal } from "@/lib/goals/revenue-goal";
+import { buildPaceSeries, computeGoalProgress, nextDay } from "@/lib/goals/goal-math";
+import {
+  revenueByCustomer,
+  revenueCollected,
+  revenueCollectedByDay,
+  stripeMrr,
+  usdPerCad,
+} from "@/lib/founders-finances/metrics";
 
-type MrrSnapshot = { current: number; target: number; pct: number };
-type MrrPoint = { date: string; mrr: number; synthetic: boolean };
-type Concentration = { client_name: string; pct_of_mrr: number; is_at_risk: boolean };
+const dollars = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
 
 export async function FounderToday({
   profile,
@@ -75,50 +82,85 @@ export async function FounderToday({
       safe("today.momentum", momentumMetrics(tenantId), { outboundVelocity7d: null, contentPublished7d: null, contentSends7d: null }),
     ]);
 
+  const todayKey = operatorDateKey();
+  const isWeekend = operatorIsWeekend();
+
+  // THE BOARD'S OWN NUMBERS (2026-09-24). "Pipeline (all)" read every lead row
+  // ever written (2,350) while /pipeline, bounded by the revenue cycle, read 0.
+  // On the OASIS sales workspace these tiles now run the board's query.
+  const tenantSlug = await safe("today.tenant_slug", tenantSlugFor(tenantId), null);
+  const board = isWebsiteSalesTenantSlug(tenantSlug)
+    ? await safe("today.board_summary", founderBoardSummary(tenantId, tenantSlug), null)
+    : null;
+
   // The money block. A SEPARATE await, entered only when the capability says so
-  // — the point of the branch is that these three reads never happen otherwise,
-  // not that their results get dropped afterwards.
-  let mrr: MrrSnapshot | null = null;
-  let history: MrrPoint[] = [];
-  let concentration: Concentration | null = null;
+  // — the point of the branch is that these reads never happen otherwise, not
+  // that their results get dropped afterwards.
+  //
+  // REBUILT 2026-09-24. The goal is a revenue_goals row (money COLLECTED in a
+  // period) and every figure comes from the Finances ledger or live Stripe. The
+  // hand-typed user_profiles.mrr_* columns and their silent $5,000 fallback are
+  // no longer read here.
+  type Money = {
+    goal: Awaited<ReturnType<typeof getActiveRevenueGoal>>;
+    collected: Awaited<ReturnType<typeof revenueCollected>> | null;
+    byDay: Awaited<ReturnType<typeof revenueCollectedByDay>>;
+    last7: Awaited<ReturnType<typeof revenueCollected>> | null;
+    mrr: Awaited<ReturnType<typeof stripeMrr>> | null;
+    usdPerCadToday: number | null;
+    topCustomer: { customer: string; share_pct: number } | null;
+  };
+  let money: Money | null = null;
   if (showFinancials) {
-    const [m, h, c] = await Promise.all([
-      safe("today.mrr_snapshot", mrrSnapshot(), { current: 0, target: 5000, pct: 0 }),
-      safe("today.mrr_history", mrrHistory(30), [] as MrrPoint[]),
-      safe("today.top_client_concentration", topClientConcentration(tenantId), { client_name: "—", pct_of_mrr: 0, is_at_risk: false }),
+    const goal = await safe("today.revenue_goal", getActiveRevenueGoal(tenantId), null);
+    const range = goal ? { from: goal.period_start, to: nextDay(goal.period_end) } : null;
+    const [collected, byDay, last7, mrr, rate, customers] = await Promise.all([
+      range ? safe("today.revenue_collected", revenueCollected(range), null) : Promise.resolve(null),
+      range ? safe("today.revenue_by_day", revenueCollectedByDay(range), []) : Promise.resolve([]),
+      safe("today.collected_7d", revenueCollected({ from: operatorDateKey(new Date(), -6), to: operatorDateKey(new Date(), 1) }), null),
+      safe("today.stripe_mrr", stripeMrr(), null),
+      safe("today.fx", usdPerCad(todayKey), null),
+      range ? safe("today.revenue_by_customer", revenueByCustomer(range), []) : Promise.resolve([]),
     ]);
-    mrr = m;
-    history = h;
-    concentration = c;
+    const total = customers.reduce((sum, c) => sum + c.usd_cents, 0);
+    money = {
+      goal,
+      collected,
+      byDay,
+      last7,
+      mrr,
+      usdPerCadToday: rate,
+      topCustomer:
+        customers.length > 0 && total > 0
+          ? { customer: customers[0].customer, share_pct: Math.round((customers[0].usd_cents / total) * 1000) / 10 }
+          : null,
+    };
   }
+  const progress =
+    money?.goal && money.collected ? computeGoalProgress(money.goal, money.collected.usd_cents, todayKey) : null;
+  const paceSeries =
+    money?.goal ? buildPaceSeries(money.goal, money.byDay, todayKey) : [];
+  const mrrUsdCents =
+    money?.mrr && money.mrr.currency.toUpperCase() === "CAD" && money.usdPerCadToday
+      ? Math.round(money.mrr.mrr_cents * money.usdPerCadToday)
+      : money?.mrr && money.mrr.currency.toUpperCase() === "USD"
+        ? money.mrr.mrr_cents
+        : null;
 
   const primaryLead = plan?.primary_lead_id
     ? await safe("today.primary_lead", getLeadById(plan.primary_lead_id), null)
     : topLead; // auto-promote highest-score open lead if no plan-level pin
 
-  const targetDate = profile.mrr_target_date ? new Date(profile.mrr_target_date) : null;
-  const daysToTarget = targetDate
-    ? Math.max(0, Math.round((targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
-    : null;
-  const gap = mrr ? Math.max(0, mrr.target - mrr.current) : 0;
-
-  const todayKey = operatorDateKey();
-  const isWeekend = operatorIsWeekend();
   // DERIVED FROM THE GOAL, not from the retired plan pipeline.
   //
   // This read `plan?.mission`, and on 2026-08-17 it was rendering "The structure
   // survives the cheat days. $5K MRR by May 30." beside tiles reading $10,000 and
-  // 09-30. The mission text came from a daily_plan row written by the
-  // materialisation cron that fed "The day" — a surface now retired — so it had
-  // been frozen since whenever that last ran, contradicting the live numbers
-  // directly under it.
-  //
-  // A header line that restates the goal cannot go stale, because it is computed
-  // from the same figures as the countdown beside it.
+  // 09-30. A header line that restates the goal cannot go stale, because it is
+  // computed from the same row as the countdown beside it.
   const missionLine = isWeekend
     ? "Weekend mode"
-    : mrr
-      ? `$${mrr.target.toLocaleString()} by ${targetDate?.toISOString().slice(0, 10) ?? "the target date"}`
+    : money?.goal
+      ? `${dollars(money.goal.target_cents)} collected by ${money.goal.period_end}`
       : "Operating view";
 
   return (
@@ -144,33 +186,43 @@ export async function FounderToday({
         </Card>
       )}
 
-      {mrr && (
+      {money && (
         <GoalCountdownCard
-          current={mrr.current}
-          target={mrr.target}
-          daysLeft={daysToTarget}
-          targetDate={targetDate ? targetDate.toISOString().slice(0, 10) : null}
+          goal={money.goal}
+          progress={progress}
+          collectedCadCents={money.collected?.cad_cents ?? null}
+          fxMissingDays={money.collected?.fx_missing_days ?? []}
         />
       )}
 
-      {/* Hero band — 6 metrics that actually matter */}
-      {mrr && concentration && (
+      {/* Hero band — the numbers the sprint is judged on. */}
+      {money && (
         <section className="grid grid-cols-2 lg:grid-cols-6 gap-4">
           <Stat
             label="Net MRR"
-            value={`$${Math.round(mrr.current).toLocaleString()}`}
+            value={
+              money.mrr
+                ? `${money.mrr.currency.toUpperCase() === "CAD" ? "CA" : ""}${dollars(money.mrr.mrr_cents)}`
+                : "—"
+            }
             accent
-            hint={`${mrr.pct.toFixed(1)}% of $${Math.round(mrr.target).toLocaleString()}`}
+            hint={
+              money.mrr
+                ? `${money.mrr.active_subscriptions} live Stripe sub${money.mrr.active_subscriptions === 1 ? "" : "s"}${
+                    mrrUsdCents !== null && money.mrr.currency.toUpperCase() !== "USD" ? ` · ≈ ${dollars(mrrUsdCents)} USD` : ""
+                  }`
+                : "Stripe unavailable — not guessed"
+            }
           />
           <Stat
-            label="Gap to goal"
-            value={`$${Math.round(gap).toLocaleString()}`}
-            hint={daysToTarget !== null ? `${daysToTarget}d to deadline` : ""}
+            label="Collected (sprint)"
+            value={money.collected ? dollars(money.collected.usd_cents) : "—"}
+            hint={money.goal ? `of ${dollars(money.goal.target_cents)} USD` : "no active goal"}
           />
           <Stat
             label="Days left"
-            value={daysToTarget !== null ? `${daysToTarget}` : "—"}
-            hint={targetDate ? `until ${targetDate.toISOString().slice(5, 10)}` : ""}
+            value={progress ? `${progress.days_left}` : "—"}
+            hint={money.goal ? `deadline ${money.goal.period_end.slice(5)}` : ""}
           />
           <Stat
             label="Replies (7d)"
@@ -178,34 +230,34 @@ export async function FounderToday({
             hint={replyRate.replies > 0 ? "Inbound waiting on you" : "No replies this week"}
           />
           <Stat
-            label="MRR added (7d)"
-            value={(() => {
-              const last = history[history.length - 1]?.mrr ?? mrr.current;
-              const wkAgo = history[history.length - 8]?.mrr ?? last;
-              const delta = Math.round(last - wkAgo);
-              return delta >= 0 ? `+$${delta.toLocaleString()}` : `-$${Math.abs(delta).toLocaleString()}`;
-            })()}
-            hint={history[0]?.synthetic ? "projected (no real history yet)" : "real delta"}
+            label="Collected (7d)"
+            value={money.last7 ? dollars(money.last7.usd_cents) : "—"}
+            hint={money.last7 ? `${money.last7.payments} payment${money.last7.payments === 1 ? "" : "s"}` : "ledger unavailable"}
           />
           <Stat
-            label="Top client share"
-            value={concentration.pct_of_mrr > 0 ? `${concentration.pct_of_mrr.toFixed(0)}%` : "—"}
-            hint={
-              concentration.is_at_risk
-                ? `⚠ ${truncate(concentration.client_name, 18)}`
-                : truncate(concentration.client_name, 22)
-            }
+            label="Top customer share"
+            value={money.topCustomer ? `${money.topCustomer.share_pct.toFixed(0)}%` : "—"}
+            hint={money.topCustomer ? truncate(money.topCustomer.customer, 22) : "no sprint revenue yet"}
           />
         </section>
       )}
 
-      {/* Secondary band — pipeline health */}
+      {/* Secondary band — pipeline health. On the OASIS sales workspace these
+          are the /pipeline board's own counts for the current revenue cycle. */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat
-          label="Active pipeline"
-          value={activePipe.total_active}
-          hint={`${activePipe.qualified} qualified · ${activePipe.proposal} proposal`}
-        />
+        {board ? (
+          <Stat
+            label="On the board"
+            value={board.onBoard}
+            hint={`${board.qualified} qualified · ${board.meetings} in founder meetings`}
+          />
+        ) : (
+          <Stat
+            label="Active pipeline"
+            value={activePipe.total_active}
+            hint={`${activePipe.qualified} qualified · ${activePipe.proposal} proposal`}
+          />
+        )}
         <Stat
           label="Reply rate (7d)"
           value={replyRate.sends > 0 ? `${replyRate.rate_pct.toFixed(1)}%` : "—"}
@@ -216,11 +268,19 @@ export async function FounderToday({
           value={counts.decisions}
           hint={counts.decisions > 0 ? "agent ticks" : "quiet"}
         />
-        <Stat
-          label="Pipeline (all)"
-          value={pipeline.total}
-          hint={`${pipeline.stages.qualified || 0} qualified · ${pipeline.stages.won || 0} won`}
-        />
+        {board ? (
+          <Stat
+            label="Won this cycle"
+            value={board.won}
+            hint={`since ${board.cycleStartedAt.slice(0, 10)} · ${board.lost} lost`}
+          />
+        ) : (
+          <Stat
+            label="Pipeline (all)"
+            value={pipeline.total}
+            hint={`${pipeline.stages.qualified || 0} qualified · ${pipeline.stages.won || 0} won`}
+          />
+        )}
       </section>
 
       {/* Momentum band — non-money signals that still measure direction.
@@ -257,13 +317,13 @@ export async function FounderToday({
       </section>
 
       <section className="grid lg:grid-cols-3 gap-6">
-        {mrr && (
+        {money?.goal && (
           <Card
-            title="MRR · 30-day trajectory"
-            subtitle={`Target ${targetDate?.toISOString().slice(0, 10) || "—"}`}
-            action={history[0]?.synthetic ? <Tag tone="warm">projected</Tag> : null}
+            title="Sprint · collected vs pace"
+            subtitle={`Cumulative USD collected against the straight line to ${dollars(money.goal.target_cents)} by ${money.goal.period_end}`}
+            action={progress ? <Tag tone={progress.status === "behind" || progress.status === "missed" ? "warm" : "engaged"}>{progress.status.replace("_", " ")}</Tag> : null}
           >
-            <MRRProgressChart data={history} target={mrr.target} />
+            <GoalPaceChart data={paceSeries} target={money.goal.target_cents / 100} />
           </Card>
         )}
 

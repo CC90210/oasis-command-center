@@ -395,7 +395,8 @@ async function main() {
       id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT,
-      invited_by TEXT, manager_user_id TEXT, joined_at TEXT, updated_at TEXT
+      invited_by TEXT, manager_user_id TEXT, joined_at TEXT, updated_at TEXT,
+      deactivated_at TEXT, deactivated_by TEXT, deactivation_reason TEXT
     );
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (
@@ -1084,11 +1085,21 @@ async function main() {
   assert.deepEqual(forged.body.fields, ["assigned_to"]);
   assertReadable(forged.body, "target_not_on_sales_roster");
 
+  // 2026-09-24: the roster is CC+Adon plus ACTIVE reps. A deactivated rep is
+  // off it — still signed in here (no ban), so this proves the roster itself refuses.
+  await seed.execute({
+    sql: "UPDATE user_profiles SET deactivated_at = '2026-09-24T00:00:00Z' WHERE auth_user_id = ?",
+    args: [OPENER],
+  });
   login(OPENER, "opener@oasis.test");
-  const repOutsideCycle = await postRecord("oasis-ai-cc", { name: "Rep Outside Cycle", state: "ON", stage: "assigned" });
-  assert.equal(repOutsideCycle.status, 403, "a non-founder rep created a lead owned outside CC+Adon");
-  assert.equal(repOutsideCycle.body.error, "target_not_on_sales_roster");
-  assertReadable(repOutsideCycle.body, "rep outside current assignment roster");
+  const inactiveRep = await postRecord("oasis-ai-cc", { name: "Inactive Rep", state: "ON", stage: "assigned" });
+  assert.equal(inactiveRep.status, 403, "a deactivated rep created a lead");
+  assert.equal(inactiveRep.body.error, "target_not_on_sales_roster");
+  assertReadable(inactiveRep.body, "deactivated rep outside the assignment roster");
+  await seed.execute({
+    sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE auth_user_id = ?",
+    args: [OPENER],
+  });
 
   login(MEMBER, "member@oasis.test");
   const member = await postRecord("oasis-ai-cc", { name: "Member Lead", state: "ON", stage: "assigned" });
@@ -1101,7 +1112,7 @@ async function main() {
   assert.equal(sunIntoOasis.body.error, "slug_not_owned");
 
   assert.equal(await leadCount(), n0, "a refused create still wrote a row");
-  run("(d) researched, missing/invalid region, forged owner, non-founder rep, member and a SunBiz profile are all refused");
+  run("(d) researched, missing/invalid region, forged owner, deactivated rep, member and a SunBiz profile are all refused");
 
   // A rep's own lead: Assigned, theirs, on their pipeline and in their book.
   login(OTHER_REP, "adon@oasisai.work");
@@ -1122,7 +1133,13 @@ async function main() {
     [],
     "a rep's Team read must be their own book — never the pool or another rep's leads",
   );
-  run("(c) an allowlisted CC+Adon lead lands in Assigned and every other rep is refused");
+  // An ACTIVE rep (David, the opener) keeps working their own book.
+  login(OPENER, "opener@oasis.test");
+  const activeRepLead = await postRecord("oasis-ai-cc", { name: "Active Rep Sourced", state: "ON", stage: "assigned" });
+  assert.equal(activeRepLead.status, 200, activeRepLead.body.message);
+  assert.equal((await storedLead(activeRepLead.body.record!.id)).data.assigned_to, OPENER);
+  assert.ok((await mineIds(openerViewer)).has(activeRepLead.body.record!.id), "an active rep's own lead is missing from their book");
+  run("(c) CC+Adon and active reps create into Assigned; a deactivated rep is refused");
 
   // Bulk assignment is useful for pre-handoff sales work, but it must use the
   // same roster and lifecycle boundary as the single-lead handoff.
@@ -1279,13 +1296,21 @@ async function main() {
   assert.ok((claimForge.body.fields ?? []).includes("claimed_at"), JSON.stringify(claimForge.body));
   assertReadable(claimForge.body, "claimed_at on create");
 
+  await seed.execute({
+    sql: "UPDATE user_profiles SET deactivated_at = '2026-09-24T00:00:00Z' WHERE auth_user_id = ?",
+    args: [OPENER],
+  });
   login(OPENER, "opener@oasis.test");
   const n1 = await leadCount();
   const qaOutsideRoster = await postQuickAdd({ business_name: "Rep Outside Co", email: "outside@quick.test", stage: "assigned", state: "ON" });
-  assert.equal(qaOutsideRoster.status, 403);
+  assert.equal(qaOutsideRoster.status, 403, "quick-add accepted a deactivated rep");
   assert.equal(qaOutsideRoster.body.error, "target_not_on_sales_roster");
-  assertReadable(qaOutsideRoster.body, "quick-add rep outside roster");
+  assertReadable(qaOutsideRoster.body, "quick-add deactivated rep outside roster");
   assert.equal(await leadCount(), n1);
+  await seed.execute({
+    sql: "UPDATE user_profiles SET deactivated_at = NULL WHERE auth_user_id = ?",
+    args: [OPENER],
+  });
   login(OTHER_REP, "adon@oasisai.work");
   const qaDefault = await postQuickAdd({
     business_name: "Rep Default Co", phone: "4165550199", email: "repdefault@quick.test", state: "ON",

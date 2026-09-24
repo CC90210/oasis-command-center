@@ -85,7 +85,8 @@ async function main() {
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, invited_by TEXT,
-      joined_at TEXT, manager_user_id TEXT, updated_at TEXT);
+      joined_at TEXT, manager_user_id TEXT, updated_at TEXT,
+      deactivated_at TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);

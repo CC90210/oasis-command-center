@@ -192,7 +192,8 @@ assert.equal(
   "Settings must route team management to /team instead of mounting a second invite form",
 );
 assert.ok(
-  settings.includes("Manage team & invites") && settings.includes('href="/team"'),
+  // Label widened 2026-09-24 when /team gained the Active/Inactive toggle.
+  settings.includes("Manage team, invites & active status") && settings.includes('href="/team"'),
   "Settings must retain one clear Team management CTA",
 );
 assert.ok(

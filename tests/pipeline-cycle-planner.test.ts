@@ -57,7 +57,10 @@ async function seedDatabase(dbPath: string): Promise<void> {
           admin_access INTEGER NOT NULL,
           invited_by TEXT,
           joined_at TEXT NOT NULL,
-          manager_user_id TEXT
+          manager_user_id TEXT,
+          deactivated_at TEXT,
+          deactivated_by TEXT,
+          deactivation_reason TEXT
         )`,
       ],
       "write",

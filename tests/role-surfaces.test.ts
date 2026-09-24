@@ -421,6 +421,13 @@ const FINANCIAL_READERS = [
   "mrrSnapshot",
   "mrrHistory",
   "topClientConcentration",
+  // 2026-09-24: Today's money now comes from the Finances ledger + live Stripe.
+  "revenueCollected",
+  "revenueByCustomer",
+  "stripeMrr",
+  "getActiveRevenueGoal",
+  "founders-finances",
+  "GoalPaceChart",
   "pipelineBreakdown",
   "priorityInbound",
   "outreachReplyRate",
@@ -907,7 +914,7 @@ assert.ok(
 assert.ok(founderToday.length > 2000, "FounderToday.tsx did not load — the scan above proves nothing");
 assert.ok(repToday.length > 2000, "RepToday.tsx did not load — the scan above proves nothing");
 assert.ok(deliveryToday.length > 1000, "DeliveryToday.tsx did not load — the scan above proves nothing");
-for (const reader of ["mrrSnapshot", "mrrHistory", "topClientConcentration", "MRRProgressChart", "GoalCountdownCard"]) {
+for (const reader of ["revenueCollected", "stripeMrr", "getActiveRevenueGoal", "GoalPaceChart", "GoalCountdownCard"]) {
   assert.ok(
     founderCode.includes(reader),
     `the founder dashboard no longer names ${reader}. Either the money moved, or this matcher is broken — ` +
