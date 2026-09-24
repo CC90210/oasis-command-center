@@ -364,6 +364,16 @@ async function main() {
     // A later event with no refund list and a SMALLER cumulative must not add a delta.
     await deliver("charge.refunded", charge({ id: "ch_1", amount: 50000, pi: "pi_1", refunded: 10000 }), { created: refundCreated });
     assert.equal(await count(`SELECT COALESCE(SUM(amount_cents), 0) FROM fin_payments WHERE kind = 'refund'`), 10000);
+    // Refund with no itemised list and no Stripe key: one delta row, dated by the EVENT, not "now".
+    const refundedAt = epoch("2026-09-12T13:00:00Z");
+    await deliver("charge.succeeded", charge({ id: "ch_delta", amount: 3000, created: epoch("2026-09-11T12:00:00Z"), name: "Delta Co" }));
+    await deliver("charge.refunded", charge({ id: "ch_delta", amount: 3000, refunded: 1000, created: epoch("2026-09-11T12:00:00Z"), name: "Delta Co" }), { created: refundedAt });
+    await deliver("charge.refunded", charge({ id: "ch_delta", amount: 3000, refunded: 1000, created: epoch("2026-09-11T12:00:00Z"), name: "Delta Co" }), { created: refundedAt });
+    const delta = (await raw.execute(`SELECT occurred_on, amount_cents, stripe_refund_id FROM fin_payments WHERE kind = 'refund' AND parent_payment_id = (SELECT id FROM fin_payments WHERE stripe_charge_id = 'ch_delta')`)).rows;
+    assert.equal(delta.length, 1, "a second identical event adds nothing (capped)");
+    assert.equal(delta[0].occurred_on, "2026-09-12", "dated by the charge.refunded event, not by when it was processed");
+    assert.equal(Number(delta[0].amount_cents), 1000);
+    assert.equal((await metrics.revenueCollected({ from: "2026-09-11", to: "2026-09-13" })).cad_cents, 2000);
     const sept21 = await metrics.revenueCollected({ from: "2026-09-21", to: "2026-09-22" });
     assert.equal(sept21.cad_cents, 50000, "the original payment day is unchanged");
     const sept23 = await metrics.revenueCollected({ from: "2026-09-23", to: "2026-09-24" });

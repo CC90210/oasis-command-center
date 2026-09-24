@@ -517,12 +517,20 @@ export async function deactivatePaymentLinkIfPaid(invoiceId: string, force = fal
  * Record a charge's refunds. Each refund row's insert is capped by SQL so the
  * refunds recorded for a charge can never exceed what Stripe says was
  * refunded, however many events or reconciles report them.
+ *
+ * When the individual refunds are unknown (payload without refunds.data and
+ * no verified key to list them), a single "delta" row is recorded ONLY if the
+ * caller supplies `deltaAt` — the charge.refunded event's own timestamp, so
+ * the refund lands on the day it happened. Other callers (a charge.succeeded
+ * that happens to show amount_refunded, a reconcile that lists refunds
+ * separately) must not synthesise one: dated "now", it would move the refund
+ * to the wrong day, and it would crowd out the real refund rows by the cap.
  */
 export async function recordRefundsForCharge(
   parentPaymentId: string,
   charge: ChargeInput,
   refunds: RefundFacts[] | null,
-  opts: { fetchFees: boolean },
+  opts: { fetchFees: boolean; deltaAt?: number | null },
 ): Promise<number> {
   const parent = await loadPayment(parentPaymentId);
   if (!parent) return 0;
@@ -548,10 +556,12 @@ export async function recordRefundsForCharge(
       if (r.status === "failed" || r.status === "canceled") continue;
       if (await insertRefund(parent, { refundId: r.refundId, amountCents: r.amountCents, created: r.created, bt: r.balanceTxn }, cap)) inserted += 1;
     }
-  } else {
+  } else if (opts.deltaAt) {
     const recorded = await refundedSoFar(parent.id);
     const delta = cap - recorded;
-    if (delta > 0 && (await insertRefund(parent, { refundId: null, amountCents: delta, created: Math.floor(Date.now() / 1000), bt: null }, cap))) inserted += 1;
+    if (delta > 0 && (await insertRefund(parent, { refundId: null, amountCents: delta, created: opts.deltaAt, bt: null }, cap))) inserted += 1;
+  } else if (cap > (await refundedSoFar(parent.id))) {
+    console.warn("[finances:stripe] refund amount known but refunds not itemised; left for the charge.refunded event or a reconcile", charge.chargeId);
   }
   return inserted;
 }
@@ -857,7 +867,7 @@ async function dispatch(env: StripeEventEnvelope): Promise<string> {
         parent = await findPaymentByKeys({ chargeId: c.chargeId, paymentIntentId: c.paymentIntentId });
       }
       if (!parent) return "ignored: refunded charge was never a succeeded live payment";
-      const n = await recordRefundsForCharge(parent.id, c, c.refunds, { fetchFees: true });
+      const n = await recordRefundsForCharge(parent.id, c, c.refunds, { fetchFees: true, deltaAt: env.created });
       return `refunds recorded: ${n}`;
     }
     case "invoice.paid": {
