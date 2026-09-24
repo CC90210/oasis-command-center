@@ -1,233 +1,251 @@
-import { Card, PageHeader, Stat, Tag, EmptyState } from "@/components/Card";
-import { getActiveProfile } from "@/lib/queries";
-import { safe } from "@/lib/api-helpers";
-import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+/**
+ * /projects — delivery projects.
+ *
+ * Founders: the board, one column per stage, with filters (stage, assignee,
+ * client/title search, archived) and a create form. Clients: their own
+ * workspace's projects only, with the last update shared with them.
+ *
+ * Who sees what is decided once, in lib/delivery/access.ts. An OASIS
+ * non-founder gets a 404 (the route does not confirm it exists), and a failed
+ * read renders as an error, never as "no projects yet".
+ */
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { Card, EmptyState, PageHeader, Stat } from "@/components/Card";
+import { LoadError, PriorityTag, StageTag } from "@/components/delivery/badges";
+import { ProjectCreateForm } from "@/components/delivery/ProjectForms";
 import { timeAgo } from "@/lib/fmt";
+import {
+  ACTIVE_PROJECT_STAGES,
+  PROJECT_STAGES,
+  PROJECT_STAGE_LABELS,
+  memberDisplayName,
+  type ProjectStage,
+} from "@/lib/delivery/rules";
+import { getDeliveryAccess, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
+import { listClientTenants, listProjects, type Project } from "@/lib/delivery/store";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
 export const dynamic = "force-dynamic";
 
-const STAGES = [
-  "discovery",
-  "blueprint",
-  "development",
-  "qa",
-  "deployment",
-  "live",
-] as const;
+type Search = { stage?: string; assignee?: string; q?: string; archived?: string };
 
-const STAGE_LABELS: Record<string, string> = {
-  discovery: "Discovery",
-  blueprint: "Blueprint",
-  development: "Development",
-  qa: "QA",
-  deployment: "Deployment",
-  live: "Live",
-};
-
-const STAGE_COLORS: Record<string, string> = {
-  discovery: "bg-blue-500/20 text-blue-400",
-  blueprint: "bg-purple-500/20 text-purple-400",
-  development: "bg-amber-500/20 text-amber-400",
-  qa: "bg-orange-500/20 text-orange-400",
-  deployment: "bg-emerald-500/20 text-emerald-400",
-  live: "bg-green-500/20 text-green-400",
-};
-
-const PRIORITY_COLORS: Record<string, string> = {
-  low: "bg-slate-500/20 text-slate-400",
-  medium: "bg-blue-500/20 text-blue-400",
-  high: "bg-amber-500/20 text-amber-400",
-  urgent: "bg-red-500/20 text-red-400",
-};
-
-type Project = {
-  id: string;
-  tenant_id: string;
-  title: string;
-  description: string | null;
-  stage: string;
-  priority: string;
-  assigned_to: string | null;
-  due_date: string | null;
-  created_at: string;
-  updated_at: string;
-  task_count: number;
-  tasks_done: number;
-};
-
-async function getProjects(tenantId?: string): Promise<Project[]> {
-  if (!tursoConfigured()) return [];
-  try {
-    const db = getTursoClient();
-    const tenantFilter = tenantId ? "WHERE p.tenant_id = ?" : "";
-    const args = tenantId ? [tenantId] : [];
-    const r = await db.execute({
-      sql: `SELECT p.*,
-                   COUNT(t.id) as task_count,
-                   SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) as tasks_done
-            FROM delivery_projects p
-            LEFT JOIN delivery_tasks t ON t.project_id = p.id
-            ${tenantFilter}
-            GROUP BY p.id
-            ORDER BY
-              CASE p.priority
-                WHEN 'urgent' THEN 0
-                WHEN 'high'   THEN 1
-                WHEN 'medium' THEN 2
-                ELSE 3
-              END,
-              p.updated_at DESC`,
-      args,
-    });
-    return r.rows.map((row) => ({
-      id: String(row.id ?? ""),
-      tenant_id: String(row.tenant_id ?? ""),
-      title: String(row.title ?? ""),
-      description: row.description ? String(row.description) : null,
-      stage: String(row.stage ?? "discovery"),
-      priority: String(row.priority ?? "medium"),
-      assigned_to: row.assigned_to ? String(row.assigned_to) : null,
-      due_date: row.due_date ? String(row.due_date) : null,
-      created_at: String(row.created_at ?? ""),
-      updated_at: String(row.updated_at ?? ""),
-      task_count: Number(row.task_count ?? 0),
-      tasks_done: Number(row.tasks_done ?? 0),
-    }));
-  } catch {
-    return [];
-  }
-}
-
-function ProjectCard({ project }: { project: Project }) {
-  const progress =
-    project.task_count > 0
-      ? Math.round((project.tasks_done / project.task_count) * 100)
-      : 0;
-
+function ProjectCard({ p, assignee }: { p: Project; assignee: string | null }) {
+  const progress = p.task_count > 0 ? Math.round((p.tasks_done / p.task_count) * 100) : null;
+  const client = p.client_tenant_name || p.client_name || p.client_email;
   return (
-    <div className="p-4 bg-bg-elev rounded-lg border border-bg-border hover:border-accent/30 transition-colors">
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <h3 className="font-bold text-sm">{project.title}</h3>
-        <span
-          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-            PRIORITY_COLORS[project.priority] || PRIORITY_COLORS.medium
-          }`}
-        >
-          {project.priority}
-        </span>
+    <Link
+      href={`/projects/${p.id}`}
+      className="block rounded-lg border border-bg-border bg-bg-elev p-3.5 transition-colors hover:border-accent/40"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="text-sm font-semibold leading-snug text-fg">{p.title}</h3>
+        <PriorityTag priority={p.priority} />
       </div>
-
-      {project.description && (
-        <p className="text-xs text-fg-muted mb-3 line-clamp-2">
-          {project.description}
-        </p>
-      )}
-
-      <div className="flex items-center gap-2 mb-2">
-        <span
-          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-            STAGE_COLORS[project.stage] || ""
-          }`}
-        >
-          {STAGE_LABELS[project.stage] || project.stage}
-        </span>
-      </div>
-
-      {project.task_count > 0 && (
-        <div className="mb-2">
-          <div className="flex justify-between text-[10px] text-fg-muted mb-1">
-            <span>
-              {project.tasks_done}/{project.task_count} tasks
-            </span>
+      <div className="mt-1 truncate text-xs text-fg-muted">{client || "No client set"}</div>
+      {progress !== null && (
+        <div className="mt-3">
+          <div className="mb-1 flex justify-between text-[10px] text-fg-dim">
+            <span>{p.tasks_done}/{p.task_count} tasks</span>
             <span>{progress}%</span>
           </div>
-          <div className="w-full h-1.5 bg-bg rounded-full overflow-hidden">
-            <div
-              className="h-full bg-accent rounded-full transition-all"
-              style={{ width: `${progress}%` }}
-            />
+          <div className="h-1 overflow-hidden rounded-full bg-bg">
+            <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }} />
           </div>
         </div>
       )}
-
-      <div className="flex items-center justify-between text-[10px] text-fg-muted">
-        {project.due_date && <span>Due {project.due_date}</span>}
-        <span>{timeAgo(project.updated_at)}</span>
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-dim">
+        <span>{assignee ?? "Unassigned"}</span>
+        {p.due_date && <span>Due {p.due_date}</span>}
+        {p.open_ticket_count > 0 && (
+          <span className="font-semibold text-status-warm">
+            {p.open_ticket_count} open ticket{p.open_ticket_count === 1 ? "" : "s"}
+          </span>
+        )}
+        <span className="ml-auto">{timeAgo(p.updated_at)}</span>
       </div>
-    </div>
+    </Link>
   );
 }
 
-export default async function ProjectsPage() {
-  const profile = await safe("projects.profile", getActiveProfile(), null);
-  const surface = await resolveViewerSurface();
-  const isFounder = surface.ok && surface.capabilities.canSeeAllPipeline;
+export default async function ProjectsPage({ searchParams }: { searchParams?: Promise<Search> }) {
+  const access = await getDeliveryAccess();
+  if (!access.ok) {
+    if (access.status === 403) notFound();
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Projects" />
+        <Card><EmptyState message="Sign in to see your projects." /></Card>
+      </div>
+    );
+  }
+  const viewer = access.viewer;
+  const sp = (await searchParams) ?? {};
+  const db = getDeliveryDb();
+  if (!db) return <LoadError what="projects" detail="The database is not configured on this deployment." />;
 
-  // Founders see all projects; clients see only their tenant's
-  const tenantId = isFounder ? undefined : profile?.tenant_id || "";
-  const projects = await safe(
-    "projects.list",
-    getProjects(tenantId),
-    [],
-  );
+  // ── client view ─────────────────────────────────────────────────────────
+  if (viewer.kind === "client") {
+    let projects: Project[] = [];
+    let failure: string | null = null;
+    try {
+      projects = (await listProjects(db, viewer)).rows;
+    } catch (err) {
+      console.error("[projects.page.client]", err);
+      failure = err instanceof Error ? err.message : String(err);
+    }
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader
+          title="Your projects"
+          subtitle="Where each of your projects stands, and the latest update from the OASIS team."
+          action={<a className="btn-secondary" href={SUPPORT_FORM_PATH}>Report an issue</a>}
+        />
+        {failure ? (
+          <LoadError what="your projects" />
+        ) : projects.length === 0 ? (
+          <Card><EmptyState message="No projects are linked to your workspace yet." /></Card>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {projects.map((p) => (
+              <Link key={p.id} href={`/projects/${p.id}`} className="block rounded-xl border border-bg-border bg-bg-panel p-5 hover:border-accent/40">
+                <div className="flex items-start justify-between gap-3">
+                  <h2 className="font-semibold text-fg">{p.title}</h2>
+                  <StageTag stage={p.stage} />
+                </div>
+                {p.last_client_update_body ? (
+                  <p className="mt-3 line-clamp-3 text-sm text-fg-muted">
+                    {p.last_client_update_body}
+                    <span className="mt-1 block text-xs text-fg-dim">{timeAgo(p.last_client_update_at)}</span>
+                  </p>
+                ) : (
+                  <p className="mt-3 text-sm text-fg-dim">No updates shared yet.</p>
+                )}
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
-  const byStage = STAGES.map((stage) => ({
+  // ── founder view ────────────────────────────────────────────────────────
+  const stageFilter = PROJECT_STAGES.includes(sp.stage as ProjectStage) ? (sp.stage as ProjectStage) : null;
+  let result: Awaited<ReturnType<typeof listProjects>> | null = null;
+  let failure: string | null = null;
+  let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
+  let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
+  let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
+  try {
+    [result, roster, directory, tenants] = await Promise.all([
+      listProjects(db, viewer, {
+        stage: stageFilter,
+        assignee: sp.assignee || null,
+        q: sp.q || null,
+        includeArchived: sp.archived === "1",
+      }),
+      loadAssignmentRoster(),
+      loadMemberDirectory(),
+      listClientTenants(db),
+    ]);
+  } catch (err) {
+    console.error("[projects.page]", err);
+    failure = err instanceof Error ? err.message : String(err);
+  }
+  const rosterOptions = roster
+    .filter((m) => m.auth_user_id)
+    .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }));
+  const projects = result?.rows ?? [];
+  const nameOf = (id: string | null) => memberDisplayName(id, directory);
+  const columns = (stageFilter ? [stageFilter] : PROJECT_STAGES).map((stage) => ({
     stage,
-    label: STAGE_LABELS[stage],
-    projects: projects.filter((p) => p.stage === stage),
+    items: projects.filter((p) => p.stage === stage),
   }));
-
-  const activeCount = projects.filter((p) => p.stage !== "live").length;
+  const active = projects.filter((p) => ACTIVE_PROJECT_STAGES.includes(p.stage)).length;
+  const openTickets = projects.reduce((n, p) => n + p.open_ticket_count, 0);
+  const filtered = Boolean(stageFilter || sp.assignee || sp.q || sp.archived === "1");
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
-        title={isFounder ? "Projects" : "Project Status"}
+        title="Projects"
         subtitle={
-          isFounder
-            ? `${activeCount} active project${activeCount !== 1 ? "s" : ""} across all clients.`
-            : "Track the progress of your AI implementation."
+          failure ? "Delivery projects." : `${active} active project${active === 1 ? "" : "s"}${filtered ? " in this view" : ""}.`
         }
+        action={<ProjectCreateForm roster={rosterOptions} clientTenants={tenants.map((t) => ({ value: t.id, label: t.name }))} />}
       />
 
-      <section className="grid grid-cols-2 md:grid-cols-3 gap-4">
-        <Stat label="Active" value={activeCount} accent />
-        <Stat
-          label="Completed"
-          value={projects.filter((p) => p.stage === "live").length}
-        />
-        <Stat label="Total Tasks" value={projects.reduce((s, p) => s + p.task_count, 0)} />
-      </section>
-
-      {projects.length === 0 ? (
-        <Card title="No projects yet">
-          <EmptyState message="Projects will appear here once a delivery engagement begins." />
-        </Card>
+      {failure ? (
+        <LoadError what="projects" detail={failure} />
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          {byStage.map(({ stage, label, projects: stageProjects }) => (
-            <div key={stage} className="space-y-3">
-              <div className="flex items-center gap-2">
-                <h2 className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-                  {label}
-                </h2>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-elev text-fg-muted border border-bg-border">
-                  {stageProjects.length}
-                </span>
+        <>
+          <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <Stat label="Active" value={active} accent />
+            <Stat label="In client review" value={projects.filter((p) => p.stage === "review").length} />
+            <Stat label="Live + maintenance" value={projects.filter((p) => p.stage === "live" || p.stage === "maintenance").length} />
+            <Stat label="Open tickets" value={openTickets} hint={openTickets ? "across these projects" : undefined} />
+          </section>
+
+          <form method="get" className="flex flex-wrap items-end gap-3 rounded-xl border border-bg-border bg-bg-panel p-4">
+            <label className="w-40">
+              <span className="label">Stage</span>
+              <select name="stage" className="select" defaultValue={stageFilter ?? ""}>
+                <option value="">All stages</option>
+                {PROJECT_STAGES.map((s) => (
+                  <option key={s} value={s}>{PROJECT_STAGE_LABELS[s]}</option>
+                ))}
+              </select>
+            </label>
+            <label className="w-44">
+              <span className="label">Assignee</span>
+              <select name="assignee" className="select" defaultValue={sp.assignee ?? ""}>
+                <option value="">Anyone</option>
+                <option value="unassigned">Unassigned</option>
+                {rosterOptions.map((r) => (
+                  <option key={r.value} value={r.value}>{r.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="min-w-[12rem] flex-1">
+              <span className="label">Search</span>
+              <input name="q" className="input" defaultValue={sp.q ?? ""} placeholder="Title, client or email" />
+            </label>
+            <label className="flex items-center gap-2 pb-2 text-sm text-fg-muted">
+              <input type="checkbox" name="archived" value="1" defaultChecked={sp.archived === "1"} />
+              Include archived
+            </label>
+            <button type="submit" className="btn-secondary">Apply</button>
+            {filtered && <Link href="/projects" className="pb-2 text-sm text-fg-muted hover:text-fg">Clear</Link>}
+          </form>
+
+          {result?.truncated && (
+            <p className="text-sm text-status-warm">Showing the first 500 projects. Narrow the filters to see the rest.</p>
+          )}
+
+          {projects.length === 0 ? (
+            <Card>
+              <EmptyState message={filtered ? "No projects match these filters." : "No projects yet. Create the first one above."} />
+            </Card>
+          ) : (
+            <div className="-mx-4 overflow-x-auto px-4 pb-2 md:mx-0 md:px-0">
+              <div className="flex gap-4" style={{ minWidth: stageFilter ? undefined : `${columns.length * 260}px` }}>
+                {columns.map(({ stage, items }) => (
+                  <section key={stage} className="min-w-[240px] flex-1 space-y-3">
+                    <header className="flex items-center gap-2">
+                      <h2 className="text-[11px] font-bold uppercase tracking-[0.14em] text-fg-muted">{PROJECT_STAGE_LABELS[stage]}</h2>
+                      <span className="rounded border border-bg-border bg-bg-elev px-1.5 py-0.5 text-[10px] text-fg-muted">{items.length}</span>
+                    </header>
+                    {items.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-bg-border p-3 text-center text-[11px] text-fg-dim">None</div>
+                    ) : (
+                      items.map((p) => <ProjectCard key={p.id} p={p} assignee={nameOf(p.assigned_to)} />)
+                    )}
+                  </section>
+                ))}
               </div>
-              {stageProjects.length === 0 ? (
-                <div className="p-3 bg-bg-elev/50 rounded-lg border border-bg-border border-dashed text-[10px] text-fg-muted text-center">
-                  No projects
-                </div>
-              ) : (
-                stageProjects.map((project) => (
-                  <ProjectCard key={project.id} project={project} />
-                ))
-              )}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );

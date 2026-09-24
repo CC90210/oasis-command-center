@@ -1,9 +1,46 @@
+import Link from "next/link";
 import { Card, PageHeader, Stat, EmptyState } from "@/components/Card";
+import { LoadError, StageTag, TicketStatusTag } from "@/components/delivery/badges";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
+import { timeAgo } from "@/lib/fmt";
+import { getDeliveryAccess } from "@/lib/delivery/session";
+import { listProjects, listTickets, type Project, type Ticket } from "@/lib/delivery/store";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 
 export const dynamic = "force-dynamic";
+
+type DeliveryPanel =
+  | { kind: "client"; projects: Project[]; tickets: Ticket[] }
+  | { kind: "error" }
+  | { kind: "none" };
+
+/**
+ * The client's projects and tickets, through the same scoped store as
+ * /projects and /tickets (lib/delivery/access.ts decides): only rows whose
+ * client_tenant_id is this workspace, only what a client may see. Anyone who
+ * is not a client viewer (an OASIS founder previewing the page) gets nothing
+ * here rather than the whole book.
+ */
+async function getDeliveryPanel(): Promise<DeliveryPanel> {
+  if (!tursoConfigured()) return { kind: "none" };
+  try {
+    const access = await getDeliveryAccess();
+    if (!access.ok || access.viewer.kind !== "client") return { kind: "none" };
+    const db = getTursoClient();
+    const [projects, tickets] = await Promise.all([
+      listProjects(db, access.viewer),
+      listTickets(db, access.viewer, { status: "all" }),
+    ]);
+    return { kind: "client", projects: projects.rows, tickets: tickets.rows };
+  } catch (err) {
+    // Loud, not an empty section: "no projects" and "could not load" differ.
+    // The driver's text goes to the log, not to the client.
+    console.error("[client-portal.delivery]", err);
+    return { kind: "error" };
+  }
+}
 
 type RoiSnapshot = {
   snapshot_date: string;
@@ -43,9 +80,10 @@ export default async function ClientPortalPage() {
   const profile = await safe("client-portal.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
 
-  const snapshots = tenantId
-    ? await safe("client-portal.roi", getRecentRoi(tenantId, 30), [])
-    : [];
+  const [snapshots, delivery] = await Promise.all([
+    tenantId ? safe("client-portal.roi", getRecentRoi(tenantId, 30), []) : Promise.resolve([] as RoiSnapshot[]),
+    getDeliveryPanel(),
+  ]);
 
   const totals = snapshots.reduce(
     (acc, s) => ({
@@ -130,6 +168,63 @@ export default async function ClientPortalPage() {
           </div>
         )}
       </Card>
+
+      {delivery.kind === "error" && <LoadError what="your projects and tickets" />}
+      {delivery.kind === "client" && (
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Card
+            title="Your projects"
+            subtitle="Where each project stands, and the latest update we shared."
+            action={<Link href="/projects" className="text-xs text-accent hover:underline">All projects</Link>}
+          >
+            {delivery.projects.length === 0 ? (
+              <EmptyState message="No projects are linked to your workspace yet." />
+            ) : (
+              <ul className="divide-y divide-bg-border">
+                {delivery.projects.slice(0, 6).map((p) => (
+                  <li key={p.id} className="py-3">
+                    <Link href={`/projects/${p.id}`} className="flex items-center justify-between gap-3 hover:text-accent">
+                      <span className="truncate text-sm font-semibold">{p.title}</span>
+                      <StageTag stage={p.stage} />
+                    </Link>
+                    <p className="mt-1 line-clamp-2 text-xs text-fg-muted">
+                      {p.last_client_update_body
+                        ? `${p.last_client_update_body} · ${timeAgo(p.last_client_update_at)}`
+                        : "No updates shared yet."}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+          <Card
+            title="Your tickets"
+            subtitle="Support requests and our latest reply."
+            action={<a href={SUPPORT_FORM_PATH} className="btn-secondary text-xs">Report an issue</a>}
+          >
+            {delivery.tickets.length === 0 ? (
+              <EmptyState message="No tickets. If something comes up, report it and you will get a ticket number." />
+            ) : (
+              <ul className="divide-y divide-bg-border">
+                {delivery.tickets.slice(0, 6).map((t) => (
+                  <li key={t.id} className="py-3">
+                    <Link href={`/tickets/${t.id}`} className="flex items-center gap-3 hover:text-accent">
+                      <span className="font-mono text-xs text-fg-muted">{t.ticket_number}</span>
+                      <span className="min-w-0 flex-1 truncate text-sm">{t.title}</span>
+                      <TicketStatusTag status={t.status} />
+                    </Link>
+                    <p className="mt-1 line-clamp-2 text-xs text-fg-muted">
+                      {t.last_public_reply_body
+                        ? `Our last reply: ${t.last_public_reply_body} · ${timeAgo(t.last_public_reply_at)}`
+                        : `Opened ${timeAgo(t.created_at)}. No reply yet.`}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        </div>
+      )}
 
       <Card title="Value Summary" subtitle="What your AI has accomplished this month">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
