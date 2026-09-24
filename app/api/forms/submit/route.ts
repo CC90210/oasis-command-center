@@ -82,6 +82,7 @@ import {
 } from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
+import { handleSupportFormSubmission, isSupportFormSubmission } from "@/lib/delivery/support-intake";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -219,6 +220,16 @@ export async function POST(req: NextRequest) {
 }
 
 async function handleSubmit(req: NextRequest, body: SubmitBody) {
+
+  // CLIENT SUPPORT TICKET FORM (/f/oasis-ai-cc/support). A support request is a
+  // TICKET, never a lead. This returns before everything below — the anonymous
+  // lead create (initAnonymousLead), uploads, stage transitions and every
+  // drip/notification hook — so none of it runs for this form. The gate is an
+  // exact tenant+slug match on the body with no query, so every other form's
+  // path is untouched. See lib/delivery/support-intake.ts.
+  if (isSupportFormSubmission(body)) {
+    return handleSupportFormSubmission(req, body);
+  }
 
   // Two auth shapes:
   //   1. Personalized link (Solara's mint): body.token is an HMAC.
