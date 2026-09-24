@@ -619,11 +619,18 @@ export type NewProject = {
 const STARTED_STAGES: readonly ProjectStage[] = ["building", "review", "live", "maintenance"];
 const LAUNCHED_STAGES: readonly ProjectStage[] = ["live", "maintenance"];
 
-function updateStatement(projectId: string, author: Author, body: string, visibility: UpdateVisibility, at: string): InStatement {
+function updateStatement(
+  projectId: string,
+  author: Author,
+  body: string,
+  visibility: UpdateVisibility,
+  at: string,
+  id: string = randomUUID(),
+): InStatement {
   return {
     sql: `INSERT INTO delivery_updates (id, project_id, tenant_id, author_user_id, author_name, body, visibility, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [randomUUID(), projectId, DELIVERY_TENANT_ID, author.userId, author.name, body, visibility, at],
+    args: [id, projectId, DELIVERY_TENANT_ID, author.userId, author.name, body, visibility, at],
   };
 }
 
@@ -760,15 +767,15 @@ export async function addProjectUpdate(
 ): Promise<string | null> {
   if (!(await projectExists(db, projectId))) return null;
   const at = now.toISOString();
-  const stmt = updateStatement(projectId, author, input.body, input.visibility, at);
+  const id = randomUUID();
   await db.batch(
     [
-      stmt,
+      updateStatement(projectId, author, input.body, input.visibility, at, id),
       { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, DELIVERY_TENANT_ID, projectId] },
     ],
     "write",
   );
-  return String((stmt as { args: unknown[] }).args[0]);
+  return id;
 }
 
 export async function projectExists(db: Client, projectId: string): Promise<boolean> {
