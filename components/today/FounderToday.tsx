@@ -41,15 +41,7 @@ import type { UserProfile } from "@/lib/supabase";
 import { tenantSlugFor } from "@/lib/team";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { founderBoardSummary } from "@/lib/oasis-board-summary";
-import { getActiveRevenueGoal } from "@/lib/goals/revenue-goal";
-import { buildPaceSeries, computeGoalProgress, nextDay } from "@/lib/goals/goal-math";
-import {
-  revenueByCustomer,
-  revenueCollected,
-  revenueCollectedByDay,
-  stripeMrr,
-  usdPerCad,
-} from "@/lib/founders-finances/metrics";
+import { loadOasisMoney } from "@/lib/goals/oasis-money";
 
 const dollars = (cents: number) => `$${Math.round(cents / 100).toLocaleString("en-US")}`;
 
@@ -98,54 +90,14 @@ export async function FounderToday({
   // that their results get dropped afterwards.
   //
   // REBUILT 2026-09-24. The goal is a revenue_goals row (money COLLECTED in a
-  // period) and every figure comes from the Finances ledger or live Stripe. The
+  // period) and every figure comes from the Finances ledger or live Stripe, read
+  // through lib/goals/oasis-money.ts — the same loader /analytics uses. The
   // hand-typed user_profiles.mrr_* columns and their silent $5,000 fallback are
   // no longer read here.
-  type Money = {
-    goal: Awaited<ReturnType<typeof getActiveRevenueGoal>>;
-    collected: Awaited<ReturnType<typeof revenueCollected>> | null;
-    byDay: Awaited<ReturnType<typeof revenueCollectedByDay>>;
-    last7: Awaited<ReturnType<typeof revenueCollected>> | null;
-    mrr: Awaited<ReturnType<typeof stripeMrr>> | null;
-    usdPerCadToday: number | null;
-    topCustomer: { customer: string; share_pct: number } | null;
-  };
-  let money: Money | null = null;
-  if (showFinancials) {
-    const goal = await safe("today.revenue_goal", getActiveRevenueGoal(tenantId), null);
-    const range = goal ? { from: goal.period_start, to: nextDay(goal.period_end) } : null;
-    const [collected, byDay, last7, mrr, rate, customers] = await Promise.all([
-      range ? safe("today.revenue_collected", revenueCollected(range), null) : Promise.resolve(null),
-      range ? safe("today.revenue_by_day", revenueCollectedByDay(range), []) : Promise.resolve([]),
-      safe("today.collected_7d", revenueCollected({ from: operatorDateKey(new Date(), -6), to: operatorDateKey(new Date(), 1) }), null),
-      safe("today.stripe_mrr", stripeMrr(), null),
-      safe("today.fx", usdPerCad(todayKey), null),
-      range ? safe("today.revenue_by_customer", revenueByCustomer(range), []) : Promise.resolve([]),
-    ]);
-    const total = customers.reduce((sum, c) => sum + c.usd_cents, 0);
-    money = {
-      goal,
-      collected,
-      byDay,
-      last7,
-      mrr,
-      usdPerCadToday: rate,
-      topCustomer:
-        customers.length > 0 && total > 0
-          ? { customer: customers[0].customer, share_pct: Math.round((customers[0].usd_cents / total) * 1000) / 10 }
-          : null,
-    };
-  }
-  const progress =
-    money?.goal && money.collected ? computeGoalProgress(money.goal, money.collected.usd_cents, todayKey) : null;
-  const paceSeries =
-    money?.goal ? buildPaceSeries(money.goal, money.byDay, todayKey) : [];
-  const mrrUsdCents =
-    money?.mrr && money.mrr.currency.toUpperCase() === "CAD" && money.usdPerCadToday
-      ? Math.round(money.mrr.mrr_cents * money.usdPerCadToday)
-      : money?.mrr && money.mrr.currency.toUpperCase() === "USD"
-        ? money.mrr.mrr_cents
-        : null;
+  const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
+  const progress = money?.progress ?? null;
+  const paceSeries = money?.paceSeries ?? [];
+  const mrrUsdCents = money?.mrrUsdCents ?? null;
 
   const primaryLead = plan?.primary_lead_id
     ? await safe("today.primary_lead", getLeadById(plan.primary_lead_id), null)
