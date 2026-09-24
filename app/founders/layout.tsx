@@ -23,10 +23,11 @@
  * worse than none. Each page calls the gate itself.
  */
 
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { resolveFounder } from "@/lib/founders/gate";
 import { FOUNDERS_PORTAL } from "@/lib/portals/registry";
+import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
+import { FoundersSectionNav } from "@/components/founders/FoundersSectionNav";
 
 export default async function FoundersLayout({
   children,
@@ -71,28 +72,14 @@ export default async function FoundersLayout({
             </div>
           </div>
 
-          <nav className="flex flex-wrap items-center gap-1.5">
-            {FOUNDERS_PORTAL.sections.map((s) =>
-              s.enabled ? (
-                <Link
-                  key={s.href}
-                  href={s.href}
-                  className="rounded-full border px-3 py-1.5 text-xs font-medium text-fg-muted transition-all hover:text-fg"
-                  style={{ borderColor: "rgba(31,227,240,0.22)" }}
-                >
-                  {s.label}
-                </Link>
-              ) : (
-                <span
-                  key={s.href}
-                  className="cursor-default rounded-full border border-bg-border px-3 py-1.5 text-xs font-medium text-fg-dim/60"
-                  title={`${s.label} — not built yet`}
-                >
-                  {s.label}
-                </span>
-              ),
+          {/* Sub-section chips render only inside their parent (see
+              FoundersSectionNav), and the Finances chip only for the two
+              owners — the portal gate also admits the marketing hire. */}
+          <FoundersSectionNav
+            sections={FOUNDERS_PORTAL.sections.filter(
+              (s) => s.audience !== "finance_owners" || isFinanceOwnerEmail(founder.email),
             )}
-          </nav>
+          />
         </div>
       </div>
 
