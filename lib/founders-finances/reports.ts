@@ -247,6 +247,33 @@ export function cashFlow(
   };
 }
 
+/**
+ * Money in / money out through cash-like accounts, per entry: an entry that
+ * raises cash is "in", one that lowers it is "out", and a transfer between two
+ * cash accounts (e.g. a Stripe payout to the bank) moves nothing and is
+ * neither — otherwise every payout would read as revenue a second time.
+ */
+export function cashInOut(
+  accounts: readonly ReportAccount[],
+  lines: readonly ReportLine[],
+  from: string,
+  to: string,
+): { inCents: number; outCents: number } {
+  const cash = new Set(accounts.filter((a) => CASH_SUBTYPES.has(a.subtype)).map((a) => a.id));
+  const delta = new Map<string, number>();
+  for (const l of lines) {
+    if (l.entryDate < from || l.entryDate >= to || !cash.has(l.accountId)) continue;
+    delta.set(l.entryId, (delta.get(l.entryId) || 0) + l.cadDebitCents - l.cadCreditCents);
+  }
+  let inCents = 0;
+  let outCents = 0;
+  for (const d of delta.values()) {
+    if (d > 0) inCents += d;
+    else outCents += -d;
+  }
+  return { inCents, outCents };
+}
+
 export type LedgerAccountSection = {
   account: ReportAccount;
   openingCents: number;

@@ -99,6 +99,43 @@ export function computeInvoiceTotals(
   };
 }
 
+/**
+ * Re-total already-stored lines (integers) under the CURRENT registration
+ * status — used when a draft is finalised, so a draft written before
+ * registration was switched on is issued with the tax that now applies.
+ */
+export function totalsFromStoredLines(
+  lines: ReadonlyArray<{ description: string; quantityMilli: number; unitPriceCents: number; taxable: boolean }>,
+  opts: { registered: boolean },
+): InvoiceTotals {
+  if (lines.length === 0) throw new InvoiceError("an invoice needs at least one line");
+  const computed = lines.map((l) => ({
+    description: l.description,
+    quantityMilli: l.quantityMilli,
+    unitPriceCents: l.unitPriceCents,
+    amountCents: lineAmountCents(l.quantityMilli, l.unitPriceCents),
+    taxable: l.taxable,
+  }));
+  const subtotalCents = computed.reduce((a, l) => a + l.amountCents, 0);
+  const taxableSubtotalCents = computed.filter((l) => l.taxable).reduce((a, l) => a + l.amountCents, 0);
+  const tax = computeSalesTax(taxableSubtotalCents, opts.registered);
+  return {
+    lines: computed,
+    subtotalCents,
+    taxableSubtotalCents,
+    gstCents: tax.gstCents,
+    qstCents: tax.qstCents,
+    totalCents: subtotalCents + tax.taxCents,
+  };
+}
+
+/** "1500" -> "1.5" for form defaults. */
+export function quantityMilliToString(milli: number): string {
+  const whole = Math.floor(milli / 1000);
+  const frac = String(milli % 1000).padStart(3, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : String(whole);
+}
+
 /** "OASIS" + 2026 + 1 -> "OASIS-2026-0001". Sequence pads to 4, grows past 9999. */
 export function formatInvoiceNumber(prefix: string, year: number, seq: number): string {
   const p = sanitizePrefix(prefix);
