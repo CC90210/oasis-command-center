@@ -112,6 +112,11 @@ jobs:
           # is one line, and the failure is invisible — pages that repeat or skip
           # rows, producing counts wrong in an unpredictable direction.
           npm run test:paged-reads
+          # ADDED 2026-09-24. Projects + Tickets: a client must never read
+          # another client's ticket, project or internal note; work is only
+          # assignable to the active roster; a support-form submission becomes
+          # a ticket and never a lead; SLA breaches alert exactly once.
+          npm run test:delivery
           # Re-enabled 2026-08-08. This was excluded for exactly the
           # server-only import chain that NODE_OPTIONS above now resolves;
           # 41 assertions came back with it.
