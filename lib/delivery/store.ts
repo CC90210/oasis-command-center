@@ -1277,6 +1277,67 @@ export async function claimBreachAlerts(db: Client, now: Date, limit = 50): Prom
   return rows(rs).map((r) => String(r.id));
 }
 
+/** Prefix on sla_breach_alert_status while a retry of a FAILED breach alert is sending. */
+export const BREACH_ALERT_RETRYING = "retrying; last attempt: ";
+
+/**
+ * How long a retry in flight is left alone. Far longer than one pass takes (at
+ * most 50 alerts, two sends each) and shorter than the 15 minutes between
+ * passes, so the pass after one that died picks its retry up again.
+ */
+export const BREACH_RETRY_LEASE_MS = 10 * 60_000;
+
+/**
+ * Take back the breach alerts whose last send FAILED on a lane, so a mailbox or
+ * Telegram outage costs the founders a delay, not the alert. Same conditions as
+ * the first claim (still breached, unanswered, open), and only claims from an
+ * EARLIER pass, so a pass never retries its own failure.
+ *
+ * Compare-and-set per ticket on the claim stamp AND the status the candidate
+ * query read: of two overlapping passes exactly one wins each ticket. The winner
+ * gets the failed status back, so it re-sends only the failed lanes.
+ *
+ * The winner MARKS the status (BREACH_ALERT_RETRYING + the failed outcome), it
+ * does not blank it. The failure stays readable on the ticket while the retry
+ * sends, and a pass that dies before recording the outcome (a write error, the
+ * Worker killed mid-loop) leaves the FAILED text, and so the retry, in place.
+ * A marked retry is skipped for BREACH_RETRY_LEASE_MS so an overlapping pass
+ * cannot send it twice; after that it is a pass that died, and is retried.
+ */
+export async function reclaimFailedBreachAlerts(
+  db: Client,
+  now: Date,
+  limit = 50,
+): Promise<Array<{ id: string; previous_status: string }>> {
+  const at = now.toISOString();
+  const leaseExpired = new Date(now.getTime() - BREACH_RETRY_LEASE_MS).toISOString();
+  const candidates = rows(
+    await db.execute({
+      sql: `SELECT id, sla_breach_alert_at, sla_breach_alert_status FROM support_tickets
+            WHERE tenant_id = ? AND sla_breached_at IS NOT NULL
+              AND instr(sla_breach_alert_status, 'FAILED') > 0
+              AND sla_breach_alert_at < CASE WHEN substr(sla_breach_alert_status, 1, ?) = ? THEN ? ELSE ? END
+              AND first_response_at IS NULL AND status IN (${OPEN_STATUS_SQL})
+            ORDER BY sla_target, id
+            LIMIT ?`,
+      args: [DELIVERY_TENANT_ID, BREACH_ALERT_RETRYING.length, BREACH_ALERT_RETRYING, leaseExpired, at, limit],
+    }),
+  );
+  const won: Array<{ id: string; previous_status: string }> = [];
+  for (const c of candidates) {
+    const read = String(c.sla_breach_alert_status);
+    const failed = read.startsWith(BREACH_ALERT_RETRYING) ? read.slice(BREACH_ALERT_RETRYING.length) : read;
+    const rs = await db.execute({
+      sql: `UPDATE support_tickets SET sla_breach_alert_at = ?, sla_breach_alert_status = ?
+            WHERE tenant_id = ? AND id = ? AND sla_breach_alert_at = ? AND sla_breach_alert_status = ?
+              AND first_response_at IS NULL AND status IN (${OPEN_STATUS_SQL})`,
+      args: [at, BREACH_ALERT_RETRYING + failed, DELIVERY_TENANT_ID, String(c.id), String(c.sla_breach_alert_at), read],
+    });
+    if (rs.rowsAffected === 1) won.push({ id: String(c.id), previous_status: failed });
+  }
+  return won;
+}
+
 /** Tickets that claimed a founder alert or client ack but never recorded it being sent. */
 export async function listPendingIntakeNotifications(db: Client, olderThan: Date, limit = 25): Promise<string[]> {
   const rs = await db.execute({

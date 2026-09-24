@@ -456,6 +456,15 @@ export async function POST(
     // send still reports success — the rep simply never hears about their lead.
     if (assignee.status === "lookup_failed") trackingWarnings.push("assignee_lookup_failed");
     if (assignee.status === "no_address") trackingWarnings.push("assignee_has_no_address");
+    // Not a failure, a decision the operator would otherwise never see: the
+    // retired rep stays on the lead for history but is left off Cc/Reply-To.
+    // A sentence rather than a code, and comma-free because the field is joined
+    // with commas below.
+    if (assignee.status === "deactivated") {
+      trackingWarnings.push(
+        "The rep this lead is assigned to has been deactivated so they were not copied. Replies will come to you instead.",
+      );
+    }
     const assignedRepEmail = assignee.status === "resolved" ? assignee.email : null;
     // The sending mailbox is excluded HERE, not only inside the shared sender.
     // The bridge fallback leaves from the same address and has no way to know it,

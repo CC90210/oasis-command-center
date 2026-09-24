@@ -37,7 +37,7 @@ import { TenantAutomations } from "@/components/automations/TenantAutomations";
 import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { LeadDocumentsPanel } from "@/components/leads/LeadDocumentsPanel";
 import { ApplicationUnderwritingReport } from "@/components/underwriting/ApplicationUnderwritingReport";
-import { attachAssignedNames } from "@/lib/assigned-names";
+import { attachAssignedNames, buildMemberDirectory } from "@/lib/assigned-names";
 import { StageRail } from "@/components/manifest/StageRail";
 import { PipelineSearchableTable } from "@/components/manifest/PipelineSearchableTable";
 import { PageSearchBar } from "@/components/manifest/PageSearchBar";
@@ -69,7 +69,7 @@ import {
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { resolveDataTenant } from "@/lib/manifest/tenant-scope";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
 import type { ManifestPageDef } from "@/lib/manifest/schema";
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
@@ -184,7 +184,6 @@ export default async function TenantCatchAllPage({
   if (oasisCreateTarget) redirect(oasisCreateTarget);
 
   const user = await getSessionUser();
-  const service = getServiceSupabase();
   const profileRes = user
     ? await resolveActiveProfileForUser(user)
     : { profile: null, error: null };
@@ -261,20 +260,13 @@ export default async function TenantCatchAllPage({
       pageDef.kind === "dashboard");
   let adminRoster: Array<{ id: string; name: string }> = [];
   if (showLeadFilter && dataTenantId) {
-    const rosterRes = await service
-      .from("user_profiles")
-      .select("auth_user_id, display_name, full_name")
-      .eq("tenant_id", dataTenantId);
-    adminRoster = ((rosterRes.data || []) as Array<{
-      auth_user_id: string | null;
-      display_name: string | null;
-      full_name: string | null;
-    }>)
-      .filter((m) => m.auth_user_id)
-      .map((m) => ({
-        id: m.auth_user_id as string,
-        name: m.display_name || m.full_name || "Unnamed",
-      }));
+    // A chip is a live control, so only active teammates get one — the rule
+    // /pipeline applies (2026-09-24). A deactivated rep's existing
+    // ?agent=<id> link still filters through leadScope above; it has no chip.
+    const { names, activeIds } = await buildMemberDirectory(dataTenantId);
+    adminRoster = [...names]
+      .filter(([id]) => activeIds.has(id))
+      .map(([id, name]) => ({ id, name }));
   }
 
   // Record-detail view — opened when an operator clicks a Kanban card or

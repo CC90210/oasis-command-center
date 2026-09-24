@@ -50,6 +50,37 @@ export const SUPPORT_FORM_PATH = `/f/${SUPPORT_FORM_TENANT_SLUG}/${SUPPORT_FORM_
 export const SUPPORT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 export const SUPPORT_ATTACHMENT_MIME = ["application/pdf", "image/png", "image/jpeg", "image/webp"];
 
+/**
+ * Do the file's first bytes carry this type's signature? A type in the
+ * allowlist above with no signature here is refused, never waved through.
+ */
+export function attachmentBytesMatchType(bytes: Uint8Array, mimeType: string): boolean {
+  const startsWith = (sig: number[], offset = 0) => sig.every((b, i) => bytes[offset + i] === b);
+  switch (mimeType) {
+    case "application/pdf":
+      return startsWith([0x25, 0x50, 0x44, 0x46, 0x2d]); // "%PDF-"
+    case "image/png":
+      return startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case "image/jpeg":
+      return startsWith([0xff, 0xd8, 0xff]);
+    case "image/webp":
+      return startsWith([0x52, 0x49, 0x46, 0x46]) && startsWith([0x57, 0x45, 0x42, 0x50], 8); // "RIFF" .... "WEBP"
+    default:
+      return false;
+  }
+}
+
+/**
+ * Which allowed type the file's first bytes say it is, or null for none. The
+ * declared type is only what the sender's request body says (a browser takes it
+ * from the file's extension, so a JPEG screenshot saved as .png arrives as
+ * image/png). The intake stores, and so later serves, a file under the type
+ * its bytes prove, never the declared one.
+ */
+export function sniffAttachmentType(bytes: Uint8Array): string | null {
+  return SUPPORT_ATTACHMENT_MIME.find((type) => attachmentBytesMatchType(bytes, type)) ?? null;
+}
+
 export const SUPPORT_FORM_BRANDING: FormBranding = {
   // The established OASIS mark, same as `start`, `ai-audit` and client onboarding.
   primary_color: "#e8c547",

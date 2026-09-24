@@ -11,6 +11,13 @@
  *   - ticket creation is idempotent on the form submission id, including when
  *     the cron's reconcile sweep re-drives a submission whose request died;
  *   - founders are alerted and the client acknowledged EXACTLY once;
+ *   - the per-IP and per-address limits hold in the DATABASE, so a fresh
+ *     in-memory bucket (another isolate) or a parallel burst cannot get past
+ *     them, a count that fails refuses, and a refused request writes, uploads
+ *     and sends nothing;
+ *   - an attachment whose bytes are none of the allowed types is never
+ *     uploaded and the client's confirmation email says the file was not kept;
+ *     a real JPEG sent as .png is kept, stored as a JPEG;
  *   - the real /api/forms/submit route takes the support branch before any of
  *     its lead/drip code, and no other form is routed into it (static guard).
  */
@@ -288,6 +295,246 @@ async function main() {
     assert.equal(r2.ticketsCreated.length, 0);
     assert.equal(sent.length, before, "a second sweep sends nothing");
     assert.equal(await count("SELECT count(*) AS n FROM support_tickets WHERE form_submission_id = 'sub-orphan'"), 1);
+  });
+
+  // ── the durable rate limit ──────────────────────────────────────────────
+  // rateLimit() is an in-memory bucket per isolate. Every request below is made
+  // as if it landed on a FRESH isolate: Date.now() (the bucket's clock) jumps an
+  // hour so every bucket has refilled, while the intake's own clock (deps.now)
+  // stays inside the window. Only the database can refuse these.
+  const realDateNow = Date.now;
+  let hops = 0;
+  const hopIsolate = () => {
+    hops += 1;
+    const offset = hops * 3_600_000;
+    Date.now = () => realDateNow() + offset;
+  };
+  let clock = new Date("2026-09-24T13:00:00.000Z");
+  const scheduled: Array<() => Promise<void>> = [];
+  const stored: string[] = [];
+  const storedTypes: string[] = [];
+  const limitDeps = {
+    db,
+    now: () => clock,
+    notify: fakeNotify,
+    schedule: (task: () => Promise<void>) => void scheduled.push(task),
+    upload: async (path: string, _bytes: Buffer, type: string) => {
+      stored.push(path);
+      storedTypes.push(type);
+      return { ok: true as const };
+    },
+  };
+  const requestFrom = (ip: string, payload: Json) => ({
+    req: new NextRequest("http://localhost/api/forms/submit", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": ip },
+    }),
+    body: { step_index: 0, payload, anonymous_init: { tenant_slug: "oasis-ai-cc", form_slug: "support" } },
+  });
+  const submitFrom = async (ip: string, payload: Json, db2 = db) => {
+    hopIsolate();
+    try {
+      const { req, body } = requestFrom(ip, payload);
+      return await intake.handleSupportFormSubmission(req, body, { ...limitDeps, db: db2 });
+    } finally {
+      Date.now = realDateNow;
+    }
+  };
+  const ticketPayload = (email: string, i: number): Json => ({
+    name: "Rate Tester", email, category: "question", priority: "low", description: `attempt ${i}`,
+    attachment: { inline_base64: png, filename: "s.png", mime_type: "image/png", size_bytes: 16 },
+  });
+  const footprint = async () => ({
+    submissions: await count("SELECT count(*) AS n FROM form_submissions"),
+    tickets: await count("SELECT count(*) AS n FROM support_tickets"),
+    uploads: stored.length,
+    scheduled: scheduled.length,
+    sent: sent.length,
+  });
+  const at = (base: string, plusMs: number) => new Date(Date.parse(base) + plusMs);
+
+  await check("the 6th submission from one IP inside a minute is refused, even on a fresh isolate", async () => {
+    for (let i = 0; i < 5; i++) {
+      clock = at("2026-09-24T13:00:00.000Z", i * 5_000);
+      const r = await submitFrom("203.0.113.7", ticketPayload(`ip-flood-${i}@example.test`, i));
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    }
+    const before = await footprint();
+    clock = at("2026-09-24T13:00:00.000Z", 50_000);
+    const r6 = await submitFrom("203.0.113.7", ticketPayload("ip-flood-5@example.test", 5));
+    const j6 = (await r6.json()) as Json;
+    assert.equal(r6.status, 429, JSON.stringify(j6));
+    assert.equal(j6.error, "rate_limited");
+    assert.equal(j6.retry_in_sec, 60);
+    assert.match(String(j6.message), /wait a minute/, "the form shows this sentence, not its fixed 'a few seconds' copy");
+    assert.deepEqual(await footprint(), before, "a refused request writes, uploads, schedules and sends nothing");
+    // The window slides: once the first of the five is a minute old, one more is let in.
+    clock = at("2026-09-24T13:00:00.000Z", 61_000);
+    const r7 = await submitFrom("203.0.113.7", ticketPayload("ip-flood-6@example.test", 6));
+    assert.equal(r7.status, 200, JSON.stringify(await r7.json()));
+  });
+  await check("the submission records the normalised address and the upload's real outcome", async () => {
+    const row = (await db.execute({
+      sql: "SELECT payload FROM form_submissions WHERE ip_address = '203.0.113.7' ORDER BY submitted_at LIMIT 1",
+      args: [],
+    })).rows[0];
+    const p = JSON.parse(String(row.payload)) as { email: string; attachment: Array<{ storage_path: string | null; error?: string }> };
+    assert.equal(p.email, "ip-flood-0@example.test");
+    assert.equal(p.attachment[0].storage_path, stored[0], "not left saying 'upload did not finish'");
+    assert.equal(p.attachment[0].error, undefined);
+  });
+  await check("the 4th submission to one address inside 10 minutes is refused, from any IP, however it is typed", async () => {
+    const typed = ["victim@example.test", "  Victim@Example.TEST ", "victim@example.test"];
+    for (let i = 0; i < 3; i++) {
+      clock = at("2026-09-24T14:00:00.000Z", i * 60_000);
+      const r = await submitFrom(`198.51.100.${i + 1}`, ticketPayload(typed[i], i));
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    }
+    const before = await footprint();
+    clock = at("2026-09-24T14:00:00.000Z", 9 * 60_000);
+    const r4 = await submitFrom("198.51.100.99", ticketPayload("VICTIM@example.test", 3));
+    const j4 = (await r4.json()) as Json;
+    assert.equal(r4.status, 429, JSON.stringify(j4));
+    assert.equal(j4.error, "rate_limited");
+    assert.equal(j4.retry_in_sec, 600);
+    assert.match(String(j4.message), /this email address in the last 10 minutes/);
+    assert.deepEqual(await footprint(), before, "a refused request writes, uploads, schedules and sends nothing");
+  });
+  await check("the INSERT counts again: a request whose count went stale is still refused", async () => {
+    // Stands in for a parallel request that passed the count before the fifth
+    // row landed: the count says zero, the INSERT sees the truth.
+    for (let i = 0; i < 5; i++) {
+      clock = at("2026-09-24T15:00:00.000Z", i * 1_000);
+      const r = await submitFrom("203.0.113.8", ticketPayload(`stale-${i}@example.test`, i));
+      assert.equal(r.status, 200, JSON.stringify(await r.json()));
+    }
+    const staleCount = Object.assign(Object.create(db), {
+      execute: async (stmt: { sql: string; args?: unknown[] }) =>
+        stmt.sql.startsWith("SELECT (SELECT count(*) FROM form_submissions")
+          ? { rows: [{ ip: 0, email: 0 }], rowsAffected: 0 }
+          : db.execute(stmt as never),
+    }) as typeof db;
+    const before = await footprint();
+    clock = at("2026-09-24T15:00:00.000Z", 10_000);
+    const r = await submitFrom("203.0.113.8", ticketPayload("stale-5@example.test", 5), staleCount);
+    assert.equal(r.status, 429, JSON.stringify(await r.json()));
+    assert.deepEqual(await footprint(), before);
+  });
+  await check("parallel requests from one IP on fresh isolates: exactly five get in", async () => {
+    clock = new Date("2026-09-24T16:00:00.000Z");
+    const racers: Array<Promise<Response>> = [];
+    try {
+      for (let i = 0; i < 8; i++) {
+        hopIsolate(); // the IP bucket is read synchronously, as the call starts
+        const { req, body } = requestFrom("203.0.113.9", ticketPayload(`race-${i}@example.test`, i));
+        racers.push(intake.handleSupportFormSubmission(req, body, limitDeps));
+      }
+      const statuses = (await Promise.all(racers)).map((r) => r.status).sort();
+      assert.deepEqual(statuses, [200, 200, 200, 200, 200, 429, 429, 429]);
+    } finally {
+      Date.now = realDateNow;
+    }
+    assert.equal(await count("SELECT count(*) AS n FROM form_submissions WHERE ip_address = '203.0.113.9'"), 5);
+  });
+  await check("a count that cannot run refuses (429, plain English), logs a tag, writes nothing", async () => {
+    const broken = Object.assign(Object.create(db), {
+      execute: async (stmt: { sql: string; args?: unknown[] }) => {
+        if (stmt.sql.startsWith("SELECT (SELECT count(*) FROM form_submissions")) throw new Error("simulated libSQL outage");
+        return db.execute(stmt as never);
+      },
+    }) as typeof db;
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map(String).join(" "));
+    const before = await footprint();
+    clock = new Date("2026-09-24T17:00:00.000Z");
+    let r: Response;
+    try {
+      r = await submitFrom("203.0.113.10", ticketPayload("outage@example.test", 0), broken);
+    } finally {
+      console.error = realError;
+    }
+    const j = (await r.json()) as Json;
+    assert.equal(r.status, 429, JSON.stringify(j));
+    assert.equal(j.error, "rate_limited");
+    assert.match(String(j.message), /try again/);
+    assert.ok(logged.some((l) => l.includes("[support-intake.rate_limit]") && l.includes("simulated libSQL outage")), logged.join("\n"));
+    assert.deepEqual(await footprint(), before);
+  });
+
+  // ── attachment bytes ────────────────────────────────────────────────────
+  const ackTo = (to: string) => sent.filter((s) => s.kind === "email" && s.to === to);
+  await check("an attachment whose bytes are no allowed type is refused before upload; the ticket stands and the client is told", async () => {
+    clock = new Date("2026-09-24T18:00:00.000Z");
+    const html = Buffer.from("<html><script>alert(1)</script></html>").toString("base64");
+    const uploadsBefore = stored.length;
+    scheduled.length = 0;
+    const r = await submitFrom("192.0.2.50", {
+      ...ticketPayload("mime@example.test", 0),
+      attachment: { inline_base64: html, filename: "shot.png", mime_type: "image/png", size_bytes: 38 },
+    });
+    const j = (await r.json()) as Json & { uploads: { warnings: unknown[] } };
+    assert.equal(r.status, 200, JSON.stringify(j));
+    assert.equal(stored.length, uploadsBefore, "nothing was uploaded");
+    assert.match(JSON.stringify(j.uploads.warnings), /content_mismatch: image\/png/);
+    const row = (await db.execute({ sql: "SELECT attachments FROM support_tickets WHERE ticket_number = ?", args: [String(j.ticket_number)] })).rows[0];
+    const att = JSON.parse(String(row.attachments));
+    assert.equal(att[0].storage_path, null);
+    assert.equal(att[0].error, "file is not a PDF, PNG, JPEG or WebP");
+    // The form's thank-you screen cannot show a refused file; the confirmation email does.
+    assert.equal(scheduled.length, 1);
+    await scheduled.shift()!();
+    const acks = ackTo("mime@example.test");
+    assert.equal(acks.length, 1);
+    assert.match(acks[0].body, /We could not keep the file you attached\. We accept PDF, PNG, JPEG or WebP files up to 10 MB/);
+    // That sentence (like the form's help text) spells the limits out; it must move with them.
+    assert.equal(seed.SUPPORT_ATTACHMENT_MAX_BYTES, 10 * 1024 * 1024);
+    assert.deepEqual(seed.SUPPORT_ATTACHMENT_MIME, ["application/pdf", "image/png", "image/jpeg", "image/webp"]);
+    assert.equal(acks[0].body.includes("shot.png"), false, "the sender-typed file name is never echoed");
+  });
+  await check("a real JPEG sent as image/png is kept and stored as what its bytes are", async () => {
+    clock = new Date("2026-09-24T18:30:00.000Z");
+    const jpeg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
+    const uploadsBefore = stored.length;
+    scheduled.length = 0;
+    const r = await submitFrom("192.0.2.51", {
+      ...ticketPayload("jpeg@example.test", 0),
+      attachment: { inline_base64: jpeg, filename: "screenshot.png", mime_type: "image/png", size_bytes: 10 },
+    });
+    const j = (await r.json()) as Json & { uploads: { attempted: number; succeeded: number; warnings: unknown[] } };
+    assert.equal(r.status, 200, JSON.stringify(j));
+    assert.deepEqual(j.uploads, { attempted: 1, succeeded: 1, warnings: [] });
+    assert.equal(stored.length, uploadsBefore + 1);
+    assert.equal(storedTypes[storedTypes.length - 1], "image/jpeg", "stored, and so served, as a JPEG");
+    const row = (await db.execute({ sql: "SELECT attachments FROM support_tickets WHERE ticket_number = ?", args: [String(j.ticket_number)] })).rows[0];
+    const att = JSON.parse(String(row.attachments));
+    assert.equal(att[0].mime_type, "image/jpeg");
+    assert.equal(att[0].storage_path, stored[stored.length - 1]);
+    assert.equal(att[0].error, undefined);
+    await scheduled.shift()!();
+    const acks = ackTo("jpeg@example.test");
+    assert.equal(acks.length, 1);
+    assert.equal(acks[0].body.includes("could not keep the file"), false, "a kept file needs no warning");
+  });
+  await check("every allowed type has a signature: its own bytes pass, every other type's fail", () => {
+    const samples: Record<string, Buffer> = {
+      "application/pdf": Buffer.from("%PDF-1.7\n%\xe2\xe3\n", "latin1"),
+      "image/png": Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+      "image/jpeg": Buffer.from("ffd8ffe000104a464946", "hex"),
+      "image/webp": Buffer.concat([Buffer.from("RIFF"), Buffer.from([0x24, 0, 0, 0]), Buffer.from("WEBPVP8 ")]),
+    };
+    assert.deepEqual(Object.keys(samples).sort(), [...seed.SUPPORT_ATTACHMENT_MIME].sort(), "a sample per allowed type");
+    for (const [type, bytes] of Object.entries(samples)) {
+      for (const declared of seed.SUPPORT_ATTACHMENT_MIME) {
+        assert.equal(seed.attachmentBytesMatchType(bytes, declared), declared === type, `${type} bytes declared as ${declared}`);
+      }
+    }
+    assert.equal(seed.attachmentBytesMatchType(Buffer.from("RIFF\0\0\0\0WAVEfmt ", "latin1"), "image/webp"), false, "RIFF is not enough");
+    assert.equal(seed.attachmentBytesMatchType(Buffer.alloc(0), "image/png"), false);
+    assert.equal(seed.attachmentBytesMatchType(Buffer.from("89504e470d0a1a0a", "hex"), "image/gif"), false, "an unlisted type is never waved through");
+    for (const [type, bytes] of Object.entries(samples)) assert.equal(seed.sniffAttachmentType(bytes), type);
+    assert.equal(seed.sniffAttachmentType(Buffer.from("GIF89a", "latin1")), null, "a real but unlisted type is none of them");
+    assert.equal(seed.sniffAttachmentType(Buffer.from("<html>", "latin1")), null);
   });
 
   // ── misconfiguration fails loudly ───────────────────────────────────────

@@ -15,7 +15,9 @@
  * the stage op). A record the caller can't touch is folded into `skipped` —
  * INDISTINGUISHABLE from a missing record, so the endpoint can't be used to
  * enumerate which UUIDs are real (matches the single routes' 404-for-both).
- * Never errors the whole batch — fail closed.
+ * Never errors the whole batch — fail closed. The one exception is the assign
+ * TARGET: a deactivated teammate refuses the whole batch up front (400
+ * member_deactivated) unless they already own every selected row.
  *
  * Response: { ok, op, updated, skipped, failed }.
  */
@@ -41,7 +43,11 @@ import { classifyBulkRecipients, summarizeClassification, redactForResponse } fr
 import { validateCustomMessage, renderCustomMessage } from "@/lib/bulk-email/compose";
 import { sanitizeBlastMessage, getTenantLenderNames } from "@/lib/integrations/blast-safety";
 import { stripDashes, matchPositioningPhrases, matchLenderNames } from "@/lib/integrations/blast-safety-core";
-import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import {
+  MEMBER_DEACTIVATED_MESSAGE,
+  getOasisPipelineAssignmentRoster,
+  memberStanding,
+} from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 import {
   OASIS_PRE_HANDOFF_ASSIGNABLE_STAGES,
@@ -148,9 +154,11 @@ export async function POST(req: NextRequest) {
     }
     // Validate the assignee once before touching a record. OASIS destinations
     // are limited to the current CC + Adon assignment roster for admins too; legacy
-    // workspaces retain their broader tenant-member assignment model.
+    // workspaces retain their broader tenant-member assignment model, minus
+    // deactivated teammates (2026-09-24, same rule as single /assign).
     const raw = body.assigned_to;
     let nextAssignedTo: string | null = null;
+    let targetDeactivated = false;
     if (typeof raw === "string" && raw.trim().length) {
       const candidate = raw.trim().toLowerCase();
       if (!UUID_RE.test(candidate)) {
@@ -187,14 +195,55 @@ export async function POST(req: NextRequest) {
       }
       nextAssignedTo = resolved;
     } else if (nextAssignedTo) {
-      const member = await db
-        .from("user_profiles")
-        .select("auth_user_id")
-        .eq("tenant_id", tenantId)
-        .eq("auth_user_id", nextAssignedTo)
-        .maybeSingle();
-      if (!member.data) {
+      let standing;
+      try {
+        standing = (await memberStanding(tenantId, nextAssignedTo)).standing;
+      } catch (error) {
+        // Fail closed: a check that could not run never hands out a batch.
+        console.error("[leads.bulk] assignee standing could not be verified", {
+          tenantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json(
+          { ok: false, error: "member_check_failed", message: "That teammate couldn't be verified right now. Try again in a moment." },
+          { status: 503 },
+        );
+      }
+      if (standing === "not_member") {
         return NextResponse.json({ ok: false, error: "not_a_tenant_member" }, { status: 400 });
+      }
+      targetDeactivated = standing === "deactivated";
+    }
+
+    // A deactivated teammate keeps the deals they already hold, so a batch they
+    // already own every row of is a re-save and stays allowed. One row that
+    // would be NEW work for them refuses the whole batch before anything is
+    // written: a partial hand-off would leave the operator guessing which rows
+    // moved. An unreadable chunk refuses too, since it can't be ruled out.
+    if (targetDeactivated) {
+      for (let i = 0; i < ids.length; i += FETCH_CHUNK) {
+        const chunk = ids.slice(i, i + FETCH_CHUNK);
+        const held = await db
+          .from("tenant_records")
+          .select("id, data")
+          .eq("tenant_id", tenantId)
+          .in("entity_type", ["lead", "application", "funded_deal", "renewal"])
+          .in("id", chunk);
+        if (held.error) {
+          return NextResponse.json(
+            { ok: false, error: "member_check_failed", message: "These records couldn't be checked right now. Try again in a moment." },
+            { status: 503 },
+          );
+        }
+        const newWork = ((held.data ?? []) as Array<{ data?: Record<string, unknown> | null }>).some(
+          (r) => str(r.data?.assigned_to).toLowerCase() !== nextAssignedTo,
+        );
+        if (newWork) {
+          return NextResponse.json(
+            { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE },
+            { status: 400 },
+          );
+        }
       }
     }
 
@@ -218,6 +267,12 @@ export async function POST(req: NextRequest) {
       };
       const currentStage = str(bulkRecord.data.stage).toLowerCase();
       const currentOwner = str(bulkRecord.data.assigned_to).toLowerCase();
+      // Re-checked per row: an owner changed since the scan above must not
+      // hand this row to a deactivated teammate.
+      if (targetDeactivated && currentOwner !== nextAssignedTo) {
+        out.skipped += 1;
+        continue;
+      }
       if (
         isOasisBulkWorkspace &&
         (!currentOwner ||

@@ -47,7 +47,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveBridgeTarget, callBridgeExecTool } from "@/lib/bridge-proxy";
 import { getAgents } from "@/lib/config/agents";
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import type { BrandKey } from "@/lib/email/brands";
@@ -322,11 +322,21 @@ async function resolveAssignedAgent(
   const safeName = (fallbackName || "").trim() || "the SunBiz team";
   if (assignedTo) {
     try {
-      const members = await getTenantMembers(tenantId);
+      // includeInactive: a deactivated agent still assigned to this lead is
+      // still its agent, so their real name signs (history). Only an id that
+      // matches NO member falls through to the generic signature.
+      const members = await getTenantMembers(tenantId, { includeInactive: true });
       const member = members.find((x) => x.auth_user_id === assignedTo);
       const email = (member?.email || "").trim();
-      if (email) {
-        const name = (member?.display_name || member?.full_name || "").trim() || safeName;
+      if (member && email) {
+        const name = (member.display_name || member.full_name || "").trim() || safeName;
+        if (!isActiveMember(member)) {
+          // They have left: no signer address, phone or CC, or the merchant's
+          // reply reaches someone no longer here. A null CC lets the SunBiz
+          // branch in loadHandoffContext copy the submissions inbox instead.
+          console.warn("[forms.handoff] assigned agent deactivated", { tenantId, assignedTo });
+          return { name, email: "", phone: "", ccEmail: null };
+        }
         // Phone isn't on the member row — pull it from the signing roster by
         // EMAIL match (member email is the canonical address). Best-effort.
         let phone = "";
@@ -567,10 +577,11 @@ async function loadHandoffContext(
   const agent = await resolveAssignedAgent(form.tenant_id, assignedTo, fallbackName);
 
   // CC routing: the authoritatively-resolved assigned agent, else the
-  // submissions inbox — an unassigned lead's funnel email must still land in
-  // front of a human. The address comes from the same encrypted credential
-  // store the send authenticates with (never a guessed/hardcoded mailbox);
-  // if it can't be resolved the CC stays null and the send proceeds.
+  // submissions inbox — an unassigned lead's (or a deactivated agent's) funnel
+  // email must still land in front of a human. The address comes from the same
+  // encrypted credential store the send authenticates with (never a
+  // guessed/hardcoded mailbox); if it can't be resolved the CC stays null and
+  // the send proceeds.
   let ccEmail = agent.ccEmail;
   if (!ccEmail && brandSlug === "sunbiz") {
     try {

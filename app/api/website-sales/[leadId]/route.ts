@@ -64,7 +64,13 @@ import {
   SMS_CONSENT_DISCLOSURE_VERSION,
 } from "@/lib/sms/auto-responses";
 import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
-import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import {
+  MEMBER_DEACTIVATED_MESSAGE,
+  getOasisPipelineAssignmentRoster,
+  memberStanding,
+  type MemberRow,
+  type MemberStanding,
+} from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -123,31 +129,54 @@ function verifiedFounderSmsConsentArtifact(value: unknown, nowMs: number): Recor
 }
 
 /**
- * Resolve the opener rep's invite copy. The opener is CC'd on the audit
- * invite when they are not the host/closer; a missing or malformed profile
- * degrades to no copy instead of blocking a verified booking.
+ * A sales party on this deal as a LIVE teammate, or null. Their attribution
+ * and commission are history and never change here, but a deactivated person
+ * must not be invited onto the client's calendar event or (re-)granted a seat
+ * on the deal: kept-hot leads still carry reps retired on 2026-09-24 as
+ * attributed_rep_user_id. Best-effort by design: a failed read skips the
+ * person with a warning instead of failing a booking, a reschedule, or a
+ * verified payment.
  */
-async function resolveOpenerAttendee(
-  db: ReturnType<typeof getServiceSupabase>,
+async function liveTeammate(
   tenantId: string,
-  openerUserId: unknown,
-  excludeEmail: unknown,
-): Promise<{ email: string; displayName?: string } | null> {
-  const userId = typeof openerUserId === "string" && UUID.test(openerUserId.trim())
-    ? openerUserId.trim().toLowerCase()
+  userIdValue: unknown,
+  tag: string,
+): Promise<MemberRow | null> {
+  const userId = typeof userIdValue === "string" && UUID.test(userIdValue.trim())
+    ? userIdValue.trim().toLowerCase()
     : "";
   if (!userId) return null;
-  const profile = await db
-    .from("user_profiles")
-    .select("email,full_name")
-    .eq("tenant_id", tenantId)
-    .eq("auth_user_id", userId)
-    .maybeSingle();
-  if (profile.error || !profile.data) return null;
-  const email = typeof profile.data.email === "string" ? profile.data.email.trim().toLowerCase() : "";
+  try {
+    const { standing, member } = await memberStanding(tenantId, userId);
+    if (standing === "active") return member;
+    if (standing === "deactivated") {
+      console.warn(`[website-sales.${tag}] deactivated teammate skipped`, { tenantId, userId });
+    }
+    return null;
+  } catch (error) {
+    console.warn(`[website-sales.${tag}] teammate standing unavailable; skipped`, {
+      tenantId,
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+/**
+ * Resolve the opener rep's invite copy. The opener is CC'd on the audit
+ * invite when they are not the host/closer; a missing, deactivated or
+ * malformed profile degrades to no copy instead of blocking a verified booking.
+ */
+function resolveOpenerAttendee(
+  opener: MemberRow | null,
+  excludeEmail: unknown,
+): { email: string; displayName?: string } | null {
+  if (!opener) return null;
+  const email = typeof opener.email === "string" ? opener.email.trim().toLowerCase() : "";
   const excluded = typeof excludeEmail === "string" ? excludeEmail.trim().toLowerCase() : "";
   if (!email.includes("@") || email === excluded) return null;
-  const fullName = typeof profile.data.full_name === "string" ? profile.data.full_name.trim() : "";
+  const fullName = typeof opener.full_name === "string" ? opener.full_name.trim() : "";
   return fullName ? { email, displayName: fullName } : { email };
 }
 
@@ -621,7 +650,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       current.assigned_to,
       session.userId,
     );
-    const openerAttendee = await resolveOpenerAttendee(db, session.tenantId, existingRep, auditHostEmail);
+    const liveOpener = await liveTeammate(session.tenantId, existingRep, "book-founder");
+    const openerAttendee = resolveOpenerAttendee(liveOpener, auditHostEmail);
     try {
       verifiedMeeting = await createVerifiedFounderMeeting({
         tenantId:session.tenantId,
@@ -652,8 +682,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           : 503;
       return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
     }
+    // attributed_rep_user_id below keeps the opener whatever their standing
+    // (commission history); only a live opener is granted a seat on the deal.
     const collaborators = [
-      existingRep,
+      ...(liveOpener ? [existingRep] : []),
       ...normalizeCollaborators(current).filter((userId) => userId !== founderUserId),
     ].filter((userId, index, list) => list.indexOf(userId) === index).slice(0, 5);
     patch = {
@@ -804,12 +836,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
           return NextResponse.json({ok:false,error:"verified_meeting_required"},{status:409});
         }
         try {
-          const openerAttendee = await resolveOpenerAttendee(
-            db,
-            session.tenantId,
-            // Post-booking assigned_to is the closer; attributed_rep stays the
-            // opener. excludeEmail drops the copy when they are the same person.
-            current.attributed_rep_user_id ?? current.assigned_to,
+          const openerAttendee = resolveOpenerAttendee(
+            await liveTeammate(
+              session.tenantId,
+              // Post-booking assigned_to is the closer; attributed_rep stays the
+              // opener. excludeEmail drops the copy when they are the same person.
+              current.attributed_rep_user_id ?? current.assigned_to,
+              "reschedule",
+            ),
             current.audit_host_email,
           );
           verifiedMeeting = await rescheduleVerifiedFounderMeeting({
@@ -1085,6 +1119,30 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
       }
     }
     const builderUserId = typeof body.builderUserId === "string" ? body.builderUserId.trim() : "";
+    // The builder named here becomes the fulfillment owner and the delivery
+    // cycle's assignee once the setup is paid in full. A deactivated teammate
+    // never takes new work, so refuse them now, before the receipt or anything
+    // else is written. A replay of an already-recorded request returned above
+    // and never reaches this check.
+    if (UUID.test(builderUserId)) {
+      let builderStanding: MemberStanding;
+      try {
+        builderStanding = (await memberStanding(session.tenantId, builderUserId.toLowerCase())).standing;
+      } catch (error) {
+        console.error("[website-sales.record-payment] builder standing could not be verified", {
+          tenantId:session.tenantId,
+          error:error instanceof Error ? error.message : String(error),
+        });
+        return NextResponse.json({
+          ok:false,
+          error:"member_check_failed",
+          message:"That builder couldn't be verified right now. Try again in a moment.",
+        },{status:503});
+      }
+      if (builderStanding === "deactivated") {
+        return NextResponse.json({ok:false,error:"member_deactivated",message:MEMBER_DEACTIVATED_MESSAGE},{status:422});
+      }
+    }
     const packageId = current.recommended_tier as WebsitePackageId;
     const automationIds = Array.isArray(current.automation_interests)
       ? current.automation_interests.filter((value): value is string => typeof value === "string")
@@ -1374,9 +1432,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
     const bookedFounder = typeof current.booked_founder === "string" && UUID.test(current.booked_founder) ? current.booked_founder : null;
     const founderUserId = closedByRep ? (bookedFounder ?? session.userId) : session.userId;
     const finalStage = "won";
+    // The opener and closer keep their ledger lines whatever their standing;
+    // a deactivated one is only not (re-)granted a seat on the deal.
+    const [liveOpener, liveCloser] = await Promise.all([
+      liveTeammate(session.tenantId, openerUserId, "record-payment"),
+      liveTeammate(session.tenantId, closerUserId, "record-payment"),
+    ]);
     const collaborators = [
-      openerUserId,
-      closerUserId,
+      liveOpener ? openerUserId : null,
+      liveCloser ? closerUserId : null,
       session.userId,
       ...normalizeCollaborators(current),
     ].filter((userId): userId is string => typeof userId === "string" && UUID.test(userId) && userId !== builderUserId)

@@ -113,6 +113,36 @@ export function isActiveMember(member: { deactivated_at?: string | null }): bool
 
 export type RosterOptions = { includeInactive?: boolean };
 
+/** The refusal every live-work route returns for a deactivated target. */
+export const MEMBER_DEACTIVATED_MESSAGE =
+  "That teammate has been deactivated and can't take new work. Choose an active teammate.";
+
+export type MemberStanding = "active" | "deactivated" | "not_member";
+
+/**
+ * Where one person stands in a workspace, for code about to hand them LIVE
+ * work — a new owner, a collaborator, a calendar invite, a notification.
+ * Before 2026-09-24 each route selected `auth_user_id` alone, so a deactivated
+ * teammate passed as a member everywhere. A person with several profile rows
+ * is active if any row is. A read error throws; the caller decides whether a
+ * failed check refuses (writes) or skips the person (best-effort notices).
+ */
+export async function memberStanding(
+  tenantId: string,
+  authUserId: string,
+): Promise<{ standing: MemberStanding; member: MemberRow | null }> {
+  const { data, error } = await getServiceSupabase()
+    .from("user_profiles")
+    .select(MEMBER_COLUMNS)
+    .eq("tenant_id", tenantId)
+    .eq("auth_user_id", authUserId);
+  if (error) throw dbError("memberStanding", error);
+  const rows = (data ?? []) as MemberRow[];
+  if (rows.length === 0) return { standing: "not_member", member: null };
+  const active = rows.find(isActiveMember);
+  return active ? { standing: "active", member: active } : { standing: "deactivated", member: rows[0] };
+}
+
 const MEMBER_COLUMNS =
   "id, auth_user_id, email, full_name, display_name, team_role, is_owner, admin_access, invited_by, joined_at, manager_user_id, deactivated_at, deactivated_by, deactivation_reason";
 
@@ -139,6 +169,11 @@ function nameFromMemberEmail(email: string): string {
 
 function memberPreferenceScore(member: MemberRow): number {
   return (
+    // An active row outranks every deactivated one, whatever its authority:
+    // the rosters filter to active AFTER this dedup, so a deactivated duplicate
+    // that won here would take the person's live row with it and they would
+    // vanish from every live list although they still work here.
+    (isActiveMember(member) ? 10_000 : 0) +
     (member.is_owner ? 1_000 : 0) +
     (member.team_role === "owner" ? 500 : 0) +
     (member.team_role === "admin" ? 400 : 0) +

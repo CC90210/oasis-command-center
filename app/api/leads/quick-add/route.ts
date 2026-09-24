@@ -16,7 +16,8 @@
  * step 0 as no_contact_method — chosen behavior 2026-07-20).
  *
  * Auth: any non-read-only tenant member (canWriteCrm), with OASIS creates
- * further restricted to the current CC + Adon assignment roster. Fail closed.
+ * further restricted to the assignment roster (getOasisPipelineAssignmentRoster:
+ * CC, Adon and ACTIVE reps; a deactivated teammate is refused). Fail closed.
  * Audited to lead_interactions.
  */
 
@@ -133,14 +134,18 @@ export async function POST(req: NextRequest) {
         error: error instanceof Error ? error.message : String(error),
       });
       return NextResponse.json(
-        { ok: false, error: "sales_roster_unavailable", message: "The CC + Adon assignment roster could not be verified." },
+        { ok: false, error: "sales_roster_unavailable", message: "The sales assignment roster could not be verified." },
         { status: 503 },
       );
     }
     const resolved = resolveAssignableTarget(roster, sess.userId);
     if (!resolved) {
       return NextResponse.json(
-        { ok: false, error: "target_not_on_sales_roster", message: "This pipeline cycle assigns new work only to CC or Adon." },
+        {
+          ok: false,
+          error: "target_not_on_sales_roster",
+          message: "New OASIS leads go only to CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+        },
         { status: 403 },
       );
     }

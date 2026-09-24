@@ -84,13 +84,19 @@ export type Viewer = {
  * lead read, so adding the badge costs one roster query per 90 seconds per
  * instance rather than one per request.
  *
- * Uses the SALES roster -- the same list the claim route validates an
- * assignment against -- not every profile on the tenant, so the badge can only
- * ever name somebody who could legitimately hold a lead.
+ * Uses the SALES roster, not every profile on the tenant, so the badge can
+ * only ever name somebody who held a lead as a rep.
+ *
+ * DEACTIVATED REPS INCLUDED (2026-09-24). A name is HISTORY, not a live
+ * target: a retired rep keeps assigned_to on their closed / won / in-delivery
+ * leads, and the active-only default blanked the badge on exactly those rows.
+ * This map only NAMES a holder -- it never decides who may be assigned or
+ * claim (the claim route checks the active assignment roster itself), so
+ * widening it hands nobody new work.
  */
 async function repNameMap(): Promise<ReadonlyMap<string, string>> {
   return memo(`web-leads:rep-names:${WEBDEV_TENANT_ID}`, TTL.LEADS, async () => {
-    const roster = await getOasisSalesRepRoster(WEBDEV_TENANT_ID);
+    const roster = await getOasisSalesRepRoster(WEBDEV_TENANT_ID, undefined, { includeInactive: true });
     const map = new Map<string, string>();
     for (const m of roster) {
       const id = (m.auth_user_id || "").trim().toLowerCase();

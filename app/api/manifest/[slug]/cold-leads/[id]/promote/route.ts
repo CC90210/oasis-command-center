@@ -10,7 +10,9 @@
  * NULL), the existing promoted_lead_id is returned without double-creating.
  *
  * Body: { assignee_user_id?: string } (required for an OASIS promotion; must
- * resolve to the current CC + Adon assignment roster)
+ * resolve to the current CC + Adon assignment roster. Elsewhere optional, but
+ * when given it must be an ACTIVE member of the tenant: a promoted lead is new
+ * work, so a deactivated teammate is refused.)
  *
  * Response: { ok: true, promoted_lead_id: string, was_already_promoted: boolean }
  *
@@ -32,7 +34,11 @@ import {
   stageForWebsiteSalesLead,
 } from "@/lib/leads/canonical-lead-fields";
 import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
-import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import {
+  MEMBER_DEACTIVATED_MESSAGE,
+  getOasisPipelineAssignmentRoster,
+  memberStanding,
+} from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -160,6 +166,37 @@ export async function POST(
       promoted_lead_id: lead.promoted_lead_id,
       was_already_promoted: true,
     });
+  }
+
+  // Non-OASIS assignee: any UUID used to become assigned_to. It must be an
+  // active member of THIS tenant (2026-09-24). Checked after the idempotent
+  // return above, which writes nothing, and before the insert below.
+  if (!isOasisPromotion && assigneeUserId) {
+    let standing;
+    try {
+      standing = (await memberStanding(context.tenantId, assigneeUserId)).standing;
+    } catch (error) {
+      console.error("[cold-leads.promote] assignee standing could not be verified", {
+        tenantId: context.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "member_check_failed", message: "That teammate couldn't be verified right now. Try again in a moment." },
+        { status: 503 },
+      );
+    }
+    if (standing === "not_member") {
+      return NextResponse.json(
+        { ok: false, error: "not_a_tenant_member", message: "That user isn't on this tenant." },
+        { status: 400 },
+      );
+    }
+    if (standing === "deactivated") {
+      return NextResponse.json(
+        { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE },
+        { status: 400 },
+      );
+    }
   }
 
   // Create a tenant_records lead row from the cold lead's data.

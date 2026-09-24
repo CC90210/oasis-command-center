@@ -9,6 +9,7 @@ import {
   isTrueAdminRole,
   getSessionContext,
   getTenantMembers,
+  isActiveMember,
   removeMember,
   setMemberRole,
   tenantSlugFor,
@@ -198,10 +199,15 @@ async function calendarReadiness(tenantId: string, userId: string | null, profil
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const ctx = await getSessionContext();
   if (!ctx) return bad(401, "unauthorized");
-  const members = await getTenantMembers(ctx.tenantId);
+  // Active teammates only, unless the caller opts in with ?include_inactive=1.
+  // The lead drawer's owner and collaborator controls opt in so a deactivated
+  // teammate still attached to a lead renders by name (flagged `active: false`,
+  // never offered as a new target); every other caller keeps the live roster.
+  const includeInactive = new URL(req.url).searchParams.get("include_inactive") === "1";
+  const members = await getTenantMembers(ctx.tenantId, { includeInactive });
   const canManage = canManageTeam(ctx.teamRole, ctx.adminAccess);
   // Workspace fallback (2026-08-25): when the OASIS workspace Calendar
   // credentials are configured, a host WITHOUT a personal work connection can
@@ -233,7 +239,11 @@ export async function GET() {
   const membersWithCalendar = await Promise.all(
     members.map(async (member) => ({
       member,
-      readiness: await calendarReadiness(ctx.tenantId, member.auth_user_id, member.email),
+      // A deactivated teammate cannot host a booking, so their token is never
+      // spent on a Google probe; the null user id returns the not-connected shape.
+      readiness: isActiveMember(member)
+        ? await calendarReadiness(ctx.tenantId, member.auth_user_id, member.email)
+        : await calendarReadiness(ctx.tenantId, null, null),
     })),
   );
   return NextResponse.json({
@@ -259,6 +269,8 @@ export async function GET() {
       team_role: m.team_role,
       is_owner: m.is_owner,
       joined_at: m.joined_at,
+      // Always true unless the caller asked for ?include_inactive=1.
+      active: isActiveMember(m),
       // ═══ THIS HOST'S OWN CONNECTION, AND NOTHING ELSE ═══════════════════
       //
       // This used to be `readiness.calendar_connected || workspaceFallbackReady`.

@@ -13,13 +13,17 @@
  * check being deleted, but not a check being made wrong. This is the half that
  * can be exercised for real.
  *
- * NOT exported as "may X assign to Y": the two callers differ on self-assignment
- * (claim lets a rep take a lead for themselves without consulting the roster;
- * a sheet has no such exemption). That difference is deliberate and stays with
- * each route. This answers membership only.
+ * NOT exported as "may X assign to Y": WHO may send an assignment differs per
+ * route (claim lets a rep claim for themselves and only an admin or manager
+ * name someone else; a sheet is admin or manager only) and stays with each
+ * route. Neither exempts a self-claim from the roster: the claim route runs
+ * every claim, a rep's own included, through resolveAssignableTarget against
+ * getOasisPipelineAssignmentRoster (CC, Adon and ACTIVE reps), so a
+ * deactivated rep cannot take a lead for themselves either. This answers
+ * membership only.
  */
 
-/** The shape both callers already have from getOasisSalesRepRoster. */
+/** The shape both callers already have from getOasisPipelineAssignmentRoster. */
 export type RosterMember = { auth_user_id?: string | null };
 
 /**

@@ -76,8 +76,10 @@ assert.match(page, /viewerMode=\{managerCoachingView \? "coaching" : "operate"\}
 // managers owned zero leads, so that was their entire pipeline.
 assert.match(
   page,
-  /const managerWorksTeamBook[\s\S]*?readableRepUserIds\.length > 0/,
-  "a manager's operate rights must key on the server-resolved roster, not personal ownership",
+  // The ACTIVE roster (2026-09-24): a deactivated rep's kept deal stays
+  // readable (readableRepUserIds) but opens in the coaching view.
+  /const managerWorksTeamBook[\s\S]*?activeRepUserIds\.length > 0/,
+  "a manager's operate rights must key on the server-resolved active roster, not personal ownership",
 );
 assert.match(
   page,

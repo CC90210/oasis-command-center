@@ -211,8 +211,8 @@ export async function POST(
    * sourcing leads and need to enter them, assigned to whoever found them.
    *
    * Deliberately NARROW. This first gate admits only roles that already work
-   * the OASIS pipeline; the assignment-roster gate below then limits the
-   * current cycle to CC and Adon. Every other entity and workspace still
+   * the OASIS pipeline; the assignment-roster gate below then limits owners
+   * to CC, Adon and active reps. Every other entity and workspace still
    * requires an admin because this is the generic record endpoint.
    */
   const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
@@ -246,7 +246,8 @@ export async function POST(
    * doors share -- this route and rep-only /api/leads/quick-add. Every new lead
    * starts in Assigned, lifecycle fields remain server-owned, and the planner
    * stamps the motion/program/ownership fields both boards read. Every owner is
-   * resolved against the current CC + Adon assignment roster before planning.
+   * resolved against the assignment roster (getOasisPipelineAssignmentRoster:
+   * CC, Adon and ACTIVE reps) before planning; a deactivated teammate is refused.
    *
    * Before 2026-09-10 this route accepted only `researched` -- a stage the board
    * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
@@ -294,7 +295,7 @@ export async function POST(
         {
           ok: false,
           error: "sales_roster_unavailable",
-          message: "The CC + Adon assignment roster could not be verified, so the lead was not saved. Try again in a moment.",
+          message: "The sales assignment roster could not be verified, so the lead was not saved. Try again in a moment.",
         },
         { status: 503 },
       );
@@ -308,8 +309,8 @@ export async function POST(
           ok: false,
           error: "target_not_on_sales_roster",
           message: r.is_admin
-            ? "Choose CC or Adon for this pipeline cycle."
-            : "This pipeline cycle assigns new work only to CC or Adon.",
+            ? "Choose CC, Adon or an active sales rep. A deactivated teammate cannot take new work."
+            : "New OASIS leads go only to CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
           ...(r.is_admin ? { fields: ["assigned_to"] } : {}),
         },
         { status: r.is_admin ? 422 : 403 },

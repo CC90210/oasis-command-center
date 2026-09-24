@@ -10,7 +10,13 @@
  *   - an answered, closed or not-yet-due ticket is never flagged;
  *   - downgrading severity clears a stale breach, and a genuine new breach
  *     under the new target alerts again (once);
- *   - a failed alert is recorded on the ticket and fails the run.
+ *   - a failed alert is recorded on the ticket and fails the run;
+ *   - a failed alert is retried on the NEXT pass, on the failed lane only,
+ *     exactly once even with overlapping passes, and never for a ticket
+ *     answered since;
+ *   - a retry whose pass dies before recording its outcome keeps the FAILED
+ *     text on the ticket (marked "retrying"), is left alone by an overlapping
+ *     pass, and is sent exactly once by the pass after the lease runs out.
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
@@ -136,6 +142,151 @@ async function main() {
     assert.equal(r.alert_failures[0].ticket_id, t.id);
     assert.match(String(await col(t.id, "sla_breach_alert_status")), /email: FAILED \(smtp down\)/);
     emailOk = true;
+  });
+
+  // Retries of a failed breach alert. Close every earlier fixture first so the
+  // counts below are this ticket's alone ("mail down" above is one to retry).
+  await db.execute("UPDATE support_tickets SET status = 'closed' WHERE status <> 'closed'");
+  const lanes = { telegram: true, email: false };
+  const lanesSent: string[] = [];
+  const flaky = {
+    ...deps,
+    telegram: async () => {
+      lanesSent.push("telegram");
+      return lanes.telegram ? { ok: true } : { ok: false, reason: "telegram down" };
+    },
+    email: async () => {
+      lanesSent.push("email");
+      return lanes.email ? { ok: true } : { ok: false, reason: "smtp down" };
+    },
+  };
+  await check("a failed breach alert stays eligible, is re-sent next pass on the failed lane only, then never again", async () => {
+    const t = (await store.createTicket(db, { ...base, title: "retry me", severity: "critical" }, at("2026-09-24T14:00:00.000Z"))).ticket;
+    const p1 = await runSlaCheck(db, flaky, at("2026-09-24T15:05:00.000Z"));
+    assert.equal(p1.alerted, 1, JSON.stringify(p1));
+    assert.equal(p1.retried, 0, "a pass never retries its own failure");
+    assert.deepEqual(lanesSent, ["telegram", "email"]);
+    assert.equal(p1.alert_failures.length, 1);
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: sent; email: FAILED (smtp down)");
+    assert.ok(await col(t.id, "sla_breach_alert_at"), "the claim is kept; the FAILED status is what makes it eligible");
+
+    lanes.email = true;
+    lanesSent.length = 0;
+    const p2 = await runSlaCheck(db, flaky, at("2026-09-24T15:20:00.000Z"));
+    assert.equal(p2.retried, 1, JSON.stringify(p2));
+    assert.equal(p2.alerted, 0);
+    assert.deepEqual(p2.alert_failures, []);
+    assert.deepEqual(lanesSent, ["email"], "exactly one send: the email; the Telegram they already have is not repeated");
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: sent; email: sent");
+
+    lanesSent.length = 0;
+    const p3 = await runSlaCheck(db, flaky, at("2026-09-24T15:35:00.000Z"));
+    assert.equal(p3.retried, 0);
+    assert.equal(p3.alerted, 0);
+    assert.deepEqual(lanesSent, [], "a delivered alert is never sent again");
+    await store.updateTicket(db, t.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, at("2026-09-24T15:36:00.000Z"));
+  });
+  await check("both lanes failed: both are retried, and overlapping passes retry them once", async () => {
+    lanes.telegram = false;
+    lanes.email = false;
+    lanesSent.length = 0;
+    const t = (await store.createTicket(db, { ...base, title: "all down", severity: "critical" }, at("2026-09-24T16:00:00.000Z"))).ticket;
+    const p1 = await runSlaCheck(db, flaky, at("2026-09-24T17:05:00.000Z"));
+    assert.equal(p1.alert_failures.length, 1);
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: FAILED (telegram down); email: FAILED (smtp down)");
+
+    lanes.telegram = true;
+    lanes.email = true;
+    lanesSent.length = 0;
+    const [a, b] = await Promise.all([
+      runSlaCheck(db, flaky, at("2026-09-24T17:20:00.000Z")),
+      runSlaCheck(db, flaky, at("2026-09-24T17:20:00.000Z")),
+    ]);
+    assert.equal(a.retried + b.retried, 1, JSON.stringify({ a, b }));
+    assert.deepEqual([...lanesSent].sort(), ["email", "telegram"], "one telegram + one email, not two of each");
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: sent; email: sent");
+    await store.updateTicket(db, t.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, at("2026-09-24T17:21:00.000Z"));
+  });
+  await check("a failed breach alert on a ticket answered since is not retried", async () => {
+    lanes.email = false;
+    lanesSent.length = 0;
+    const t = (await store.createTicket(db, { ...base, title: "answered after", severity: "critical" }, at("2026-09-24T18:00:00.000Z"))).ticket;
+    await runSlaCheck(db, flaky, at("2026-09-24T19:05:00.000Z"));
+    assert.match(String(await col(t.id, "sla_breach_alert_status")), /email: FAILED/);
+    await store.addTicketComment(db, t.id, { body: "On it", is_internal: false, author_type: "team", author: { userId: "u-cc", name: "CC" } }, at("2026-09-24T19:10:00.000Z"));
+    lanes.email = true;
+    lanesSent.length = 0;
+    const p2 = await runSlaCheck(db, flaky, at("2026-09-24T19:20:00.000Z"));
+    assert.equal(p2.retried, 0);
+    assert.deepEqual(lanesSent, []);
+    assert.match(String(await col(t.id, "sla_breach_alert_status")), /email: FAILED/, "the failure stays readable on the ticket");
+  });
+  await check("a retry whose pass dies before recording keeps its FAILED text, and the next pass sends it once", async () => {
+    lanes.telegram = true;
+    lanes.email = false;
+    lanesSent.length = 0;
+    const t = (await store.createTicket(db, { ...base, title: "dies mid-retry", severity: "critical" }, at("2026-09-24T20:00:00.000Z"))).ticket;
+    await runSlaCheck(db, flaky, at("2026-09-24T21:05:00.000Z"));
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: sent; email: FAILED (smtp down)");
+
+    // Pass 2: the mailbox is still down AND the outcome write fails.
+    const outcomeWriteFails = Object.assign(Object.create(db), {
+      execute: async (stmt: { sql: string; args?: unknown[] }) => {
+        if (stmt.sql.startsWith("UPDATE support_tickets SET sla_breach_alert_status = ?")) throw new Error("transient write failure");
+        return db.execute(stmt as never);
+      },
+    }) as typeof db;
+    const logged: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    lanesSent.length = 0;
+    let p2: Awaited<ReturnType<typeof runSlaCheck>>;
+    try {
+      p2 = await runSlaCheck(outcomeWriteFails, flaky, at("2026-09-24T21:20:00.000Z"));
+    } finally {
+      console.error = realError;
+    }
+    assert.equal(p2.retried, 1, JSON.stringify(p2));
+    assert.deepEqual(lanesSent, ["email"]);
+    assert.deepEqual(p2.alert_failures.map((f) => f.ticket_id), [t.id], "the pass fails loudly, not green");
+    assert.match(String(p2.alert_failures[0].error), /transient write failure/);
+    assert.ok(logged.some((l) => l.includes("[delivery.sla_cron]") && l.includes(t.id)), logged.join("\n"));
+    assert.equal(
+      await col(t.id, "sla_breach_alert_status"),
+      "retrying; last attempt: telegram: sent; email: FAILED (smtp down)",
+      "the failure is still readable, not blanked",
+    );
+
+    // An overlapping pass inside the lease leaves the retry in flight alone.
+    lanes.email = true;
+    lanesSent.length = 0;
+    const overlap = await runSlaCheck(db, flaky, at("2026-09-24T21:25:00.000Z"));
+    assert.equal(overlap.retried, 0, JSON.stringify(overlap));
+    assert.deepEqual(lanesSent, []);
+
+    // Pass 3, the next scheduled one: the lease has run out and the mailbox is back.
+    let statusWhileSending: unknown;
+    const watching = {
+      ...flaky,
+      email: async () => {
+        statusWhileSending = await col(t.id, "sla_breach_alert_status");
+        return flaky.email();
+      },
+    };
+    const p3 = await runSlaCheck(db, watching, at("2026-09-24T21:35:00.000Z"));
+    assert.equal(p3.retried, 1, JSON.stringify(p3));
+    assert.deepEqual(p3.alert_failures, []);
+    assert.deepEqual(lanesSent, ["email"], "exactly one send: the email that never went, not the Telegram again");
+    assert.match(String(statusWhileSending), /^retrying; last attempt: .*email: FAILED \(smtp down\)$/, "readable while it sends");
+    assert.equal(await col(t.id, "sla_breach_alert_status"), "telegram: sent; email: sent");
+
+    // Pass 4: nothing left to send.
+    lanesSent.length = 0;
+    const p4 = await runSlaCheck(db, flaky, at("2026-09-24T21:50:00.000Z"));
+    assert.equal(p4.retried, 0);
+    assert.equal(p4.alerted, 0);
+    assert.deepEqual(lanesSent, []);
+    await store.updateTicket(db, t.id, { status: "closed" }, { userId: "u-cc", name: "CC" }, at("2026-09-24T21:51:00.000Z"));
   });
   await check("a client reply reopens a resolved ticket; a team reply does not reopen", async () => {
     const t = (await store.createTicket(db, { ...base, title: "reopen", severity: "low" }, T0)).ticket;

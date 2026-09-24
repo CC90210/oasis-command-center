@@ -10,7 +10,8 @@
  *   attacker-controlled text inside an OASIS-branded email to an arbitrary
  *   inbox. The acknowledgement therefore carries the ticket number, the
  *   category, the priority and a sanitised first name — never the title or the
- *   description.
+ *   description. When the attached file was not kept it says so in a fixed
+ *   sentence, never naming the file (the name is sender-typed too).
  */
 import { escapeTelegramHtml } from "@/lib/notify/telegram-format";
 import {
@@ -125,6 +126,9 @@ export function newTicketFounderEmail(t: MessageTicket, url: string): Email {
 
 export function clientAckEmail(t: MessageTicket): Email {
   const name = safeGreetingName(t.client_name);
+  // The public form's thank-you screen cannot say a file was refused, so this
+  // email is where the client learns it.
+  const fileNotKept = (t.attachments ?? []).some((a) => a.error);
   return {
     subject: `We received your request (${t.ticket_number})`,
     body: [
@@ -135,6 +139,12 @@ export function clientAckEmail(t: MessageTicket): Email {
       `Category: ${TICKET_CATEGORY_LABELS[t.category]}`,
       `Priority: ${TICKET_SEVERITY_LABELS[t.severity]}`,
       "",
+      ...(fileNotKept
+        ? [
+            "We could not keep the file you attached. We accept PDF, PNG, JPEG or WebP files up to 10 MB: reply to this email with it attached and we will add it to your ticket.",
+            "",
+          ]
+        : []),
       `You will hear from a person on the OASIS team within ${slaTargetPhrase(t.severity)}.`,
       `If you need to add anything, reply to this email and keep ${t.ticket_number} in the subject line.`,
       "",

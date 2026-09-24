@@ -581,12 +581,13 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /memberDirectoryPromise = managerTeamRead\s*\?\s*Promise\.resolve\(\{\s*names: managerRepRoster[^}]*\}\)\s*:\s*buildMemberDirectory\(tenantId\)/.test(pipelineCode) &&
-    /session\.ok && pipelineAdmin\s*\?\s*new Map\(\[\.\.\.memberNameMap\]\.filter\(\(\[id\]\) => activeMemberIds\.has\(id\)\)\)\s*:\s*managerRepRoster/.test(pipelineCode),
+  /memberDirectoryPromise = managerTeamRead\s*\?\s*Promise\.resolve\(\{\s*names: managerRepRoster,\s*activeIds: managerActiveRepIds\s*\}\)\s*:\s*buildMemberDirectory\(tenantId\)/.test(pipelineCode) &&
+    /new Map\(\s*\[\.\.\.\(session\.ok && pipelineAdmin \? memberNameMap : managerRepRoster\)\]\.filter\(\(\[id\]\) =>\s*activeMemberIds\.has\(id\),?\s*\)/.test(pipelineCode),
   // 2026-09-24: admins get every ACTIVE member as a filter chip (a deactivated
-  // teammate keeps their name on old rows but loses the chip); managers still
-  // get only the sales-rep roster.
-  "admins get the active member filter while managers get only the sales-rep roster",
+  // teammate keeps their name on old rows but loses the chip); managers get
+  // only the ACTIVE sales-rep roster, while their board scope and names keep
+  // deactivated reports (tests/manager-deactivated-report-history.test.ts).
+  "admins get the active member filter while managers get only the active sales-rep roster",
 );
 
 /* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
@@ -757,7 +758,7 @@ assert.ok(
   "the commission API must reject authenticated personas with no commission capability",
 );
 assert.ok(
-  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId)") &&
+  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true })") &&
     commissionApi.includes('persona === "manager"') &&
     commissionApi.includes("repUserIds"),
   "a manager commission ledger must use a server-resolved direct-report scope",

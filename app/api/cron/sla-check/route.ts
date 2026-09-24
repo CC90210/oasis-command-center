@@ -3,8 +3,9 @@
  *
  * Guarded by lib/cron-auth.ts (CRON_SECRET bearer + platform proof). Flags
  * first-response breaches, alerts the founders ONCE per breach (Telegram
- * operator lane + email from the OASIS mailbox), and reconciles support-form
- * intake. See lib/delivery/sla-cron.ts.
+ * operator lane + email from the OASIS mailbox; a lane that failed is retried
+ * on the next run), and reconciles support-form intake. See
+ * lib/delivery/sla-cron.ts.
  *
  * Before 2026-09-24 this inserted into agent_events with a column that table
  * does not have (agent_name), against a support_tickets table that did not
@@ -13,9 +14,10 @@
  * Returns 500 when a breach alert failed to send, so the cron runner's own
  * failure reporting sees it; the per-ticket reason is on each ticket.
  *
- * NOT YET SCHEDULED: the schedule lives in workers/oasis-cc-cron/src/index.ts,
- * outside this change. Add a "/api/cron/sla-check" entry there on a 15-minute
- * schedule ("0,15,30,45 * * * *") — see docs/DELIVERY_AND_SUPPORT.md.
+ * SCHEDULED every 15 minutes, in all three places a cron schedule lives:
+ * config/cron-registry.json, workers/oasis-cc-cron/src/index.ts, and the
+ * 15-minute group in .github/workflows/cron-driver.yml. A schedule change
+ * touches all three.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
@@ -35,9 +37,11 @@ async function handle(req: NextRequest) {
   }
   try {
     const result = await runSlaCheck(getTursoClient(), defaultNotifyDeps(), new Date());
-    // Alert failures fail the run once (each breach is claimed once). An
-    // unparseable orphan submission is reported in the body and logged, but
-    // would re-fail every run for a week, so it does not flip the status.
+    // Alert failures fail the run, and every run after it until the retry
+    // goes through or the ticket is answered or closed: a dead alert channel
+    // stays red. An unparseable orphan submission is reported in the body and
+    // logged, but would re-fail every run for a week, so it does not flip the
+    // status.
     const ok = result.alert_failures.length === 0;
     return NextResponse.json({ ok, ...result }, { status: ok ? 200 : 500 });
   } catch (err) {

@@ -2,10 +2,25 @@
  * POST /api/web-leads/claim    — take leads into the caller's own book
  * POST /api/web-leads/claim?release=1 — put them back in the pool
  *
- * CURRENT CYCLE: only CC or Adon may receive a claim. A sales-capable account
- * may still browse, but assignment resolves against the separate founder
- * destination roster below. Managers/admins can name one of those destinations;
- * every other target fails closed before the claim operation runs.
+ * WHO MAY RECEIVE A CLAIM (2026-09-24): CC, Adon, and every ACTIVE sales rep --
+ * exactly getOasisPipelineAssignmentRoster(), the same list the Assign picker
+ * reads. Until that day it was CC + Adon only. When the sales team was retired
+ * CC kept Schneur (builder) and David (opener) as working reps, so an active rep
+ * may now self-claim from the pool and a founder may assign a pool lead to one.
+ * A deactivated teammate (user_profiles.deactivated_at set) is off that roster
+ * and is refused, as a self-claim and as an assignTo target alike. Every target
+ * off the roster fails closed before the claim operation runs.
+ *
+ * Deactivation normally ends the session before this route is reached:
+ * deactivateMember (lib/team-activation.ts) bans the login and bumps
+ * session_version, lib/turso-auth.ts verifySessionAgainstDb refuses both, and
+ * the caller gets the 401 below. The roster check is defense in depth for a
+ * session that still resolves: a login left open because the person is still
+ * active in another workspace, a ban step that failed after the profile was
+ * marked, or deactivated_at set directly in the database.
+ *
+ * Sending assignTo at all needs an admin or a manager -- even when it names the
+ * caller. A rep self-claims by leaving assignTo out.
  *
  * Auth, in the same order every other route in this feature uses: unresolved
  * caller -> 401 before any read. Caller in a different tenant -> 403. libSQL
@@ -97,10 +112,12 @@ export async function POST(req: NextRequest) {
   // bespoke "assign" implementation is how those rules drift apart.
   //
   // Two gates, because assignment moves commission:
-  //   - only an admin or a manager may name someone else. A rep must not be
-  //     able to push work onto a colleague, or quietly take a lead off one.
-  //   - the target must be on the server-resolved CC + Adon assignment roster,
-  //     so this cannot park a lead on an arbitrary id someone typed.
+  //   - only an admin or a manager may send assignTo, whoever it names (the
+  //     caller's own id included). A rep must not be able to push work onto a
+  //     colleague, or quietly take a lead off one; a rep claims by omitting it.
+  //   - the target must be on the server-resolved assignment roster (CC, Adon
+  //     and active reps), so this cannot park a lead on an arbitrary id someone
+  //     typed, or on a rep who has been deactivated.
   const assignToRaw = (body as { assignTo?: unknown })?.assignTo;
   let claimFor = session.userId;
   if (typeof assignToRaw === "string" && assignToRaw.trim()) {
@@ -117,10 +134,13 @@ export async function POST(req: NextRequest) {
     claimFor = target;
   }
 
-  // Current-cycle ownership is deliberately founder-only. This is separate
-  // from the manager read roster: adding founders to that roster would widen
-  // cross-rep visibility, while skipping this check would let any sales seat
-  // self-claim outside the CC+Adon boundary.
+  // Every claim, a self-claim included, must land on the assignment roster:
+  // CC, Adon and ACTIVE reps. This is separate from the manager read roster
+  // (getOasisSalesRepRoster): adding founders to that one would widen cross-rep
+  // visibility. Skipping this check would let an admin who is neither a founder
+  // nor a rep take new work, and would leave a deactivated rep whose session
+  // still resolves (see the header) with nothing between them and the pool. A
+  // normal deactivation is refused earlier, at the session check.
   let roster;
   try {
     roster = await getOasisPipelineAssignmentRoster(session.tenantId);
@@ -134,7 +154,11 @@ export async function POST(req: NextRequest) {
   const resolved = resolveAssignableTarget(roster, claimFor);
   if (!resolved) {
     return NextResponse.json(
-      { ok: false, error: "target_not_on_sales_roster", message: "This cycle assigns pipeline work only to CC or Adon." },
+      {
+        ok: false,
+        error: "target_not_on_sales_roster",
+        message: "Only CC, Adon or an active sales rep can receive these leads. A deactivated teammate cannot take new work.",
+      },
       { status: 400 },
     );
   }

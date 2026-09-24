@@ -13,7 +13,10 @@
  * sent (store.claimNotification) and its outcome recorded after. A retry, a
  * duplicate after() or the cron re-driving a stuck ticket all find the claim
  * and send nothing. The outcome string is shown on the ticket page, so "the
- * email never went" is visible where the ticket is, not only in a log.
+ * email never went" is visible where the ticket is, not only in a log. A
+ * breach alert that FAILED on a lane is the one that tries again: the next SLA
+ * pass takes it back and re-sends that lane only (store.reclaimFailedBreachAlerts),
+ * and the FAILED text stays on the ticket until a send records otherwise.
  *
  * Senders are injected (NotifyDeps) so tests exercise all of this with fakes.
  */
@@ -185,15 +188,30 @@ export async function emailClientReply(
   return status;
 }
 
-/** Alert the founders about a breach whose claim this caller already holds. */
-export async function alertSlaBreach(db: Client, ticketId: string, deps: NotifyDeps, now: Date): Promise<string | null> {
+/**
+ * Alert the founders about a breach whose claim this caller already holds.
+ * `previousStatus` is the outcome of an earlier attempt that FAILED on a lane
+ * (store.reclaimFailedBreachAlerts): a lane it records as sent is not sent
+ * again, so retrying a dead mailbox does not repeat the Telegram message.
+ */
+export async function alertSlaBreach(
+  db: Client,
+  ticketId: string,
+  deps: NotifyDeps,
+  now: Date,
+  previousStatus: string | null = null,
+): Promise<string | null> {
   const ticket = await getTicket(db, SYSTEM_READER, ticketId);
   if (!ticket) return null;
   const url = ticketUrl(deps, ticketId);
   const mail = slaBreachFounderEmail(ticket, url, now);
+  // The status is "telegram: <outcome>; email: <outcome>" and a sent lane has
+  // no reason text after it, so these anchors cannot match inside a reason.
+  const telegramSent = previousStatus?.startsWith("telegram: sent;") ?? false;
+  const emailSent = previousStatus?.endsWith("; email: sent") ?? false;
   const [tg, em] = await Promise.all([
-    settle(deps.telegram(slaBreachTelegram(ticket, url, now))),
-    emailFounders(deps, mail.subject, mail.body, `support-breach:${ticketId}:${ticket.sla_target}`),
+    telegramSent ? { ok: true } : settle(deps.telegram(slaBreachTelegram(ticket, url, now))),
+    emailSent ? { ok: true } : emailFounders(deps, mail.subject, mail.body, `support-breach:${ticketId}:${ticket.sla_target}`),
   ]);
   const status = `${outcome("telegram", tg)}; ${outcome("email", em)}`;
   if (!tg.ok || !em.ok) console.error("[delivery.notify.sla_breach]", { ticket: ticket.ticket_number, status });

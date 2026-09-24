@@ -8,7 +8,8 @@
  * lib/lead-scope recordMatchesViewer.
  *
  * Data flow:
- *   - GET /api/team/members → dropdown options
+ *   - GET /api/team/members?include_inactive=1 → chip names + dropdown options
+ *     (deactivated teammates are named on chips, never offered to add)
  *   - POST /api/leads/[id]/collaborators { add | remove } → updates the array
  *
  * Only the owner/admin can edit (the endpoint enforces it). Renders current
@@ -24,7 +25,30 @@ type Member = {
   auth_user_id: string;
   full_name: string | null;
   display_name: string | null;
+  /** false for a deactivated teammate (only sent with ?include_inactive=1). */
+  active?: boolean;
 };
+
+/** Chip label for a collaborator id. A deactivated teammate keeps their name,
+ *  marked "(inactive)"; only an id matching no member falls back to the UUID. */
+export function collaboratorName(members: Member[] | null, id: string): string {
+  const m = members?.find((x) => x.auth_user_id.toLowerCase() === id);
+  if (!m) return id.slice(0, 8);
+  const name = m.display_name || m.full_name || id.slice(0, 8);
+  return m.active === false ? `${name} (inactive)` : name;
+}
+
+/** Members eligible to ADD: active, not the owner, not already a collaborator. */
+export function addableCollaborators(
+  members: Member[] | null,
+  owner: string,
+  collabs: string[],
+): Member[] {
+  return (members || []).filter((m) => {
+    const id = m.auth_user_id.toLowerCase();
+    return m.active !== false && id !== owner && !collabs.includes(id);
+  });
+}
 
 export function CollaboratorsControl({
   recordId,
@@ -49,7 +73,8 @@ export function CollaboratorsControl({
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/team/members", { cache: "no-store" })
+    // include_inactive: a deactivated collaborator's chip still shows their name.
+    fetch("/api/team/members?include_inactive=1", { cache: "no-store" })
       .then(async (r) => {
         if (!r.ok) return;
         const body = (await r.json().catch(() => ({}))) as { ok?: boolean; members?: Member[] };
@@ -65,18 +90,10 @@ export function CollaboratorsControl({
   }, []);
 
   const owner = (ownerAssignedTo || "").toLowerCase();
-  const nameFor = (id: string) => {
-    const m = members?.find((x) => x.auth_user_id.toLowerCase() === id);
-    return m?.display_name || m?.full_name || id.slice(0, 8);
-  };
+  const nameFor = (id: string) => collaboratorName(members, id);
 
-  // Members eligible to ADD: not the owner, not already a collaborator.
   const addable = useMemo(
-    () =>
-      (members || []).filter((m) => {
-        const id = m.auth_user_id.toLowerCase();
-        return id !== owner && !collabs.includes(id);
-      }),
+    () => addableCollaborators(members, owner, collabs),
     [members, owner, collabs],
   );
 
