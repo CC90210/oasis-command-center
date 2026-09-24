@@ -32,9 +32,6 @@ export function ProfileEditor({
     (profile as { personal_phone?: string | null }).personal_phone || "",
   );
   const [brand, setBrand] = useState(profile.brand);
-  const [mrrTarget, setMrrTarget] = useState(String(profile.mrr_target_usd));
-  const [mrrCurrent, setMrrCurrent] = useState(String(profile.mrr_current_usd));
-  const [mrrDate, setMrrDate] = useState(profile.mrr_target_date || "");
   const [manifesto, setManifesto] = useState(profile.manifesto || "");
   const tenantBase = (tenantAgents || []).map(resolveAgentKey);
   const availableAgentKeys = Array.from(
@@ -63,9 +60,6 @@ export function ProfileEditor({
             ? {}
             : {
                 brand,
-                mrr_target_usd: Number(mrrTarget) || 0,
-                mrr_current_usd: Number(mrrCurrent) || 0,
-                mrr_target_date: mrrDate || null,
                 manifesto: manifesto || null,
                 ...(primaryAgent ? { primary_agent: primaryAgent } : {}),
               }),
@@ -128,15 +122,9 @@ export function ProfileEditor({
                 This list comes from Workspace agents below. Enable or remove an agent there once for the whole team.
               </p>
             </Field>
-            <Field label="MRR target (USD)">
-              <input className="input" type="number" value={mrrTarget} onChange={(e) => setMrrTarget(e.target.value)} />
-            </Field>
-            <Field label="MRR current (USD)">
-              <input className="input" type="number" value={mrrCurrent} onChange={(e) => setMrrCurrent(e.target.value)} />
-            </Field>
-            <Field label="MRR target date">
-              <input className="input" type="date" value={mrrDate} onChange={(e) => setMrrDate(e.target.value)} />
-            </Field>
+            {/* MRR fields removed 2026-09-24: MRR is read live from Stripe and the
+                goal is set under Settings → Revenue goal. A typed number here is
+                how Today showed $6,263 while Stripe held $72. */}
           </>
         )}
         <Field label="Email">

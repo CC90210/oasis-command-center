@@ -51,6 +51,7 @@ import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerP
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
 import { SalesTeamOperationsPanel } from "@/components/settings/SalesTeamOperationsPanel";
+import { RevenueGoalPanel } from "@/components/settings/RevenueGoalPanel";
 import { TOOL_DEFINITIONS } from "@/lib/cloud-tool-runner";
 import { chatAgentKeys } from "@/lib/agent-personas";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
@@ -330,6 +331,20 @@ export async function SettingsContent({
               <p className="text-sm text-fg-muted leading-relaxed">
                 Add teammates, choose their job role, review pending invitations, and revoke access from the dedicated Team page.
               </p>
+            </SettingsSection>
+          )}
+
+          {canManageTenant && oasisSalesWorkspace && (
+            <SettingsSection
+              title="Revenue goal"
+              subtitle="The one goal Today counts down to: money collected in a period, computed from the Finances ledger. MRR is never typed — it is read live from Stripe."
+            >
+              <RevenueGoalPanel
+                canEdit={
+                  !!teamProfile &&
+                  (teamProfile.is_owner === true || teamProfile.team_role === "owner" || teamProfile.team_role === "admin")
+                }
+              />
             </SettingsSection>
           )}
 

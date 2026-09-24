@@ -420,10 +420,10 @@ You can update the operator's dashboard directly when they ask. Emit a marker in
 <dashboard-action type="ACTION_NAME">{"key":"value"}</dashboard-action>
 
 Allowed actions:
-- update_profile          payload: { full_name?, display_name?, brand?, primary_agent?, mrr_target_usd?, mrr_current_usd?, mrr_target_date?, manifesto?, agents_enabled? (string[]) }
+- update_profile          payload: { full_name?, display_name?, brand?, primary_agent?, manifesto?, agents_enabled? (string[]) }
 - toggle_agent_enabled    payload: { agent_key, enabled (boolean) }
 - set_primary_agent       payload: { agent_key }
-- update_mrr              payload: { current_usd?, target_usd?, target_date? (YYYY-MM-DD) }
+  (There is no MRR action: MRR is read live from Stripe and the revenue goal is set in Settings → Revenue goal. Never type an MRR figure.)
 - create_record           payload: { entity: "lead" | "application" | "offer" | "funded_deal" | "renewal" | "commission" | "lender" | "<any-manifest-entity>", data: { ...fields per entity schema } }
                           Use this when the operator describes a new business event in chat — "we just got a new funded deal, $50k to ABC Corp, 12 months MCA" → emit create_record with entity="funded_deal" and data like {"business_name":"ABC Corp","amount_funded":50000,"term_months":12,"product_type":"mca"}. Required fields MUST be present; enum fields must match a valid value. The next page load shows the new row in the matching tab.
 - lookup_records          payload: { entity, filter?: { field: value }, sort?: "field" | "-field", limit?: number }
