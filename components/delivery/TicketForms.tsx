@@ -180,6 +180,8 @@ export type EditableTicket = {
   project_id: string | null;
   client_tenant_id: string | null;
   resolution: string | null;
+  /** How the client link was made; email_* links are unverified. */
+  client_match?: string | null;
 };
 
 export function TicketControls({
@@ -263,6 +265,18 @@ export function TicketControls({
           </select>
         </label>
       </div>
+      {ticket.client_tenant_id &&
+        (ticket.client_match === "email_project" || ticket.client_match === "email_tenant") && (
+          <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-fg-muted space-y-2">
+            <p>
+              This ticket was linked to the client from the email typed into the public form, which
+              nobody verified. The client does not see it in their portal until you confirm the link.
+            </p>
+            <button type="button" className="btn-secondary" disabled={busy} onClick={() => patch({ confirm_client_link: true })}>
+              Confirm client link
+            </button>
+          </div>
+        )}
       <form
         className="space-y-2"
         onSubmit={async (e) => {

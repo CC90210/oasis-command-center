@@ -138,6 +138,20 @@ async function main() {
     assert.equal(ticketRow.title, "Bug: The booking widget shows a blank page.");
     assert.equal(ticketRow.sla_target, "2026-09-24T16:00:00.000Z", "high = 4h first response");
   });
+  await check("an email-inferred link stays founder-only until a founder confirms it", async () => {
+    // The public form's email is unverified: anyone who knows a client's address
+    // could otherwise put text into that client's portal.
+    const client = { kind: "client" as const, userId: "u-client-a", clientTenantId: CLIENT_A, canAct: true };
+    const founder = { kind: "founder" as const, userId: "u-cc", canAct: true };
+    const id = String(ticketRow.id);
+    assert.equal(await store.getTicket(db, client, id), null, "client must not see an unconfirmed inferred ticket");
+    assert.ok(await store.getTicket(db, founder, id), "founders always see it");
+    const confirmed = await store.updateTicket(db, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:05:00.000Z"));
+    assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+    assert.ok(await store.getTicket(db, client, id), "after confirmation the client sees their ticket");
+    const again = await store.updateTicket(db, id, { confirm_client_link: true }, { userId: "u-cc", name: "CC" }, new Date("2026-09-24T12:06:00.000Z"));
+    assert.equal(again.ok, false, "confirming a link that is no longer inferred is refused");
+  });
   await check("NO lead: tenant_records and lead_interactions are untouched", async () => {
     assert.equal(await count("SELECT count(*) AS n FROM tenant_records"), leadsBefore);
     assert.equal(await count("SELECT count(*) AS n FROM lead_interactions"), 0);

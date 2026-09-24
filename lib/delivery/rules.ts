@@ -605,6 +605,7 @@ export type TicketPatch = Partial<{
   client_email: string | null;
   client_company: string | null;
   assigned_to: unknown;
+  confirm_client_link: true;
 }>;
 
 export function validateTicketPatch(raw: unknown): Validation<TicketPatch> {
@@ -624,6 +625,9 @@ export function validateTicketPatch(raw: unknown): Validation<TicketPatch> {
     ["client_name", () => text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", () => email(b, "client_email", false)],
     ["client_company", () => text(b, "client_company", LIMITS.company, false)],
+    // A founder vouches for a client link that was only inferred from the
+    // public form's unverified email; until then the client cannot see it.
+    ["confirm_client_link", () => (b.confirm_client_link === true ? { ok: true, value: true } : invalid("confirm_client_link_invalid", "confirm_client_link"))],
   ];
   for (const [key, run] of steps) {
     if (!has(key)) continue;

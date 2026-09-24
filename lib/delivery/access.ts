@@ -97,6 +97,25 @@ export function rowScope(viewer: DeliveryViewer, alias: string): SqlScope {
   };
 }
 
+/**
+ * Links a client may see a ticket through. The public support form's email is
+ * UNVERIFIED, so a link inferred from it ("email_project" / "email_tenant")
+ * would let anyone who knows a client's address put text into that client's
+ * portal. Such a ticket stays founder-only until a founder confirms the link
+ * (which records it as "manual").
+ */
+export const CLIENT_VISIBLE_MATCHES = ["session", "manual"] as const;
+
+/** rowScope for support_tickets: a client also needs a trusted client link. */
+export function ticketRowScope(viewer: DeliveryViewer, alias: string): SqlScope {
+  const base = rowScope(viewer, alias);
+  if (viewer.kind === "founder") return base;
+  return {
+    sql: `${base.sql} AND ${alias}.client_match IN (${CLIENT_VISIBLE_MATCHES.map(() => "?").join(", ")})`,
+    args: [...base.args, ...CLIENT_VISIBLE_MATCHES],
+  };
+}
+
 /** Extra predicate on ticket_comments: clients see public comments only. */
 export function commentScope(viewer: DeliveryViewer, alias: string): string {
   return viewer.kind === "founder" ? "1 = 1" : `${alias}.is_internal = 0`;

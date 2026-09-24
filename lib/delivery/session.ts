@@ -79,6 +79,7 @@ const MESSAGES: Record<string, string> = {
   assignee_invalid: "The assignee value is not valid.",
   invalid_transition: "That status change is not allowed from the ticket's current status.",
   project_belongs_to_another_client: "That project belongs to a different client than this ticket.",
+  no_inferred_client_link: "This ticket has no unverified client link to confirm.",
   project_not_found: "That project does not exist in this workspace.",
   client_tenant_not_found: "That client workspace does not exist.",
   lead_not_found: "That lead does not exist in the OASIS pipeline.",

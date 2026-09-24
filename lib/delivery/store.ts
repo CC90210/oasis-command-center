@@ -23,6 +23,7 @@ import { isUniqueViolationError } from "@/lib/api-helpers";
 import {
   commentScope,
   rowScope,
+  ticketRowScope,
   updateScope,
   type DeliveryViewer,
 } from "@/lib/delivery/access";
@@ -310,7 +311,9 @@ export type ProjectFilters = {
 
 function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
   // A client's open-ticket count only counts THEIR tickets on the project.
-  const clientTickets = viewer.kind === "client" ? " AND s.client_tenant_id = ?" : "";
+  const clientTickets = viewer.kind === "client"
+    ? " AND s.client_tenant_id = ? AND s.client_match IN ('session', 'manual')"
+    : "";
   return {
     sql: `SELECT p.*, tn.name AS client_tenant_name,
       (SELECT COUNT(*) FROM delivery_tasks t
@@ -477,7 +480,7 @@ export async function listTickets(
   filters: TicketFilters = {},
 ): Promise<Listed<Ticket>> {
   const head = ticketSelect(viewer);
-  const scope = rowScope(viewer, "t");
+  const scope = ticketRowScope(viewer, "t");
   const where = [scope.sql];
   const args: string[] = [...head.args, ...scope.args];
   const status = filters.status || "open";
@@ -524,7 +527,7 @@ export async function listTickets(
 
 export async function getTicket(db: Client, viewer: DeliveryViewer, id: string): Promise<Ticket | null> {
   const head = ticketSelect(viewer);
-  const scope = rowScope(viewer, "t");
+  const scope = ticketRowScope(viewer, "t");
   const rs = await db.execute({
     sql: `${head.sql} WHERE ${scope.sql} AND t.id = ? LIMIT 1`,
     args: [...head.args, ...scope.args, id],
@@ -538,7 +541,7 @@ export async function listTicketComments(
   viewer: DeliveryViewer,
   ticketId: string,
 ): Promise<TicketComment[]> {
-  const scope = rowScope(viewer, "t");
+  const scope = ticketRowScope(viewer, "t");
   const rs = await db.execute({
     sql: `SELECT c.* FROM ticket_comments c
           JOIN support_tickets t ON t.id = c.ticket_id AND t.tenant_id = c.tenant_id
@@ -972,11 +975,12 @@ export type TicketChanges = Partial<{
   client_email: string | null;
   client_company: string | null;
   assigned_to: string | null;
+  confirm_client_link: true;
 }>;
 
 export type TicketUpdateResult =
   | { ok: true; changed: string[] }
-  | { ok: false; status: 404 | 409; error: "not_found" | "invalid_transition" | "project_belongs_to_another_client" | "project_not_found" };
+  | { ok: false; status: 404 | 409; error: "not_found" | "invalid_transition" | "project_belongs_to_another_client" | "project_not_found" | "no_inferred_client_link" };
 
 /**
  * Apply a founder's edit. Status moves are checked against TICKET_TRANSITIONS;
@@ -1042,6 +1046,12 @@ export async function updateTicket(
   }
 
   let clientTenant = s(cur.client_tenant_id);
+  if (changes.confirm_client_link) {
+    const inferred = cur.client_match === "email_project" || cur.client_match === "email_tenant";
+    if (!inferred || !clientTenant) return { ok: false, status: 409, error: "no_inferred_client_link" };
+    set("client_match", "manual");
+    notes.push("Client link confirmed by a founder — the client can now see this ticket.");
+  }
   if ("client_tenant_id" in changes && (changes.client_tenant_id ?? null) !== clientTenant) {
     clientTenant = changes.client_tenant_id ?? null;
     set("client_tenant_id", clientTenant);
