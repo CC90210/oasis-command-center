@@ -212,6 +212,31 @@ async function main() {
     pending.length = 0;
   });
 
+  // ── client matching beyond projects ─────────────────────────────────────
+  await check("a client-workspace user with no project email is linked to their workspace", async () => {
+    const r = await submit({ name: "Bob", email: "owner@client-b.test", category: "question", priority: "low", description: "Where is my invoice?" });
+    const j = (await r.json()) as Json;
+    assert.equal(r.status, 200, JSON.stringify(j));
+    const row = (await db.execute({ sql: "SELECT client_tenant_id, client_match, project_id FROM support_tickets WHERE ticket_number = ?", args: [String(j.ticket_number)] })).rows[0];
+    assert.equal(row.client_tenant_id, "bbbbbbbb-0000-4000-8000-00000000000b");
+    assert.equal(row.client_match, "email_tenant");
+    assert.equal(row.project_id, null);
+  });
+  await check("a founder testing the form is never filed into a client's portal", async () => {
+    // CC also holds a profile in client A's workspace (founders operate client workspaces).
+    await db.execute({
+      sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, joined_at)
+            VALUES ('p-cc-in-a', ?, 'conaugh@oasisai.work', ?, 'admin', 0, '2026-09-01T00:00:00Z')`,
+      args: ["0d000000-0000-4000-8000-000000000001", CLIENT_A],
+    });
+    const r = await submit({ name: "CC", email: "conaugh@oasisai.work", category: "other", priority: "low", description: "test ticket" });
+    const j = (await r.json()) as Json;
+    const row = (await db.execute({ sql: "SELECT client_tenant_id, client_match FROM support_tickets WHERE ticket_number = ?", args: [String(j.ticket_number)] })).rows[0];
+    assert.equal(row.client_tenant_id, null);
+    assert.equal(row.client_match, "none");
+  });
+  pending.length = 0;
+
   // ── idempotency on the form submission id ───────────────────────────────
   await check("createTicket twice for one submission returns the same ticket", async () => {
     const input = {

@@ -89,7 +89,13 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
     if (data?.id) router.push(`/projects/${String(data.id)}`);
   }
   return (
-    <form onSubmit={submit} className="w-full max-w-3xl rounded-xl border border-bg-border bg-bg-panel p-5 space-y-4">
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16"
+      role="dialog"
+      aria-modal="true"
+      aria-label="New project"
+    >
+    <form onSubmit={submit} className="w-full max-w-3xl rounded-xl border border-bg-border bg-bg-panel p-5 space-y-4 shadow-card">
       <div className="flex items-center justify-between">
         <h2 className="text-xs font-bold uppercase tracking-[0.14em]">New project</h2>
         <button type="button" className="text-xs text-fg-muted hover:text-fg" onClick={() => setOpen(false)}>
@@ -156,6 +162,7 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
         {busy ? "Creating..." : "Create project"}
       </button>
     </form>
+    </div>
   );
 }
 

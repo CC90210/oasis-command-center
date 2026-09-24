@@ -65,8 +65,14 @@ export function TicketCreateForm({
     );
   }
   return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16"
+      role="dialog"
+      aria-modal="true"
+      aria-label="New internal ticket"
+    >
     <form
-      className="w-full max-w-3xl rounded-xl border border-bg-border bg-bg-panel p-5 space-y-4"
+      className="w-full max-w-3xl rounded-xl border border-bg-border bg-bg-panel p-5 space-y-4 shadow-card"
       onSubmit={async (e) => {
         e.preventDefault();
         const data = await run("/api/tickets", "POST", {
@@ -157,6 +163,7 @@ export function TicketCreateForm({
         {busy ? "Creating..." : "Create ticket"}
       </button>
     </form>
+    </div>
   );
 }
 

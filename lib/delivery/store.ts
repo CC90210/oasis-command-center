@@ -1323,6 +1323,14 @@ export async function matchClientByEmail(
   if (projects.length > 1 && projectTenants.length === 1) {
     return { client_tenant_id: projectTenants[0], project_id: null, client_match: "email_project" };
   }
+  // An OASIS teammate is not a client. CC and Adon also hold profiles in client
+  // workspaces they operate, so without this a founder testing the form would
+  // file a ticket into that client's portal.
+  const teammate = await db.execute({
+    sql: "SELECT 1 AS ok FROM user_profiles WHERE lower(email) = ? AND tenant_id = ? LIMIT 1",
+    args: [email, DELIVERY_TENANT_ID],
+  });
+  if (teammate.rows.length > 0) return { client_tenant_id: null, project_id: null, client_match: "none" };
   const tenants = rows(
     await db.execute({
       sql: `SELECT DISTINCT tenant_id FROM user_profiles
