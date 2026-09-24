@@ -21,6 +21,7 @@ import { randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
 import {
+  CLIENT_VISIBLE_MATCHES,
   commentScope,
   rowScope,
   ticketRowScope,
@@ -311,8 +312,9 @@ export type ProjectFilters = {
 
 function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
   // A client's open-ticket count only counts THEIR tickets on the project.
+  // Same trusted-link rule as ticketRowScope — one list, CLIENT_VISIBLE_MATCHES.
   const clientTickets = viewer.kind === "client"
-    ? " AND s.client_tenant_id = ? AND s.client_match IN ('session', 'manual')"
+    ? ` AND s.client_tenant_id = ? AND s.client_match IN (${CLIENT_VISIBLE_MATCHES.map((m) => `'${m}'`).join(", ")})`
     : "";
   return {
     sql: `SELECT p.*, tn.name AS client_tenant_name,
