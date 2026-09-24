@@ -52,6 +52,8 @@ import type {
   WorkerStatusSource,
 } from "@/lib/automations/worker-status";
 import {
+  FLEET_REPORTER_SERVICE,
+  describeStatusReporter,
   resolveWorkerControlMode,
   selectWorkerInventory,
 } from "@/lib/automations/worker-status";
@@ -278,7 +280,9 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
 
   // integrations_health is keyed (profile_id, service). When the bridge
   // hasn't pushed (no profile_id, or no rows), fall back to "unconfigured".
-  const services = workerSet.map((w) => w.service);
+  // The reporter row rides along with the workers it vouches for — see
+  // describeStatusReporter for why it exists.
+  const services = [...workerSet.map((w) => w.service), FLEET_REPORTER_SERVICE];
   const healthMap = new Map<
     string,
     { status: string; metadata: Record<string, unknown>; last_ping_at: string | null }
@@ -479,6 +483,12 @@ export const GET = jsonRoute("api/automations/background-workers GET", async () 
     ok: true,
     bridge_online: bridgeOnline,
     last_seen_at: lastSeenAt,
+    status_reporter: describeStatusReporter({
+      row: healthMap.get(FLEET_REPORTER_SERVICE),
+      bridgeOnline,
+      now,
+      staleMs: DAEMON_HEALTH_STALE_MS,
+    }),
     // True when this tenant's worker actions must route through the server-side
     // bridge proxy (/api/automations/background-workers/control) instead of the
     // operator's localhost bridge. SunBiz (VPS daemons) with bridge env set.
