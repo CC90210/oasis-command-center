@@ -572,9 +572,12 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /memberNameMapPromise = managerTeamRead\s*\?\s*Promise\.resolve\(managerRepRoster\)\s*:\s*buildMemberNameMap\(tenantId\)/.test(pipelineCode) &&
-    /session\.ok && pipelineAdmin\s*\?\s*memberNameMap\s*:\s*managerRepRoster/.test(pipelineCode),
-  "admins get the full member filter while managers get only the sales-rep roster",
+  /memberDirectoryPromise = managerTeamRead\s*\?\s*Promise\.resolve\(\{\s*names: managerRepRoster[^}]*\}\)\s*:\s*buildMemberDirectory\(tenantId\)/.test(pipelineCode) &&
+    /session\.ok && pipelineAdmin\s*\?\s*new Map\(\[\.\.\.memberNameMap\]\.filter\(\(\[id\]\) => activeMemberIds\.has\(id\)\)\)\s*:\s*managerRepRoster/.test(pipelineCode),
+  // 2026-09-24: admins get every ACTIVE member as a filter chip (a deactivated
+  // teammate keeps their name on old rows but loses the chip); managers still
+  // get only the sales-rep roster.
+  "admins get the active member filter while managers get only the sales-rep roster",
 );
 
 /* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
