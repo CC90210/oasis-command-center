@@ -114,6 +114,47 @@ export async function updateSettings(viewer: FinanceViewer, entityRef: string, r
   return loadSettings(entity.id);
 }
 
+const ACCOUNT_TYPES = ["asset", "liability", "equity", "revenue", "expense"] as const;
+const SUBTYPES_BY_TYPE: Record<(typeof ACCOUNT_TYPES)[number], string[]> = {
+  asset: ["bank", "cash", "clearing", "receivable", "prepaid", "fixed_asset", "investment", "other"],
+  liability: ["payable", "credit_card", "loan", "other"],
+  equity: ["owner_equity", "other"],
+  revenue: ["revenue"],
+  expense: ["expense"],
+};
+
+/** Add an account to a book's chart. Income/expense accounts also become categories. */
+export async function createAccount(viewer: FinanceViewer, entityRef: string, raw: Record<string, unknown>): Promise<string> {
+  const entity = await requireEntity(viewer, entityRef);
+  const code = text(raw.code, 10);
+  if (!/^\d{4,6}$/.test(code)) throw new FinanceInputError("account code must be 4-6 digits");
+  const name = text(raw.name, 120);
+  if (!name) throw new FinanceInputError("account name is required");
+  const type = text(raw.type, 20) as (typeof ACCOUNT_TYPES)[number];
+  if (!ACCOUNT_TYPES.includes(type)) throw new FinanceInputError("choose an account type");
+  const subtype = text(raw.subtype, 30) || SUBTYPES_BY_TYPE[type][0];
+  if (!SUBTYPES_BY_TYPE[type].includes(subtype)) throw new FinanceInputError(`subtype ${subtype} does not fit a ${type} account`);
+  const exists = await queryOne<{ id: string }>(`SELECT id FROM fin_accounts WHERE entity_id = ? AND (code = ? OR lower(name) = lower(?))`, [entity.id, code, name]);
+  if (exists) throw new FinanceInputError("an account with that code or name already exists");
+  const id = `${entity.id}:${code}`;
+  const statements = [
+    {
+      sql: `INSERT INTO fin_accounts (id, entity_id, code, name, type, subtype, currency, is_system) VALUES (?, ?, ?, ?, ?, ?, 'CAD', 0)`,
+      args: [id, entity.id, code, name, type, subtype],
+    },
+    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "account.created", objectType: "account", objectId: id, detail: { code, name, type } }),
+  ];
+  const categoryKind = type === "revenue" ? "income" : type === "expense" ? "expense" : subtype === "credit_card" || subtype === "bank" ? "transfer" : null;
+  if (categoryKind) {
+    statements.push({
+      sql: `INSERT OR IGNORE INTO fin_categories (id, entity_id, name, kind, account_id) VALUES (?, ?, ?, ?, ?)`,
+      args: [`${entity.id}:cat:${code}`, entity.id, name, categoryKind, id],
+    });
+  }
+  await writeBatch(statements);
+  return id;
+}
+
 /**
  * Pin the Stripe account the configured key belongs to. The founder confirms
  * the account id Stripe itself reported — this call re-reads it rather than

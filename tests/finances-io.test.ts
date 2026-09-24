@@ -321,6 +321,20 @@ async function main() {
     // invoice.paid for an unrelated Stripe invoice with the same PI must not add a row either.
     await deliver("invoice.paid", { id: "in_x", object: "invoice", currency: "cad", amount_paid: invoiceStripeTotal, livemode: true, payment_intent: "pi_inv", status_transitions: { paid_at: created } });
     assert.equal((await metrics.revenueCollected({ from: "2026-09-22", to: "2026-09-23" })).payments, 1);
+
+    // The other order: the intent (with fin_invoice_id) arrives first, then the charge.
+    const id2 = await invoices.createDraftInvoice(cc, "oasis", { new_contact: { name: "Initech", email: "ap@initech.test" }, issue_date: "2026-09-22", currency: "CAD", lines: [{ description: "Audit", quantity: 1, unit_price: "400" }] });
+    await invoices.finalizeInvoice(cc, id2);
+    const c2 = charge({ id: "ch_inv2", amount: 40000, pi: "pi_inv2", created, name: "Initech" });
+    await deliver("payment_intent.succeeded", { id: "pi_inv2", object: "payment_intent", amount_received: 40000, currency: "cad", created, livemode: true, latest_charge: c2, metadata: { fin_invoice_id: id2 } }, { created });
+    await deliver("charge.succeeded", c2, { created });
+    assert.equal((await raw.execute({ sql: `SELECT status FROM fin_invoices WHERE id = ?`, args: [id2] })).rows[0].status, "paid");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_inv2'`), 1);
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'stripe_invoice_link'`), 1, "only the first order needed a reclass");
+    const day2 = await metrics.revenueCollected({ from: "2026-09-22", to: "2026-09-23" });
+    assert.equal(day2.payments, 2);
+    assert.equal(day2.cad_cents, invoiceStripeTotal + 40000);
+    assert.equal(await count(`SELECT fee_status = 'pending' FROM fin_payments WHERE stripe_charge_id = 'ch_inv2'`), 1, "no balance transaction and no key: fee left pending, not guessed");
   });
 
   await check("manual mark-paid: one payment row, invoice paid, collected once", async () => {

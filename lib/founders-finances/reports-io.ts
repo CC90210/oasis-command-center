@@ -157,6 +157,33 @@ export async function taxOverview(viewer: FinanceViewer, range: { from?: string;
   return { entity, settings, threshold: await thresholdStatus(), period, from, to };
 }
 
+/** Recent money received/refunded (Stripe + manual), business book. */
+export async function listPayments(viewer: FinanceViewer, entityRef: string, limit = 50) {
+  const entity = await requireEntity(viewer, entityRef);
+  return query<{
+    id: string;
+    kind: string;
+    source: string;
+    occurred_on: string;
+    amount_cents: number;
+    currency: string;
+    settlement_cad_cents: number | null;
+    fee_cad_cents: number | null;
+    fee_status: string;
+    customer_name: string;
+    customer_email: string;
+    invoice_number: string | null;
+    description: string;
+    entry_id: string | null;
+  }>(
+    `SELECT p.id, p.kind, p.source, p.occurred_on, p.amount_cents, p.currency, p.settlement_cad_cents, p.fee_cad_cents, p.fee_status,
+            p.customer_name, p.customer_email, i.number AS invoice_number, p.description, p.entry_id
+       FROM fin_payments p LEFT JOIN fin_invoices i ON i.id = p.invoice_id
+      WHERE p.entity_id = ? ORDER BY p.occurred_at DESC LIMIT ${Math.max(1, Math.min(200, Math.trunc(limit)))}`,
+    [entity.id],
+  );
+}
+
 // ── overview ─────────────────────────────────────────────────────────────
 
 function monthStart(date: string, back = 0): string {

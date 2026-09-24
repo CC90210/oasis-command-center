@@ -76,6 +76,11 @@ jobs:
           # against a real half-applied boundary and then never run by anything
           # but a human on demand. A guard nothing executes is documentation.
           npm run test:founders-marketing
+          # FOUNDERS > Finances (2026-09-24): the balanced-entry invariant,
+          # GST/QST math, own-day FX, Stripe signature + idempotency, import
+          # dedupe, personal-book privacy, and revenueCollected never counting
+          # a Stripe-paid invoice twice — run against a real local libSQL file.
+          npm run test:finances
           # A client's book must never render on an OASIS surface. Added
           # 2026-08-17 after the Breeze underwriting queue appeared on
           # top-level /automations because the gate keyed on operator ROLE
