@@ -130,7 +130,8 @@ jobs:
               ROUTES="/api/cron/enroll-drips
                       /api/cron/enroll-accelerated
                       /api/cron/reconcile-sms
-                      /api/cron/health-check" ;;
+                      /api/cron/health-check
+                      /api/cron/sla-check" ;;
             "*/30 * * * *")
               # Inbound scanning. Without these an approval sits unread, which
               # is what happened for six days in August.

@@ -42,6 +42,7 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/tps-backlog-watch", schedule: "0 */6 * * *" },
   { path: "/api/cron/renewal-thresholds", schedule: "15 13 * * *" },
   { path: "/api/cron/health-check", schedule: "*/15 * * * *" },
+  { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/sync-sms-numbers", schedule: "0 6,18 * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
   { path: "/api/cron/dispatch-bulk-email", schedule: "*/5 * * * *" },
