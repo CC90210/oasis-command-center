@@ -102,7 +102,7 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
           action={<a className="btn-secondary" href={SUPPORT_FORM_PATH}>Report an issue</a>}
         />
         {failure ? (
-          <LoadError what="your projects" detail={failure} />
+          <LoadError what="your projects" />
         ) : projects.length === 0 ? (
           <Card><EmptyState message="No projects are linked to your workspace yet." /></Card>
         ) : (

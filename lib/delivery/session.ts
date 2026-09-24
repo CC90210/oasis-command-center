@@ -35,7 +35,11 @@ export function loadMemberDirectory(): Promise<MemberRow[]> {
   return getTenantMembers(DELIVERY_TENANT_ID, { includeInactive: true });
 }
 
-/** Log the cause, answer with a sentence. Never an empty body, never a fake empty list. */
+/**
+ * Log the cause, answer with a sentence. Never an empty body, never a fake
+ * empty list. The driver's text stays in the log: these routes also answer
+ * clients, and "no such table: delivery_projects" is not theirs to read.
+ */
 export function serverError(label: string, err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[delivery:${label}]`, err instanceof Error ? err.stack ?? message : message);
@@ -43,8 +47,7 @@ export function serverError(label: string, err: unknown) {
     {
       ok: false,
       error: "server_error",
-      message: "Something went wrong loading this. The error has been logged.",
-      detail: message.slice(0, 300),
+      message: `Something went wrong (${label}). The error has been logged.`,
     },
     { status: 500 },
   );

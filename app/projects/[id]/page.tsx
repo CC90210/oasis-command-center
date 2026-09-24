@@ -63,7 +63,8 @@ export default async function ProjectDetailPage({ params }: { params: Promise<{ 
     }
   } catch (err) {
     console.error("[projects.detail.page]", err);
-    return <LoadError what="this project" detail={err instanceof Error ? err.message : String(err)} />;
+    const detail = viewer.kind === "founder" ? (err instanceof Error ? err.message : String(err)) : undefined;
+    return <LoadError what="this project" detail={detail} />;
   }
   if (!data) notFound();
   const { project, tasks, updates, tickets } = data;

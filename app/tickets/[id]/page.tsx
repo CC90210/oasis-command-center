@@ -107,7 +107,8 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
     if (ticket) comments = await listTicketComments(db, viewer, id);
   } catch (err) {
     console.error("[tickets.detail.page]", err);
-    return <LoadError what="this ticket" detail={err instanceof Error ? err.message : String(err)} />;
+    const detail = viewer.kind === "founder" ? (err instanceof Error ? err.message : String(err)) : undefined;
+    return <LoadError what="this ticket" detail={detail} />;
   }
   if (!ticket) notFound();
   const now = new Date();

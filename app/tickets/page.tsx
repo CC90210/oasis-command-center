@@ -73,7 +73,7 @@ export default async function TicketsPage({ searchParams }: { searchParams?: Pro
           action={<a className="btn-primary" href={SUPPORT_FORM_PATH}>Report an issue</a>}
         />
         {failure ? (
-          <LoadError what="your tickets" detail={failure} />
+          <LoadError what="your tickets" />
         ) : tickets.length === 0 ? (
           <Card><EmptyState message="No tickets yet. If something comes up, report it and you will get a ticket number." /></Card>
         ) : (

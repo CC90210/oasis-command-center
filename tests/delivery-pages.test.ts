@@ -51,6 +51,21 @@ function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
   }
   if (isValidElement(node)) {
     const props = (node.props ?? {}) as Record<string, unknown>;
+    // Render plain server function components (LoadError, Thread, badges) so
+    // their text is visible. A client component calls hooks, which do not
+    // exist under react-server and throw — for those, fall back to the props,
+    // which are exactly what would be serialized to the browser.
+    if (typeof node.type === "function") {
+      try {
+        const rendered = (node.type as (p: unknown) => unknown)(props);
+        if (!(rendered instanceof Promise)) {
+          textOf(rendered, out, depth + 1);
+          return out;
+        }
+      } catch {
+        /* client component: use its props below */
+      }
+    }
     for (const [k, v] of Object.entries(props)) {
       if (k === "children") textOf(v as ReactNode, out, depth + 1);
       else if (typeof v === "string") out.push(v);
@@ -161,6 +176,24 @@ async function main() {
   await check("client portal for a founder shows no delivery book at all", async () => {
     const page = await text(portal());
     assert.doesNotMatch(page, /ALPHA-PROJECT|BRAVO-PROJECT/);
+  });
+
+  // Last, because it breaks the schema: a failed read is an error on screen,
+  // never an empty list — and the driver's text reaches founders, not clients.
+  await db.execute("ALTER TABLE support_tickets RENAME TO support_tickets_gone");
+  await check("a failed read renders an error, not 'no tickets'; only founders see the cause", async () => {
+    await login(USERS.cc);
+    const founderView = await text(tickets({ searchParams: sp }));
+    assert.match(founderView, /Could not load/);
+    assert.match(founderView, /no such table/);
+    assert.doesNotMatch(founderView, /No open tickets/);
+    await login(USERS.clientA);
+    const clientView = await text(tickets({ searchParams: sp }));
+    assert.match(clientView, /Could not load/);
+    assert.doesNotMatch(clientView, /no such table|support_tickets/);
+    const portalView = await text(portal());
+    assert.match(portalView, /Could not load/);
+    assert.doesNotMatch(portalView, /no such table/);
   });
 
   finish("delivery-pages");

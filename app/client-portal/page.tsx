@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 
 type DeliveryPanel =
   | { kind: "client"; projects: Project[]; tickets: Ticket[] }
-  | { kind: "error"; detail: string }
+  | { kind: "error" }
   | { kind: "none" };
 
 /**
@@ -36,8 +36,9 @@ async function getDeliveryPanel(): Promise<DeliveryPanel> {
     return { kind: "client", projects: projects.rows, tickets: tickets.rows };
   } catch (err) {
     // Loud, not an empty section: "no projects" and "could not load" differ.
+    // The driver's text goes to the log, not to the client.
     console.error("[client-portal.delivery]", err);
-    return { kind: "error", detail: err instanceof Error ? err.message : String(err) };
+    return { kind: "error" };
   }
 }
 
@@ -168,7 +169,7 @@ export default async function ClientPortalPage() {
         )}
       </Card>
 
-      {delivery.kind === "error" && <LoadError what="your projects and tickets" detail={delivery.detail} />}
+      {delivery.kind === "error" && <LoadError what="your projects and tickets" />}
       {delivery.kind === "client" && (
         <div className="grid gap-6 lg:grid-cols-2">
           <Card
