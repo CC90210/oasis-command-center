@@ -21,6 +21,7 @@ import {
   countsTowardHealth,
   formatLastSeen,
   isOperatorStopped,
+  type StatusReporter,
   type WorkerControlMode,
   type WorkerRuntime,
   type WorkerStatusSource,
@@ -98,6 +99,8 @@ type ApiResponse = {
   ok: boolean;
   bridge_online: boolean;
   last_seen_at: string | null;
+  /** Whether the bridge could read the fleet — absent on an older API. */
+  status_reporter?: StatusReporter;
   workers: Worker[];
   /** When true, worker actions route through the server-side bridge proxy
    * (SunBiz VPS daemons) instead of the operator's localhost bridge. */
@@ -189,6 +192,11 @@ export function BackgroundWorkersPanel() {
   const hasLocalWorkers = (byRuntime.get("local")?.length ?? 0) > 0;
   const hasRemoteWorkers = (byRuntime.get("remote")?.length ?? 0) > 0;
   const bridgeLabel = hasRemoteWorkers && !hasLocalWorkers ? "Remote bridge" : "Local bridge";
+  // When the reporter itself is blind, a stale local tile means "unseen", not
+  // "down" — the pill and the tiles must say so instead of counting outages.
+  const reporter = data.status_reporter;
+  const reporterBlind =
+    hasLocalWorkers && (reporter?.state === "failing" || reporter?.state === "silent");
 
   return (
     <div className="space-y-3">
@@ -197,7 +205,7 @@ export function BackgroundWorkersPanel() {
           <Cpu className="w-4 h-4 text-fg-muted" />
           <div className="text-sm font-bold text-fg">Background workers</div>
           <span className="text-[10px] uppercase tracking-wider text-fg-dim border border-bg-border rounded-full px-1.5 py-0.5">
-            {healthy}/{total} healthy
+            {reporterBlind ? "status unknown" : `${healthy}/${total} healthy`}
           </span>
         </div>
         {(hasLocalWorkers || hasRemoteWorkers) && data.last_seen_at && (
@@ -207,6 +215,22 @@ export function BackgroundWorkersPanel() {
           </div>
         )}
       </div>
+
+      {reporterBlind && reporter && (
+        <div className="rounded-lg border border-status-warm/40 bg-status-warm/10 p-3 text-xs text-status-warm flex items-start gap-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>
+            Worker status isn&apos;t reaching the dashboard — the workers themselves may be
+            running fine.{" "}
+            {reporter.state === "failing"
+              ? `This computer reports it can't read its process list: ${reporter.error}.`
+              : `This computer is online but its last worker report was ${
+                  reporter.last_ping_at ? formatLastSeen(reporter.last_ping_at) : "never"
+                }.`}{" "}
+            Restarting &ldquo;Bridge heartbeat&rdquo; usually clears it.
+          </span>
+        </div>
+      )}
 
       {!data.bridge_online && (hasLocalWorkers || hasRemoteWorkers) && (
         <div className="rounded-lg border border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted">
@@ -235,6 +259,7 @@ export function BackgroundWorkersPanel() {
                   key={worker.service}
                   worker={worker}
                   bridgeOnline={data.bridge_online}
+                  reporterBlind={reporterBlind && workerRuntime === "local"}
                   remoteControl={legacyRemoteControl}
                   onChange={refresh}
                 />
@@ -274,11 +299,14 @@ export function BackgroundWorkersPanel() {
 function WorkerRow({
   worker,
   bridgeOnline,
+  reporterBlind = false,
   remoteControl,
   onChange,
 }: {
   worker: Worker;
   bridgeOnline: boolean;
+  /** The bridge can't read the fleet, so a stale tile is unseen, not down. */
+  reporterBlind?: boolean;
   /** Route actions through the server-side bridge proxy (SunBiz VPS). */
   remoteControl: boolean;
   onChange: () => void | Promise<void>;
@@ -304,7 +332,12 @@ function WorkerRow({
     (workerRuntime === "retired" || Boolean(worker.not_expected_here)) &&
     optimisticStatus === null;
 
-  const Icon = byDesign || operatorStopped
+  // Unseen while the reporter is blind: neither a fault nor a green light.
+  const unseen = reporterBlind && optimisticStatus === null && Boolean(worker.stale);
+
+  const Icon = unseen
+    ? HelpCircle
+    : byDesign || operatorStopped
     ? MinusCircle
     : effectiveStatus === "healthy"
       ? CheckCircle2
@@ -313,7 +346,7 @@ function WorkerRow({
         : effectiveStatus === "degraded"
           ? AlertCircle
           : HelpCircle;
-  const iconClass = byDesign || operatorStopped
+  const iconClass = unseen || byDesign || operatorStopped
     ? "text-fg-dim"
     : effectiveStatus === "healthy"
       ? "text-status-engaged"
@@ -375,7 +408,9 @@ function WorkerRow({
   } else if (effectiveStatus === "down") {
     statusLabel =
       optimisticStatus === null && worker.stale
-        ? `Down — stopped reporting${lastSeen}`
+        ? reporterBlind
+          ? `Status unknown — not reported${lastSeen}`
+          : `Down — stopped reporting${lastSeen}`
         : `Stopped${lastSeen}`;
   } else if (effectiveStatus === "degraded") {
     statusLabel = `Degraded — check logs${lastSeen}`;
@@ -394,7 +429,7 @@ function WorkerRow({
   return (
     <div
       className={`rounded-lg border p-3 ${
-        byDesign || operatorStopped
+        unseen || byDesign || operatorStopped
           ? "border-bg-border bg-bg-deep/40 opacity-70"
           : effectiveStatus === "healthy"
             ? "border-bg-border bg-bg-elev/30"

@@ -4,6 +4,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkPhoneOptOut, normalizePhoneE164 } from "@/lib/lead-interactions-queries";
 import { sanitizeBlastMessage } from "@/lib/integrations/blast-safety";
 import { canManageSunbizDraft, isSunbizDraftAction, isWithinSmsHours, normalizeDraftText } from "@/lib/sunbiz-draft-policy";
+import { MEMBER_DEACTIVATED_MESSAGE, memberStanding, type MemberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -53,9 +54,20 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   if (body.action === "handoff") {
     const handoffUserId = typeof body.handoff_user_id === "string" && UUID_RE.test(body.handoff_user_id) ? body.handoff_user_id : null;
     if (!handoffUserId) return NextResponse.json({ ok: false, error: "invalid_handoff_user" }, { status: 400 });
-    const target = await db.from("user_profiles").select("auth_user_id").eq("tenant_id", session.tenantId)
-      .eq("auth_user_id", handoffUserId).maybeSingle();
-    if (target.error || !target.data) return NextResponse.json({ ok: false, error: "handoff_user_not_found" }, { status: 404 });
+    // A handoff gives this live conversation to a person and pauses the agent,
+    // so the target must be an ACTIVE member — checked before any write. A
+    // deactivated teammate is still a member (history), never a destination.
+    let standing: MemberStanding;
+    try {
+      ({ standing } = await memberStanding(session.tenantId, handoffUserId));
+    } catch (err) {
+      console.error("[conversations.drafts.PATCH] handoff member check failed", err);
+      return NextResponse.json({ ok: false, error: "handoff_user_lookup_failed" }, { status: 503 });
+    }
+    if (standing === "not_member") return NextResponse.json({ ok: false, error: "handoff_user_not_found" }, { status: 404 });
+    if (standing === "deactivated") {
+      return NextResponse.json({ ok: false, error: "handoff_user_deactivated", message: MEMBER_DEACTIVATED_MESSAGE }, { status: 422 });
+    }
     const changed = await db.from("sunbiz_reply_drafts")
       .update({ handoff_user_id: handoffUserId, handoff_at: new Date().toISOString(), updated_at: new Date().toISOString() })
       .eq("id", id).eq("tenant_id", session.tenantId).eq("status", "pending").select("id").maybeSingle();

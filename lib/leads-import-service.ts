@@ -1,5 +1,20 @@
 import { routeSunBizImportStage } from "./sunbiz-stage-routing";
 import { getServiceSupabase } from "./supabase-server";
+import { dbError } from "./db-error";
+import {
+  isWebsiteSalesTenantSlug,
+  OASIS_COLD_OUTBOUND_MOTION,
+  OASIS_WEBSITE_SALES_PROGRAM,
+} from "./leads/canonical-lead-fields";
+import { resolveOwnedSlug } from "./manifest/tenant-scope";
+import { pipelineCycleAssignmentFacts } from "./pipeline-cycle";
+import {
+  getOasisPipelineAssignmentRoster,
+  MEMBER_DEACTIVATED_MESSAGE,
+  memberStanding,
+  type MemberStanding,
+} from "./team";
+import { resolveAssignableTarget } from "./web-leads/assign-target";
 
 const MAX_ROWS = 5_000;
 const DEDUP_LOOKBACK = 20_000;
@@ -60,13 +75,105 @@ export type LeadImportFailure = {
   would_have_inserted?: number;
   skipped_duplicate?: number;
   skipped_malformed?: number;
+  /** 1-based row that stopped the batch, when one row did. */
+  row?: number;
 };
+
+export type ImportAssigneeCheck =
+  | { ok: true; authUserId: string }
+  | {
+      ok: false;
+      error: "member_deactivated" | "not_a_tenant_member";
+      message: string;
+      row: number;
+    };
+
+/**
+ * Owner check for NON-OASIS imports (SunBiz and the other legacy workspaces),
+ * which take each row's owner from its assigned_to cell. Until 2026-09-24 that
+ * cell was stored verbatim, so a CSV could hand new leads to a deactivated
+ * teammate, or to someone who was never on the team. OASIS imports do not come
+ * through here: their assignment roster is active-only already.
+ *
+ * The cell may hold an auth user id or a teammate's email; either resolves to
+ * the auth id, because assigned_to is compared against auth_user_id everywhere
+ * downstream (see lib/leads/assignee-email.ts). Standing is cached per id and
+ * the email lookup reads the tenant's profiles once, so a 5,000-row file that
+ * names the same three reps costs a handful of reads.
+ *
+ * A read error THROWS. An import creates ownership, so the caller refuses the
+ * whole batch rather than guess who the owner is.
+ */
+export function createImportAssigneeCheck(tenantId: string) {
+  const standingById = new Map<string, Promise<MemberStanding>>();
+  let authIdsByEmail: Promise<Map<string, string[]>> | null = null;
+
+  const standingOf = (authUserId: string) => {
+    let pending = standingById.get(authUserId);
+    if (!pending) {
+      pending = memberStanding(tenantId, authUserId).then((r) => r.standing);
+      standingById.set(authUserId, pending);
+    }
+    return pending;
+  };
+
+  const loadEmails = async () => {
+    const { data, error } = await getServiceSupabase()
+      .from("user_profiles")
+      .select("auth_user_id, email")
+      .eq("tenant_id", tenantId);
+    if (error) throw dbError("leads.import.assignee_emails", error);
+    const byEmail = new Map<string, string[]>();
+    for (const row of (data ?? []) as Array<{ auth_user_id: string | null; email: string | null }>) {
+      const email = (row.email || "").trim().toLowerCase();
+      const authUserId = (row.auth_user_id || "").trim().toLowerCase();
+      if (!email || !authUserId) continue;
+      const ids = byEmail.get(email) ?? [];
+      if (!ids.includes(authUserId)) ids.push(authUserId);
+      byEmail.set(email, ids);
+    }
+    return byEmail;
+  };
+
+  return async (assignedTo: string, row: number): Promise<ImportAssigneeCheck> => {
+    const value = assignedTo.trim().toLowerCase();
+    let candidates: string[];
+    if (value.includes("@")) {
+      authIdsByEmail ??= loadEmails();
+      candidates = (await authIdsByEmail).get(value) ?? [];
+    } else {
+      candidates = [value];
+    }
+
+    let deactivated = false;
+    for (const authUserId of candidates) {
+      const standing = await standingOf(authUserId);
+      if (standing === "active") return { ok: true, authUserId };
+      if (standing === "deactivated") deactivated = true;
+    }
+    return deactivated
+      ? {
+          ok: false,
+          error: "member_deactivated",
+          message: `Row ${row}: ${MEMBER_DEACTIVATED_MESSAGE} No rows were imported.`,
+          row,
+        }
+      : {
+          ok: false,
+          error: "not_a_tenant_member",
+          message: `Row ${row} names an owner who isn't on this team. Use a teammate's email or user id. No rows were imported.`,
+          row,
+        };
+  };
+}
 
 export async function importLeadsForTenant(input: {
   tenantId: string;
   rows: IncomingLeadImportRow[];
   dedupBy?: string[];
   defaultSource?: string;
+  /** Batch owner for OASIS chat imports; ignored outside OASIS. */
+  assignee?: string;
 }): Promise<LeadImportResult | LeadImportFailure> {
   const rows = Array.isArray(input.rows) ? input.rows : [];
   if (rows.length === 0) return { ok: false, error: "no_rows" };
@@ -84,6 +191,22 @@ export async function importLeadsForTenant(input: {
       : ["email", "phone", "business"];
   const defaultSource = input.defaultSource || "csv_import";
   const db = getServiceSupabase();
+  const tenantSlug = await resolveOwnedSlug(input.tenantId);
+  if (!tenantSlug) return { ok: false, error: "tenant_scope_unresolved" };
+  const isOasisWorkspace = isWebsiteSalesTenantSlug(tenantSlug);
+  const importedAt = new Date().toISOString();
+  let assignmentRoster: Awaited<ReturnType<typeof getOasisPipelineAssignmentRoster>> | null = null;
+  if (isOasisWorkspace) {
+    try {
+      assignmentRoster = await getOasisPipelineAssignmentRoster(input.tenantId);
+    } catch (error) {
+      return {
+        ok: false,
+        error: "assignment_roster_unavailable",
+        detail: error instanceof Error ? error.message : "Unable to load the CC + Adon assignment roster",
+      };
+    }
+  }
 
   const existingRes = await db
     .from("tenant_records")
@@ -133,6 +256,7 @@ export async function importLeadsForTenant(input: {
   const seenEmails = new Set<string>();
   const seenPhones = new Set<string>();
   const seenBusinesses = new Set<string>();
+  const checkAssignee = createImportAssigneeCheck(input.tenantId);
 
   for (const [i, raw] of rows.entries()) {
     const name = cleanString(raw.name, 200);
@@ -154,7 +278,49 @@ export async function importLeadsForTenant(input: {
     const monthlyRevenue = parseMoney(raw.monthly_revenue);
     const paperGrade = cleanString(raw.paper_grade, 8);
     const timeInBusiness = cleanString(raw.time_in_business, 80);
-    const assignedTo = cleanString(raw.assigned_to, 120);
+    const assignedTo = cleanString(
+      isOasisWorkspace ? input.assignee || raw.assigned_to : raw.assigned_to,
+      254,
+    );
+    let assignmentFacts: Record<string, string> = assignedTo ? { assigned_to: assignedTo } : {};
+    if (assignmentRoster) {
+      if (!assignedTo) {
+        return {
+          ok: false,
+          error: "assignee_required",
+          message: `Row ${i + 1} needs CC or Adon as owner. No rows were imported.`,
+        };
+      }
+      const resolved =
+        resolveAssignableTarget(assignmentRoster, assignedTo) ||
+        assignmentRoster.find(
+          (member) => member.email.trim().toLowerCase() === assignedTo.toLowerCase(),
+        )?.auth_user_id?.trim() ||
+        null;
+      if (!resolved) {
+        return {
+          ok: false,
+          error: "target_not_on_sales_roster",
+          message: `Row ${i + 1} names an owner outside the CC + Adon assignment roster. No rows were imported.`,
+        };
+      }
+      assignmentFacts = pipelineCycleAssignmentFacts(resolved, importedAt);
+    } else if (assignedTo) {
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(assignedTo, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new leads.
+        return {
+          ok: false,
+          error: "member_check_failed",
+          detail: error instanceof Error ? error.message : "Unable to verify the row's owner",
+          row: i + 1,
+        };
+      }
+      if (!owner.ok) return owner;
+      assignmentFacts = { assigned_to: owner.authUserId };
+    }
     const businessKey = normBusiness(businessName);
 
     const dateSubmitted = cleanString(raw.date_submitted, 80);
@@ -186,10 +352,22 @@ export async function importLeadsForTenant(input: {
         bankStatementUrls ||
         dlVcUrls,
     );
-    const { stage, entityType: rowEntityType } = routeSunBizImportStage(raw.stage, {
+    const routedStage = routeSunBizImportStage(raw.stage, {
       explicitRecordType: raw.record_type,
       hasApplicationEvidence,
     });
+    const stage = routedStage.stage;
+    // Cloud-tool OASIS imports feed the active revenue board. SunBiz's CSV
+    // application inference is correct only outside that workspace.
+    const rowEntityType = assignmentRoster ? "lead" : routedStage.entityType;
+    if (assignmentRoster && rowEntityType === "lead") {
+      Object.assign(assignmentFacts, {
+        sales_program: OASIS_WEBSITE_SALES_PROGRAM,
+        sales_motion: OASIS_COLD_OUTBOUND_MOTION,
+        stage_entered_at: importedAt,
+        claimed_at: importedAt,
+      });
+    }
 
     if (!email && !phone && !name && !businessName) {
       skippedMalformed += 1;
@@ -243,7 +421,7 @@ export async function importLeadsForTenant(input: {
         ...(monthlyRevenue != null ? { monthly_revenue: monthlyRevenue } : {}),
         ...(paperGrade ? { paper_grade: paperGrade } : {}),
         ...(timeInBusiness ? { time_in_business: timeInBusiness } : {}),
-        ...(assignedTo ? { assigned_to: assignedTo } : {}),
+        ...assignmentFacts,
         ...(dateSubmitted ? { date_submitted: dateSubmitted, submitted_at: dateSubmitted } : {}),
         ...(lenderList ? { lender_list: lenderList } : {}),
         ...(dba ? { dba } : {}),
@@ -267,7 +445,13 @@ export async function importLeadsForTenant(input: {
         ...(dlVcUrls ? { dl_vc_urls: dlVcUrls } : {}),
         ...(tags && tags.length > 0 ? { tags } : {}),
         ...(originalStage ? { original_stage: originalStage } : {}),
-        stage: rowEntityType === "lead" && (!originalStage || ["new", "new_contact"].includes(originalStage.toLowerCase())) ? "researched" : stage,
+        stage:
+          assignmentRoster && rowEntityType === "lead"
+            ? "assigned"
+            : rowEntityType === "lead" &&
+                (!originalStage || ["new", "new_contact"].includes(originalStage.toLowerCase()))
+              ? "researched"
+              : stage,
         status: rowEntityType === "application" ? stage : "new",
         score: 0,
       },

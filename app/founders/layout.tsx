@@ -10,7 +10,9 @@
  * Everything under /founders is OASIS's OWN tooling — not a tenant of the
  * platform, not something a customer is ever sold. It must not read as one more
  * CRM tab. This wrapper gives it its own header, its own accent, and its own
- * sub-nav so the boundary is obvious the moment you look at the screen.
+ * sub-nav so the boundary is obvious the moment you look at the screen. The
+ * exception is Finances, which shows its own tab bar instead of the banner
+ * (CC, 2026-09-24).
  *
  * THE ACCENT IS DELIBERATE. The multi-tenant CRM uses the neutral platform blue
  * (#3b82f6, tailwind `accent`). The founders portal uses OASIS cyan #1FE3F0 —
@@ -23,10 +25,11 @@
  * worse than none. Each page calls the gate itself.
  */
 
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { resolveFounder } from "@/lib/founders/gate";
 import { FOUNDERS_PORTAL } from "@/lib/portals/registry";
+import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
+import { FoundersPortalBanner } from "@/components/founders/FoundersPortalBanner";
 
 export default async function FoundersLayout({
   children,
@@ -41,60 +44,18 @@ export default async function FoundersLayout({
 
   return (
     <div className="space-y-6">
-      {/* Portal banner. The one piece of chrome that says "you have left the
-          CRM". Cyan hairline + wordmark, matching the OASIS brand system. */}
-      <div
-        className="rounded-xl border px-5 py-3.5"
-        style={{
-          borderColor: "rgba(31,227,240,0.22)",
-          background:
-            "linear-gradient(90deg, rgba(31,227,240,0.07) 0%, rgba(31,227,240,0.02) 55%, transparent 100%)",
-        }}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <span
-              className="inline-block h-2 w-2 rounded-full"
-              style={{ background: "#1FE3F0", boxShadow: "0 0 10px rgba(31,227,240,0.7)" }}
-              aria-hidden
-            />
-            <div>
-              <div
-                className="text-[10px] font-bold uppercase tracking-[0.22em]"
-                style={{ color: "#1FE3F0" }}
-              >
-                {FOUNDERS_PORTAL.label}
-              </div>
-              <div className="mt-0.5 text-[11px] text-fg-dim">
-                {FOUNDERS_PORTAL.tagline}
-              </div>
-            </div>
-          </div>
-
-          <nav className="flex flex-wrap items-center gap-1.5">
-            {FOUNDERS_PORTAL.sections.map((s) =>
-              s.enabled ? (
-                <Link
-                  key={s.href}
-                  href={s.href}
-                  className="rounded-full border px-3 py-1.5 text-xs font-medium text-fg-muted transition-all hover:text-fg"
-                  style={{ borderColor: "rgba(31,227,240,0.22)" }}
-                >
-                  {s.label}
-                </Link>
-              ) : (
-                <span
-                  key={s.href}
-                  className="cursor-default rounded-full border border-bg-border px-3 py-1.5 text-xs font-medium text-fg-dim/60"
-                  title={`${s.label} — not built yet`}
-                >
-                  {s.label}
-                </span>
-              ),
-            )}
-          </nav>
-        </div>
-      </div>
+      {/* Portal banner (wordmark, tagline, section chips). Renders on every
+          founders page EXCEPT /founders/finances/**, which starts with its own
+          tab bar (see FoundersPortalBanner). The sections are filtered here,
+          on the server: the Finances chip only for the two owners — the
+          portal gate also admits the marketing hire. */}
+      <FoundersPortalBanner
+        label={FOUNDERS_PORTAL.label}
+        tagline={FOUNDERS_PORTAL.tagline}
+        sections={FOUNDERS_PORTAL.sections.filter(
+          (s) => s.audience !== "finance_owners" || isFinanceOwnerEmail(founder.email),
+        )}
+      />
 
       {children}
     </div>

@@ -128,3 +128,54 @@ export function formatLastSeen(iso: string, now: Date = new Date()): string {
       : { year: "numeric", month: "short", day: "numeric" };
   return `${then.toLocaleDateString(undefined, opts)}, ${then.toLocaleTimeString()}`;
 }
+
+/** The bridge's own report on whether it could read the worker fleet. */
+export const FLEET_REPORTER_SERVICE = "fleet_watchdog";
+
+export type StatusReporter = {
+  /**
+   * ok      — the bridge read the fleet on its last tick.
+   * failing — the bridge is pinging and says it could NOT read the fleet.
+   * silent  — the bridge is pinging but its fleet report has gone stale.
+   * unknown — no fleet report exists (a bridge older than this contract).
+   */
+  state: "ok" | "failing" | "silent" | "unknown";
+  error: string | null;
+  last_ping_at: string | null;
+};
+
+/**
+ * Whether the worker tiles can be believed at all (2026-09-24).
+ *
+ * On 2026-09-23 the bridge kept pinging every minute while its process-table
+ * read failed, so the twelve pm2.* rows simply stopped arriving. Each tile then
+ * aged past the stale window and rendered "Down — stopped reporting" for a
+ * worker that was running the whole time. Twelve false outages and no reason
+ * given. The reporter's own row is what separates "these workers are down" from
+ * "we cannot see these workers" — two situations that need opposite responses.
+ */
+export function describeStatusReporter(input: {
+  row: { status: string; metadata?: Record<string, unknown> | null; last_ping_at: string | null } | undefined;
+  bridgeOnline: boolean;
+  now: number;
+  staleMs: number;
+}): StatusReporter {
+  const { row } = input;
+  if (!row) return { state: "unknown", error: null, last_ping_at: null };
+  const pinged = row.last_ping_at ? Date.parse(row.last_ping_at) : NaN;
+  const fresh = Number.isFinite(pinged) && input.now - pinged <= input.staleMs;
+  if (!fresh) {
+    return {
+      state: input.bridgeOnline ? "silent" : "unknown",
+      error: null,
+      last_ping_at: row.last_ping_at,
+    };
+  }
+  if (row.status === "healthy") return { state: "ok", error: null, last_ping_at: row.last_ping_at };
+  const reported = row.metadata?.error;
+  return {
+    state: "failing",
+    error: typeof reported === "string" && reported ? reported : "the bridge could not read the process table",
+    last_ping_at: row.last_ping_at,
+  };
+}

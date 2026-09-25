@@ -26,7 +26,7 @@
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { getSubmissionsCreds, getSubmissionsFrom } from "@/lib/integrations/submissions-gmail";
 import {
   LEAD_SOURCE_LABELS,
@@ -74,17 +74,28 @@ export async function sendFormCompletionEmail(input: {
     const contact = typeof leadData.contact_name === "string" ? leadData.contact_name.trim() : "";
     const assignedTo = typeof leadData.assigned_to === "string" ? leadData.assigned_to : null;
 
-    // Resolve the assigned agent's email + name.
+    // Resolve the assigned agent's email + name. Deactivated teammates are
+    // included because the NAME is history — a funded lead keeps the agent who
+    // worked it (2026-09-24). A deactivated agent is never a RECIPIENT, though:
+    // they have left, so the email goes to submissions@ alone (already on every
+    // one of these) and the body marks them inactive so the inbox picks it up.
     let agentEmail = "";
     let agentName = "";
+    let agentInactive = false;
     if (assignedTo) {
-      const members = await getTenantMembers(tenantId).catch(() => []);
+      const members = await getTenantMembers(tenantId, { includeInactive: true }).catch(() => []);
       const m = members.find((x) => x.auth_user_id === assignedTo);
       if (m) {
-        agentEmail = EMAIL_RE.test((m.email || "").trim()) ? m.email.trim() : "";
         agentName = (m.display_name || m.full_name || "").trim();
+        if (isActiveMember(m)) {
+          agentEmail = EMAIL_RE.test((m.email || "").trim()) ? m.email.trim() : "";
+        } else {
+          agentInactive = true;
+          console.warn("[form-completion-email] assignee deactivated", { leadId, tenantId, assignedTo });
+        }
       }
     }
+    const agentLabel = agentName && agentInactive ? `${agentName} (inactive)` : agentName;
 
     // From + submissions@ recipient via the tenant's gws credential.
     const creds = await getSubmissionsCreds(tenantId);
@@ -124,7 +135,7 @@ export async function sendFormCompletionEmail(input: {
       "",
       `Merchant: ${business}${contact ? ` — ${contact}` : ""}`,
       `Form: ${formLabel}`,
-      `Agent: ${agentName || "(unassigned)"}`,
+      `Agent: ${agentLabel || "(unassigned)"}`,
       ...(usedLink ? [`Link used: ${usedLink}`] : []),
       ...(link ? ["", `Open the lead: ${link}`] : []),
       "",

@@ -33,6 +33,12 @@
  * must not be the one path that bypasses it. The email path has no such
  * gate, matching app/api/leads/[id]/email/route.ts (which doesn't check it
  * either) — an existing asymmetry in this codebase, not introduced here.
+ *
+ * Sender standing: every row goes out AS its actor — their own Gmail, their
+ * own TextTorrent line — and replies route back to them. A row a teammate
+ * queued before being deactivated (user_profiles.deactivated_at) must not
+ * fire from a retired person's mailbox, so the actor's standing in the row's
+ * tenant is re-read before any lane is chosen (senderMayDispatch).
  */
 
 import { NextResponse, type NextRequest } from "next/server";
@@ -49,6 +55,7 @@ import { operatorHasAppPassword, sendGmailAppPasswordAsOperator } from "@/lib/in
 import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
   recoverStaleDashboardEmailReservations,
   type DashboardEmailReservationRecovery,
@@ -147,6 +154,52 @@ async function markPermanentFail(db: Db, row: ClaimedRow, reason: string) {
  * automatic retry is forbidden because it can send a duplicate. */
 async function markDeliveryUnknown(db: Db, row: ClaimedRow, reason: string) {
   await markScheduledSendDeliveryUnknown(db, row, reason);
+}
+
+/**
+ * Whether the row's actor may still send as themselves. Returns false once the
+ * row has been marked; true hands it to its lane unchanged. Standing is read
+ * only in the row's own tenant, and once per (tenant, actor) per pass — a
+ * batch often holds several rows from one rep.
+ *
+ *  - deactivated → permanent fail `sender_deactivated`. The send would leave
+ *    from their mailbox or line and pull the replies back to them; there is no
+ *    one else's credential to fall back to, so it never fires.
+ *  - not_member → today's behaviour: the lane's tenant-scoped credential
+ *    lookup decides, exactly as it did before this check existed.
+ *  - read error → the normal retry path, never a send: this row would go out
+ *    as the person, so an unknown standing must not send it. That holds for
+ *    the SunBiz automations that queue here too (Kixie voicemail follow-ups,
+ *    renewal notices) — a requeue delays them one tick, it does not drop them.
+ *    A failure is not cached, so the actor's next row asks again.
+ */
+async function senderMayDispatch(
+  db: Db,
+  row: ClaimedRow,
+  standings: Map<string, MemberStanding>,
+): Promise<boolean> {
+  const key = `${row.tenant_id}:${row.actor_user_id}`;
+  let standing = standings.get(key);
+  if (!standing) {
+    try {
+      standing = (await memberStanding(row.tenant_id, row.actor_user_id)).standing;
+    } catch (err) {
+      console.error("[dispatch-scheduled-sends] sender standing check failed", {
+        id: row.id,
+        tenant: row.tenant_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await markRetryOrFail(db, row, "sender_standing_check_failed");
+      return false;
+    }
+    standings.set(key, standing);
+  }
+  if (standing === "deactivated") {
+    console.warn("[dispatch-scheduled-sends] sender deactivated", { id: row.id, tenant: row.tenant_id });
+    await markPermanentFail(db, row, "sender_deactivated");
+    return false;
+  }
+  return true;
 }
 
 async function processSms(db: Db, row: ClaimedRow): Promise<void> {
@@ -424,11 +477,14 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
   let processed = 0;
   let sentCount = 0;
   let failedCount = 0;
+  const senderStandings = new Map<string, MemberStanding>();
   for (const row of claimed) {
     if (Date.now() - startedAt > SOFT_BUDGET_MS) break;
     try {
-      if (row.channel === "sms") await processSms(db, row);
-      else await processEmail(db, row);
+      if (await senderMayDispatch(db, row, senderStandings)) {
+        if (row.channel === "sms") await processSms(db, row);
+        else await processEmail(db, row);
+      }
     } catch (err) {
       console.error("[dispatch-scheduled-sends] unhandled row error", row.id, err);
       if (!(err instanceof DeliveryStateUnknownError)) {

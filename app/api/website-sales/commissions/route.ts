@@ -131,7 +131,9 @@ export async function GET() {
   let repScope: { repUserId?: string; repUserIds?: string[] } = {};
   if (!session.isAdmin && persona === "manager") {
     try {
-      const directReports = await getOasisSalesRepRoster(session.tenantId, session.userId);
+      // A ledger is history: a deactivated report's rows must stay in their
+      // former manager's list and totals, so inactive reports are included.
+      const directReports = await getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true });
       ledgerScope = "manager_team";
       repScope = {
         // The manager sees their own sales/override entries plus only the reps

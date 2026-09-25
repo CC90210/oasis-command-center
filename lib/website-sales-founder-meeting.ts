@@ -2,6 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
   buildFounderMeetingMessages,
   FOUNDER_MEETING_DURATION_MINUTES,
@@ -154,6 +155,7 @@ export type FounderMeetingServiceDependencies = {
   createCalendar: typeof createGoogleFounderMeeting;
   updateCalendar: typeof updateGoogleFounderMeeting;
   cancelCalendar: typeof cancelGoogleFounderMeeting;
+  memberStanding: typeof memberStanding;
 };
 
 function dependencies(
@@ -165,6 +167,7 @@ function dependencies(
     createCalendar: overrides.createCalendar ?? createGoogleFounderMeeting,
     updateCalendar: overrides.updateCalendar ?? updateGoogleFounderMeeting,
     cancelCalendar: overrides.cancelCalendar ?? cancelGoogleFounderMeeting,
+    memberStanding: overrides.memberStanding ?? memberStanding,
   };
 }
 
@@ -1443,6 +1446,18 @@ export async function rescheduleVerifiedFounderMeeting(input: {
   );
   const hostUserId = appointment.assigned_to;
   const googleEventId = appointment.google_event_id;
+  // A reschedule is LIVE work for the host: Google re-sends the invite from
+  // their calendar and every new reminder row goes out as them. A host
+  // deactivated since booking must not get either, so refuse before anything
+  // is reserved, patched or queued. A failed read refuses too (retryable) —
+  // an unknown standing must not send as the person.
+  let hostStanding: MemberStanding;
+  try {
+    hostStanding = (await deps.memberStanding(input.tenantId, hostUserId)).standing;
+  } catch (error) {
+    throw new Error("meeting_host_check_failed", { cause: error });
+  }
+  if (hostStanding === "deactivated") throw new Error("meeting_host_deactivated");
   const reservation = await reserveOperation(
     db,
     appointment,

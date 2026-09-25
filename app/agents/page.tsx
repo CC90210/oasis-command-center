@@ -30,7 +30,7 @@ async function _tenantHasNoBridge(tenantId: string | null): Promise<boolean> {
     return !data || data.length === 0;
   } catch (err) {
     // Failed to check — don't show banner on transient DB error. Logged
-    // so a persistently-broken bridge_pairings query is surfaced in Vercel
+    // so a persistently-broken bridge_pairings query is surfaced in Cloudflare
     // logs instead of silently suppressing the onboarding nudge.
     console.error("[agents.tenant_has_no_bridge]", err);
     return false;
@@ -141,7 +141,7 @@ export default async function AgentsPage() {
           <span
             title={
               rows.filter((r) => r.live).length === 0
-                ? `None of your ${enabled.length} agents have pinged in the last 15 minutes. Start an agent's autonomous loop on the paired machine (e.g. \`pm2 start bravo-autonomous\`) and it will turn green here.`
+                ? `None of your ${enabled.length} agents have pinged in the last 15 minutes. Open Settings → Devices to check the paired machine, or run \`oasis bridge status\` there.`
                 : `${rows.filter((r) => r.live).length} of ${enabled.length} agents have pinged in the last 15 minutes — their autonomous loops are running.`
             }
             className="inline-block"

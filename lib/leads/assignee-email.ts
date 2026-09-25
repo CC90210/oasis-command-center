@@ -11,7 +11,7 @@
  * wrong one silently resolves nobody.
  */
 
-import { getTenantMembers } from "@/lib/team";
+import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { isAddressShaped } from "@/lib/leads/lead-copy-recipients";
 
 /**
@@ -29,6 +29,14 @@ export type AssigneeLookup =
   | { status: "unassigned" }
   /** Assigned to somebody who has no usable address on the roster. */
   | { status: "no_address" }
+  /**
+   * Assigned to a teammate who has since been deactivated (2026-09-24): won and
+   * in-delivery leads keep their owner for history. They are not copied — they
+   * have left, and the address resolved here also becomes the Reply-To and the
+   * signer, so a prospect's reply would go to someone no longer here. The caller
+   * falls through to the sender exactly as for an unassigned lead.
+   */
+  | { status: "deactivated" }
   | { status: "lookup_failed"; error: string };
 
 /**
@@ -48,7 +56,9 @@ export async function resolveAssigneeEmail(
 
   let members: Awaited<ReturnType<typeof getTenantMembers>>;
   try {
-    members = await getTenantMembers(tenantId);
+    // Inactive included so a deactivated owner is reported as that, rather than
+    // as an id the roster does not contain.
+    members = await getTenantMembers(tenantId, { includeInactive: true });
   } catch (e) {
     return {
       status: "lookup_failed",
@@ -58,6 +68,10 @@ export async function resolveAssigneeEmail(
 
   for (const m of members) {
     if ((m.auth_user_id || "").trim().toLowerCase() === id) {
+      if (!isActiveMember(m)) {
+        console.warn("[assignee-email] assignee deactivated", { tenantId, assignedTo: id });
+        return { status: "deactivated" };
+      }
       const email = (m.email || "").trim();
       return email && isAddressShaped(email)
         ? { status: "resolved", email }

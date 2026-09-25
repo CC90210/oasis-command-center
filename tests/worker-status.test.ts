@@ -29,6 +29,7 @@ import assert from "node:assert/strict";
 import {
   SUPERVISOR_DISABLED,
   countsTowardHealth,
+  describeStatusReporter,
   formatLastSeen,
   isOperatorStopped,
 } from "../lib/automations/worker-status";
@@ -160,6 +161,47 @@ import {
     countsTowardHealth({ status: "healthy", runtime: "cloud" }),
     true,
     "a reporting cloud automation is part of OASIS health",
+  );
+}
+
+// ── 3. A blind reporter is not twelve dead workers ────────────────────────
+{
+  // 2026-09-23: the bridge pinged every minute while its fleet read failed, so
+  // every pm2.* tile aged into "Down — stopped reporting". The reporter row is
+  // what tells "down" apart from "cannot see".
+  const now = Date.parse("2026-09-24T12:00:00Z");
+  const fresh = "2026-09-24T11:59:30Z";
+  const old = "2026-09-23T09:00:13Z";
+  const staleMs = 300_000;
+
+  assert.deepEqual(
+    describeStatusReporter({ row: { status: "healthy", last_ping_at: fresh }, bridgeOnline: true, now, staleMs }),
+    { state: "ok", error: null, last_ping_at: fresh },
+  );
+  const failing = describeStatusReporter({
+    row: { status: "down", metadata: { error: "ProcessTableUnreadable: wmic returned nothing" }, last_ping_at: fresh },
+    bridgeOnline: true, now, staleMs,
+  });
+  assert.equal(failing.state, "failing");
+  assert.match(failing.error ?? "", /ProcessTableUnreadable/, "the reason must reach the operator");
+  assert.equal(
+    describeStatusReporter({ row: { status: "healthy", last_ping_at: old }, bridgeOnline: true, now, staleMs }).state,
+    "silent",
+    "bridge alive but fleet report stale = reporter silent, not workers down",
+  );
+  assert.equal(
+    describeStatusReporter({ row: { status: "healthy", last_ping_at: old }, bridgeOnline: false, now, staleMs }).state,
+    "unknown",
+    "with the bridge itself offline the bridge banner already explains the gap",
+  );
+  assert.equal(
+    describeStatusReporter({ row: undefined, bridgeOnline: true, now, staleMs }).state,
+    "unknown",
+    "an older bridge that never sends the row must not be accused of failing",
+  );
+  assert.equal(
+    describeStatusReporter({ row: { status: "down", metadata: {}, last_ping_at: fresh }, bridgeOnline: true, now, staleMs }).error,
+    "the bridge could not read the process table",
   );
 }
 

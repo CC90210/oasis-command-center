@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
 
 type LifecycleEntity = "lead" | "application" | "funded_deal" | "renewal";
 type RecordRow = { id: string; entity_type: LifecycleEntity; data: Record<string, unknown> };
@@ -49,22 +50,32 @@ export async function assignLifecycleOwner(input: {
   const ownershipChangedAt = input.occurredAt ?? new Date().toISOString();
   for (const row of rows.values()) {
     const previousOwner =
-      typeof row.data.assigned_to === "string" ? row.data.assigned_to.toLowerCase() : null;
+      typeof row.data.assigned_to === "string"
+        ? row.data.assigned_to.trim().toLowerCase() || null
+        : null;
+    const nextOwner = input.assignedTo?.trim().toLowerCase() || null;
+    const ownerChanged = previousOwner !== nextOwner;
     previousOwners.push(previousOwner);
-    const ownerChanged = previousOwner !== input.assignedTo;
+    const cycleOwnershipPatch = input.resetClaimClock
+      ? input.assignedTo
+        ? {
+            ...pipelineCycleAssignmentFacts(input.assignedTo, ownershipChangedAt),
+            ...(ownerChanged ? { claimed_at: ownershipChangedAt, last_call_at: null } : {}),
+          }
+        : {
+            assigned_to: null,
+            assigned_at: null,
+            claimed_at: null,
+            pipeline_cycle: null,
+            last_call_at: null,
+          }
+      : { assigned_to: input.assignedTo };
     const update = await db.rpc("patch_tenant_record_data", {
       p_id: row.id,
       p_tenant_id: input.tenantId,
       p_patch: {
-        assigned_to: input.assignedTo,
+        ...cycleOwnershipPatch,
         ...(input.occurredAt ? { last_contacted_at: input.occurredAt } : {}),
-        ...(input.resetClaimClock && ownerChanged
-          ? {
-              assigned_at: input.assignedTo ? ownershipChangedAt : null,
-              claimed_at: input.assignedTo ? ownershipChangedAt : null,
-              last_call_at: null,
-            }
-          : {}),
       },
     });
     if (update.error) return { ok: false, error: update.error.message };

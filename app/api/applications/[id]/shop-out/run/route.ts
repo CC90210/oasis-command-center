@@ -194,7 +194,7 @@ async function handleShopOutRun(
 
   // Derive the agent CC list — single source of truth for the rep-fields
   // scan + UUID resolution + agents.config.json intersection.
-  const derivedAgents = await deriveAgentCcs(db, appData);
+  const derivedAgents = await deriveAgentCcs(db, sess.tenantId, appData);
   const agentEmails = new Set(getAgents().map((a) => a.email.toLowerCase().trim()));
   const derivedCcs = derivedAgents.map((a) => a.email.toLowerCase().trim());
 

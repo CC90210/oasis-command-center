@@ -41,7 +41,7 @@ import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { MEMBER_DEACTIVATED_MESSAGE, getOasisPipelineAssignmentRoster, memberStanding } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -128,6 +128,58 @@ function mustScopeRegardlessOfFlag(teamRole: string, isAdmin: boolean): boolean 
   return !isAdmin && mustSeeOwnRecordsOnly(teamRole);
 }
 
+/**
+ * A NEW owner on a generic record must be an ACTIVE member of this workspace.
+ *
+ * Outside OASIS sales leads (which resolve owners against the assignment
+ * roster above), POST data.assigned_to and PATCH patch.assigned_to were stored
+ * verbatim, so an admin could hand a SunBiz lead or application to a
+ * deactivated rep through this route although every UI picker is active-only.
+ * Same rule as /api/leads/[id]/assign and /api/leads/bulk (2026-09-24): a
+ * deactivated teammate keeps the records they already hold but takes no new
+ * ones, and a check that could not run never hands out a record.
+ *
+ * Returns the refusal, or null when the assignee may take the record. The
+ * stored value is the caller's, untouched; only the lookup is normalised.
+ */
+async function refuseInactiveAssignee(tenantId: string, assignee: string): Promise<NextResponse | null> {
+  let standing;
+  try {
+    standing = (await memberStanding(tenantId, assignee.trim().toLowerCase())).standing;
+  } catch (error) {
+    console.error("[manifest.records] assignee standing could not be verified", {
+      tenantId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "member_check_failed",
+        message: "That teammate couldn't be verified right now, so nothing was saved. Try again in a moment.",
+      },
+      { status: 503 },
+    );
+  }
+  if (standing === "deactivated") {
+    return NextResponse.json(
+      { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE, fields: ["assigned_to"] },
+      { status: 422 },
+    );
+  }
+  if (standing === "not_member") {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "not_a_tenant_member",
+        message: "That person isn't a member of this workspace. Choose a teammate from this workspace.",
+        fields: ["assigned_to"],
+      },
+      { status: 400 },
+    );
+  }
+  return null;
+}
+
 function handleRecordsError(err: unknown): NextResponse {
   if (err instanceof RecordsError) {
     const status =
@@ -203,18 +255,17 @@ export async function POST(
 
   const isOasisSalesLead = entity.toLowerCase() === "lead" && isWebsiteSalesTenantSlug(slug);
   /**
-   * A SALES REP MAY CREATE THEIR OWN OASIS LEAD.
+   * A SALES ROLE MAY REQUEST AN OASIS LEAD CREATE.
    *
    * Creation used to be admin-only everywhere, so a rep who found a business
    * themselves had nowhere to put it: /pipeline/new redirected them away and
    * this route answered 403. CC, 2026-09-08: reps have their own way of
    * sourcing leads and need to enter them, assigned to whoever found them.
    *
-   * Deliberately NARROW. It widens creation for OASIS leads only, and only for
-   * roles that already work this pipeline — every other entity and every other
-   * workspace still requires an admin, because this is the generic record
-   * endpoint and a blanket relaxation would let any member create any record
-   * type in any tenant.
+   * Deliberately NARROW. This first gate admits only roles that already work
+   * the OASIS pipeline; the assignment-roster gate below then limits owners
+   * to CC, Adon and active reps. Every other entity and workspace still
+   * requires an admin because this is the generic record endpoint.
    */
   const repMayCreateOwnLead = isOasisSalesLead && mayWorkWebsiteSalesLifecycle(r.team_role);
   if (!r.is_admin && !repMayCreateOwnLead) {
@@ -246,23 +297,27 @@ export async function POST(
    * planOasisLeadCreate (lib/oasis-lead-create.ts) is the one rule both create
    * doors share -- this route and rep-only /api/leads/quick-add. Every new lead
    * starts in Assigned, lifecycle fields remain server-owned, and the planner
-   * stamps the motion/program/ownership fields both boards read. An admin picks
-   * a verified sales-roster owner; a rep-created lead is self-owned.
+   * stamps the motion/program/ownership fields both boards read. Every owner is
+   * resolved against the assignment roster (getOasisPipelineAssignmentRoster:
+   * CC, Adon and ACTIVE reps) before planning; a deactivated teammate is refused.
    *
    * Before 2026-09-10 this route accepted only `researched` -- a stage the board
    * had stopped drawing -- and stamped nothing on an admin's lead, so CC's leads
    * were saved and appeared on no screen. Nothing here is taken from the request
    * for ownership: a rep cannot assign a lead they found to somebody else.
    *
-   * Every other entity and workspace keeps the plain copy, exactly as before.
+   * Every other entity and workspace keeps the plain copy, exactly as before,
+   * except that a named owner must be an active member (refuseInactiveAssignee).
    */
   let data: Record<string, unknown> = { ...body.data };
   if (isOasisSalesLead) {
-    let resolvedAssigneeUserId = user.id;
     const plannerData: Record<string, unknown> = { ...body.data };
+    const requestedAssignee = r.is_admin
+      ? typeof body.data.assigned_to === "string"
+        ? body.data.assigned_to.trim()
+        : ""
+      : user.id;
     if (r.is_admin) {
-      const requestedAssignee =
-        typeof body.data.assigned_to === "string" ? body.data.assigned_to.trim() : "";
       if (!requestedAssignee) {
         return NextResponse.json(
           {
@@ -275,40 +330,44 @@ export async function POST(
         );
       }
 
-      let roster;
-      try {
-        roster = await getOasisSalesRepRoster(r.tenant_id);
-      } catch (error) {
-        console.error("[manifest.records] OASIS sales roster could not be verified", {
-          tenantId: r.tenant_id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "sales_roster_unavailable",
-            message: "The sales roster could not be verified, so the lead was not saved. Try again in a moment.",
-          },
-          { status: 503 },
-        );
-      }
-      const resolved = resolveAssignableTarget(roster, requestedAssignee);
-      if (!resolved) {
-        return NextResponse.json(
-          {
-            ok: false,
-            error: "target_not_on_sales_roster",
-            message: "Choose an active sales rep from this workspace.",
-            fields: ["assigned_to"],
-          },
-          { status: 422 },
-        );
-      }
-      resolvedAssigneeUserId = resolved;
       // The browser value proved intent only. The planner receives the
       // canonical roster id separately and continues treating assigned_to as
       // a protected lifecycle field in every other caller.
       delete plannerData.assigned_to;
+    }
+
+    let roster;
+    try {
+      roster = await getOasisPipelineAssignmentRoster(r.tenant_id);
+    } catch (error) {
+      console.error("[manifest.records] OASIS assignment roster could not be verified", {
+        tenantId: r.tenant_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "sales_roster_unavailable",
+          message: "The sales assignment roster could not be verified, so the lead was not saved. Try again in a moment.",
+        },
+        { status: 503 },
+      );
+    }
+    const resolvedAssigneeUserId = r.is_admin
+      ? resolveAssignableTarget(roster, requestedAssignee)
+      : resolveAssignableTarget(roster, user.id);
+    if (!resolvedAssigneeUserId) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "target_not_on_sales_roster",
+          message: r.is_admin
+            ? "Choose CC, Adon or an active sales rep. A deactivated teammate cannot take new work."
+            : "New OASIS leads go only to CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+          ...(r.is_admin ? { fields: ["assigned_to"] } : {}),
+        },
+        { status: r.is_admin ? 422 : 403 },
+      );
     }
 
     const plan = planOasisLeadCreate({
@@ -332,6 +391,10 @@ export async function POST(
       );
     }
     data = plan.data;
+  } else if (typeof data.assigned_to === "string" && data.assigned_to.trim()) {
+    // The plain copy still names its owner: that owner must be able to take it.
+    const refusal = await refuseInactiveAssignee(r.tenant_id, data.assigned_to);
+    if (refusal) return refusal;
   }
 
   try {
@@ -428,6 +491,26 @@ export async function PATCH(
         },
         { status: 403 },
       );
+    }
+  }
+
+  // A changed owner is new work for them; re-saving the owner a record already
+  // has is not, even when that teammate has since been deactivated. (An OASIS
+  // sales lead never gets here with assigned_to: it was refused above.)
+  const nextAssignee = typeof body.patch.assigned_to === "string" ? body.patch.assigned_to.trim() : "";
+  if (nextAssignee) {
+    let current;
+    try {
+      current = await getRecord({ tenant_id: r.tenant_id, entity: entity.toLowerCase(), id });
+    } catch (err) {
+      return handleRecordsError(err);
+    }
+    const currentAssignee =
+      typeof current?.data?.assigned_to === "string" ? current.data.assigned_to.trim().toLowerCase() : "";
+    // A missing record falls through to updateRecord's not_found, as before.
+    if (current && nextAssignee.toLowerCase() !== currentAssignee) {
+      const refusal = await refuseInactiveAssignee(r.tenant_id, nextAssignee);
+      if (refusal) return refusal;
     }
   }
 

@@ -6,18 +6,19 @@
  * the local bridge's /env/set endpoint (CORS-allowed for the dashboard
  * origin, token-gated by the bridge_token at ~/.oasis/bridge_token).
  *
- * Why local-bridge instead of Vercel: the operator's CLI tools all read
- * .env.agents on disk. Routing through the bridge keeps the secret on
- * the operator's machine — Vercel never sees it.
+ * Why local bridge: the operator's CLI tools read a protected local secret
+ * store. Routing through the bridge keeps the secret on the operator's
+ * machine — the hosted dashboard never receives it.
  *
- * If the bridge isn't online we fall back to a copy-paste affordance
- * so the operator can finish manually.
+ * If the bridge is offline, saving fails closed until the paired-machine
+ * supervisor is restored. We never instruct the operator to edit secret
+ * files manually.
  */
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Check, KeyRound, Loader2, X, ExternalLink, Copy } from "lucide-react";
+import { Check, KeyRound, Loader2, X, ExternalLink } from "lucide-react";
 import { BRIDGE_CHAT_BASE } from "@/lib/agent-roots";
 
 type Props = {
@@ -37,7 +38,6 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -92,15 +92,6 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
     }
   }
 
-  function copyManual() {
-    const line = `${envKey}=${value || "<paste-key-here>"}`;
-    if (typeof navigator !== "undefined" && navigator.clipboard) {
-      navigator.clipboard.writeText(line);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    }
-  }
-
   if (typeof document === "undefined") return null;
   return createPortal(
     <div
@@ -127,7 +118,7 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
           <h2 className="text-base font-bold text-fg">Connect {serviceLabel}</h2>
         </div>
         <p className="text-xs text-fg-muted leading-relaxed mb-4">
-          Paste your API key here. It saves to <code className="text-accent font-mono">.env.agents</code> on your local machine via the bridge — never touches our servers. The integration flips green within ~5 seconds of save.
+          Paste your API key here. The bridge saves it to the protected local secret store on your paired machine, so it never touches our servers. The integration flips green within ~5 seconds of save.
         </p>
 
         <label className="block">
@@ -163,21 +154,14 @@ export function KeyPasteModal({ open, onClose, service, serviceLabel, envKey, ap
           <div className="mt-4 rounded-lg border border-status-warm/40 bg-status-warm/5 p-3 text-xs text-status-warm">
             <div className="font-bold mb-1">Bridge offline.</div>
             <div className="text-fg-muted leading-relaxed">
-              Run <code className="text-accent">bravo bridge start</code> on your machine and try again. Or copy this line and paste into <code className="text-accent">.env.agents</code> manually:
+              Open Settings → Devices, or run <code className="text-accent">oasis bridge status</code> followed by <code className="text-accent">oasis bridge restart</code> on the paired machine. Return here when the bridge reports online; secret entry stays disabled until then.
             </div>
-            <div className="mt-2 flex items-center gap-2">
-              <code className="flex-1 bg-bg-deep rounded px-2 py-1 text-[11px] font-mono text-fg overflow-x-auto">
-                {envKey}={value || "<paste-key>"}
-              </code>
-              <button
-                type="button"
-                onClick={copyManual}
-                className="text-xs text-fg-dim hover:text-accent inline-flex items-center gap-1"
-              >
-                {copied ? <Check className="w-3 h-3 text-status-engaged" /> : <Copy className="w-3 h-3" />}
-                {copied ? "copied" : "copy"}
-              </button>
-            </div>
+            <a
+              href="/settings/devices"
+              className="mt-2 inline-flex text-xs font-semibold text-accent hover:text-accent-bright"
+            >
+              Open Devices
+            </a>
           </div>
         )}
 

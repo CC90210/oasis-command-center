@@ -84,7 +84,9 @@ async function main() {
       session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
-      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, updated_at TEXT);
+      onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, invited_by TEXT,
+      joined_at TEXT, manager_user_id TEXT, updated_at TEXT,
+      deactivated_at TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
@@ -101,8 +103,8 @@ async function main() {
     CREATE TABLE forms (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT, enabled INTEGER DEFAULT 1, created_at TEXT);
   `);
   const profile = (id: string, authId: string, email: string, tenant: string, role: string, owner = 0) => ({
-    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
+    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, joined_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
     args: [id, authId, email, tenant, role, owner],
   });
   let t = 0;
@@ -113,13 +115,13 @@ async function main() {
   await seed.batch(
     [
       ...[
-        [OWNER, "cc@oasis.test"],
-        [OPENER, "opener@oasis.test"],
+        [OWNER, "conaugh@oasisai.work"],
+        [OPENER, "adon@oasisai.work"],
         [SUN_ADMIN, "admin@sun.test"],
         [SUN_AGENT, "agent@sun.test"],
       ].map(([id, email]) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [id, email] })),
-      profile("p-owner", OWNER, "cc@oasis.test", WEBDEV_TENANT_ID, "owner", 1),
-      profile("p-opener", OPENER, "opener@oasis.test", WEBDEV_TENANT_ID, "opener"),
+      profile("p-owner", OWNER, "conaugh@oasisai.work", WEBDEV_TENANT_ID, "owner", 1),
+      profile("p-opener", OPENER, "adon@oasisai.work", WEBDEV_TENANT_ID, "opener"),
       // SunBiz production runs owner / admin / member today; `agent` is the
       // ownership-scoped role the gate treats narrowly, so both are driven.
       profile("p-sun-admin", SUN_ADMIN, "admin@sun.test", SUN, "admin"),
@@ -269,8 +271,8 @@ async function main() {
     assert.equal(await stageOf("m-owner-biz1"), "signed_application");
   });
 
-  login(OPENER, "opener@oasis.test");
-  await check("OASIS opener, email of an unassigned pool lead: 409 with a sentence", async () => {
+  login(OPENER, "adon@oasisai.work");
+  await check("OASIS Adon, email of an unassigned pool lead: 409 with a sentence", async () => {
     const r = await post({ business_name: "Pool Two", email: "pool2@oasis.test", state: "ON" });
     assert.equal(r.status, 409, JSON.stringify(r.body));
     assert.equal(r.body.error, "lead_exists_not_yours");

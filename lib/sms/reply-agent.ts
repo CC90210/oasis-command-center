@@ -16,6 +16,7 @@ import {
   type MeetingIntent,
 } from "@/lib/sms/meeting-intent";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { memberStanding } from "@/lib/team";
 import { getTursoClient } from "@/lib/turso";
 import {
   activateVerifiedFounderMeeting,
@@ -951,24 +952,50 @@ async function loadExpectedLeadTransition(
   };
 }
 
-async function resolveOpenerAttendee(
-  db: Db,
-  appointment: Appointment,
+/**
+ * The opener's invite copy on a client-driven reschedule. Never throws: the
+ * copy is a courtesy, and the client's reschedule must go through without it.
+ * A deactivated opener (a rep retired on 2026-09-24 who is still frozen as
+ * attributed_rep_user_id) gets no invite, and a failed read or an unusable
+ * profile drops the copy with a warning. Exported for tests.
+ */
+export async function resolveSmsAgentOpenerAttendee(
+  appointment: Pick<Appointment, "tenant_id" | "organizer_email_snapshot">,
   openerUserId: string | null,
 ): Promise<OpenerAttendee | null> {
   const userId = openerUserId?.trim().toLowerCase() || "";
   if (!UUID.test(userId)) return null;
-  const profile = await db.from("user_profiles")
-    .select("email,full_name")
-    .eq("tenant_id", appointment.tenant_id)
-    .eq("auth_user_id", userId)
-    .maybeSingle();
-  if (profile.error || !profile.data) throw new Error("sms_agent_opener_profile_lookup_failed");
-  const email = typeof profile.data.email === "string" ? profile.data.email.trim().toLowerCase() : "";
+  let opener: Awaited<ReturnType<typeof memberStanding>>;
+  try {
+    opener = await memberStanding(appointment.tenant_id, userId);
+  } catch (error) {
+    console.warn("[sms-reply-agent] opener standing unavailable; invite copy skipped", {
+      code: "sms_agent_opener_profile_lookup_failed",
+      tenantId: appointment.tenant_id,
+      userId,
+    }, error);
+    return null;
+  }
+  if (opener.standing !== "active" || !opener.member) {
+    console.warn("[sms-reply-agent] opener is not an active teammate; invite copy skipped", {
+      tenantId: appointment.tenant_id,
+      userId,
+      standing: opener.standing,
+    });
+    return null;
+  }
+  const email = typeof opener.member.email === "string" ? opener.member.email.trim().toLowerCase() : "";
   const organizer = (appointment.organizer_email_snapshot || "").trim().toLowerCase();
-  if (!email.includes("@")) throw new Error("sms_agent_opener_email_invalid");
+  if (!email.includes("@")) {
+    console.warn("[sms-reply-agent] opener email unusable; invite copy skipped", {
+      code: "sms_agent_opener_email_invalid",
+      tenantId: appointment.tenant_id,
+      userId,
+    });
+    return null;
+  }
   if (email === organizer) return null;
-  const displayName = typeof profile.data.full_name === "string" ? profile.data.full_name.trim() : "";
+  const displayName = typeof opener.member.full_name === "string" ? opener.member.full_name.trim() : "";
   return displayName ? { email, displayName } : { email };
 }
 
@@ -1075,6 +1102,29 @@ async function notifyRep(input: {
     telegramOncePerOpen: input.severity !== "info",
   });
   if (!input.appointment.assigned_to || !input.appointment.organizer_email_snapshot) return null;
+  // The rep copy leaves FROM the host's own Gmail. A host who is no longer an
+  // active teammate gets nothing sent as them — the operator alert above is
+  // the notice. A failed read skips it too, but reports it: the host may be
+  // active and simply missed their copy.
+  let host: Awaited<ReturnType<typeof memberStanding>>;
+  try {
+    host = await memberStanding(input.job.tenant_id, input.appointment.assigned_to);
+  } catch (error) {
+    console.warn("[sms-reply-agent] host standing unavailable; rep email skipped", {
+      code: "sms_agent_host_standing_check_failed",
+      tenantId: input.job.tenant_id,
+      appointmentId: input.appointment.id,
+    }, error);
+    return "rep_standing_check_failed";
+  }
+  if (host.standing !== "active") {
+    console.warn("[sms-reply-agent] host is not an active teammate; rep email skipped", {
+      tenantId: input.job.tenant_id,
+      appointmentId: input.appointment.id,
+      standing: host.standing,
+    });
+    return null;
+  }
   const body = [
     input.summary,
     input.oldTime ? `Old time: ${input.oldTime}` : null,
@@ -1402,7 +1452,7 @@ async function executeReschedule(
   meetingAt: string,
 ) {
   const expectedLead = await loadExpectedLeadTransition(db, appointment);
-  const openerAttendee = await resolveOpenerAttendee(db, appointment, expectedLead.openerUserId);
+  const openerAttendee = await resolveSmsAgentOpenerAttendee(appointment, expectedLead.openerUserId);
   const meeting = await rescheduleVerifiedFounderMeeting({
     tenantId: job.tenant_id,
     leadId: appointment.lead_id,
@@ -1792,7 +1842,18 @@ async function processClaimedJob(
       );
       return { status: "escalated" };
     }
-    const meeting = await executeReschedule(db, job, appointment, rescheduleVerdict.meetingAt);
+    let meeting: Awaited<ReturnType<typeof executeReschedule>>;
+    try {
+      meeting = await executeReschedule(db, job, appointment, rescheduleVerdict.meetingAt);
+    } catch (error) {
+      // The host was deactivated since booking, or their standing could not be
+      // read: the service refused before touching the calendar, the lead or a
+      // reminder row. A human rebooks it — never a crashed client conversation.
+      const code = smsAgentSafeErrorCode(error);
+      if (code !== "meeting_host_deactivated" && code !== "meeting_host_check_failed") throw error;
+      await pageAndEscalate(db, job, appointment, intent, code, "human_reschedule_required");
+      return { status: "escalated", failed: true };
+    }
     conversation = await updateConversation(
       db,
       conversation,

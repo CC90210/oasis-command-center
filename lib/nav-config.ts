@@ -45,7 +45,8 @@ export type NavIconKey =
   | "Heart"
   | "Sparkles"
   | "FileSearch"
-  | "ClipboardCheck";
+  | "ClipboardCheck"
+  | "Ticket";
 
 /**
  * NavItem - one entry in the sidebar.
@@ -111,6 +112,8 @@ export const CC_NAV: NavItem[] = [
   { group: "System", href: "/automations", label: "Automations", icon: "RefreshCcw" },
   { group: "System", href: "/health", label: "Health", icon: "ShieldCheck" },
   { group: "System", href: "/analytics", label: "Analytics", icon: "BarChart3" },
+  { group: "System", href: "/projects", label: "Projects", icon: "ClipboardCheck" },
+  { group: "System", href: "/tickets", label: "Tickets", icon: "FileSearch" },
   { group: "System", href: "/settings", label: "Settings", icon: "Settings" },
   // Nav arc on CC's empire sidebar:
   //   - 13 entries → 7  (Phase 2, 2026-05-16: blunt consolidation, no merge)

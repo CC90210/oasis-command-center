@@ -177,8 +177,11 @@ export async function resolveLeadReadPolicy(session: LeadReadSession): Promise<L
   if (!oasisJobRole) return { mode: "denied" };
 
   const managerTeamRead = canReadOasisSalesTeamPipeline({ teamRole: role, tenantSlug: slug });
+  // A READ boundary, so deactivated reps stay on it: their closed and
+  // in-delivery leads keep assigned_to for history (lib/team-activation-rules.ts
+  // "keep"), and their former manager must still open those records.
   const roster = managerTeamRead
-    ? await getOasisSalesRepRoster(session.tenantId).catch(() => [])
+    ? await getOasisSalesRepRoster(session.tenantId, undefined, { includeInactive: true }).catch(() => [])
     : [];
   return {
     mode: "oasis",

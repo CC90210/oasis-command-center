@@ -2240,8 +2240,9 @@ function readableError(code: string): string {
     // because every one of these is a "somebody must go and do a thing"
     // condition, not something retrying will clear.
     workspace_calendar_token_invalid:
-      "Bookings are down for everyone, not just this host: the shared OASIS workspace calendar credential has expired. " +
-      "An administrator must reconnect it with Calendar access. Reconnecting this host will NOT fix it. Nothing was booked and no invite went out.",
+      "Bookings are down for everyone, not just this host: the deployed shared OASIS calendar credential could not be verified. " +
+      "Securely sync the existing authorized workspace credential bundle from the canonical secret store, then run the live verifier. " +
+      "Rotate only if that canonical bundle also fails direct provider verification. Nothing was booked and no invite went out.",
     token_refresh_failed:
       "Google rejected the host's saved sign-in, usually because access was revoked or the password changed. " +
       "They need to reconnect Google once in Settings. Nothing was booked and no invite went out.",
@@ -2261,6 +2262,8 @@ function readableError(code: string): string {
     verified_meeting_required: "This older booking has no verified Calendar receipt. Return it to Qualified and book it through the guided handoff.",
     meeting_no_longer_reschedulable: "This meeting is already completed or cancelled and cannot be rescheduled.",
     meeting_transition_pending: "A Calendar change is already waiting for its lifecycle update. Refresh and retry the same action.",
+    meeting_host_deactivated: "This meeting's host has been deactivated, so it can't be rescheduled. Once its time has passed, mark it no-show; before then, cancel it. Then book a new audit with an active host.",
+    meeting_host_check_failed: "We could not confirm this meeting's host just now. Nothing was changed. Retry in a moment.",
     outcome_note_required: "Add the outcome and handoff context in the note above before saving.",
     meeting_close_failed: "The meeting outcome could not close its reminder queue. Refresh and retry before moving on.",
     meeting_not_started: "A no-show cannot be recorded before the scheduled meeting time.",

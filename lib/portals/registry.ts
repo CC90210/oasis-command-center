@@ -39,6 +39,36 @@ export type PortalSection = {
   label: string;
   /** false renders the chip greyed and unclickable — honest about what is not built. */
   enabled: boolean;
+  /**
+   * A sub-section chip belongs to one top-level destination and renders only
+   * while the viewer is inside it. Without this, Marketing's Library / Train /
+   * Performance chips sat in the header of every founders page, Finances
+   * included — and Finances has its own tab bar.
+   */
+  parent?: string;
+  /** Narrower than the portal gate (see FoundersNavItem.audience). */
+  audience?: "finance_owners";
+};
+
+/**
+ * `audience: "finance_owners"` — shown only to the two owners (CC, Adon).
+ * The founders portal gate also admits the marketing hire and builders, whose
+ * job is the studio; the money is not theirs to see. The row is hidden for
+ * them AND the pages 404 for them (lib/founders-finances/access-io.ts) —
+ * hiding is cosmetic, the page gate is the wall.
+ */
+export type FoundersNavItem = {
+  href: string;
+  label: string;
+  icon: NavIconKey;
+  audience?: "finance_owners";
+};
+
+const FINANCES_NAV_ITEM: FoundersNavItem = {
+  href: "/founders/finances",
+  label: "Finances",
+  icon: "Landmark",
+  audience: "finance_owners",
 };
 
 export type Portal = {
@@ -114,16 +144,13 @@ export const MARKETING_SHELL_ACTIVE = false as const;
  * on the next edit. This is the structural form: there is now only one list, so
  * disagreement is not expressible.
  */
-export const FOUNDERS_NAV: ReadonlyArray<{
-  href: string;
-  label: string;
-  icon: NavIconKey;
-}> = MARKETING_SHELL_ACTIVE
+export const FOUNDERS_NAV: ReadonlyArray<FoundersNavItem> = MARKETING_SHELL_ACTIVE
   ? [
       { href: "/founders/marketing", label: "Content", icon: "Megaphone" },
       { href: "/founders/growth", label: "Marketing", icon: "BarChart3" },
+      FINANCES_NAV_ITEM,
     ]
-  : [{ href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }];
+  : [{ href: "/founders/marketing", label: "Marketing", icon: "Megaphone" }, FINANCES_NAV_ITEM];
 
 export const FOUNDERS_PORTAL: Portal = {
   id: "founders",
@@ -131,17 +158,35 @@ export const FOUNDERS_PORTAL: Portal = {
   tagline: "Our own marketing, ops and intelligence. Not a tenant surface.",
   routePrefix: "/founders",
   tenantSlugs: [],
-  owns: ["app/founders/", "lib/founders/", "lib/founders-marketing-core.ts", "components/founders/"],
+  owns: ["app/founders/", "lib/founders/", "lib/founders-marketing-core.ts", "lib/founders-finances/", "components/founders/"],
   sections: [
-    ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true })),
-    { href: "/founders/marketing/library", label: "Library", enabled: true },
-    { href: "/founders/marketing/train", label: "Train", enabled: true },
+    ...FOUNDERS_NAV.map((n) => ({ href: n.href, label: n.label, enabled: true, ...(n.audience ? { audience: n.audience } : {}) })),
+    { href: "/founders/marketing/library", label: "Library", enabled: true, parent: "/founders/marketing" },
+    { href: "/founders/marketing/train", label: "Train", enabled: true, parent: "/founders/marketing" },
     // Enabled: the page exists and reads real numbers now. It was greyed since the
     // portal shipped, captioned "Phase 5", while Zernio had been collecting the
     // metrics the whole time — 68 of 79 published posts carry non-zero data.
-    { href: "/founders/marketing/performance", label: "Performance", enabled: true },
+    { href: "/founders/marketing/performance", label: "Performance", enabled: true, parent: "/founders/marketing" },
   ],
 };
+
+/**
+ * The header chips to render on `pathname`: every top-level section, plus the
+ * sub-sections of whichever parent the viewer is inside. PURE, so the rule
+ * that Marketing's chips never appear on a Finances page is testable.
+ */
+export function visibleFoundersSections(
+  pathname: string,
+  sections: readonly PortalSection[],
+): { chips: PortalSection[]; active: string | null } {
+  const within = (href: string) => pathname === href || pathname.startsWith(`${href}/`);
+  const chips = [
+    ...sections.filter((s) => !s.parent),
+    ...sections.filter((s) => s.parent && within(s.parent)),
+  ];
+  const active = [...chips].filter((s) => within(s.href)).sort((a, b) => b.href.length - a.href.length)[0]?.href ?? null;
+  return { chips, active };
+}
 
 /**
  * OASIS AI's own product surface: the public marketing website, the agency lead

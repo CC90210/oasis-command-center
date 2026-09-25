@@ -22,6 +22,7 @@ import {
   withAssignedTo,
   isUuid,
 } from "@/lib/web-leads/assign";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 
@@ -433,13 +434,14 @@ async function main() {
   assert.equal(isTerritoryAssignmentEligible({ stage: "unassigned" }), true);
   assert.equal(isTerritoryAssignmentEligible({ stage: "assigned" }), false);
   assert.equal(isTerritoryAssignmentEligible({ stage: "researched", dnc: true }), false);
-  const assignedAt = "2026-09-14T12:00:00.000Z";
+  const assignedAt = "2026-09-23T12:00:00.000Z";
   assert.deepEqual(withAssignedTo({ business_name: "X", stage: "researched" }, AGENT, assignedAt), {
     business_name: "X",
     assigned_to: AGENT,
     collaborators: [],
     assigned_at: assignedAt,
     claimed_at: assignedAt,
+    pipeline_cycle: CURRENT_OASIS_PIPELINE_CYCLE.id,
     sales_program: "website_sales_v1",
     sales_motion: "cold_outbound",
     lead_source_track: "company",
@@ -476,15 +478,16 @@ void main().catch((error) => {
 // this door did not, so the two doors disagreed about what ownership means.
 {
   // 1. THE FIX FIRES: a fresh, unstamped lead becomes pipeline-eligible.
-  const out = withAssignedTo({ business_name: "Silverthorne" }, "rep-1", "2026-08-26T00:00:00.000Z");
+  const out = withAssignedTo({ business_name: "Silverthorne" }, "rep-1", "2026-09-23T12:00:00.000Z");
   assert.equal(out.assigned_to, "rep-1");
   assert.equal(out.sales_program, "website_sales_v1", "without this the lead never reaches /pipeline");
   assert.equal(out.sales_motion, "cold_outbound", "without this the lead is rejected by the OASIS pipeline query");
   assert.equal(out.lead_source_track, "company", "territory-fed work is company sourced");
   assert.equal(out.stage, "assigned");
-  assert.equal(out.claimed_at, "2026-08-26T00:00:00.000Z");
-  assert.equal(out.assigned_at, "2026-08-26T00:00:00.000Z");
-  assert.equal(out.stage_entered_at, "2026-08-26T00:00:00.000Z");
+  assert.equal(out.claimed_at, "2026-09-23T12:00:00.000Z");
+  assert.equal(out.assigned_at, "2026-09-23T12:00:00.000Z");
+  assert.equal(out.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
+  assert.equal(out.stage_entered_at, "2026-09-23T12:00:00.000Z");
 }
 {
   // 2. Territory propagation is intake-only. An active self-sourced row is
@@ -516,7 +519,7 @@ for (const stage of ["lost", "in_build"] as const) {
 {
   // 3. A blank-string stage counts as absent, not as a stage. A whitespace value
   //    would otherwise be preserved as "in flight" and keep the lead invisible.
-  const out = withAssignedTo({ stage: "   " }, "rep-3", "2026-08-26T00:00:00.000Z");
+  const out = withAssignedTo({ stage: "   " }, "rep-3", "2026-09-23T12:00:00.000Z");
   assert.equal(out.stage, "assigned");
 }
 {
@@ -531,14 +534,14 @@ for (const stage of ["lost", "in_build"] as const) {
   // A malformed legacy self flag without a durable source identity fails
   // closed to company. A real frozen source identity survives assignment; the
   // payout engine decides whether that source is also the closer.
-  const self = withAssignedTo({ lead_source_track: "self" }, "rep-5", "2026-08-26T00:00:00.000Z");
+  const self = withAssignedTo({ lead_source_track: "self" }, "rep-5", "2026-09-23T12:00:00.000Z");
   assert.equal(self.lead_source_track, "company");
-  const invalid = withAssignedTo({ lead_source_track: "partner" }, "rep-5", "2026-08-26T00:00:00.000Z");
+  const invalid = withAssignedTo({ lead_source_track: "partner" }, "rep-5", "2026-09-23T12:00:00.000Z");
   assert.equal(invalid.lead_source_track, "company");
   const frozen = withAssignedTo(
     { stage: "researched", assigned_to: null, lead_source_track: "self", sourced_by_user_id: SOURCE_REP },
     AGENT,
-    "2026-08-26T00:00:00.000Z",
+    "2026-09-23T12:00:00.000Z",
   );
   assert.equal(frozen.lead_source_track, "self");
   assert.equal(frozen.sourced_by_user_id, SOURCE_REP);

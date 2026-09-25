@@ -30,6 +30,7 @@ import { ALL_MARKETING_PATHS } from "@/lib/marketing/routes";
 import { foundersAllowlist } from "@/lib/founders/gate";
 import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing-core";
 import { FOUNDERS_NAV } from "@/lib/portals/registry";
+import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
 import type { NavItem } from "@/lib/nav-config";
 import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
@@ -326,7 +327,11 @@ export default async function RootLayout({
     // app/founders/layout.tsx disagree in PR #175, and what put an inactive
     // shell into CC's primary nav labelled "Marketing" while the live hub was
     // relabelled "Content". One list, both navs.
-    ? FOUNDERS_NAV.map((n) => ({ group: "Founders", ...n }))
+    ? FOUNDERS_NAV
+        // Finances is narrower than the founders gate: only the two owners.
+        // Cosmetic here — its pages 404 for anyone else (access-io.ts).
+        .filter((n) => n.audience !== "finance_owners" || isFinanceOwnerEmail(profile?.email))
+        .map(({ audience: _audience, ...n }) => ({ group: "Founders", ...n }))
     : [];
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server

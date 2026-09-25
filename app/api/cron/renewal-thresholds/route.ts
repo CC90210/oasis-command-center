@@ -3,6 +3,7 @@ import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { lenderContact, lenderRenewalMessage, notifyRenewalAgent, resolveAgentMailbox } from "@/lib/renewals/outreach";
 import { formatTerm, isTermUnit } from "@/lib/renewals/derive";
+import { memberStanding, type MemberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -23,6 +24,17 @@ async function run(req: NextRequest) {
   const deals = await db.from("funded_deals").select("*").not("next_renewal_date", "is", null).lte("next_renewal_date", today).limit(100);
   if (deals.error) return NextResponse.json({ ok: false, error: deals.error.message }, { status: 500 });
   const summary = { discovered: 0, queued: 0, review_required: 0, blocked: 0 };
+  // One standing read per agent per pass — the same rep owns many deals. A
+  // failed read is not cached, so the next deal asks again.
+  const standings = new Map<string, MemberStanding>();
+  const standingOf = async (tenantId: string, userId: string) => {
+    const key = `${tenantId}:${userId}`;
+    const known = standings.get(key);
+    if (known) return known;
+    const { standing } = await memberStanding(tenantId, userId);
+    standings.set(key, standing);
+    return standing;
+  };
   for (const raw of deals.data || []) {
     const deal = raw as {
       id: string; tenant_id: string; lead_id: string | null; lender_id: string | null;
@@ -40,13 +52,36 @@ async function run(req: NextRequest) {
     const lender = (lenderRes?.data?.data || {}) as Record<string, unknown>;
     const agentId = typeof lead.assigned_to === "string" ? lead.assigned_to : null;
     const lenderEmail = lenderContact(lender);
-    const sender = agentId ? await resolveAgentMailbox(deal.tenant_id, agentId) : null;
+    // The lender email goes out AS this agent, from their own mailbox, and the
+    // lender replies to them. A deactivated agent keeps the deal (history) but
+    // never sends it: no mailbox, no queued send, the event is blocked until
+    // the deal has a new owner. Their internal notice is already rerouted to
+    // the tenant's submissions inbox (lib/renewals/outreach.ts).
+    // READ-ERROR POLICY: this send speaks as the person, so a failed standing
+    // read queues nothing either — it takes the missing-mailbox path and a
+    // retry from the renewal drawer checks again.
+    let agentDeactivated = false;
+    let agentCheckFailed = false;
+    if (agentId) {
+      try {
+        agentDeactivated = (await standingOf(deal.tenant_id, agentId)) === "deactivated";
+      } catch (error) {
+        agentCheckFailed = true;
+        console.warn("[renewal-thresholds] assigned agent check failed", {
+          tenantId: deal.tenant_id, dealId: deal.id, agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (agentDeactivated) console.warn("[renewal-thresholds] assigned agent deactivated", { tenantId: deal.tenant_id, dealId: deal.id, agentId });
+    }
+    const sender = agentId && !agentDeactivated && !agentCheckFailed ? await resolveAgentMailbox(deal.tenant_id, agentId) : null;
     const historical = String(deal.next_renewal_date) < yesterday;
-    let status = historical ? "review_required" : (!lenderEmail || !sender || !agentId ? "blocked" : "pending");
+    let status = agentDeactivated ? "blocked" : historical ? "review_required" : (!lenderEmail || !sender || !agentId ? "blocked" : "pending");
     const inserted = await db.from("renewal_outreach_events").insert({
       tenant_id: deal.tenant_id, funded_deal_id: deal.id, lead_id: deal.lead_id,
       lender_id: deal.lender_id, assigned_agent_id: agentId, threshold_date: deal.next_renewal_date,
-      status, last_error: !lenderEmail ? "lender_email_missing" : !agentId ? "assigned_agent_missing" : !sender ? "agent_mailbox_missing" : null,
+      status, last_error: agentDeactivated ? "assigned_agent_deactivated" : !lenderEmail ? "lender_email_missing" : !agentId ? "assigned_agent_missing"
+        : agentCheckFailed ? "assigned_agent_check_failed" : !sender ? "agent_mailbox_missing" : null,
     }).select("id").single();
     if (inserted.error) continue;
     summary.discovered++;

@@ -76,6 +76,11 @@ jobs:
           # against a real half-applied boundary and then never run by anything
           # but a human on demand. A guard nothing executes is documentation.
           npm run test:founders-marketing
+          # FOUNDERS > Finances (2026-09-24): the balanced-entry invariant,
+          # GST/QST math, own-day FX, Stripe signature + idempotency, import
+          # dedupe, personal-book privacy, and revenueCollected never counting
+          # a Stripe-paid invoice twice — run against a real local libSQL file.
+          npm run test:finances
           # A client's book must never render on an OASIS surface. Added
           # 2026-08-17 after the Breeze underwriting queue appeared on
           # top-level /automations because the gate keyed on operator ROLE
@@ -112,6 +117,11 @@ jobs:
           # is one line, and the failure is invisible — pages that repeat or skip
           # rows, producing counts wrong in an unpredictable direction.
           npm run test:paged-reads
+          # ADDED 2026-09-24. Projects + Tickets: a client must never read
+          # another client's ticket, project or internal note; work is only
+          # assignable to the active roster; a support-form submission becomes
+          # a ticket and never a lead; SLA breaches alert exactly once.
+          npm run test:delivery
           # Re-enabled 2026-08-08. This was excluded for exactly the
           # server-only import chain that NODE_OPTIONS above now resolves;
           # 41 assertions came back with it.
@@ -125,6 +135,11 @@ jobs:
           # through. It needs --conditions=react-server because the renderer
           # imports server-only.
           npm run test:watermark
+          # ADDED 2026-09-24 (OASIS fresh start): teammate deactivation and the
+          # rosters that must hide inactive people, the revenue-goal arithmetic,
+          # Today's board-summary congruency, and the worker-status reporter
+          # (panel rule + Health check) behind the 2026-09-23 false "11/12 down".
+          npm run test:fresh-start
       - name: Build
         env:
           # Minimal env so the build doesn't blow up on missing required vars.

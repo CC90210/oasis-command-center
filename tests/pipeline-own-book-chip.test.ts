@@ -46,7 +46,8 @@ assert.match(
 );
 assert.match(
   names,
-  /map\.set\(m\.auth_user_id, name\)/,
+  // buildMemberDirectory (2026-09-24) builds the name map buildMemberNameMap returns.
+  /names\.set\(m\.auth_user_id, name\)/,
   "buildMemberNameMap is expected to store auth_user_id RAW — this asymmetry is why the lookup below must be case-insensitive",
 );
 

@@ -29,9 +29,10 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { pendingRecoveryLanes } from "../lib/health/runner";
+import { pendingRecoveryLanes, runHealthChecks } from "../lib/health/runner";
 import { DEPLOY_CHECKS } from "../lib/health/deploy-checks";
 import { evaluate } from "../lib/health/checks-core";
+import { healthAlertStateKey } from "../lib/health/alert-state-key";
 
 const RUNNER = readFileSync("lib/health/runner.ts", "utf8");
 
@@ -210,6 +211,67 @@ function recordingDb(result: { count?: number; error?: { message: string } }) {
   };
 }
 
+type AlertStateRow = {
+  alert_key: string;
+  tenant_id: string;
+  last_signature: string | null;
+  last_alerted_at: string | null;
+  repeat_n: number | null;
+  first_failed_at: string | null;
+  updated_at: string;
+};
+
+/** Minimal in-memory adapter that drives the runner's actual state machine. */
+function tenantIsolationDb() {
+  const states = new Map<string, AlertStateRow>();
+  const stateReadFilters: Array<Record<string, string>> = [];
+  const runRows: Array<Record<string, unknown>> = [];
+
+  const db = {
+    from(table: string) {
+      if (table === "health_check_runs") {
+        return {
+          insert(row: Record<string, unknown>) {
+            runRows.push(row);
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+      }
+      if (table !== "health_alert_state") throw new Error(`unexpected table ${table}`);
+      return {
+        select() {
+          const filters: Record<string, string> = {};
+          const query = {
+            eq(column: string, value: string) {
+              filters[column] = value;
+              return query;
+            },
+            async maybeSingle() {
+              stateReadFilters.push({ ...filters });
+              const row = states.get(filters.alert_key);
+              return {
+                data: row && row.tenant_id === filters.tenant_id ? { ...row } : null,
+                error: null,
+              };
+            },
+          };
+          return query;
+        },
+        upsert(row: AlertStateRow) {
+          const existing = states.get(row.alert_key);
+          if (existing && existing.tenant_id !== row.tenant_id) {
+            return Promise.reject(new Error("cross-tenant alert-state overwrite"));
+          }
+          states.set(row.alert_key, { ...row });
+          return Promise.resolve({ data: null, error: null });
+        },
+      };
+    },
+  };
+
+  return { db, states, stateReadFilters, runRows };
+}
+
 const TENANT = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 const NOW = Date.parse("2026-09-19T12:00:00.000Z");
 
@@ -232,9 +294,11 @@ async function main() {
       calls.some((c) => c.fn === "eq" && c.args[0] === "check_id" && c.args[1] === "alerting.telegram_delivery"),
       "the check no longer filters to the delivery-failure rows — it would count every health row ever written",
     );
-    assert.ok(
-      calls.some((c) => c.fn === "eq" && c.args[0] === "tenant_id" && c.args[1] === TENANT),
-      "the alerting check is not scoped to the tenant it was given",
+    assert.equal(
+      calls.some((c) => c.fn === "eq" && c.args[0] === "tenant_id"),
+      false,
+      "delivery is estate-wide: an OASIS Calendar page rejected by Telegram must not disappear " +
+        "because the scheduler also grades SunBiz outcomes",
     );
     // Bounded, unlike the stall check. A delivery failure from last month is
     // history; this one must be able to go green once the channel is repaired,
@@ -266,6 +330,75 @@ async function main() {
     "failing",
     "one undelivered page is already an audience hearing nothing",
   );
+
+  // Drive the real runner twice with the same check id in two tenants. This is
+  // behavioral coverage: both alert, both retain independent state, and one
+  // tenant recovering cannot close the other tenant's incident.
+  {
+    const tenantA = "11111111-1111-4111-8111-111111111111";
+    const tenantB = "22222222-2222-4222-8222-222222222222";
+    const observed = new Map([[tenantA, 1], [tenantB, 1]]);
+    const deliveries: Array<{ message: string; lane: string | undefined }> = [];
+    const memory = tenantIsolationDb();
+    const sharedCheck = {
+      id: "shared.synthetic_failure",
+      severity: "critical" as const,
+      lane: "operator" as const,
+      rule: { kind: "must_be_zero" as const },
+      observe: async (_db: unknown, tenantId: string) => observed.get(tenantId) ?? 0,
+      describe: () => "synthetic failure",
+    };
+    const send = async (message: string, options?: { lane?: string }) => {
+      deliveries.push({ message, lane: options?.lane });
+      return { ok: true };
+    };
+
+    for (const tenantId of [tenantA, tenantB]) {
+      await runHealthChecks(tenantId, {
+        nowMs: NOW,
+        checks: [sharedCheck],
+        db: memory.db as never,
+        sendTelegramImpl: send as never,
+      });
+    }
+
+    assert.equal(deliveries.length, 2, "each tenant's first failure must page independently");
+    assert.deepEqual(
+      [...memory.states.keys()].sort(),
+      [
+        healthAlertStateKey(tenantA, sharedCheck.id),
+        healthAlertStateKey(tenantB, sharedCheck.id),
+      ].sort(),
+      "the same check id must persist as two tenant-qualified alert episodes",
+    );
+    assert.ok(
+      memory.stateReadFilters.some((filters) => filters.tenant_id === tenantA),
+      "tenant A state read was not tenant-scoped",
+    );
+    assert.ok(
+      memory.stateReadFilters.some((filters) => filters.tenant_id === tenantB),
+      "tenant B state read was not tenant-scoped",
+    );
+
+    observed.set(tenantA, 0);
+    await runHealthChecks(tenantA, {
+      nowMs: NOW + 15 * 60_000,
+      checks: [sharedCheck],
+      db: memory.db as never,
+      sendTelegramImpl: send as never,
+    });
+
+    assert.equal(
+      memory.states.get(healthAlertStateKey(tenantA, sharedCheck.id))?.first_failed_at,
+      null,
+      "tenant A recovery did not close tenant A's episode",
+    );
+    assert.notEqual(
+      memory.states.get(healthAlertStateKey(tenantB, sharedCheck.id))?.first_failed_at,
+      null,
+      "tenant A recovery closed tenant B's episode",
+    );
+  }
 }
 assert.match(
   DEPLOY_CHECKS_SRC,

@@ -31,7 +31,6 @@ import { operatorDateKey, operatorDayStartIso } from "./dates";
 import { getDbBackend } from "./db";
 import { isMissingTableError } from "./api-helpers";
 import { getTenantEnabledAgents } from "./manifest/tenant-scope";
-import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "./profile-custom-fields";
 import type { TenantRecord } from "./manifest/data";
 import {
   getTodayPlanTurso,
@@ -910,75 +909,6 @@ export async function integrationsHealth(
       updated_at: new Date().toISOString(),
     };
   });
-}
-
-// ============================================================================
-// Top-client concentration risk — % of MRR from a single client
-// ============================================================================
-
-/**
- * Returns the % of MRR concentrated in the operator's biggest client.
- * Reads `profile.custom_fields.top_client_name` + `top_client_mrr_usd`
- * (operators set these in Settings or via scripts/seed_profile.py); for
- * other tenants without those fields, falls back to the top-1 won client
- * by score from the leads table.
- *
- * Future-friendly: when revenue_events table lands, swap to that.
- */
-export async function topClientConcentration(tenantId: string): Promise<{
-  client_name: string;
-  pct_of_mrr: number;
-  is_at_risk: boolean;
-}> {
-  const profile = await getActiveProfile();
-  const totalMrr = Number(profile?.mrr_current_usd) || 0;
-  if (totalMrr === 0) {
-    return { client_name: "—", pct_of_mrr: 0, is_at_risk: false };
-  }
-
-  // R3-2: read from tenant_records. Pull leads with status="won"
-  // (or stage="funded" — Phase 2 enum equivalent), pick the highest
-  // scoring as the fallback name.
-  const db = getServiceSupabase();
-  const r = await db
-    .from("tenant_records")
-    .select("data")
-    .eq("tenant_id", tenantId)
-    .eq("entity_type", "lead")
-    .order("updated_at", { ascending: false })
-    .limit(200);
-  let topWonName: string | null = null;
-  let topWonScore = -Infinity;
-  for (const row of (r.data || []) as Array<{ data: Record<string, unknown> | null }>) {
-    const d = row.data || {};
-    const status = (typeof d.status === "string" ? d.status : null);
-    const stage = (typeof d.stage === "string" ? d.stage : null);
-    const isWon = status === "won" || stage === "funded";
-    if (!isWon) continue;
-    const score = typeof d.score === "number" ? d.score : 0;
-    if (score > topWonScore) {
-      topWonScore = score;
-      topWonName =
-        (typeof d.name === "string" ? d.name : null) ||
-        (typeof d.company === "string" ? d.company : null);
-    }
-  }
-
-  if (!topWonName) return { client_name: "—", pct_of_mrr: 0, is_at_risk: false };
-
-  // Read from profile.custom_fields.top_client_mrr_usd. Operators set this
-  // in Settings or via scripts/seed_profile.py. No magic numbers.
-  const customFields = (profile?.custom_fields || {}) as Record<string, unknown>;
-  const configuredName = getCustomFieldString(customFields, PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_NAME);
-  const configuredMrr = Number(customFields[PROFILE_CUSTOM_FIELD_KEYS.TOP_CLIENT_MRR_USD]) || 0;
-
-  const name = configuredName || topWonName || "Top client";
-  const pct = configuredMrr > 0 ? (configuredMrr / totalMrr) * 100 : 0;
-  return {
-    client_name: name,
-    pct_of_mrr: Math.round(pct * 10) / 10,
-    is_at_risk: pct >= 60,
-  };
 }
 
 // ============================================================================

@@ -103,7 +103,7 @@ export default async function ShopOutPage({ params, searchParams }: PageProps) {
   // cannot drift on rep-field universe / field-name aliases.
   const deal = extractSubmissionDeal(appData);
   const missing = validateSubmissionDeal(deal);
-  const derivedAgents = await deriveAgentCcs(db, appData);
+  const derivedAgents = await deriveAgentCcs(db, sess.tenantId, appData);
 
   // Render the first-lender preview server-side so it's instant when the
   // page paints. Only do this when we actually have a lender + valid deal.

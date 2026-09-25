@@ -161,7 +161,7 @@ jobs:
       - name: Build (OpenNext -> Cloudflare Worker)
         run: npx opennextjs-cloudflare build
         env:
-          NODE_OPTIONS: "--max-old-space-size=4096"
+          NODE_OPTIONS: "--max-old-space-size=4096 --use-system-ca"
           CF_MIGRATION_BUILD: "1"
           ACCELERATED_ENROLL_LIVE: ${{ secrets.ACCELERATED_ENROLL_LIVE }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

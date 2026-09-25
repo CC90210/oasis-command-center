@@ -48,10 +48,12 @@ import {
   type BridgeHealthReason,
   isBridgeHealthReason,
 } from "@/lib/bridge-health-types";
+import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+const hostedRuntime = deploymentRuntimeLabel();
 const REASON_DETAIL: Record<BridgeHealthReason, string | null> = {
   ok: null,
   unauthenticated: "Sign in to probe the bridge.",
@@ -60,19 +62,19 @@ const REASON_DETAIL: Record<BridgeHealthReason, string | null> = {
   no_tenant:
     "Your profile has no tenant binding. Contact the operator.",
   profile_lookup_failed:
-    "Supabase user_profiles lookup failed. Check the Vercel function logs and Supabase project health — this is a database availability issue, not a VPS networking issue.",
+    `Supabase user_profiles lookup failed. Check the ${hostedRuntime} logs and Supabase project health — this is a database availability issue, not a VPS networking issue.`,
   tenant_lookup_failed:
-    "Supabase tenant lookup failed. Check the Vercel function logs.",
+    `Supabase tenant lookup failed. Check the ${hostedRuntime} logs.`,
   bridge_not_enabled_for_tenant:
     "This tenant doesn't have bridge access. Operator-only by default.",
   bridge_not_configured:
-    "BRIDGE_VPS_URL and/or BRIDGE_BEARER_TOKEN env vars are unset on Vercel. Set both in Project Settings -> Environment Variables (Production), then redeploy.",
+    `BRIDGE_VPS_URL and/or BRIDGE_BEARER_TOKEN are unset in the ${hostedRuntime}. Set both as production secrets, then redeploy.`,
   vps_timeout:
-    "VPS didn't answer the proxy in 1500ms. Check Cloudflare Tunnel status on the VPS and pm2 status of the claude-bridge daemon.",
+    "VPS didn't answer the proxy in 1500ms. Check the tunnel, then open Settings → Devices or run `oasis bridge status` on the paired host.",
   vps_unauthorized:
-    "VPS returned 401 — Vercel's BRIDGE_BEARER_TOKEN doesn't match the value the daemon expects. Re-sync the two .env values.",
+    `VPS returned 401 — the ${hostedRuntime}'s BRIDGE_BEARER_TOKEN doesn't match the value the daemon expects. Re-sync the runtime secret and host credential.`,
   vps_upstream_error:
-    "VPS returned a 5xx — the daemon is running but unhealthy. Tail the pm2 logs for claude-bridge.",
+    "VPS returned a 5xx — the daemon is running but unhealthy. Inspect state/logs/daemon-claude-bridge.log on the bridge host.",
   vps_unreachable:
     "Couldn't reach the VPS at all (DNS, TCP, or TLS error). Verify BRIDGE_VPS_URL points at a live hostname.",
 };

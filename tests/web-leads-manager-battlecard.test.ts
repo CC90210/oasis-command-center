@@ -8,8 +8,12 @@ const read = (path: string) => readFileSync(join(root, path), "utf8");
 const detail = read("app/pipeline/[id]/page.tsx");
 assert.match(
   detail,
-  /readableAssigneeIds:\s*readableRepUserIds/,
-  "the manager's server-resolved pipeline roster must reach the embedded battle-card gate",
+  // The page's HISTORY read set, deactivated reports included (2026-09-24): the
+  // card's API resolves the same includeInactive roster in resolveWebLeadViewer,
+  // so the ACTIVE set here would hide a card the API serves. Anchored on
+  // cardViewer because managerWorksTeamBook passes activeRepUserIds on purpose.
+  /const cardViewer =[^;]*readableAssigneeIds:\s*readableRepUserIds\b/,
+  "the manager's server-resolved history roster must reach the embedded battle-card gate",
 );
 assert.match(
   detail,

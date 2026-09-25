@@ -316,6 +316,128 @@ export function AdminAccessToggle({
   );
 }
 
+type DeactivationImpact = {
+  leadHandling: boolean;
+  leads: { pool: number; board: number; keep: number };
+  unpaidCommissions: number;
+};
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Active / Inactive switch (2026-09-24). Deactivating asks the server what will
+ * happen first and says it in the confirm, because it moves leads — the one
+ * part reactivation does not undo.
+ */
+export function MemberActivationToggle({
+  profileId,
+  name,
+  active,
+}: {
+  profileId: string;
+  name: string;
+  active: boolean;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [pending, startTransition] = useTransition();
+  const url = `/api/team/members/${encodeURIComponent(profileId)}/activation`;
+
+  async function deactivate() {
+    const preview = await fetch(url);
+    const previewBody = await preview.json().catch(() => ({}));
+    if (!preview.ok) {
+      alert(previewBody.error || "Could not check what deactivating would change.");
+      return;
+    }
+    const impact = previewBody.impact as DeactivationImpact;
+    const lines = [
+      `Deactivate ${name}?`,
+      "",
+      "They are removed from the pipeline, assign lists, and reports, and can't sign in until reactivated. Their history stays.",
+    ];
+    if (impact.leadHandling) {
+      lines.push(
+        "",
+        `• ${plural(impact.leads.pool, "early-stage lead")} go back to the Leads pool`,
+        `• ${plural(impact.leads.board, "warm lead")} stay on the board, unassigned, for you to pick up`,
+        `• ${plural(impact.leads.keep, "closed or delivery lead")} keep ${name} as owner (history)`,
+        "",
+        "Lead moves are not undone by reactivating.",
+      );
+    }
+    if (impact.unpaidCommissions > 0) {
+      lines.push("", `${plural(impact.unpaidCommissions, "unpaid commission line")} stay open for your review.`);
+    }
+    if (!confirm(lines.join("\n"))) return;
+
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: false, reason: "Deactivated from the Team page" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(body.error || "Deactivation failed.");
+      return;
+    }
+    const notes: string[] = [];
+    if (body.loginNote) notes.push(body.loginNote);
+    if (Array.isArray(body.refused) && body.refused.length > 0) {
+      notes.push(
+        `${plural(body.refused.length, "lead")} changed while this ran and were left as they were — run Deactivate again to retry them.`,
+      );
+    }
+    if (notes.length > 0) alert(notes.join("\n"));
+  }
+
+  async function reactivate() {
+    if (!confirm(`Reactivate ${name}? They can sign in again and reappear in assign lists. Their old leads are not handed back.`)) {
+      return;
+    }
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ active: true }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(body.error || "Reactivation failed.");
+    }
+  }
+
+  async function toggle() {
+    setBusy(true);
+    try {
+      if (active) await deactivate();
+      else await reactivate();
+      startTransition(() => router.refresh());
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      disabled={busy || pending}
+      title={active ? "Deactivate — hide from every live list and block sign-in" : "Reactivate this teammate"}
+      className={`text-[11px] font-mono px-2 py-1 rounded border transition-colors disabled:opacity-50 ${
+        active
+          ? "border-status-engaged/40 text-status-engaged hover:border-status-warm/50 hover:text-status-warm"
+          : "border-bg-border text-fg-muted hover:text-fg hover:border-accent/40"
+      }`}
+    >
+      {busy ? "..." : active ? "Active" : "Inactive · reactivate"}
+    </button>
+  );
+}
+
 export function RemoveMemberClientButton({ profileId }: { profileId: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();

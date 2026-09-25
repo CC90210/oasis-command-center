@@ -421,6 +421,15 @@ const FINANCIAL_READERS = [
   "mrrSnapshot",
   "mrrHistory",
   "topClientConcentration",
+  // 2026-09-24: Today's money now comes from the Finances ledger + live Stripe.
+  "revenueCollected",
+  "revenueByCustomer",
+  "stripeMrr",
+  "getActiveRevenueGoal",
+  "founders-finances",
+  "loadOasisMoney",
+  "oasis-money",
+  "GoalPaceChart",
   "pipelineBreakdown",
   "priorityInbound",
   "outreachReplyRate",
@@ -572,9 +581,13 @@ assert.ok(
     'caught it, not the tests.',
 );
 assert.ok(
-  /memberNameMapPromise = managerTeamRead\s*\?\s*Promise\.resolve\(managerRepRoster\)\s*:\s*buildMemberNameMap\(tenantId\)/.test(pipelineCode) &&
-    /session\.ok && pipelineAdmin\s*\?\s*memberNameMap\s*:\s*managerRepRoster/.test(pipelineCode),
-  "admins get the full member filter while managers get only the sales-rep roster",
+  /memberDirectoryPromise = managerTeamRead\s*\?\s*Promise\.resolve\(\{\s*names: managerRepRoster,\s*activeIds: managerActiveRepIds\s*\}\)\s*:\s*buildMemberDirectory\(tenantId\)/.test(pipelineCode) &&
+    /new Map\(\s*\[\.\.\.\(session\.ok && pipelineAdmin \? memberNameMap : managerRepRoster\)\]\.filter\(\(\[id\]\) =>\s*activeMemberIds\.has\(id\),?\s*\)/.test(pipelineCode),
+  // 2026-09-24: admins get every ACTIVE member as a filter chip (a deactivated
+  // teammate keeps their name on old rows but loses the chip); managers get
+  // only the ACTIVE sales-rep roster, while their board scope and names keep
+  // deactivated reports (tests/manager-deactivated-report-history.test.ts).
+  "admins get the active member filter while managers get only the active sales-rep roster",
 );
 
 /* ───── the leadgen fields must be on the OASIS lead entity ─────────────────
@@ -745,7 +758,7 @@ assert.ok(
   "the commission API must reject authenticated personas with no commission capability",
 );
 assert.ok(
-  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId)") &&
+  commissionApi.includes("getOasisSalesRepRoster(session.tenantId, session.userId, { includeInactive: true })") &&
     commissionApi.includes('persona === "manager"') &&
     commissionApi.includes("repUserIds"),
   "a manager commission ledger must use a server-resolved direct-report scope",
@@ -904,7 +917,7 @@ assert.ok(
 assert.ok(founderToday.length > 2000, "FounderToday.tsx did not load — the scan above proves nothing");
 assert.ok(repToday.length > 2000, "RepToday.tsx did not load — the scan above proves nothing");
 assert.ok(deliveryToday.length > 1000, "DeliveryToday.tsx did not load — the scan above proves nothing");
-for (const reader of ["mrrSnapshot", "mrrHistory", "topClientConcentration", "MRRProgressChart", "GoalCountdownCard"]) {
+for (const reader of ["loadOasisMoney", "GoalPaceChart", "GoalCountdownCard"]) {
   assert.ok(
     founderCode.includes(reader),
     `the founder dashboard no longer names ${reader}. Either the money moved, or this matcher is broken — ` +

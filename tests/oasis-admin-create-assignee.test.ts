@@ -5,12 +5,13 @@ import {
   oasisLeadCreateForm,
   planOasisLeadCreate,
 } from "../lib/oasis-lead-create";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "../lib/pipeline-cycle";
 
 const ADMIN = "11111111-1111-4111-8111-111111111111";
 const REP = "22222222-2222-4222-8222-222222222222";
-const NOW = new Date("2026-09-14T12:00:00.000Z");
+const NOW = new Date("2026-09-23T12:00:00.000Z");
 const seedLead = OASIS_SEED.data_model!.find((entity) => entity.name === "lead")!;
-const assignees = [{ userId: REP, label: "Ariel Rep" }];
+const assignees = [{ userId: REP, label: "Active Rep" }];
 
 const adminForm = oasisLeadCreateForm(
   seedLead,
@@ -22,7 +23,7 @@ assert.ok(assigneeField, "an admin create form must require a sales rep destinat
 assert.equal(assigneeField!.type, "enum");
 assert.equal(assigneeField!.required, true);
 assert.deepEqual(assigneeField!.enum_values, [REP]);
-assert.equal(adminForm.optionLabels.assigned_to[REP], "Ariel Rep");
+assert.equal(adminForm.optionLabels.assigned_to[REP], "Active Rep");
 assert.equal(adminForm.fieldLabels.assigned_to, "Sales rep");
 
 const repForm = oasisLeadCreateForm(
@@ -50,6 +51,7 @@ if (planned.ok) {
   assert.equal(planned.data.lead_source_track, "company");
   assert.equal(planned.data.sourced_by_user_id, null);
   assert.equal(planned.data.claimed_at, NOW.toISOString());
+  assert.equal(planned.data.pipeline_cycle, CURRENT_OASIS_PIPELINE_CYCLE.id);
 }
 
 const missing = planOasisLeadCreate({
@@ -78,13 +80,13 @@ assert.equal(rawOwner.ok, false, "the pure planner must continue rejecting raw b
 if (!rawOwner.ok) assert.equal(rawOwner.error, "protected_lifecycle_fields");
 
 const route = readFileSync("app/api/manifest/[slug]/records/[entity]/route.ts", "utf8");
-assert.match(route, /getOasisSalesRepRoster\(r\.tenant_id\)/, "the API must reload the tenant roster");
+assert.match(route, /getOasisPipelineAssignmentRoster\(r\.tenant_id\)/, "the API must reload the founder assignment roster");
 assert.match(route, /resolveAssignableTarget\(roster, requestedAssignee\)/, "the API must resolve through the canonical roster row");
 assert.match(route, /delete\s+plannerData\.assigned_to/, "raw assigned_to must be stripped before planning");
 assert.match(route, /resolvedAssigneeUserId:/, "the API must pass the trusted id separately");
 
 const page = readFileSync("app/pipeline/new/page.tsx", "utf8");
-assert.match(page, /getOasisSalesRepRoster\(tenantId\)/, "the admin form must be hydrated from the tenant sales roster");
+assert.match(page, /getOasisPipelineAssignmentRoster\(tenantId\)/, "the admin form must be hydrated from the founder assignment roster");
 assert.match(page, /choose its sales rep.+starts in Assigned/is, "admin copy must describe the one valid Pipeline entry point");
 assert.match(page, /enters your Pipeline at Assigned/i, "rep copy must distinguish self-sourced direct create from the Leads pool");
 

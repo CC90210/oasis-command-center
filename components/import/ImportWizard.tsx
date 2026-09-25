@@ -76,6 +76,11 @@ type FuzzyBatchResult = {
 
 type Step = "pick" | "upload" | "preview" | "confirm" | "done";
 
+export type LeadAssignmentOption = {
+  id: string;
+  name: string;
+};
+
 function IconFor({ name }: { name: EntityDefinition["icon"] }) {
   const cls = "w-5 h-5";
   switch (name) {
@@ -87,7 +92,11 @@ function IconFor({ name }: { name: EntityDefinition["icon"] }) {
   }
 }
 
-export function ImportWizard() {
+export function ImportWizard({
+  leadAssignmentOptions = null,
+}: {
+  leadAssignmentOptions?: readonly LeadAssignmentOption[] | null;
+}) {
   const [step, setStep] = useState<Step>("pick");
   const [entityKey, setEntityKey] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -99,6 +108,7 @@ export function ImportWizard() {
   const [finalResult, setFinalResult] = useState<ImportResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [leadAssigneeUserId, setLeadAssigneeUserId] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Build C — fuzzy-match suggestions in the confirm step. Populated
   // on-demand by clicking "Check for similar merchants"; kept as a
@@ -109,6 +119,9 @@ export function ImportWizard() {
   const [fuzzyError, setFuzzyError] = useState<string | null>(null);
 
   const entity = entityKey ? getEntityDefinition(entityKey) : null;
+  const needsLeadAssignee =
+    entity?.entity_type === "lead" && leadAssignmentOptions !== null;
+  const missingLeadAssignee = needsLeadAssignee && !leadAssigneeUserId;
 
   // Reset wizard state when an operator changes entity.
   function pickEntity(key: string) {
@@ -121,6 +134,7 @@ export function ImportWizard() {
     setDryResult(null);
     setFinalResult(null);
     setError(null);
+    setLeadAssigneeUserId("");
     setStep("upload");
   }
 
@@ -132,6 +146,7 @@ export function ImportWizard() {
     setDryResult(null);
     setFinalResult(null);
     setError(null);
+    setLeadAssigneeUserId("");
     setSubmitting(false);
     setFuzzyResults(null);
     setFuzzyLoading(false);
@@ -228,7 +243,7 @@ export function ImportWizard() {
   }
 
   async function runDryRun() {
-    if (!entity || !parsed || parsed.mapped.length === 0) return;
+    if (!entity || !parsed || parsed.mapped.length === 0 || missingLeadAssignee) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -240,6 +255,8 @@ export function ImportWizard() {
           dedup_by: dedupBy,
           default_source: defaultSource,
           dry_run: true,
+          assignee_user_id:
+            entity.entity_type === "lead" ? leadAssigneeUserId || undefined : undefined,
         }),
       });
       const body = (await res.json()) as ImportResponse;
@@ -258,7 +275,7 @@ export function ImportWizard() {
   }
 
   async function commitImport() {
-    if (!entity || !parsed || parsed.mapped.length === 0) return;
+    if (!entity || !parsed || parsed.mapped.length === 0 || missingLeadAssignee) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -269,6 +286,8 @@ export function ImportWizard() {
           rows: parsed.mapped,
           dedup_by: dedupBy,
           default_source: defaultSource,
+          assignee_user_id:
+            entity.entity_type === "lead" ? leadAssigneeUserId || undefined : undefined,
         }),
       });
       const body = (await res.json()) as ImportResponse;
@@ -533,12 +552,44 @@ export function ImportWizard() {
             </div>
           </div>
 
+          {needsLeadAssignee && (
+            <div className="rounded-lg border border-bg-border bg-bg-elev/30 p-4">
+              <label className="block">
+                <span className="text-xs text-fg-muted block mb-2">
+                  Assign every imported lead to
+                </span>
+                <select
+                  value={leadAssigneeUserId}
+                  onChange={(event) => setLeadAssigneeUserId(event.target.value)}
+                  disabled={leadAssignmentOptions.length === 0}
+                  className="w-full bg-bg-elev border border-bg-border rounded px-2 py-1.5 text-sm text-fg disabled:opacity-50"
+                  required
+                >
+                  <option value="">Choose CC or Adon</option>
+                  {leadAssignmentOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.name}</option>
+                  ))}
+                </select>
+              </label>
+              <p className="mt-2 text-xs text-fg-muted">
+                {leadAssignmentOptions.length > 0
+                  ? "The owner and active revenue cycle are stamped on every lead in this batch."
+                  : "The CC + Adon assignment roster is unavailable. Import is paused until it can be verified."}
+              </p>
+            </div>
+          )}
+
           {error && <div className="text-sm text-red-400">⚠ {error}</div>}
 
           <div className="flex justify-end gap-2">
             <button
               onClick={runDryRun}
-              disabled={submitting || parsed.mapped.length === 0 || recognizedCount === 0}
+              disabled={
+                submitting ||
+                parsed.mapped.length === 0 ||
+                recognizedCount === 0 ||
+                missingLeadAssignee
+              }
               className="btn-primary text-sm inline-flex items-center gap-2"
             >
               {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}

@@ -222,10 +222,12 @@ const integrationStatus: CloudTool = {
 const importLeadsFromAttachment: CloudTool = {
   name: "import_leads_from_attachment",
   description:
-    "Parse a CSV uploaded through chat and import recognized SunBiz leads into the CRM with dedupe. Use only when the operator explicitly asks to import/sync/update leads from an attached CSV; use dry_run=true when they only ask you to inspect it.",
+    "Parse a CSV uploaded through chat and import recognized leads with dedupe. OASIS defaults the batch owner to the signed-in operator and permits only CC or Adon; pass assignee as conaugh@oasisai.work or adon@oasisai.work to choose explicitly. Use only when the operator explicitly asks to import/sync/update leads; use dry_run=true when they only ask you to inspect it.",
   args: {
     attachment_id: "UUID shown in the ATTACHED FILES block.",
     dry_run: "Optional boolean. true parses and previews without inserting.",
+    assignee:
+      "Optional OASIS batch owner: conaugh@oasisai.work, adon@oasisai.work, or canonical auth UUID. Defaults to the signed-in operator.",
   },
   async execute(input, ctx) {
     const attachmentId = String(input.attachment_id || "").trim();
@@ -260,6 +262,7 @@ const importLeadsFromAttachment: CloudTool = {
       tenantId: ctx.tenantId,
       rows: parsed.mapped,
       defaultSource: `chat_attachment:${row.filename}`,
+      assignee: String(input.assignee || ctx.userId).trim(),
     });
     if (!result.ok) {
       return {

@@ -17,6 +17,7 @@
 import "server-only";
 
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isActiveMember } from "@/lib/team";
 
 /** Candidate storage formats for a NANP number: 10-digit, 1+10, +1+10. */
 export function phoneCandidates(raw: string | null | undefined): string[] {
@@ -64,12 +65,37 @@ export type ResolvedRep = {
   userId: string;
   email: string;
   displayName: string;
+  /**
+   * False for a deactivated teammate (user_profiles.deactivated_at). A retired
+   * rep's Kixie line can keep ringing: the call is still attributed to them
+   * (history), but nothing may hand them new work or send in their name.
+   */
+  isActive: boolean;
+};
+
+type RepProfileRow = {
+  id: string;
+  auth_user_id: string;
+  email: string;
+  display_name: string | null;
+  full_name: string | null;
+  deactivated_at: string | null;
 };
 
 /**
  * Resolve the acting rep from the webhook's agent email (Kixie login) to a
  * dashboard user. Case-insensitive equality (Matt's Kixie login is
  * `Submissions@...` with a capital S). Returns null when no profile matches.
+ *
+ * Several profiles can share an address (pre-cutover profile debt). That used
+ * to be a maybeSingle() error, which silently dropped the rep; now an active
+ * row wins over a deactivated one, then a row with a login, then the lowest id
+ * so the pick is stable.
+ *
+ * A READ ERROR returns null, exactly as before: the webhook then takes its
+ * no-rep path (call unattributed, no rep-signed SMS, no appointment). This runs
+ * on every SunBiz call, so a lookup hiccup must never break the pipeline; the
+ * warning makes it visible instead of silent.
  */
 export async function resolveRepByEmail(
   tenantId: string,
@@ -83,21 +109,26 @@ export async function resolveRepByEmail(
   const safe = e.replace(/[%_\\]/g, "\\$&");
   const r = await db
     .from("user_profiles")
-    .select("auth_user_id, email, display_name, full_name")
+    .select("id, auth_user_id, email, display_name, full_name, deactivated_at")
     .eq("tenant_id", tenantId)
-    .ilike("email", safe)
-    .maybeSingle();
-  if (r.error || !r.data) return null;
-  const row = r.data as {
-    auth_user_id: string;
-    email: string;
-    display_name: string | null;
-    full_name: string | null;
-  };
+    .ilike("email", safe);
+  if (r.error) {
+    console.warn("[kixie-attribution] rep lookup failed", { tenantId, error: r.error.message });
+    return null;
+  }
+  const rows = (r.data || []) as RepProfileRow[];
+  if (!rows.length) return null;
+  const [row] = [...rows].sort(
+    (left, right) =>
+      Number(isActiveMember(right)) - Number(isActiveMember(left)) ||
+      Number(Boolean(right.auth_user_id)) - Number(Boolean(left.auth_user_id)) ||
+      String(left.id).localeCompare(String(right.id)),
+  );
   return {
     userId: row.auth_user_id,
     email: row.email,
     displayName: row.display_name || row.full_name || e.split("@")[0],
+    isActive: isActiveMember(row),
   };
 }
 

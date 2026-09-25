@@ -165,6 +165,7 @@ async function fixture() {
     cancelCalendar: async (input: { eventId: string }) => {
       calls.cancelled.push(input.eventId);
     },
+    memberStanding: async () => ({ standing: "active" as const, member: null }),
   };
   return { raw, db, deps, calls };
 }

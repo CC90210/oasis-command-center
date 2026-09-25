@@ -8,6 +8,11 @@
  * Idempotent — UPSERT on (tenant_id, snapshot_date) so re-runs replace the
  * day's row instead of duplicating.
  *
+ * OASIS workspaces are SKIPPED (2026-09-24): their MRR is live Stripe only,
+ * read from the Finances ledger (lib/founders-finances/metrics.ts stripeMrr),
+ * and a profile snapshot there would re-enter the hand-typed number the fresh
+ * start removed.
+ *
  * Auth: requires CRON_SECRET in the Authorization header.
  *
  * Schedule (configure in Vercel project → Settings → Cron Jobs OR add to
@@ -19,6 +24,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { checkCronAuth } from "@/lib/cron-auth";
+import { tenantSlugFor } from "@/lib/team";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,6 +49,7 @@ export async function GET(req: NextRequest) {
   }
 
   const seen = new Set<string>();
+  const skippedOasis: string[] = [];
   const inserts: Array<{
     tenant_id: string;
     snapshot_date: string;
@@ -56,6 +64,10 @@ export async function GET(req: NextRequest) {
   }>) {
     if (seen.has(r.tenant_id)) continue;
     seen.add(r.tenant_id);
+    if (isOasisSurfaceTenant(await tenantSlugFor(r.tenant_id))) {
+      skippedOasis.push(r.tenant_id);
+      continue;
+    }
     inserts.push({
       tenant_id: r.tenant_id,
       snapshot_date: today,
@@ -66,7 +78,7 @@ export async function GET(req: NextRequest) {
   }
 
   if (inserts.length === 0) {
-    return NextResponse.json({ ok: true, snapshots: 0 });
+    return NextResponse.json({ ok: true, snapshots: 0, skipped_oasis: skippedOasis });
   }
 
   const { error } = await db
@@ -76,5 +88,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, snapshots: inserts.length, date: today });
+  return NextResponse.json({ ok: true, snapshots: inserts.length, date: today, skipped_oasis: skippedOasis });
 }

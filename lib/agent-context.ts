@@ -58,18 +58,42 @@ export async function composeDashboardContextV2(ctx: ToolContext): Promise<Dashb
 
   // MRR
   if (mrrR.ok) {
-    const m = mrrR.result as {
-      current_usd: number;
-      target_usd: number;
-      pct_to_target: number;
-      gap_usd: number;
-      days_to_target: number | null;
-    };
-    const daysPart =
-      typeof m.days_to_target === "number" ? `, ${m.days_to_target}d to deadline` : "";
-    lines.push(
-      `- MRR: ${fmtUSD(m.current_usd)} of ${fmtUSD(m.target_usd)} (${fmtPct(m.pct_to_target)}, gap ${fmtUSD(m.gap_usd)}${daysPart})`
-    );
+    const r = mrrR.result as Record<string, unknown>;
+    if (r.source === "stripe_live") {
+      // OASIS: live Stripe MRR + the revenue goal (collected in a period).
+      const mrr = r.mrr as { cents: number; currency: string; usd_cents: number | null; active_subscriptions: number } | null;
+      const goal = r.goal as {
+        target_usd: number; period_end: string; collected_usd: number;
+        pct_to_target: number; gap_usd: number; days_left: number; status: string;
+      } | null;
+      lines.push(
+        mrr
+          ? `- Net MRR (live Stripe): ${mrr.currency} ${fmtUSD(mrr.cents / 100)}${mrr.usd_cents !== null && mrr.currency !== "USD" ? ` (≈ USD ${fmtUSD(mrr.usd_cents / 100)})` : ""}, ${mrr.active_subscriptions} active subscription(s)`
+          : r.stripe_connected === false
+            ? "- Net MRR: unknown — Stripe is not connected to Finances yet (Founders → Finances → Settings → Stripe); card payments are not in 'collected'. Say so, do not estimate"
+            : "- Net MRR: Stripe unavailable right now — say so, do not estimate",
+      );
+      if (goal) {
+        lines.push(
+          `- Revenue goal: ${fmtUSD(goal.collected_usd)} USD collected of ${fmtUSD(goal.target_usd)} by ${goal.period_end} (${fmtPct(goal.pct_to_target)}, gap ${fmtUSD(goal.gap_usd)}, ${goal.days_left}d left, ${goal.status.replace("_", " ")})`,
+        );
+      }
+    } else if (typeof r.withheld === "string") {
+      lines.push(`- Revenue: ${r.withheld}`);
+    } else {
+      const m = r as {
+        current_usd: number;
+        target_usd: number;
+        pct_to_target: number;
+        gap_usd: number;
+        days_to_target: number | null;
+      };
+      const daysPart =
+        typeof m.days_to_target === "number" ? `, ${m.days_to_target}d to deadline` : "";
+      lines.push(
+        `- MRR: ${fmtUSD(m.current_usd)} of ${fmtUSD(m.target_usd)} (${fmtPct(m.pct_to_target)}, gap ${fmtUSD(m.gap_usd)}${daysPart})`
+      );
+    }
   }
 
   // Pipeline

@@ -7,7 +7,7 @@
 import Link from "next/link";
 import { Card } from "@/components/Card";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { getTenantMembers, type MemberRow } from "@/lib/team";
+import { getTenantMembers, isActiveMember, type MemberRow } from "@/lib/team";
 import { getActivityFeed, type ActivityRow } from "@/lib/audit/activity-feed";
 import {
   buildEmployeeActivityRollup,
@@ -80,11 +80,14 @@ async function loadEmployeeRollup(
     };
 
     const [interactions, audits] = await Promise.all([loadInteractions(), loadAudits()]);
-    return { rows: buildEmployeeActivityRollup(
-      members,
-      interactions,
-      audits,
-    ), error: null };
+    // A deactivated teammate is listed only when they acted inside the window
+    // (their actions are real and still count); with none, they are no longer
+    // part of "team activity" and get no zero row.
+    const inactiveIds = new Set(members.filter((m) => !isActiveMember(m)).map((m) => m.id));
+    const rows = buildEmployeeActivityRollup(members, interactions, audits)
+      .filter((row) => !inactiveIds.has(row.profileId) || row.recent_actions > 0)
+      .map((row) => (inactiveIds.has(row.profileId) ? { ...row, label: `${row.label} (inactive)` } : row));
+    return { rows, error: null };
   } catch (error) {
     console.error("[OperationsTrackerPanel.loadEmployeeRollup]", error);
     return {
@@ -109,7 +112,10 @@ export async function OperationsTrackerPanel({
     );
   }
 
-  const members = await getTenantMembers(tenantId).catch((error) => {
+  // History read: the feed and the 7-day totals name whoever acted, including a
+  // teammate deactivated since. The active-only default would turn their past
+  // actions into "System" rows and drop them from the totals.
+  const members = await getTenantMembers(tenantId, { includeInactive: true }).catch((error) => {
     console.error("[OperationsTrackerPanel.getTenantMembers]", error);
     return [] as MemberRow[];
   });

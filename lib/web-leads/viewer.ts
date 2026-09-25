@@ -16,7 +16,16 @@ type WebLeadViewerDependencies = {
 
 const DEFAULT_DEPENDENCIES: WebLeadViewerDependencies = {
   resolveTenantSlug: tenantSlugFor,
-  listSalesRoster: getOasisSalesRepRoster,
+  // DEACTIVATED REPS INCLUDED (2026-09-24). readableAssigneeIds is a READ
+  // boundary over existing deals: a retired rep keeps assigned_to on their
+  // closed / won / in-delivery leads, and the active-only default made those
+  // 404 for their manager on every by-id route, the battle card included.
+  // It grants no LIVE capability: claiming and assigning validate against
+  // getOasisPipelineAssignmentRoster (active only) in the claim route, and the
+  // Team view it scopes is read-only. The only writes behind it are the
+  // card's re-check / presence requests, which follow read access by design.
+  listSalesRoster: (tenantId) =>
+    getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true }),
 };
 
 /**

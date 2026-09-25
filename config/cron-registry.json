@@ -106,6 +106,10 @@
       "schedule": "*/15 * * * *"
     },
     {
+      "path": "/api/cron/sla-check",
+      "schedule": "*/15 * * * *"
+    },
+    {
       "path": "/api/cron/sync-sms-numbers",
       "schedule": "0 6,18 * * *"
     },

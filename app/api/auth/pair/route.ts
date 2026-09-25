@@ -348,7 +348,7 @@ export async function POST(req: NextRequest) {
   // Idempotent by (tenant_id, machine_fingerprint). The DB enforces the
   // invariant via the partial unique index from migration 030
   // (idx_bridge_pairings_unique_live_machine, WHERE revoked_at IS NULL).
-  // Without this, every restart of `bravo bridge serve` minted a NEW row
+  // Without this, every restart of `oasis bridge serve` minted a NEW row
   // — CC saw four Mac rows for the same fingerprint after setup attempts.
   //
   // Strategy: try INSERT first. On unique-constraint violation (Postgres

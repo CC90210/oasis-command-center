@@ -42,7 +42,7 @@ import {
   READ_ONLY_DENIED_TOOLS,
   READ_ONLY_DENIED_MARKERS,
   TOOL_NATIVE_MARKER_TYPES,
-  isReadOnlyRole,
+  canWriteCrm,
 } from "@/lib/role-gates";
 import { logAction } from "@/lib/action-log";
 import {
@@ -71,6 +71,7 @@ import {
   linkChatAttachmentsToSession,
   loadChatAttachmentsForTurn,
 } from "@/lib/chat-attachments";
+import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -253,10 +254,9 @@ export async function POST(req: NextRequest) {
   // whether the operator's local bridge is reachable. When it IS, Phase 2
   // of giggly-reef gives the cloud-mode chat real local tools (read_file,
   // write_file, bash, send_email, send_sms) via the browser proxy to
-  // localhost:9100/exec-tool. Without this check, the OLD notice would
-  // gaslight the model into telling the operator "I can't send email —
-  // run bravo bridge serve" even when the bridge is right there waiting
-  // for the tool call. Caught 2026-05-15 from CC's screenshot.
+  // localhost:9100/exec-tool. Without this check, the old notice would
+  // tell the operator to relaunch an already-running bridge instead of
+  // issuing the available tool call. Caught 2026-05-15 from CC's screenshot.
   // Bridge online check + advertised tool list (Phase F). Single round
   // trip vs the original separate getBridgeOnline call. When the bridge
   // is online AND has advertised a capabilities list, the dashboard
@@ -322,11 +322,9 @@ export async function POST(req: NextRequest) {
   // bridge owns tool execution). The model gets ONE of them so it
   // doesn't have to guess. Empty when cloud_tools is "off".
   //
-  // Phase 0 of harness completeness — these are agent-agnostic. Bravo-
-  // specific CLI strings ("bravo bridge serve") removed; the universal
-  // "pm2 restart claude-bridge" is correct for every agent on the
-  // operator's machine since the bridge is one process shared across
-  // agents. The model is addressed by its registry label so Maven
+  // Phase 0 of harness completeness — these are agent-agnostic. The installed
+  // OASIS launcher owns the shared bridge lifecycle on every supported host.
+  // The model is addressed by its registry label so Maven
   // says "Maven, your CMO," not "Bravo, your lead architect."
   const agentInfo = getAgentInfo(agentKey);
   const agentLabel = agentInfo.label || agentKey.toUpperCase();
@@ -344,7 +342,8 @@ export async function POST(req: NextRequest) {
     ? `\n\nSEARCH BEFORE DECLINING — NON-NEGOTIABLE:\nBefore you EVER say "I don't have X" or "I don't see X anywhere" or ask the operator for something they might have already saved, you MUST:\n  1. Check the OPERATOR KNOWN FACTS block (if present below) — calendar links, signatures, business names, common assets live there.\n  2. If the operator might have stored it as a SECRET (API key, webhook URL, access token), call get_credential with a plausible UPPER_SNAKE_CASE name (e.g., STRIPE_SECRET_KEY, CALENDLY_API_KEY, CUSTOM_WEBHOOK_URL). Try 2-3 plausible names before giving up.\n  3. If still not found, call read_brain_doc on a plausibly-named doc (e.g., USER.md, STATE.md, PROFILE.md) or search_memory with relevant keywords.\n  4. Only after a real search returns nothing should you ask the operator. When they give you the answer, IMMEDIATELY call save_known_fact for facts OR add_credential for secrets (admin-only — if get_credential returned {forbidden:true} earlier, tell them to save it via Settings → Custom credentials instead).\nThe operator gets visibly frustrated when you decline without searching — they've told previous instances of you the same thing 20 times. Search first, ask last, save always. NEVER echo a credential value back in chat — pass it to the tool that needs it and tell the operator what you did, not what the value was. Vault values you receive are scrubbed from chat_messages on persist, but the live SSE stream is the operator's screen — discipline yourself.`
     : `\n\nSEARCH BEFORE DECLINING:\nBefore saying "I don't have X" or asking the operator for something basic about them, ALWAYS:\n  - Check the OPERATOR KNOWN FACTS block (if present below) — evergreen facts live there.\n  - For secrets (API keys, webhooks, tokens), call get_credential with a plausible UPPER_SNAKE_CASE name first.\nIf a fact or credential isn't found, ask AND save it via save_known_fact (facts) or add_credential (secrets — admin only; if you're forbidden, tell the operator the exact KEY name to add under Settings → Custom credentials). NEVER echo a credential value back in chat.`;
 
-  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to check \`pm2 logs claude-bridge\` and \`pm2 restart claude-bridge\` — don't retry the same tool.\n---`;
+  const hostedRuntime = deploymentRuntimeLabel();
+  const cloudModeNoticeBridge = `\n\n---\nRUNTIME: CLOUD MODE + LOCAL BRIDGE\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on the ${hostedRuntime} — but the operator's local bridge IS online. The browser proxies tool_use calls to localhost:9100/exec-tool, so you have real local capabilities even though the LLM call itself is going through the operator's API key.\n\nWhat you CAN do:\n- Anything in the cloud tool palette below (records, http_get/post, integrations).\n- Read/write files on the operator's machine (read_file, write_file).\n- Run shell commands (bash) — confirm destructive ones first.\n- Discover the operator's scripts (list_scripts) and run them (run_script).\n- Discover the operator's playbooks (list_skills) and load them (load_skill) before executing procedural work — they exist for a reason; don't improvise.\n- Send real emails (send_email) via the operator's Gmail.\n- Send SMS (send_sms) — always include opt-out language on first-touch.\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice.${searchFirstBridge}\n\nIf a bridge tool fails with "bridge_unreachable" in the result, the operator's bridge just went offline mid-turn. Tell them to open Settings → Devices, or run \`oasis bridge status\` followed by \`oasis bridge restart\` on the paired machine — don't retry the same tool.\n---`;
 
   // Same operator/tenant split as the bridge notice. For non-operators,
   // skip the `search_memory` mention since they don't have the tool in
@@ -353,7 +352,7 @@ export async function POST(req: NextRequest) {
     ? `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nEven without the bridge, three cloud-side surfaces hold operator context:\n  - OPERATOR KNOWN FACTS block below (calendar link, signature, business name, common asks)\n  - Custom credentials vault — call get_credential with a plausible UPPER_SNAKE_CASE name for any secret (API keys, webhook URLs, access tokens)\n  - search_memory for prior decisions / SOPs the operator's brain has documented\nALWAYS check all three before saying "I don't have X." When a fact is missing, ask AND call save_known_fact; when a credential is missing, ask AND call add_credential (admin only — fall back to telling the operator the exact KEY name to add under Settings → Custom credentials if you're forbidden). NEVER echo a credential value back in chat.`
     : `\n\nBEFORE DECLINING — CHECK KNOWN FACTS + CREDENTIALS:\nTwo cloud-side surfaces hold operator context: the OPERATOR KNOWN FACTS block below (evergreen facts) and the Custom credentials vault (call get_credential with a plausible UPPER_SNAKE_CASE name for secrets). ALWAYS check both before saying "I don't have X." When something's missing, ask AND save it (save_known_fact for facts; add_credential for secrets if admin, else tell the operator the exact KEY name for Settings). NEVER echo a credential value back in chat.`;
 
-  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on Vercel. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open a terminal on your machine and run \`pm2 restart claude-bridge\`. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
+  const cloudModeNoticeNoBridge = `\n\n---\nRUNTIME: CLOUD ONLY\nYou are ${agentLabel} (${agentRole}), running through the dashboard's /api/chat path on the ${hostedRuntime}. The operator's local bridge is NOT online right now. You have the DASHBOARD STATE block below (real Supabase data — MRR, pipeline, recent inbound, today's plan, integrations health) plus the cloud tool palette (records, http_get/post, integrations) but NO local file system access, no shell, no email/SMS sends, no Python scripts.\n\nIf the operator asks for something that needs the local machine (read a file, send an email, run a script, follow a playbook):\n- Be explicit: say the bridge isn't online right now.\n- Tell them: "Open Settings → Devices, or run \`oasis bridge status\` followed by \`oasis bridge restart\` on the paired machine. The chat header will turn cyan when it comes back and I'll have read_file / write_file / bash / send_email / send_sms / list_skills / list_scripts available."\n- Do NOT infer file contents. Do NOT pretend to have sent emails you didn't send.${searchFirstNoBridge}\n\nWhat you CAN do right now:\n- Use the cloud tool palette below (records read/write/search, http_get/post, lead lookup, integration status).\n- Mutate dashboard data via <dashboard-action> markers.\n- Strategy, drafting, brainstorming, advice — anything that doesn't need the operator's machine.\n---`;
 
   // Phase 3 — when operator pinned cloud_only, the persona MUST see the
   // no-bridge notice even if the bridge is paired. Otherwise the model
@@ -472,8 +471,8 @@ export async function POST(req: NextRequest) {
   // write tools from the palette AND block write markers in the
   // dispatcher below. Both lists live in lib/role-gates.ts so they
   // can't drift out of sync.
-  const isReadOnly = isReadOnlyRole(operatorRole);
-  if (isReadOnly) {
+  const crmWritesAllowed = canWriteCrm(operatorRole);
+  if (!crmWritesAllowed) {
     const base = toolPalette ?? SAFE_TENANT_TOOL_PALETTE;
     toolPalette = base.filter((t) => !READ_ONLY_DENIED_TOOLS.has(t));
   }
@@ -754,6 +753,14 @@ export async function POST(req: NextRequest) {
           const { PLAN_MODE_TOOL_ALLOWLIST } = await import("@/lib/chat-modes/plan-mode");
           const toolSpecs = extractCloudToolMarkers(assistantText);
           for (const spec of toolSpecs) {
+            if (!crmWritesAllowed && READ_ONLY_DENIED_TOOLS.has(spec.name)) {
+              send("cloud_tool_result", {
+                ok: false,
+                name: spec.name,
+                error: `forbidden_role:${operatorRole}`,
+              });
+              continue;
+            }
             if (effectivePlanMode === "plan" && !PLAN_MODE_TOOL_ALLOWLIST.has(spec.name)) {
               send("cloud_tool_result", {
                 ok: false,
@@ -793,11 +800,11 @@ export async function POST(req: NextRequest) {
             ? rawSpecs.filter((s) => !TOOL_NATIVE_MARKER_TYPES.has(s.type))
             : rawSpecs;
         for (const spec of specs) {
-          if (isReadOnly && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
+          if (!crmWritesAllowed && READ_ONLY_DENIED_MARKERS.has(spec.type)) {
             send("action", {
               ok: false,
-              error: "forbidden_read_only",
-              summary: `Refused ${spec.type}: signed-in operator has team_role=read_only.`,
+              error: "forbidden_role",
+              summary: `Refused ${spec.type}: signed-in operator has no recognized CRM-write role.`,
             });
             continue;
           }

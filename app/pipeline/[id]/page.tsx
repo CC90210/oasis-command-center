@@ -42,7 +42,7 @@ import {
   canReadOasisSalesTeamPipeline,
   managerRosterCoversAssignment,
 } from "@/lib/role-surfaces";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
 
 export const dynamic = "force-dynamic";
 
@@ -91,12 +91,27 @@ export default async function PipelineLeadDetailPage({
     resolveOwnedSlug(tenantId),
   ]);
 
-  const readableRepUserIds =
+  // One roster, two questions. OPENING a lead is a history read: a closed or
+  // in-delivery deal keeps its deactivated rep's assigned_to forever
+  // (lib/team-activation-rules.ts "keep"), so their former manager must still
+  // open it rather than land on "Lead not found". The battle card is a read
+  // too: its API resolves this same history roster (lib/web-leads/viewer.ts,
+  // includeInactive), and the card only mutates behind canMutateLead. OPERATING
+  // on a lead (managerWorksTeamBook) stays on ACTIVE reps.
+  const managerRoster =
     session.ok && canReadOasisSalesTeamPipeline({ teamRole: session.teamRole, tenantSlug: ownedSlug })
-      ? (await safe("pipeline.detail.managerRoster", getOasisSalesRepRoster(tenantId), [])).flatMap((member) =>
-          member.auth_user_id ? [member.auth_user_id] : [],
+      ? await safe(
+          "pipeline.detail.managerRoster",
+          getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true }),
+          [],
         )
       : [];
+  const readableRepUserIds = managerRoster.flatMap((member) =>
+    member.auth_user_id ? [member.auth_user_id] : [],
+  );
+  const activeRepUserIds = managerRoster.flatMap((member) =>
+    member.auth_user_id && isActiveMember(member) ? [member.auth_user_id] : [],
+  );
 
   const activeRecord =
     record &&
@@ -179,10 +194,11 @@ export default async function PipelineLeadDetailPage({
   // a rep. This grants the lifecycle actions -- book the audit, correct a
   // contact fact -- on leads their own reps hold, plus unassigned leads, which
   // belong to nobody and which every opener can already work.
-  // readableRepUserIds is populated ONLY when canReadOasisSalesTeamPipeline
+  // activeRepUserIds is populated ONLY when canReadOasisSalesTeamPipeline
   // passed above, which already requires the manager role on an OASIS surface
   // tenant. The explicit role check is kept anyway so this does not silently
-  // widen if that resolution is ever reused for another role.
+  // widen if that resolution is ever reused for another role. A deactivated
+  // rep's kept deal opens in the coaching view, never the operate one.
   // Roster membership is answered by the shared predicate, never re-derived
   // here: lib/web-leads/data.ts asks the identical question for the prospecting
   // surface, and a second inline copy is how those two surfaces drift.
@@ -194,12 +210,12 @@ export default async function PipelineLeadDetailPage({
   const managerWorksTeamBook =
     session.ok &&
     session.teamRole.trim().toLowerCase() === "manager" &&
-    readableRepUserIds.length > 0 &&
+    activeRepUserIds.length > 0 &&
     (!assignedTo ||
       managerRosterCoversAssignment({
         teamRole: session.teamRole,
         assignedTo,
-        readableAssigneeIds: readableRepUserIds,
+        readableAssigneeIds: activeRepUserIds,
       }));
   const canWorkLifecycle =
     (canMutateLead && session.ok && mayWorkWebsiteSalesLifecycle(session.teamRole, session.isAdmin)) ||

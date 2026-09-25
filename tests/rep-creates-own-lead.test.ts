@@ -51,7 +51,7 @@ function run(name: string, fn: () => void) {
 // lowercased id, so the stamp must lowercase what the session hands it.
 const REP_ID = "0B0B0B0B-0000-4000-8000-00000000000A";
 const ADMIN_ID = "0B0B0B0B-0000-4000-8000-00000000000B";
-const NOW = new Date("2026-09-10T12:00:00.000Z");
+const NOW = new Date("2026-09-23T12:00:00.000Z");
 
 function planFor(
   viewer: { isAdmin: boolean; teamRole: string },

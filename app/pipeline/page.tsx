@@ -34,8 +34,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { resolveOwnedSlug } from "@/lib/manifest/tenant-scope";
 import { getTenant } from "@/lib/queries";
 import { isOasisPipelineAdmin } from "@/lib/oasis-sales-pipeline-policy";
-import { buildMemberNameMap, withAssignedName } from "@/lib/assigned-names";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import { buildMemberDirectory, withAssignedName } from "@/lib/assigned-names";
+import { getOasisSalesRepRoster, isActiveMember } from "@/lib/team";
 import { canReadOasisSalesTeamPipeline } from "@/lib/role-surfaces";
 import { attachWebsiteScores } from "@/lib/web-leads/attach-scores";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
@@ -49,6 +49,7 @@ import {
   listOasisPipelineWindow,
   resolveOasisPipelineAssigneeScope,
 } from "@/lib/oasis-pipeline-query";
+import { CURRENT_OASIS_PIPELINE_CYCLE } from "@/lib/pipeline-cycle";
 
 export const dynamic = "force-dynamic";
 
@@ -220,15 +221,24 @@ export default async function PipelinePage({
   // Promise.all below. Rejections stay attached to the promise and surface
   // there, exactly as before.
   const ownedSlugPromise = resolveOwnedSlug(tenantId);
-  const managerRepRoster = managerTeamRead
-    ? new Map(
-        (await getOasisSalesRepRoster(tenantId))
-          .map((member) => [
-            member.auth_user_id!.trim().toLowerCase(),
-            (member.display_name || member.full_name || member.email).trim(),
-          ]),
-      )
-    : new Map<string, string>();
+  // A manager's board is a READ of their team's book. A deactivated rep's
+  // closed and in-delivery leads keep assigned_to for history
+  // (lib/team-activation-rules.ts "keep"), so the board scope and the names
+  // include inactive reps; only the filter chips (activeIds) are active-only.
+  const managerRoster = managerTeamRead
+    ? await getOasisSalesRepRoster(tenantId, undefined, { includeInactive: true })
+    : [];
+  const managerRepRoster = new Map(
+    managerRoster.map((member) => [
+      member.auth_user_id!.trim().toLowerCase(),
+      (member.display_name || member.full_name || member.email).trim(),
+    ]),
+  );
+  const managerActiveRepIds = new Set(
+    managerRoster
+      .filter(isActiveMember)
+      .map((member) => member.auth_user_id!.trim().toLowerCase()),
+  );
   const assigneeScope = resolveOasisPipelineAssigneeScope({
     isAdmin: pipelineAdmin,
     userId: session.ok ? session.userId : null,
@@ -240,9 +250,12 @@ export default async function PipelinePage({
   // Resolve the directory once. The former path fetched it once to label rows
   // and again to build the rep chips, after resolving the same session/profile
   // three times above. Start this read alongside the pipeline query instead.
-  const memberNameMapPromise = managerTeamRead
-    ? Promise.resolve(managerRepRoster)
-    : buildMemberNameMap(tenantId);
+  // Names cover every teammate (old rows keep a deactivated rep's name); the
+  // active set decides who gets a filter chip. See buildMemberDirectory.
+  const memberDirectoryPromise = managerTeamRead
+    ? Promise.resolve({ names: managerRepRoster, activeIds: managerActiveRepIds })
+    : buildMemberDirectory(tenantId);
+  const memberNameMapPromise = memberDirectoryPromise.then((directory) => directory.names);
   // The manager's default roster and an explicit rep chip use the same bounded
   // one-read path. Treating ?rep= as a scalar scope fell back to one query per
   // lifecycle stage even though it is simply a one-member roster.
@@ -284,6 +297,7 @@ export default async function PipelinePage({
           session.ok && session.teamRole.trim().toLowerCase() === "builder"
             ? session.userId
             : null,
+        cycle: CURRENT_OASIS_PIPELINE_CYCLE,
         query,
       }),
       memberNameMapPromise,
@@ -337,10 +351,14 @@ export default async function PipelinePage({
   // Counts on the old rep chips came from the current row slice and looked
   // exact while omitting old deals. Keep the filters, but show the selected
   // board's exact total in the pipeline itself.
-  const repRoster =
-    session.ok && pipelineAdmin
-      ? memberNameMap
-      : managerRepRoster;
+  const { activeIds: activeMemberIds } = await memberDirectoryPromise;
+  // Both audiences' name maps carry deactivated people; a chip is a live
+  // control, so only active ones get one.
+  const repRoster = new Map(
+    [...(session.ok && pipelineAdmin ? memberNameMap : managerRepRoster)].filter(([id]) =>
+      activeMemberIds.has(id),
+    ),
+  );
 
   // A manager who also carries a book had to spot their own name in a row of
   // ten colleagues to see just their leads. Their chip is pinned first and

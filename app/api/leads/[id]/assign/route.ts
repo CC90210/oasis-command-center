@@ -19,6 +19,12 @@
  * sales rep may only transfer their own pre-handoff lead to another sales role.
  * Closer and builder ownership is workflow-only after that point.
  *
+ * Target: a LIVE destination, so a deactivated teammate is refused on every
+ * tenant (2026-09-24). OASIS checks the assignment roster (CC, Adon and active
+ * reps); other tenants check membership and then refuse a deactivated member,
+ * except as the lead's current owner — re-saving a deal they already hold is
+ * not handing them new work. null (unassign) needs no target check.
+ *
  * Response 200: { ok: true, assigned_to: string | null }
  * Response 4xx: { ok: false, error, message? }
  */
@@ -40,7 +46,11 @@ import {
   isReleasedOasisPipelineRow,
   roleMayOperateOasisSalesLead,
 } from "@/lib/oasis-sales-pipeline-policy";
-import { getOasisSalesRepRoster } from "@/lib/team";
+import {
+  MEMBER_DEACTIVATED_MESSAGE,
+  getOasisPipelineAssignmentRoster,
+  isActiveMember,
+} from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -106,27 +116,33 @@ export async function POST(
   const isOasisWorkspace = isWebsiteSalesTenantSlug(tenantSlug);
 
   // Verify the candidate against the authoritative destination set. OASIS is
-  // sales-roster-only for admins and reps alike; legacy workspaces retain the
-  // broader tenant-member assignment rule.
+  // sales-roster-only for admins and reps alike (CC, Adon and active reps; the
+  // roster already leaves deactivated teammates out); legacy workspaces retain
+  // the broader tenant-member assignment rule.
+  let targetDeactivated = false;
   if (nextAssignedTo) {
     if (isOasisWorkspace) {
       let roster;
       try {
-        roster = await getOasisSalesRepRoster(tenantId);
+        roster = await getOasisPipelineAssignmentRoster(tenantId);
       } catch (error) {
-        console.error("[leads.assign] OASIS sales roster could not be verified", {
+        console.error("[leads.assign] OASIS assignment roster could not be verified", {
           tenantId,
           error: error instanceof Error ? error.message : String(error),
         });
         return NextResponse.json(
-          { ok: false, error: "sales_roster_unavailable", message: "The sales roster could not be verified." },
+          { ok: false, error: "sales_roster_unavailable", message: "The sales assignment roster could not be verified." },
           { status: 503 },
         );
       }
       const resolved = resolveAssignableTarget(roster, nextAssignedTo);
       if (!resolved) {
         return NextResponse.json(
-          { ok: false, error: "target_not_on_sales_roster", message: "Choose an active sales rep from this workspace." },
+          {
+            ok: false,
+            error: "target_not_on_sales_roster",
+            message: "Choose CC, Adon or an active sales rep. A deactivated teammate cannot take new work.",
+          },
           { status: 422 },
         );
       }
@@ -134,7 +150,7 @@ export async function POST(
     } else {
       const memberCheck = await db
         .from("user_profiles")
-        .select("auth_user_id")
+        .select("auth_user_id, deactivated_at")
         .eq("tenant_id", tenantId)
         .eq("auth_user_id", nextAssignedTo)
         .maybeSingle();
@@ -148,6 +164,9 @@ export async function POST(
           { status: 400 },
         );
       }
+      // Still a member (their name stays on the deals they worked), but not a
+      // live destination. Refused below, once the current owner is known.
+      targetDeactivated = !isActiveMember(memberCheck.data as { deactivated_at?: string | null });
     }
   }
 
@@ -187,7 +206,7 @@ export async function POST(
       {
         ok: false,
         error: "assignee_required",
-        message: "OASIS leads need an active sales rep. Use Leads and its Release action to return work to the shared pool.",
+        message: "OASIS leads need an owner: CC, Adon or an active sales rep. Use Leads and its Release action to return work to the shared pool.",
       },
       { status: 422 },
     );
@@ -198,6 +217,14 @@ export async function POST(
     typeof record.data.assigned_to === "string"
       ? record.data.assigned_to.trim().toLowerCase()
       : "";
+  // A deactivated teammate keeps the deals they already hold, so re-saving the
+  // same owner is allowed; handing them this deal is not.
+  if (targetDeactivated && nextAssignedTo !== currentOwner) {
+    return NextResponse.json(
+      { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE },
+      { status: 400 },
+    );
+  }
   if (
     isOasisSalesLead &&
     (!currentOwner ||

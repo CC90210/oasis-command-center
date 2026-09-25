@@ -3,7 +3,7 @@
 /**
  * DevicesEditor — list paired machines for this tenant + revoke action.
  *
- * Each row in bridge_pairings is a local install (`bravo bridge start`
+ * Each row in bridge_pairings is a local install (`oasis bridge start`
  * pinging /api/bridge/ping every 60s). Revoking sets revoked_at; the daemon
  * sees 403 on its next ping, exits, and the operator must re-pair via
  * `bravo setup` to bring it back online.

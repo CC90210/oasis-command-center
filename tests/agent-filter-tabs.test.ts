@@ -8,7 +8,12 @@ assert.match(source, /const filterScopeEnabled = leadFiltersEnabled\(viewer, sco
 assert.match(source, /resolveAssignedScope\([\s\S]*?filterScopeEnabled/,
   "selected agent tabs apply their assigned scope");
 assert.match(source, /chip\(base, "All leads", activeAll\)/, "All leads tab is rendered");
-assert.match(source, /adminRoster[\s\S]*?user_profiles[\s\S]*?auth_user_id, display_name, full_name/,
-  "agent tabs come from the full tenant roster");
+// 2026-09-24: a tab is a live control, so it offers ACTIVE teammates only; a
+// deactivated rep's ?agent= link still filters, it just gets no tab.
+assert.match(
+  source,
+  /const \{ names, activeIds \} = await buildMemberDirectory\(dataTenantId\);\s*adminRoster = \[\.\.\.names\]\s*\.filter\(\(\[id\]\) => activeIds\.has\(id\)\)/,
+  "agent tabs come from the tenant directory, active teammates only",
+);
 
 console.log("agent filter tabs tests passed");

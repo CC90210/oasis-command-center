@@ -8,11 +8,11 @@ export const PERSONAL_PROFILE_FIELDS = new Set([
   "onboarding_completed_at",
 ]);
 
+// mrr_target_usd / mrr_current_usd / mrr_target_date are no longer editable
+// (2026-09-24): MRR is live Stripe and the goal is a revenue_goals row. Typed
+// values here are exactly how the dashboard drifted from the bank.
 export const ADMIN_PROFILE_FIELDS = new Set([
   "brand",
-  "mrr_target_usd",
-  "mrr_current_usd",
-  "mrr_target_date",
   "manifesto",
   "primary_agent",
   "agents_enabled",

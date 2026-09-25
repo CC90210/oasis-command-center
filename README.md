@@ -49,7 +49,7 @@ mode dropdown:
 
 - **CLI (local bridge)** — browser POSTs directly to `localhost:9100/chat` on
   the operator's machine. The bridge (Python sidecar shipped with the desktop
-  app or `bravo bridge serve`) spawns Claude Code / Codex / Gemini CLI with
+  app or `oasis bridge serve` through the installed launcher) spawns Claude Code / Codex / Gemini CLI with
   the operator's persona prompt. Full file/script access, free under the
   operator's CLI subscription.
 - **Cloud + my files** / **Cloud only** — POST to `/api/chat` (Next route).

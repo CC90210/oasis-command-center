@@ -15,7 +15,8 @@
  * CC handling: default is the row's stored cc_emails (the original
  * post-checkbox list from the run). Operator can override per-reply,
  * but the new addresses still need to be in agents.config.json — same
- * gate as the /run endpoint.
+ * gate as the /run endpoint. Either way, a teammate deactivated in this
+ * tenant is dropped before sending (dropDeactivatedEmails).
  *
  * After send: append the new RFC822 Message-Id to message_id_history,
  * update last_message_id to the new one, refresh updated_at.
@@ -27,6 +28,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getAgents } from "@/lib/config/agents";
+import { dropDeactivatedEmails } from "@/lib/lenders/derive-agent-ccs";
 import { logAction } from "@/lib/action-log";
 
 export const runtime = "nodejs";
@@ -144,7 +146,13 @@ export async function POST(
         .map((e) => e.toLowerCase().trim())
         .filter((e) => agentEmails.has(e))
     : null;
-  const ccEmails = incomingCcs !== null ? incomingCcs : storedCcs;
+  // The stored list was frozen at the original send and the roster gate does
+  // not know who has left, so both drop a teammate deactivated here since.
+  const ccEmails = await dropDeactivatedEmails(
+    db,
+    sess.tenantId,
+    incomingCcs !== null ? incomingCcs : storedCcs,
+  );
 
   // Subject — original prefixed with "Re: " (once).
   const subjectStem = stripExistingRePrefix(thread.subject || "(no subject)");

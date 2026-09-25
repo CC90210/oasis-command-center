@@ -49,6 +49,7 @@ import { dispatchPendingSunbizThreads } from "@/lib/lenders/shop-out-dispatch";
 import { watermarkAttachmentsForShopOut } from "@/lib/lead-documents";
 import { complianceProfileInputs } from "@/lib/lenders/match-fitness";
 import { deriveDealSigner, resolveSignerForOperator } from "@/lib/config/agents";
+import { memberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -284,18 +285,29 @@ async function handleShopOut(
   // buildShopOutPlan can merge it into the per-row CC alongside the
   // operator's typed list and the lender's stored submission_cc_emails.
   // application.data.assigned_to holds an auth_user_id (set by
-  // /api/leads/[id]/assign); join through user_profiles to get the email.
+  // /api/leads/[id]/assign); resolve it within THIS tenant to get the email.
+  // Only an ACTIVE rep is copied: a deactivated one keeps the deal (history)
+  // but must not be CC'd, sign, or become the Reply-To of new lender mail, so
+  // their email stays null and the operator signer / shared inbox applies. A
+  // failed check withholds the copy the same way.
   let assignedRepEmail: string | null = null;
   const assignedTo = typeof appData.assigned_to === "string" ? appData.assigned_to : null;
   if (assignedTo) {
-    const profileRes = await db
-      .from("user_profiles")
-      .select("email")
-      .eq("auth_user_id", assignedTo)
-      .maybeSingle();
-    const email = (profileRes.data as { email: string | null } | null)?.email;
-    if (typeof email === "string" && email.includes("@")) {
-      assignedRepEmail = email;
+    try {
+      const { standing, member } = await memberStanding(tenantId, assignedTo);
+      const email = member?.email;
+      if (standing === "active" && typeof email === "string" && email.includes("@")) {
+        assignedRepEmail = email;
+      } else if (standing === "deactivated") {
+        console.warn("[shop-out] assigned rep deactivated", { tenantId, applicationId, assignedTo });
+      }
+    } catch (error) {
+      console.warn("[shop-out] assigned rep check failed", {
+        tenantId,
+        applicationId,
+        assignedTo,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

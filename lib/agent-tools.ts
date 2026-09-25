@@ -13,6 +13,9 @@
  */
 
 import { getServiceSupabase } from "./supabase-server";
+import { tenantSlugFor } from "./team";
+import { isOasisSurfaceTenant } from "./role-surfaces";
+import { loadOasisMoney } from "./goals/oasis-money";
 
 export type ToolDeclaration = {
   name: string;
@@ -65,7 +68,7 @@ export const TOOL_DECLARATIONS: ToolDeclaration[] = [
   {
     name: "mrr_today",
     description:
-      "Current net MRR (USD), target, % to goal, and gap to goal. Use when the operator asks how revenue is doing.",
+      "How revenue is doing. OASIS: live Stripe net MRR plus the active revenue goal (money COLLECTED in the goal period vs its USD target, days left). Other workspaces: the operator-set MRR and target. Use when the operator asks how revenue is doing.",
     parameters: { type: "object", properties: {} },
   },
   {
@@ -137,6 +140,39 @@ const HANDLERS: Record<string, ToolHandler> = {
   },
 
   async mrr_today(_args, ctx) {
+    // OASIS (2026-09-24): MRR is live Stripe only and the goal is revenue
+    // COLLECTED in a period — the same loader Today and /analytics read. Company
+    // money is founder-only there, so a rep's chat gets no figure at all.
+    if (isOasisSurfaceTenant(await tenantSlugFor(ctx.tenantId))) {
+      if (!ctx.isAdmin) return { withheld: "Company revenue is visible to CC and Adon only." };
+      const m = await loadOasisMoney(ctx.tenantId, "agent.mrr_today");
+      return {
+        source: "stripe_live",
+        stripe_connected: m.stripeConnected,
+        mrr: m.mrr
+          ? {
+              cents: m.mrr.mrr_cents,
+              currency: m.mrr.currency.toUpperCase(),
+              usd_cents: m.mrrUsdCents,
+              active_subscriptions: m.mrr.active_subscriptions,
+            }
+          : null,
+        goal:
+          m.goal && m.progress
+            ? {
+                label: m.goal.label,
+                target_usd: m.goal.target_cents / 100,
+                period_start: m.goal.period_start,
+                period_end: m.goal.period_end,
+                collected_usd: m.progress.collected_cents / 100,
+                pct_to_target: m.progress.pct,
+                gap_usd: m.progress.remaining_cents / 100,
+                days_left: m.progress.days_left,
+                status: m.progress.status,
+              }
+            : null,
+      };
+    }
     const db = getServiceSupabase();
     const { data: profile } = await db
       .from("user_profiles")

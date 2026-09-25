@@ -12,7 +12,8 @@
  *     { leadId, entity?, scheduledFor (ISO), preCallNote?, assignedTo? }.
  *     Authorizes the lead via getWritableLead (CRM-write role tier — any
  *     non-read_only tenant member may schedule a call on any lead in their
- *     tenant, same tier as set-stage/promote).
+ *     tenant, same tier as set-stage/promote). assignedTo other than the
+ *     caller must be an ACTIVE member of the caller's tenant (2026-09-24).
  *
  *   GET — list the CURRENT user's appointments (assigned_to = me OR
  *     created_by = me), tenant-scoped, status != 'cancelled' by default,
@@ -28,6 +29,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getWritableLead } from "@/lib/lead-access";
+import { MEMBER_DEACTIVATED_MESSAGE, memberStanding } from "@/lib/team";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -126,6 +128,40 @@ export async function POST(req: NextRequest) {
       : NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
+  // An appointment lands on the assignee's call sheet — live work. Booking
+  // your own call needs no check; booking one for a teammate needs an ACTIVE
+  // member of this tenant, never a deactivated one or someone elsewhere.
+  let assignedTo = sess.userId;
+  const requestedAssignee = assignedToRaw.toLowerCase();
+  if (requestedAssignee && requestedAssignee !== sess.userId.toLowerCase()) {
+    let standing;
+    try {
+      standing = (await memberStanding(sess.tenantId, requestedAssignee)).standing;
+    } catch (error) {
+      console.error("[call-appointments] assignee standing could not be verified", {
+        tenantId: sess.tenantId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return NextResponse.json(
+        { ok: false, error: "member_check_failed", message: "That teammate couldn't be verified right now. Try again in a moment." },
+        { status: 503 },
+      );
+    }
+    if (standing === "not_member") {
+      return NextResponse.json(
+        { ok: false, error: "not_a_tenant_member", message: "That user isn't on this tenant." },
+        { status: 400 },
+      );
+    }
+    if (standing === "deactivated") {
+      return NextResponse.json(
+        { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE },
+        { status: 400 },
+      );
+    }
+    assignedTo = requestedAssignee;
+  }
+
   const db = getServiceSupabase();
   const ins = await db
     .from("call_appointments")
@@ -134,7 +170,7 @@ export async function POST(req: NextRequest) {
       lead_id: leadId,
       entity_type: entity,
       scheduled_for: scheduledFor.toISOString(),
-      assigned_to: assignedToRaw || sess.userId,
+      assigned_to: assignedTo,
       pre_call_note: preCallNote,
       created_by: sess.userId,
     })
