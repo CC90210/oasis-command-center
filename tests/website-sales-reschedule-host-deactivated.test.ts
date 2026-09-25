@@ -265,9 +265,9 @@ async function main() {
 
   await check("the lifecycle UI explains both codes in plain English instead of printing them", async () => {
     const ui = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
-    assert.ok(ui.includes(
-      `meeting_host_deactivated: "This meeting's host has been deactivated. Mark it no-show and book a new audit with an active host."`,
-    ));
+    // The copy must name an action the route accepts at any time: no-show is
+    // refused before the meeting starts, so both paths are spelled out.
+    assert.match(ui, /meeting_host_deactivated: "[^"]*deactivated[^"]*no-show[^"]*cancel[^"]*active host\."/);
     assert.match(ui, /meeting_host_check_failed: "[^"]*Retry[^"]*"/);
   });
 
