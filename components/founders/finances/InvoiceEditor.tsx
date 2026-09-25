@@ -4,16 +4,31 @@
  * Create / edit a draft invoice. Totals preview runs the SAME pure function
  * the server uses (computeInvoiceTotals), so what you see is what gets
  * stored — the server still recomputes and is the only authority.
+ *
+ * "How the client pays" — bank transfer (Wise, the default for a one-off
+ * invoice), card (Stripe) or both. Whether Wise can supply details for the
+ * chosen currency is asked of the server (GET /api/founders/finances/wise
+ * ?view=editor) after render, so the form never waits on Wise; when it
+ * cannot, the reason is shown and the invoice falls back to the card link.
  */
 
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { computeInvoiceTotals } from "@/lib/founders-finances/invoice";
 import { formatCents } from "@/lib/founders-finances/money";
+import {
+  DEFAULT_NEW_INVOICE_METHOD,
+  INVOICE_PAYMENT_METHODS,
+  PAYMENT_METHOD_LABEL,
+  offersBankTransfer,
+  parsePaymentMethod,
+  type InvoicePaymentMethod,
+} from "@/lib/founders-finances/wise";
 import { postFinanceAction } from "./ActionForm";
 import { inputClass, labelClass, primaryButton, quietButton } from "./ui";
 
 type Line = { description: string; quantity: string; unit_price: string; taxable: boolean; revenue_account_id: string };
+type WiseInfo = { methodSupported: boolean; available: boolean; reason: string | null };
 
 export function InvoiceEditor({
   entity,
@@ -36,6 +51,8 @@ export function InvoiceEditor({
     currency: "CAD" | "USD";
     notes: string;
     lines: Line[];
+    /** Optional: when omitted, the editor reads the stored method from the server. */
+    paymentMethod?: InvoicePaymentMethod;
   };
 }) {
   const router = useRouter();
@@ -52,6 +69,33 @@ export function InvoiceEditor({
   );
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // null while an edited draft's stored method is still loading: nothing is sent, so it cannot be overwritten.
+  const [method, setMethod] = useState<InvoicePaymentMethod | null>(initial ? initial.paymentMethod ?? null : DEFAULT_NEW_INVOICE_METHOD);
+  const [wise, setWise] = useState<WiseInfo | null>(null);
+  const invoiceId = initial?.invoiceId;
+
+  useEffect(() => {
+    let live = true;
+    const qs = new URLSearchParams({ view: "editor", currency });
+    if (invoiceId) qs.set("invoice_id", invoiceId);
+    fetch(`/api/founders/finances/wise?${qs.toString()}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j: Record<string, unknown>) => {
+        if (!live || j?.ok !== true) return;
+        const w = (j.wise || {}) as { available?: boolean; reason?: string | null };
+        const supported = j.method_supported === true;
+        setWise({ methodSupported: supported, available: w.available === true, reason: w.reason ?? null });
+        // Before migration 184 every invoice is a card invoice; afterwards an edited draft shows what it stored.
+        if (!supported) setMethod("stripe");
+        else setMethod((m) => m ?? parsePaymentMethod(j.invoice_payment_method) ?? DEFAULT_NEW_INVOICE_METHOD);
+      })
+      .catch(() => {
+        if (live) setWise({ methodSupported: false, available: false, reason: "Could not reach the server to check Wise." });
+      });
+    return () => {
+      live = false;
+    };
+  }, [currency, invoiceId]);
 
   const preview = useMemo(() => {
     try {
@@ -76,6 +120,7 @@ export function InvoiceEditor({
       lines,
     };
     if (initial) body.invoice_id = initial.invoiceId;
+    if (method && wise?.methodSupported) body.payment_method = method;
     if (contactId === "__new") body.new_contact = { name: newName, email: newEmail };
     else body.contact_id = contactId;
     const r = await postFinanceAction(body).catch((e: unknown) => ({ ok: false, message: e instanceof Error ? e.message : "Network error." }));
@@ -130,6 +175,35 @@ export function InvoiceEditor({
             <option value="CAD">CAD</option>
             <option value="USD">USD</option>
           </select>
+        </div>
+        <div className="sm:col-span-2">
+          <label className={labelClass}>How the client pays</label>
+          <select
+            className={inputClass}
+            value={method ?? ""}
+            disabled={!wise || !wise.methodSupported}
+            onChange={(e) => setMethod(parsePaymentMethod(e.target.value))}
+          >
+            {method === null && <option value="">Loading…</option>}
+            {INVOICE_PAYMENT_METHODS.map((m) => (
+              <option key={m} value={m}>
+                {PAYMENT_METHOD_LABEL[m]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="-mt-1 text-[11px] leading-snug text-fg-dim sm:col-span-4">
+          {!wise ? (
+            "Checking Wise…"
+          ) : !wise.methodSupported ? (
+            <span className="text-status-warm">{wise.reason || "Bank transfer isn't available right now."} The invoice goes out with the card link.</span>
+          ) : method && offersBankTransfer(method) && !wise.available ? (
+            <span className="text-status-warm">Wise unavailable: {wise.reason} It will be sent with the card link or your payment instructions instead.</span>
+          ) : method && offersBankTransfer(method) ? (
+            `The invoice prints the Wise ${currency} bank details with its number as the payment reference. Recurring billing stays on Stripe subscriptions.`
+          ) : (
+            "A Stripe card payment link is attached when the invoice is sent."
+          )}
         </div>
       </div>
 

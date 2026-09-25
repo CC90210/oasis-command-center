@@ -7,6 +7,14 @@
  * ISSUED (numbered, receivable recognised); sent_at records the successful
  * email. An invoice that was issued but whose email failed shows as
  * "issued, not emailed" and can be re-sent without re-numbering.
+ *
+ * HOW THE CLIENT PAYS (payment_method, migration 184): "wise" prints the Wise
+ * receiving details for the invoice currency with the invoice number as the
+ * payment reference (the default for a new one-off invoice); "stripe" attaches
+ * a card Payment Link (every invoice from before 184); "wise_stripe" offers
+ * both. A Wise invoice whose details cannot be read (not connected, Wise down)
+ * still goes out — with the card link, or the founders' payment instructions
+ * — and the send result says why.
  */
 import "server-only";
 
@@ -37,6 +45,7 @@ import {
   loadContact,
   loadInvoice,
   loadInvoiceLines,
+  paymentMethodColumnReady,
   recomputeInvoicePaidStatement,
   type ContactRow,
   type InvoiceLineRow,
@@ -45,7 +54,18 @@ import {
 import { addressLines, loadSettings } from "./settings-io";
 import { renderInvoicePdf } from "./invoice-pdf";
 import { composeInvoiceEmail, sendInvoiceEmail } from "./invoice-email";
-import { getStripeClient, stripeRequest, financeTenantId } from "./stripe-io";
+import { getStripeClient, stripeRequest, financeTenantId, StripeNotReady } from "./stripe-io";
+import {
+  bankTransferLines,
+  DEFAULT_NEW_INVOICE_METHOD,
+  offersBankTransfer,
+  offersCard,
+  parsePaymentMethod,
+  storedPaymentMethod,
+  type InvoicePaymentMethod,
+  type WiseDetailField,
+} from "./wise";
+import { receivingDetailsOrReason } from "./wise-io";
 import { deactivatePaymentLinkIfPaid } from "./stripe-ingest";
 import { validateEmail } from "./validation";
 
@@ -97,6 +117,8 @@ type DraftInput = {
   currency: "CAD" | "USD";
   notes: string;
   lines: Array<InvoiceLineInput & { revenueAccountId: string }>;
+  /** null = not given: a new draft takes the default, an edit keeps what it had. */
+  paymentMethod: InvoicePaymentMethod | null;
 };
 
 async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, viewer: FinanceViewer): Promise<DraftInput> {
@@ -136,7 +158,26 @@ async function parseDraftInput(entity: EntityRow, raw: Record<string, unknown>, 
       revenueAccountId: acct,
     };
   });
-  return { contactId, issueDate, dueDate, currency, notes: text(raw.notes, 2000), lines };
+  let paymentMethod: InvoicePaymentMethod | null = null;
+  if (raw.payment_method !== undefined && raw.payment_method !== null && raw.payment_method !== "") {
+    paymentMethod = parsePaymentMethod(raw.payment_method);
+    if (!paymentMethod) throw new FinanceInputError("payment method must be bank transfer (Wise), card (Stripe) or both");
+  }
+  return { contactId, issueDate, dueDate, currency, notes: text(raw.notes, 2000), lines, paymentMethod };
+}
+
+/**
+ * The statement that stores a draft's payment method, or none. Before
+ * migration 184 there is no column: asking for anything but the card flow
+ * then is refused rather than silently dropped.
+ */
+async function paymentMethodStatement(invoiceId: string, method: InvoicePaymentMethod | null): Promise<InStatement[]> {
+  if (method === null) return [];
+  if (!(await paymentMethodColumnReady())) {
+    if (method === "stripe") return [];
+    throw new FinanceInputError("Bank transfer (Wise) isn't available on invoices yet, so choose the card link for now.");
+  }
+  return [{ sql: `UPDATE fin_invoices SET payment_method = ? WHERE id = ? AND status = 'draft'`, args: [method, invoiceId] }];
 }
 
 function lineStatements(invoiceId: string, lines: DraftInput["lines"], computed: ReturnType<typeof computeInvoiceTotals>): InStatement[] {
@@ -159,6 +200,7 @@ export async function createDraftInvoice(viewer: FinanceViewer, entityRef: strin
     throw new FinanceInputError((e as Error).message);
   }
   const id = newId("inv");
+  const method = input.paymentMethod ?? ((await paymentMethodColumnReady()) ? DEFAULT_NEW_INVOICE_METHOD : null);
   await writeBatch([
     {
       sql: `INSERT INTO fin_invoices (id, entity_id, contact_id, status, issue_date, due_date, currency, subtotal_cents, gst_cents,
@@ -166,6 +208,7 @@ export async function createDraftInvoice(viewer: FinanceViewer, entityRef: strin
             VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [id, entity.id, input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, viewerLabel(viewer)],
     },
+    ...(await paymentMethodStatement(id, method)),
     ...lineStatements(id, input.lines, totals),
     auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_created", objectType: "invoice", objectId: id, detail: { total: totals.totalCents, currency: input.currency } }),
   ]);
@@ -194,6 +237,7 @@ export async function updateDraftInvoice(viewer: FinanceViewer, invoiceId: strin
              WHERE id = ? AND status = 'draft'`,
       args: [input.contactId, input.issueDate, input.dueDate, input.currency, totals.subtotalCents, totals.gstCents, totals.qstCents, totals.totalCents, settings.gst_qst_registered, input.notes, invoiceId],
     },
+    ...(await paymentMethodStatement(invoiceId, input.paymentMethod)),
     auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.draft_updated", objectType: "invoice", objectId: invoiceId }),
   ]);
 }
@@ -247,15 +291,35 @@ export async function getInvoiceDetail(viewer: FinanceViewer, invoiceId: string)
     contact,
     payments,
     settings,
+    paymentMethod: storedPaymentMethod(inv.payment_method),
   };
 }
 
 export async function invoicePdfBytes(viewer: FinanceViewer, invoiceId: string): Promise<{ bytes: Uint8Array; filename: string }> {
   const d = await getInvoiceDetail(viewer, invoiceId);
-  return { bytes: await pdfFor(d.invoice, d.lines, d.contact, d.settings), filename: `${d.invoice.number || "DRAFT"}.pdf` };
+  const wise = await bankTransferFor(d.invoice);
+  return { bytes: await pdfFor(d.invoice, d.lines, d.contact, d.settings, wise.lines), filename: `${d.invoice.number || "DRAFT"}.pdf` };
 }
 
-async function pdfFor(inv: InvoiceRow, lines: InvoiceLineRow[], contact: ContactRow | null, settings: Awaited<ReturnType<typeof loadSettings>>): Promise<Uint8Array> {
+/**
+ * The Wise lines an invoice prints, when its method offers a bank transfer.
+ * `notice` says why they are missing when they should be there (Wise not
+ * connected, unreachable) — the invoice still goes out without them.
+ */
+async function bankTransferFor(inv: InvoiceRow): Promise<{ lines: WiseDetailField[] | null; notice: string | null }> {
+  if (!offersBankTransfer(storedPaymentMethod(inv.payment_method))) return { lines: null, notice: null };
+  const r = await receivingDetailsOrReason(inv.currency);
+  if (!r.ok) return { lines: null, notice: r.reason };
+  return { lines: bankTransferLines(r.details, inv.number || "the invoice number (assigned when issued)"), notice: null };
+}
+
+async function pdfFor(
+  inv: InvoiceRow,
+  lines: InvoiceLineRow[],
+  contact: ContactRow | null,
+  settings: Awaited<ReturnType<typeof loadSettings>>,
+  bankTransfer: WiseDetailField[] | null = null,
+): Promise<Uint8Array> {
   return renderInvoicePdf({
     seller: {
       legalName: settings.legal_name,
@@ -279,6 +343,7 @@ async function pdfFor(inv: InvoiceRow, lines: InvoiceLineRow[], contact: Contact
       notes: inv.notes,
       paymentLinkUrl: inv.stripe_payment_link_url,
       paymentInstructions: settings.payment_instructions,
+      bankTransfer,
     },
     customer: { name: contact?.name || "", company: contact?.company || "", email: contact?.email || "", address: contact?.address || "" },
     lines: lines.map((l) => ({ description: l.description, quantityMilli: l.quantity_milli, unitPriceCents: l.unit_price_cents, amountCents: l.amount_cents })),
@@ -402,12 +467,28 @@ export async function ensurePaymentLink(inv: InvoiceRow): Promise<string> {
   return url;
 }
 
-export type SendResult = { invoiceId: string; number: string; emailedTo: string; paymentLinkUrl: string | null; messageId: string };
+export type SendResult = {
+  invoiceId: string;
+  number: string;
+  emailedTo: string;
+  paymentLinkUrl: string | null;
+  messageId: string;
+  /** The email and PDF carry the Wise receiving details. */
+  bankTransfer: boolean;
+  /** Set when the invoice asked for a bank transfer but Wise could not supply the details — the reason, in a sentence. */
+  notice: string | null;
+};
 
 /**
- * Finalise (if draft), attach a payment link (unless explicitly declined),
- * render the PDF and email it from the OASIS mailbox. Every failure throws:
- * the caller sees it and nothing pretends the customer was emailed.
+ * Finalise (if draft), attach the payment options the invoice's method asks
+ * for, render the PDF and email it from the OASIS mailbox. Every failure
+ * throws: the caller sees it and nothing pretends the customer was emailed.
+ *
+ * Card link: attached when the method offers card (unless the sender turned
+ * it off — the flow every invoice before migration 184 used, unchanged), and
+ * as the fallback when a bank-transfer invoice cannot show Wise details. A
+ * bank-transfer invoice with neither Wise nor Stripe nor written payment
+ * instructions is refused: it would ask for money with no way to pay.
  */
 export async function sendInvoice(
   viewer: FinanceViewer,
@@ -423,14 +504,33 @@ export async function sendInvoice(
   const to = opts.to ? validateEmail(opts.to) : contact?.email ? validateEmail(contact.email) : null;
   if (!to) throw new FinanceInputError("the customer has no valid email address; add one or enter a recipient");
   let inv = await finalizeInvoice(viewer, invoiceId);
-  let url: string | null = inv.stripe_payment_link_url;
-  if (opts.paymentLink !== false && !url) {
-    url = await ensurePaymentLink(inv);
-    inv = (await loadInvoice(invoiceId)) as InvoiceRow;
-  }
+  const method = storedPaymentMethod(inv.payment_method);
+  const wise = await bankTransferFor(inv);
   const settings = await loadSettings(entity.id);
+  const cardWanted = opts.paymentLink !== false && (offersCard(method) || (offersBankTransfer(method) && !wise.lines));
+  let url: string | null = cardWanted ? inv.stripe_payment_link_url : null;
+  if (cardWanted && !url) {
+    try {
+      url = await ensurePaymentLink(inv);
+      inv = (await loadInvoice(invoiceId)) as InvoiceRow;
+    } catch (e) {
+      // A card invoice needs its link: that failure stays loud. The FALLBACK
+      // link for a Wise invoice may be skipped when the founders wrote their
+      // own payment instructions.
+      if (offersCard(method) || !(e instanceof StripeNotReady)) throw e;
+      if (!settings.payment_instructions.trim()) {
+        throw new FinanceInputError(
+          `${wise.notice} Stripe is not ready either (${e.message}). Add payment instructions in Finances > Settings, or connect one of them. The invoice was NOT emailed.`,
+        );
+      }
+      url = null;
+    }
+  }
+  if (offersBankTransfer(method) && !wise.lines && !url && !settings.payment_instructions.trim()) {
+    throw new FinanceInputError(`${wise.notice} No card link and no payment instructions either, so the client would have no way to pay. The invoice was NOT emailed.`);
+  }
   const lines = await loadInvoiceLines(invoiceId);
-  const pdf = await pdfFor(inv, lines, contact, settings);
+  const pdf = await pdfFor(inv, lines, contact, settings, wise.lines);
   const mail = composeInvoiceEmail({
     kind: "invoice",
     sellerName: settings.legal_name,
@@ -440,15 +540,31 @@ export async function sendInvoice(
     balanceCents: balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents }),
     currency: inv.currency,
     dueDate: inv.due_date,
-    paymentLinkUrl: opts.paymentLink === false ? null : url,
+    paymentLinkUrl: url,
     paymentInstructions: settings.payment_instructions,
+    bankTransfer: wise.lines,
   });
   const sent = await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${inv.number}.pdf` });
   await writeBatch([
     { sql: `UPDATE fin_invoices SET sent_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), sent_to = ? WHERE id = ?`, args: [to, invoiceId] },
-    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "invoice.emailed", objectType: "invoice", objectId: invoiceId, detail: { to, from: sent.from, link: Boolean(url) } }),
+    auditStatement({
+      entityId: entity.id,
+      actor: viewerLabel(viewer),
+      action: "invoice.emailed",
+      objectType: "invoice",
+      objectId: invoiceId,
+      detail: { to, from: sent.from, link: Boolean(url), method, wise: Boolean(wise.lines), notice: wise.notice },
+    }),
   ]);
-  return { invoiceId, number: inv.number as string, emailedTo: to, paymentLinkUrl: opts.paymentLink === false ? null : url, messageId: sent.messageId };
+  return {
+    invoiceId,
+    number: inv.number as string,
+    emailedTo: to,
+    paymentLinkUrl: url,
+    messageId: sent.messageId,
+    bankTransfer: Boolean(wise.lines),
+    notice: wise.notice,
+  };
 }
 
 // ── manual payment ───────────────────────────────────────────────────────
@@ -603,7 +719,15 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
       try {
         const lines = await loadInvoiceLines(r.id);
         const contact = await loadContact(r.contact_id);
-        const pdf = await pdfFor(r, lines, contact, settings);
+        const wise = await bankTransferFor(r);
+        if (wise.notice) console.error("[finances:invoices] reminder without Wise details", r.number, wise.notice);
+        // Same rule as sendInvoice: never ask for money with no way to pay.
+        if (offersBankTransfer(storedPaymentMethod(r.payment_method)) && !wise.lines && !r.stripe_payment_link_url && !settings.payment_instructions.trim()) {
+          throw new FinanceInputError(
+            `${wise.notice || "Wise bank details are unavailable."} There is no card link or payment instructions either, so the reminder was NOT sent.`,
+          );
+        }
+        const pdf = await pdfFor(r, lines, contact, settings, wise.lines);
         const mail = composeInvoiceEmail({
           kind: "reminder",
           sellerName: settings.legal_name,
@@ -615,6 +739,7 @@ export async function remindOverdue(viewer: FinanceViewer, opts: { send: boolean
           dueDate: r.due_date,
           paymentLinkUrl: r.stripe_payment_link_url,
           paymentInstructions: settings.payment_instructions,
+          bankTransfer: wise.lines,
         });
         await sendInvoiceEmail({ tenantId: financeTenantId(), to, ...mail, pdf, filename: `${r.number}.pdf` });
         await writeBatch([

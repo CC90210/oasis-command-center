@@ -9,6 +9,11 @@
  * Standard PDF fonts are WinAnsi-encoded: any character outside that set
  * (emoji, CJK, some punctuation) would throw at draw time, so every string is
  * passed through winAnsiSafe() first.
+ *
+ * Bank-transfer details (Wise) print as label/value rows ending in the
+ * payment reference — the invoice number — which is what lets a deposit be
+ * matched back to this invoice (wise-reconcile.ts). They are omitted once the
+ * invoice is paid, like the card link.
  */
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
@@ -38,6 +43,8 @@ export type InvoicePdfInput = {
     notes: string;
     paymentLinkUrl: string | null;
     paymentInstructions: string;
+    /** Wise receiving details for the invoice currency, reference last (wise.ts bankTransferLines). */
+    bankTransfer?: Array<{ label: string; value: string }> | null;
   };
   customer: { name: string; company: string; email: string; address: string };
   lines: Array<{ description: string; quantityMilli: number; unitPriceCents: number; amountCents: number }>;
@@ -221,6 +228,28 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     }
     y -= 10;
   };
+  const rows = (title: string, entries: Array<{ label: string; value: string }>) => {
+    const labelW = 130;
+    const wrapped = entries.map((row) => ({ label: row.label, lines: wrap(row.value, regular, 10, W - 2 * M - labelW) }));
+    const height = wrapped.reduce((a, row) => a + row.lines.length * 13, 0);
+    if (y - height - 20 < M) {
+      page = doc.addPage([W, H]);
+      y = H - M - 10;
+    }
+    text(title, M, y, 8, bold, MUTED);
+    y -= 14;
+    for (const row of wrapped) {
+      text(row.label, M, y, 9, regular, MUTED);
+      row.lines.forEach((l, i) => {
+        text(l, M + labelW, y, 10, i === 0 && /reference/i.test(row.label) ? bold : regular);
+        y -= 13;
+      });
+    }
+    y -= 10;
+  };
+  if (input.invoice.bankTransfer?.length && input.invoice.status !== "paid") {
+    rows("PAY BY BANK TRANSFER (WISE)", input.invoice.bankTransfer);
+  }
   if (input.invoice.paymentLinkUrl && input.invoice.status !== "paid") {
     block("PAY ONLINE", input.invoice.paymentLinkUrl);
   }

@@ -70,7 +70,11 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
-/** PURE. Subject + text + html for an invoice or a reminder. */
+/**
+ * PURE. Subject + text + html for an invoice or a reminder. `bankTransfer`
+ * (Wise receiving details, payment reference last) prints before the card
+ * link: a bank transfer is the default way to pay a one-off invoice.
+ */
 export function composeInvoiceEmail(args: {
   kind: "invoice" | "reminder";
   sellerName: string;
@@ -82,6 +86,7 @@ export function composeInvoiceEmail(args: {
   dueDate: string;
   paymentLinkUrl: string | null;
   paymentInstructions: string;
+  bankTransfer?: Array<{ label: string; value: string }> | null;
 }): { subject: string; text: string; html: string } {
   const amount = formatCents(args.balanceCents, args.currency);
   const greeting = args.customerName ? `Hi ${args.customerName},` : "Hello,";
@@ -94,13 +99,24 @@ export function composeInvoiceEmail(args: {
       ? `This is a reminder that invoice ${args.number} for ${amount} was due on ${args.dueDate}. The invoice is attached.`
       : `Please find attached invoice ${args.number} for ${formatCents(args.totalCents, args.currency)}, due ${args.dueDate}.`;
   const payLine = args.paymentLinkUrl ? `You can pay by card here: ${args.paymentLinkUrl}` : "";
-  const text = [greeting, "", lead, payLine ? `\n${payLine}` : "", args.paymentInstructions ? `\n${args.paymentInstructions}` : "", "", "Thank you,", args.sellerName]
+  const bank = args.bankTransfer?.length ? args.bankTransfer : null;
+  const bankText = bank
+    ? `\nPay by bank transfer (Wise):\n${bank.map((r) => `  ${r.label}: ${r.value}`).join("\n")}\nPlease include the payment reference so we can match your payment.`
+    : "";
+  const text = [greeting, "", lead, ...(bankText ? [bankText] : []), payLine ? `\n${payLine}` : "", args.paymentInstructions ? `\n${args.paymentInstructions}` : "", "", "Thank you,", args.sellerName]
     .filter((l, i, a) => !(l === "" && a[i - 1] === ""))
     .join("\n");
+  const bankHtml = bank
+    ? `<p style="margin-bottom:4px"><strong>Pay by bank transfer (Wise)</strong></p>
+<table style="border-collapse:collapse;font-size:14px">${bank
+        .map((r) => `<tr><td style="padding:2px 16px 2px 0;color:#555">${esc(r.label)}</td><td style="padding:2px 0">${/reference/i.test(r.label) ? `<strong>${esc(r.value)}</strong>` : esc(r.value)}</td></tr>`)
+        .join("")}</table>
+<p style="color:#555;margin-top:4px">Please include the payment reference so we can match your payment.</p>`
+    : "";
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#16181d;line-height:1.5">
 <p>${esc(greeting)}</p>
 <p>${esc(lead)}</p>
-${args.paymentLinkUrl ? `<p><a href="${esc(args.paymentLinkUrl)}" style="display:inline-block;padding:10px 16px;background:#0b7c85;color:#ffffff;text-decoration:none;border-radius:6px">Pay ${esc(amount)}</a></p>` : ""}
+${bankHtml ? `${bankHtml}\n` : ""}${args.paymentLinkUrl ? `<p><a href="${esc(args.paymentLinkUrl)}" style="display:inline-block;padding:10px 16px;background:#0b7c85;color:#ffffff;text-decoration:none;border-radius:6px">Pay ${esc(amount)}</a></p>` : ""}
 ${args.paymentInstructions ? `<p style="color:#555">${esc(args.paymentInstructions).replace(/\n/g, "<br>")}</p>` : ""}
 <p>Thank you,<br>${esc(args.sellerName)}</p>
 </div>`;

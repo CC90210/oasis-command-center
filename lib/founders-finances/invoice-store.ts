@@ -8,7 +8,7 @@ import "server-only";
 
 import { crossCurrencySettlementLines, type JournalLineInput } from "./ledger";
 import { accountId, SYS } from "./chart";
-import { query, queryOne, type InStatement } from "./db";
+import { finDb, query, queryOne, type InStatement } from "./db";
 import { buildPosting, type Posting } from "./ledger-io";
 import { usdToCadCents, parseRateMicro } from "./fx";
 import type { InvoiceStatus } from "./invoice";
@@ -42,6 +42,8 @@ export type InvoiceRow = {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Migration 184. Absent until it is applied: read it through wise.ts storedPaymentMethod(). */
+  payment_method?: string | null;
 };
 
 export type InvoiceLineRow = {
@@ -66,6 +68,32 @@ export type ContactRow = {
   address: string;
   stripe_customer_id: string | null;
 };
+
+let methodColumn: { at: number; ok: boolean } | null = null;
+
+/**
+ * Is fin_invoices.payment_method there (migration 184)? Code ships before a
+ * migration reaches every database, so writers ask first: until it is
+ * applied, every invoice reads as "stripe" and behaves exactly as before.
+ * A yes is remembered for the isolate's life; a no is re-checked after a
+ * minute, so applying the migration takes effect without a redeploy.
+ */
+export async function paymentMethodColumnReady(): Promise<boolean> {
+  if (methodColumn && (methodColumn.ok || Date.now() - methodColumn.at < 60_000)) return methodColumn.ok;
+  let ok = true;
+  try {
+    await finDb().execute(`SELECT payment_method FROM fin_invoices LIMIT 0`);
+  } catch (e) {
+    if (!/no such column/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    ok = false;
+  }
+  methodColumn = { at: Date.now(), ok };
+  return ok;
+}
+
+export function resetPaymentMethodColumnMemo(): void {
+  methodColumn = null;
+}
 
 export async function loadInvoice(id: string): Promise<InvoiceRow | null> {
   return queryOne<InvoiceRow>(`SELECT * FROM fin_invoices WHERE id = ?`, [id]);

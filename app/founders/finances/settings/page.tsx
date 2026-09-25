@@ -1,38 +1,71 @@
 /**
- * /founders/finances/settings — legal identity, GST/QST registration,
- * invoice numbering, the Stripe account pin + reconcile, FX refresh, rules.
+ * /founders/finances/settings — the business's legal identity, GST/QST
+ * registration, invoice numbering, the Stripe account pin + reconcile, the
+ * Wise bank connection, FX refresh and categorisation rules.
+ *
+ * Speed: everything from the database comes from one loader in a single
+ * parallel wave (page-context loadSettingsPage). The one network call — asking
+ * Stripe which account the configured key belongs to — streams in behind
+ * Suspense, so a slow Stripe never holds up the page.
  */
+import { Suspense } from "react";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { ActionButton } from "@/components/founders/finances/ActionButton";
-import { tableClass, tdClass } from "@/components/founders/finances/ui";
-import { financePage, type SearchParams } from "@/lib/founders-finances/page-context";
-import { loadSettings } from "@/lib/founders-finances/settings-io";
+import { WiseCard } from "@/components/founders/finances/WiseCard";
+import { primaryButton, tableClass, tdClass } from "@/components/founders/finances/ui";
+import { financePage, loadSettingsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { stripeConnectionStatus } from "@/lib/founders-finances/stripe-io";
-import { listRules } from "@/lib/founders-finances/transactions-io";
-import { entityCategories } from "@/lib/founders-finances/access-io";
-import { queryOne } from "@/lib/founders-finances/db";
 
 export const dynamic = "force-dynamic";
 
+async function StripeStatus({ entitySlug }: { entitySlug: string }) {
+  const stripe = await stripeConnectionStatus();
+  if (!stripe.keyPresent) {
+    return <p className="text-status-warm">No Stripe secret key is configured for the founders&rsquo; workspace. Card payment links and reconcile are unavailable; the webhook can still record events.</p>;
+  }
+  if (stripe.error) return <p className="text-status-hot">Stripe did not answer: {stripe.error}</p>;
+  return (
+    <>
+      <p>
+        The configured key belongs to <span className="font-mono">{stripe.accountId}</span>
+        {stripe.accountName && <> ({stripe.accountName})</>}.{" "}
+        {stripe.ready ? <Tag tone="engaged">confirmed</Tag> : stripe.pinned ? <Tag tone="hot">does not match pinned {stripe.pinned}</Tag> : <Tag tone="warm">not confirmed</Tag>}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {stripe.accountId && !stripe.ready && (
+          <ActionButton
+            action="stripe.pin"
+            payload={{ entity: entitySlug, account_id: stripe.accountId }}
+            label={`This is OASIS's account — confirm ${stripe.accountId}`}
+            tone="primary"
+            confirm={`Confirm ${stripe.accountId}${stripe.accountName ? ` (${stripe.accountName})` : ""} is OASIS AI Solutions' own Stripe account — not Trytan's, PropFlow's or the store's?`}
+          />
+        )}
+        {stripe.ready && <ActionButton action="stripe.reconcile" payload={{ days: 30 }} label="Reconcile last 30 days" />}
+        {stripe.ready && <ActionButton action="stripe.reconcile" payload={{ days: 365 }} label="Backfill a year" confirm="Pull a year of payments, refunds and subscriptions from Stripe? Safe to repeat." />}
+      </div>
+    </>
+  );
+}
+
 export default async function FinanceSettingsPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities } = await financePage(searchParams);
-  const business = entity.kind === "business";
-  const [s, rules, categories, stripe, lastFx, lastEvent] = await Promise.all([
-    loadSettings(entity.id),
-    listRules(viewer, entity.slug),
-    entityCategories(entity.id),
-    business ? stripeConnectionStatus() : Promise.resolve(null),
-    business ? queryOne<{ d: string | null }>(`SELECT MAX(rate_date) AS d FROM fin_fx_rates`) : Promise.resolve(null),
-    business ? queryOne<{ at: string | null; n: number }>(`SELECT MAX(received_at) AS at, COUNT(*) AS n FROM fin_stripe_events`) : Promise.resolve(null),
-  ]);
+  const { viewer, entity } = await financePage(searchParams);
+  const { settings: s, rules, categories, lastFx, lastEvent } = await loadSettingsPage(viewer, entity);
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <PageHeader title="Settings" action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/settings" />} />
+      <PageHeader
+        title="Settings"
+        subtitle="What invoices print, whether the business charges GST/QST, how payments come in, and the rules that categorise bank transactions."
+        action={
+          <a href="#company" className={primaryButton}>
+            Edit company details
+          </a>
+        }
+      />
 
-      <Card title={business ? "Company & invoicing" : "Book details"} subtitle={business ? "Printed on every invoice." : undefined}>
+      <Card id="company" title="Company & invoicing" subtitle="Printed on every invoice.">
         <ActionForm
           action="settings.update"
           hidden={{ entity: entity.slug }}
@@ -48,67 +81,42 @@ export default async function FinanceSettingsPage({ searchParams }: { searchPara
             { name: "region", label: "Province", defaultValue: s.region },
             { name: "postal_code", label: "Postal code", defaultValue: s.postal_code },
             { name: "country", label: "Country", defaultValue: s.country },
-            ...(business
-              ? [
-                  { name: "invoice_prefix", label: "Invoice prefix", defaultValue: s.invoice_prefix, hint: `Next: ${s.invoice_prefix}-${s.invoice_number_year ?? new Date().getFullYear()}-${String(s.invoice_number_year ? s.invoice_next_number : 1).padStart(4, "0")}` },
-                  { name: "invoice_next_number", label: "Next number", type: "number" as const, defaultValue: String(s.invoice_next_number), hint: "Resets to 1 each new year." },
-                  { name: "payment_terms_days", label: "Payment terms (days)", type: "number" as const, defaultValue: String(s.payment_terms_days) },
-                  { name: "payment_instructions", label: "Payment instructions (printed on invoices)", type: "textarea" as const, defaultValue: s.payment_instructions, span: 3 as const, placeholder: "Interac e-Transfer to billing@… · Wire details on request" },
-                  { name: "gst_qst_registered", label: "Registered for GST/QST", type: "checkbox" as const, defaultValue: s.gst_qst_registered === 1 },
-                  { name: "gst_number", label: "GST/HST number", defaultValue: s.gst_number, placeholder: "123456789RT0001" },
-                  { name: "qst_number", label: "QST number", defaultValue: s.qst_number, placeholder: "1234567890TQ0001" },
-                  { name: "registration_effective_date", label: "Registered since", type: "date" as const, defaultValue: s.registration_effective_date || "" },
-                ]
-              : []),
+            { name: "invoice_prefix", label: "Invoice prefix", defaultValue: s.invoice_prefix, hint: `Next: ${s.invoice_prefix}-${s.invoice_number_year ?? new Date().getFullYear()}-${String(s.invoice_number_year ? s.invoice_next_number : 1).padStart(4, "0")}` },
+            { name: "invoice_next_number", label: "Next number", type: "number", defaultValue: String(s.invoice_next_number), hint: "Resets to 1 each new year." },
+            { name: "payment_terms_days", label: "Payment terms (days)", type: "number", defaultValue: String(s.payment_terms_days) },
+            { name: "payment_instructions", label: "Payment instructions (printed on invoices)", type: "textarea", defaultValue: s.payment_instructions, span: 3, placeholder: "Interac e-Transfer to billing@… · Wire details on request" },
+            { name: "gst_qst_registered", label: "Registered for GST/QST", type: "checkbox", defaultValue: s.gst_qst_registered === 1 },
+            { name: "gst_number", label: "GST/HST number", defaultValue: s.gst_number, placeholder: "123456789RT0001" },
+            { name: "qst_number", label: "QST number", defaultValue: s.qst_number, placeholder: "1234567890TQ0001" },
+            { name: "registration_effective_date", label: "Registered since", type: "date", defaultValue: s.registration_effective_date || "" },
           ]}
         />
       </Card>
 
-      {business && stripe && (
-        <Card title="Stripe" subtitle="OASIS's own Stripe account only. Finances refuses to create payment links or backfill until the account below is confirmed.">
-          <div className="space-y-3 text-sm">
-            {!stripe.keyPresent ? (
-              <p className="text-status-warm">No Stripe secret key is configured for the founders&rsquo; workspace. Card payment links and reconcile are unavailable; the webhook can still record events.</p>
-            ) : stripe.error ? (
-              <p className="text-status-hot">Stripe did not answer: {stripe.error}</p>
-            ) : (
-              <p>
-                The configured key belongs to <span className="font-mono">{stripe.accountId}</span>
-                {stripe.accountName && <> ({stripe.accountName})</>}.{" "}
-                {stripe.ready ? <Tag tone="engaged">confirmed</Tag> : stripe.pinned ? <Tag tone="hot">does not match pinned {stripe.pinned}</Tag> : <Tag tone="warm">not confirmed</Tag>}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2">
-              {stripe.accountId && !stripe.ready && (
-                <ActionButton
-                  action="stripe.pin"
-                  payload={{ entity: entity.slug, account_id: stripe.accountId }}
-                  label={`This is OASIS's account — confirm ${stripe.accountId}`}
-                  tone="primary"
-                  confirm={`Confirm ${stripe.accountId}${stripe.accountName ? ` (${stripe.accountName})` : ""} is OASIS AI Solutions' own Stripe account — not Trytan's, PropFlow's or the store's?`}
-                />
-              )}
-              {stripe.ready && <ActionButton action="stripe.reconcile" payload={{ days: 30 }} label="Reconcile last 30 days" />}
-              {stripe.ready && <ActionButton action="stripe.reconcile" payload={{ days: 365 }} label="Backfill a year" confirm="Pull a year of payments, refunds and subscriptions from Stripe? Safe to repeat." />}
-            </div>
-            <p className="text-xs text-fg-dim">
-              Webhook endpoint: <span className="font-mono">/api/webhooks/stripe-finance</span> · events received: {lastEvent?.n ?? 0}
-              {lastEvent?.at && <> · last {lastEvent.at.slice(0, 16).replace("T", " ")} UTC</>}
-            </p>
-          </div>
-        </Card>
-      )}
+      <Card id="stripe" title="Stripe" subtitle="OASIS's own Stripe account only. Finances refuses to create payment links or backfill until the account below is confirmed.">
+        <div className="space-y-3 text-sm">
+          <Suspense fallback={<p className="text-fg-muted">Checking which Stripe account the key belongs to…</p>}>
+            <StripeStatus entitySlug={entity.slug} />
+          </Suspense>
+          <p className="text-xs text-fg-dim">
+            Webhook endpoint: <span className="font-mono">/api/webhooks/stripe-finance</span> · events received: {lastEvent?.n ?? 0}
+            {lastEvent?.at && <> · last {lastEvent.at.slice(0, 16).replace("T", " ")} UTC</>}
+          </p>
+        </div>
+      </Card>
 
-      {business && (
-        <Card title="Exchange rates" subtitle="Bank of Canada daily USD/CAD. Each payment converts at its own day's rate.">
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="text-fg-muted">Latest stored rate: {lastFx?.d || "none yet"}</span>
-            <ActionButton action="fx.refresh" payload={{}} label="Fetch last 30 days" />
-          </div>
-        </Card>
-      )}
+      {/* Wise — the business bank. Loads its own data after render, so it adds
+          no round trips to this page. */}
+      <WiseCard />
 
-      <Card title="Categorisation rules" subtitle="First matching rule (lowest priority number) sets the category on import. Seeded: Stripe payouts are transfers, not revenue.">
+      <Card id="exchange-rates" title="Exchange rates" subtitle="Bank of Canada daily USD/CAD. Each payment converts at its own day's rate; pages only read stored rates, so fetch here when a figure says a rate is missing.">
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          <span className="text-fg-muted">Latest stored rate: {lastFx?.d || "none yet"}</span>
+          <ActionButton action="fx.refresh" payload={{}} label="Fetch last 30 days" />
+        </div>
+      </Card>
+
+      <Card id="rules" title="Categorisation rules" subtitle="First matching rule (lowest priority number) sets the category on import. Seeded: Stripe payouts are transfers, not revenue.">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <table className={tableClass}>
             <tbody>

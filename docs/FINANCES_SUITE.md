@@ -73,6 +73,7 @@ Seed rows (entities, charts, categories, tax codes, the Stripe-payout rule) are 
 | `FINANCE_AGENT_TOKEN` (≥ 24 chars) | Atlas internal API | every internal call answers 503 — **blocking for Atlas** |
 | `INVOICE_FROM_EMAIL`, `INVOICE_FROM_APP_PASSWORD`, `INVOICE_FROM_NAME` | optional override for the invoice sender | falls back to the existing `OASIS_MAIL_FROM` + `OASIS_MAIL_APP_PASSWORD`, then the founders' tenant `oasis_gmail` integration row. None of the three → sending an invoice fails loudly (`invoice_mailer_not_configured`); it is never sent without its PDF |
 | `STRIPE_SECRET_KEY` / tenant integration `stripe.secret_key` | payment links, reconcile, fee lookups | existing credential path, read for the first tenant in `FOUNDERS_TENANT_IDS`. Without it: no card links, no reconcile; the webhook still records payments with fees marked pending |
+| `WISE_API_TOKEN`, `WISE_PROFILE_ID` | Wise bank details on invoices, "Check for Wise payments", the Wise bank feed | invoices go out with the card link / payment instructions and say why; Wise sync and reconcile answer 503 (see **Wise** below) |
 | `FOUNDERS_TENANT_IDS`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `R2_*` | already required by the app | — |
 
 ## What needs a founder before this is live
@@ -150,9 +151,44 @@ curl -s -X POST https://<host>/api/internal/finance/invoices/remind-overdue \
 | Expense | Dr expense (tax included in cost while unregistered) / Cr the account it was paid from |
 | Owner draw / contribution | Dr draws-owner / Cr bank; Dr bank / Cr equity-owner |
 
+## Wise (the business bank)
+
+Wise is where money lands; Stripe is the card processor. A one-off or lump-sum invoice asks for a **bank transfer into Wise**; recurring billing (MRR) stays on Stripe subscriptions, where automatic payment matters. Business chequing (1000) **is** the Wise account, holding CAD and USD as themselves.
+
+**Env (names only):** `WISE_API_TOKEN`, `WISE_PROFILE_ID` (the BUSINESS profile id). Unset → every Wise surface says so in a sentence ("Wise is not connected…") and nothing guesses: invoices go out with the card link and/or the payment instructions, sync and reconcile answer 503 for Atlas. Every call is a GET; nothing in the command center can move money through Wise.
+
+**Endpoints (probed live 2026-09-24 with `Business-Empire-Agent/scripts/integrations/wise_tool.py`):**
+
+| Endpoint | Result | Used for |
+|---|---|---|
+| `GET /v2/profiles` | 200 | profile name |
+| `GET /v4/profiles/{p}/balances?types=STANDARD` | 200 (CAD, USD, EUR, GBP balances) | balance ids + amounts |
+| `GET /v1/profiles/{p}/balance-statements/{balance}/statement.json` | 200, no SCA for this profile | receiving details (`bankDetails`, labelled "Institution number", "Transit number", "Routing number (ACH or ABA)", "Swift/BIC"), every transaction with its running balance |
+| `GET /v1/profiles/{p}/account-details` | **403** for this token | not used |
+| `GET /v1/borderless-accounts` | 200 but no CAD transit number | not used |
+
+A 403 carrying `x-2fa-approval` (Strong Customer Authentication) is reported as such, never retried.
+
+**Invoice payment method** (`fin_invoices.payment_method`, migration 184): `wise` (default for a new invoice), `stripe` (card Payment Link; every invoice from before 184), `wise_stripe` (both). The PDF and the email print the Wise receiving details **for the invoice currency** — account holder, bank, institution/transit or routing, account number, Swift — with the **invoice number as the payment reference**; settings' payment instructions still print as an extra line. If Wise cannot supply details, the invoice falls back to the card link or the instructions and the send result says why; with none of the three it is refused, not sent. Before migration 184 is applied the column is absent: every invoice reads `stripe`, and choosing Wise is refused with a message naming 184.
+
+**Mark paid from Wise** (`wise-reconcile.ts`, button "Check for Wise payments"): reads recent deposits (bank transfers in, Wise-acquired card payments net of Wise's fee). Recorded automatically ONLY when the payer's reference names exactly one open invoice AND the amount and currency settle it; everything else (no reference, wrong amount, two invoices named) is listed for a founder to confirm or dismiss. Idempotent on Wise's transaction reference (settlement entry source `wise_payment`, unique). A USD payment stays USD on chequing (the settlement goes through Currency exchange clearing, realised FX as usual).
+
+**Bank feed** (`wise-feed-io.ts`, button "Sync Wise"): Wise CAD and USD activity → Transactions on Business chequing, through the SAME import as a CSV/OFX upload (the statement is rendered as OFX): same dedupe, same rules, same import history. FITID = `WISE-<currency>-<CREDIT|DEBIT>-<Wise reference>`, so a re-sync inserts nothing (and records no empty import). USD rows post at the stored own-day rate. **Stripe payouts do not say "Stripe" on Wise** — they arrive as "Received money from OASIS AI"; a deposit is tagged `Stripe payout po_…` only when it matches a real Stripe payout (currency, amount to the cent, within 3 days), which the seeded "stripe" rule then books as a transfer from Stripe clearing. Without a working Stripe key, payouts import unreviewed. A deposit already recorded against an invoice imports as *excluded* (and reconcile excludes an unreviewed fed line when it records), so the money is counted once.
+
+**Opening balance** (founder only, "Preview" then "Post"): for a chosen day, compares 1000 Business chequing per currency (entries dated on or before it) with Wise's balance at the end of that Toronto day, and posts the difference against 3900 Retained earnings — one entry per currency, source `opening_balance`, ref `wise:<currency>:<date>` (unique). The business chart has no opening-balance account of its own; retained earnings is the owner-neutral equity. Never automatic; not exposed to Atlas.
+
+```bash
+# Match Wise deposits to open invoices — dry run unless "dry_run": false
+curl -s -X POST https://<host>/api/internal/finance/wise-reconcile \
+  -H "Authorization: Bearer <FINANCE_AGENT_TOKEN>" -H "Content-Type: application/json" -d '{"days":30}'
+# Import Wise activity into Transactions — dry run unless "dry_run": false
+curl -s -X POST https://<host>/api/internal/finance/wise-sync \
+  -H "Authorization: Bearer <FINANCE_AGENT_TOKEN>" -H "Content-Type: application/json" -d '{"since":"2026-09-01"}'
+```
+
 ## Not built (later tier)
 
-- Live bank feeds (Plaid / Flinks) — statements are imported as CSV/OFX/QFX.
+- Live bank feeds for banks other than Wise (Plaid / Flinks) — those statements are imported as CSV/OFX/QFX.
 - An email-receipt inbox inside Finances — Atlas extracts receipts and posts drafts through the internal API instead.
 - A reconciliation matching UI (matching statement lines to Stripe payouts / invoices one-by-one).
 - Budgets.

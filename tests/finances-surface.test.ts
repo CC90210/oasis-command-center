@@ -49,7 +49,7 @@ async function main() {
   const rootLayout = readFileSync(join(root, "app/layout.tsx"), "utf8");
   assert.match(rootLayout, /isFinanceOwnerEmail\(profile\?\.email\)/, "the sidebar filters the Finances row by owner email");
   const foundersLayout = readFileSync(join(root, "app/founders/layout.tsx"), "utf8");
-  assert.match(foundersLayout, /FoundersSectionNav/);
+  assert.match(foundersLayout, /FoundersPortalBanner/, "banner + chips; hidden on Finances (tests/finances-roundtrips.test.ts)");
   assert.match(foundersLayout, /isFinanceOwnerEmail\(founder\.email\)/, "the header chip is filtered the same way");
 
   // ── gates, over the whole tree ──────────────────────────────────────────
@@ -78,7 +78,7 @@ async function main() {
     assert.match(src, /status: 404/, `${r} must answer 404, never 403`);
   }
   const internal = walk(join(root, "app/api/internal/finance")).filter((f) => f.endsWith("route.ts"));
-  assert.equal(internal.length, 5, "summary, stripe-reconcile, fx-refresh, transactions, invoices/remind-overdue");
+  assert.equal(internal.length, 7, "summary, stripe-reconcile, fx-refresh, transactions, invoices/remind-overdue, wise-reconcile, wise-sync");
   for (const r of internal) {
     const src = readFileSync(r, "utf8");
     assert.match(src, /const denied = checkFinanceAgentAuth\(req\);\s*if \(denied\) return denied;/, `${r} must check FINANCE_AGENT_TOKEN first`);
