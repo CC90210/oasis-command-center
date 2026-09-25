@@ -159,6 +159,11 @@ export async function POST(
       result.error === "no_rows" ? 400
       : result.error === "too_many_rows" ? 413
       : result.error === "assignee_required" ? 422
+      // A row's assigned_to named a deactivated teammate or a non-member;
+      // the whole batch was refused (same codes as /api/leads/import).
+      : result.error === "member_deactivated" ? 422
+      : result.error === "not_a_tenant_member" ? 422
+      : result.error === "member_check_failed" ? 503
       : result.error === "tenant_scope_unresolved" ? 503
       : result.error === "dedup_lookup_failed" ? 500
       : result.error === "insert_failed" ? 500

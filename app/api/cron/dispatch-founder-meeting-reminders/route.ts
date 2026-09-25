@@ -9,6 +9,8 @@ import { sendSmsDirectTwilio, tenantHasDirectTwilio } from "@/lib/sms-direct-twi
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
 import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
+import { writeAgentAlert } from "@/lib/notify/agent-alert";
+import { memberStanding, type MemberStanding } from "@/lib/team";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -150,6 +152,78 @@ async function retryOrFail(db: Db, row: NotificationRow, reason: string) {
   });
 }
 
+/** Sender standing read once per (tenant, sender) per pass, and the email rows
+ *  withheld from a deactivated sender this pass (alerted once, after the loop). */
+type SenderPass = {
+  standings: Map<string, MemberStanding>;
+  withheld: NotificationRow[];
+};
+
+/**
+ * Whether an EMAIL row's sender may still send as themselves — mirrors
+ * app/api/cron/dispatch-scheduled-sends senderMayDispatch. A founder-meeting
+ * email goes out from the host's own Gmail, so a row queued before the host
+ * was deactivated must not fire. Returns false once the row has been marked.
+ * SMS rows never come here: they leave from the tenant's Twilio line.
+ *
+ *  - deactivated → permanent fail `sender_deactivated`; retrying cannot bring
+ *    the host back. Collected for the pass's operator alert.
+ *  - not_member → today's behaviour: sendGmailAsOperator's own tenant-scoped
+ *    mailbox lookup decides.
+ *  - read error → the normal retry path, never a send. Not cached, so the
+ *    sender's next row asks again.
+ */
+async function senderMayDispatch(db: Db, row: NotificationRow, pass: SenderPass): Promise<boolean> {
+  const key = `${row.tenant_id}:${row.sender_user_id}`;
+  let standing = pass.standings.get(key);
+  if (!standing) {
+    try {
+      standing = (await memberStanding(row.tenant_id, row.sender_user_id)).standing;
+    } catch (error) {
+      console.error("[founder-meeting-reminders] sender standing check failed", {
+        id: row.id,
+        tenant: row.tenant_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await retryOrFail(db, row, "sender_standing_check_failed");
+      return false;
+    }
+    pass.standings.set(key, standing);
+  }
+  if (standing === "deactivated") {
+    console.warn("[founder-meeting-reminders] sender deactivated", { id: row.id, tenant: row.tenant_id });
+    await mark(db, row, "failed", { error: "sender_deactivated", incrementAttempt: true });
+    pass.withheld.push(row);
+    return false;
+  }
+  return true;
+}
+
+/** One card per tenant per pass (founder meetings are OASIS-only, so in
+ *  practice one), refreshed rather than re-paged while it stays open. */
+async function alertWithheldReminders(withheld: NotificationRow[]): Promise<void> {
+  const byTenant = new Map<string, NotificationRow[]>();
+  for (const row of withheld) byTenant.set(row.tenant_id, [...(byTenant.get(row.tenant_id) || []), row]);
+  for (const [tenantId, rows] of byTenant) {
+    const appointmentIds = [...new Set(rows.map((row) => row.appointment_id))];
+    await writeAgentAlert({
+      tenantId,
+      alertType: "founder_meeting_sender_deactivated",
+      severity: "warn",
+      title: "Founder-meeting reminder withheld: host deactivated",
+      body: `${rows.length} reminder email(s) were not sent because the meeting host has been deactivated. ` +
+        `Mark each meeting no-show and book a new audit with an active host. Appointments: ${appointmentIds.join(", ")}`,
+      lane: "operator",
+      payload: {
+        notification_ids: rows.map((row) => row.id),
+        appointment_ids: appointmentIds,
+        sender_user_ids: [...new Set(rows.map((row) => row.sender_user_id))],
+      },
+      telegramOncePerOpen: true,
+    });
+  }
+}
+
 async function acquireAppointmentLease(
   db: Db,
   row: NotificationRow,
@@ -289,7 +363,11 @@ async function persistReminderTracking(db: Db, row: NotificationRow): Promise<vo
   await markTrackingComplete(db, row);
 }
 
-async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipped" | "failed" | "held"> {
+async function processRow(
+  db: Db,
+  row: NotificationRow,
+  senderPass: SenderPass,
+): Promise<"sent" | "skipped" | "failed" | "held"> {
   const appointmentResult = await db.from("call_appointments")
     .select("id,scheduled_for,status,calendar_status,workflow_status,revision,sms_consent,client_phone_snapshot,client_name_snapshot,company_snapshot,client_agenda,timezone,google_meet_link,organizer_email_snapshot,pending_started_at,updated_at,notification_lease_token,notification_lease_expires_at")
     .eq("tenant_id", row.tenant_id)
@@ -367,6 +445,7 @@ async function processRow(db: Db, row: NotificationRow): Promise<"sent" | "skipp
     let provider = "";
     let receipt = "";
     if (row.channel === "email") {
+      if (!(await senderMayDispatch(db, row, senderPass))) return "failed";
       if (!appointment.organizer_email_snapshot) {
         await mark(db, row, "failed", { error: "approved_sender_missing", incrementAttempt: true });
         return "failed";
@@ -600,6 +679,7 @@ async function handle(req: NextRequest) {
   let sent = 0;
   let skipped = 0;
   let failures = reconciliation.failed + backfill.failed + trackingFailures + (deliveryUnknown.data?.length || 0);
+  const senderPass: SenderPass = { standings: new Map(), withheld: [] };
   for (const candidate of (due.data || []) as Array<{ id: string; tenant_id: string }>) {
     const attemptToken = randomUUID();
     const claimed = await db.from("website_sales_meeting_notifications")
@@ -617,7 +697,7 @@ async function handle(req: NextRequest) {
     if (!claimed.data) continue;
     processed++;
     try {
-      const outcome = await processRow(db, claimed.data as NotificationRow);
+      const outcome = await processRow(db, claimed.data as NotificationRow, senderPass);
       if (outcome === "sent") sent++;
       else if (outcome === "skipped") skipped++;
       else if (outcome === "failed") failures++;
@@ -634,6 +714,7 @@ async function handle(req: NextRequest) {
       }
     }
   }
+  if (senderPass.withheld.length) await alertWithheldReminders(senderPass.withheld);
 
   await setHealth({
     status: failures ? "degraded" : "healthy",

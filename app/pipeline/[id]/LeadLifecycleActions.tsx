@@ -2262,6 +2262,8 @@ function readableError(code: string): string {
     verified_meeting_required: "This older booking has no verified Calendar receipt. Return it to Qualified and book it through the guided handoff.",
     meeting_no_longer_reschedulable: "This meeting is already completed or cancelled and cannot be rescheduled.",
     meeting_transition_pending: "A Calendar change is already waiting for its lifecycle update. Refresh and retry the same action.",
+    meeting_host_deactivated: "This meeting's host has been deactivated. Mark it no-show and book a new audit with an active host.",
+    meeting_host_check_failed: "We could not confirm this meeting's host just now. Nothing was changed. Retry in a moment.",
     outcome_note_required: "Add the outcome and handoff context in the note above before saving.",
     meeting_close_failed: "The meeting outcome could not close its reminder queue. Refresh and retry before moving on.",
     meeting_not_started: "A no-show cannot be recorded before the scheduled meeting time.",

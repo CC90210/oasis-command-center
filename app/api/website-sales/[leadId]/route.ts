@@ -866,7 +866,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ le
             "meeting_transition_pending",
             "google_calendar_not_connected",
             "calendar_scope_required",
-          ].includes(code) ? 409 : 503;
+            "meeting_host_deactivated",
+          ].includes(code) ? 409 : 503; // incl. meeting_host_check_failed: retryable
           return NextResponse.json({ok:false,error:code,detail,correlationId:requestId},{status});
         }
       } else if (outcome === "no_show" && UUID.test(appointmentId)) {

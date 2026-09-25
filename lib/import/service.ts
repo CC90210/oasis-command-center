@@ -24,6 +24,7 @@ import {
   stageForWebsiteSalesLead,
 } from "@/lib/leads/canonical-lead-fields";
 import { pipelineCycleAssignmentFacts } from "@/lib/pipeline-cycle";
+import { createImportAssigneeCheck, type ImportAssigneeCheck } from "@/lib/leads-import-service";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const MAX_ROWS = 5_000;
@@ -47,6 +48,8 @@ export type ImportFailure = {
   message?: string;
   detail?: string;
   would_have_inserted?: number;
+  /** 1-based row that stopped the batch, when one row did. */
+  row?: number;
 };
 
 // ---------------- normalizers (mirror the leads importer to keep
@@ -458,6 +461,11 @@ export async function importRowsForTenant(input: {
   let skippedMalformed = 0;
   const duplicateKeys: string[] = [];
   const errors: string[] = [];
+  // Applications and funded deals take their owner from the row's assigned_to
+  // cell, which was stored verbatim — so a CSV could hand new records to a
+  // deactivated teammate or a non-member. Same check as /api/leads/import;
+  // one instance per batch, so standing is read once per named owner.
+  const checkAssignee = createImportAssigneeCheck(tenantId);
 
   for (const [i, raw] of rows.entries()) {
     // Normalize every canonical field per its declared type.
@@ -538,6 +546,32 @@ export async function importRowsForTenant(input: {
     for (const field of dedupBy) {
       const k = dedupKeyFor(field, data);
       if (k) seen[k.kind].add(k.key);
+    }
+
+    // Non-OASIS: the row's owner must be an ACTIVE member of this tenant,
+    // checked before anything is written so a refusal imports nothing.
+    // OASIS leads are owned by the roster-resolved batch assignee instead.
+    if (!isOasisLeadImport && typeof data.assigned_to === "string") {
+      let owner: ImportAssigneeCheck;
+      try {
+        owner = await checkAssignee(data.assigned_to, i + 1);
+      } catch (error) {
+        // Fail closed: an owner that could not be verified never gets new records.
+        console.error("[import] row owner could not be verified", {
+          tenantId,
+          entity: entity.entity_type,
+          row: i + 1,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return {
+          ok: false,
+          error: "member_check_failed",
+          message: `Row ${i + 1}'s owner couldn't be verified right now. No rows were imported. Try again in a moment.`,
+          row: i + 1,
+        };
+      }
+      if (!owner.ok) return owner;
+      data.assigned_to = owner.authUserId;
     }
 
     toInsert.push({

@@ -1102,6 +1102,29 @@ async function notifyRep(input: {
     telegramOncePerOpen: input.severity !== "info",
   });
   if (!input.appointment.assigned_to || !input.appointment.organizer_email_snapshot) return null;
+  // The rep copy leaves FROM the host's own Gmail. A host who is no longer an
+  // active teammate gets nothing sent as them — the operator alert above is
+  // the notice. A failed read skips it too, but reports it: the host may be
+  // active and simply missed their copy.
+  let host: Awaited<ReturnType<typeof memberStanding>>;
+  try {
+    host = await memberStanding(input.job.tenant_id, input.appointment.assigned_to);
+  } catch (error) {
+    console.warn("[sms-reply-agent] host standing unavailable; rep email skipped", {
+      code: "sms_agent_host_standing_check_failed",
+      tenantId: input.job.tenant_id,
+      appointmentId: input.appointment.id,
+    }, error);
+    return "rep_standing_check_failed";
+  }
+  if (host.standing !== "active") {
+    console.warn("[sms-reply-agent] host is not an active teammate; rep email skipped", {
+      tenantId: input.job.tenant_id,
+      appointmentId: input.appointment.id,
+      standing: host.standing,
+    });
+    return null;
+  }
   const body = [
     input.summary,
     input.oldTime ? `Old time: ${input.oldTime}` : null,
@@ -1819,7 +1842,18 @@ async function processClaimedJob(
       );
       return { status: "escalated" };
     }
-    const meeting = await executeReschedule(db, job, appointment, rescheduleVerdict.meetingAt);
+    let meeting: Awaited<ReturnType<typeof executeReschedule>>;
+    try {
+      meeting = await executeReschedule(db, job, appointment, rescheduleVerdict.meetingAt);
+    } catch (error) {
+      // The host was deactivated since booking, or their standing could not be
+      // read: the service refused before touching the calendar, the lead or a
+      // reminder row. A human rebooks it — never a crashed client conversation.
+      const code = smsAgentSafeErrorCode(error);
+      if (code !== "meeting_host_deactivated" && code !== "meeting_host_check_failed") throw error;
+      await pageAndEscalate(db, job, appointment, intent, code, "human_reschedule_required");
+      return { status: "escalated", failed: true };
+    }
     conversation = await updateConversation(
       db,
       conversation,

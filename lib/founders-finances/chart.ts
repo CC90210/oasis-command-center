@@ -118,6 +118,7 @@ export const BUSINESS_CHART: readonly ChartAccount[] = [
   { code: "5400", name: "Meals & entertainment", type: "expense", subtype: "expense", category: "expense" },
   { code: "5500", name: "Travel", type: "expense", subtype: "expense", category: "expense" },
   { code: "5600", name: "Office supplies", type: "expense", subtype: "expense", category: "expense" },
+  { code: "5650", name: "Rent & occupancy", type: "expense", subtype: "expense", category: "expense" },
   { code: "5700", name: "Professional fees", type: "expense", subtype: "expense", category: "expense" },
   { code: "5800", name: "Phone & internet", type: "expense", subtype: "expense", category: "expense" },
   { code: "5900", name: "Hosting & cloud", type: "expense", subtype: "expense", category: "expense" },

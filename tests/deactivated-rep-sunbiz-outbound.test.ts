@@ -5,7 +5,7 @@
  * Six paths resolved a rep by id and handed them live work regardless of
  * user_profiles.deactivated_at:
  *
- *   - lib/forms/next-steps-email.ts         signer email/phone + CC on the
+ *   - lib/forms/next-steps-email.ts         signer name/email/phone + CC on the
  *                                            merchant's funnel email
  *   - lib/renewals/outreach.ts              the renewal-threshold internal email
  *   - lib/notify/sunbiz-events.ts           per-user Telegram alerts (owner + admins)
@@ -117,6 +117,7 @@ const RETIRED_ADMIN = "0f0f0f0f-0000-4000-8000-000000000002";
 const ACTIVE_REP = "0f0f0f0f-0000-4000-8000-000000000003"; // alex@ on the roster
 const RETIRED_REP = "0f0f0f0f-0000-4000-8000-000000000004"; // jordan@ on the roster (has a phone)
 const STRANGER = "0f0f0f0f-0000-4000-8000-000000000005"; // a member of OTHER_TENANT only
+const RETIRED_NO_EMAIL = "0f0f0f0f-0000-4000-8000-000000000006"; // deactivated, profile has no email
 const RETIRED_AT = "2026-09-24T12:00:00Z";
 
 const LENDER = "9c9c9c9c-0000-4000-8000-000000000001";
@@ -156,12 +157,19 @@ const tagged = (warned: unknown[][], tag: string) => warned.find((args) => args[
 /** Chainable, thenable stand-in for the merchant-email handoff db
  *  (email-idempotency-marker.test.ts). The SunBiz direct-SMTP reservation comes
  *  back empty, so the send takes the bridge path the stub above records. */
-function makeHandoffDb(assignedTo: string) {
+function makeHandoffDb(assignedTo: string, assignedAgentName?: string) {
   const resultFor = (table: string, op: string): { data: unknown; error: unknown } => {
     if (table === "lead_interactions" && op === "select") return { data: [], error: null };
     if (table === "tenant_records" && op === "select") {
       return {
-        data: { data: { email: "merchant@example.com", contact_name: "Dana Merchant", assigned_to: assignedTo } },
+        data: {
+          data: {
+            email: "merchant@example.com",
+            contact_name: "Dana Merchant",
+            assigned_to: assignedTo,
+            ...(assignedAgentName ? { assigned_agent_name: assignedAgentName } : {}),
+          },
+        },
         error: null,
       };
     }
@@ -239,6 +247,9 @@ async function main() {
       profile("p-jordan-other", OTHER_TENANT, RETIRED_REP, "jordan@other.test", "Jordan Elsewhere", "agent"),
       // A roster address, but only ever a member of the OTHER tenant.
       profile("p-stranger", OTHER_TENANT, STRANGER, "Submissions@sunbizfunding.com", "Sam Stranger", "agent"),
+      // A retired rep whose profile never had an email: still recognised as
+      // deactivated, so the lead's cached name for them never signs either.
+      profile("p-quinn", TENANT, RETIRED_NO_EMAIL, "", "Quinn Retired", "agent", { deactivatedAt: RETIRED_AT }),
       record(LENDER, "lender", { name: "Lender One", contact: "deals@lender.test" }),
       record(APP_ACTIVE, "application", { business_name: "Active Rep Co", assigned_to: ACTIVE_REP }),
       record(APP_RETIRED, "application", { business_name: "Retired Rep Co", assigned_to: RETIRED_REP }),
@@ -251,12 +262,12 @@ async function main() {
 
   // ── lib/forms/next-steps-email.ts: the merchant's funnel email ────────────
   const { maybeSendApplicationReceivedEmail } = await import("../lib/forms/next-steps-email");
-  const sendReceipt = async (assignedTo: string) => {
+  const sendReceipt = async (assignedTo: string, assignedAgentName?: string) => {
     bridgeCalls.length = 0;
     credentialAsks.length = 0;
     const { warned } = await captureWarn(() =>
       maybeSendApplicationReceivedEmail({
-        db: makeHandoffDb(assignedTo) as never,
+        db: makeHandoffDb(assignedTo, assignedAgentName) as never,
         form: { id: "form-1", tenant_id: TENANT, slug: "full-application" },
         link: { tenant: "submissions", lead_id: "lead-1" },
         payload: {},
@@ -276,10 +287,16 @@ async function main() {
     assert.equal(tagged(warned, "[forms.handoff] assigned agent deactivated"), undefined);
   });
 
-  await check("funnel email: a deactivated agent keeps the name but not the address, phone or CC; submissions@ is CC'd", async () => {
-    const { call, warned } = await sendReceipt(RETIRED_REP);
-    assert.equal(call.signer_name, "Jordan Retired", "the name is history and still signs");
-    assert.match(String(call.body), /^- Jordan Retired$/m);
+  await check("funnel email: a deactivated agent does not sign (the team does) and gets no address, phone or CC; submissions@ is CC'd", async () => {
+    // The lead still caches the retired agent's name, as a real lead row does.
+    const { call, warned } = await sendReceipt(RETIRED_REP, "Jordan Retired");
+    assert.equal(call.signer_name, "the SunBiz team", "a new message is never signed by a deactivated agent");
+    assert.match(String(call.body), /^- the SunBiz team$/m);
+    assert.doesNotMatch(
+      JSON.stringify(call),
+      /jordan/i,
+      "the retired agent's name and address appear nowhere in the rendered email",
+    );
     assert.equal(call.signer_email, undefined, "a merchant reply must not reach a deactivated agent");
     assert.equal(call.signer_phone, undefined, "nor may their phone number appear");
     assert.equal(call.cc, "submissions@sun.test", "the tenant's own submissions inbox takes the copy");
@@ -287,6 +304,16 @@ async function main() {
     const tag = tagged(warned, "[forms.handoff] assigned agent deactivated");
     assert.ok(tag, "withholding the agent must be visible in the logs");
     assert.equal((tag[1] as { assignedTo?: string }).assignedTo, RETIRED_REP);
+  });
+
+  await check("funnel email: a deactivated agent with no profile email is still withheld, never signed by the cached name", async () => {
+    const { call, warned } = await sendReceipt(RETIRED_NO_EMAIL, "Quinn Retired");
+    assert.equal(call.signer_name, "the SunBiz team");
+    assert.doesNotMatch(JSON.stringify(call), /quinn/i, "the retired agent's cached name must not sign");
+    assert.equal(call.cc, "submissions@sun.test");
+    const tag = tagged(warned, "[forms.handoff] assigned agent deactivated");
+    assert.ok(tag, "withholding the agent must be visible in the logs");
+    assert.equal((tag[1] as { assignedTo?: string }).assignedTo, RETIRED_NO_EMAIL);
   });
 
   // ── lib/notify/sunbiz-events.ts: per-user Telegram recipients ─────────────

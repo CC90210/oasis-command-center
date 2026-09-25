@@ -319,24 +319,28 @@ async function resolveAssignedAgent(
   assignedTo: string | null,
   fallbackName: string,
 ): Promise<AssignedAgent> {
-  const safeName = (fallbackName || "").trim() || "the SunBiz team";
+  const teamSignature = "the SunBiz team";
+  const safeName = (fallbackName || "").trim() || teamSignature;
   if (assignedTo) {
     try {
-      // includeInactive: a deactivated agent still assigned to this lead is
-      // still its agent, so their real name signs (history). Only an id that
-      // matches NO member falls through to the generic signature.
+      // includeInactive: a deactivated agent still assigned to this lead must be
+      // RECOGNISED, not missed — missed, they would fall through to the cached
+      // assigned_agent_name below, which is the same retired person.
       const members = await getTenantMembers(tenantId, { includeInactive: true });
       const member = members.find((x) => x.auth_user_id === assignedTo);
+      if (member && !isActiveMember(member)) {
+        // They have left: a new message is never signed by them, so the
+        // generic team signature signs instead (not fallbackName — that is the
+        // cached name of this same person), with no signer address, phone or
+        // CC, or the merchant's reply reaches someone no longer here. A null CC
+        // lets the SunBiz branch in loadHandoffContext copy the submissions
+        // inbox instead.
+        console.warn("[forms.handoff] assigned agent deactivated", { tenantId, assignedTo });
+        return { name: teamSignature, email: "", phone: "", ccEmail: null };
+      }
       const email = (member?.email || "").trim();
       if (member && email) {
         const name = (member.display_name || member.full_name || "").trim() || safeName;
-        if (!isActiveMember(member)) {
-          // They have left: no signer address, phone or CC, or the merchant's
-          // reply reaches someone no longer here. A null CC lets the SunBiz
-          // branch in loadHandoffContext copy the submissions inbox instead.
-          console.warn("[forms.handoff] assigned agent deactivated", { tenantId, assignedTo });
-          return { name, email: "", phone: "", ccEmail: null };
-        }
         // Phone isn't on the member row — pull it from the signing roster by
         // EMAIL match (member email is the canonical address). Best-effort.
         let phone = "";
@@ -349,8 +353,12 @@ async function resolveAssignedAgent(
         }
         return { name, email, phone, ccEmail: email };
       }
-    } catch {
-      // member lookup failed — fall through to name-only signer + no CC.
+    } catch (error) {
+      // Member lookup failed: standing is unknown, so do not sign as the
+      // cached assigned_agent_name — that can be a retired person. The team
+      // signature signs, with no CC.
+      console.error("[forms.handoff] assigned agent lookup failed", { tenantId, assignedTo, error });
+      return { name: teamSignature, email: "", phone: "", ccEmail: null };
     }
   }
   // Unassigned / unresolvable: display name only, never a guessed CC.

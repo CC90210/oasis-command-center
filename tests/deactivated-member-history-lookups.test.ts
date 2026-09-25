@@ -358,11 +358,14 @@ async function main() {
     return { body: String(marker.row.content), cc: (marker.row.metadata as { cc_email?: string | null }).cc_email };
   };
 
-  await check("a deactivated but still-assigned agent signs with their real name but is never CC'd", async () => {
+  await check("a deactivated but still-assigned agent never signs a new email and is never CC'd", async () => {
     const { body, cc } = await sendReceipt(RETIRED_REP);
-    assert.match(body, /^- Ethan Retired$/m);
-    // Their name is history; their inbox is live work. This tenant is not
-    // SunBiz, so there is no submissions inbox to CC in their place.
+    // A NEW outbound message is live work, so the retired agent is not its
+    // signer (2026-09-24 rule): the team signature signs, and their name
+    // appears nowhere. This tenant is not SunBiz, so there is no submissions
+    // inbox to CC in their place.
+    assert.match(body, /^- the SunBiz team$/m);
+    assert.ok(!body.includes("Ethan Retired"), "the retired agent's name must not appear in a new email");
     assert.equal(cc, null);
   });
 

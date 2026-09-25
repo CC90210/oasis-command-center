@@ -41,7 +41,7 @@ import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { generateApplicationDocumentFromRecord } from "@/lib/forms/application-document";
 import { mayWorkWebsiteSalesLifecycle } from "@/lib/website-sales-workflow";
 import { planOasisLeadCreate } from "@/lib/oasis-lead-create";
-import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { MEMBER_DEACTIVATED_MESSAGE, getOasisPipelineAssignmentRoster, memberStanding } from "@/lib/team";
 import { resolveAssignableTarget } from "@/lib/web-leads/assign-target";
 
 export const runtime = "nodejs";
@@ -126,6 +126,58 @@ function mustScopeRegardlessOfFlag(teamRole: string, isAdmin: boolean): boolean 
   // persona, and were reading the whole tenant through this door. The set is
   // shared with lib/web-leads/data.ts so the two cannot drift.
   return !isAdmin && mustSeeOwnRecordsOnly(teamRole);
+}
+
+/**
+ * A NEW owner on a generic record must be an ACTIVE member of this workspace.
+ *
+ * Outside OASIS sales leads (which resolve owners against the assignment
+ * roster above), POST data.assigned_to and PATCH patch.assigned_to were stored
+ * verbatim, so an admin could hand a SunBiz lead or application to a
+ * deactivated rep through this route although every UI picker is active-only.
+ * Same rule as /api/leads/[id]/assign and /api/leads/bulk (2026-09-24): a
+ * deactivated teammate keeps the records they already hold but takes no new
+ * ones, and a check that could not run never hands out a record.
+ *
+ * Returns the refusal, or null when the assignee may take the record. The
+ * stored value is the caller's, untouched; only the lookup is normalised.
+ */
+async function refuseInactiveAssignee(tenantId: string, assignee: string): Promise<NextResponse | null> {
+  let standing;
+  try {
+    standing = (await memberStanding(tenantId, assignee.trim().toLowerCase())).standing;
+  } catch (error) {
+    console.error("[manifest.records] assignee standing could not be verified", {
+      tenantId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "member_check_failed",
+        message: "That teammate couldn't be verified right now, so nothing was saved. Try again in a moment.",
+      },
+      { status: 503 },
+    );
+  }
+  if (standing === "deactivated") {
+    return NextResponse.json(
+      { ok: false, error: "member_deactivated", message: MEMBER_DEACTIVATED_MESSAGE, fields: ["assigned_to"] },
+      { status: 422 },
+    );
+  }
+  if (standing === "not_member") {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "not_a_tenant_member",
+        message: "That person isn't a member of this workspace. Choose a teammate from this workspace.",
+        fields: ["assigned_to"],
+      },
+      { status: 400 },
+    );
+  }
+  return null;
 }
 
 function handleRecordsError(err: unknown): NextResponse {
@@ -254,7 +306,8 @@ export async function POST(
    * were saved and appeared on no screen. Nothing here is taken from the request
    * for ownership: a rep cannot assign a lead they found to somebody else.
    *
-   * Every other entity and workspace keeps the plain copy, exactly as before.
+   * Every other entity and workspace keeps the plain copy, exactly as before,
+   * except that a named owner must be an active member (refuseInactiveAssignee).
    */
   let data: Record<string, unknown> = { ...body.data };
   if (isOasisSalesLead) {
@@ -338,6 +391,10 @@ export async function POST(
       );
     }
     data = plan.data;
+  } else if (typeof data.assigned_to === "string" && data.assigned_to.trim()) {
+    // The plain copy still names its owner: that owner must be able to take it.
+    const refusal = await refuseInactiveAssignee(r.tenant_id, data.assigned_to);
+    if (refusal) return refusal;
   }
 
   try {
@@ -434,6 +491,26 @@ export async function PATCH(
         },
         { status: 403 },
       );
+    }
+  }
+
+  // A changed owner is new work for them; re-saving the owner a record already
+  // has is not, even when that teammate has since been deactivated. (An OASIS
+  // sales lead never gets here with assigned_to: it was refused above.)
+  const nextAssignee = typeof body.patch.assigned_to === "string" ? body.patch.assigned_to.trim() : "";
+  if (nextAssignee) {
+    let current;
+    try {
+      current = await getRecord({ tenant_id: r.tenant_id, entity: entity.toLowerCase(), id });
+    } catch (err) {
+      return handleRecordsError(err);
+    }
+    const currentAssignee =
+      typeof current?.data?.assigned_to === "string" ? current.data.assigned_to.trim().toLowerCase() : "";
+    // A missing record falls through to updateRecord's not_found, as before.
+    if (current && nextAssignee.toLowerCase() !== currentAssignee) {
+      const refusal = await refuseInactiveAssignee(r.tenant_id, nextAssignee);
+      if (refusal) return refusal;
     }
   }
 
