@@ -10,14 +10,66 @@
  */
 import "server-only";
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet, Row } from "@libsql/client";
 import { getTursoClient } from "@/lib/turso";
 
 export type { InStatement };
 
+/**
+ * Round-trip counter. Every execute and every batch is one trip to Turso (a
+ * batch is one trip however many statements it carries). Counting is scoped
+ * to the async context of countRoundTrips(), so concurrent requests never
+ * share a tally; outside that scope the only cost is one getStore() call.
+ * tests/finances-roundtrips.test.ts uses it to pin an upper bound per page.
+ */
+type Tally = { trips: number; sql: string[] };
+const tally = new AsyncLocalStorage<Tally>();
+
+function countTrip(t: Tally | undefined, sql: string): void {
+  if (!t) return;
+  t.trips += 1;
+  t.sql.push(sql.replace(/\s+/g, " ").trim().slice(0, 120));
+}
+
+function sqlOf(stmt: InStatement): string {
+  return typeof stmt === "string" ? stmt : stmt.sql;
+}
+
+export async function countRoundTrips<T>(fn: () => Promise<T>): Promise<{ result: T; trips: number; sql: string[] }> {
+  const t: Tally = { trips: 0, sql: [] };
+  const result = await tally.run(t, fn);
+  return { result, trips: t.trips, sql: t.sql };
+}
+
+/**
+ * The libSQL client. Inside countRoundTrips() it is wrapped so the modules
+ * that call finDb().execute() directly are counted too; outside, it is the
+ * plain client.
+ */
 export function finDb(): Client {
-  return getTursoClient();
+  const client = getTursoClient();
+  const t = tally.getStore();
+  if (!t) return client;
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      if (prop === "execute") {
+        return (stmt: InStatement, ...rest: unknown[]) => {
+          countTrip(t, sqlOf(stmt));
+          return (target.execute as (...a: unknown[]) => Promise<ResultSet>)(stmt, ...rest);
+        };
+      }
+      if (prop === "batch") {
+        return (stmts: InStatement[], ...rest: unknown[]) => {
+          countTrip(t, `batch(${stmts.length}) ${stmts[0] ? sqlOf(stmts[0]) : ""}`);
+          return (target.batch as (...a: unknown[]) => Promise<ResultSet[]>)(stmts, ...rest);
+        };
+      }
+      const v = Reflect.get(target, prop, receiver);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
 }
 
 export function newId(prefix: string): string {

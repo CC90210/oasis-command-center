@@ -6,8 +6,7 @@
 import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
 import { inputClass, labelClass, numClass, quietButton, tableClass, tdClass } from "@/components/founders/finances/ui";
-import { financePage, param, type SearchParams } from "@/lib/founders-finances/page-context";
-import { taxOverview } from "@/lib/founders-finances/reports-io";
+import { financePage, loadTaxesPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { formatCents } from "@/lib/founders-finances/money";
 
 export const dynamic = "force-dynamic";
@@ -21,14 +20,14 @@ const LEVEL = {
 
 export default async function TaxesPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, sp } = await financePage(searchParams);
-  const t = await taxOverview(viewer, { from: param(sp, "from") || undefined, to: param(sp, "to") || undefined });
+  const t = await loadTaxesPage(viewer, sp);
   const registered = t.settings.gst_qst_registered === 1;
   const lv = LEVEL[t.threshold.level];
   const cad = (c: number) => formatCents(c, "CAD");
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <PageHeader title="Taxes" subtitle="GST/QST for OASIS AI Solutions. Personal books have no sales-tax obligations here." />
+      <PageHeader title="Taxes" subtitle="GST/QST for OASIS AI Solutions: how close the business is to having to register, and what it would owe each period." />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title="Registration">
@@ -55,7 +54,7 @@ export default async function TaxesPage({ searchParams }: { searchParams: Search
               <p>Not registered — small supplier. Invoices carry no GST or QST.</p>
               <p className="text-xs text-fg-dim">
                 When you register, enter both numbers in{" "}
-                <Link href="/founders/finances/settings" className="text-[#1FE3F0] hover:underline">
+                <Link href="/founders/finances/settings#company" className="text-[#1FE3F0] hover:underline">
                   Settings
                 </Link>
                 . Tax then applies to invoices issued from that point.

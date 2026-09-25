@@ -1,19 +1,14 @@
 /**
- * /founders/finances/accounts — chart of accounts with balances, new
- * accounts, and (business) owner draws / contributions with the 50/50 view.
+ * /founders/finances/accounts — the business's chart of accounts with
+ * balances, new accounts, and owner draws / contributions with the 50/50 view.
  */
 import { Card, PageHeader } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
-import { numClass, tableClass, tdClass } from "@/components/founders/finances/ui";
-import { financePage, type SearchParams } from "@/lib/founders-finances/page-context";
-import { loadLedger } from "@/lib/founders-finances/reports-io";
-import { equitySummary } from "@/lib/founders-finances/bills-io";
-import { entityAccounts } from "@/lib/founders-finances/access-io";
+import { numClass, primaryButton, tableClass, tdClass } from "@/components/founders/finances/ui";
+import { financePage, loadAccountsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { CASH_SUBTYPES } from "@/lib/founders-finances/chart";
 import { naturalBalance } from "@/lib/founders-finances/ledger";
 import { formatCents } from "@/lib/founders-finances/money";
-import { addDays, torontoToday } from "@/lib/founders-finances/fx";
 import { OWNER_LABEL } from "@/lib/founders-finances/access";
 
 export const dynamic = "force-dynamic";
@@ -22,9 +17,8 @@ const TYPE_ORDER = ["asset", "liability", "equity", "revenue", "expense"] as con
 const TYPE_LABEL: Record<string, string> = { asset: "Assets", liability: "Liabilities", equity: "Equity", revenue: "Revenue", expense: "Expenses" };
 
 export default async function AccountsPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities } = await financePage(searchParams);
-  const today = torontoToday();
-  const [{ accounts, lines }, rows] = await Promise.all([loadLedger(entity.id, addDays(today, 1)), entityAccounts(entity.id)]);
+  const { viewer, entity } = await financePage(searchParams);
+  const { today, accounts, lines, equity } = await loadAccountsPage(viewer, entity);
   const sums = new Map<string, { d: number; c: number }>();
   for (const l of lines) {
     const s = sums.get(l.accountId) || { d: 0, c: 0 };
@@ -32,16 +26,18 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
     s.c += l.cadCreditCents;
     sums.set(l.accountId, s);
   }
-  const business = entity.kind === "business";
-  const equity = business ? await equitySummary(viewer, entity.slug) : null;
-  const cashAccounts = rows.filter((a) => CASH_SUBTYPES.has(a.subtype));
+  const cashAccounts = accounts.filter((a) => CASH_SUBTYPES.has(a.subtype));
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Accounts"
-        subtitle="Balances are CAD equivalents, all time, from the ledger."
-        action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/accounts" />}
+        subtitle="Every account in the books with its balance today, in CAD, plus what each owner has taken out or put in."
+        action={
+          <a href="#owner-draws" className={primaryButton}>
+            Record a draw
+          </a>
+        }
       />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -70,7 +66,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
             </Card>
           );
         })}
-        <Card title="Add an account">
+        <Card id="add-account" title="Add an account">
           <ActionForm
             action="account.create"
             hidden={{ entity: entity.slug }}
@@ -100,7 +96,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Sea
       </div>
 
       {equity && (
-        <Card title="Owner draws & contributions" subtitle="CC and Adon own OASIS 50/50. Net withdrawn = draws minus money put in.">
+        <Card id="owner-draws" title="Owner draws & contributions" subtitle="CC and Adon own OASIS 50/50. Net withdrawn = draws minus money put in.">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             {(["cc", "adon"] as const).map((k) => (
               <div key={k} className="rounded-lg border border-bg-border bg-bg-elev p-4">

@@ -29,22 +29,25 @@ export const REPORT_KINDS = ["pnl", "balance", "trial", "cashflow", "ledger", "a
 export type ReportKind = (typeof REPORT_KINDS)[number];
 
 export async function loadLedger(entityId: string, before: string): Promise<{ accounts: ReportAccount[]; lines: ReportLine[] }> {
-  const accounts = await query<ReportAccount>(`SELECT id, code, name, type, subtype FROM fin_accounts WHERE entity_id = ? ORDER BY code`, [entityId]);
-  const lines = await query<{
-    entry_id: string;
-    entry_date: string;
-    account_id: string;
-    cad_debit_cents: number;
-    cad_credit_cents: number;
-    memo: string;
-    entry_memo: string;
-    source: string;
-  }>(
-    `SELECT l.entry_id, e.entry_date, l.account_id, l.cad_debit_cents, l.cad_credit_cents, l.memo, e.memo AS entry_memo, e.source
-       FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
-      WHERE l.entity_id = ? AND e.entry_date < ?`,
-    [entityId, before],
-  );
+  // The two reads are independent: one round trip of latency, not two.
+  const [accounts, lines] = await Promise.all([
+    query<ReportAccount>(`SELECT id, code, name, type, subtype FROM fin_accounts WHERE entity_id = ? ORDER BY code`, [entityId]),
+    query<{
+      entry_id: string;
+      entry_date: string;
+      account_id: string;
+      cad_debit_cents: number;
+      cad_credit_cents: number;
+      memo: string;
+      entry_memo: string;
+      source: string;
+    }>(
+      `SELECT l.entry_id, e.entry_date, l.account_id, l.cad_debit_cents, l.cad_credit_cents, l.memo, e.memo AS entry_memo, e.source
+         FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
+        WHERE l.entity_id = ? AND e.entry_date < ?`,
+      [entityId, before],
+    ),
+  ]);
   return {
     accounts,
     lines: lines.map((l) => ({
@@ -94,6 +97,8 @@ export async function runReport(
   const d = defaultRange();
   const from = range.from && isIsoDate(range.from) ? range.from : d.from;
   const to = range.to && isIsoDate(range.to) ? range.to : d.to;
+  // AR aging reads open invoices only; loading the whole ledger for it was waste.
+  if (kind === "aging") return { kind, entity, from, to, data: await arAgingFor(entity.id, addDays(to, -1)) };
   const { accounts, lines } = await loadLedger(entity.id, to);
   switch (kind) {
     case "pnl":
@@ -106,8 +111,6 @@ export async function runReport(
       return { kind, entity, from, to, data: cashFlow(accounts, lines, from, to) };
     case "ledger":
       return { kind, entity, from, to, data: generalLedger(accounts, lines, from, to, range.accountId || null) };
-    case "aging":
-      return { kind, entity, from, to, data: await arAgingFor(entity.id, addDays(to, -1)) };
   }
 }
 
@@ -115,17 +118,19 @@ export async function runReport(
 
 /** Revenue (CAD, net of refunds) per calendar quarter for the business book. */
 export async function quarterlyRevenue(entityId: string, quarters: ReadonlyArray<{ label: string; from: string; to: string }>) {
-  const out: Array<{ label: string; revenueCents: number }> = [];
-  for (const q of quarters) {
-    const row = await queryOne<{ net: number | null }>(
-      `SELECT COALESCE(SUM(l.cad_credit_cents - l.cad_debit_cents), 0) AS net
-         FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id JOIN fin_accounts a ON a.id = l.account_id
-        WHERE l.entity_id = ? AND a.type = 'revenue' AND e.entry_date >= ? AND e.entry_date < ?`,
-      [entityId, q.from, q.to],
-    );
-    out.push({ label: q.label, revenueCents: Number(row?.net || 0) });
-  }
-  return out;
+  // One query per quarter, all in flight at once (they were awaited in turn:
+  // four round trips of latency on the Overview and Taxes pages). Order kept.
+  return Promise.all(
+    quarters.map(async (q) => {
+      const row = await queryOne<{ net: number | null }>(
+        `SELECT COALESCE(SUM(l.cad_credit_cents - l.cad_debit_cents), 0) AS net
+           FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id JOIN fin_accounts a ON a.id = l.account_id
+          WHERE l.entity_id = ? AND a.type = 'revenue' AND e.entry_date >= ? AND e.entry_date < ?`,
+        [entityId, q.from, q.to],
+      );
+      return { label: q.label, revenueCents: Number(row?.net || 0) };
+    }),
+  );
 }
 
 export async function thresholdStatus(today = torontoToday()): Promise<ThresholdStatus> {
@@ -135,18 +140,22 @@ export async function thresholdStatus(today = torontoToday()): Promise<Threshold
 
 export async function taxOverview(viewer: FinanceViewer, range: { from?: string; to?: string }) {
   const entity = await requireEntity(viewer, BUSINESS_ENTITY_ID);
-  const settings = await loadSettings(entity.id);
   const q = quarterOf(torontoToday());
   const from = range.from && isIsoDate(range.from) ? range.from : q.from;
   const to = range.to && isIsoDate(range.to) ? range.to : q.to;
-  const sums = await query<{ account_id: string; d: number; c: number }>(
-    `SELECT l.account_id, COALESCE(SUM(l.cad_debit_cents), 0) AS d, COALESCE(SUM(l.cad_credit_cents), 0) AS c
-       FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
-      WHERE l.entity_id = ? AND e.entry_date >= ? AND e.entry_date < ? AND l.account_id IN (?, ?, ?, ?)
-      GROUP BY l.account_id`,
-    [entity.id, from, to, accountId(entity.id, SYS.gstPayable), accountId(entity.id, SYS.qstPayable), accountId(entity.id, SYS.gstReceivable), accountId(entity.id, SYS.qstReceivable)],
-  );
-  const get = (code: string) => sums.find((s) => s.account_id === accountId(entity.id, code)) || { d: 0, c: 0 };
+  // Settings, the period sums and the threshold are independent reads.
+  const [settings, sums, threshold] = await Promise.all([
+    loadSettings(entity.id),
+    query<{ account_id: string; d: number; c: number }>(
+      `SELECT l.account_id, COALESCE(SUM(l.cad_debit_cents), 0) AS d, COALESCE(SUM(l.cad_credit_cents), 0) AS c
+         FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
+        WHERE l.entity_id = ? AND e.entry_date >= ? AND e.entry_date < ? AND l.account_id IN (?, ?, ?, ?)
+        GROUP BY l.account_id`,
+      [entity.id, from, to, accountId(entity.id, SYS.gstPayable), accountId(entity.id, SYS.qstPayable), accountId(entity.id, SYS.gstReceivable), accountId(entity.id, SYS.qstReceivable)],
+    ),
+    thresholdStatus(),
+  ]);
+  const get =(code: string) => sums.find((s) => s.account_id === accountId(entity.id, code)) || { d: 0, c: 0 };
   const period = gstQstPeriodReport({
     registered: settings.gst_qst_registered === 1,
     gstCollectedCents: Number(get(SYS.gstPayable).c) - Number(get(SYS.gstPayable).d),
@@ -154,7 +163,7 @@ export async function taxOverview(viewer: FinanceViewer, range: { from?: string;
     gstItcCents: Number(get(SYS.gstReceivable).d) - Number(get(SYS.gstReceivable).c),
     qstItrCents: Number(get(SYS.qstReceivable).d) - Number(get(SYS.qstReceivable).c),
   });
-  return { entity, settings, threshold: await thresholdStatus(), period, from, to };
+  return { entity, settings, threshold, period, from, to };
 }
 
 /** Recent money received/refunded (Stripe + manual), business book. */
@@ -192,12 +201,33 @@ function monthStart(date: string, back = 0): string {
   return d.toISOString().slice(0, 10);
 }
 
-export async function overview(viewer: FinanceViewer, entityRef: string) {
+/**
+ * `sweep: "deferred"` skips the inline overdue sweep. ONLY for a caller that
+ * runs sweepOverdue itself after the response (the Overview page, via
+ * next/server after()); nothing here depends on the sweep, because overdue is
+ * recomputed from the due date below. Atlas's /summary keeps the default.
+ */
+export async function overview(viewer: FinanceViewer, entityRef: string, opts: { sweep?: "inline" | "deferred" } = {}) {
   const entity: EntityRow = await requireEntity(viewer, entityRef);
   const today = torontoToday();
   const tomorrow = addDays(today, 1);
-  if (entity.kind === "business") await sweepOverdue(entity.id);
-  const { accounts, lines } = await loadLedger(entity.id, tomorrow);
+  const business = entity.kind === "business";
+  // Independent reads run together. The open-invoice read stays BEHIND the
+  // sweep (the only write here), so it never runs ahead of it.
+  const openInvoices = async () => {
+    if (!business) return [];
+    if (opts.sweep !== "deferred") await sweepOverdue(entity.id);
+    return query<{ status: string; due_date: string; total_cents: number; amount_paid_cents: number; currency: string }>(
+      `SELECT status, due_date, total_cents, amount_paid_cents, currency FROM fin_invoices WHERE entity_id = ? AND status IN ('sent', 'overdue')`,
+      [entity.id],
+    );
+  };
+  const [{ accounts, lines }, invoices, unreviewed, threshold] = await Promise.all([
+    loadLedger(entity.id, tomorrow),
+    openInvoices(),
+    queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM fin_bank_transactions WHERE entity_id = ? AND status IN ('unreviewed', 'draft')`, [entity.id]),
+    business ? thresholdStatus(today) : Promise.resolve(null),
+  ]);
   const balances = new Map<string, number>();
   for (const l of lines) balances.set(l.accountId, (balances.get(l.accountId) || 0) + l.cadDebitCents - l.cadCreditCents);
   const cashAccounts = accounts
@@ -213,12 +243,6 @@ export async function overview(viewer: FinanceViewer, entityRef: string) {
     series.push({ month: from.slice(0, 7), ...io });
   }
   const pnlMonth = profitAndLoss(accounts, lines, monthStart(today), tomorrow);
-  const invoices = entity.kind === "business"
-    ? await query<{ status: string; due_date: string; total_cents: number; amount_paid_cents: number; currency: string }>(
-        `SELECT status, due_date, total_cents, amount_paid_cents, currency FROM fin_invoices WHERE entity_id = ? AND status IN ('sent', 'overdue')`,
-        [entity.id],
-      )
-    : [];
   const openAr: Record<string, number> = {};
   const overdueAr: Record<string, number> = {};
   let overdueCount = 0;
@@ -230,10 +254,6 @@ export async function overview(viewer: FinanceViewer, entityRef: string) {
       overdueCount += 1;
     }
   }
-  const unreviewed = await queryOne<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM fin_bank_transactions WHERE entity_id = ? AND status IN ('unreviewed', 'draft')`,
-    [entity.id],
-  );
   return {
     entity,
     today,
@@ -245,6 +265,6 @@ export async function overview(viewer: FinanceViewer, entityRef: string) {
     overdueAr,
     overdueCount,
     unreviewed: Number(unreviewed?.n || 0),
-    threshold: entity.kind === "business" ? await thresholdStatus(today) : null,
+    threshold,
   };
 }

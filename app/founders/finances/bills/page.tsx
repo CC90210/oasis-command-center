@@ -1,18 +1,13 @@
 /**
- * /founders/finances/bills — bills (owed, paid later) and expenses (already
- * paid), receipts, and recurring expenses.
+ * /founders/finances/bills — the business's bills (owed, paid later) and
+ * expenses (already paid), receipts, and recurring expenses.
  */
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { ActionButton } from "@/components/founders/finances/ActionButton";
 import { ReceiptUpload } from "@/components/founders/finances/ReceiptUpload";
-import { numClass, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
-import { financePage, type SearchParams } from "@/lib/founders-finances/page-context";
-import { listBills, listRecurring } from "@/lib/founders-finances/bills-io";
-import { entityAccounts, entityCategories } from "@/lib/founders-finances/access-io";
-import { loadSettings } from "@/lib/founders-finances/settings-io";
-import { query } from "@/lib/founders-finances/db";
+import { numClass, primaryButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import { financePage, loadBillsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { REGISTER_SUBTYPES } from "@/lib/founders-finances/chart";
 import { formatCents } from "@/lib/founders-finances/money";
 import { torontoToday } from "@/lib/founders-finances/fx";
@@ -20,35 +15,26 @@ import { torontoToday } from "@/lib/founders-finances/fx";
 export const dynamic = "force-dynamic";
 
 export default async function BillsPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities } = await financePage(searchParams);
-  const [bills, accounts, categories, settings, recurring] = await Promise.all([
-    listBills(viewer, entity.slug),
-    entityAccounts(entity.id),
-    entityCategories(entity.id),
-    loadSettings(entity.id),
-    listRecurring(viewer, entity.slug),
-  ]);
+  const { viewer, entity } = await financePage(searchParams);
+  const { bills, accounts, categories, settings, recurring, attachments } = await loadBillsPage(viewer, entity);
   const payFrom = accounts.filter((a) => REGISTER_SUBTYPES.has(a.subtype));
   const expenseCats = categories.filter((c) => c.kind === "expense");
-  const business = entity.kind === "business";
-  const registered = business && settings.gst_qst_registered === 1;
-  const attachments = bills.length
-    ? await query<{ id: string; owner_id: string; filename: string }>(
-        `SELECT id, owner_id, filename FROM fin_attachments WHERE entity_id = ? AND owner_type = 'bill' ORDER BY created_at`,
-        [entity.id],
-      )
-    : [];
+  const registered = settings.gst_qst_registered === 1;
   const today = torontoToday();
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Bills & Expenses"
-        subtitle={registered ? "GST/QST you pay is tracked as input tax credits." : "Not registered — GST/QST you pay is part of the cost."}
-        action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/bills" />}
+        subtitle={`What the business pays: one-off expenses, bills due later, and monthly costs. ${registered ? "GST/QST you pay is tracked as input tax credits." : "Not registered — GST/QST you pay is part of the cost."}`}
+        action={
+          <a href="#recurring" className={primaryButton}>
+            Add a recurring cost
+          </a>
+        }
       />
 
-      <Card title="Record a bill or expense">
+      <Card id="record" title="Record a bill or expense">
         <ActionForm
           action="bill.create"
           hidden={{ entity: entity.slug }}
@@ -59,12 +45,10 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
               name: "kind",
               label: "Type",
               type: "select",
-              options: business
-                ? [
-                    { value: "expense", label: "Expense (already paid)" },
-                    { value: "bill", label: "Bill (pay later)" },
-                  ]
-                : [{ value: "expense", label: "Expense" }],
+              options: [
+                { value: "expense", label: "Expense (already paid)" },
+                { value: "bill", label: "Bill (pay later)" },
+              ],
             },
             { name: "vendor_name", label: "Vendor", required: true },
             { name: "bill_date", label: "Date", type: "date", defaultValue: today, required: true },
@@ -83,7 +67,13 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
 
       <Card title={`Bills & expenses (${bills.length})`} noPadding>
         {bills.length === 0 ? (
-          <p className="p-5 text-sm text-fg-muted">Nothing recorded yet.</p>
+          <p className="p-5 text-sm text-fg-muted">
+            Nothing recorded yet.{" "}
+            <a href="#record" className="text-[#1FE3F0] hover:underline">
+              Record your first expense
+            </a>{" "}
+            with the form above.
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className={tableClass}>
@@ -137,10 +127,10 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
         )}
       </Card>
 
-      <Card title="Recurring expenses" subtitle="Subscriptions and fixed costs. Record each one when it comes due — nothing is booked automatically.">
+      <Card id="recurring" title="Recurring expenses" subtitle="Subscriptions, rent and other fixed costs. Record each one when it comes due — nothing is booked automatically.">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <ul className="divide-y divide-bg-border/60 text-sm">
-            {recurring.length === 0 && <li className="py-2 text-fg-muted">None yet.</li>}
+            {recurring.length === 0 && <li className="py-2 text-fg-muted">None yet. Add each subscription and the rent with the form.</li>}
             {recurring.map((r) => (
               <li key={r.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
                 <span>

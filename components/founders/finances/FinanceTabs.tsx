@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * Finances' own secondary navigation. Carries the selected book (?entity=)
- * from tab to tab so switching to Reports does not silently drop you back
- * into the business book.
+ * Finances' own secondary navigation. Business book only, so the links carry
+ * no ?entity= (the pages ignore it). Plain <Link>s: with a loading.tsx under
+ * every tab, Next prefetches each tab's shell and a click paints the skeleton
+ * immediately instead of waiting on the server render.
  */
 
 import Link from "next/link";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 
 export const FINANCE_TABS = [
   { href: "/founders/finances", label: "Overview" },
@@ -22,8 +23,6 @@ export const FINANCE_TABS = [
 
 export function FinanceTabs() {
   const pathname = usePathname() || "";
-  const params = useSearchParams();
-  const entity = params?.get("entity");
   const active = [...FINANCE_TABS]
     .filter((t) => pathname === t.href || pathname.startsWith(`${t.href}/`))
     .sort((a, b) => b.href.length - a.href.length)[0]?.href;
@@ -34,7 +33,7 @@ export function FinanceTabs() {
         return (
           <Link
             key={t.href}
-            href={entity ? `${t.href}?entity=${encodeURIComponent(entity)}` : t.href}
+            href={t.href}
             aria-current={isActive ? "page" : undefined}
             className={`whitespace-nowrap border-b-2 px-3 py-2 text-xs font-semibold transition-colors ${
               isActive ? "border-[#1FE3F0] text-fg" : "border-transparent text-fg-muted hover:text-fg"

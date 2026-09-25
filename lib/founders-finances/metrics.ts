@@ -15,7 +15,7 @@
 import "server-only";
 
 import { BUSINESS_ENTITY_ID } from "./chart";
-import { isIsoDate, RATE_SCALE } from "./fx";
+import { addDays, isIsoDate, RATE_SCALE, torontoToday } from "./fx";
 import {
   collectedByCustomer,
   collectedByDay,
@@ -28,6 +28,11 @@ import { divRoundHalfAwayFromZero } from "./money";
 import { summarizeMrr } from "./mrr";
 import { query, queryOne } from "./db";
 import { latestUsdCadMicro, rateLookupFor, usdCadRate } from "./fx-io";
+
+/** CAD per 1 USD on `date` (own day or the prior business days) from stored rates only. */
+async function storedUsdCadMicro(date: string): Promise<bigint | null> {
+  return (await rateLookupFor(date, addDays(date, 1)))(date);
+}
 
 function assertRange(args: { from: string; to: string }): void {
   if (!isIsoDate(args.from) || !isIsoDate(args.to)) throw new Error("from and to must be ISO dates (YYYY-MM-DD)");
@@ -85,18 +90,31 @@ async function loadCollectedRows(from: string, to: string): Promise<CollectedRow
   });
 }
 
-async function lookupForRows(rows: readonly CollectedRow[], from: string, to: string): Promise<RateLookup> {
+/**
+ * `storedRatesOnly`: never call the Bank of Canada; a day with no stored rate
+ * is reported in fx_missing_days instead. The Finances pages pass it — a
+ * network fetch (8s timeout) inside a page render is what made tab switches
+ * take seconds. Rates arrive from Settings > "Fetch last 30 days" and the
+ * fx-refresh internal route. Atlas and the Today page keep the fetch.
+ */
+export type RateOpts = { storedRatesOnly?: boolean };
+
+async function lookupForRows(rows: readonly CollectedRow[], from: string, to: string, opts: RateOpts = {}): Promise<RateLookup> {
+  if (opts.storedRatesOnly) return rateLookupFor(from, to);
   const days = [...new Set(rows.map((r) => r.occurredOn))];
   return rateLookupFor(from, to, { ensureDays: days });
 }
 
-export async function revenueCollected(args: {
-  from: string;
-  to: string;
-}): Promise<{ cad_cents: number; usd_cents: number; payments: number; fx_missing_days: string[] }> {
+export async function revenueCollected(
+  args: {
+    from: string;
+    to: string;
+  },
+  opts: RateOpts = {},
+): Promise<{ cad_cents: number; usd_cents: number; payments: number; fx_missing_days: string[] }> {
   assertRange(args);
   const rows = await loadCollectedRows(args.from, args.to);
-  return summarizeCollected(rows, args.from, args.to, await lookupForRows(rows, args.from, args.to));
+  return summarizeCollected(rows, args.from, args.to, await lookupForRows(rows, args.from, args.to, opts));
 }
 
 export async function revenueCollectedByDay(args: {
@@ -117,14 +135,18 @@ export async function revenueByCustomer(args: {
   return collectedByCustomer(rows, args.from, args.to, await lookupForRows(rows, args.from, args.to));
 }
 
-export async function stripeMrr(): Promise<{ mrr_cents: number; currency: string; active_subscriptions: number; as_of: string | null }> {
-  const subs = await query<{ status: string; currency: string; monthly_cents: number }>(
-    `SELECT status, currency, monthly_cents FROM fin_subscriptions WHERE entity_id = ? AND livemode = 1`,
-    [BUSINESS_ENTITY_ID],
-  );
-  const asOf = await queryOne<{ as_of: string | null }>(`SELECT MAX(updated_at) AS as_of FROM fin_subscriptions WHERE entity_id = ?`, [BUSINESS_ENTITY_ID]);
+export async function stripeMrr(
+  opts: RateOpts = {},
+): Promise<{ mrr_cents: number; currency: string; active_subscriptions: number; as_of: string | null }> {
+  const [subs, asOf] = await Promise.all([
+    query<{ status: string; currency: string; monthly_cents: number }>(
+      `SELECT status, currency, monthly_cents FROM fin_subscriptions WHERE entity_id = ? AND livemode = 1`,
+      [BUSINESS_ENTITY_ID],
+    ),
+    queryOne<{ as_of: string | null }>(`SELECT MAX(updated_at) AS as_of FROM fin_subscriptions WHERE entity_id = ?`, [BUSINESS_ENTITY_ID]),
+  ]);
   const currencies = new Set(subs.map((s) => s.currency.toUpperCase()));
-  const rate = currencies.size > 1 ? await latestUsdCadMicro() : null;
+  const rate = currencies.size > 1 ? (opts.storedRatesOnly ? await storedUsdCadMicro(torontoToday()) : await latestUsdCadMicro()) : null;
   const s = summarizeMrr(
     subs.map((x) => ({ status: x.status, currency: x.currency, monthlyCents: Number(x.monthly_cents) })),
     rate,

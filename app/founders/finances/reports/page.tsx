@@ -1,14 +1,13 @@
 /**
- * /founders/finances/reports — P&L, Balance Sheet, Trial Balance, Cash Flow,
- * General Ledger, AR aging. Entity + date range; CSV export of the same data.
+ * /founders/finances/reports — the business's P&L, Balance Sheet, Trial
+ * Balance, Cash Flow, General Ledger and AR aging for a date range, with a CSV
+ * export of the same data.
  */
 import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
-import { inputClass, labelClass, numClass, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
-import { financePage, param, type SearchParams } from "@/lib/founders-finances/page-context";
-import { REPORT_KINDS, runReport, type ReportKind } from "@/lib/founders-finances/reports-io";
-import { entityAccounts } from "@/lib/founders-finances/access-io";
+import { inputClass, labelClass, numClass, primaryButton, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import { financePage, loadReportsPage, type SearchParams } from "@/lib/founders-finances/page-context";
+import { REPORT_KINDS, type ReportKind } from "@/lib/founders-finances/reports-io";
 import { AGING_BUCKETS, type AccountRow } from "@/lib/founders-finances/reports";
 import { formatCents } from "@/lib/founders-finances/money";
 
@@ -48,13 +47,9 @@ function Rows({ title, rows, total }: { title: string; rows: AccountRow[]; total
 }
 
 export default async function ReportsPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities, sp } = await financePage(searchParams);
-  const kindRaw = param(sp, "kind") as ReportKind;
-  const kind: ReportKind = REPORT_KINDS.includes(kindRaw) ? kindRaw : "pnl";
-  const account = param(sp, "account") || null;
-  const r = await runReport(viewer, entity.slug, kind, { from: param(sp, "from") || undefined, to: param(sp, "to") || undefined, accountId: account });
-  const accounts = kind === "ledger" ? await entityAccounts(entity.id) : [];
-  const base = `entity=${entity.slug}&from=${r.from}&to=${r.to}`;
+  const { viewer, entity, sp } = await financePage(searchParams);
+  const { kind, account, report: r, accounts } = await loadReportsPage(viewer, entity, sp);
+  const base = `from=${r.from}&to=${r.to}`;
   const csvHref = `/api/founders/finances/reports?${base}&kind=${kind}${account ? `&account=${encodeURIComponent(account)}` : ""}`;
   const pointInTime = kind === "balance" || kind === "trial" || kind === "aging";
 
@@ -62,8 +57,12 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Reports"
-        subtitle={pointInTime ? `As of the end of ${r.to} (exclusive), CAD` : `${r.from} to ${r.to} (exclusive), CAD`}
-        action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/reports" />}
+        subtitle={`The statements an accountant asks for, in CAD. ${LABEL[kind]}: ${pointInTime ? `as of ${r.to} (not included)` : `${r.from} up to ${r.to} (not included)`}.`}
+        action={
+          <a href={csvHref} className={primaryButton}>
+            Export CSV
+          </a>
+        }
       />
 
       <Card>
@@ -75,7 +74,6 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
           ))}
         </div>
         <form method="GET" className="grid grid-cols-2 gap-3 md:grid-cols-5">
-          <input type="hidden" name="entity" value={entity.slug} />
           <input type="hidden" name="kind" value={kind} />
           {!pointInTime && (
             <div>
@@ -104,9 +102,6 @@ export default async function ReportsPage({ searchParams }: { searchParams: Sear
             <button type="submit" className={quietButton}>
               Run
             </button>
-            <a href={csvHref} className={quietButton}>
-              Export CSV
-            </a>
           </div>
         </form>
       </Card>

@@ -10,8 +10,8 @@ import { ActionButton } from "@/components/founders/finances/ActionButton";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
 import { INVOICE_STATUS_TONE, numClass, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
-import { FinanceNotFound, resolveFinanceViewer, entityAccounts } from "@/lib/founders-finances/access-io";
-import { getInvoiceDetail, listContacts } from "@/lib/founders-finances/invoices-io";
+import { FinanceNotFound, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
+import { loadInvoiceDetailPage } from "@/lib/founders-finances/page-context";
 import { balanceDueCents, quantityMilliToString } from "@/lib/founders-finances/invoice";
 import { centsToDecimalString, formatCents } from "@/lib/founders-finances/money";
 import { CASH_SUBTYPES } from "@/lib/founders-finances/chart";
@@ -25,18 +25,16 @@ export default async function InvoiceDetailPage({ params }: { params: Promise<{ 
   const { id } = await params;
   let d;
   try {
-    d = await getInvoiceDetail(viewer, id);
+    d = await loadInvoiceDetailPage(viewer, id);
   } catch (e) {
     if (e instanceof FinanceNotFound) notFound();
     throw e;
   }
-  const { invoice: inv, lines, contact, payments, settings, effectiveStatus } = d;
+  const { invoice: inv, lines, contact, payments, settings, effectiveStatus, accounts, contacts } = d;
   const balance = inv.status === "void" ? 0 : balanceDueCents({ totalCents: inv.total_cents, amountPaidCents: inv.amount_paid_cents });
-  const accounts = await entityAccounts(inv.entity_id);
   const depositAccounts = accounts.filter((a) => CASH_SUBTYPES.has(a.subtype));
   const isDraft = inv.status === "draft";
   const open = effectiveStatus === "sent" || effectiveStatus === "overdue";
-  const contacts = isDraft ? await listContacts(viewer, inv.entity_id, "customer") : [];
   const revenueAccounts = accounts.filter((a) => a.type === "revenue" && a.subtype === "revenue").map((a) => ({ id: a.id, name: a.name }));
 
   return (

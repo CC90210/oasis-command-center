@@ -1,21 +1,17 @@
 /**
- * /founders/finances/transactions — the money-in/out register: filters,
- * categorise (posts to the ledger), exclude, "make a rule from this", manual
- * entry, statement import, Atlas drafts to approve, and Stripe activity.
+ * /founders/finances/transactions — the business's money-in/out register:
+ * filters, categorise (posts to the ledger), exclude, "make a rule from this",
+ * manual entry, statement import, Atlas drafts to approve, and Stripe activity.
  */
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { ActionButton } from "@/components/founders/finances/ActionButton";
 import { CategorizeCell } from "@/components/founders/finances/CategorizeCell";
 import { ImportPanel } from "@/components/founders/finances/ImportPanel";
 import { ReceiptUpload } from "@/components/founders/finances/ReceiptUpload";
-import { amountTone, inputClass, labelClass, numClass, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
-import { financePage, param, type SearchParams } from "@/lib/founders-finances/page-context";
-import { importHistory, listTransactions } from "@/lib/founders-finances/transactions-io";
-import { entityAccounts, entityCategories } from "@/lib/founders-finances/access-io";
-import { listPayments } from "@/lib/founders-finances/reports-io";
+import { amountTone, inputClass, labelClass, numClass, primaryButton, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import { financePage, loadTransactionsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { REGISTER_SUBTYPES } from "@/lib/founders-finances/chart";
 import { formatCents } from "@/lib/founders-finances/money";
 import { suggestRulePattern } from "@/lib/founders-finances/rules";
@@ -26,22 +22,8 @@ export const dynamic = "force-dynamic";
 const STATUS_TONE = { unreviewed: "warm", posted: "engaged", excluded: "neutral", draft: "info" } as const;
 
 export default async function TransactionsPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities, sp } = await financePage(searchParams);
-  const filters = {
-    accountId: param(sp, "account") || undefined,
-    categoryId: param(sp, "category") || undefined,
-    status: param(sp, "status") || undefined,
-    from: param(sp, "from") || undefined,
-    to: param(sp, "to") || undefined,
-    q: param(sp, "q") || undefined,
-  };
-  const [rows, accounts, categories, imports, payments] = await Promise.all([
-    listTransactions(viewer, entity.slug, filters),
-    entityAccounts(entity.id),
-    entityCategories(entity.id),
-    importHistory(viewer, entity.slug),
-    entity.kind === "business" ? listPayments(viewer, entity.slug, 25) : Promise.resolve([]),
-  ]);
+  const { viewer, entity, sp } = await financePage(searchParams);
+  const { filters, rows, accounts, categories, imports, payments } = await loadTransactionsPage(viewer, entity, sp);
   const registerAccounts = accounts.filter((a) => REGISTER_SUBTYPES.has(a.subtype));
   const catOptions = categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind }));
   const drafts = rows.filter((r) => r.status === "draft").length;
@@ -50,13 +32,16 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Transactions"
-        subtitle="Choosing a category posts the transaction to the books. Uncategorised rows and Atlas drafts stay out of the ledger until you do."
-        action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/transactions" />}
+        subtitle="Every dollar in and out of the business. Pick a category to post a transaction to the books; uncategorised rows and Atlas drafts stay out until you do."
+        action={
+          <a href="#add-transaction" className={primaryButton}>
+            Add a transaction
+          </a>
+        }
       />
 
       <Card>
         <form method="GET" className="grid grid-cols-2 gap-3 md:grid-cols-7">
-          <input type="hidden" name="entity" value={entity.slug} />
           <div className="col-span-2">
             <label className={labelClass}>Search</label>
             <input name="q" defaultValue={filters.q} className={inputClass} placeholder="Description, payee, memo" />
@@ -106,17 +91,27 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
             <button type="submit" className={quietButton}>
               Filter
             </button>
-            <Link href={`/founders/finances/transactions?entity=${entity.slug}`} className="text-xs text-fg-muted hover:text-fg">
+            <Link href="/founders/finances/transactions" className="text-xs text-fg-muted hover:text-fg">
               Clear
             </Link>
-            {drafts > 0 && <span className="text-xs text-status-info">{drafts} draft(s) from Atlas waiting for approval</span>}
+            {drafts > 0 && <span className="text-xs text-status-info">{drafts} draft{drafts === 1 ? "" : "s"} from Atlas waiting for approval</span>}
           </div>
         </form>
       </Card>
 
       <Card title={`Register (${rows.length})`} noPadding>
         {rows.length === 0 ? (
-          <p className="p-5 text-sm text-fg-muted">No transactions match. Import a statement or add one below.</p>
+          <p className="p-5 text-sm text-fg-muted">
+            No transactions match.{" "}
+            <a href="#import" className="text-[#1FE3F0] hover:underline">
+              Import a statement
+            </a>{" "}
+            or{" "}
+            <a href="#add-transaction" className="text-[#1FE3F0] hover:underline">
+              add one
+            </a>
+            .
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className={tableClass}>
@@ -175,7 +170,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
       </Card>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <Card title="Add a transaction" subtitle="Negative amount = money out.">
+        <Card id="add-transaction" title="Add a transaction" subtitle="Negative amount = money out.">
           <ActionForm
             action="txn.create"
             hidden={{ entity: entity.slug }}
@@ -192,7 +187,7 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
             ]}
           />
         </Card>
-        <Card title="Import a bank or card statement" subtitle="CSV from any Canadian bank, or OFX/QFX. Rows already imported are skipped.">
+        <Card id="import" title="Import a bank or card statement" subtitle="CSV from any Canadian bank, or OFX/QFX. Rows already imported are skipped.">
           <ImportPanel entity={entity.slug} accounts={registerAccounts.map((a) => ({ id: a.id, name: a.name }))} />
           {imports.length > 0 && (
             <ul className="mt-4 space-y-1 text-xs text-fg-dim">
@@ -206,51 +201,55 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
         </Card>
       </div>
 
-      {entity.kind === "business" && (
-        <Card title="Stripe and invoice payments" subtitle="Money received, recorded automatically from Stripe or when you mark an invoice paid." noPadding>
-          {payments.length === 0 ? (
-            <p className="p-5 text-sm text-fg-muted">No payments recorded yet. They arrive through the Stripe webhook, or run a reconcile from Settings.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className={tableClass}>
-                <thead>
-                  <tr>
-                    <th className={thClass}>Date</th>
-                    <th className={thClass}>Customer</th>
-                    <th className={thClass}>Source</th>
-                    <th className={`${thClass} ${numClass}`}>Amount</th>
-                    <th className={`${thClass} ${numClass}`}>CAD</th>
-                    <th className={`${thClass} ${numClass}`}>Fee</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {payments.map((p) => {
-                    const sign = p.kind === "refund" ? -1 : 1;
-                    return (
-                      <tr key={p.id}>
-                        <td className={`${tdClass} tabular-nums text-fg-muted`}>{p.occurred_on}</td>
-                        <td className={tdClass}>
-                          {p.customer_name || p.customer_email || "Unknown customer"}
-                          {p.invoice_number && <span className="ml-2 text-[11px] text-fg-dim">{p.invoice_number}</span>}
-                        </td>
-                        <td className={`${tdClass} text-fg-muted`}>
-                          {p.kind === "refund" ? "Refund" : p.source === "stripe" ? "Stripe" : "Manual"}
-                          {!p.entry_id && <span className="ml-2 text-[11px] text-status-warm">not yet posted</span>}
-                        </td>
-                        <td className={`${tdClass} ${numClass} ${amountTone(sign * p.amount_cents)}`}>{formatCents(sign * p.amount_cents, p.currency)}</td>
-                        <td className={`${tdClass} ${numClass} text-fg-muted`}>{p.settlement_cad_cents === null ? "—" : formatCents(sign * p.settlement_cad_cents, "CAD")}</td>
-                        <td className={`${tdClass} ${numClass} text-fg-muted`}>
-                          {p.fee_cad_cents !== null ? formatCents(p.fee_cad_cents, "CAD") : p.fee_status === "pending" ? <span className="text-status-warm">pending</span> : "—"}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-      )}
+      <Card title="Stripe and invoice payments" subtitle="Money received, recorded automatically from Stripe or when you mark an invoice paid." noPadding>
+        {payments.length === 0 ? (
+          <p className="p-5 text-sm text-fg-muted">
+            No payments recorded yet. Stripe payments arrive on their own once Stripe is{" "}
+            <Link href="/founders/finances/settings#stripe" className="text-[#1FE3F0] hover:underline">
+              connected in Settings
+            </Link>
+            ; invoice payments appear when you mark an invoice paid.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className={tableClass}>
+              <thead>
+                <tr>
+                  <th className={thClass}>Date</th>
+                  <th className={thClass}>Customer</th>
+                  <th className={thClass}>Source</th>
+                  <th className={`${thClass} ${numClass}`}>Amount</th>
+                  <th className={`${thClass} ${numClass}`}>CAD</th>
+                  <th className={`${thClass} ${numClass}`}>Fee</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payments.map((p) => {
+                  const sign = p.kind === "refund" ? -1 : 1;
+                  return (
+                    <tr key={p.id}>
+                      <td className={`${tdClass} tabular-nums text-fg-muted`}>{p.occurred_on}</td>
+                      <td className={tdClass}>
+                        {p.customer_name || p.customer_email || "Unknown customer"}
+                        {p.invoice_number && <span className="ml-2 text-[11px] text-fg-dim">{p.invoice_number}</span>}
+                      </td>
+                      <td className={`${tdClass} text-fg-muted`}>
+                        {p.kind === "refund" ? "Refund" : p.source === "stripe" ? "Stripe" : "Manual"}
+                        {!p.entry_id && <span className="ml-2 text-[11px] text-status-warm">not yet posted</span>}
+                      </td>
+                      <td className={`${tdClass} ${numClass} ${amountTone(sign * p.amount_cents)}`}>{formatCents(sign * p.amount_cents, p.currency)}</td>
+                      <td className={`${tdClass} ${numClass} text-fg-muted`}>{p.settlement_cad_cents === null ? "—" : formatCents(sign * p.settlement_cad_cents, "CAD")}</td>
+                      <td className={`${tdClass} ${numClass} text-fg-muted`}>
+                        {p.fee_cad_cents !== null ? formatCents(p.fee_cad_cents, "CAD") : p.fee_status === "pending" ? <span className="text-status-warm">pending</span> : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

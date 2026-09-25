@@ -1,16 +1,16 @@
 /**
  * FOUNDERS > Finances. Its own tab bar (Overview · Transactions · Invoices ·
- * Bills & Expenses · Accounts · Reports · Taxes · Settings), under the portal
- * banner but instead of Marketing's sub-chips (those render only inside
- * /founders/marketing — components/founders/FoundersSectionNav.tsx).
+ * Bills & Expenses · Accounts · Reports · Taxes · Settings) is the first thing
+ * on every Finances page: the founders portal banner does not render here
+ * (components/founders/FoundersPortalBanner.tsx).
  *
  * Gate: stricter than the founders portal. Only CC and Adon, resolved by auth
  * user id (lib/founders-finances/access-io.ts). Everyone else — including the
  * marketing hire the portal admits — gets a 404 here, and every page and API
- * route re-checks on its own.
+ * route re-checks on its own. resolveFinanceViewer is memoised per request,
+ * so this check and the page's own cost one resolution, not two.
  */
 
-import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { FinanceTabs } from "@/components/founders/finances/FinanceTabs";
@@ -22,9 +22,7 @@ export default async function FinancesLayout({ children }: { children: React.Rea
   if (!viewer) notFound();
   return (
     <div className="space-y-5">
-      <Suspense fallback={<div className="h-9 border-b border-bg-border" />}>
-        <FinanceTabs />
-      </Suspense>
+      <FinanceTabs />
       {children}
     </div>
   );

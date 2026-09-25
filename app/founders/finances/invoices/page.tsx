@@ -1,51 +1,44 @@
 /**
- * /founders/finances/invoices — invoice list, new draft, customers.
- * Business book only: the personal books do not invoice.
+ * /founders/finances/invoices — the business's invoice list, new draft,
+ * customers. (invoices-io businessOnly() is still the server-side rule that a
+ * personal book never invoices; this page only ever shows the business.)
  */
 import Link from "next/link";
+import { after } from "next/server";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { EntitySwitcher } from "@/components/founders/finances/EntitySwitcher";
 import { InvoiceEditor } from "@/components/founders/finances/InvoiceEditor";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
-import { INVOICE_STATUS_TONE as STATUS_TONE, numClass, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
-import { financePage, param, type SearchParams } from "@/lib/founders-finances/page-context";
-import { listContacts, listInvoices, sweepOverdue } from "@/lib/founders-finances/invoices-io";
-import { loadSettings } from "@/lib/founders-finances/settings-io";
-import { query } from "@/lib/founders-finances/db";
+import { INVOICE_STATUS_TONE as STATUS_TONE, numClass, primaryButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
+import { financePage, loadInvoicesPage, type SearchParams } from "@/lib/founders-finances/page-context";
+import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { formatCents } from "@/lib/founders-finances/money";
 import { torontoToday } from "@/lib/founders-finances/fx";
 
 export const dynamic = "force-dynamic";
 
 export default async function InvoicesPage({ searchParams }: { searchParams: SearchParams }) {
-  const { viewer, entity, entities, sp } = await financePage(searchParams);
-  if (entity.kind !== "business") {
-    return (
-      <div className="space-y-6">
-        <PageHeader title="Invoices" action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/invoices" />} />
-        <Card>
-          <p className="text-sm text-fg-muted">Personal books do not send invoices. Switch to OASIS AI Solutions.</p>
-        </Card>
-      </div>
-    );
-  }
-  await sweepOverdue(entity.id);
-  const status = param(sp, "status");
-  const [invoices, contacts, settings, revenueAccounts] = await Promise.all([
-    listInvoices(viewer, entity.slug, status || undefined),
-    listContacts(viewer, entity.slug, "customer"),
-    loadSettings(entity.id),
-    query<{ id: string; name: string }>(`SELECT id, name FROM fin_accounts WHERE entity_id = ? AND type = 'revenue' AND subtype = 'revenue' AND archived = 0 ORDER BY code`, [entity.id]),
-  ]);
-  const q = `entity=${entity.slug}`;
+  const { viewer, entity, sp } = await financePage(searchParams);
+  const { status, invoices, contacts, settings, revenueAccounts } = await loadInvoicesPage(viewer, entity, sp);
+  // Persisting "overdue" runs after the response: the list already shows
+  // overdue from the due date (effective_status), so nothing here waits on it.
+  after(() =>
+    sweepOverdue(entity.id).then(
+      () => undefined,
+      (e: unknown) => console.error("[finances:invoices] overdue sweep failed", e instanceof Error ? e.message : e),
+    ),
+  );
   const filters = ["", "draft", "sent", "overdue", "paid", "void"];
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Invoices"
-        subtitle={settings.gst_qst_registered ? "GST/QST registered — taxes are added to new invoices." : "Not GST/QST registered — invoices carry no sales tax."}
-        action={<EntitySwitcher entities={entities} current={entity.slug} basePath="/founders/finances/invoices" />}
+        subtitle={`Bill a client and track what has been paid. ${settings.gst_qst_registered ? "GST/QST registered — tax is added to new invoices." : "Not GST/QST registered — invoices carry no sales tax."}`}
+        action={
+          <a href="#new-invoice" className={primaryButton}>
+            New invoice
+          </a>
+        }
       />
 
       <Card noPadding>
@@ -53,7 +46,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
           {filters.map((f) => (
             <Link
               key={f || "all"}
-              href={`/founders/finances/invoices?${q}${f ? `&status=${f}` : ""}`}
+              href={f ? `/founders/finances/invoices?status=${f}` : "/founders/finances/invoices"}
               className={`rounded-md px-2.5 py-1 text-xs font-semibold ${status === f ? "bg-bg-elev text-fg" : "text-fg-muted hover:text-fg"}`}
             >
               {f ? f[0].toUpperCase() + f.slice(1) : "All"}
@@ -61,7 +54,13 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
           ))}
         </div>
         {invoices.length === 0 ? (
-          <p className="p-5 text-sm text-fg-muted">No invoices{status ? ` with status ${status}` : ""} yet.</p>
+          <p className="p-5 text-sm text-fg-muted">
+            No {status ? `${status} ` : ""}invoices yet.{" "}
+            <a href="#new-invoice" className="text-[#1FE3F0] hover:underline">
+              Create one below
+            </a>
+            .
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className={tableClass}>
@@ -101,7 +100,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
         )}
       </Card>
 
-      <Card title="New invoice" subtitle={`Numbered ${settings.invoice_prefix}-YYYY-NNNN when issued. Terms: ${settings.payment_terms_days} days.`}>
+      <Card id="new-invoice" title="New invoice" subtitle={`Numbered ${settings.invoice_prefix}-YYYY-NNNN when issued. Terms: ${settings.payment_terms_days} days.`}>
         <InvoiceEditor
           entity={entity.slug}
           contacts={contacts.map((c) => ({ id: c.id, name: c.name, email: c.email }))}
@@ -114,7 +113,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
       <Card title="Customers" subtitle={`${contacts.length} on file`}>
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <ul className="divide-y divide-bg-border/60 text-sm">
-            {contacts.length === 0 && <li className="py-2 text-fg-muted">No customers yet.</li>}
+            {contacts.length === 0 && <li className="py-2 text-fg-muted">No customers yet. Add your first one with the form.</li>}
             {contacts.map((c) => (
               <li key={c.id} className="flex justify-between gap-3 py-2">
                 <span>{c.name}</span>

@@ -10,6 +10,7 @@
  */
 import "server-only";
 
+import { cache } from "react";
 import { resolveFounder } from "@/lib/founders/gate";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
@@ -60,7 +61,14 @@ export async function loadOwnerProfiles(): Promise<Array<{ email: string | null;
   }));
 }
 
-export async function resolveFinanceViewer(): Promise<FounderViewer | null> {
+/**
+ * Memoised per request (React cache): the founders layout, the Finances
+ * layout and the page each ask, and before this every ask re-read the owner
+ * profiles. Per REQUEST only — the cache is dropped between requests, so a
+ * session is never carried from one request into the next. The gate itself is
+ * unchanged.
+ */
+export const resolveFinanceViewer = cache(async function resolveFinanceViewer(): Promise<FounderViewer | null> {
   const founder = await resolveFounder();
   if (!founder) return null;
   const session = await resolveSessionContext();
@@ -70,24 +78,49 @@ export async function resolveFinanceViewer(): Promise<FounderViewer | null> {
   if (!ownerKey) return null;
   await ensureFinanceSeed();
   return { kind: "founder", ownerKey, email: FINANCE_OWNER_EMAILS[ownerKey], userId: session.userId };
-}
+});
 
 const ENTITY_COLS = "id, slug, name, kind, owner_key, base_currency";
 
+/**
+ * The entity table, read once per process. fin_entities is written ONLY by the
+ * seed (INSERT OR IGNORE of the three fixed rows in chart.ts ENTITY_SEEDS) —
+ * nothing in the app renames, re-owns or deletes a book — so the rows cannot
+ * change under a running process. Before this, every requireEntity() was its
+ * own round trip, i.e. one per list function on every page. The ACCESS
+ * decision is not cached: canAccessEntity() still runs on every call.
+ */
+let entityTable: Promise<EntityRow[]> | null = null;
+
+function loadEntityTable(): Promise<EntityRow[]> {
+  if (!entityTable) {
+    entityTable = ensureFinanceSeed()
+      .then(() => query<EntityRow>(`SELECT ${ENTITY_COLS} FROM fin_entities ORDER BY kind, name`))
+      .catch((e) => {
+        entityTable = null; // retry next call rather than caching a failure
+        throw e;
+      });
+  }
+  return entityTable;
+}
+
+/** Tests only: forget the per-process entity table. */
+export function resetEntityTableMemo(): void {
+  entityTable = null;
+}
+
 export async function visibleEntities(viewer: FinanceViewer): Promise<EntityRow[]> {
-  await ensureFinanceSeed();
-  const rows = await query<EntityRow>(`SELECT ${ENTITY_COLS} FROM fin_entities ORDER BY kind, name`);
+  const rows = await loadEntityTable();
   return rows.filter((e) => canAccessEntity(e, viewer));
 }
 
 /** By id or slug. Throws FinanceNotFound for missing AND for forbidden. */
 export async function requireEntity(viewer: FinanceViewer, idOrSlug: string | null | undefined): Promise<EntityRow> {
-  await ensureFinanceSeed();
   const key = String(idOrSlug || "").trim();
   if (!key) throw new FinanceNotFound();
-  const row = await queryOne<EntityRow>(`SELECT ${ENTITY_COLS} FROM fin_entities WHERE id = ? OR slug = ?`, [key, key]);
+  const row = (await loadEntityTable()).find((e) => e.id === key || e.slug === key);
   if (!row || !canAccessEntity(row, viewer)) throw new FinanceNotFound();
-  return row;
+  return { ...row };
 }
 
 export async function requireBusinessEntity(viewer: FinanceViewer): Promise<EntityRow> {
