@@ -63,7 +63,7 @@ async function check(name: string, fn: () => Promise<void>) {
     console.log(`  ok    ${name}`);
   } catch (e) {
     failures += 1;
-    console.log(`  FAIL  ${name}\n        ${(e as Error).stack?.split("\n").slice(0, 5).join("\n        ")}`);
+    console.log(`  FAIL  ${name}\n        ${(e as Error).stack?.split("\n").slice(0, 24).join("\n        ")}`);
   }
 }
 
@@ -416,7 +416,25 @@ async function main() {
 
   process.env.STRIPE_SECRET_KEY = "rk_test_wise_feed";
   await raw.execute({ sql: `UPDATE fin_settings SET stripe_account_id = 'acct_test_oasis' WHERE entity_id = ?`, args: [B] });
-  fixtures.payouts = [{ id: "po_test_1", object: "payout", amount: 6784, currency: "usd", status: "paid", arrival_date: Math.floor(Date.parse(`${addDays(today, -4)}T00:00:00Z`) / 1000) }];
+  // This USD payout took CA$93.00 out of a CAD Stripe balance (its balance transaction, expanded). The charge it
+  // pays out is in Stripe clearing first, as the Stripe import puts it there: the feed never books a payout that
+  // Stripe clearing does not hold in the currency Stripe settled in.
+  const { postJournalEntry } = await import("../lib/founders-finances/ledger-io");
+  await postJournalEntry({ entityId: B, entryDate: addDays(today, -9), memo: "Stripe charge", source: "stripe_charge", sourceRef: "ch_wise_feed_1", createdBy: "stripe", lines: [
+    { accountId: accountId(B, SYS.stripeClearing), currency: "CAD", debitCents: 9300 },
+    { accountId: accountId(B, SYS.serviceRevenue), currency: "CAD", creditCents: 9300 },
+  ] });
+  fixtures.payouts = [
+    {
+      id: "po_test_1",
+      object: "payout",
+      amount: 6784,
+      currency: "usd",
+      status: "paid",
+      arrival_date: Math.floor(Date.parse(`${addDays(today, -4)}T00:00:00Z`) / 1000),
+      balance_transaction: { id: "txn_po_test_1", object: "balance_transaction", amount: -9300, currency: "cad", fee: 0, net: -9300, type: "payout" },
+    },
+  ];
   const since = addDays(today, -20);
   const txnRows = () => count(`SELECT COUNT(*) FROM fin_bank_transactions WHERE entity_id = ? AND account_id = ?`, [B, chequing]);
   const imports = () => count(`SELECT COUNT(*) FROM fin_imports WHERE entity_id = ?`, [B]);
@@ -433,28 +451,36 @@ async function main() {
     assert.equal(await imports(), 0);
   });
 
-  await check("feed: Wise activity lands on Business chequing through the import; a Stripe payout becomes a transfer from clearing at the stored own-day rate", async () => {
+  await check("feed: Wise activity lands on Business chequing through the import; a USD Stripe payout comes out of CAD Stripe clearing through FX clearing at the stored own-day rate", async () => {
     const r = await feedIo.syncWiseFeed(cc, { since }, { dryRun: false });
     const usd = r.currencies.find((c) => c.currency === "USD")!;
     const cad = r.currencies.find((c) => c.currency === "CAD")!;
     assert.equal(usd.inserted, 5);
     assert.equal(cad.inserted, 2);
-    assert.equal(usd.posted, 1, "only the payout matched a rule");
+    assert.equal(usd.stripe_payouts, 1);
+    assert.equal(usd.conversions, 1, "the conversion's USD leg");
+    assert.equal(cad.conversions, 1, "and its CAD leg, booked together");
+    assert.equal(usd.posted, 2, "the payout and the conversion leg; no rule touched either");
     assert.equal(usd.invoice_payments, 2);
     assert.equal(await txnRows(), 7);
-    assert.equal(await count(`SELECT COUNT(*) FROM fin_bank_transactions WHERE fitid LIKE '%-BALANCE-7001'`), 2, "both legs of the conversion");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_bank_transactions WHERE fitid LIKE '%-BALANCE-7001' AND status = 'posted'`), 2, "both legs of the conversion");
     const payout = (await raw.execute({ sql: `SELECT * FROM fin_bank_transactions WHERE fitid = 'WISE-USD-CREDIT-TRANSFER-9003'`, args: [] })).rows[0];
     assert.equal(payout.status, "posted");
     assert.match(String(payout.description), /Stripe payout po_test_1/);
     assert.equal(payout.source, "import");
+    assert.equal(payout.rule_id, null, "booked by the feed, not by the seeded 'stripe' rule");
     const lines = (await raw.execute({ sql: `SELECT account_id, currency, debit_cents, credit_cents, cad_debit_cents, cad_credit_cents FROM fin_journal_lines WHERE entry_id = ? ORDER BY line_no`, args: [String(payout.entry_id)] })).rows;
     const cadValue = usdToCadCents(6784, parseRateMicro("1.3700"));
     assert.deepEqual(
       lines.map((l) => [l.account_id, l.currency, Number(l.debit_cents), Number(l.credit_cents), Number(l.cad_debit_cents), Number(l.cad_credit_cents)]),
       [
         [chequing, "USD", 6784, 0, cadValue, 0],
-        [accountId(B, SYS.stripeClearing), "USD", 0, 6784, 0, cadValue],
+        [accountId(B, SYS.fxClearing), "USD", 0, 6784, 0, cadValue],
+        [accountId(B, SYS.fxClearing), "CAD", cadValue, 0, cadValue, 0],
+        [accountId(B, SYS.stripeClearing), "CAD", 0, 9300, 0, 9300],
+        [accountId(B, SYS.fxGainLoss), "CAD", 9300 - cadValue, 0, 9300 - cadValue, 0],
       ],
+      "CA$93.00 leaves Stripe clearing (where the CAD charges are), US$67.84 reaches chequing, the gap is FX",
     );
     for (const ref of ["TRANSFER-9001", "TRANSFER-9002"]) {
       const row = (await raw.execute({ sql: `SELECT status, memo, entry_id FROM fin_bank_transactions WHERE fitid = ?`, args: [`WISE-USD-CREDIT-${ref}`] })).rows[0];
@@ -491,28 +517,35 @@ async function main() {
     assert.equal(await nativeBalance("USD"), beforeUsd + 40000, "the money is in the books once");
   });
 
-  await check("opening balance: preview only, then an explicit post makes chequing equal Wise on that day, per currency", async () => {
+  await check("opening balance: preview only, then an explicit post makes chequing equal Wise on that day, per currency — and it stays equal once the waiting lines are categorised", async () => {
     const day = addDays(today, -1);
     await assert.rejects(feedIo.postWiseOpeningBalance(cc, { date: addDays(today, 2) }, { dryRun: true }), /future/);
     const entries = () => count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'opening_balance'`);
+    const pendingOf = (cur: string) =>
+      count(`SELECT COALESCE(SUM(amount_cents), 0) FROM fin_bank_transactions WHERE fitid LIKE 'WISE-%' AND currency = ? AND status = 'unreviewed' AND posted_date <= ?`, [cur, day]);
     const preview = await feedIo.postWiseOpeningBalance(cc, { date: day }, { dryRun: true });
     assert.equal(await entries(), 0, "a preview posts nothing");
     const usd = preview.lines.find((l) => l.currency === "USD")!;
     const cad = preview.lines.find((l) => l.currency === "CAD")!;
     assert.equal(usd.wise_cents, 195238, "running balance after the day's last row");
     assert.equal(cad.wise_cents, 128947);
-    assert.equal(usd.books_cents, await nativeBalance("USD", day));
+    assert.equal(usd.pending_cents, await pendingOf("USD"), "the card line still waiting to be categorised");
+    assert.ok(usd.pending_lines > 0 && cad.pending_lines > 0);
+    assert.equal(usd.books_cents, (await nativeBalance("USD", day)) + usd.pending_cents, "books count the fed lines not yet posted");
     assert.equal(usd.difference_cents, usd.wise_cents - usd.books_cents);
+    // The USD balance opened at 0 and every USD movement is booked (payout, conversion, invoice receipts, the waiting card line): no plug.
+    assert.equal(usd.difference_cents, 0, "USD chequing already equals Wise USD");
+    assert.deepEqual(preview.lines.map((l) => [l.currency, l.action, l.existing]), [["CAD", "post", null], ["USD", "none", null]]);
     const posted = await feedIo.postWiseOpeningBalance(cc, { date: day }, { dryRun: false });
     assert.equal(posted.lines.filter((l) => l.entry_id).length, preview.lines.filter((l) => l.difference_cents !== 0).length);
+    // Categorise what was waiting: chequing now equals Wise, not Wise plus the waiting lines a second time.
+    for (const t of (await raw.execute({ sql: `SELECT id, amount_cents FROM fin_bank_transactions WHERE fitid LIKE 'WISE-%' AND status = 'unreviewed'`, args: [] })).rows) {
+      await (await import("../lib/founders-finances/transactions-io")).categorizeTransaction(cc, String(t.id), `${B}:cat:${Number(t.amount_cents) > 0 ? "4900" : "5100"}`);
+    }
     assert.equal(await nativeBalance("USD", day), 195238);
     assert.equal(await nativeBalance("CAD", day), 128947);
-    const usdEntry = posted.lines.find((l) => l.currency === "USD")!.entry_id!;
-    const usdLine = (await raw.execute({ sql: `SELECT debit_cents, credit_cents, cad_debit_cents, cad_credit_cents FROM fin_journal_lines WHERE entry_id = ? AND account_id = ?`, args: [usdEntry, chequing] })).rows[0];
-    const moved = Number(usdLine.debit_cents) - Number(usdLine.credit_cents);
-    assert.equal(Number(usdLine.cad_debit_cents) - Number(usdLine.cad_credit_cents), Math.sign(moved) * usdToCadCents(Math.abs(moved), parseRateMicro("1.3700")), "USD at the stored rate for the day");
     const again = await feedIo.postWiseOpeningBalance(cc, { date: day }, { dryRun: false });
-    assert.deepEqual(again.lines.map((l) => [l.difference_cents, l.entry_id]), [[0, null], [0, null]], "already matching: nothing more to post");
+    assert.deepEqual(again.lines.map((l) => [l.action, l.entry_id]), [["keep", null], ["none", null]], "already right: nothing more to post");
     assert.equal(await entries(), posted.lines.filter((l) => l.entry_id).length);
   });
 
@@ -523,8 +556,12 @@ async function main() {
     assert.equal(bs.balanced, true);
     assert.equal(await count(`SELECT COUNT(*) FROM (SELECT entry_id, SUM(cad_debit_cents) d, SUM(cad_credit_cents) c FROM fin_journal_lines GROUP BY entry_id HAVING d <> c)`), 0);
     const fx = accountId(B, SYS.fxClearing);
-    assert.equal(await count(`SELECT COALESCE(SUM(cad_debit_cents - cad_credit_cents), 0) FROM fin_journal_lines WHERE account_id = ?`, [fx]), 0, "USD receipts held at Wise leave nothing in FX clearing");
-    assert.equal(await count(`SELECT COALESCE(SUM(debit_cents - credit_cents), 0) FROM fin_journal_lines WHERE account_id = ? AND currency = 'USD'`, [fx]), 0);
+    assert.equal(await count(`SELECT COALESCE(SUM(cad_debit_cents - cad_credit_cents), 0) FROM fin_journal_lines WHERE account_id = ?`, [fx]), 0, "FX clearing nets to zero in CAD: receipts, the payout and the conversion");
+    assert.equal(
+      await count(`SELECT COALESCE(SUM(l.debit_cents - l.credit_cents), 0) FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id WHERE l.account_id = ? AND l.currency = 'USD' AND e.source = 'wise_payment'`, [fx]),
+      0,
+      "USD receipts held at Wise leave no USD in FX clearing",
+    );
     assert.ok(await count(`SELECT COUNT(*) FROM fin_journal_lines WHERE account_id = ? AND memo = 'Realised FX gain'`, [accountId(B, SYS.fxGainLoss)]) > 0, "paid at 1.37 on a 1.36 invoice: the gain is realised");
     assert.ok(calls.every((c) => !c.includes("/transfers") && !c.includes("/quotes")), "nothing ever asked Wise to move money");
   });

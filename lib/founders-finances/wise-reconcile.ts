@@ -38,10 +38,11 @@ import { usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadContact, loadInvoice, recomputeInvoicePaidStatement, type InvoiceRow } from "./invoice-store";
 import { deactivatePaymentLinkIfPaid } from "./stripe-ingest";
 import { dismissKey, proposeWiseMatches, settlementFor, type OpenInvoiceForMatch, type WiseDeposit } from "./wise";
-import { wiseFitid } from "./wise-feed";
+import { WISE_PAYMENT_SOURCE, wiseFitid } from "./wise-feed";
 import { recentWiseDeposits } from "./wise-io";
 
-export const WISE_PAYMENT_SOURCE = "wise_payment";
+// Defined next to the feed so transactions-io can refuse to book a recorded deposit twice without importing this module.
+export { WISE_PAYMENT_SOURCE };
 const WISE_FEE_SOURCE = "wise_fee";
 /** "Bank fees" in BUSINESS_CHART; SYS has no role key for it. */
 const BANK_FEES_CODE = "5010";

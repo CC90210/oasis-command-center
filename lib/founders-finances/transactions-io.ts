@@ -9,6 +9,22 @@
  * gated on the row still pointing at the entry this decision saw.
  * Uncategorised rows and Atlas drafts are not posted until a founder reviews
  * them — a draft is a suggestion, not a booking.
+ *
+ * OWNED vs LINKED. A line's entry is normally its OWN (source "bank_txn",
+ * written from this file). A bank feed can instead LINK a line to an entry
+ * that already moved the same money — an expense or bill payment recorded on
+ * the Bills page — so the money is booked once. Excluding a linked line only
+ * unlinks it; re-categorising one is refused. Neither ever reverses the
+ * expense it points at.
+ *
+ * HELD lines. The Wise feed holds an unreviewed line it cannot safely book
+ * (it may already be on the books) by starting its memo with FEED_HOLD_MARK
+ * and saying why. No RULE ever categorises a held line — not at import, not
+ * "Apply rules to unreviewed transactions", not "create rule from
+ * transaction"; a founder decides it, one line at a time. Categorising is
+ * refused outright where it is certainly a second booking
+ * (alreadyOnTheBooks): a line linked to an expense, a Wise deposit already
+ * recorded against an invoice, a Wise line an opening balance already holds.
  */
 import "server-only";
 
@@ -30,7 +46,12 @@ import {
   type CategoryRow,
   type EntityRow,
 } from "./access-io";
-import { buildPosting, buildReversal } from "./ledger-io";
+import { buildPosting, buildReversal, findEntryBySource } from "./ledger-io";
+import type { JournalLineInput } from "./ledger";
+import { FEED_HOLD_MARK, OPENING_BALANCE_SOURCE, parseWiseFitid, WISE_PAYMENT_SOURCE } from "./wise-feed";
+
+/** The source of every entry a register line owns. */
+export const REGISTER_ENTRY_SOURCE = "bank_txn";
 
 export type TxnRow = {
   id: string;
@@ -47,6 +68,7 @@ export type TxnRow = {
   rule_id: string | null;
   status: "unreviewed" | "posted" | "excluded" | "draft";
   entry_id: string | null;
+  fitid: string | null;
   source: string;
   memo: string;
   created_by: string;
@@ -75,7 +97,7 @@ function txnPostingInput(txn: Pick<TxnRow, "id" | "entity_id" | "account_id" | "
     entityId: txn.entity_id,
     entryDate: txn.posted_date,
     memo: txn.description.slice(0, 200),
-    source: "bank_txn",
+    source: REGISTER_ENTRY_SOURCE,
     sourceRef,
     createdBy,
     lines: inflow
@@ -202,12 +224,53 @@ async function statementsToPost(txn: TxnRow, category: CategoryRow, actor: strin
   return { statements, entryId: posting.entryId };
 }
 
+/** The entry a line points at when it is NOT the line's own (a linked expense / bill payment), else null. */
+async function linkedEntryOf(txn: Pick<TxnRow, "entry_id">): Promise<{ id: string; memo: string } | null> {
+  if (!txn.entry_id) return null;
+  const e = await queryOne<{ id: string; source: string; memo: string }>(`SELECT id, source, memo FROM fin_journal_entries WHERE id = ?`, [txn.entry_id]);
+  return e && e.source !== REGISTER_ENTRY_SOURCE ? { id: e.id, memo: e.memo } : null;
+}
+
+/**
+ * Why posting this line would put money on the books a SECOND time, or null.
+ * A line that owns its entry is only ever re-categorised (the old entry is
+ * reversed first), so only a line with no entry, or a linked one, can double.
+ */
+async function alreadyOnTheBooks(txn: TxnRow): Promise<string | null> {
+  const linked = await linkedEntryOf(txn);
+  if (linked) return `this bank line is matched to "${linked.memo}", which is already on the books; exclude the line to unmatch it first`;
+  if (txn.entry_id) return null;
+  const wise = parseWiseFitid(txn.fitid);
+  if (!wise) return null;
+  if (wise.direction === "CREDIT") {
+    const paid = await queryOne<{ memo: string }>(
+      `SELECT memo FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted'`,
+      [txn.entity_id, WISE_PAYMENT_SOURCE, wise.ref],
+    );
+    if (paid) return `Wise deposit ${wise.ref} is already recorded as an invoice payment ("${paid.memo}"); categorising it too would count it twice`;
+  }
+  // An opening balance posted BEFORE this line arrived, for a day on or after it, already absorbed its money.
+  const opening = await queryOne<{ entry_date: string }>(
+    `SELECT e.entry_date FROM fin_journal_entries e
+      WHERE e.entity_id = ? AND e.source = ? AND e.status = 'posted' AND e.entry_date >= ? AND e.created_at < ?
+        AND EXISTS (SELECT 1 FROM fin_journal_lines l WHERE l.entry_id = e.id AND l.account_id = ? AND l.currency = ?)
+      ORDER BY e.entry_date DESC LIMIT 1`,
+    [txn.entity_id, OPENING_BALANCE_SOURCE, txn.posted_date, txn.created_at, txn.account_id, txn.currency],
+  );
+  if (opening) {
+    return `this Wise line is dated on or before the opening balance of ${opening.entry_date}, which was posted before the line arrived and so already contains it; re-post the opening balance on the Wise card first`;
+  }
+  return null;
+}
+
 export async function categorizeTransaction(viewer: FinanceViewer, txnId: string, categoryId: string): Promise<void> {
   const entity = await requireRowEntity(viewer, "fin_bank_transactions", txnId);
   const category = await requireCategoryOf(entity.id, categoryId);
   const txn = await loadTxn(txnId);
   if (!txn) throw new FinanceNotFound();
   if (txn.status === "posted" && txn.category_id === category.id && txn.entry_id) return;
+  const twice = await alreadyOnTheBooks(txn);
+  if (twice) throw new FinanceInputError(twice);
   const { statements } = await statementsToPost(txn, category, viewerLabel(viewer));
   statements.push(auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "txn.categorized", objectType: "transaction", objectId: txnId, detail: { category: category.name } }));
   try {
@@ -223,7 +286,8 @@ export async function excludeTransaction(viewer: FinanceViewer, txnId: string): 
   const txn = await loadTxn(txnId);
   if (!txn) throw new FinanceNotFound();
   const statements: InStatement[] = [];
-  if (txn.entry_id) {
+  // A linked line is only unlinked: the expense it points at stays on the books.
+  if (txn.entry_id && !(await linkedEntryOf(txn))) {
     const rev = await buildReversal({ entityId: entity.id, entryId: txn.entry_id, date: txn.posted_date, memo: "Excluded", createdBy: viewerLabel(viewer) });
     statements.push(...rev.statements);
   }
@@ -345,7 +409,11 @@ export async function applyRulesToUnreviewed(viewer: FinanceViewer, entityRef: s
   const entity = await requireEntity(viewer, entityRef);
   const rules = await activeRules(entity.id);
   if (rules.length === 0) return 0;
-  const rows = await query<TxnRow>(`SELECT * FROM fin_bank_transactions WHERE entity_id = ? AND status = 'unreviewed' LIMIT 2000`, [entity.id]);
+  // A line the bank feed holds for a founder is never a rule's to book (see HELD lines above).
+  const rows = await query<TxnRow>(
+    `SELECT * FROM fin_bank_transactions WHERE entity_id = ? AND status = 'unreviewed' AND substr(memo, 1, ?) <> ? LIMIT 2000`,
+    [entity.id, FEED_HOLD_MARK.length, FEED_HOLD_MARK],
+  );
   let applied = 0;
   for (const t of rows) {
     const hit = firstMatchingRule(rules, { description: t.description, payee: t.payee, amountCents: t.amount_cents });
@@ -411,13 +479,25 @@ export async function previewImport(viewer: FinanceViewer, entityRef: string, a:
 }
 
 /**
+ * What a bank feed tells the import. `hold`: FITIDs the caller resolves
+ * itself (a line that is an expense already on the books, a deposit already
+ * recorded against an invoice, a Stripe payout, a currency conversion). Those
+ * rows are inserted UNREVIEWED and no rule touches them — a rule posting them
+ * first is exactly how money got counted twice.
+ */
+export type ImportHooks = { hold?: ReadonlySet<string> };
+
+/**
  * Commit an import. The file is re-parsed here — rows from the browser are
  * never trusted. Inserts are OR IGNORE against UNIQUE(entity, account,
  * dedupe_hash): re-importing the same file inserts nothing.
  */
-export async function commitImport(viewer: FinanceViewer, entityRef: string, a: ImportArgs) {
+export async function commitImport(viewer: FinanceViewer, entityRef: string, a: ImportArgs, hooks: ImportHooks = {}) {
   const entity = await requireEntity(viewer, entityRef);
-  const { account, parsed, currency, rows } = await parseForImport(entity, a);
+  const parsedImport = await parseForImport(entity, a);
+  const { account, parsed, currency } = parsedImport;
+  const held = (r: { fitid: string | null }) => r.fitid !== null && (hooks.hold?.has(r.fitid) ?? false);
+  const rows = parsedImport.rows.map((r) => (held(r) ? { ...r, ruleId: null, suggestedCategoryId: null } : r));
   if (parsed.errors.length > 0 && rows.length === 0) throw new FinanceInputError(`nothing importable: ${parsed.errors.slice(0, 3).join("; ")}`);
   const importId = newId("imp");
   const format = parsed.format;
@@ -455,6 +535,94 @@ export async function commitImport(viewer: FinanceViewer, entityRef: string, a: 
     }
   }
   return { importId, total: rows.length, inserted, duplicates, posted, errors: parsed.errors.slice(0, 50) };
+}
+
+// ── bank-line <-> entry matching (the Wise feed) ─────────────────────────
+
+/** An audit row written only when `txnId` ended up pointing at `entryId` in the same batch. */
+function auditIfLinked(a: { entityId: string; actor: string; action: string; txnId: string; entryId: string; detail: Record<string, unknown> }): InStatement {
+  return {
+    sql: `INSERT INTO fin_audit_log (id, entity_id, actor, action, object_type, object_id, detail_json)
+          SELECT ?, ?, ?, ?, 'transaction', ?, ? WHERE EXISTS (SELECT 1 FROM fin_bank_transactions WHERE id = ? AND entry_id = ?)`,
+    args: [newId("aud"), a.entityId, a.actor.slice(0, 200), a.action, a.txnId, JSON.stringify(a.detail).slice(0, 8000), a.txnId, a.entryId],
+  };
+}
+
+/**
+ * Mark an UNREVIEWED line as posted against an entry that ALREADY exists (a
+ * paid expense, a bill payment): nothing new is posted, so the money is on
+ * the books once. Gated: the line must still be unreviewed and unposted, the
+ * entry must be live, and no other line may already point at it — one bill is
+ * never matched twice, even by two syncs at once. rowsAffected of the first
+ * statement is 1 when it linked.
+ */
+export function linkLineToEntryStatements(a: {
+  entityId: string;
+  txnId: string;
+  entryId: string;
+  categoryId: string | null;
+  memo: string;
+  actor: string;
+  detail?: Record<string, unknown>;
+}): InStatement[] {
+  return [
+    {
+      sql: `UPDATE fin_bank_transactions SET status = 'posted', entry_id = ?, category_id = COALESCE(?, category_id), memo = ?
+             WHERE id = ? AND entity_id = ? AND status = 'unreviewed' AND entry_id IS NULL
+               AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ? AND entity_id = ? AND status = 'posted')
+               AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions WHERE entity_id = ? AND entry_id = ?)`,
+      args: [a.entryId, a.categoryId, a.memo.slice(0, 500), a.txnId, a.entityId, a.entryId, a.entityId, a.entityId, a.entryId],
+    },
+    auditIfLinked({ entityId: a.entityId, actor: a.actor, action: "txn.linked", txnId: a.txnId, entryId: a.entryId, detail: { entry: a.entryId, ...(a.detail || {}) } }),
+  ];
+}
+
+/**
+ * Post an UNREVIEWED line with journal lines a caller built (a Stripe payout,
+ * a currency conversion). The entry is the line's OWN — source bank_txn, ref
+ * the line id — so exclude and re-categorise reverse it like any categorised
+ * line. `posting` must run before `link` in the batch; with `together`, every
+ * listed line must still be unreviewed for ANY of the entries to be written
+ * (a conversion's two legs land together or not at all).
+ */
+export async function buildLinePosting(a: {
+  txn: Pick<TxnRow, "id" | "entity_id" | "posted_date" | "description">;
+  lines: JournalLineInput[];
+  categoryId: string | null;
+  memo: string;
+  actor: string;
+  fixedRates?: Record<string, string>;
+  together?: string[];
+  detail?: Record<string, unknown>;
+}): Promise<{ entryId: string; posting: InStatement[]; link: InStatement[] }> {
+  const ids = [...new Set([a.txn.id, ...(a.together || [])])];
+  const sourceRef = (await findEntryBySource(a.txn.entity_id, REGISTER_ENTRY_SOURCE, a.txn.id)) ? `${a.txn.id}:${newId("r")}` : a.txn.id;
+  const built = await buildPosting({
+    entityId: a.txn.entity_id,
+    entryDate: a.txn.posted_date,
+    memo: a.memo.slice(0, 200),
+    source: REGISTER_ENTRY_SOURCE,
+    sourceRef,
+    createdBy: a.actor,
+    fixedRates: a.fixedRates,
+    lines: a.lines,
+    gate: {
+      sql: `(SELECT COUNT(*) FROM fin_bank_transactions WHERE id IN (${ids.map(() => "?").join(",")}) AND status = 'unreviewed' AND entry_id IS NULL) = ?`,
+      args: [...ids, ids.length],
+    },
+  });
+  return {
+    entryId: built.entryId,
+    posting: built.statements,
+    link: [
+      {
+        sql: `UPDATE fin_bank_transactions SET category_id = COALESCE(?, category_id), entry_id = ?, status = 'posted', memo = ?
+               WHERE id = ? AND status = 'unreviewed' AND entry_id IS NULL AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+        args: [a.categoryId, built.entryId, a.memo.slice(0, 500), a.txn.id, built.entryId],
+      },
+      auditIfLinked({ entityId: a.txn.entity_id, actor: a.actor, action: "txn.posted_by_feed", txnId: a.txn.id, entryId: built.entryId, detail: { entry: built.entryId, ...(a.detail || {}) } }),
+    ],
+  };
 }
 
 // ── Atlas drafts ─────────────────────────────────────────────────────────

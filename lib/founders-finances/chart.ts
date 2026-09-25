@@ -90,7 +90,10 @@ export const BUSINESS_CHART: readonly ChartAccount[] = [
   { code: "1000", name: "Business chequing", type: "asset", subtype: "bank" },
   { code: "1010", name: "Business savings", type: "asset", subtype: "bank" },
   { code: "1050", name: "Stripe clearing", type: "asset", subtype: "clearing", category: "transfer" },
-  { code: "1060", name: "Currency exchange clearing", type: "asset", subtype: "clearing" },
+  // A transfer category so a Wise conversion's legs (moving money between the
+  // CAD and USD balances) have somewhere correct to go; the bank feed books
+  // both legs here itself, with the FX difference (wise-feed.ts).
+  { code: "1060", name: "Currency exchange clearing", type: "asset", subtype: "clearing", category: "transfer" },
   { code: "1100", name: "Accounts receivable", type: "asset", subtype: "receivable" },
   { code: "1200", name: "GST receivable (ITC)", type: "asset", subtype: "tax_receivable" },
   { code: "1210", name: "QST receivable (ITR)", type: "asset", subtype: "tax_receivable" },

@@ -41,8 +41,42 @@ type CheckResult = {
   needs_confirmation: Match[];
   errors: Array<{ wise_ref: string; invoice_number: string; message: string }>;
 };
-type OpeningLine = { currency: string; wise_cents: number; books_cents: number; difference_cents: number; entry_id: string | null };
-type Opening = { date: string; dry_run: boolean; lines: OpeningLine[] };
+type OpeningAction = "none" | "keep" | "post" | "replace" | "remove";
+type OpeningLine = {
+  currency: string;
+  wise_cents: number;
+  books_cents: number;
+  pending_cents: number;
+  pending_lines: number;
+  undecided_lines: number;
+  difference_cents: number;
+  existing: { entry_id: string; date: string; cents: number } | null;
+  action: OpeningAction;
+  entry_id: string | null;
+};
+type Opening = { date: string; dry_run: boolean; lines: OpeningLine[]; blocked: string | null };
+
+const writes = (l: OpeningLine) => l.action === "post" || l.action === "replace" || l.action === "remove";
+
+/** One sentence per currency: what posting does (preview) or did (after posting). */
+function openingSentence(l: OpeningLine, date: string, done: boolean): string {
+  const amount = formatCents(l.difference_cents, l.currency);
+  const old = l.existing ? `the ${formatCents(l.existing.cents, l.currency)} opening balance posted for ${l.existing.date}` : "";
+  switch (l.action) {
+    case "keep":
+      return `${l.currency}: the opening balance for ${date} is already right (${amount}); nothing to change.`;
+    case "none":
+      return `${l.currency}: Business chequing already matches Wise on ${date}; no opening balance needed.`;
+    case "post":
+      return done ? `${l.currency}: posted ${amount} for ${date}.` : `${l.currency}: posts ${amount} for ${date} against Retained earnings.`;
+    case "replace":
+      return done
+        ? `${l.currency}: replaced ${old} — reversed it and posted ${amount} for ${date}.`
+        : `${l.currency}: replaces ${old}. That entry is reversed and ${amount} is posted for ${date}, so there is still exactly one.`;
+    case "remove":
+      return done ? `${l.currency}: reversed ${old}; none is needed.` : `${l.currency}: reverses ${old}; with it gone chequing already matches Wise on ${date}.`;
+  }
+}
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
 
@@ -103,15 +137,17 @@ export function WiseCard() {
 
   async function openingBalance(post: boolean) {
     if (post) {
-      const moves = (opening?.lines || []).filter((l) => l.difference_cents !== 0).map((l) => formatCents(l.difference_cents, l.currency));
-      if (!window.confirm(`Post an opening balance on ${openingDate} (${moves.join(", ")}) against Retained earnings, so Business chequing equals Wise?`)) return;
+      const moves = (opening?.lines || []).filter(writes).map((l) => openingSentence(l, openingDate, false));
+      if (!window.confirm(`So Business chequing equals Wise from the end of ${openingDate}:\n\n${moves.join("\n")}\n\nGo ahead?`)) return;
     }
     setBusy(post ? "opening_post" : "opening_preview");
     setMsg(null);
     try {
       const j = await call({ action: post ? "opening_post" : "opening_preview", date: openingDate });
-      setOpening(j.result as Opening);
-      if (typeof j.message === "string" && j.message) setMsg({ tone: "ok", text: j.message });
+      const result = j.result as Opening;
+      setOpening(result);
+      // Said from the result itself: it knows a replacement from a first post and a removal from "already matches".
+      if (post) setMsg({ tone: "ok", text: result.lines.map((l) => openingSentence(l, result.date, true)).join(" ") });
       if (post) router.refresh();
     } catch (e) {
       setMsg({ tone: "err", text: e instanceof Error ? e.message : "Failed." });
@@ -289,8 +325,11 @@ export function WiseCard() {
         <div className="space-y-2 border-t border-bg-border pt-3">
           <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">Bank feed</div>
           <p className="text-xs text-fg-dim">
-            Brings Wise activity (CAD and USD) into Transactions on Business chequing. Stripe payouts are booked as transfers from Stripe clearing; everything else
-            waits for you to categorise. Syncing again never adds a line twice.
+            Brings Wise activity (CAD and USD) into Transactions on Business chequing. A payment that is already an expense in Bills is matched to it, and a deposit
+            already recorded against an invoice is set aside, so nothing is counted twice. Stripe payouts are booked as transfers from Stripe clearing (only when
+            Stripe clearing holds them in the currency Stripe paid out from) and currency conversions through Currency exchange clearing. A line that may already
+            be on the books — it could be one of several expenses, part of one, or inside the opening balance — is held with a note saying why, and no rule
+            ever books it; you decide it. Everything else waits for you or your rules to categorise. Syncing again never adds a line twice.
           </p>
           <div className="flex flex-wrap items-end gap-2">
             <div>
@@ -307,8 +346,11 @@ export function WiseCard() {
           <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">Opening balance</div>
           {!WISE_FEED_WRITES_ENABLED && <p className="text-xs text-status-warm">{WISE_FEED_OFF_MESSAGE}</p>}
           <p className="text-xs text-fg-dim">
-            Sets Business chequing to what Wise actually held at the end of a day, one entry per currency against Retained earnings. Preview first; nothing is
-            posted until you confirm.
+            Sets Business chequing to what Wise actually held at the end of a day, one entry per currency against Retained earnings. There is only ever one per
+            currency: posting again replaces it (the old entry is reversed). Wise lines not yet categorised count as if they were, so categorising them later
+            keeps chequing equal to Wise. A bank payment matched to an expense dated on the other side of the day counts on the bank&apos;s date, and a voided
+            entry counts as never booked, so chequing equals Wise from the later of the two dates on. If the books on or before the day change afterwards, the
+            next sync says so and you re-post. Preview first; nothing is posted until you confirm.
           </p>
           <div className="flex flex-wrap items-end gap-2">
             <div>
@@ -349,12 +391,37 @@ export function WiseCard() {
                   ))}
                 </tbody>
               </table>
-              {opening.dry_run && opening.lines.some((l) => l.difference_cents !== 0) && (
-                <button type="button" className={primaryButton} disabled={!WISE_FEED_WRITES_ENABLED || busy !== null} onClick={() => openingBalance(true)}>
-                  {busy === "opening_post" ? "Posting…" : `Post opening balance for ${opening.date}`}
+              {opening.dry_run && (
+                <ul className="space-y-1 text-xs text-fg-dim">
+                  {opening.lines.map((l) => (
+                    <li key={l.currency}>
+                      {l.existing && (
+                        <span className="text-status-warm">
+                          An opening balance is already posted for {l.currency}: {formatCents(l.existing.cents, l.currency)} on {l.existing.date}.{" "}
+                        </span>
+                      )}
+                      {openingSentence(l, opening.date, false)}
+                      {l.pending_lines > 0 && (
+                        <>
+                          {" "}
+                          Books include {l.pending_lines} Wise line(s) not yet categorised ({formatCents(l.pending_cents, l.currency)}).
+                        </>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {opening.dry_run && opening.blocked && <p className="text-xs text-status-warm">{opening.blocked}</p>}
+              {opening.dry_run && opening.lines.some(writes) && (
+                <button type="button" className={primaryButton} disabled={!WISE_FEED_WRITES_ENABLED || busy !== null || !!opening.blocked} onClick={() => openingBalance(true)}>
+                  {busy === "opening_post"
+                    ? "Posting…"
+                    : opening.lines.some((l) => l.action === "replace" || l.action === "remove")
+                      ? `Replace the opening balance with ${opening.date}`
+                      : `Post opening balance for ${opening.date}`}
                 </button>
               )}
-              {opening.dry_run && opening.lines.every((l) => l.difference_cents === 0) && (
+              {opening.dry_run && !opening.blocked && !opening.lines.some(writes) && (
                 <p className="text-xs text-status-engaged">Business chequing already matches Wise on {opening.date}.</p>
               )}
             </>
