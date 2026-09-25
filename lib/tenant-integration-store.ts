@@ -18,6 +18,7 @@
 import "server-only";
 import { getServiceSupabase } from "./supabase-server";
 import { encryptField, decryptField } from "./field-encryption";
+import { isOasisSurfaceTenant } from "./role-surfaces";
 import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integration-schemas";
 
 /**
@@ -180,6 +181,27 @@ function readEnvFallback(service: string, fieldKey: string): string | null {
   return null;
 }
 
+// Services whose env value is OASIS's OWN account, not a platform default.
+// The Worker's STRIPE_SECRET_KEY is a full live key for OASIS's Stripe
+// (2026-09-25); answering it to any tenant would let a SunBiz lead that
+// carries the website-sales marker create payment links or read charges in
+// OASIS's account. Only an OASIS tenant falls back; every other tenant must
+// store its own key. Fails closed when the tenant can't be resolved.
+const OASIS_OWNED_ENV_FALLBACK_SERVICES: ReadonlySet<string> = new Set(["stripe"]);
+
+async function tenantMayUseEnvFallback(tenantId: string, service: string): Promise<boolean> {
+  if (!OASIS_OWNED_ENV_FALLBACK_SERVICES.has(service)) return true;
+  const r = await getServiceSupabase().from("tenants").select("slug").eq("id", tenantId).maybeSingle();
+  if (r.error) {
+    console.error("[tenant-integration-store] tenant lookup failed; OASIS-owned env fallback refused", {
+      service,
+      error: r.error.message,
+    });
+    return false;
+  }
+  return isOasisSurfaceTenant((r.data as { slug?: string | null } | null)?.slug);
+}
+
 /**
  * Resolve a single value. Returns null when neither the DB nor the
  * env-var fallback has it. NEVER throws on missing data — callers
@@ -208,7 +230,7 @@ export async function getTenantIntegrationValue(
     }
   }
   const envValue = readEnvFallback(service, fieldKey);
-  if (envValue) return envValue;
+  if (envValue && (await tenantMayUseEnvFallback(tenantId, service))) return envValue;
   return null;
 }
 
@@ -238,7 +260,7 @@ export async function getTenantIntegrationBundle(
     }
   }
   if (options.allowEnvFallback !== false) {
-    const envMap = ENV_FALLBACKS[service] || {};
+    const envMap = (await tenantMayUseEnvFallback(tenantId, service)) ? ENV_FALLBACKS[service] || {} : {};
     for (const fieldKey of Object.keys(envMap)) {
       if (bundle[fieldKey]) continue;
       const value = readEnvFallback(service, fieldKey);
@@ -278,8 +300,9 @@ export async function getTenantIntegrationPresenceForStatus(
     ),
   );
   const presence: Record<string, boolean> = {};
+  const envAllowed = await tenantMayUseEnvFallback(tenantId, service);
   for (const fieldKey of fieldKeys) {
-    const envPresent = envKeysFor(service, fieldKey).some(
+    const envPresent = envAllowed && envKeysFor(service, fieldKey).some(
       (envKey) => Boolean(process.env[envKey]?.trim()),
     );
     const encrypted = stored.get(fieldKey);
