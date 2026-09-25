@@ -10,31 +10,45 @@
  * converge on the same row. revenueCollected reads that table, which is why a
  * Stripe-paid invoice cannot be counted twice.
  *
- * POSTING. Charge (no invoice): Dr Stripe clearing / Cr revenue, gross CAD.
- * Charge for a fin invoice: Dr Stripe clearing / Cr AR (via invoice-store's
- * settlement, with realised FX for USD). Fee: Dr Stripe fees / Cr Stripe
- * clearing, from the charge's balance transaction. Refund: Dr Refunds / Cr
- * Stripe clearing. A charge booked as revenue and matched to an invoice later
- * gets a reclass (Dr revenue / Cr AR) instead of a second income entry.
+ * POSTING. Charge (no fin invoice): Dr Stripe clearing / Cr revenue, gross
+ * CAD — 4010 Subscription revenue when the charge paid a Stripe invoice FOR A
+ * SUBSCRIPTION, 4000 Service revenue otherwise (a one-off charge or a one-off
+ * Stripe invoice). Charge for a fin invoice: Dr Stripe clearing / Cr AR (via
+ * invoice-store's settlement, with realised FX for USD). Fee: Dr Stripe fees
+ * / Cr Stripe clearing, from the charge's balance transaction, in ITS
+ * currency (the settlement currency — USD for OASIS's account) on the day the
+ * balance moved. Refund: Dr Refunds / Cr Stripe clearing. A charge booked as
+ * revenue and matched to an invoice later gets a reclass (Dr revenue / Cr AR)
+ * instead of a second income entry.
  *
- * FEES may be unknown when the event arrives (no verified Stripe key, or a
- * balance transaction not yet readable). Then the payment is recorded with
- * fee_status 'pending' and syncPendingStripe() completes it later; a USD
- * charge whose CAD settlement had to be estimated from the Bank of Canada
- * rate is trued up to Stripe's real figure at that point (the gap is FX).
+ * SUBSCRIPTION OR NOT. From API 2025-03-31 (basil; the account default) a
+ * charge no longer names its invoice, so a new payment asks Stripe which
+ * invoice its payment intent paid (GET /v1/invoice_payments, read-only).
+ * Only NEW payment rows are classified; a row already in the books keeps the
+ * account it was posted to.
+ *
+ * FEES may be unknown when the event arrives (no verified Stripe key, a
+ * balance transaction not yet readable, or no Bank of Canada rate yet for the
+ * fee's day). Then the payment is recorded with fee_status 'pending' and
+ * syncPendingStripe() completes it later — card (ch_) and non-card (py_)
+ * charges alike; a USD charge whose CAD settlement had to be estimated from
+ * the Bank of Canada rate is trued up to Stripe's real CAD figure when the
+ * balance transaction is in CAD (the gap is FX).
  */
 import "server-only";
 
 import { accountId, BUSINESS_ENTITY_ID, SYS } from "./chart";
 import { divRoundHalfAwayFromZero } from "./money";
-import { torontoDateOfEpochSeconds, usdToCadCents } from "./fx";
+import { addDays, torontoDateOfEpochSeconds, usdToCadCents } from "./fx";
 import {
   chargeFacts,
   eventEnvelope,
   finMetadata,
+  invoiceFromInvoicePayments,
   invoicePaidFacts,
   paymentIntentFacts,
   refundFacts,
+  stripeInvoiceFacts,
   subscriptionFacts,
   balanceTxnFacts,
   type BalanceTxnFacts,
@@ -47,9 +61,10 @@ import {
 import { subscriptionMonthlyCents } from "./mrr";
 import { auditStatement, finDb, isUniqueViolation, newId, query, queryOne, writeBatch, type InStatement } from "./db";
 import { buildPosting } from "./ledger-io";
-import { usdCadRate } from "./fx-io";
+import { LedgerError } from "./ledger";
+import { rateLookupFor, usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
-import { getStripeClient, listAll, stripeRequest, StripeNotReady } from "./stripe-io";
+import { getStripeClient, listAll, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
@@ -164,6 +179,57 @@ function cadFromBalanceTxn(bt: BalanceTxnFacts | null): { gross: number; fee: nu
 }
 
 /**
+ * Fill in `subscriptionInvoice` (and the Stripe invoice id) when the payload
+ * did not carry them, by asking Stripe which invoice the charge paid. Reads
+ * only. Stays null without a verified key. A 4xx from Stripe (e.g. a key
+ * without invoice read access) is logged and leaves it null; a 5xx/429 or a
+ * network failure throws, so the webhook is retried and a reconcile stops
+ * loudly instead of booking revenue to a guessed account.
+ */
+async function classifyCharge(charge: ChargeInput): Promise<void> {
+  if (charge.subscriptionInvoice !== null) return;
+  const key = await readyKey();
+  if (!key) return;
+  try {
+    let invoiceId = charge.stripeInvoiceId;
+    if (!invoiceId) {
+      if (!charge.paymentIntentId) {
+        // No payment intent: a direct charge, which no Stripe invoice creates.
+        charge.subscriptionInvoice = false;
+        return;
+      }
+      const u = new URLSearchParams();
+      u.set("payment[type]", "payment_intent");
+      u.set("payment[payment_intent]", charge.paymentIntentId);
+      u.set("limit", "10");
+      u.append("expand[]", "data.invoice");
+      const found = invoiceFromInvoicePayments(await stripeRequest(key, "GET", "/v1/invoice_payments", u));
+      if (found.kind === "none") {
+        charge.subscriptionInvoice = false;
+        return;
+      }
+      if (found.kind === "invoice") {
+        charge.stripeInvoiceId = found.invoice.stripeInvoiceId;
+        charge.subscriptionInvoice = found.invoice.forSubscription;
+        return;
+      }
+      invoiceId = found.stripeInvoiceId;
+      if (!invoiceId) return;
+    }
+    const inv = stripeInvoiceFacts(await stripeRequest(key, "GET", `/v1/invoices/${encodeURIComponent(invoiceId)}`));
+    if (!inv) return;
+    charge.stripeInvoiceId = inv.stripeInvoiceId;
+    charge.subscriptionInvoice = inv.forSubscription;
+  } catch (e) {
+    if (e instanceof StripeApiError && e.status >= 400 && e.status < 500 && e.status !== 429) {
+      console.error("[finances:stripe] could not tell whether the charge paid a subscription invoice", charge.chargeId, e.message);
+      return;
+    }
+    throw e;
+  }
+}
+
+/**
  * Record one succeeded charge (idempotent). Returns the payment row id.
  * `fetchFees`: may call Stripe for the balance transaction when the payload
  * did not carry it expanded.
@@ -211,7 +277,13 @@ export async function recordStripeCharge(
   const invoiceId = await linkableInvoice(charge.metadata.finInvoiceId, charge.currency);
   const contactId = invoiceId ? (await loadInvoice(invoiceId))?.contact_id ?? null : await contactForCustomer(charge.customerId);
   const paymentId = newId("pay");
-  const incomeCode = charge.stripeInvoiceId ? SYS.subscriptionRevenue : SYS.serviceRevenue;
+  // Only a payment booked as revenue needs its revenue account; a fin
+  // invoice's payment settles AR.
+  if (!invoiceId) await classifyCharge(charge);
+  if (!invoiceId && charge.subscriptionInvoice === null) {
+    console.warn("[finances:stripe] subscription or one-off unknown (no verified key or lookup refused); booked as service revenue", charge.chargeId);
+  }
+  const incomeCode = charge.subscriptionInvoice === true ? SYS.subscriptionRevenue : SYS.serviceRevenue;
   const statements: InStatement[] = [
     {
       sql: `INSERT OR IGNORE INTO fin_payments
@@ -248,7 +320,7 @@ export async function recordStripeCharge(
     },
   ];
   if (invoiceId) statements.push(recomputeInvoicePaidStatement(invoiceId, new Date(charge.created * 1000).toISOString()));
-  statements.push(auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_recorded", objectType: "payment", objectId: paymentId, detail: { charge: charge.chargeId, invoice: invoiceId } }));
+  statements.push(auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_recorded", objectType: "payment", objectId: paymentId, detail: { charge: charge.chargeId, invoice: invoiceId, income: invoiceId ? null : incomeCode, subscription: charge.subscriptionInvoice } }));
   await writeBatch(statements);
 
   // OR IGNORE may have lost a race to a concurrent delivery: re-read by key.
@@ -256,7 +328,7 @@ export async function recordStripeCharge(
   if (!row) throw new Error(`payment for ${charge.chargeId ?? charge.paymentIntentId} was neither inserted nor found`);
   const created = row.id === paymentId;
   await postPaymentEntries(row.id);
-  if (created && fromBt) await postFeeIfKnown(row.id);
+  if (bt) await postFee(row.id, bt);
   if (created && invoiceId) await deactivatePaymentLinkIfPaid(invoiceId);
   if (charge.amountRefundedCents > 0) await recordRefundsForCharge(row.id, charge, charge.refunds, opts);
   return { paymentId: row.id, created };
@@ -372,42 +444,84 @@ export async function postPaymentEntries(paymentId: string): Promise<void> {
   }
 }
 
-async function postFeeIfKnown(paymentId: string): Promise<void> {
+/**
+ * Post a charge's Stripe fee from its balance transaction: Dr 5000 Stripe
+ * fees / Cr 1050 Stripe clearing, in the balance transaction's OWN currency
+ * (the settlement currency — USD for OASIS, whatever the charge currency),
+ * dated the Toronto day the balance moved, CAD equivalent at that day's Bank
+ * of Canada rate like every other foreign line. Once per payment
+ * (fee_status) and once per charge (source 'stripe_fee' + the charge id is
+ * unique), so a re-run posts nothing. fee_cad_cents is set to the CAD the
+ * ledger actually booked, read back from the entry in the same batch.
+ *
+ * Returns true when the fee is in the books (now or before). No rate for the
+ * fee's day yet -> false, left pending for the next sync, never guessed.
+ */
+async function postFee(paymentId: string, bt: BalanceTxnFacts): Promise<boolean> {
   const p = await loadPayment(paymentId);
-  if (!p || p.fee_status === "posted" || p.fee_cad_cents === null) return;
+  if (!p || p.kind !== "payment") return false;
+  if (p.fee_status !== "pending") return p.fee_status === "posted";
+  const sourceRef = p.stripe_charge_id || p.id;
+  const feesAccount = accountId(E, SYS.stripeFees);
+  const clearing = p.deposit_account_id || accountId(E, SYS.stripeClearing);
+  const markPosted: InStatement = {
+    sql: `UPDATE fin_payments
+             SET fee_status = 'posted',
+                 fee_cad_cents = COALESCE((SELECT SUM(l.cad_debit_cents) - SUM(l.cad_credit_cents)
+                                             FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
+                                            WHERE e.entity_id = ? AND e.source = 'stripe_fee' AND e.source_ref = ? AND l.account_id = ?), 0),
+                 stripe_balance_txn_id = COALESCE(stripe_balance_txn_id, ?)
+           WHERE id = ? AND fee_status = 'pending'`,
+    args: [E, sourceRef, feesAccount, bt.id, p.id],
+  };
   const statements: InStatement[] = [];
-  if (p.fee_cad_cents > 0) {
-    const posting = await buildPosting({
-      entityId: E,
-      entryDate: p.occurred_on,
-      memo: "Stripe processing fee",
-      source: "stripe_fee",
-      sourceRef: p.stripe_charge_id || p.id,
-      createdBy: ACTOR,
-      lines: [
-        { accountId: accountId(E, SYS.stripeFees), currency: "CAD", debitCents: p.fee_cad_cents },
-        { accountId: p.deposit_account_id || accountId(E, SYS.stripeClearing), currency: "CAD", creditCents: p.fee_cad_cents },
-      ],
-    });
-    statements.push(...posting.statements);
+  if (bt.feeCents !== 0) {
+    const amount = Math.abs(bt.feeCents);
+    const [dr, cr] = bt.feeCents > 0 ? [feesAccount, clearing] : [clearing, feesAccount];
+    try {
+      const posting = await buildPosting({
+        entityId: E,
+        entryDate: bt.created !== null ? torontoDateOfEpochSeconds(bt.created) : p.occurred_on,
+        memo: bt.feeCents > 0 ? "Stripe processing fee" : "Stripe fee credit",
+        source: "stripe_fee",
+        sourceRef,
+        createdBy: ACTOR,
+        lines: [
+          { accountId: dr, currency: bt.currency, debitCents: amount },
+          { accountId: cr, currency: bt.currency, creditCents: amount },
+        ],
+      });
+      statements.push(...posting.statements);
+    } catch (e) {
+      if (e instanceof LedgerError && e.code === "fx_rate_missing") {
+        console.error("[finances:stripe] fee left pending: no Bank of Canada rate yet for", bt.currency, "on the fee's day", p.id);
+        return false;
+      }
+      throw e;
+    }
   }
-  statements.push({ sql: `UPDATE fin_payments SET fee_status = 'posted' WHERE id = ?`, args: [p.id] });
+  statements.push(markPosted);
   try {
     await writeBatch(statements);
   } catch (e) {
     if (!isUniqueViolation(e)) throw e;
-    await finDb().execute({ sql: `UPDATE fin_payments SET fee_status = 'posted' WHERE id = ?`, args: [p.id] });
+    // Already posted under this charge by a concurrent run: adopt that entry.
+    await finDb().execute(markPosted);
   }
+  return true;
 }
 
 /**
- * Fill in what a later look at the balance transaction tells us: the fee,
- * and for an estimated USD settlement the real CAD figure (trued up against
- * FX gain/loss if the estimate was already posted).
+ * Fill in what a later look at the balance transaction tells us: the fee
+ * (any settlement currency), and for an estimated USD settlement the real CAD
+ * figure when Stripe settled in CAD (trued up against FX gain/loss if the
+ * estimate was already posted). Returns true when the payment is complete:
+ * income entry posted and fee in the books. No balance transaction yet ->
+ * false, still pending, not an error.
  */
-async function completeSettlement(paymentId: string, bt: BalanceTxnFacts | null): Promise<void> {
+async function completeSettlement(paymentId: string, bt: BalanceTxnFacts | null): Promise<boolean> {
   const p = await loadPayment(paymentId);
-  if (!p) return;
+  if (!p) return false;
   const fromBt = cadFromBalanceTxn(bt);
   if (fromBt) {
     const wasEstimated = p.settlement_estimated === 1 && p.settlement_cad_cents !== null;
@@ -447,7 +561,10 @@ async function completeSettlement(paymentId: string, bt: BalanceTxnFacts | null)
     }
   }
   await postPaymentEntries(p.id);
-  if (fromBt) await postFeeIfKnown(p.id);
+  const feeDone = bt ? await postFee(p.id, bt) : false;
+  if (!feeDone) return false;
+  const after = await loadPayment(p.id);
+  return after !== null && after.entry_id !== null;
 }
 
 /**
@@ -684,6 +801,7 @@ export async function applyStripeInvoicePaid(facts: InvoicePaidFacts): Promise<s
       chargeId: facts.chargeId,
       paymentIntentId: facts.paymentIntentId,
       stripeInvoiceId: facts.stripeInvoiceId,
+      subscriptionInvoice: facts.forSubscription,
       customerId: facts.customerId,
       customerName: facts.customerName,
       customerEmail: facts.customerEmail,
@@ -701,6 +819,8 @@ export async function applyStripeInvoicePaid(facts: InvoicePaidFacts): Promise<s
     };
   }
   charge.stripeInvoiceId = charge.stripeInvoiceId || facts.stripeInvoiceId;
+  // This invoice is what the charge paid, so it decides subscription vs one-off.
+  charge.subscriptionInvoice = facts.forSubscription;
   if (!charge.metadata.finInvoiceId && facts.metadata.finInvoiceId) charge.metadata = facts.metadata;
   const res = await recordStripeCharge(charge, { fetchFees: true });
   return res.created ? "recorded" : "linked_existing";
@@ -837,6 +957,7 @@ async function dispatch(env: StripeEventEnvelope): Promise<string> {
           chargeId: pi.latestChargeId,
           paymentIntentId: pi.paymentIntentId,
           stripeInvoiceId: null,
+          subscriptionInvoice: null,
           customerId: pi.customerId,
           customerName: "",
           customerEmail: "",
@@ -964,23 +1085,34 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
   return summary;
 }
 
-/** Complete payments recorded without a fee or without a CAD settlement. */
+/**
+ * Complete payments recorded without a fee or without a CAD settlement.
+ * Card charges (ch_) and non-card payments (py_: Link, pre-authorized debit)
+ * are both Charges that GET /v1/charges/{id} returns with their balance
+ * transaction. Returns how many became complete; one whose balance
+ * transaction is not available yet stays pending and is not counted.
+ */
 export async function syncPendingStripe(key?: string): Promise<number> {
   const k = key ?? (await readyKey());
   if (!k) return 0;
-  const pending = await query<{ id: string; stripe_charge_id: string | null }>(
-    `SELECT id, stripe_charge_id FROM fin_payments
+  const pending = await query<{ id: string; stripe_charge_id: string | null; occurred_on: string }>(
+    `SELECT id, stripe_charge_id, occurred_on FROM fin_payments
       WHERE kind = 'payment' AND source = 'stripe' AND (fee_status = 'pending' OR entry_id IS NULL)
       ORDER BY occurred_on LIMIT 100`,
   );
+  if (pending.length > 0) {
+    // A non-CAD fee needs its day's rate. Fetch any missing days from the Bank
+    // of Canada in ONE request up front rather than one per payment.
+    const days = [...new Set(pending.map((p) => p.occurred_on))].sort();
+    await rateLookupFor(days[0], addDays(days[days.length - 1], 1), { ensureDays: days });
+  }
   let done = 0;
   for (const p of pending) {
-    if (!p.stripe_charge_id || !p.stripe_charge_id.startsWith("ch_")) continue;
+    if (!p.stripe_charge_id || !/^(ch|py)_/.test(p.stripe_charge_id)) continue;
     try {
       const c = await fetchChargeExpanded(k, p.stripe_charge_id);
       if (!c) continue;
-      await completeSettlement(p.id, c.balanceTxn);
-      done += 1;
+      if (await completeSettlement(p.id, c.balanceTxn)) done += 1;
     } catch (e) {
       console.error("[finances:stripe] pending sync failed", p.id, e instanceof Error ? e.message : e);
     }

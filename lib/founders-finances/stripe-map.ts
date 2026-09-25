@@ -38,6 +38,13 @@ export type ChargeFacts = {
   chargeId: string;
   paymentIntentId: string | null;
   stripeInvoiceId: string | null;
+  /**
+   * Whether the charge pays a Stripe invoice FOR A SUBSCRIPTION. null =
+   * unknown: from 2025-03-31 (basil) a charge no longer names its invoice at
+   * all, so only a lookup (invoice_payments by payment intent) can tell.
+   * false only when the payload itself says there is no invoice.
+   */
+  subscriptionInvoice: boolean | null;
   customerId: string | null;
   customerName: string;
   customerEmail: string;
@@ -66,10 +73,15 @@ export function chargeFacts(raw: unknown): ChargeFacts | null {
   const customerObj = asObj(c.customer);
   const refundsList = asObj(c.refunds);
   const refundsData = Array.isArray(refundsList?.data) ? (refundsList!.data as unknown[]) : null;
+  // Pre-basil payloads carry `invoice` (null when there is none); basil
+  // payloads omit the key, which says nothing either way.
+  const expandedInvoice = stripeInvoiceFacts(c.invoice);
+  const subscriptionInvoice = !("invoice" in c) ? null : c.invoice === null ? false : expandedInvoice ? expandedInvoice.forSubscription : null;
   return {
     chargeId,
     paymentIntentId: idOf(c.payment_intent),
     stripeInvoiceId: idOf(c.invoice),
+    subscriptionInvoice,
     customerId: idOf(c.customer),
     customerName: str(billing?.name) || str(customerObj?.name) || "",
     customerEmail: str(billing?.email) || str(c.receipt_email) || str(customerObj?.email) || "",
@@ -159,12 +171,20 @@ export function refundFacts(raw: unknown): RefundFacts | null {
   };
 }
 
+/**
+ * A balance transaction is in the SETTLEMENT currency — the Stripe account's
+ * own currency, which need not be the charge's. OASIS's account settles in
+ * USD (every live balance transaction and payout, checked 2026-09-24), so a
+ * CA$100 charge lands as a USD amount with a USD fee.
+ */
 export type BalanceTxnFacts = {
   id: string;
   amountCents: number;
   feeCents: number;
   netCents: number;
   currency: string;
+  /** When the balance moved (epoch seconds); null when the payload lacks it. */
+  created: number | null;
 };
 
 /** Only an EXPANDED balance transaction yields facts; a bare id yields null. */
@@ -176,7 +196,52 @@ export function balanceTxnFacts(raw: unknown): BalanceTxnFacts | null {
   const net = int(b?.net);
   const currency = normalizeCurrencyCode(b?.currency);
   if (!b || !id || amount === null || fee === null || net === null || !currency) return null;
-  return { id, amountCents: amount, feeCents: fee, netCents: net, currency };
+  return { id, amountCents: amount, feeCents: fee, netCents: net, currency, created: int(b.created) };
+}
+
+export type StripeInvoiceFacts = {
+  stripeInvoiceId: string;
+  subscriptionId: string | null;
+  billingReason: string | null;
+  /** The invoice bills a subscription: it names one, or billing_reason is subscription*. */
+  forSubscription: boolean;
+};
+
+/** A subscription invoice names its subscription, or says so in billing_reason (subscription_create, _cycle, _update, _threshold). */
+export function isSubscriptionInvoice(f: { subscriptionId: string | null; billingReason: string | null }): boolean {
+  return f.subscriptionId !== null || (f.billingReason ?? "").startsWith("subscription");
+}
+
+/**
+ * An EXPANDED invoice -> facts; a bare id yields null. The subscription is
+ * `invoice.subscription` before 2025-03-31 and
+ * `invoice.parent.subscription_details.subscription` from then on.
+ */
+export function stripeInvoiceFacts(raw: unknown): StripeInvoiceFacts | null {
+  const inv = asObj(raw);
+  const id = str(inv?.id);
+  if (!inv || !id || !id.startsWith("in_")) return null;
+  const parent = asObj(asObj(inv.parent)?.subscription_details);
+  const subscriptionId = idOf(inv.subscription) || idOf(parent?.subscription);
+  const billingReason = str(inv.billing_reason);
+  return { stripeInvoiceId: id, subscriptionId, billingReason, forSubscription: isSubscriptionInvoice({ subscriptionId, billingReason }) };
+}
+
+/**
+ * GET /v1/invoice_payments?payment[payment_intent]=… (with data.invoice
+ * expanded) -> the invoice a payment paid. `none` = Stripe lists no invoice
+ * for it: a one-off payment. `unknown` = the list could not be read, or names
+ * an invoice it did not expand.
+ */
+export function invoiceFromInvoicePayments(raw: unknown): { kind: "invoice"; invoice: StripeInvoiceFacts } | { kind: "none" } | { kind: "unknown"; stripeInvoiceId: string | null } {
+  const list = asObj(raw);
+  if (!list || !Array.isArray(list.data)) return { kind: "unknown", stripeInvoiceId: null };
+  const rows = (list.data as unknown[]).map(asObj).filter((r): r is Obj => r !== null);
+  if (rows.length === 0) return { kind: "none" };
+  // Prefer the payment that actually paid; an open/canceled attempt is not it.
+  const row = rows.find((r) => r.status === "paid") ?? rows[0];
+  const invoice = stripeInvoiceFacts(row.invoice);
+  return invoice ? { kind: "invoice", invoice } : { kind: "unknown", stripeInvoiceId: idOf(row.invoice) };
 }
 
 export type InvoicePaidFacts = {
@@ -192,6 +257,9 @@ export type InvoicePaidFacts = {
   livemode: boolean;
   metadata: FinMetadata;
   subscriptionId: string | null;
+  billingReason: string | null;
+  /** Paid for a subscription -> subscription revenue; a one-off Stripe invoice -> service revenue. */
+  forSubscription: boolean;
 };
 
 export function invoicePaidFacts(raw: unknown): InvoicePaidFacts | null {
@@ -212,7 +280,7 @@ export function invoicePaidFacts(raw: unknown): InvoicePaidFacts | null {
       paymentIntentId = paymentIntentId || idOf(pay?.payment_intent);
     }
   }
-  const parent = asObj(asObj(inv.parent)?.subscription_details);
+  const kind = stripeInvoiceFacts(inv)!; // non-null: same id/object checks as above
   return {
     stripeInvoiceId: id,
     chargeId,
@@ -225,7 +293,9 @@ export function invoicePaidFacts(raw: unknown): InvoicePaidFacts | null {
     paidAt,
     livemode: inv.livemode === true,
     metadata: finMetadata(inv),
-    subscriptionId: idOf(inv.subscription) || idOf(parent?.subscription),
+    subscriptionId: kind.subscriptionId,
+    billingReason: kind.billingReason,
+    forSubscription: kind.forSubscription,
   };
 }
 

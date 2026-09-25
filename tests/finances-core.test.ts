@@ -56,7 +56,17 @@ import { trialBalance, balanceSheet, profitAndLoss, cashFlow, arAging, toCsv, ty
 import { ownerParity } from "../lib/founders-finances/parity";
 import { seedStatements, BUSINESS_CHART, PERSONAL_CHART, SYS, ENTITY_SEEDS } from "../lib/founders-finances/chart";
 import { validateTransactionInput, validateBulkTransactions, validateBillInput } from "../lib/founders-finances/validation";
-import { chargeFacts, paymentIntentFacts, subscriptionFacts, invoicePaidFacts, customerLabel } from "../lib/founders-finances/stripe-map";
+import {
+  chargeFacts,
+  paymentIntentFacts,
+  subscriptionFacts,
+  invoicePaidFacts,
+  customerLabel,
+  balanceTxnFacts,
+  stripeInvoiceFacts,
+  isSubscriptionInvoice,
+  invoiceFromInvoicePayments,
+} from "../lib/founders-finances/stripe-map";
 
 let passed = 0;
 function t(name: string, fn: () => void) {
@@ -629,6 +639,54 @@ t("stripe payloads across API versions", () => {
   const inv = invoicePaidFacts({ id: "in_1", currency: "cad", amount_paid: 100, payments: { data: [{ payment: { type: "payment_intent", payment_intent: "pi_7" } }] } });
   assert.equal(inv!.paymentIntentId, "pi_7", "2025-03-31 invoice.payments shape");
   assert.equal(customerLabel({ name: "", email: "" }), "Unknown customer");
+});
+
+// Live shapes, 2026-09-24 (account API 2025-07-30.basil): a CA$ charge whose
+// balance transaction is in USD, no `invoice` key on the charge, and the
+// subscription on invoice.parent.subscription_details.
+t("stripe: settlement-currency balance transactions and subscription vs one-off invoices", () => {
+  const bt = balanceTxnFacts({ id: "txn_1", object: "balance_transaction", amount: 7226, fee: 442, net: 6784, currency: "usd", created: 1_788_646_076, status: "available" });
+  assert.deepEqual(bt, { id: "txn_1", amountCents: 7226, feeCents: 442, netCents: 6784, currency: "USD", created: 1_788_646_076 });
+  assert.equal(balanceTxnFacts({ id: "txn_2", amount: 1, fee: 0, net: 1, currency: "cad" })!.created, null, "created is optional");
+
+  const basil = chargeFacts({ id: "py_1", amount: 15000, currency: "cad", created: 1, status: "succeeded", paid: true, livemode: true, payment_intent: "pi_1" });
+  assert.equal(basil!.chargeId, "py_1", "non-card payments (py_) are charges too");
+  assert.equal(basil!.subscriptionInvoice, null, "basil: no invoice key -> unknown, never 'one-off'");
+  const legacyNone = chargeFacts({ id: "ch_1", amount: 100, currency: "cad", created: 1, status: "succeeded", invoice: null });
+  assert.equal(legacyNone!.subscriptionInvoice, false, "pre-basil invoice: null -> not an invoice payment");
+  const legacyId = chargeFacts({ id: "ch_2", amount: 100, currency: "cad", created: 1, status: "succeeded", invoice: "in_2" });
+  assert.equal(legacyId!.stripeInvoiceId, "in_2");
+  assert.equal(legacyId!.subscriptionInvoice, null, "an invoice id alone does not say subscription");
+  const legacyExpanded = chargeFacts({ id: "ch_3", amount: 100, currency: "cad", created: 1, status: "succeeded", invoice: { id: "in_3", subscription: "sub_3", billing_reason: "subscription_cycle" } });
+  assert.equal(legacyExpanded!.stripeInvoiceId, "in_3");
+  assert.equal(legacyExpanded!.subscriptionInvoice, true);
+
+  const subBasil = stripeInvoiceFacts({ id: "in_4", billing_reason: "subscription_cycle", parent: { type: "subscription_details", subscription_details: { subscription: "sub_4" } } });
+  assert.deepEqual(subBasil, { stripeInvoiceId: "in_4", subscriptionId: "sub_4", billingReason: "subscription_cycle", forSubscription: true });
+  assert.equal(stripeInvoiceFacts({ id: "in_5", subscription: "sub_5", billing_reason: "manual" })!.forSubscription, true, "names a subscription");
+  assert.equal(stripeInvoiceFacts({ id: "in_6", billing_reason: "subscription_create" })!.forSubscription, true, "billing_reason subscription_*");
+  assert.equal(stripeInvoiceFacts({ id: "in_7", billing_reason: "manual", parent: null })!.forSubscription, false, "a one-off Stripe invoice");
+  assert.equal(stripeInvoiceFacts("in_8"), null, "a bare id yields no facts");
+  assert.equal(isSubscriptionInvoice({ subscriptionId: null, billingReason: "quote_accept" }), false);
+
+  const paid = invoicePaidFacts({ id: "in_9", currency: "cad", amount_paid: 10000, billing_reason: "subscription_cycle", parent: { subscription_details: { subscription: "sub_9" } } });
+  assert.equal(paid!.subscriptionId, "sub_9");
+  assert.equal(paid!.billingReason, "subscription_cycle");
+  assert.equal(paid!.forSubscription, true);
+  assert.equal(invoicePaidFacts({ id: "in_10", currency: "cad", amount_paid: 10000, billing_reason: "manual" })!.forSubscription, false);
+
+  const found = invoiceFromInvoicePayments({
+    object: "list",
+    data: [
+      { id: "inpay_a", status: "canceled", invoice: { id: "in_old", billing_reason: "manual" } },
+      { id: "inpay_b", status: "paid", invoice: { id: "in_11", billing_reason: "subscription_cycle", parent: { subscription_details: { subscription: "sub_11" } } } },
+    ],
+  });
+  assert.equal(found.kind, "invoice");
+  assert.equal(found.kind === "invoice" && found.invoice.stripeInvoiceId, "in_11", "the payment that PAID wins over an abandoned attempt");
+  assert.deepEqual(invoiceFromInvoicePayments({ object: "list", data: [] }), { kind: "none" }, "no invoice -> a one-off payment");
+  assert.deepEqual(invoiceFromInvoicePayments({ object: "list", data: [{ status: "paid", invoice: "in_12" }] }), { kind: "unknown", stripeInvoiceId: "in_12" });
+  assert.deepEqual(invoiceFromInvoicePayments(null), { kind: "unknown", stripeInvoiceId: null });
 });
 
 console.log(`finances-core: ${passed} groups passed`);
