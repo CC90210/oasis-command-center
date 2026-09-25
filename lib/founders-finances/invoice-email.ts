@@ -25,6 +25,7 @@ import "server-only";
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { mailboxBrandConflict } from "@/lib/email/brand-for-tenant";
 import { formatCents } from "./money";
+import { oneTimePayVerb } from "./invoice";
 
 export class InvoiceMailerNotConfigured extends Error {
   constructor(message: string) {
@@ -70,24 +71,48 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
-/**
- * PURE. Subject + text + html for an invoice or a reminder. `bankTransfer`
- * (Wise receiving details, payment reference last) prints before the card
- * link: a bank transfer is the default way to pay a one-off invoice.
- */
-export function composeInvoiceEmail(args: {
+type InvoiceEmailArgs = {
   kind: "invoice" | "reminder";
   sellerName: string;
   customerName: string;
   number: string;
+  /** The ONE-TIME total (the receivable). */
   totalCents: number;
+  /** The ONE-TIME balance still owed. */
   balanceCents: number;
   currency: string;
   dueDate: string;
   paymentLinkUrl: string | null;
   paymentInstructions: string;
   bankTransfer?: Array<{ label: string; value: string }> | null;
-}): { subject: string; text: string; html: string } {
+  /**
+   * The monthly retainer and its Stripe recurring link (migration 185).
+   * Absent = no retainer: the email is exactly what it was before 185.
+   * Reminders never carry it — they chase the one-time balance only.
+   * `setUp`: the client already started the subscription with the link, so
+   * the section says the payments are set up instead of carrying a used link.
+   */
+  retainer?: RetainerArg | null;
+};
+
+type RetainerArg = { monthlyCents: number; linkUrl: string } | { monthlyCents: number; setUp: true };
+
+const BUTTON = "display:inline-block;padding:10px 16px;background:#0b7c85;color:#ffffff;text-decoration:none;border-radius:6px";
+
+/**
+ * PURE. Subject + text + html for an invoice or a reminder. `bankTransfer`
+ * (Wise receiving details, payment reference last) prints before the card
+ * link: a bank transfer is the default way to pay a one-off invoice.
+ *
+ * With a monthly retainer the invoice email has two clearly separate parts:
+ * "Implementation — {amount} due by {date}: pay by bank transfer" (the Wise
+ * details + reference, and the card link when the invoice offers card) and
+ * "Monthly retainer — {amount}/month: set up automatic monthly card
+ * payments" (the Stripe subscription link), then "Due now" and "Monthly
+ * retainer" as two separate totals.
+ */
+export function composeInvoiceEmail(args: InvoiceEmailArgs): { subject: string; text: string; html: string } {
+  if (args.kind === "invoice" && args.retainer && args.retainer.monthlyCents > 0) return composeRetainerInvoiceEmail(args, args.retainer);
   const amount = formatCents(args.balanceCents, args.currency);
   const greeting = args.customerName ? `Hi ${args.customerName},` : "Hello,";
   const subject =
@@ -119,6 +144,87 @@ export function composeInvoiceEmail(args: {
 ${bankHtml ? `${bankHtml}\n` : ""}${args.paymentLinkUrl ? `<p><a href="${esc(args.paymentLinkUrl)}" style="display:inline-block;padding:10px 16px;background:#0b7c85;color:#ffffff;text-decoration:none;border-radius:6px">Pay ${esc(amount)}</a></p>` : ""}
 ${args.paymentInstructions ? `<p style="color:#555">${esc(args.paymentInstructions).replace(/\n/g, "<br>")}</p>` : ""}
 <p>Thank you,<br>${esc(args.sellerName)}</p>
+</div>`;
+  return { subject, text, html };
+}
+
+function composeRetainerInvoiceEmail(args: InvoiceEmailArgs, retainer: RetainerArg): { subject: string; text: string; html: string } {
+  const money = (c: number) => formatCents(c, args.currency);
+  const greeting = args.customerName ? `Hi ${args.customerName},` : "Hello,";
+  const subject = `Invoice ${args.number} from ${args.sellerName}`;
+  const dueNow = args.balanceCents > 0;
+  const monthly = `${money(retainer.monthlyCents)}/month`;
+  const lead = dueNow
+    ? `Please find attached invoice ${args.number}. It has two parts: the implementation, paid once, and your monthly retainer, paid automatically by card.`
+    : `Please find attached invoice ${args.number}. It sets up your monthly retainer; nothing is due now.`;
+  const bank = args.bankTransfer?.length ? args.bankTransfer : null;
+  const card = args.paymentLinkUrl || null;
+  const implHeading = `Implementation — ${money(args.balanceCents)} due by ${args.dueDate}: ${oneTimePayVerb(Boolean(bank), Boolean(card))}`;
+  const link = "linkUrl" in retainer ? retainer.linkUrl : null;
+  const retainerHeading = link
+    ? `Monthly retainer — ${monthly}: set up automatic monthly card payments`
+    : `Monthly retainer — ${monthly}: automatic monthly card payments are already set up`;
+  const retainerNote = link
+    ? "Your card is then charged automatically each month through Stripe."
+    : "Your card is charged automatically each month through Stripe; there is nothing to do.";
+
+  const textParts: string[] = [greeting, "", lead];
+  if (dueNow) {
+    textParts.push("", implHeading);
+    if (bank) {
+      textParts.push(...bank.map((r) => `  ${r.label}: ${r.value}`), "Please include the payment reference so we can match your payment.");
+    }
+    if (card) textParts.push(bank ? `Or pay by card: ${card}` : `Pay by card: ${card}`);
+    if (!bank && !card && args.paymentInstructions) textParts.push(args.paymentInstructions);
+  }
+  textParts.push("", retainerHeading, ...(link ? [`  ${link}`] : []), retainerNote);
+  textParts.push("", `Due now: ${money(args.balanceCents)}`, `Monthly retainer: ${monthly}`);
+  if (dueNow && args.paymentInstructions && (bank || card)) textParts.push("", args.paymentInstructions);
+  textParts.push("", "Thank you,", args.sellerName);
+  const text = textParts.join("\n");
+
+  const bankHtml = bank
+    ? `<table style="border-collapse:collapse;font-size:14px">${bank
+        .map((r) => `<tr><td style="padding:2px 16px 2px 0;color:#555">${esc(r.label)}</td><td style="padding:2px 0">${/reference/i.test(r.label) ? `<strong>${esc(r.value)}</strong>` : esc(r.value)}</td></tr>`)
+        .join("")}</table>
+<p style="color:#555;margin-top:4px">Please include the payment reference so we can match your payment.</p>`
+    : "";
+  const section = (heading: string, body: string) =>
+    `<div style="margin:18px 0;padding:14px 16px;border:1px solid #d9dde3;border-radius:8px">
+<p style="margin:0 0 8px 0"><strong>${esc(heading)}</strong></p>
+${body}
+</div>`;
+  const implHtml = dueNow
+    ? section(
+        implHeading,
+        [
+          bankHtml,
+          card ? `<p style="margin:${bank ? "10px" : "0"} 0 0 0"><a href="${esc(card)}" style="${BUTTON}">Pay ${esc(money(args.balanceCents))} by card</a></p>` : "",
+          args.paymentInstructions && !bank && !card ? `<p style="color:#555;margin:0">${esc(args.paymentInstructions).replace(/\n/g, "<br>")}</p>` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      )
+    : "";
+  const retainerHtml = section(
+    retainerHeading,
+    link
+      ? `<p style="margin:0"><a href="${esc(link)}" style="${BUTTON}">Set up monthly payments</a></p>
+<p style="color:#555;margin:8px 0 0 0">${esc(retainerNote)}</p>`
+      : `<p style="color:#555;margin:0">${esc(retainerNote)}</p>`,
+  );
+  const totalsHtml = `<table style="border-collapse:collapse;font-size:14px">
+<tr><td style="padding:2px 16px 2px 0;color:#555">Due now</td><td style="padding:2px 0;text-align:right"><strong>${esc(money(args.balanceCents))}</strong></td></tr>
+<tr><td style="padding:2px 16px 2px 0;color:#555">Monthly retainer</td><td style="padding:2px 0;text-align:right"><strong>${esc(monthly)}</strong></td></tr>
+</table>`;
+  const instructionsHtml =
+    dueNow && args.paymentInstructions && (bank || card) ? `<p style="color:#555">${esc(args.paymentInstructions).replace(/\n/g, "<br>")}</p>\n` : "";
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#16181d;line-height:1.5">
+<p>${esc(greeting)}</p>
+<p>${esc(lead)}</p>
+${implHtml ? `${implHtml}\n` : ""}${retainerHtml}
+${totalsHtml}
+${instructionsHtml}<p>Thank you,<br>${esc(args.sellerName)}</p>
 </div>`;
   return { subject, text, html };
 }

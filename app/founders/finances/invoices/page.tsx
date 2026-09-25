@@ -11,6 +11,7 @@ import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { INVOICE_STATUS_TONE as STATUS_TONE, numClass, primaryButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
 import { financePage, loadInvoicesPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
+import { retainerColumnsReady } from "@/lib/founders-finances/invoice-store";
 import { formatCents } from "@/lib/founders-finances/money";
 import { torontoToday } from "@/lib/founders-finances/fx";
 
@@ -18,7 +19,11 @@ export const dynamic = "force-dynamic";
 
 export default async function InvoicesPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity, sp } = await financePage(searchParams);
-  const { status, invoices, contacts, settings, revenueAccounts } = await loadInvoicesPage(viewer, entity, sp);
+  // The migration-185 check runs beside the loader (memoised once it is there), so it adds no wait.
+  const [{ status, invoices, contacts, settings, revenueAccounts }, retainerSupported] = await Promise.all([
+    loadInvoicesPage(viewer, entity, sp),
+    retainerColumnsReady(),
+  ]);
   // Persisting "overdue" runs after the response: the list already shows
   // overdue from the due date (effective_status), so nothing here waits on it.
   after(() =>
@@ -27,7 +32,9 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
       (e: unknown) => console.error("[finances:invoices] overdue sweep failed", e instanceof Error ? e.message : e),
     ),
   );
-  const filters = ["", "draft", "sent", "overdue", "paid", "void"];
+  // "sent" and "overdue" are invoices with money owed now; an issued invoice that only sets up a retainer is under "retainer".
+  const filters = ["", "draft", "sent", "overdue", "retainer", "paid", "void"];
+  const retainerNote = { none: "no link yet", not_emailed: "link not emailed yet", emailed: "link emailed" } as const;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -86,11 +93,23 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
                     <td className={tdClass}>{i.contact_name}</td>
                     <td className={`${tdClass} tabular-nums text-fg-muted`}>{i.issue_date}</td>
                     <td className={`${tdClass} tabular-nums text-fg-muted`}>{i.due_date}</td>
-                    <td className={`${tdClass} ${numClass}`}>{formatCents(i.total_cents, i.currency)}</td>
+                    <td className={`${tdClass} ${numClass}`}>
+                      {formatCents(i.total_cents, i.currency)}
+                      {i.retainer_cents > 0 && <div className="text-[11px] text-fg-dim">+ {formatCents(i.retainer_cents, i.currency)}/mo retainer</div>}
+                    </td>
                     <td className={`${tdClass} ${numClass}`}>{formatCents(i.balance_cents, i.currency)}</td>
                     <td className={tdClass}>
-                      <Tag tone={STATUS_TONE[i.effective_status]}>{i.effective_status}</Tag>
-                      {i.status !== "draft" && i.status !== "void" && !i.sent_at && <span className="ml-2 text-[11px] text-status-warm">not emailed</span>}
+                      {i.list_status === "retainer" ? (
+                        <>
+                          <Tag tone="accent">retainer set up</Tag>
+                          <div className="mt-0.5 text-[11px] text-fg-dim">nothing due now · {retainerNote[i.retainer_link]}</div>
+                        </>
+                      ) : (
+                        <>
+                          <Tag tone={STATUS_TONE[i.list_status]}>{i.list_status}</Tag>
+                          {i.status !== "draft" && i.status !== "void" && !i.sent_at && <span className="ml-2 text-[11px] text-status-warm">not emailed</span>}
+                        </>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -107,6 +126,7 @@ export default async function InvoicesPage({ searchParams }: { searchParams: Sea
           revenueAccounts={revenueAccounts}
           registered={settings.gst_qst_registered === 1}
           today={torontoToday()}
+          retainerSupported={retainerSupported}
         />
       </Card>
 

@@ -10,11 +10,18 @@
  * chosen currency is asked of the server (GET /api/founders/finances/wise
  * ?view=editor) after render, so the form never waits on Wise; when it
  * cannot, the reason is shown and the invoice falls back to the card link.
+ *
+ * One-time / Monthly per line (migration 185): one-time lines are the
+ * implementation price, due now and paid as chosen above; monthly lines are
+ * the retainer, paid by card through a Stripe link that charges the client
+ * automatically each month. The summary shows the two totals separately.
+ * Before 185 (`retainerSupported` false) the toggle is not offered and every
+ * line is one-time, as before.
  */
 
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { computeInvoiceTotals } from "@/lib/founders-finances/invoice";
+import { computeInvoiceTotals, LINE_BILLING_LABEL, LINE_BILLINGS, retainerTaxRefusal, type LineBilling } from "@/lib/founders-finances/invoice";
 import { formatCents } from "@/lib/founders-finances/money";
 import {
   DEFAULT_NEW_INVOICE_METHOD,
@@ -27,7 +34,7 @@ import {
 import { postFinanceAction } from "./ActionForm";
 import { inputClass, labelClass, primaryButton, quietButton } from "./ui";
 
-type Line = { description: string; quantity: string; unit_price: string; taxable: boolean; revenue_account_id: string };
+type Line = { description: string; quantity: string; unit_price: string; taxable: boolean; revenue_account_id: string; billing: LineBilling };
 type WiseInfo = { methodSupported: boolean; available: boolean; reason: string | null };
 
 export function InvoiceEditor({
@@ -37,12 +44,15 @@ export function InvoiceEditor({
   registered,
   today,
   initial,
+  retainerSupported = false,
 }: {
   entity: string;
   contacts: Array<{ id: string; name: string; email: string }>;
   revenueAccounts: Array<{ id: string; name: string }>;
   registered: boolean;
   today: string;
+  /** Migration 185 is applied: lines can be billed monthly (the retainer). */
+  retainerSupported?: boolean;
   initial?: {
     invoiceId: string;
     contactId: string;
@@ -64,9 +74,8 @@ export function InvoiceEditor({
   const [dueDate, setDueDate] = useState(initial?.dueDate || "");
   const [currency, setCurrency] = useState<"CAD" | "USD">(initial?.currency || "CAD");
   const [notes, setNotes] = useState(initial?.notes || "");
-  const [lines, setLines] = useState<Line[]>(
-    initial?.lines?.length ? initial.lines : [{ description: "", quantity: "1", unit_price: "", taxable: true, revenue_account_id: defaultAccount }],
-  );
+  const blankLine = (): Line => ({ description: "", quantity: "1", unit_price: "", taxable: true, revenue_account_id: defaultAccount, billing: "one_time" });
+  const [lines, setLines] = useState<Line[]>(initial?.lines?.length ? initial.lines : [blankLine()]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // null while an edited draft's stored method is still loading: nothing is sent, so it cannot be overwritten.
@@ -99,13 +108,25 @@ export function InvoiceEditor({
 
   const preview = useMemo(() => {
     try {
-      return { ok: true as const, t: computeInvoiceTotals(lines.map((l) => ({ description: l.description || "—", quantity: l.quantity || "0", unitPrice: l.unit_price || "0", taxable: l.taxable })), { registered }) };
+      return {
+        ok: true as const,
+        t: computeInvoiceTotals(
+          lines.map((l) => ({ description: l.description || "—", quantity: l.quantity || "0", unitPrice: l.unit_price || "0", taxable: l.taxable, billing: l.billing })),
+          { registered },
+        ),
+      };
     } catch (e) {
       return { ok: false as const, error: e instanceof Error ? e.message : "invalid" };
     }
   }, [lines, registered]);
 
   const setLine = (i: number, patch: Partial<Line>) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
+  const hasMonthly = retainerSupported && lines.some((l) => l.billing === "monthly");
+  const hasOneTime = lines.some((l) => l.billing !== "monthly");
+  // The server refuses a retainer that would carry GST/QST; say so before Save, in the same words.
+  const taxedRetainer = hasMonthly && preview.ok ? retainerTaxRefusal(preview.t) : null;
+  // How the one-time part gets paid, in the words the summary uses.
+  const oneTimeHow = method === "stripe" ? "card" : method === "wise_stripe" ? "bank transfer or card" : "bank transfer";
 
   async function save() {
     setBusy(true);
@@ -117,7 +138,8 @@ export function InvoiceEditor({
       due_date: dueDate,
       currency,
       notes,
-      lines,
+      // Before migration 185 every line is one-time: the field is not sent at all, exactly as before.
+      lines: retainerSupported ? lines : lines.map(({ billing: _billing, ...rest }) => rest),
     };
     if (initial) body.invoice_id = initial.invoiceId;
     if (method && wise?.methodSupported) body.payment_method = method;
@@ -200,9 +222,11 @@ export function InvoiceEditor({
           ) : method && offersBankTransfer(method) && !wise.available ? (
             <span className="text-status-warm">Wise unavailable: {wise.reason} It will be sent with the card link or your payment instructions instead.</span>
           ) : method && offersBankTransfer(method) ? (
-            `The invoice prints the Wise ${currency} bank details with its number as the payment reference. Recurring billing stays on Stripe subscriptions.`
+            `The invoice prints the Wise ${currency} bank details with its number as the payment reference.${
+              retainerSupported ? " Mark a line Monthly to bill it as a retainer, paid by card through Stripe every month." : " Recurring billing stays on Stripe subscriptions."
+            }`
           ) : (
-            "A Stripe card payment link is attached when the invoice is sent."
+            `A Stripe card payment link is attached when the invoice is sent.${retainerSupported ? " Mark a line Monthly to bill it as a retainer." : ""}`
           )}
         </div>
       </div>
@@ -212,6 +236,7 @@ export function InvoiceEditor({
           <thead>
             <tr className="text-left text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted">
               <th className="pb-1.5 pr-2">Description</th>
+              {retainerSupported && <th className="w-36 pb-1.5 pr-2">Billed</th>}
               <th className="w-20 pb-1.5 pr-2">Qty</th>
               <th className="w-28 pb-1.5 pr-2">Unit price</th>
               <th className="w-40 pb-1.5 pr-2">Revenue account</th>
@@ -226,6 +251,25 @@ export function InvoiceEditor({
                 <td className="py-1 pr-2">
                   <input className={inputClass} value={l.description} onChange={(e) => setLine(i, { description: e.target.value })} placeholder="What was delivered" />
                 </td>
+                {retainerSupported && (
+                  <td className="py-1 pr-2">
+                    <div className="inline-flex overflow-hidden rounded-md border border-bg-border" role="group" aria-label={`Line ${i + 1} billed`}>
+                      {LINE_BILLINGS.map((b) => (
+                        <button
+                          key={b}
+                          type="button"
+                          aria-pressed={l.billing === b}
+                          onClick={() => setLine(i, { billing: b })}
+                          className={`px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+                            l.billing === b ? "bg-[rgba(31,227,240,0.14)] text-fg" : "bg-bg-deep text-fg-dim hover:text-fg"
+                          }`}
+                        >
+                          {LINE_BILLING_LABEL[b]}
+                        </button>
+                      ))}
+                    </div>
+                  </td>
+                )}
                 <td className="py-1 pr-2">
                   <input className={inputClass} inputMode="decimal" value={l.quantity} onChange={(e) => setLine(i, { quantity: e.target.value })} />
                 </td>
@@ -247,7 +291,7 @@ export function InvoiceEditor({
                   </td>
                 )}
                 <td className="py-1 text-right tabular-nums text-fg-muted">
-                  {preview.ok && preview.t.lines[i] ? formatCents(preview.t.lines[i].amountCents, currency) : "—"}
+                  {preview.ok && preview.t.lines[i] ? `${formatCents(preview.t.lines[i].amountCents, currency)}${hasMonthly && l.billing === "monthly" ? "/mo" : ""}` : "—"}
                 </td>
                 <td className="py-1 pl-2">
                   {lines.length > 1 && (
@@ -260,7 +304,7 @@ export function InvoiceEditor({
             ))}
           </tbody>
         </table>
-        <button type="button" className={`${quietButton} mt-2`} onClick={() => setLines((ls) => [...ls, { description: "", quantity: "1", unit_price: "", taxable: true, revenue_account_id: defaultAccount }])}>
+        <button type="button" className={`${quietButton} mt-2`} onClick={() => setLines((ls) => [...ls, blankLine()])}>
           Add line
         </button>
       </div>
@@ -274,7 +318,7 @@ export function InvoiceEditor({
           {preview.ok ? (
             <>
               <div className="flex justify-between text-fg-muted">
-                <dt>Subtotal</dt>
+                <dt>{hasMonthly ? "One-time subtotal" : "Subtotal"}</dt>
                 <dd className="tabular-nums">{formatCents(preview.t.subtotalCents, currency)}</dd>
               </div>
               {registered ? (
@@ -291,10 +335,29 @@ export function InvoiceEditor({
               ) : (
                 <div className="text-[11px] text-fg-dim">No GST/QST — not registered (small supplier).</div>
               )}
-              <div className="flex justify-between border-t border-bg-border pt-1 font-semibold text-fg">
-                <dt>Total</dt>
-                <dd className="tabular-nums">{formatCents(preview.t.totalCents, currency)}</dd>
-              </div>
+              {hasMonthly ? (
+                <>
+                  <div className="flex justify-between border-t border-bg-border pt-1 font-semibold text-fg">
+                    <dt>Due now ({oneTimeHow})</dt>
+                    <dd className="tabular-nums">{formatCents(preview.t.totalCents, currency)}</dd>
+                  </div>
+                  <div className="flex justify-between font-semibold text-fg">
+                    <dt>Monthly retainer (card, automatic){registered && preview.t.monthly.gstCents + preview.t.monthly.qstCents > 0 ? ", incl. tax" : ""}</dt>
+                    <dd className="tabular-nums">{formatCents(preview.t.monthly.totalCents, currency)}/mo</dd>
+                  </div>
+                  <div className="pt-1 text-[11px] leading-snug text-fg-dim">
+                    {hasOneTime
+                      ? `The one-time amount is paid by ${oneTimeHow} by the due date; the retainer is paid through a Stripe link the client uses once to set up automatic monthly card payments.`
+                      : "Nothing is due now: the client uses the Stripe link on the invoice once to set up automatic monthly card payments."}
+                  </div>
+                  {taxedRetainer && <div className="pt-1 text-[11px] leading-snug text-status-warm">{taxedRetainer}</div>}
+                </>
+              ) : (
+                <div className="flex justify-between border-t border-bg-border pt-1 font-semibold text-fg">
+                  <dt>Total</dt>
+                  <dd className="tabular-nums">{formatCents(preview.t.totalCents, currency)}</dd>
+                </div>
+              )}
             </>
           ) : (
             <div className="text-xs text-status-warm">{preview.error}</div>

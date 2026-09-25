@@ -14,11 +14,20 @@
  * payment reference — the invoice number — which is what lets a deposit be
  * matched back to this invoice (wise-reconcile.ts). They are omitted once the
  * invoice is paid, like the card link.
+ *
+ * MONTHLY RETAINER (migration 185). When `invoice.retainer` is set, monthly
+ * lines print their prices "/mo", the totals block shows "Due now" (the
+ * one-time part, which is all subtotal/tax/total cover) and "Monthly
+ * retainer" separately, and the payment part is two sections:
+ * "Implementation — {amount} due by {date}: pay by bank transfer" and
+ * "Monthly retainer — {amount}/month: set up automatic monthly card
+ * payments" with the Stripe subscription link. Without a retainer the PDF is
+ * exactly what it was.
  */
 
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { formatCents } from "./money";
-import { quantityMilliToString } from "./invoice";
+import { oneTimePayVerb, quantityMilliToString } from "./invoice";
 
 export type InvoicePdfInput = {
   seller: {
@@ -45,9 +54,19 @@ export type InvoicePdfInput = {
     paymentInstructions: string;
     /** Wise receiving details for the invoice currency, reference last (wise.ts bankTransferLines). */
     bankTransfer?: Array<{ label: string; value: string }> | null;
+    /** The monthly retainer (its own subtotal/tax; totalCents is per month) and its Stripe recurring link once created. */
+    retainer?: {
+      subtotalCents: number;
+      gstCents: number;
+      qstCents: number;
+      totalCents: number;
+      linkUrl: string | null;
+      /** The client already started the subscription with the link: say so rather than print the used-up link. */
+      setUp?: boolean;
+    } | null;
   };
   customer: { name: string; company: string; email: string; address: string };
-  lines: Array<{ description: string; quantityMilli: number; unitPriceCents: number; amountCents: number }>;
+  lines: Array<{ description: string; quantityMilli: number; unitPriceCents: number; amountCents: number; monthly?: boolean }>;
 };
 
 const INK = rgb(0.09, 0.1, 0.12);
@@ -112,6 +131,7 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     page.drawText(safe, { x: xRight - font.widthOfTextAtSize(safe, size), y: yy, size, font, color });
   };
   const money = (c: number) => formatCents(c, input.invoice.currency);
+  const retainer = input.invoice.retainer && input.invoice.retainer.totalCents > 0 ? input.invoice.retainer : null;
 
   // Header: seller left, invoice block right.
   text(input.seller.legalName, M, y - 4, 16, bold);
@@ -178,9 +198,10 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
       header();
     }
     text(descLines[0], colDesc, y, 10);
+    const per = retainer && l.monthly ? "/mo" : "";
     right(quantityMilliToString(l.quantityMilli), colQty + 30, y, 10);
-    right(money(l.unitPriceCents), colUnit, y, 10);
-    right(money(l.amountCents), colAmt, y, 10);
+    right(`${money(l.unitPriceCents)}${per}`, colUnit, y, 10);
+    right(`${money(l.amountCents)}${per}`, colAmt, y, 10);
     for (const extra of descLines.slice(1)) {
       y -= 13;
       text(extra, colDesc, y, 10);
@@ -200,15 +221,23 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     right(value, W - M, y, strong ? 11 : 10, strong ? bold : regular);
     y -= strong ? 18 : 15;
   };
-  totalRow("Subtotal", money(input.invoice.subtotalCents));
+  totalRow(retainer ? "One-time subtotal" : "Subtotal", money(input.invoice.subtotalCents));
   if (input.invoice.taxRegistered) {
     totalRow(`GST 5%${input.seller.gstNumber ? ` (${input.seller.gstNumber})` : ""}`, money(input.invoice.gstCents));
     totalRow(`QST 9.975%${input.seller.qstNumber ? ` (${input.seller.qstNumber})` : ""}`, money(input.invoice.qstCents));
   }
-  totalRow(`Total ${input.invoice.currency}`, money(input.invoice.totalCents), true);
+  totalRow(retainer ? `Due now ${input.invoice.currency}` : `Total ${input.invoice.currency}`, money(input.invoice.totalCents), true);
   if (input.invoice.amountPaidCents > 0) {
     totalRow("Paid", `-${money(input.invoice.amountPaidCents)}`);
     totalRow("Balance due", money(Math.max(0, input.invoice.totalCents - input.invoice.amountPaidCents)), true);
+  }
+  if (retainer) {
+    y -= 4;
+    if (input.invoice.taxRegistered && retainer.gstCents + retainer.qstCents > 0) {
+      totalRow("Retainer subtotal", `${money(retainer.subtotalCents)}/month`);
+      totalRow("GST + QST", `${money(retainer.gstCents + retainer.qstCents)}/month`);
+    }
+    totalRow(`Monthly retainer ${input.invoice.currency}`, `${money(retainer.totalCents)}/month`, true);
   }
   y -= 12;
 
@@ -247,14 +276,50 @@ export async function renderInvoicePdf(input: InvoicePdfInput): Promise<Uint8Arr
     }
     y -= 10;
   };
-  if (input.invoice.bankTransfer?.length && input.invoice.status !== "paid") {
-    rows("PAY BY BANK TRANSFER (WISE)", input.invoice.bankTransfer);
+  // A section heading in plain words (10pt bold), kept with at least its first rows.
+  const heading = (t: string) => {
+    const lines = wrap(t, bold, 10, W - 2 * M);
+    if (y - lines.length * 14 - 60 < M) {
+      page = doc.addPage([W, H]);
+      y = H - M - 10;
+    }
+    for (const l of lines) {
+      text(l, M, y, 10, bold, ACCENT);
+      y -= 14;
+    }
+    y -= 4;
+  };
+  if (retainer) {
+    const balance = Math.max(0, input.invoice.totalCents - input.invoice.amountPaidCents);
+    if (balance > 0 && input.invoice.status !== "paid") {
+      const bank = input.invoice.bankTransfer?.length ? input.invoice.bankTransfer : null;
+      const card = input.invoice.paymentLinkUrl;
+      heading(`Implementation — ${money(balance)} due by ${input.invoice.dueDate}: ${oneTimePayVerb(Boolean(bank), Boolean(card))}`);
+      if (bank) rows("BANK TRANSFER (WISE)", bank);
+      if (card) block(bank ? "OR PAY BY CARD" : "PAY BY CARD", card);
+      block("PAYMENT", input.invoice.paymentInstructions);
+    }
+    if (retainer.setUp) {
+      heading(`Monthly retainer — ${money(retainer.totalCents)}/month: automatic monthly card payments are already set up`);
+      block("MONTHLY CARD PAYMENTS (STRIPE)", "Your card is charged automatically each month through Stripe; there is nothing to do.");
+    } else {
+      heading(`Monthly retainer — ${money(retainer.totalCents)}/month: set up automatic monthly card payments`);
+      block(
+        "SET UP MONTHLY CARD PAYMENTS (STRIPE)",
+        retainer.linkUrl || "The link to set up your monthly card payments is in the email this invoice came with.",
+      );
+    }
+    block("NOTES", input.invoice.notes);
+  } else {
+    if (input.invoice.bankTransfer?.length && input.invoice.status !== "paid") {
+      rows("PAY BY BANK TRANSFER (WISE)", input.invoice.bankTransfer);
+    }
+    if (input.invoice.paymentLinkUrl && input.invoice.status !== "paid") {
+      block("PAY ONLINE", input.invoice.paymentLinkUrl);
+    }
+    block("PAYMENT", input.invoice.paymentInstructions);
+    block("NOTES", input.invoice.notes);
   }
-  if (input.invoice.paymentLinkUrl && input.invoice.status !== "paid") {
-    block("PAY ONLINE", input.invoice.paymentLinkUrl);
-  }
-  block("PAYMENT", input.invoice.paymentInstructions);
-  block("NOTES", input.invoice.notes);
 
   const pages = doc.getPages();
   pages.forEach((p, i) => {

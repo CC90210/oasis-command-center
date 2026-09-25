@@ -2,7 +2,7 @@
 
 **Status:** built on branch `feat/finances-suite`, not deployed. Migration 180 is written and validated on a throwaway database; it has **not** been applied to the live Turso database.
 **Code:** `lib/founders-finances/` (rules + I/O), `app/founders/finances/` (pages), `app/api/founders/finances/` (UI routes), `app/api/internal/finance/` (Atlas), `app/api/webhooks/stripe-finance/` (Stripe).
-**Tests:** `npm run test:finances` (in CI) — `tests/finances-core.test.ts` (pure rules), `tests/finances-io.test.ts` (real local libSQL + the real route handlers), `tests/finances-surface.test.ts` (nav, gates, PDF, email, CSV).
+**Tests:** `npm run test:finances` (in CI) — `tests/finances-core.test.ts` (pure rules), `tests/finances-io.test.ts` (real local libSQL + the real route handlers), `tests/finances-surface.test.ts` (nav, gates, PDF, email, CSV). The one-time + retainer invoice flow is `tests/finances-invoice-retainer.test.ts` (run it directly: `node --conditions=react-server --import tsx tests/finances-invoice-retainer.test.ts`; it is not yet listed in the `test:finances` script).
 
 ---
 
@@ -39,7 +39,7 @@ Tabs: **Overview · Transactions · Invoices · Bills & Expenses · Accounts · 
 | `fx_rates` | Bank of Canada daily USD/CAD |
 | `contacts` | customers and vendors |
 | `rules` | auto-categorisation (contains / equals / starts with, direction, amount range, priority). Seeded rule: deposits containing "stripe" are a transfer from Stripe clearing, not revenue |
-| `invoices`, `invoice_lines` | invoices, statuses draft → sent → overdue → paid / void |
+| `invoices`, `invoice_lines` | invoices, statuses draft → sent → overdue → paid / void. Each line is billed `one_time` or `monthly` (migration 185, see **Invoices: implementation + retainer**) |
 | `bills`, `bill_lines` | bills (pay later, via AP) and expenses (already paid) |
 | `attachments` | receipts: pointer + sha256; bytes in the private `finance-receipts` bucket (R2 via `getServiceSupabase().storage`) |
 | `bank_transactions`, `imports` | the money-in/out register; statement imports with dedupe hashes (`UNIQUE(entity, account, dedupe_hash)`) |
@@ -85,6 +85,7 @@ Seed rows (entities, charts, categories, tax codes, the Stripe-payout rule) are 
 5. Make sure an OASIS mailbox is configured (`OASIS_MAIL_FROM`/`OASIS_MAIL_APP_PASSWORD` already exist for the shared sender, or set `INVOICE_FROM_*`).
 6. Settings → fill payment instructions (e-transfer address) that print on every invoice.
 7. Settings → Exchange rates → "Fetch last 30 days" (or let the first metric read fetch them), then Settings → Stripe → "Backfill a year".
+8. For retainers on invoices: **apply migration 185** (same command as 180, file `185_finance_invoice_retainer.turso.sql`), and in Stripe → Developers → API keys give OASIS's restricted key **write** access to **Prices** and **Payment Links** (as of 2026-09-24 it has Products write only; Prices, Payment Links, Subscriptions and Invoices write are denied). Without that, sending an invoice that needs a Stripe link is refused with one sentence saying so; nothing is emailed.
 
 ## Applying migration 180
 
@@ -140,7 +141,8 @@ curl -s -X POST https://<host>/api/internal/finance/invoices/remind-overdue \
 
 | Event | Entry |
 |---|---|
-| Invoice issued | Dr AR / Cr revenue (/ Cr GST, QST payable when registered), at the issue day's rate |
+| Invoice issued | Dr AR / Cr revenue (/ Cr GST, QST payable when registered), at the issue day's rate — the **one-time lines only**; a retainer-only invoice posts nothing |
+| Monthly retainer | nothing at issue. Each month's charge on the Stripe subscription the client starts from the invoice's retainer link arrives through the Stripe ingest: Dr Stripe clearing / Cr Subscription revenue (the "Stripe charge, no invoice" row) |
 | Stripe charge, no invoice | Dr Stripe clearing / Cr revenue (subscription revenue if it came from a Stripe invoice), CAD settlement amount |
 | Stripe charge for an invoice | Dr Stripe clearing / Cr AR; a USD invoice settles through Currency exchange clearing with realised FX gain/loss |
 | Stripe fee | Dr Stripe fees / Cr Stripe clearing (from the charge's balance transaction) |
@@ -150,6 +152,31 @@ curl -s -X POST https://<host>/api/internal/finance/invoices/remind-overdue \
 | Bill / pay bill | Dr expense (+ ITC/ITR if registered) / Cr AP; then Dr AP / Cr bank |
 | Expense | Dr expense (tax included in cost while unregistered) / Cr the account it was paid from |
 | Owner draw / contribution | Dr draws-owner / Cr bank; Dr bank / Cr equity-owner |
+
+## Invoices: implementation + retainer (migration 185)
+
+An OASIS client usually pays an **implementation** price once and a **retainer** every month. Both go on one invoice, and they are paid two different ways:
+
+| Part | Lines | Paid by | Booked |
+|---|---|---|---|
+| Implementation (due now) | `billing = 'one_time'` (the default) | bank transfer into Wise, invoice number as the reference — or the card link, per the invoice's payment method (below, **Wise**), which applies to this part only | at issue: Dr AR / Cr revenue |
+| Monthly retainer | `billing = 'monthly'` | a Stripe **recurring** Payment Link the client uses once to set up automatic monthly card payments | each month, when Stripe collects it (Stripe ingest → Subscription revenue) |
+
+**No double counting.** `fin_invoices.subtotal/gst/qst/total_cents` are the ONE-TIME figures, so AR, "balance due", paid, overdue, the Wise reconcile, AR aging and every report keep reading one number that means "owed now". `retainer_monthly_cents` records the retainer (its monthly lines); it is informational and never posted. An invoice is **paid** when its one-time balance is paid; the retainer link stays live after that (the client may not have subscribed yet). An invoice may be all one-time (as before 185), both, or **all monthly** — a retainer set-up invoice: nothing is due now, nothing is booked at issue, it is never overdue and never reminded, and "Record a payment" is refused with a sentence.
+
+**The retainer link** (`invoices-io.ts ensureRetainerLink`), created when the invoice is emailed: a Product ("Monthly retainer — invoice N"), a Price with `recurring[interval]=month` for the retainer amount in the invoice currency, and a Payment Link limited to one completed checkout. Idempotency keys are the invoice id (+ amount + currency for the price, + price + the link being replaced for the link, so going back to an earlier amount makes a new link instead of replaying a switched-off one). The price and the amount + currency it charges (`stripe_retainer_price_id/_cents/_currency`) are saved as soon as Stripe creates it, so a send whose link Stripe refuses is retried with the same price rather than a new one each time. A re-send first asks Stripe for the stored link's state: **unused and live** → reused while the amount and currency are unchanged; when they change, a new price + link on the same product, the old link switched off before the new one is handed out. **Used** (the client completed its one checkout, which also switches it off) → the email and PDF say "automatic monthly card payments are already set up" instead of carrying the dead link; a retainer-only invoice then has nothing left to send and the re-send is refused in a sentence; a changed amount is refused too (a new link would start a second subscription — change the subscription in Stripe). **Switched off unused** (someone turned it off in Stripe) → refused, saying to turn it back on. Every link carries an `inactive_message` telling a client who opens an old one that there is nothing more to do if they already set up payments. Voiding the invoice switches the link off; a subscription the client already started keeps running until it is cancelled in Stripe. Metadata on the link and on every subscription it starts: `fin_retainer_invoice_id`, `fin_retainer_invoice_number` (+ `fin_contact_id` on the subscription) — deliberately **not** `fin_invoice_id`, which the Stripe ingest reads as "this charge settles the invoice's receivable". A retainer charge must never clear the one-time AR.
+
+**Stripe permissions.** The link needs Prices and Payment Links **write** on OASIS's restricted key. A 403 from Stripe refuses the send in one sentence — for the retainer: *"Stripe won't let this app create the retainer's card link yet: give the OASIS restricted key write access to Prices and Payment Links in Stripe → Developers → API keys, then send again. Nothing was emailed."*; the one-off card link says the same for "the invoice's card payment link" (it used to surface Stripe's raw 403). The invoice stays issued-not-emailed and is re-sent without renumbering. Stripe not set up at all (no key / account not confirmed) refuses a retainer invoice the same way, naming the reason.
+
+**Email and PDF.** With a retainer they have two separate parts — "Implementation — {amount} due by {date}: pay by bank transfer" (Wise details + reference; "…or card" with the card link when the method includes card) and "Monthly retainer — {amount}/month: set up automatic monthly card payments" (the Stripe link) — and the totals show **Due now** and **Monthly retainer** apart. Monthly lines print "/mo". Overdue reminders chase the one-time balance only and never mention the retainer. Without a retainer both are exactly what they were.
+
+**GST/QST on a retainer is refused for now.** Registered, a taxable monthly line would put GST + QST into the Stripe price, and the Stripe ingest books every subscription charge entirely as Subscription revenue — it has no tax split — so the tax would be counted as income and never reach GST/QST payable. `invoice.ts retainerTaxRefusal` refuses it in one sentence when a draft is saved, when it is issued (registration may have been switched on since) and in the editor before Save. A monthly line not marked taxable (e.g. zero-rated for a non-resident client) is fine, and nothing changes while OASIS is not registered. Lift the refusal once the Stripe ingest splits retainer tax out of subscription charges.
+
+**Editor.** Each line has a One-time / Monthly toggle; the summary shows "Due now (bank transfer)" and "Monthly retainer (card, automatic)" with one line on where each is paid. The invoice list shows "+ {amount}/mo retainer" under the total; the invoice page shows both totals and the retainer link once created.
+
+**Before 185 is applied** (`invoice-store.ts retainerColumnsReady()` false, re-checked every minute): no toggle, every line is one-time, nothing reads or writes a retainer, and a monthly line sent by any caller is refused with a message naming 185.
+
+**Not handled yet (outside the invoice code):** a retainer charge is booked as Subscription revenue under the Stripe customer, not linked to the invoice's contact automatically (the subscription's `fin_contact_id` metadata is there for that), and the app does not learn that the client subscribed until a re-send asks Stripe. The Stripe ingest has no GST/QST split (hence the refusal above). A retainer-only invoice stays `sent` with a $0 balance for good, and `app/api/internal/finance/summary/route.ts` (what Atlas reads) lists every `sent`/`overdue` invoice as open — it should skip zero-balance invoices or report `retainer_cents` beside them.
 
 ## Wise (the business bank)
 
@@ -169,7 +196,7 @@ Wise is where money lands; Stripe is the card processor. A one-off or lump-sum i
 
 A 403 carrying `x-2fa-approval` (Strong Customer Authentication) is reported as such, never retried.
 
-**Invoice payment method** (`fin_invoices.payment_method`, migration 184): `wise` (default for a new invoice), `stripe` (card Payment Link; every invoice from before 184), `wise_stripe` (both). The PDF and the email print the Wise receiving details **for the invoice currency** — account holder, bank, institution/transit or routing, account number, Swift — with the **invoice number as the payment reference**; settings' payment instructions still print as an extra line. If Wise cannot supply details, the invoice falls back to the card link or the instructions and the send result says why; with none of the three it is refused, not sent. Before migration 184 is applied the column is absent: every invoice reads `stripe`, and choosing Wise is refused with a message naming 184.
+**Invoice payment method** (`fin_invoices.payment_method`, migration 184) — how the **one-time** part is paid (a monthly retainer is always the Stripe recurring link, see above): `wise` (default for a new invoice), `stripe` (card Payment Link; every invoice from before 184), `wise_stripe` (both). The PDF and the email print the Wise receiving details **for the invoice currency** — account holder, bank, institution/transit or routing, account number, Swift — with the **invoice number as the payment reference**; settings' payment instructions still print as an extra line. If Wise cannot supply details, the invoice falls back to the card link or the instructions and the send result says why; with none of the three it is refused, not sent. Before migration 184 is applied the column is absent: every invoice reads `stripe`, and choosing Wise is refused with a message naming 184.
 
 **Mark paid from Wise** (`wise-reconcile.ts`, button "Check for Wise payments"): reads recent deposits (bank transfers in, Wise-acquired card payments net of Wise's fee). Recorded automatically ONLY when the payer's reference names exactly one open invoice AND the amount and currency settle it; everything else (no reference, wrong amount, two invoices named) is listed for a founder to confirm or dismiss. Idempotent on Wise's transaction reference (settlement entry source `wise_payment`, unique). A USD payment stays USD on chequing (the settlement goes through Currency exchange clearing, realised FX as usual).
 
