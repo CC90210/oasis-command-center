@@ -50,6 +50,7 @@ import { getAgents } from "@/lib/config/agents";
 import { getTenantMembers, isActiveMember } from "@/lib/team";
 import { mintFormLinkBySlug } from "@/lib/forms/agent-routing";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
+import { getSubmissionsCreds } from "@/lib/integrations/submissions-gmail";
 import type { BrandKey } from "@/lib/email/brands";
 import { SUNBIZ_LEGAL_FOOTER } from "@/lib/config/email-signature";
 import { listUnsubscribeHeader } from "@/lib/email/tracked-html";
@@ -592,14 +593,14 @@ async function loadHandoffContext(
   // the send proceeds.
   let ccEmail = agent.ccEmail;
   if (!ccEmail && brandSlug === "sunbiz") {
+    // A static import, like lib/notify/form-completion-email.ts: a dynamic
+    // import() here bypassed the module cache under Node 20 (CI), so harness
+    // stubs never applied there (2026-09-25).
     try {
-      // Lazy import (mirrors sendOnce's nodemailer pattern): loading the
-      // credential store at module scope drags server-only into non-Next
-      // harnesses that stub the -send module but not this one.
-      const { getSubmissionsCreds } = await import("@/lib/integrations/submissions-gmail");
       const creds = await getSubmissionsCreds(form.tenant_id, "sunbiz");
       ccEmail = (creds.fromAddress || "").trim() || null;
-    } catch {
+    } catch (error) {
+      console.error("[forms.handoff] submissions inbox lookup failed; sending without a CC", { tenantId: form.tenant_id, error });
       ccEmail = null;
     }
   }
