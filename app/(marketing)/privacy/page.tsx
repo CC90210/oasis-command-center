@@ -253,6 +253,13 @@ export default function PrivacyPage() {
           database hosted by Supabase, Inc. in the United States. The application
           no longer uses that database, and we plan to delete it.
         </p>
+        <p>
+          <strong>Former hosting provider.</strong> Until September 2026 the
+          application was served by Vercel, Inc. in the United States. That
+          deployment no longer receives traffic, but request logs and build
+          artifacts from that period remain with Vercel under its own retention
+          until we close the account.
+        </p>
       </LegalSection>
 
       <LegalSection n={7} title="International transfers">

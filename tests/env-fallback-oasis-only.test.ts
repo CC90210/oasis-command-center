@@ -331,6 +331,25 @@ async function main() {
     });
   });
 
+  // Codex review 2026-09-28: the gate counted stored rows by field NAME, so a
+  // complete set of corrupt rows read as configured and the send was admitted,
+  // then failed in the resolver. The gate must hold instead, env or no env.
+  await check("the outbound provider gate holds a provider whose stored credentials will not decrypt", async () => {
+    const { loadProviderAvailability } = await import("../lib/routing/provider-availability");
+    let corrupted: Record<string, { configured: boolean }> = {};
+    await capturingErrors(async () => {
+      corrupted = await loadProviderAvailability(OASIS_AI_CC);
+    });
+    for (const [provider, v] of Object.entries(corrupted)) {
+      assert.equal(v.configured, false, `${provider} reads as configured from unreadable stored credentials`);
+    }
+    const clean = await loadProviderAvailability(OASIS_WEBDEV);
+    assert.ok(
+      Object.values(clean).some((v) => v.configured),
+      "anti-vacuity: OASIS's uncorrupted workspace must still see its env-configured providers",
+    );
+  });
+
   await check("corruption is per tenant: OASIS's other workspace still resolves env", async () => {
     for (const { service, fieldKey, envValue } of matrix) {
       assert.equal(await store.getTenantIntegrationValue(OASIS_WEBDEV, service, fieldKey), envValue);

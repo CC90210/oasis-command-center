@@ -247,6 +247,16 @@ for (const s of SUBPROCESSORS) {
       `Cloudflare; the legacy Supabase copy is disclosed separately on /privacy section 6.`,
   );
 }
+// Retired is not deleted: both former providers still hold data from the
+// period they served (Supabase a full legacy copy, Vercel request logs and
+// build artifacts), so /privacy must disclose them until the accounts close.
+// Dropping them from the live table must not drop them from the page
+// (Codex review, 2026-09-28).
+{
+  const privacyPage = readFileSync(join(root, "app/(marketing)/privacy/page.tsx"), "utf8");
+  assert.match(privacyPage, /Former database provider[\s\S]*Supabase/, "/privacy must disclose the legacy Supabase copy");
+  assert.match(privacyPage, /Former hosting provider[\s\S]*Vercel/, "/privacy must disclose the former Vercel hosting and its retained logs");
+}
 for (const d of DATA_MATRIX) {
   assert.doesNotMatch(
     d.sharedWith,

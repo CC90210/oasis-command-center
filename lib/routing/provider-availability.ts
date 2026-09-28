@@ -17,6 +17,7 @@
  */
 
 import "server-only";
+import { decryptField } from "@/lib/field-encryption";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import type { ProviderAvailability, ProviderId } from "./outbound-routing";
@@ -101,12 +102,18 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
 
   // field_key too, not just service: a row's existence says nothing about
   // whether the bundle is complete enough to send with.
+  //
+  // And only a field that DECRYPTS counts. getTenantIntegrationBundle drops an
+  // unreadable field and refuses the env value for it, so counting the row by
+  // its name admits a send the resolver then fails with a hole in the bundle —
+  // a burned attempt instead of a hold (Codex review, 2026-09-28).
   const fieldsByService = new Map<string, Set<string>>();
+  const unreadableServices = new Set<string>();
   try {
     const db = getServiceSupabase();
     const r = await db
       .from("tenant_integration_credentials")
-      .select("service, field_key")
+      .select("service, field_key, encrypted_value")
       .eq("tenant_id", tenantId);
     if (r.error) {
       console.error("[provider-availability] credential read failed, holding everything", r.error.message);
@@ -114,6 +121,19 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
     }
     for (const row of r.data || []) {
       const svc = String(row.service);
+      let readable = false;
+      try {
+        readable = Boolean(row.encrypted_value && decryptField(String(row.encrypted_value)).trim());
+      } catch (err) {
+        unreadableServices.add(svc);
+        console.error("[provider-availability] stored credential unreadable; provider held", {
+          tenantId,
+          service: svc,
+          field: String(row.field_key),
+          err,
+        });
+      }
+      if (!readable) continue;
       const set = fieldsByService.get(svc) ?? new Set<string>();
       set.add(String(row.field_key));
       fieldsByService.set(svc, set);
@@ -167,7 +187,10 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
 
   return Object.fromEntries(
     ids.map((p) => {
-      const configured = hasCompleteBundle(p) || (envApplies && Boolean(envConfigured[p]));
+      // A service with an unreadable stored field gets no env credit: the
+      // resolver refuses env for that field, so the bundle would be incomplete.
+      const envCounts = envApplies && !unreadableServices.has(CREDENTIAL_SERVICE[p]);
+      const configured = hasCompleteBundle(p) || (envCounts && Boolean(envConfigured[p]));
       return [p, { configured, enabled: configured && envEnabled(p) }];
     }),
   ) as ProviderAvailability;
