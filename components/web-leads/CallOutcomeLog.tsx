@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { PhoneMissed, PhoneCall, ThumbsUp, ThumbsDown, Loader2 } from "lucide-react";
+import { PhoneMissed, PhoneCall, ThumbsUp, ThumbsDown, PhoneOff, Loader2 } from "lucide-react";
 // Type-only: lib/web-leads/outcome.ts imports getServiceSupabase() (server-only).
 // A value import here would pull that whole module into the client bundle and
 // fail the build -- same reasoning WebsiteComparison.tsx documents.
@@ -31,6 +31,7 @@ const OUTCOME_LABEL: Record<CallOutcome, string> = {
   connected: "Connected",
   interested: "Interested",
   not_interested: "Not interested",
+  do_not_call: "Do not call",
 };
 
 const BUTTONS: { outcome: CallOutcome; icon: React.ReactNode }[] = [
@@ -38,7 +39,26 @@ const BUTTONS: { outcome: CallOutcome; icon: React.ReactNode }[] = [
   { outcome: "connected", icon: <PhoneCall className="h-4 w-4" /> },
   { outcome: "interested", icon: <ThumbsUp className="h-4 w-4" /> },
   { outcome: "not_interested", icon: <ThumbsDown className="h-4 w-4" /> },
+  { outcome: "do_not_call", icon: <PhoneOff className="h-4 w-4" /> },
 ];
+
+/**
+ * "Do not call" asks twice, and it is the only outcome that does.
+ *
+ * Every other outcome on this panel is correctable by logging a later one --
+ * the route's own header says a mis-click is fixed by appending, not editing.
+ * That is not true here. The flag this outcome sets is read by claim.ts, which
+ * states it "never expires", and nothing in the codebase writes it back to
+ * false. So a slip of the thumb permanently removes a business from the pool
+ * with no route back through the product.
+ *
+ * A confirm step on a genuinely irreversible action is not friction, it is the
+ * difference between a rep honouring a request and a rep destroying a lead.
+ * No colour is used to mark it: Rule 2 bans colour keyed to meaning on this
+ * surface and web-leads-guards enforces that by class name, so the warning is
+ * carried by the words changing instead.
+ */
+const NEEDS_CONFIRM: CallOutcome = "do_not_call";
 
 // Mirrors the server contract without value-importing its server-only module.
 const MAX_CALL_NOTE_LENGTH = 4000;
@@ -68,6 +88,7 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [pending, setPending] = useState<CallOutcome | null>(null);
+  const [confirmingDnc, setConfirmingDnc] = useState(false);
   const [note, setNote] = useState("");
   const [leadCanMutate, setLeadCanMutate] = useState(false);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -174,7 +195,7 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
           <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Log this call</p>
 
       <div className="grid grid-cols-2 gap-2">
-        {BUTTONS.map(({ outcome, icon }) => (
+        {BUTTONS.filter(({ outcome }) => outcome !== NEEDS_CONFIRM).map(({ outcome, icon }) => (
           <button
             key={outcome}
             type="button"
@@ -187,6 +208,33 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
           </button>
         ))}
       </div>
+
+      {/* Its own row, full width, below the reversible four. The separation is
+          the signal, since colour is not available to carry it here. */}
+      <button
+        type="button"
+        disabled={pending !== null}
+        aria-describedby="dnc-consequence"
+        onClick={() => {
+          if (!confirmingDnc) { setConfirmingDnc(true); return; }
+          setConfirmingDnc(false);
+          void logOutcome(NEEDS_CONFIRM);
+        }}
+        onBlur={() => setConfirmingDnc(false)}
+        className="mt-2 flex w-full items-center justify-center gap-2 rounded-md border border-bg-border bg-bg-panel px-3 py-2 text-sm font-medium text-fg transition-colors hover:border-accent/40 hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {pending === NEEDS_CONFIRM ? <Loader2 className="h-4 w-4 animate-spin" /> : <PhoneOff className="h-4 w-4" />}
+        {pending === NEEDS_CONFIRM
+          ? "Logging…"
+          : confirmingDnc
+            ? "Confirm: never call this business again"
+            : OUTCOME_LABEL[NEEDS_CONFIRM]}
+      </button>
+      <p id="dnc-consequence" className="mt-1 text-xs leading-5 text-fg-muted">
+        {confirmingDnc
+          ? "This cannot be undone here. The business leaves the pool permanently."
+          : "Use when someone asks not to be contacted again."}
+      </p>
 
       <textarea
         ref={noteRef}
