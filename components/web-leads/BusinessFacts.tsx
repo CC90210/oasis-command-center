@@ -48,7 +48,10 @@
 // importing it under that name shadows the global Map constructor for the
 // whole module. Nothing here needs a Map today, which is exactly when that
 // trap gets set for whoever adds the first one.
-import { Building2, ExternalLink, Globe, Map as MapIcon, MapPin, Phone, Tag } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  AtSign, Building2, Check, Copy, ExternalLink, Globe, Map as MapIcon, MapPin, Phone, Tag,
+} from "lucide-react";
 import type { WebLead } from "@/lib/web-leads/data";
 import { preferredSiteUrl } from "@/lib/web-leads/url-safety";
 import { BusinessHoursPanel, CallingWindowNotice, useNow } from "./OpeningHours";
@@ -65,12 +68,82 @@ export function fullAddress(lead: WebLead): string | null {
 const LABEL = "text-[10px] font-bold uppercase tracking-[0.12em] text-fg-muted";
 const NOT_ON_FILE = "Not on file";
 
+/**
+ * Copy one field to the clipboard.
+ *
+ * WHY EVERY FACT GETS ONE. A rep reads these mid-call and then has to get them
+ * into a dialer, an email, a CRM note or a text. Retyping a postal code or a
+ * six-part address off a screen while someone is talking is where transcription
+ * errors come from, and a wrong digit in a phone number is a call that never
+ * happens.
+ *
+ * NO COLOUR, INCLUDING FOR SUCCESS. Rule 2 of this module bans colour keyed to
+ * anything, and tests/web-leads-guards.test.ts enforces it by class name. A
+ * green "Copied" tick would be exactly the precedent the ban exists to stop:
+ * once colour means something anywhere on this card, the next person tints the
+ * website score. So the confirmation is carried by the WORD and by the icon
+ * SHAPE, which also survives greyscale and colour blindness.
+ *
+ * NOT RENDERED WHEN THERE IS NOTHING TO COPY. A button next to "Not on file"
+ * invites a click that silently does nothing, which is worse than no button.
+ *
+ * THE FAILURE PATH IS VISIBLE. navigator.clipboard is unavailable on insecure
+ * origins and can be refused by permissions policy, so a rejection says so
+ * rather than leaving the label reading "Copy" forever while the rep believes
+ * they have the value.
+ */
+function CopyButton({ value, what }: { value: string; what: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+
+  // One timer, cleared on unmount. Without this a copy in a drawer the rep
+  // closes immediately sets state on an unmounted component.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  async function copy() {
+    if (timer.current) clearTimeout(timer.current);
+    try {
+      await navigator.clipboard.writeText(value);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+    timer.current = setTimeout(() => setState("idle"), 1600);
+  }
+
+  const label = state === "copied" ? "Copied"
+    : state === "failed" ? "Press Ctrl+C" : "Copy";
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      // The accessible name carries the FIELD, because "Copy" repeated nine
+      // times down a card tells a screen-reader user nothing about which one
+      // they are on.
+      aria-label={state === "copied" ? `${what} copied` : `Copy ${what}`}
+      className="mt-1 inline-flex items-center gap-1 rounded border border-bg-border bg-bg-raised px-1.5 py-0.5 text-[10px] font-semibold text-fg-muted transition-colors hover:border-accent/50 hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+    >
+      {state === "copied"
+        ? <Check className="h-3 w-3" aria-hidden />
+        : <Copy className="h-3 w-3" aria-hidden />}
+      {label}
+    </button>
+  );
+}
+
 function Fact({
-  icon, label, value, span = "", verbatim = false,
+  icon, label, value, span = "", verbatim = false, copyAs,
 }: {
   icon: React.ReactNode;
   label: string;
   value: string | null;
+  /**
+   * What this field is CALLED in a copy button's accessible name, e.g. "phone
+   * number". Passing it opts the row into a copy control; omitting it means the
+   * value is a sentence nobody would paste anywhere — the two verbatim
+   * directory strings — and the row stays plain.
+   */
+  copyAs?: string;
   /**
    * Column-span classes for the two long sentences, or "".
    *
@@ -95,6 +168,69 @@ function Fact({
         <p className={`mt-0.5 break-words text-sm leading-relaxed ${verbatim ? "italic text-fg-dim" : "text-fg"}`}>
           {value || NOT_ON_FILE}
         </p>
+        {/* Only when there is something to copy. See CopyButton's header. */}
+        {copyAs && value && <CopyButton value={value} what={copyAs} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Every address we hold for this business, and the page each came from.
+ *
+ * ONE ROW OR FIVE, THE SAME BLOCK. A sole trader publishes `info@`; a law firm
+ * publishes the receptionist and three partners. Rendering only the first would
+ * hide exactly the address a rep wants — the named human rather than the shared
+ * inbox — and rendering a count ("4 emails") would make them open something
+ * else to see them.
+ *
+ * THE SOURCE URL RIDES ALONG. Under CASL the lawful basis for this email is
+ * implied consent through conspicuous publication, and that basis IS the page
+ * the address was published on. It is shown, not hidden behind a tooltip,
+ * because a rep asked "where did you get this?" needs to answer it.
+ *
+ * `lead.email` MAY NOT BE IN `lead.emails`. The JARVIS writer fills the shared
+ * `email` field only when it is empty, so a rep who typed an owner's address
+ * there keeps it. That one is listed first and marked, rather than silently
+ * merged, because "the rep entered this" and "we scraped this" are different
+ * claims about the same field.
+ */
+function EmailFacts({ lead }: { lead: WebLead }) {
+  const scraped = lead.emails;
+  const primary = lead.email;
+  const repEntered = primary && !scraped.some((e) => e.email.toLowerCase() === primary.toLowerCase())
+    ? primary
+    : null;
+
+  if (!primary && scraped.length === 0) {
+    return <Fact icon={<AtSign className="h-4 w-4" />} label="Email" value={null} />;
+  }
+
+  return (
+    <div className="flex gap-3 border-b border-bg-border/60 py-2.5">
+      <div className="mt-0.5 shrink-0 text-fg-dim" aria-hidden><AtSign className="h-4 w-4" /></div>
+      <div className="min-w-0 flex-1">
+        <p className={LABEL}>{scraped.length > 1 ? `Email (${scraped.length})` : "Email"}</p>
+        <ul className="mt-0.5 space-y-2">
+          {repEntered && (
+            <li className="min-w-0">
+              <p className="break-words text-sm leading-relaxed text-fg">{repEntered}</p>
+              <p className="text-[10px] text-fg-dim">Entered by a rep</p>
+              <CopyButton value={repEntered} what="email address" />
+            </li>
+          )}
+          {scraped.map((e) => (
+            <li key={e.email} className="min-w-0">
+              <p className="break-words text-sm leading-relaxed text-fg">{e.email}</p>
+              {e.sourceUrl && (
+                <p className="break-words text-[10px] text-fg-dim">
+                  Published at {e.sourceUrl}
+                </p>
+              )}
+              <CopyButton value={e.email} what="email address" />
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );
@@ -119,6 +255,10 @@ function WebsiteFact({ lead }: { lead: WebLead }) {
       <div className="min-w-0 flex-1">
         <p className={LABEL}>Website</p>
         <p className="mt-0.5 break-words text-sm leading-relaxed text-fg">{lead.websiteUrl || NOT_ON_FILE}</p>
+        {/* Copies the RAW stored string, not preferredSiteUrl's origin. The
+            text is the honest record of what we hold and is what a rep pastes
+            into a note; the button below is for going there. */}
+        {lead.websiteUrl && <CopyButton value={lead.websiteUrl} what="website address" />}
         {/* Nothing at all when preferredSiteUrl returns null. rel="noopener
             noreferrer" is a requirement, not a nicety: without it the opened
             page can reach back through window.opener, and these are ~27,000
@@ -159,12 +299,31 @@ export function BusinessFacts({ lead, layout = "stack" }: { lead: WebLead; layou
       {/* Identity and location first. A rep confirms who they are calling
           BEFORE they pitch, which is the whole reason this block sits at the
           top of the card rather than under the charts. */}
-      <Fact icon={<MapPin className="h-4 w-4" />} label="Address" value={fullAddress(lead)} />
-      <Fact icon={<Phone className="h-4 w-4" />} label="Phone" value={lead.phone} />
-      <Fact icon={<Building2 className="h-4 w-4" />} label="Industry" value={lead.industry} />
+      <Fact
+        icon={<MapPin className="h-4 w-4" />} label="Address"
+        value={fullAddress(lead)} copyAs="address"
+      />
+      <Fact
+        icon={<Phone className="h-4 w-4" />} label="Phone"
+        value={lead.phone} copyAs="phone number"
+      />
+      {/* Directly under the phone, because those are the two ways to reach
+          them and a rep chooses between them before anything else on this
+          card matters. */}
+      <EmailFacts lead={lead} />
+      <Fact
+        icon={<Building2 className="h-4 w-4" />} label="Industry"
+        value={lead.industry} copyAs="industry"
+      />
       <WebsiteFact lead={lead} />
-      <Fact icon={<Tag className="h-4 w-4" />} label="Directory category" value={lead.osmCategory} />
-      <Fact icon={<MapIcon className="h-4 w-4" />} label="Territory" value={lead.territoryName} />
+      <Fact
+        icon={<Tag className="h-4 w-4" />} label="Directory category"
+        value={lead.osmCategory} copyAs="directory category"
+      />
+      <Fact
+        icon={<MapIcon className="h-4 w-4" />} label="Territory"
+        value={lead.territoryName} copyAs="territory"
+      />
       {/* WHEN THIS BUSINESS IS OPEN, full width, directly under WHERE they are.
           A rep decides in this order -- who, where, and then whether it is even
           worth dialling right now -- so the hours sit inside the identity block
