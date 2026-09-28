@@ -184,6 +184,7 @@ import { selectAngle, recoverablePoints, IF_THE_ANSWER_IS_CLEAN } from "@/lib/we
 import { evidenceFrom } from "@/lib/web-leads/evidence";
 import { BusinessFacts, fullAddress } from "./BusinessFacts";
 import { CallOutcomeLog } from "./CallOutcomeLog";
+import { LeadTimelinePanel } from "@/components/leads/LeadTimelinePanel";
 import { ObjectionConsole } from "./ObjectionConsole";
 import { BattleSection, BattleSections, SectionToolbar, useBattleSections } from "./BattleSection";
 import { hueFor, GOLD, CYAN } from "./battle-hud";
@@ -1446,8 +1447,35 @@ export function BattleCard({
           >
             <IndustryAutomationGuide initialIndustry={lead.industry} />
           </BattleSection>
+          {/* HISTORY SITS ABOVE THE WRITE SURFACE, deliberately.
+              A rep about to dial needs to know what this business has already
+              received from us, and needs it BEFORE the call rather than after
+              logging one. Being the second person from the same company to
+              phone someone this week is the fastest way to sound like the
+              cold-call operation we are telling them we are not.
+
+              REUSED, NOT REBUILT. LeadTimelinePanel already unifies email,
+              calls, voicemail, documents and open events for one lead, and its
+              own header cites the 2026-05-16 ask: "we need to see text + email
+              conversations". It was wired to the pipeline lead file and never to
+              this card, so the capability existed and the rep working the cold
+              board could not see it. It fetches by leadId and scopes by session
+              tenant, which is the same tenant these leads live in
+              (oasis-ai-cc), so it needs nothing from this component but the id.
+
+              COLLAPSIBLE, unlike the outcome log below it. This is a read
+              surface: useful before the call, noise during it. */}
+          <BattleSection
+            id="history"
+            defaultOpen={false}
+            title="What we have already sent them"
+            sub="Every email, call and document recorded against this business, newest first. Worth ten seconds before you dial."
+            teaser="Email history, call dispositions, documents"
+          >
+            <LeadTimelinePanel leadId={leadId} />
+          </BattleSection>
           <Panel>
-            {/* Reused wholesale rather than restyled: one component owns the four
+            {/* Reused wholesale rather than restyled: one component owns the
                 outcomes, and logging an outcome IS the transfer to the pipeline
                 (lib/web-leads/outcome.ts) -- there is no separate "move to
                 pipeline" button anywhere in this feature. A second copy here
