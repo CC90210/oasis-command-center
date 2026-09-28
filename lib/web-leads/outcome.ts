@@ -76,9 +76,9 @@ import { WEBSITE_SALES_STAGES, type WebsiteSalesStage } from "@/lib/website-sale
 import { WEBDEV_TENANT_ID, type WebLead } from "./data";
 import { safeFilterValue } from "./audit";
 
-export type CallOutcome = "no_answer" | "connected" | "interested" | "not_interested";
+export type CallOutcome = "no_answer" | "connected" | "interested" | "not_interested" | "do_not_call";
 
-export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "connected", "interested", "not_interested"];
+export const CALL_OUTCOMES: readonly CallOutcome[] = ["no_answer", "connected", "interested", "not_interested", "do_not_call"];
 
 export function isCallOutcome(v: unknown): v is CallOutcome {
   return typeof v === "string" && (CALL_OUTCOMES as readonly string[]).includes(v);
@@ -90,6 +90,7 @@ const DB_OUTCOME: Record<CallOutcome, string> = {
   connected: "reached",
   interested: "interested",
   not_interested: "not_interested",
+  do_not_call: "do_not_call",
 };
 
 /** The reverse of DB_OUTCOME, for rendering history back in the UI's own
@@ -101,6 +102,7 @@ const UI_OUTCOME_FROM_DB: Partial<Record<string, CallOutcome>> = {
   reached: "connected",
   interested: "interested",
   not_interested: "not_interested",
+  do_not_call: "do_not_call",
 };
 
 /**
@@ -147,6 +149,14 @@ export function nextStage(current: string | null | undefined, outcome: CallOutco
   const currentIndex = current ? stages.indexOf(current) : -1;
 
   if (currentIndex === -1 || currentIndex > connectedIndex) return null;
+
+  // A do-not-call ends the lead from anywhere in this surface's range, including
+  // from "connected" itself: a prospect who spoke to us and then asked to be
+  // removed is removed. Past "connected" the guard above still declines to move
+  // the stage, because that lifecycle is CC's engine's to own -- but the dnc
+  // flag is written by the context patch regardless, so the request is never
+  // lost just because the lead had progressed.
+  if (outcome === "do_not_call") return "lost";
 
   if (outcome === "not_interested") return "lost";
 
@@ -496,8 +506,31 @@ export async function logCallOutcome(input: {
     }
     if (!outcomeTouchAlreadyApplied(current.lastCallAt, calledAt)) continue;
 
+    // ═══ WHY dnc IS WRITTEN HERE AND NOT WITH THE STAGE ═══
+    //
+    // lib/web-leads/claim.ts blocks a claim on `dnc` and says the flag "never
+    // expires"; lib/web-leads/assign.ts checks it before assigning. Four places
+    // READ it. Until this change nothing WROTE it, so the gate that protects a
+    // person who asked to be left alone could only ever open.
+    //
+    // It goes in the context patch because that patch runs on every outcome,
+    // while the stage patch runs only when nextStage() returns a target -- and
+    // nextStage deliberately declines to move a lead past "connected", since
+    // that lifecycle belongs to CC's engine. A prospect deep in that lifecycle
+    // who asks to be removed must still be removed, so the flag cannot ride on
+    // a stage change it may never get.
+    //
+    // `lost` alone is not enough: claim.ts recycles a lost lead back into the
+    // pool after 90 days. Only dnc makes it permanent, which is the difference
+    // between honouring the request and re-dialling them next quarter.
+    //
+    // This is a CRTC obligation, not a courtesy. An internal do-not-call list
+    // binds a telemarketer even when the calls are exempt from the National
+    // DNCL, as business-to-business calls are, and the request must be kept for
+    // three years and fourteen days.
     const contextPatch: Record<string, unknown> = {
       last_disposition: outcome,
+      ...(outcome === "do_not_call" ? { dnc: true, dnc_at: calledAt } : {}),
       ...(note ? { last_handoff_note: note, last_handoff_note_at: calledAt } : {}),
     };
     try {
