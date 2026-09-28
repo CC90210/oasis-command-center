@@ -196,8 +196,18 @@ function Fact({
  * claims about the same field.
  */
 function EmailFacts({ lead }: { lead: WebLead }) {
-  const scraped = lead.emails;
-  const primary = lead.email;
+  // `?? []` IS LOAD-BEARING, NOT DEFENSIVE PADDING.
+  //
+  // The type says these are always present, and tsc agrees — but tsc does NOT
+  // check .measure/, because TypeScript skips dot-directories even under a
+  // `**/*.tsx` include (verified with --listFiles: zero matches). So the
+  // geometry harness builds WebLead objects through esbuild, which does not
+  // typecheck either, and any fixture written before this field existed arrives
+  // here with `emails` undefined. `.some()` on undefined throws, and a throw in
+  // this component takes the address, the phone and the hours down with the
+  // email — the exact failure readEmails() was written to prevent one layer up.
+  const scraped = lead.emails ?? [];
+  const primary = lead.email ?? null;
   const repEntered = primary && !scraped.some((e) => e.email.toLowerCase() === primary.toLowerCase())
     ? primary
     : null;
