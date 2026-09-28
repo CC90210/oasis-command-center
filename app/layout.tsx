@@ -363,12 +363,13 @@ export default async function RootLayout({
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
       </head>
-      {/* `grain` draws globals.css's fixed 40px "Iron Man HUD" grid across
-          the whole viewport. That belongs to the operator dashboard. On
-          the public site it tiled a checkerboard behind every page and
-          every scroll position — the thing CC kept pointing at. Scoped to
-          the dashboard branch; marketing brings its own atmosphere. */}
-      <body className={isFullBleed ? undefined : "grain"}>
+      {/* `grain` is gone entirely, not merely scoped. It drew a fixed 40px
+          grid across the viewport, and a previous pass narrowed it to the
+          dashboard because it tiled a checkerboard behind the public site.
+          The grid is a named AI-generated tell, so the rule behind it has
+          been deleted from globals.css and the class would now resolve to
+          nothing. Removing the attribute keeps markup honest about that. */}
+      <body>
         {/* First-party web-vitals beacon (P0). Renders nothing; posts
             TTFB/LCP/INP/CLS to /api/perf/vitals. First-party rather than
             @vercel/speed-insights because the Cloudflare cutover is in

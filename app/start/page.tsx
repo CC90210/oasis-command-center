@@ -69,16 +69,20 @@ export default async function WelcomePage() {
         {/* Centred hero — flex-1 so it fills remaining vertical space on md+,
             content can grow naturally on mobile (where main allows scroll). */}
         <section className="mx-auto flex w-full max-w-6xl flex-1 flex-col items-center justify-center px-5 pb-8 pt-6 sm:px-8 sm:pb-10 md:overflow-hidden md:pt-0">
-          <div className="welcome-fade mb-3 inline-flex shrink-0 items-center gap-2 border-l border-emerald-300/[0.45] bg-emerald-300/[0.08] px-3 py-1.5 text-[10px] font-mono uppercase tracking-[0.22em] text-emerald-100/[0.85] backdrop-blur-md sm:mb-4">
-            Pick your entry path
-          </div>
+          {/* The uppercase, letter-spaced, mono "eyebrow" that used to sit here
+              said "Pick your entry path", which the subheading below already
+              says. An eyebrow on every heading is one of the banned tells, and
+              this one carried no information at all. */}
 
+          {/* Gradient-filled heading text removed: `bg-clip-text` with
+              transparent text plus a 28px coloured drop-shadow is a reliable
+              generated-UI signature, and it drops contrast below the WCAG 2.2 AA
+              floor the product is required to meet. Emphasis now comes from
+              weight and a solid accent, which is rule 8's guidance. */}
           <h1 className="welcome-fade welcome-fade-d1 shrink-0 text-center text-[clamp(2rem,5.5vw,4.4rem)] font-black leading-[0.98] tracking-tight text-white">
             Build the agent
             <br />
-            <span className="welcome-shimmer bg-clip-text text-transparent drop-shadow-[0_0_28px_rgba(134,239,172,0.22)]">
-              before you enter.
-            </span>
+            <span className="text-emerald-200">before you enter.</span>
           </h1>
 
           <p className="welcome-fade welcome-fade-d2 mt-4 max-w-xl shrink-0 text-center text-[14px] leading-6 text-white/[0.66] sm:mt-5 sm:text-base sm:leading-7">
@@ -134,28 +138,10 @@ export default async function WelcomePage() {
           to { opacity: 1; transform: translateY(0); }
         }
 
-        /* Shimmer on the gradient headline. Background is 3x text width so
-           the gradient stripe slowly slides across without ever blanking. */
-        .welcome-shimmer {
-          background-image: linear-gradient(
-            110deg,
-            #a7f3d0 0%,
-            #86efac 22%,
-            #5eead4 44%,
-            #67e8f9 56%,
-            #86efac 78%,
-            #a7f3d0 100%
-          );
-          background-size: 280% 100%;
-          background-position: 0% 50%;
-          animation: welcome-shimmer 9s ease-in-out infinite;
-        }
-        @keyframes welcome-shimmer {
-          0%, 100% { background-position: 0% 50%; }
-          50%      { background-position: 100% 50%; }
-        }
+        /* The headline shimmer (a six-stop gradient sliding across the text on
+           a 9s infinite loop) is gone along with the gradient fill it painted. */
 
-        /* Card hover: subtle lift + amplified glow on the primary card. */
+        /* Card hover: a subtle lift. */
         .welcome-card {
           transition: transform 0.35s cubic-bezier(.2,.7,.2,1),
                       box-shadow 0.35s cubic-bezier(.2,.7,.2,1),
@@ -165,8 +151,12 @@ export default async function WelcomePage() {
         .welcome-card:hover {
           transform: translateY(-3px);
         }
+        /* Was a 56px saturated green bloom with no offset. Light has a
+           direction, so the primary card now lifts with a real two-layer
+           elevation shadow and states its primacy with its border. */
         .welcome-card-primary:hover {
-          box-shadow: 0 0 56px -14px rgba(52, 211, 153, 0.95);
+          box-shadow: 0 4px 10px rgba(4, 7, 11, 0.5), 0 16px 32px rgba(4, 7, 11, 0.4);
+          border-color: rgba(52, 211, 153, 0.55);
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -174,10 +164,6 @@ export default async function WelcomePage() {
             opacity: 1;
             transform: none;
             animation: none;
-          }
-          .welcome-shimmer {
-            animation: none;
-            background-position: 25% 50%;
           }
           .welcome-card { transition: none; }
           .welcome-card:hover { transform: none; }

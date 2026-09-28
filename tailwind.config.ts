@@ -24,6 +24,11 @@ const config: Config = {
           raised: "#15181e",
           elev: "#1c2028",
           border: "#22262e",
+          // One step up from `border`, for hover and focus separation. Defined
+          // before use per design constitution rule 26: a class that resolves to
+          // nothing fails silently, which is how `bg-bg-deep` once rendered ~85
+          // overlays transparent (see the note above).
+          "border-strong": "#2e343f",
           hover: "#1a1d24",
         },
         fg: {
@@ -114,11 +119,20 @@ const config: Config = {
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
       },
+      // Elevation only. Oasis design constitution rules 14 and 15: a border
+      // separates things on the same plane, a shadow lifts something above it.
+      // Light has a direction, so every shadow here carries a y-offset; a
+      // shadow with 0 0 offsets is a glow, and a coloured glow is the single
+      // most recognisable "AI-generated UI" tell. Tinted to the cool neutral
+      // of the panel surface rather than flat black.
       boxShadow: {
-        glow: "0 0 24px rgba(59, 130, 246, 0.22)",
-        card: "0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.6)",
-        elev: "0 8px 24px rgba(0, 0, 0, 0.5)",
-        ironman: "0 0 0 1px rgba(59,130,246,0.25), 0 16px 40px -12px rgba(59,130,246,0.25)",
+        // Active-state emphasis. Tight and directional, not a bloom.
+        glow: "0 1px 3px rgba(59, 130, 246, 0.35)",
+        card: "0 1px 2px rgba(6, 9, 15, 0.50), 0 2px 6px rgba(6, 9, 15, 0.35)",
+        elev: "0 4px 10px rgba(6, 9, 15, 0.45), 0 16px 32px rgba(6, 9, 15, 0.38)",
+        // Replaces `ironman`, a 40px saturated-blue halo wired into Card and
+        // Stat and therefore visible on nearly every screen of the dashboard.
+        raised: "0 2px 4px rgba(6, 9, 15, 0.45), 0 8px 24px rgba(6, 9, 15, 0.35)",
       },
     },
   },
