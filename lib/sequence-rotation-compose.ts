@@ -20,7 +20,7 @@
  *   - Malformed / empty JSON → "compose_parse_failed: <raw slice>"
  */
 
-import { inferText } from "./subscription-infer";
+import { inferForTenant } from "./ai/infer";
 
 const MAX_TOKENS = 900;
 
@@ -93,12 +93,11 @@ export async function composeRotationSuggestion(
   opts: { tenantId: string | null },
 ): Promise<RotationComposeResult> {
   // Subscription, not the paid API. See lib/subscription-infer.ts.
-  const inf = await inferText({
+  const inf = await inferForTenant(opts.tenantId, {
     source: "sequence-rotation",
     system: SYSTEM_PROMPT,
     prompt: buildUserPrompt(input),
     maxTokens: MAX_TOKENS,
-    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

@@ -1,7 +1,7 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
-import { queueInfer } from "@/lib/bridge-infer";
+import { queueInferForTenant } from "@/lib/ai/infer";
 import { sendGmailAsOperator } from "@/lib/integrations/gmail-oauth-send";
 import { isDryRun } from "@/lib/integrations/send-mode";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
@@ -328,7 +328,7 @@ export function validateSmsAgentReschedule(input: {
   return { ok: true, meetingAt };
 }
 
-type InferFunction = typeof queueInfer;
+type InferFunction = typeof queueInferForTenant;
 
 export type SmsAgentClassificationResult =
   | {
@@ -380,7 +380,7 @@ export async function classifySmsAgentJob(
   const prompt = redactAll(wrapUntrusted(input.body, { label: "inbound_sms", maxLen: 2_000 }));
   let inferred: Awaited<ReturnType<InferFunction>>;
   try {
-    inferred = await (overrides.infer || queueInfer)(
+    inferred = await (overrides.infer || queueInferForTenant)(
       {
         source: "sms-reply-agent",
         system: CLASSIFICATION_SYSTEM,
@@ -2137,7 +2137,7 @@ export async function runSmsReplyAgentWorker(overrides: {
             pendingCount += 1;
             continue;
           }
-          const result = await processClaimedJob(db, raw, job, nowMs, overrides.infer || queueInfer);
+          const result = await processClaimedJob(db, raw, job, nowMs, overrides.infer || queueInferForTenant);
           if (result.status === "done") done += 1;
           if (result.status === "escalated") escalated += 1;
           if (result.status === "pending") pendingCount += 1;

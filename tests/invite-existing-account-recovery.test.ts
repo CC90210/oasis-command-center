@@ -485,7 +485,16 @@ async function testTursoSignupActuallyPersistsFullName() {
       session_version INTEGER NOT NULL DEFAULT 0,
       deleted_at TEXT
     )`);
+    // Signup is invite-only (P0-8), so the signup this test drives must carry
+    // an invite pinned to the email. IF NOT EXISTS: the race test above left
+    // tenant_invites in the shared in-memory database.
+    await db.execute(`CREATE TABLE IF NOT EXISTS tenant_invites (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, email TEXT, team_role TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, expires_at TEXT NOT NULL, redeemed_at TEXT, redeemed_by TEXT, revoked_at TEXT)`);
     const email = `david-${randomUUID()}@oasisai.work`;
+    const inviteRaw = `signup-metadata-invite-${randomUUID()}`;
+    await db.execute({
+      sql: `INSERT INTO tenant_invites (id, tenant_id, email, team_role, token_hash, created_by, expires_at) VALUES ('invite-metadata', 'oasis-tenant', ?, 'opener', ?, 'admin-1', '2099-01-01T00:00:00.000Z')`,
+      args: [email, hash(inviteRaw)],
+    });
     const response = await tursoSignup(new NextRequest("http://localhost/api/auth/turso-signup", {
       method: "POST",
       headers: { "content-type": "application/json", "x-forwarded-for": randomUUID() },
@@ -493,6 +502,7 @@ async function testTursoSignupActuallyPersistsFullName() {
         email,
         password: "ProductionReady123",
         full_name: "  David Smadja  ",
+        invite_token: inviteRaw,
       }),
     }));
     assert.equal(response.status, 200, await response.text());

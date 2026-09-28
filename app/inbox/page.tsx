@@ -4,14 +4,15 @@ import { listUnread, listRead } from "@/lib/agent-inbox-fs";
 import { listUnreadDb, listReadDb, dbToUiShape } from "@/lib/agent-inbox-db";
 import { getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
-import { getSessionUser } from "@/lib/supabase-server";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function InboxPage() {
-  const user = await getSessionUser();
-  const isAdmin = isOperatorEmail(user?.email);
+  // Operator-only (P0-5), before any query. This page used an email match to
+  // decide only whether to SHOW the composer, while the agent-to-agent log
+  // itself was fetched and rendered for any signed-in member.
+  await requireOperator();
   const profile = await safe("inbox.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
 
@@ -155,21 +156,20 @@ export default async function InboxPage() {
       >
         <AgentInboxList unread={unread} read={read} />
       </Card>
-      {isAdmin && (
-        <details className="rounded-lg border border-bg-border bg-bg-elev/40">
-          <summary className="cursor-pointer px-5 py-4 text-sm font-bold uppercase tracking-[0.14em] text-fg-muted hover:text-fg">
-            Post a message (admin · expand)
-          </summary>
-          <div className="px-5 pb-5">
-            <p className="text-xs text-fg-dim mb-3">
-              You usually don&apos;t need this — chat the agent directly
-              instead. Use this only for a non-urgent note that should
-              wait until the next time that agent runs.
-            </p>
-            <AgentInboxComposer />
-          </div>
-        </details>
-      )}
+      {/* Every viewer who reaches this line passed requireOperator above. */}
+      <details className="rounded-lg border border-bg-border bg-bg-elev/40">
+        <summary className="cursor-pointer px-5 py-4 text-sm font-bold uppercase tracking-[0.14em] text-fg-muted hover:text-fg">
+          Post a message (admin · expand)
+        </summary>
+        <div className="px-5 pb-5">
+          <p className="text-xs text-fg-dim mb-3">
+            You usually don&apos;t need this — chat the agent directly
+            instead. Use this only for a non-urgent note that should
+            wait until the next time that agent runs.
+          </p>
+          <AgentInboxComposer />
+        </div>
+      </details>
     </div>
   );
 }

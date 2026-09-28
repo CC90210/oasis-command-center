@@ -156,4 +156,13 @@ for (const notPublic of [
   );
 }
 
+// /api/quests served CC's ACTIVE_TASKS mirror (55 rows of oasis_quests) to the
+// whole internet "for Phase 5 proof-of-life" (doc 02 F2 / P0-6, 2026-09-28).
+// It is operator-only now; middleware must 401 a signed-out caller before the
+// route runs, and the route itself refuses any non-operator
+// (tests/admin-surfaces-operator-only.test.ts).
+for (const gated of ["/api/quests", "/api/quests/anything"]) {
+  assert.equal(isPublic(gated), false, `${gated} must stay session-gated — it is CC's task list`);
+}
+
 console.log("middleware-prefix ok");

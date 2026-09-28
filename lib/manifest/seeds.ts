@@ -4,7 +4,8 @@
  *
  *   1. the `tenant_manifests` Supabase table is empty (fresh install), OR
  *   2. the DB is unreachable from a Vercel function for this request, OR
- *   3. the requested slug isn't in the DB but we want a sensible default.
+ *   3. the requested slug isn't in the DB. A slug with no seed of its own
+ *      gets UNPROVISIONED_SEED (below), never OASIS's workspace.
  *
  * Once Phase 2's AI editor lands and writes to Supabase, seeds become the
  * "shipped defaults" — the DB row overrides per tenant. Until then, the seeds
@@ -885,9 +886,84 @@ export const SUGA_SEED: TenantManifest = {
 };
 
 /**
+ * The slug UNPROVISIONED_SEED answers to. No workspace can hold it:
+ * lib/manifest/guards.ts PROTECTED_SLUGS reserves it, so a stored manifest
+ * named "unprovisioned" can never be written and mistaken for this seed.
+ */
+export const UNPROVISIONED_SLUG = "unprovisioned";
+
+/**
+ * What a workspace sees before OASIS has set it up: Today, which says so, and
+ * Settings for the viewer's own profile. Nothing else.
+ *
+ * WHY (2026-09-28, P0-4). getSeedManifest answered every slug it did not
+ * recognise with OASIS_SEED, which is CC's own workspace: his nav (Operations,
+ * Automations, Health, Analytics ...), OASIS's lead data model, OASIS's agent
+ * roster, the operator chat picker, and local_files + computer_control
+ * permissions. 46 self-signup workspaces had no manifest row and no seed, so
+ * every one of them rendered it. A slug nobody has set up is not a request for
+ * OASIS's workspace, so it gets an empty one.
+ *
+ * No agents, no data model, no prompts, every permission off. Those arrive
+ * with the workspace's own manifest when OASIS provisions it.
+ */
+export const UNPROVISIONED_SEED: TenantManifest = {
+  version: 1,
+  tenant_slug: UNPROVISIONED_SLUG,
+  brand: {
+    name: "Your workspace",
+    logo: "oasis",
+    subtitle: "Being set up by OASIS",
+    footer_label: "OASIS OS",
+    footer_tagline: "Your workspace is being set up.",
+  },
+  agents: [],
+  nav: [
+    { group: "Workspace", href: "/", label: "Today", icon: "LayoutDashboard" },
+    { group: "Workspace", href: "/settings", label: "Settings", icon: "Settings" },
+  ],
+  pages: [
+    {
+      path: "",
+      label: "Today",
+      kind: "markdown",
+      config: {
+        body: [
+          "## Your workspace is being set up",
+          "OASIS is setting up this workspace for you. Your pipeline, your team and your agents appear here once that is done.",
+          "Nothing here needs your attention in the meantime. You can update your profile under Settings.",
+        ].join("\n\n"),
+      },
+    },
+  ],
+  data_model: [],
+  default_prompts: [],
+  permissions: { local_files: false, computer_control: false, web_access: false },
+  onboarding_industry: "custom",
+  ui: {
+    advanced_picker: false,
+  },
+  meta: {
+    created_at: "2026-09-28T00:00:00.000Z",
+    updated_at: "2026-09-28T00:00:00.000Z",
+    schema_version: MANIFEST_SCHEMA_VERSION,
+  },
+};
+
+/** True when `manifest` is the set-up placeholder rather than a real workspace. */
+export function isUnprovisionedManifest(manifest: Pick<TenantManifest, "tenant_slug"> | null | undefined): boolean {
+  return manifest?.tenant_slug === UNPROVISIONED_SLUG;
+}
+
+/**
  * Slug map for synchronous lookups. The loader uses this as the fallback when
  * Supabase has no row for a slug; the AI editor writes new manifests to DB,
  * never to this map.
+ *
+ * `default` and `oasis` stay listed so manifestExists(), the onboarding
+ * wizard's reserved-slug check and the slug-claim guard keep treating them as
+ * platform names. They are NOT served from here: getSeedManifest gates both
+ * on the viewer's tenant id. Read this map for existence only.
  */
 export const SEED_MANIFESTS: Record<string, TenantManifest> = {
   default: OASIS_SEED,
@@ -897,7 +973,61 @@ export const SEED_MANIFESTS: Record<string, TenantManifest> = {
   suga: SUGA_SEED,
 };
 
-export function getSeedManifest(slug: string | null | undefined): TenantManifest {
-  const key = (slug || "").trim().toLowerCase();
-  return SEED_MANIFESTS[key] || OASIS_SEED;
+/**
+ * OASIS's own tenants, by id. The only viewers the alias slugs below render
+ * OASIS_SEED for.
+ *
+ * Keyed by id, not slug: a slug is text a workspace can end up holding (a
+ * self-signup's slug is derived from its email, so "oasis" is one signup away).
+ * Verified against the live `tenants` table 2026-09-28. Mirrors the "oasis"
+ * rows of TENANT_ID_BRAND in lib/email/brand-for-tenant.ts;
+ * tests/manifest-unknown-slug-fail-closed.test.ts asserts they match.
+ */
+export const OASIS_SEED_TENANT_IDS: ReadonlySet<string> = new Set([
+  "ef8d389e-3f15-43f2-ae00-3660f69a1452", // slug "oasis-ai-cc"
+  "42423fde-be8b-454f-932a-750e8c9b743d", // slug "oasis-webdev"
+]);
+
+/**
+ * Slugs that name OASIS but belong to no tenant: "default" is what the loader
+ * uses when there is no slug at all, and "oasis" is the historical slug, which
+ * no tenant holds (2026-09-28). Neither says whose workspace this is, so
+ * OASIS_SEED is served under them only when the caller passes an OASIS
+ * tenant id.
+ */
+const OASIS_ALIAS_SLUGS: ReadonlySet<string> = new Set(["default", "oasis"]);
+
+/**
+ * OASIS workspaces that have no seed and no manifest row of their own.
+ *
+ * `oasis-webdev` is the website-sales tenant's own `tenants.slug` (tenant
+ * 42423fde…, the same value as OASIS_WEBSITE_TENANT_SLUG in
+ * lib/website-sales-workflow.ts, which is not imported here to keep this
+ * module's import graph small). It rendered OASIS_SEED through the old
+ * catch-all fallback, and invite redemption into it reads the seed's agent
+ * roster, so it keeps that seed explicitly. `tenants.slug` is UNIQUE, so no
+ * other tenant can hold it.
+ */
+const ROWLESS_OASIS_SEEDS: Readonly<Record<string, TenantManifest>> = {
+  "oasis-webdev": OASIS_SEED,
+};
+
+/**
+ * The in-code manifest for `slug`, or UNPROVISIONED_SEED.
+ *
+ * `viewerTenantId` is the SESSION tenant, and it only matters for the alias
+ * slugs: pass it where the caller has one, so an OASIS viewer whose slug did
+ * not resolve still gets OASIS_SEED. Every other slug ignores it.
+ */
+export function getSeedManifest(
+  slug: string | null | undefined,
+  viewerTenantId?: string | null,
+): TenantManifest {
+  const key = (slug || "").trim().toLowerCase() || "default";
+  if (OASIS_ALIAS_SLUGS.has(key)) {
+    return typeof viewerTenantId === "string" && OASIS_SEED_TENANT_IDS.has(viewerTenantId)
+      ? OASIS_SEED
+      : UNPROVISIONED_SEED;
+  }
+  return SEED_MANIFESTS[key] ?? ROWLESS_OASIS_SEEDS[key] ?? UNPROVISIONED_SEED;
 }

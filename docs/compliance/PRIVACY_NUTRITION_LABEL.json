@@ -1,5 +1,5 @@
 {
-  "$comment": "App-store-style privacy manifest for the OASIS Agent Command Center. Generated from the product's real behaviour on 2026-07-27 and kept in sync with lib/legal/constants.ts (DATA_MATRIX + SUBPROCESSORS), which is what /privacy renders. If you change either, change both in the same commit.",
+  "$comment": "App-store-style privacy manifest for the OASIS Agent Command Center. Generated from the product's real behaviour on 2026-07-27, re-verified 2026-09-28 after the Turso + Cloudflare cutover, and kept in sync with lib/legal/constants.ts (DATA_MATRIX + SUBPROCESSORS), which is what /privacy renders. If you change either, change both in the same commit; tests/legal-compliance-drift.test.ts fails if they disagree.",
   "schemaVersion": "1.0",
   "app": {
     "name": "OASIS Agent Command Center",
@@ -9,16 +9,30 @@
     "privacyPolicyUrl": "https://oasisai.work/privacy",
     "termsUrl": "https://oasisai.work/terms",
     "dmcaUrl": "https://oasisai.work/dmca",
-    "privacyContact": "privacy@oasisai.work"
+    "privacyContact": "privacy@oasisai.work",
+    "privacyOfficer": {
+      "name": "Conaugh McKenna",
+      "title": "Person in charge of the protection of personal information",
+      "titleFr": "Responsable de la protection des renseignements personnels",
+      "email": "privacy@oasisai.work"
+    }
   },
-  "lastVerified": "2026-07-27",
-  "verificationMethod": "Static scan of app/ and lib/ for collected form fields, outbound provider hosts, storage buckets, and analytics SDKs.",
+  "lastVerified": "2026-09-28",
+  "verificationMethod": "Static scan of app/, lib/ and components/ for collected form fields, outbound provider hosts, storage, deploy configuration, and analytics SDKs; each processor is pinned to its evidence in tests/legal-compliance-drift.test.ts.",
 
   "tracking": {
     "usedForTracking": false,
     "thirdPartyAnalyticsSdks": [],
     "advertisingPixels": [],
     "note": "No Google Analytics, Meta Pixel, PostHog, Mixpanel, or @vercel/analytics is present in this application as of the lastVerified date. Cookies are limited to authentication and session state."
+  },
+
+  "security": {
+    "tenantIsolation": "Application-level: customer records carry a tenant_id and application queries filter on the signed-in user's tenant. The database (Turso/libSQL) does not enforce per-customer access rules.",
+    "encryptionInTransit": true,
+    "applicationLevelEncryption": "Stored credentials only (AI provider API keys, email account passwords, OAuth tokens): AES-256-GCM before storage. Other fields, including sensitive identifiers, are not separately encrypted by the application.",
+    "fileStorage": "Private Cloudflare R2 storage (encrypted at rest by Cloudflare), served through short-lived signed links.",
+    "auditLog": "Team membership and access, AI provider settings, automation controls, and e-signature events are written to a per-tenant audit log."
   },
 
   "dataCollected": [
@@ -29,7 +43,7 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": false,
-      "sharedWith": ["Supabase", "Anthropic"],
+      "sharedWith": ["Turso", "The workspace's model provider (when included in agent context)", "Google (email and calendar invitations)", "Twilio (SMS)", "Telegram (staff alerts)"],
       "retention": "Life of account, then 24 months"
     },
     {
@@ -39,7 +53,7 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": false,
-      "sharedWith": ["Supabase", "Submitting tenant"],
+      "sharedWith": ["Turso", "Submitting tenant"],
       "retention": "Life of account, then 24 months"
     },
     {
@@ -49,9 +63,9 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": true,
-      "sharedWith": ["Supabase", "Anthropic (when present in an uploaded document)"],
+      "sharedWith": ["Turso", "Anthropic (when present in an uploaded document)"],
       "retention": "Duration of the active application; deleted on request",
-      "regulatoryNote": "Sensitive personal information under Quebec Law 25 and the CPRA. Collection requires express consent and, under Law 25 s.3.3, a privacy impact assessment before use in an automated process."
+      "regulatoryNote": "Sensitive personal information under Quebec Law 25 and the CPRA. Collection requires express consent and, under Law 25 s.3.3, a privacy impact assessment before use in an automated process. Not separately encrypted by the application."
     },
     {
       "category": "User Content — Uploaded Documents",
@@ -60,7 +74,7 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": true,
-      "sharedWith": ["Supabase Storage", "Anthropic (field extraction)"],
+      "sharedWith": ["Cloudflare R2", "Anthropic (field extraction)"],
       "retention": "Stored with the application; deleted on request"
     },
     {
@@ -70,42 +84,75 @@
       "linkedToUser": false,
       "usedForTracking": false,
       "sensitive": false,
-      "sharedWith": ["Vercel", "Supabase"],
-      "retention": "30 days"
+      "sharedWith": ["Cloudflare"],
+      "retention": "Up to 30 days"
     }
   ],
 
   "subprocessors": [
     {
-      "name": "Supabase, Inc.",
-      "role": "Database, authentication, file storage",
+      "name": "Turso",
+      "role": "Primary database (libSQL)",
       "region": "United States",
-      "dpaInPlace": true
+      "dpaInPlace": false
     },
     {
-      "name": "Vercel, Inc.",
-      "role": "Hosting and edge delivery",
-      "region": "United States / global edge",
+      "name": "Cloudflare, Inc.",
+      "role": "Application hosting (Workers), file storage (R2), edge delivery",
+      "region": "Global edge network",
       "dpaInPlace": true
     },
     {
       "name": "Anthropic PBC",
-      "role": "LLM inference (Claude); chat, agent tasks, and document field extraction",
+      "role": "LLM inference (Claude); chat, agent tasks, drafting and classification, and document field extraction",
       "region": "United States",
       "dpaInPlace": false,
-      "openIssue": "Document extraction runs via the Claude CLI on an individual subscription, not a commercial API account. Consumer subscription terms differ materially from Anthropic's Commercial Terms and DPA. Sensitive identifiers (SSN, DOB, EIN) traverse this path."
+      "openIssue": "Some automated tasks run through the Claude Code CLI on an OASIS subscription account, not under a commercial API agreement. Subscription terms differ materially from Anthropic's Commercial Terms and DPA."
     },
     {
       "name": "OpenAI, L.L.C.",
-      "role": "LLM inference (GPT) for delegated code and review tasks",
+      "role": "LLM inference (GPT) when a workspace or agent is configured to use it",
       "region": "United States",
+      "dpaInPlace": false
+    },
+    {
+      "name": "OpenRouter",
+      "role": "Model routing when a workspace is configured to use it; forwards to the selected model's host",
+      "region": "United States; forwarded to the host of the selected model",
       "dpaInPlace": false
     },
     {
       "name": "Google LLC",
-      "role": "LLM inference (Gemini) fallback provider",
+      "role": "Google Workspace APIs (Gmail send and inbox monitoring, Calendar events); Gemini inference when selected",
       "region": "United States",
       "dpaInPlace": false
+    },
+    {
+      "name": "Stripe",
+      "role": "Payments and billing (hosted Checkout; card numbers never reach OASIS servers)",
+      "region": "United States",
+      "dpaInPlace": true
+    },
+    {
+      "name": "Twilio Inc.",
+      "role": "SMS messaging",
+      "region": "United States",
+      "dpaInPlace": true
+    },
+    {
+      "name": "Telegram",
+      "role": "Operational alerts to staff (new-lead, booking, and support alerts)",
+      "region": "Global",
+      "dpaInPlace": false,
+      "openIssue": "No data processing agreement covers these alerts, which carry lead contact details."
+    }
+  ],
+
+  "legacyDataLocations": [
+    {
+      "name": "Supabase, Inc.",
+      "region": "United States",
+      "status": "Legacy copy of records created before the August 2026 move to Turso. No longer used by the application; planned for deletion."
     }
   ],
 
@@ -122,7 +169,10 @@
 
   "openGaps": [
     "No signed DPA covering the LLM providers for the document-extraction path.",
+    "No DPA confirmed with Turso (primary database), OpenRouter, Google (Gemini API path), or Telegram.",
     "Law 25 privacy impact assessment not yet completed for cross-border transfer of sensitive identifiers.",
+    "Sensitive identifiers (SSN, DOB, EIN) are not encrypted at the application level.",
+    "Legacy Supabase copy of pre-August-2026 records not yet deleted.",
     "No French-language version of the privacy policy or terms (Charter of the French Language, art. 55, for consumer contracts of adhesion in Quebec).",
     "DMCA Designated Agent not yet registered with the U.S. Copyright Office.",
     "Legal copy has not been reviewed by counsel."

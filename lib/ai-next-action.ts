@@ -27,7 +27,7 @@
  *     Deals case study", not "Send relevant material")
  */
 
-import { inferText } from "./subscription-infer";
+import { inferForTenant } from "./ai/infer";
 
 const MAX_TOKENS = 350;
 
@@ -99,12 +99,11 @@ export async function recommendNextAction(
     }\n\nWhat is the single highest-value next move?`;
 
   // Subscription, not the paid API. See lib/subscription-infer.ts.
-  const inf = await inferText({
+  const inf = await inferForTenant(opts.tenantId, {
     source: "next-action",
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
     maxTokens: MAX_TOKENS,
-    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {

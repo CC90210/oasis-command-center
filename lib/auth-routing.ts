@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getClientProfileSlugForBrand, resolveClientProfileSlug } from "@/lib/client-profiles";
+import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { isOperatorEmail } from "@/lib/operator-credentials";
 import { safeInternalPath } from "@/lib/turso-auth-admin";
 
@@ -341,7 +341,7 @@ export async function resolvePostLoginRedirect({
     resolveClientProfileSlug({
       slug: tenant?.slug || "",
       custom_fields: tenant?.custom_fields || {},
-    }) || getClientProfileSlugForBrand(profile.brand, profile.email);
+    });
 
   return normalizePostLoginRedirect(requestedNext, {
     tenantSlug: tenant?.slug || null,

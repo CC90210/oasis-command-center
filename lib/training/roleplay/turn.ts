@@ -17,7 +17,7 @@
  * moved on the answer.
  */
 
-import { inferText } from "@/lib/subscription-infer";
+import { inferForTenant } from "@/lib/ai/infer";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import {
   MAX_REP_CHARS,
@@ -86,12 +86,11 @@ export async function ownerTurn(
 ): Promise<OwnerReply> {
   assertTranscriptSane(transcript);
 
-  const inf = await inferText({
+  const inf = await inferForTenant(WEBDEV_TENANT_ID, {
     source: "training-roleplay",
     system: buildOwnerSystemPrompt(scenario),
     prompt: buildTurnPrompt(scenario, transcript),
     maxTokens: OWNER_MAX_TOKENS,
-    tenantId: WEBDEV_TENANT_ID,
     modelTier: "smart",
   });
   if (!inf.ok) {
@@ -123,12 +122,11 @@ export async function debrief(scenario: RoleplayScenario, transcript: Turn[]): P
     throw new RoleplayRejected("nothing_to_review", "You have not said anything yet.");
   }
 
-  const inf = await inferText({
+  const inf = await inferForTenant(WEBDEV_TENANT_ID, {
     source: "training-roleplay-debrief",
     system: DEBRIEF_SYSTEM_PROMPT,
     prompt: buildDebriefPrompt(scenario, transcript),
     maxTokens: DEBRIEF_MAX_TOKENS,
-    tenantId: WEBDEV_TENANT_ID,
     modelTier: "smart",
   });
   if (!inf.ok) {

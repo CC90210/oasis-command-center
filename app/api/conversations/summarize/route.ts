@@ -24,6 +24,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { summarizeConversation } from "@/lib/ai-conversation-summarize";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
+import { MANAGED_RUNTIME_NOT_CONFIGURED } from "@/lib/ai/infer";
 import {
   getReadableLeadTargetForSession,
   resolveLeadReadPolicy,
@@ -83,7 +84,10 @@ export async function POST(req: NextRequest) {
   try {
     // Subscription bridge (free) for eligible tenants; null → paid-API fallback.
     const bridgeTarget = await resolveBridgeForTenant(sess.tenantId);
-    const result = await summarizeConversation(thread.messages, { bridgeTarget });
+    const result = await summarizeConversation(thread.messages, {
+      bridgeTarget,
+      tenantId: sess.tenantId,
+    });
     return NextResponse.json({
       ok: true,
       summary: result.summary,
@@ -94,7 +98,10 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     let status = 500;
     let errorTag = "summarize_failed";
-    if (message === "anthropic_key_missing") {
+    if (
+      message === "anthropic_key_missing" ||
+      message.startsWith(MANAGED_RUNTIME_NOT_CONFIGURED)
+    ) {
       status = 503;
       errorTag = "ai_unavailable";
     } else if (message.startsWith("summarize_parse_failed")) {

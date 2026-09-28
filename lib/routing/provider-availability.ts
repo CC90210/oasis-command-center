@@ -18,6 +18,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import type { ProviderAvailability, ProviderId } from "./outbound-routing";
 
 /** Credential service names as stored in tenant_integration_credentials. */
@@ -158,9 +159,15 @@ export async function loadProviderAvailability(tenantId: string): Promise<Provid
     gws: Boolean(process.env.GMAIL_APP_PASSWORD && process.env.GMAIL_USER),
   };
 
+  // Env credentials belong to OASIS's own account, and the resolver hands them
+  // only to OASIS tenant ids (tenantMayUseEnvFallback). Counting them for any
+  // other tenant would admit a send the resolver then fails with an empty
+  // bundle: a burned attempt instead of a clean hold.
+  const envApplies = tenantMayUseEnvFallback(tenantId);
+
   return Object.fromEntries(
     ids.map((p) => {
-      const configured = hasCompleteBundle(p) || Boolean(envConfigured[p]);
+      const configured = hasCompleteBundle(p) || (envApplies && Boolean(envConfigured[p]));
       return [p, { configured, enabled: configured && envEnabled(p) }];
     }),
   ) as ProviderAvailability;

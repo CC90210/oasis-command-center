@@ -11,6 +11,12 @@
  * `env_key`. Once an operator pastes a value into Settings the DB
  * takes precedence (no need to wipe the env var).
  *
+ * The env fallback is OASIS's OWN tenants only (OASIS_ENV_CREDENTIAL_TENANT_IDS,
+ * by id). Every env value is an account OASIS operates, so any other tenant
+ * with no stored key gets null ("not connected"), never OASIS's account. A
+ * stored credential that cannot be read (query error, bad ciphertext) is also
+ * null — it is never silently replaced by the env value.
+ *
  * All functions are server-only — field-encryption requires
  * BRAVO_FIELD_ENCRYPTION_KEY which never ships to the browser.
  */
@@ -18,7 +24,6 @@
 import "server-only";
 import { getServiceSupabase } from "./supabase-server";
 import { encryptField, decryptField } from "./field-encryption";
-import { isOasisSurfaceTenant } from "./role-surfaces";
 import { TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS } from "./tenant-integration-schemas";
 
 /**
@@ -79,9 +84,11 @@ export type IntegrationSetResult =
  * resolver's source of truth.
  *
  * Unregistered (service, field_key) pairs DB-only — no env-var
- * leakage path.
+ * leakage path. Registered pairs fall back only for an OASIS tenant
+ * (tenantMayUseEnvFallback). Exported read-only so
+ * tests/env-fallback-oasis-only.test.ts covers every service in it.
  */
-const ENV_FALLBACKS: Record<string, Record<string, string>> = {
+export const ENV_FALLBACKS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   twilio: {
     account_sid: "TWILIO_ACCOUNT_SID",
     auth_token: "TWILIO_AUTH_TOKEN",
@@ -166,7 +173,8 @@ const ENV_FALLBACK_ALIASES: Record<string, Record<string, readonly string[]>> = 
   },
 };
 
-function envKeysFor(service: string, fieldKey: string): readonly string[] {
+// Exported for tests/env-fallback-oasis-only.test.ts (env names only, never values).
+export function envKeysFor(service: string, fieldKey: string): readonly string[] {
   const aliases = ENV_FALLBACK_ALIASES[service]?.[fieldKey];
   if (aliases) return aliases;
   const fallback = ENV_FALLBACKS[service]?.[fieldKey];
@@ -181,31 +189,49 @@ function readEnvFallback(service: string, fieldKey: string): string | null {
   return null;
 }
 
-// Services whose env value is OASIS's OWN account, not a platform default.
-// The Worker's STRIPE_SECRET_KEY is a full live key for OASIS's Stripe
-// (2026-09-25); answering it to any tenant would let a SunBiz lead that
-// carries the website-sales marker create payment links or read charges in
-// OASIS's account. Only an OASIS tenant falls back; every other tenant must
-// store its own key. Fails closed when the tenant can't be resolved.
-const OASIS_OWNED_ENV_FALLBACK_SERVICES: ReadonlySet<string> = new Set(["stripe"]);
+/**
+ * The only tenants that may resolve a credential from the Worker's env.
+ *
+ * Every env value in ENV_FALLBACKS is an account OASIS operates (Stripe,
+ * Gmail, Telegram, Twilio, the send-gateway HMAC …), or one it hosted for
+ * SunBiz (Kixie, TextTorrent) — none is a platform default a customer may
+ * borrow. Until 2026-09-28 only Stripe was gated: the Worker's STRIPE_SECRET_KEY
+ * is a full live key for OASIS's Stripe (2026-09-25), and a SunBiz lead that
+ * carried the website-sales marker could create payment links in OASIS's
+ * account. Every other service still answered its env account to ANY tenant
+ * with no key of its own, so a new client workspace would text, email and
+ * notify through OASIS's accounts. Now every service is gated the same way.
+ *
+ * Keyed by tenant ID, not slug: a slug is display text a workspace can claim
+ * (the historical "oasis" slug has no tenant row today). Verified against the
+ * live `tenants` table 2026-09-28 — these are the only two tenants whose slug
+ * contains "oasis". Mirrors the "oasis" rows of TENANT_ID_BRAND in
+ * lib/email/brand-for-tenant.ts; tests/env-fallback-oasis-only.test.ts asserts
+ * the two sets are equal, so adding an OASIS tenant is a decision made here.
+ */
+export const OASIS_ENV_CREDENTIAL_TENANT_IDS: ReadonlySet<string> = new Set([
+  "ef8d389e-3f15-43f2-ae00-3660f69a1452", // slug "oasis-ai-cc" (also web-leads' WEBDEV_TENANT_ID)
+  "42423fde-be8b-454f-932a-750e8c9b743d", // slug "oasis-webdev"
+]);
 
-async function tenantMayUseEnvFallback(tenantId: string, service: string): Promise<boolean> {
-  if (!OASIS_OWNED_ENV_FALLBACK_SERVICES.has(service)) return true;
-  const r = await getServiceSupabase().from("tenants").select("slug").eq("id", tenantId).maybeSingle();
-  if (r.error) {
-    console.error("[tenant-integration-store] tenant lookup failed; OASIS-owned env fallback refused", {
-      service,
-      error: r.error.message,
-    });
-    return false;
-  }
-  return isOasisSurfaceTenant((r.data as { slug?: string | null } | null)?.slug);
+/**
+ * True only for an OASIS tenant id, exact match. Anything else — another
+ * tenant, an unknown id, "", null — is false, so the fallback fails closed.
+ * Exported so direct env readers outside this store can apply the same rule.
+ */
+export function tenantMayUseEnvFallback(tenantId: string | null | undefined): boolean {
+  return typeof tenantId === "string" && OASIS_ENV_CREDENTIAL_TENANT_IDS.has(tenantId);
 }
 
 /**
  * Resolve a single value. Returns null when neither the DB nor the
  * env-var fallback has it. NEVER throws on missing data — callers
  * decide whether absence is fatal.
+ *
+ * Returns null (and logs) when the stored row cannot be read — a query
+ * error or a ciphertext that will not decrypt. It never falls through to
+ * the env value then: that would quietly send as a different account than
+ * the one the tenant configured.
  */
 export async function getTenantIntegrationValue(
   tenantId: string,
@@ -220,18 +246,30 @@ export async function getTenantIntegrationValue(
     .eq("service", service)
     .eq("field_key", fieldKey)
     .maybeSingle();
+  if (r.error) {
+    console.error("[tenant-integration-store] credential lookup failed; refusing env fallback", {
+      tenantId,
+      service,
+      fieldKey,
+      error: r.error.message,
+    });
+    return null;
+  }
   if (r.data && (r.data as { encrypted_value: string }).encrypted_value) {
     try {
       return decryptField((r.data as { encrypted_value: string }).encrypted_value);
     } catch (err) {
-      console.error("[tenant-integration-store] decrypt failed", { service, fieldKey, err });
-      // Fall through to env-var fallback so a corrupt ciphertext
-      // doesn't take the send path down entirely.
+      console.error("[tenant-integration-store] decrypt failed; credential unreadable, env fallback refused", {
+        tenantId,
+        service,
+        fieldKey,
+        err,
+      });
+      return null;
     }
   }
-  const envValue = readEnvFallback(service, fieldKey);
-  if (envValue && (await tenantMayUseEnvFallback(tenantId, service))) return envValue;
-  return null;
+  if (!tenantMayUseEnvFallback(tenantId)) return null;
+  return readEnvFallback(service, fieldKey);
 }
 
 /**
@@ -239,6 +277,10 @@ export async function getTenantIntegrationValue(
  * send paths that need (sid, token, from) together — single SELECT
  * + decrypt loop. Values that can't be resolved are absent from the
  * returned map.
+ *
+ * A stored field that will not decrypt stays absent and is never filled
+ * from env (that would pair this tenant's sid with another account's
+ * token). A query error returns an empty bundle, logged, with no env.
  */
 export async function getTenantIntegrationBundle(
   tenantId: string,
@@ -251,18 +293,33 @@ export async function getTenantIntegrationBundle(
     .select("field_key, encrypted_value")
     .eq("tenant_id", tenantId)
     .eq("service", service);
+  if (r.error) {
+    console.error("[tenant-integration-store] credential bundle lookup failed; refusing env fallback", {
+      tenantId,
+      service,
+      error: r.error.message,
+    });
+    return {};
+  }
   const bundle: Record<string, string> = {};
+  const unreadable = new Set<string>();
   for (const row of (r.data || []) as { field_key: string; encrypted_value: string }[]) {
     try {
       bundle[row.field_key] = decryptField(row.encrypted_value);
     } catch (err) {
-      console.error("[tenant-integration-store] decrypt failed", { service, field: row.field_key, err });
+      unreadable.add(row.field_key);
+      console.error("[tenant-integration-store] decrypt failed; credential unreadable, env fallback refused", {
+        tenantId,
+        service,
+        field: row.field_key,
+        err,
+      });
     }
   }
   if (options.allowEnvFallback !== false) {
-    const envMap = (await tenantMayUseEnvFallback(tenantId, service)) ? ENV_FALLBACKS[service] || {} : {};
+    const envMap = tenantMayUseEnvFallback(tenantId) ? ENV_FALLBACKS[service] || {} : {};
     for (const fieldKey of Object.keys(envMap)) {
-      if (bundle[fieldKey]) continue;
+      if (bundle[fieldKey] || unreadable.has(fieldKey)) continue;
       const value = readEnvFallback(service, fieldKey);
       if (value) bundle[fieldKey] = value;
     }
@@ -273,10 +330,10 @@ export async function getTenantIntegrationBundle(
 /**
  * Strict, value-free credential readiness for operator-facing status UI.
  *
- * Send paths intentionally tolerate a broken DB row when a valid env fallback
- * can carry the request. A Settings status must be stricter: a query failure or
- * an unreadable stored credential with no fallback is "unavailable", never
- * "not configured". Only booleans leave this function; plaintext never does.
+ * Mirrors the send paths: env counts only for an OASIS tenant, and an
+ * unreadable stored credential is never carried by env. A query failure or an
+ * unreadable stored credential is "unavailable" (throws), never "not
+ * configured". Only booleans leave this function; plaintext never does.
  */
 export async function getTenantIntegrationPresenceForStatus(
   tenantId: string,
@@ -300,7 +357,7 @@ export async function getTenantIntegrationPresenceForStatus(
     ),
   );
   const presence: Record<string, boolean> = {};
-  const envAllowed = await tenantMayUseEnvFallback(tenantId, service);
+  const envAllowed = tenantMayUseEnvFallback(tenantId);
   for (const fieldKey of fieldKeys) {
     const envPresent = envAllowed && envKeysFor(service, fieldKey).some(
       (envKey) => Boolean(process.env[envKey]?.trim()),
@@ -313,13 +370,15 @@ export async function getTenantIntegrationPresenceForStatus(
     try {
       presence[fieldKey] = Boolean(decryptField(encrypted).trim()) || envPresent;
     } catch (error) {
-      console.error("[tenant-integration-store] status decrypt failed", {
+      console.error("[tenant-integration-store] status decrypt failed; credential unreadable", {
+        tenantId,
         service,
         field: fieldKey,
         error,
       });
-      if (!envPresent) throw new Error("tenant_integration_status_decrypt_failed");
-      presence[fieldKey] = true;
+      // The send path returns null for this field (no env fallback), so an
+      // env value must not make the status say it is configured.
+      throw new Error("tenant_integration_status_decrypt_failed");
     }
   }
   return presence;
@@ -401,9 +460,12 @@ export async function listTenantIntegrationStatus(
     .eq("tenant_id", tenantId);
   if (r.error) throw new Error(r.error.message || "tenant_integration_status_failed");
 
+  // Env-backed status exists only where the resolver would actually use env:
+  // an OASIS tenant. Everyone else sees stored rows or "not connected".
+  const envAllowed = tenantMayUseEnvFallback(tenantId);
   const rows = new Map<string, IntegrationStatusRow>();
   for (const row of (r.data || []) as StoreRow[]) {
-    const envPresent = envKeysFor(row.service, row.field_key).some((envKey) =>
+    const envPresent = envAllowed && envKeysFor(row.service, row.field_key).some((envKey) =>
       Boolean(process.env[envKey]?.trim()),
     );
     let storedPresent = false;
@@ -411,12 +473,15 @@ export async function listTenantIntegrationStatus(
       try {
         storedPresent = Boolean(decryptField(row.encrypted_value).trim());
       } catch (error) {
-        console.error("[tenant-integration-store] list status decrypt failed", {
+        console.error("[tenant-integration-store] list status decrypt failed; credential unreadable", {
+          tenantId,
           service: row.service,
           field: row.field_key,
           error,
         });
-        if (!envPresent) throw new Error("tenant_integration_status_decrypt_failed");
+        // Never reported as env-backed: the resolver refuses env for an
+        // unreadable row, so "environment" here would be a false green.
+        throw new Error("tenant_integration_status_decrypt_failed");
       }
     }
     rows.set(`${row.service}:${row.field_key}`, {
@@ -434,8 +499,9 @@ export async function listTenantIntegrationStatus(
   // Environment-backed integrations are real production configuration even
   // when no encrypted tenant row exists. Synthesize value-free status rows so
   // Credentials cannot say "not set" while the send path is actively using
-  // GMAIL_USER/GMAIL_APP_PASSWORD (or another canonical fallback).
-  for (const schema of TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS) {
+  // GMAIL_USER/GMAIL_APP_PASSWORD (or another canonical fallback). OASIS
+  // tenants only — no other tenant can resolve these, so none is synthesized.
+  for (const schema of envAllowed ? TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS : []) {
     for (const field of schema.fields) {
       const key = `${schema.service}:${field.key}`;
       if (rows.has(key)) continue;

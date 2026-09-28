@@ -36,6 +36,8 @@
 import { fetchWithRetry } from "./retry";
 import { getServiceSupabase } from "./supabase-server";
 import { getManifest } from "./manifest/loader";
+import { resolveAgentToolPalette } from "./manifest/schema";
+import { isClientSafeTool, isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 import { resolveClientProfileSlug } from "./client-profiles";
 import {
   getRecord as dataGet,
@@ -98,6 +100,14 @@ const HTTP_TIMEOUT_MS = 15_000;
 // ============================================================================
 
 export type ToolContext = {
+  /**
+   * The SESSION's tenant — resolved server-side from the signed-in user
+   * (resolveChatContext in /api/chat and /api/chat/resume), never from
+   * anything the model wrote. It decides both the data scope and which tools
+   * this turn may be offered (lib/ai/tools/client-safe-registry.ts).
+   * executeTool strips any tenant key the model puts in a tool's input, so a
+   * tool can only ever read this value.
+   */
   tenantId: string;
   userId: string;
   agentKey: string;
@@ -813,17 +823,64 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
 // Server-side tool execution
 // ============================================================================
 
+/**
+ * Keys a model might use to name a tenant in a tool's input. No tool reads
+ * them (every tool scopes to ctx.tenantId), and they are removed before
+ * dispatch so a future tool cannot start trusting one by accident.
+ */
+const MODEL_TENANT_KEYS = ["tenant_id", "tenantId", "tenant"] as const;
+
+/** The tool input with any model-supplied tenant key removed. Exported for
+ *  tests/os-tool-sandbox.test.ts. */
+export function stripModelSuppliedTenant(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(input && typeof input === "object" ? input : {}) };
+  for (const key of MODEL_TENANT_KEYS) delete out[key];
+  return out;
+}
+
+function refusedToolResult(name: string, error: string): ToolResultBlock {
+  return {
+    content: JSON.stringify({ error, tool: name }),
+    is_error: true,
+    summary: `${name} refused: ${error}`,
+  };
+}
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
   ctx: ToolContext
 ): Promise<ToolResultBlock> {
+  // The tenant comes from the session. A context without one is a wiring bug
+  // upstream, and a tool scoped to "" must not run.
+  if (typeof ctx.tenantId !== "string" || ctx.tenantId.trim() === "") {
+    console.error("[cloud-tool-runner] refused a tool call with no session tenant", { tool: name });
+    return refusedToolResult(name, "tool_context_missing_tenant");
+  }
+  // Dispatch-time sandbox (docs/os-revamp/03 F2, §d.4). The loop only OFFERS a
+  // client tenant the client-safe registry, but the offer is not the boundary:
+  // a replayed or malformed tool_use, a future provider adapter, or a new
+  // caller of executeTool must still be unable to run get_credential, http_post
+  // or any other OASIS-only tool for a client tenant.
+  if (!isOasisInternalTenant(ctx.tenantId) && !isClientSafeTool(name)) {
+    console.error("[cloud-tool-runner] refused a tool outside the client-safe registry", {
+      tool: name,
+      tenantId: ctx.tenantId,
+    });
+    return refusedToolResult(name, "tool_not_available_in_this_workspace");
+  }
+  if (input && typeof input === "object" && MODEL_TENANT_KEYS.some((k) => k in input)) {
+    console.warn("[cloud-tool-runner] ignored a tenant the model put in a tool input; the session tenant applies", {
+      tool: name,
+    });
+  }
+  const safeInput = stripModelSuppliedTenant(input);
   try {
-    const data = await dispatch(name, input, ctx);
+    const data = await dispatch(name, safeInput, ctx);
     return {
       content: JSON.stringify(data),
       is_error: false,
-      summary: humanSummary(name, input, data),
+      summary: humanSummary(name, safeInput, data),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : "tool_threw";
@@ -2148,11 +2205,12 @@ export type ToolLoopRequest = {
    *  model up front that those tools don't exist this turn. */
   excludeDeferredTools?: boolean;
   /**
-   * Per-agent tool allowlist from the tenant's manifest (Phase D).
-   * Undefined → no filter; agent gets the full palette (preserves
-   * pre-Phase-D behavior for existing tenants).
-   * Empty array → agent is chat-only, no tools.
-   * Populated → only these tool names get advertised to the model.
+   * Per-agent tool allowlist from the tenant's manifest (Phase D), resolved
+   * against ctx.tenantId by resolveAgentToolPalette (lib/manifest/schema.ts):
+   *   OASIS tenant: undefined → full palette; [] → chat-only; populated →
+   *     only these tool names get advertised to the model.
+   *   Any other tenant: undefined → NO tools; populated → only the names on
+   *     the client-safe registry. Bridge-routed tools are never offered.
    *
    * Applied AFTER excludeDeferredTools — bridge-routed tools still get
    * filtered out when bridge is offline, even if they're in the palette.
@@ -2310,6 +2368,7 @@ export async function* streamOpenAICompatibleWithTools(
   const mode = normalizeMode(req.chatMode);
   const system = composePlanSystemPrompt(req.system, mode);
   const activeTools = resolveActiveTools({
+    tenantId: ctx.tenantId,
     toolPalette: req.toolPalette,
     chatMode: mode,
     // OpenAI-compatible resume for bridge-deferred tools is not wired yet.
@@ -2520,22 +2579,37 @@ type IterationLoopArgs = {
   ctx: ToolContext;
 };
 
-function resolveActiveTools(args: {
+/**
+ * The tools a turn OFFERS the model. Shared by the Anthropic loop and the
+ * OpenAI-compatible loop, so the tenant sandbox cannot exist on one path and
+ * not the other. Exported for tests/os-tool-sandbox.test.ts.
+ *
+ * Filter 0 (tenant, 2026-09-28, docs/os-revamp/03 F2) runs first and cannot be
+ * widened by anything after it: a tenant that is not OASIS's own starts from
+ * the client-safe registry with every bridge-routed (defer:true) tool removed,
+ * and its manifest palette is resolved default-deny (a missing palette means
+ * no tools). `tenantId` must be the session's (ToolContext.tenantId).
+ */
+export function resolveActiveTools(args: {
+  tenantId: string;
   excludeDeferredTools?: boolean;
   bridgeAdvertisedTools?: string[] | null;
   toolPalette?: string[];
   chatMode?: ChatPlanMode;
   forceExcludeDeferred?: boolean;
 }): ToolDef[] {
-  let activeTools: ToolDef[] = TOOL_DEFINITIONS;
+  let activeTools: ToolDef[] = isOasisInternalTenant(args.tenantId)
+    ? TOOL_DEFINITIONS
+    : TOOL_DEFINITIONS.filter((t) => !t.defer && isClientSafeTool(t.name));
+  const toolPalette = resolveAgentToolPalette(args.toolPalette, args.tenantId);
   if (args.forceExcludeDeferred || args.excludeDeferredTools) {
     activeTools = activeTools.filter((t) => !t.defer);
   } else if (args.bridgeAdvertisedTools !== undefined && args.bridgeAdvertisedTools !== null) {
     const advertised = new Set(args.bridgeAdvertisedTools);
     activeTools = activeTools.filter((t) => !t.defer || advertised.has(t.name));
   }
-  if (args.toolPalette !== undefined) {
-    const allow = new Set(args.toolPalette);
+  if (toolPalette !== undefined) {
+    const allow = new Set(toolPalette);
     activeTools = activeTools.filter((t) => allow.has(t.name));
   }
   if (args.chatMode === "plan") {
@@ -2561,8 +2635,15 @@ async function* runIterationLoop(
 ): AsyncGenerator<StreamYield> {
   const { apiKey, model, system, maxTokens, ctx, history } = args;
   const enableTools = args.enableTools !== false;
-  // Resolve which tools the model sees this turn. Four filters compose
-  // in order — most-restrictive last so the operator's intent wins:
+  // Resolve which tools the model sees this turn (resolveActiveTools). The
+  // filters compose in order — most-restrictive last so the operator's
+  // intent wins:
+  //
+  //   0. tenant (ctx.tenantId, from the session)
+  //      A tenant that is not OASIS's own is offered only the client-safe
+  //      registry, never a bridge-routed tool, and a missing palette means
+  //      no tools. Nothing below can widen it. Re-applied on every resume
+  //      because the resumed loop receives the resuming session's ctx.
   //
   //   1. excludeDeferredTools (bridge offline)
   //      Drops every bridge-routed tool. Set by /api/chat when no
@@ -2577,28 +2658,23 @@ async function* runIterationLoop(
   //
   //   3. toolPalette (Phase D — manifest per-agent allowlist)
   //      Operator's intent: "what's this agent allowed to call?"
-  //      Undefined = no filter; empty array = chat-only.
+  //      OASIS: undefined = no filter; empty array = chat-only.
   //
   //   4. Cloud tools (defer:false) are unaffected by 1+2 — they
   //      execute server-side on Cloudflare, not the bridge.
-  let activeTools: ToolDef[] = TOOL_DEFINITIONS;
-  if (args.excludeDeferredTools) {
-    activeTools = activeTools.filter((t) => !t.defer);
-  } else if (args.bridgeAdvertisedTools !== undefined && args.bridgeAdvertisedTools !== null) {
-    const advertised = new Set(args.bridgeAdvertisedTools);
-    activeTools = activeTools.filter((t) => !t.defer || advertised.has(t.name));
-  }
-  if (args.toolPalette !== undefined) {
-    const allow = new Set(args.toolPalette);
-    activeTools = activeTools.filter((t) => allow.has(t.name));
-  }
-  // Filter 5 (LAST — most-restrictive wins): plan mode. Strips every write
-  // tool to the read/search allowlist. Plan mode also re-shapes the system
-  // prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY), applied where
-  // `system` is composed by streamAnthropicWithTools before this loop runs.
-  if (args.chatMode === "plan") {
-    activeTools = filterToolsForMode(activeTools, "plan");
-  }
+  //
+  //   5. (LAST — most-restrictive wins) plan mode. Strips every write
+  //      tool to the read/search allowlist. Plan mode also re-shapes the
+  //      system prompt with the overlay (see PLAN_MODE_PROMPT_OVERLAY),
+  //      applied where `system` is composed by streamAnthropicWithTools
+  //      before this loop runs.
+  const activeTools: ToolDef[] = resolveActiveTools({
+    tenantId: ctx.tenantId,
+    excludeDeferredTools: args.excludeDeferredTools,
+    bridgeAdvertisedTools: args.bridgeAdvertisedTools,
+    toolPalette: args.toolPalette,
+    chatMode: args.chatMode,
+  });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;
 
@@ -2615,7 +2691,10 @@ async function* runIterationLoop(
       system,
       messages: history,
     };
-    if (enableTools) {
+    // An empty palette (a chat-only agent, or a client tenant's agent with no
+    // palette under default-deny) sends no `tools` key at all, the same as the
+    // OpenAI-compatible loop, rather than an empty array.
+    if (enableTools && activeTools.length > 0) {
       // Strip `defer` — it's our internal flag that tells the runner this
       // tool round-trips to the operator's local bridge instead of executing
       // server-side. Anthropic's tools[] schema only accepts name +
@@ -2877,14 +2956,29 @@ async function* runIterationLoop(
 // the API contract and this block is unused.
 // ============================================================================
 
-export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): string {
-  const cloudTools = TOOL_DEFINITIONS.filter((t) => !t.defer);
+export function cloudToolsPromptBlockV2(
+  opts: {
+    bridgeOnline?: boolean;
+    /**
+     * The session's tenant. When it is not an OASIS tenant the block describes
+     * only the client-safe tools and never the bridge tools, matching what
+     * resolveActiveTools offers. Omitted → the OASIS catalog (prior behaviour),
+     * so a caller that does not pass it only over-describes; the tools[] array
+     * and executeTool still enforce the sandbox.
+     */
+    tenantId?: string;
+  } = {},
+): string {
+  const clientTenant = opts.tenantId !== undefined && !isOasisInternalTenant(opts.tenantId);
+  const cloudTools = TOOL_DEFINITIONS.filter(
+    (t) => !t.defer && (!clientTenant || isClientSafeTool(t.name)),
+  );
   // Hide bridge tools from the persona block when the bridge is offline.
   // The Anthropic tools[] array sent on the API call is already filtered
   // by excludeDeferredTools in runIterationLoop; the persona block
   // following the same rule keeps the model from being told it has tools
-  // it can't actually call this turn.
-  const bridgeTools = opts.bridgeOnline === false
+  // it can't actually call this turn. A client tenant never has them.
+  const bridgeTools = opts.bridgeOnline === false || clientTenant
     ? []
     : TOOL_DEFINITIONS.filter((t) => t.defer);
   const lines: string[] = [];
@@ -2912,8 +3006,10 @@ export function cloudToolsPromptBlockV2(opts: { bridgeOnline?: boolean } = {}): 
   lines.push("- Prefer get_record over list_records once you have an ID.");
   lines.push("- Confirm with the operator before delete_record (no undo).");
   lines.push("- Don't use http_get/http_post for the operator's own integrations — that needs a connector.");
-  lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to open Settings → Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the paired machine, instead of retrying.");
-  lines.push("- For send_email / send_sms: always confirm content with the operator before sending. Include opt-out language on first-touch SMS.");
+  if (!clientTenant) {
+    lines.push("- For bridge tools (read_file, write_file, bash, send_email, send_sms): if a tool returns is_error with 'bridge_unreachable' in the body, the operator's local bridge isn't running. Tell them to open Settings → Devices, or run `oasis bridge status` followed by `oasis bridge restart` on the paired machine, instead of retrying.");
+    lines.push("- For send_email / send_sms: always confirm content with the operator before sending. Include opt-out language on first-touch SMS.");
+  }
   lines.push("- Tool results return JSON; quote relevant fields in your reply.");
   if (bridgeTools.length > 0) {
     lines.push("");

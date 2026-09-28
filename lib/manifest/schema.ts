@@ -30,6 +30,7 @@ export const MANIFEST_SCHEMA_VERSION = 1 as const;
 // ManifestNavIconKey), which caused build failures whenever seeds.ts referenced
 // an icon the narrower type didn't know about.
 import type { NavIconKey } from "@/lib/nav-config";
+import { isClientSafeTool, isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
 export type ManifestNavIconKey = NavIconKey;
 
 // ---------------------------------------------------------------------------
@@ -102,14 +103,20 @@ export type ManifestAgentBinding = {
    * Names match TOOL_DEFINITIONS entries in lib/cloud-tool-runner.ts
    * (e.g. "list_records", "send_email", "bash", "stripe", "load_skill").
    *
-   * Semantics:
-   *   - undefined / missing → no filter; agent gets the full palette
-   *     (preserves pre-Phase-D behavior; safe default for existing tenants
-   *     who haven't set a palette yet).
-   *   - empty array []     → no tools at all; agent is chat-only.
-   *   - populated list      → only those tools are advertised to the
-   *     model. Bridge tools still get filtered out when bridge is offline
-   *     even if they're in the palette.
+   * Semantics depend on the tenant — resolve with resolveAgentToolPalette()
+   * below, never by reading this field raw:
+   *   - OASIS's own tenants (lib/ai/tools/client-safe-registry.ts
+   *     OASIS_INTERNAL_TENANT_IDS):
+   *       undefined / missing → no filter; the full palette (unchanged).
+   *       []                  → no tools; the agent is chat-only.
+   *       populated list      → only those tools. Bridge tools are still
+   *                             filtered out when the bridge is offline.
+   *   - Every other tenant is DEFAULT-DENY (2026-09-28, doc 03 F2):
+   *       undefined / missing → NO tools.
+   *       populated list      → only the names that are also on the
+   *                             client-safe registry. Bridge-routed, credential
+   *                             and brain tools are never offered, whatever
+   *                             this list says.
    *
    * Why per-agent (not per-tenant): Helios (sales) probably should call
    * send_sms; Solara (back-office) probably shouldn't. Operator picks
@@ -149,6 +156,28 @@ export type ManifestAgentBinding = {
     mode: "read" | "write";
   }>;
 };
+
+/**
+ * The tool names an agent may be OFFERED, given its manifest palette and the
+ * tenant it is running in. `undefined` means "no palette filter" and is only
+ * ever returned for an OASIS tenant.
+ *
+ * WHY THIS IS TENANT-AWARE. A missing palette used to mean "every tool", which
+ * for a client tenant included the tools that run on OASIS's paired machine
+ * (bash, write_file, run_script) and get_credential (docs/os-revamp/03 F2).
+ * A client's missing palette now means no tools, and a client's populated
+ * palette is cut down to the client-safe registry, so no manifest edit or
+ * Settings toggle can widen it. lib/cloud-tool-runner.ts applies this to every
+ * turn from the session's tenant id and re-checks each call at dispatch.
+ */
+export function resolveAgentToolPalette(
+  palette: string[] | undefined,
+  tenantId: string | null | undefined,
+): string[] | undefined {
+  if (isOasisInternalTenant(tenantId)) return palette;
+  if (palette === undefined) return [];
+  return palette.filter(isClientSafeTool);
+}
 
 // ---------------------------------------------------------------------------
 // Pages & Data Model (Phase 2 renderer consumes these; Phase 1 keeps them

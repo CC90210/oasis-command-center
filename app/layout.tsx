@@ -63,6 +63,9 @@ export const metadata: Metadata = {
   icons: { icon: "/favicon.ico" },
 };
 
+/** The only seed slugs the public demo cookie may select (set by /api/demo/sun). */
+const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
+
 export default async function RootLayout({
   children,
 }: {
@@ -181,9 +184,12 @@ export default async function RootLayout({
       }
     }
 
+    // Only the public SunBiz preview is a demo shell. A hand-set cookie naming
+    // any other seed (e.g. "oasis-ai-cc") must not render OASIS's own nav to a
+    // tenantless visitor.
     const normalisedDemo = (requestedDemoProfile || "").trim().toLowerCase();
     demoProfileSlug =
-      normalisedDemo && normalisedDemo !== "default" && SEED_MANIFESTS[normalisedDemo]
+      DEMO_PROFILE_SLUGS.has(normalisedDemo) && SEED_MANIFESTS[normalisedDemo]
         ? normalisedDemo
         : null;
 
@@ -276,7 +282,12 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
-  const manifest = isFullBleed ? null : await timed("manifest", getManifest(manifestSlug), perfSpans);
+  // The viewer's tenant id lets an OASIS operator whose tenant-slug read
+  // degraded (manifestSlug null → "default") keep OASIS_SEED instead of the
+  // unprovisioned placeholder; it changes nothing for any other tenant.
+  const manifest = isFullBleed
+    ? null
+    : await timed("manifest", getManifest(manifestSlug, profile?.tenant_id ?? null), perfSpans);
   // One `[perf]` line per shell render: the measured session tax. This is
   // the P1 before/after number; remove only when the instant-load work ends.
   logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);

@@ -11,6 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { headers } from "next/headers";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -107,6 +108,9 @@ function relativeTime(iso: string | null | undefined): string {
 }
 
 export default async function SystemHealthPage() {
+  // Operator-only (P0-5, doc 02 F3), before the fetch: this page renders the
+  // empire's session-log summaries and agent working memory.
+  await requireOperator();
   const data = await fetchHealth();
 
   // When state-api isn't reachable from this deploy AND v6 mode is off

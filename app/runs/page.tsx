@@ -2,6 +2,7 @@ import { Card, EmptyState, PageHeader, Tag } from "@/components/Card";
 import { recentActions, getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { timeAgo } from "@/lib/fmt";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,9 @@ type ActionPayload = {
 };
 
 export default async function RunsPage() {
+  // Operator-only (P0-5). Gate before any query, so a client member never has
+  // the agent audit log fetched, rather than fetched and left unpainted.
+  await requireOperator();
   const profile = await getActiveProfile();
   if (!profile?.tenant_id) {
     return (

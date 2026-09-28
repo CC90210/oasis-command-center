@@ -5,7 +5,9 @@
  * Lookup order:
  *   1. Supabase `tenant_manifests` row keyed by slug (Phase 1b on once
  *      migration 038 is applied; until then this call returns null fast).
- *   2. In-code seed manifests in ./seeds.ts (OASIS, SUN, SUGA + default).
+ *   2. In-code seed manifests in ./seeds.ts (OASIS, SUN, SUGA). A slug with
+ *      no row and no seed gets UNPROVISIONED_SEED, the empty "being set up"
+ *      workspace, never OASIS's own (see getSeedManifest).
  *
  * The loader NEVER throws. Invalid stored manifests (malformed JSON, schema
  * drift) log via safe() and fall back to seeds, so a bad row in DB can't
@@ -57,11 +59,21 @@ async function fetchManifestFromSupabase(slug: string): Promise<TenantManifest |
   );
 }
 
-export const getManifest = cache(async (slug: string | null | undefined): Promise<TenantManifest> => {
+/**
+ * `viewerTenantId` is optional and only reaches the seed fallback: pass the
+ * SESSION tenant id where the caller has it, so an OASIS viewer whose slug did
+ * not resolve (null slug → "default") still gets OASIS's seed. Without it,
+ * "default" and "oasis" fail closed to UNPROVISIONED_SEED like any unknown
+ * slug. A primitive, not an options object, so React's cache() still dedupes.
+ */
+export const getManifest = cache(async (
+  slug: string | null | undefined,
+  viewerTenantId?: string | null,
+): Promise<TenantManifest> => {
   const key = (slug || "").trim().toLowerCase() || "default";
   const fromDb = await fetchManifestFromSupabase(key);
   if (fromDb) return fromDb;
-  return getSeedManifest(key);
+  return getSeedManifest(key, viewerTenantId);
 });
 
 /**
@@ -92,7 +104,8 @@ export function manifestNavToNavItems(items: ManifestNavItem[]): NavItem[] {
 /**
  * True when a slug exists in either the in-code seeds or the
  * tenant_manifests table. Used by routes that need to 404 for genuinely
- * unknown tenants (vs. transparently falling back to the default seed).
+ * unknown tenants (vs. getManifest, which answers them with
+ * UNPROVISIONED_SEED).
  */
 export async function manifestExists(slug: string | null | undefined): Promise<boolean> {
   const key = (slug || "").trim().toLowerCase();

@@ -5,15 +5,22 @@
  * Google callback only signs in accounts that already exist, and the signup page
  * fell back to Supabase entirely.
  *
- * On success the caller holds a session cookie, so it can go straight to
- * /api/auth/provision — getSessionUser() already reads Turso sessions, so tenant
- * provisioning needs no changes.
+ * INVITE-ONLY (P0-8, 2026-09-28). An account is created only when the request
+ * carries an active tenant invite pinned to this exact address. Signup used to
+ * be open: 47 of 49 tenants were strangers' self-signups, and because nothing
+ * proved the caller owned the address, registering someone else's email and then
+ * provisioning relinked their existing profile — a latent account takeover. No
+ * token, a stale token, or a token pinned to another address is 403: the caller
+ * is not permitted to create an account, which is different from a malformed
+ * request. /signup without a token shows "invite-only — book a call" instead of
+ * the form; new client workspaces are operator-provisioned.
  *
- * No email-confirmation round trip. Supabase's confirmation gate exists to prove
- * the address is reachable; reproducing it would mean building a second token
- * flow before anyone can log in at all. Provisioning is idempotent and the
- * password-reset path already proves address ownership, so confirmation is
- * deliberately deferred rather than half-built.
+ * On success the caller holds a session cookie and redeems the invite through
+ * /api/auth/redeem-invite, which attaches them to the inviting tenant.
+ *
+ * No separate email-confirmation round trip, and now for a stronger reason than
+ * before: the invite reached this mailbox by email, so presenting its token is
+ * the proof of address ownership that Supabase's confirmation gate existed for.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@libsql/client";
@@ -48,6 +55,18 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "invalid request" }, { status: 400 });
   }
+  // Refused before anything else is examined: a caller with no invite gets no
+  // feedback about which email or password would have been accepted.
+  const inviteToken = typeof body.invite_token === "string" ? body.invite_token.trim() : "";
+  if (!inviteToken) {
+    return NextResponse.json(
+      {
+        code: "invite_required",
+        error: "OASIS OS is invite-only — open the invite link you were emailed, or book a call",
+      },
+      { status: 403 },
+    );
+  }
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
   const rawUserMetadata = signupUserMetadata(body.full_name);
@@ -63,20 +82,19 @@ export async function POST(req: NextRequest) {
   }
   const db = createClient({ url, authToken });
 
-  const inviteToken = typeof body.invite_token === "string" ? body.invite_token.trim() : "";
-  if (inviteToken) {
-    const invite = await validateActiveInviteForEmail(db, { rawToken: inviteToken, email });
-    if (!invite.ok) {
-      return NextResponse.json(
-        {
-          code: invite.error === "email_mismatch" ? "invite_email_mismatch" : "invite_invalid",
-          error: invite.error === "email_mismatch"
-            ? "this invite was sent to a different email address"
-            : "this invite is no longer active — ask your admin for a new link",
-        },
-        { status: 400 },
-      );
-    }
+  // The email pin is the whole proof: a leaked token must not mint an account
+  // for any address other than the one the invite was sent to.
+  const invite = await validateActiveInviteForEmail(db, { rawToken: inviteToken, email });
+  if (!invite.ok) {
+    return NextResponse.json(
+      {
+        code: invite.error === "email_mismatch" ? "invite_email_mismatch" : "invite_invalid",
+        error: invite.error === "email_mismatch"
+          ? "this invite was sent to a different email address"
+          : "this invite is no longer active — ask your admin for a new link",
+      },
+      { status: 403 },
+    );
   }
 
   const existing = await db.execute({

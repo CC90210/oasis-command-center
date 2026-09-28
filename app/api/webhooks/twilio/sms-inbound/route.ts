@@ -296,7 +296,10 @@ export async function POST(req: NextRequest) {
   const { tenantId, ownerUserId } = resolved;
   budget.consume();
   const bundle = await getTenantIntegrationBundle(tenantId, "twilio");
-  const authToken = bundle.auth_token || process.env.TWILIO_AUTH_TOKEN || "";
+  // The bundle already carries OASIS's env token for OASIS tenant ids
+  // (tenantMayUseEnvFallback). No raw env fallback here: another tenant's
+  // inbound must be verified with its own token, or refused.
+  const authToken = bundle.auth_token || "";
   if (!verifyTwilioSignature(req.url, params, req.headers.get("x-twilio-signature"), authToken)) {
     return twilioInboundForbiddenResponse();
   }

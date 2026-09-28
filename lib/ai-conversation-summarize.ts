@@ -16,7 +16,7 @@
  */
 import { wrapUntrusted, INJECTION_GUARD, safeJsonExtract } from "./llm-input-boundary";
 import type { ConversationMessage } from "./conversation-threading";
-import { inferTextWithFallback } from "./bridge-infer";
+import { inferTextWithFallbackForTenant } from "./ai/infer";
 import type { BridgeTarget } from "./bridge-proxy";
 
 const SUMMARIZE_MODEL = "claude-haiku-4-5";
@@ -59,7 +59,9 @@ function buildTranscript(messages: ConversationMessage[]): string {
 
 export async function summarizeConversation(
   messages: ConversationMessage[],
-  opts?: { bridgeTarget?: BridgeTarget | null },
+  // tenantId is REQUIRED: it decides whether this may run on the OASIS
+  // subscription at all (lib/ai/infer.ts). Non-OASIS tenants are refused.
+  opts: { bridgeTarget?: BridgeTarget | null; tenantId: string | null },
 ): Promise<SummarizeResult> {
   if (messages.length === 0) throw new Error("no_messages");
 
@@ -68,10 +70,10 @@ export async function summarizeConversation(
 
   // Subscription bridge first (free); paid Anthropic API fallback. Throws
   // anthropic_key_missing only when neither is available (→ deterministic fallback).
-  const text = await inferTextWithFallback({
+  const text = await inferTextWithFallbackForTenant(opts.tenantId, {
     system: SYSTEM_PROMPT,
     prompt: userPrompt,
-    bridgeTarget: opts?.bridgeTarget ?? null,
+    bridgeTarget: opts.bridgeTarget ?? null,
     bridgeModel: "fast",
     paidModel: SUMMARIZE_MODEL,
     maxTokens: MAX_TOKENS,

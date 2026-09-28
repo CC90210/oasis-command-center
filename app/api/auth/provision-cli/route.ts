@@ -100,11 +100,25 @@ export async function POST(req: NextRequest) {
   } else {
     const byEmail = await db
       .from("user_profiles")
-      .select("id, tenant_id")
+      .select("id, tenant_id, auth_user_id")
       .eq("email", email)
       .maybeSingle();
+    if (byEmail.error) return bad(503, "profile lookup failed");
     if (byEmail.data) {
-      await db.from("user_profiles").update({ auth_user_id: authUserId }).eq("id", byEmail.data.id);
+      // Relink only an UNCLAIMED row. A row already bound to another auth
+      // account is that account's profile; overwriting auth_user_id would hand
+      // it (and its tenant) to whoever this email now resolves to (P0-8).
+      if (byEmail.data.auth_user_id && byEmail.data.auth_user_id !== authUserId) {
+        return bad(409, "profile_owned_by_another_account");
+      }
+      if (!byEmail.data.auth_user_id) {
+        const relink = await db
+          .from("user_profiles")
+          .update({ auth_user_id: authUserId })
+          .eq("id", byEmail.data.id)
+          .is("auth_user_id", null);
+        if (relink.error) return bad(503, "profile relink failed");
+      }
       profileId = byEmail.data.id;
       tenantId = byEmail.data.tenant_id;
     } else {

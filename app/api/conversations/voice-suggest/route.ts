@@ -36,6 +36,7 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { getReadableLeadRecordForSession } from "@/lib/lead-access";
 import { loadThreadForAi } from "@/lib/lead-interactions-queries";
 import { resolveBridgeForTenant } from "@/lib/bridge-for-tenant";
+import { MANAGED_RUNTIME_NOT_CONFIGURED } from "@/lib/ai/infer";
 import {
   generateVoiceSuggestion,
   fallbackVoiceDraft,
@@ -149,7 +150,7 @@ export async function POST(req: NextRequest) {
         channel,
         instruction,
       },
-      { bridgeTarget },
+      { bridgeTarget, tenantId: sess.tenantId },
     );
 
     const smsSanitize = result.sms ? await sanitizeBlastMessage(sess.tenantId, result.sms, { checkPositioning: true }) : { ok: true as const, cleaned: "" };
@@ -184,7 +185,10 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     let status = 500;
     let errorTag = "voice_suggest_failed";
-    if (message === "anthropic_key_missing") {
+    if (
+      message === "anthropic_key_missing" ||
+      message.startsWith(MANAGED_RUNTIME_NOT_CONFIGURED)
+    ) {
       status = 503;
       errorTag = "ai_unavailable";
     } else if (message.startsWith("voice_suggest_parse_failed")) {

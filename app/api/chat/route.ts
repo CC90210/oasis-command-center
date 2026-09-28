@@ -505,7 +505,7 @@ export async function POST(req: NextRequest) {
     cloudToolsMode === "off"
       ? ""
       : cloudToolsMode === "tools"
-        ? cloudToolsPromptBlockV2({ bridgeOnline: bridgeToolsActive })
+        ? cloudToolsPromptBlockV2({ bridgeOnline: bridgeToolsActive, tenantId })
         : cloudToolsPromptBlock();
   // Phase J — fold per-agent setup answers from the onboarding wizard
   // into a "TENANT SETUP" overlay so the agent sees the operator's

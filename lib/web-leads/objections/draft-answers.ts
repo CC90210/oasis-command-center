@@ -41,7 +41,7 @@
  * it to overwrite a human's words.
  */
 
-import { firstJsonObject, inferText } from "@/lib/subscription-infer";
+import { firstJsonObject, inferForTenant } from "@/lib/ai/infer";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import {
   MAX_BODY_LENGTH,
@@ -276,12 +276,11 @@ export async function draftAnswersFor(
   }
   const wanted = free.slice(0, Math.max(1, Math.min(limit, free.length)));
 
-  const inf = await inferText({
+  const inf = await inferForTenant(WEBDEV_TENANT_ID, {
     source: "objection-responses",
     system: DRAFT_SYSTEM_PROMPT,
     prompt: buildDraftPrompt(objection, wanted),
     maxTokens: MAX_TOKENS,
-    tenantId: WEBDEV_TENANT_ID,
     modelTier: "smart",
   });
   if (!inf.ok) {

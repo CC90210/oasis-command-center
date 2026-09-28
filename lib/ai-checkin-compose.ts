@@ -22,7 +22,7 @@
 
 import { OASIS_CHECKIN_COMPOSE_PROMPT } from "./prompts";
 
-import { inferText } from "./subscription-infer";
+import { inferForTenant } from "./ai/infer";
 
 const MAX_TOKENS = 800;
 
@@ -123,12 +123,11 @@ export async function composeCheckin(
   opts: { tenantId: string | null },
 ): Promise<ComposeCheckinResult> {
   // Subscription, not the paid API. See lib/subscription-infer.ts.
-  const inf = await inferText({
+  const inf = await inferForTenant(opts.tenantId, {
     source: "checkin-compose",
     system: OASIS_CHECKIN_COMPOSE_PROMPT,
     prompt: buildUserPrompt(input),
     maxTokens: MAX_TOKENS,
-    tenantId: opts.tenantId,
     modelTier: "smart",
   });
   if (!inf.ok) {
