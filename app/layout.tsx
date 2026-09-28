@@ -266,7 +266,7 @@ export default async function RootLayout({
           dangerouslySetInnerHTML={{ __html: SIDEBAR_BOOT_SCRIPT }}
         />
       </head>
-      <body className="grain">
+      <body>
         {isFullBleed || !manifest ? (
           children
         ) : (
