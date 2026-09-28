@@ -4,7 +4,6 @@
 
 :root {
   color-scheme: dark;
-  --grid-fade: radial-gradient(ellipse at center, black 30%, transparent 80%);
   /* Sidebar width — consumed by app/layout.tsx <main>'s left margin. The
      boot script in <head> flips html[data-sidebar] to "expanded" or
      "collapsed" before paint, and these rules set the matching width.
@@ -77,20 +76,11 @@ code {
     "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-/* Subtle grid overlay — Iron Man HUD vibe */
-.grain::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(59, 130, 246, 0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(59, 130, 246, 0.035) 1px, transparent 1px);
-  background-size: 40px 40px;
-  -webkit-mask-image: var(--grid-fade);
-  mask-image: var(--grid-fade);
-  z-index: 1;
-}
+/* The faint blue grid overlay that used to sit on <body>, and therefore behind
+ * every screen in the product, is gone. A faint grid plus a radial fade is one
+ * of the most recognisable signatures of generated UI, and it was doing no work:
+ * it carried no state, no hierarchy and no data. The `.grain` class on <body>
+ * in app/layout.tsx is now inert and is removed there too. */
 
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -229,61 +219,39 @@ main > div {
 }
 .btn-danger:hover { background: rgba(255, 77, 109, 0.2); }
 
-/* Scan-line effect on hero stat tiles */
-.scan-line {
-  position: relative;
-  overflow: hidden;
-}
-.scan-line::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, transparent 0%, rgba(59,130,246,0.06) 50%, transparent 100%);
-  animation: scan 6s linear infinite;
-  pointer-events: none;
-}
-@keyframes scan {
-  0% { transform: translateY(-100%); }
-  100% { transform: translateY(100%); }
-}
-
-/* Top brand bar accent — thin animated gradient under the sidebar header */
+/* Sidebar header rule.
+ *
+ * Was `.top-glow`: a blue-to-cyan gradient shimmering on a 3.5s infinite loop
+ * under the sidebar header. The Oasis motion doctrine forbids animating nav
+ * chrome, and a perpetual animation costs a compositor layer for the entire
+ * session while telling the user nothing. Now a static hairline, which is what
+ * constitution rule 14 asks separation to be. The class name is kept because
+ * Sidebar.tsx consumes it. */
 .top-glow {
-  background: linear-gradient(90deg, transparent, #3b82f6, #00d4ff, #3b82f6, transparent);
-  background-size: 200% 100%;
-  animation: shimmer 3.5s linear infinite;
+  background: var(--color-bg-border, rgba(148, 163, 184, 0.18));
   height: 1px;
-}
-@keyframes shimmer {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-/* Card ambient glow on hover */
-.card-glow:hover {
-  box-shadow: 0 0 0 1px rgba(59,130,246,0.25), 0 16px 40px -12px rgba(59,130,246,0.25);
 }
 
 /* ============================================================================
  * Chat widget — futuristic surfaces
  * ============================================================================ */
 
-/* Aurora gradient header strip on the chat card */
+/* Chat card header.
+ *
+ * Was two 1200px radial-gradient washes plus a shimmering gradient rule on a
+ * 4s infinite loop. A radial wash behind content is the most recognisable
+ * generated-UI backdrop there is, and it was decorative: it carried no state
+ * and no hierarchy. Replaced by a flat panel tint and a static hairline, so
+ * the header reads as a distinct surface without performing. */
 .chat-aurora {
   position: relative;
-  background:
-    radial-gradient(1200px 200px at 20% -50%, rgba(59,130,246,0.18), transparent 60%),
-    radial-gradient(900px 200px at 80% 120%, rgba(0,212,255,0.12), transparent 60%),
-    linear-gradient(180deg, rgba(59,130,246,0.04) 0%, transparent 100%);
+  background: rgba(148, 163, 184, 0.04);
 }
 .chat-aurora::after {
   content: "";
   position: absolute;
   left: 0; right: 0; bottom: 0; height: 1px;
-  background: linear-gradient(90deg, transparent, #3b82f6, #00d4ff, #3b82f6, transparent);
-  background-size: 200% 100%;
-  animation: shimmer 4s linear infinite;
-  opacity: 0.6;
+  background: var(--color-bg-border, rgba(148, 163, 184, 0.18));
 }
 
 /* Chat bubble — assistant (LHS) */
@@ -519,18 +487,11 @@ main > div {
   z-index: -1;
 }
 
-/* Animated border-glow line beneath the header */
+/* Rule beneath the chat header. Static: it still carries the agent's colour,
+ * which is real state, but no longer shimmers on an infinite loop. */
 .chat-rail {
   height: 1px;
-  background: linear-gradient(90deg,
-    transparent,
-    rgba(var(--agent-color, 0,212,255), 0.8),
-    rgba(var(--agent-color-deep, 59,130,246), 0.8),
-    rgba(var(--agent-color, 0,212,255), 0.8),
-    transparent);
-  background-size: 200% 100%;
-  animation: shimmer 3.5s linear infinite;
-  opacity: 0.85;
+  background: rgba(var(--agent-color, 0,212,255), 0.55);
 }
 
 /* Provider chip (in setup form) */

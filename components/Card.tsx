@@ -20,7 +20,10 @@ export function Card({
   // Layout classes from the caller append to the Card's own chrome — they
   // don't replace it. Same idiom as the `id` prop added in commit 44474f9.
   const sectionClass = [
-    "rounded-xl border border-bg-border bg-bg-panel shadow-card card-glow transition-all",
+    // `card-glow` (a 40px saturated-blue halo on hover) removed: a border
+    // separates, a shadow elevates, and a coloured bloom does neither.
+    // Hover now moves the border, which is the cheapest honest affordance.
+    "rounded-xl border border-bg-border bg-bg-panel shadow-card transition-colors hover:border-bg-border-strong",
     className || "",
   ].filter(Boolean).join(" ");
   return (
@@ -63,7 +66,11 @@ export function Stat({
   const deltaPositive = typeof delta === "number" && delta > 0;
   const deltaNegative = typeof delta === "number" && delta < 0;
   return (
-    <div className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card scan-line transition-all hover:border-accent/40 hover:shadow-ironman group">
+    // `scan-line` (a tinted band sweeping every tile on a 6s infinite loop) and
+    // `shadow-ironman` (a 40px blue halo) both removed. A stat tile shows a
+    // number; perpetual motion on it competes with the number for attention and
+    // costs a compositor layer per tile for the whole session.
+    <div className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card transition-colors hover:border-accent/40 group">
       <div className="flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
           {label}
