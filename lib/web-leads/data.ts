@@ -228,6 +228,32 @@ export type WebLead = {
   postal: string | null;
   websiteUrl: string | null;
   /**
+   * The address a rep should write to, and every other one we found.
+   *
+   * WHY BOTH. `email` is the single field the older MCA drawer and the email
+   * composer already read, so it stays a plain string and keeps working.
+   * `emails` is the full set the JARVIS contact pass extracted, each with the
+   * page that proved it — a law firm publishes four, and the rep deciding
+   * between `info@` and the named partner needs to see both and where each
+   * came from.
+   *
+   * THE SOURCE URL IS NOT DECORATION. Under CASL the lawful basis for a cold
+   * commercial email here is implied consent through conspicuous publication,
+   * and that basis IS the page the address appeared on. A rep answering "how
+   * did you get this?" needs the URL, not a reassurance.
+   *
+   * `email` may be an address a REP typed rather than one we scraped: the
+   * JARVIS writer only fills it when it is empty. So `email` is not guaranteed
+   * to appear in `emails`, and the two must not be assumed to agree.
+   */
+  email: string | null;
+  emails: Array<{
+    email: string;
+    confidence: number | null;
+    sourceUrl: string | null;
+    foundAt: string | null;
+  }>;
+  /**
    * The person who owns the business, read off their own About/Team page by
    * the JARVIS enrichment pass, with the page that proved it. Null means
    * nobody has been identified — never "there is no owner".
@@ -311,6 +337,44 @@ const str = (v: unknown): string | null =>
   typeof v === "string" && v.trim() ? v.trim() : null;
 
 /**
+ * Read the address list JARVIS writes, tolerating anything it is not.
+ *
+ * The value arrives from `tenant_records.data.webdev_emails`, written by
+ * services/leadgen/push-contacts-to-crm.mjs. It is an array of objects — but
+ * this is a JSON blob on a row a rep can also edit, and libSQL hands JSON
+ * columns back as TEXT, so it may equally arrive as a string, as null, or as
+ * something a future writer changed shape on. A lead card that throws takes the
+ * whole drawer with it and the rep loses the address, the phone and the hours
+ * along with the email, so anything unrecognised degrades to an empty list.
+ *
+ * Rows with no address are dropped rather than rendered as blanks: "Not on
+ * file" is the honest empty state (rule 3 in BusinessFacts.tsx), and an empty
+ * string masquerading as an entry defeats it.
+ */
+function readEmails(raw: unknown): WebLead["emails"] {
+  let value = raw;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { return []; }
+  }
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((e) => {
+    if (!e || typeof e !== "object") return [];
+    const row = e as Record<string, unknown>;
+    const email = str(row.email);
+    if (!email) return [];
+    const confidence = typeof row.confidence === "number" && Number.isFinite(row.confidence)
+      ? row.confidence
+      : null;
+    return [{
+      email,
+      confidence,
+      sourceUrl: str(row.source_url),
+      foundAt: str(row.found_at),
+    }];
+  });
+}
+
+/**
  * Audit sources that mean THE SITE WAS NEVER SUCCESSFULLY OBSERVED.
  *
  * A row carrying one of these is telling us its own fetch failed. Anything the
@@ -367,6 +431,8 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     address: str(d.business_address),
     postal: str(d.business_zip),
     websiteUrl: str(d.website),
+    email: str(d.email),
+    emails: readEmails(d.webdev_emails),
     ownerName: str(d.owner_name),
     ownerTitle: str(d.owner_title),
     ownerPhone: str(d.owner_phone),

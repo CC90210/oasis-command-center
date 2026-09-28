@@ -22,6 +22,16 @@ const base = {
   released: false,
   lastCallAt: null,
   auditFindings: "Checked 49 things on this site.",
+  // Added with the email block. Deliberately EMPTY in the base so the
+  // "Not on file" path is the default the harness measures, and overridden per
+  // fixture below where a populated list is the case under test.
+  //
+  // Addresses are synthetic and sit on .test, which RFC 2606 reserves and which
+  // can never resolve. The harness header says "No real merchant, no real
+  // lead"; a real prospect's address pasted into a committed fixture would be
+  // that promise broken, and it would be in git history for ever.
+  email: null,
+  emails: [],
 };
 
 export const LEADS: WebLeadRow[] = [
@@ -39,6 +49,38 @@ export const LEADS: WebLeadRow[] = [
     score: 34,
     scoreState: "scored",
     stage: "attempting_contact",
+    // FOUR ADDRESSES WITH LONG SOURCE URLS, which is the width floor for this
+    // block: a professional practice publishes a shared inbox plus one address
+    // per partner, and the deep contact path is longer than the homepage. The
+    // harness exists to find the floor, so the fixture carries the worst case
+    // rather than the average one.
+    email: "reservations.groupes@example-fixture-one.test",
+    emails: [
+      {
+        email: "reservations.groupes@example-fixture-one.test",
+        confidence: 94,
+        sourceUrl: "https://example-fixture-one.test/nous-joindre/reservations-de-groupe",
+        foundAt: "2026-09-24T18:17:36.597Z",
+      },
+      {
+        email: "direction@example-fixture-one.test",
+        confidence: 82,
+        sourceUrl: "https://example-fixture-one.test/a-propos/notre-equipe",
+        foundAt: "2026-09-24T18:17:39.466Z",
+      },
+      {
+        email: "info@example-fixture-one.test",
+        confidence: 82,
+        sourceUrl: "https://example-fixture-one.test/",
+        foundAt: "2026-09-24T18:17:39.685Z",
+      },
+      {
+        email: "comptabilite@example-fixture-one.test",
+        confidence: 70,
+        sourceUrl: "https://example-fixture-one.test/mentions-legales",
+        foundAt: "2026-09-24T18:17:39.266Z",
+      },
+    ],
   },
   {
     ...base,
