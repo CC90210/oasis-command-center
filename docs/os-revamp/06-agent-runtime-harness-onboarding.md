@@ -229,11 +229,23 @@ Example: the owner types in **#finance**: *"Why did cash drop last month? Make m
    - `inputs`, `budget_cap`, `requested_by`, `approval_policy`.
    The Feed shows "Finance is working on: cash report".
 3. **Runner claims it.** The client's runner (cloud or desktop) claims the job with its runner token. Every job is re-checked against the tenant's lifecycle: a retired or paused workspace runs nothing.
+
+   **One claim contract for every runner** (the protocol is specified in plan v2 §B2.1):
+   - **Claiming.** Each runner has a row in `runners` and a scoped, rotating token. A job names `runner_target` (`cloud` | `desktop` | `any` | a runner id). `POST /api/runner/v1/jobs/claim` is one atomic statement: queued, due, target matches, tenant not paused or retired, and under the per-tenant running cap. It sets `lease_owner` and `lease_expires_at = now + 120 s`.
+   - **Heartbeats and loss.** Heartbeats and event posts extend the lease. A reaper cron returns an expired lease to `queued` (`attempts + 1`), or fails it with `error_class = lease_lost` at `max_attempts`.
+   - **Own containers** (cloud option a) claim exactly like this; `lane='vps'` in doc 03 §d.1 is this runner kind.
+   - **Anthropic Managed Agents** (cloud option b) do not poll. A thin OASIS dispatcher claims the job under its own runner row, starts the Managed Agents session, relays events into `agent_job_events`, and heartbeats the lease while the session runs. The session never holds the OASIS runner token.
+   - **Desktop sidecar, offline.** A job targeted at a desktop runner that is offline stays `queued`, and the Feed shows "Waiting for <computer name>". Each routine carries a missed-run policy: `run_once_on_wake` (default) or `skip`. A job whose deadline passes while queued fails with `error_class = runner_offline` and tells the owner. A job targeted `any` falls back to the cloud runner after a configurable wait. Nothing silently disappears.
 4. **Workspace.**
    - The runner opens `~/.oasis/<workspace>/finance/`: "cd into the harness".
    - If the installed harness version is older than the job's, it updates ENGINE and ROLE PACK first. IDENTITY is untouched.
 5. **Brain.**
-   - The runner starts the engine with the client's brain. The key comes from the tenant vault into the process environment for this job only. It is never written to a file or shown to the model.
+   - The runner starts the engine with the client's brain. The key comes from the tenant vault for this job only and is never written to a file.
+   - **The key never reaches a process the model controls.** The engine holds the key; its terminal and tool subprocesses do not.
+     - Every shell, script and tool subprocess the model can start gets a **scrubbed environment**: an allowlisted PATH, TEMP and locale, the workspace folder, a job id. It carries no provider key and no OASIS token.
+     - Preferred: the engine talks to the provider through a **local credential proxy** that the runner owns (it injects the key on outbound provider calls only). Then even the engine's own environment carries no raw key, only a proxy URL and a per-job nonce.
+     - Output leaving the runner (logs, artifacts, events) passes the redactor, as a last line of defence.
+     - A test in the runner suite spawns a model-controlled shell and asserts the key is absent from its environment and from `env` / `set` output.
    - **Anthropic key:** the engine is the **Claude Agent SDK** (Claude Code as a library). It loads the harness folder exactly as Claude Code would: `CLAUDE.md`, `.claude/skills`, hooks, subagents.
    - **OpenAI or Google key:** a thin adapter runs the same harness with that provider's agent runtime. Capability varies; see decision §10.6.
    - **Own CLI login** (desktop only, and only if §2's terms allow): the runner launches the provider's official CLI, already logged in by the client on their own machine, in headless mode inside the harness folder.
