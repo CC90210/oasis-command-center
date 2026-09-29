@@ -24,6 +24,7 @@ import { notFound } from "next/navigation";
 import { Card, EmptyState, Tag } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { KpiTile } from "@/components/os/KpiTile";
+import { floorCount } from "@/lib/os/count";
 import { Field, LoadError, SeverityTag, SlaBadge, StageTag, TicketStatusTag } from "@/components/delivery/badges";
 import { TicketCreateForm } from "@/components/delivery/TicketForms";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
@@ -220,14 +221,34 @@ function OverviewTab({
   const activeProjects = data.projects.state === "ok"
     ? data.projects.value.rows.filter((p) => !p.archived_at && (ACTIVE_PROJECT_STAGES as readonly string[]).includes(p.stage)).length
     : null;
+  // Counted from reads capped at 500 rows: a capped read's counts are floors
+  // ("500+"), never exact-looking totals (lib/os/count.ts; Codex, PR #473).
+  const ticketsCapped = data.tickets.state === "ok" && data.tickets.value.truncated;
+  const projectsCapped = data.projects.state === "ok" && data.projects.value.truncated;
+  const shown = (n: number | null, capped: boolean) => (n === null ? null : floorCount(n, capped));
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       <div className="space-y-6 lg:col-span-2">
         {viewer.desk && (
           <section className="grid grid-cols-3 gap-3">
-            <KpiTile label="Open tickets" value={openTickets?.length ?? null} status={openTickets ? "live" : "error"} />
-            <KpiTile label="Breaching" value={breaching} status={breaching === null ? "error" : "live"} hint="unanswered past target" />
-            <KpiTile label="Active projects" value={activeProjects} status={activeProjects === null ? "error" : "live"} />
+            <KpiTile
+              label="Open tickets"
+              value={shown(openTickets?.length ?? null, ticketsCapped)}
+              status={openTickets ? "live" : "error"}
+              hint={ticketsCapped ? "at least: the first 500 tickets were read" : undefined}
+            />
+            <KpiTile
+              label="Breaching"
+              value={shown(breaching, ticketsCapped)}
+              status={breaching === null ? "error" : "live"}
+              hint={ticketsCapped ? "at least: the first 500 tickets were read" : "unanswered past target"}
+            />
+            <KpiTile
+              label="Active projects"
+              value={shown(activeProjects, projectsCapped)}
+              status={activeProjects === null ? "error" : "live"}
+              hint={projectsCapped ? "at least: the first 500 projects were read" : undefined}
+            />
           </section>
         )}
         {openTickets && openTickets.length > 0 && (
@@ -367,6 +388,7 @@ function ProjectsTab({ state }: { state: ClientRecordData["projects"] }) {
           </li>
         ))}
       </ul>
+      {state.value.truncated && <p className="px-4 pb-3 text-xs text-fg-dim">Showing the first 500 projects.</p>}
     </Card>
   );
 }
@@ -377,7 +399,8 @@ function kb(bytes: number | null): string {
 
 function FilesTab({ state, hasDeal }: { state: ClientRecordData["files"]; hasDeal: boolean }) {
   if (state.state !== "ok") return <NotLoaded state={state.state} what="Files" />;
-  const { leadFiles, ticketFiles } = state.value;
+  const { leadFiles, ticketFiles, ticketsTruncated } = state.value;
+  const cutOff = ticketsTruncated ? <p className="text-xs text-fg-dim">Only attachments on the first 500 tickets are listed.</p> : null;
   const none = (leadFiles ?? []).length === 0 && ticketFiles.length === 0;
   if (none) {
     return (
@@ -389,6 +412,7 @@ function FilesTab({ state, hasDeal }: { state: ClientRecordData["files"]; hasDea
               : "No files yet. Attachments on this client's tickets appear here."
           }
         />
+        {cutOff}
       </Card>
     );
   }
@@ -428,6 +452,7 @@ function FilesTab({ state, hasDeal }: { state: ClientRecordData["files"]; hasDea
           </ul>
         </Card>
       )}
+      {cutOff}
     </div>
   );
 }

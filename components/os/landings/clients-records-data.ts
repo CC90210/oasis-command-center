@@ -121,7 +121,12 @@ export type ClientRecordData = {
   tickets: Loaded<{ rows: Ticket[]; truncated: boolean }>;
   projects: Loaded<{ rows: Project[]; truncated: boolean }>;
   /** Documents on the source deal, and attachments on the client's tickets. */
-  files: Loaded<{ leadFiles: LeadFile[] | null; ticketFiles: Array<{ ticketId: string; ticketNumber: string; index: number; filename: string; sizeBytes: number; stored: boolean }> }>;
+  files: Loaded<{
+    leadFiles: LeadFile[] | null;
+    ticketFiles: Array<{ ticketId: string; ticketNumber: string; index: number; filename: string; sizeBytes: number; stored: boolean }>;
+    /** The ticket read hit its cap: files on tickets past it are not listed. */
+    ticketsTruncated: boolean;
+  }>;
   activity: Loaded<ActivityItem[] | null>;
 };
 
@@ -155,9 +160,9 @@ export async function loadClientRecord(
     wantTickets
       ? deskOnly("tickets", () => listTickets(db, desk!, { customer_id: customer.id, status: "all" }))
       : skip<{ rows: Ticket[]; truncated: boolean }>(),
-    tab === "overview" || tab === "projects"
-      ? deskOnly("projects", () => listProjects(db, desk!, { customer_id: customer.id, includeArchived: true }))
-      : skip<{ rows: Project[]; truncated: boolean }>(),
+    // Every tab: the header's New ticket form links one of this client's
+    // projects whichever tab is open (Codex, PR #473).
+    deskOnly("projects", () => listProjects(db, desk!, { customer_id: customer.id, includeArchived: true })),
     tab === "files"
       ? deskOnly("files", async () => (customer.source_lead_id ? listLeadFiles(db, viewer.tenantId, customer.source_lead_id) : null))
       : skip<LeadFile[] | null>(),
@@ -175,6 +180,7 @@ export async function loadClientRecord(
         state: "ok",
         value: {
           leadFiles: leadFiles.value,
+          ticketsTruncated: tickets.value.truncated,
           ticketFiles: tickets.value.rows.flatMap((t) =>
             t.attachments.map((a, index) => ({
               ticketId: t.id,

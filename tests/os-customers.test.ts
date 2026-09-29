@@ -704,6 +704,29 @@ async function main() {
     assert.doesNotMatch(ticketsTab, /Gutter quote wrong/, "another client's ticket is not on this record");
     assert.match(await page(record(harbourId, "projects")), /Harbour site/);
   });
+  await check("/clients/[id]: New ticket can link the client's project from EVERY tab (Codex, #473)", async () => {
+    // Activity lists no projects itself; before the fix the header form got
+    // an empty project list on every tab but Overview and Projects.
+    const activity = await page(record(harbourId, "activity"));
+    assert.match(activity, /Harbour site/, "the form's project options carry the client's project");
+    assert.ok(activity.includes(projectForDeal), "…by its id, as the option value");
+  });
+  await check("/clients/[id]: counts from a capped ticket read print as floors, and each tab says it was cut off", async () => {
+    const many = Array.from({ length: 501 }, (_, i) => ({
+      sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, severity, sla_target, customer_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'Bulk', 'open', 'low', ?, ?, ?, ?)`,
+      args: [`bulk-${i}`, CLIENT_A, 50_000 + i, `T-B${i}`, "2099-01-01T00:00:00.000Z", harbourId, T0.toISOString(), T0.toISOString()],
+    }));
+    await db.batch(many, "write");
+    try {
+      const overview = await page(record(harbourId));
+      assert.match(overview, /\b\d{2,3}\+/, "the open-ticket tile is a floor, never an exact-looking total");
+      assert.match(overview, /at least: the first 500 tickets were read/);
+      assert.match(await page(record(harbourId, "files")), /Only attachments on the first 500 tickets are listed\./);
+    } finally {
+      await db.execute("DELETE FROM support_tickets WHERE id LIKE 'bulk-%'");
+    }
+  });
   await check("/clients/[id]: another workspace's client is a 404, before anything of it is read", async () => {
     await login(USERS.clientB);
     assert.equal(await is404(record(acme.id)), true);
