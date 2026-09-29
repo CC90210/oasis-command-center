@@ -1217,6 +1217,9 @@ async function toolProposeEmail(input: Record<string, unknown>, ctx: ToolContext
 /** list_proposals — this agent's own approvals in the session's workspace, with the reviewer's notes. */
 async function toolListProposals(input: Record<string, unknown>, ctx: ToolContext) {
   if (!tursoConfigured()) throw new Error("approvals_unavailable: the database is not configured on this deployment");
+  // A keyless agent owns no proposals (propose_email stores its id as null),
+  // so there is nothing of its own to read back: the same rule as revise.
+  if (!ctx.agentKey) throw new Error("agent_key_required: this agent has no key, so it has no proposals of its own to read back");
   const rawView = typeof input.view === "string" ? input.view : "all";
   const view = rawView === "pending" || rawView === "decided" ? rawView : "all";
   const limit = Math.max(1, Math.min(Number(input.limit) || 20, 50));
@@ -1235,7 +1238,7 @@ async function toolListProposals(input: Record<string, unknown>, ctx: ToolContex
   const { rows, truncated } = await listApprovals(
     getTursoClient(),
     scope,
-    { view, limit, requestedBy: { type: "agent", id: ctx.agentKey || "unknown" } },
+    { view, limit, requestedBy: { type: "agent", id: ctx.agentKey } },
     now,
   );
   const nowIso = now.toISOString();

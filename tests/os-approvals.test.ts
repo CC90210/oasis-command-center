@@ -393,7 +393,15 @@ async function main() {
     assert.equal(rules.validateSendEmailPayload({ to: "not-an-email", subject: "s", body: "b" }).ok, false);
     assert.equal(rules.validateSendEmailPayload({ to: "a@b.test", subject: " ", body: "b" }).ok, false);
     assert.equal(rules.validateSendEmailPayload({ to: "a@b.test", subject: "s", body: "" }).ok, false);
-    assert.equal(rules.validatePublishPostPayload({ asset_id: "x", platforms: ["instagram", "myspace"] }).ok, false, "never fewer surfaces than asked");
+    // With a valid hash, so the refusal is the platform rule and not the
+    // missing hash (CodeRabbit #470: the old assertion passed on the latter).
+    const hash = "a".repeat(64);
+    assert.deepEqual(
+      rules.validatePublishPostPayload({ asset_id: "x", asset_hash: hash, platforms: ["instagram", "myspace"] }),
+      { ok: false, error: "platforms_invalid", field: "platforms" },
+      "never fewer surfaces than asked",
+    );
+    assert.equal(rules.validatePublishPostPayload({ asset_id: "x", asset_hash: hash, platforms: ["instagram"] }).ok, true, "control: the same payload with known platforms passes");
     assert.equal(rules.validateNewApproval({ tenantId: OASIS, departmentKey: "sales", requestedBy: { type: "agent", id: "x" }, actionKind: "wire_money", title: "t", payload: {} }).ok, false);
     assert.deepEqual(rules.validateNewApproval({ tenantId: " ", actionKind: "send_email" }), { ok: false, error: "tenant_required" });
   });
@@ -1441,6 +1449,12 @@ async function main() {
     assert.equal(revise.is_error, true);
     assert.match(revise.content, /supersedes_not_yours/);
     assert.equal(await statusOf(orphan.approval_id), "pending", "the card is untouched");
+    // Nor can it read proposals back: it owns none, and it must not read as
+    // the made-up agent "unknown" (CodeRabbit #470).
+    const runner = await import("../lib/cloud-tool-runner");
+    const listed = await runner.executeTool("list_proposals", {}, keyless);
+    assert.equal(listed.is_error, true);
+    assert.match(listed.content, /agent_key_required/);
   });
 
   await check("propose_email and list_proposals are client-safe, never deferred, denied to read-only, stripped in plan mode", async () => {
