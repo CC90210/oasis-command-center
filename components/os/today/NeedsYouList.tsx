@@ -20,6 +20,7 @@ import Link from "next/link";
 import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Receipt, Reply } from "lucide-react";
 import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
 import { needsYouCount, type NeedsYou, type NeedsYouIcon, type NeedsYouTone } from "@/components/os/today/model";
+import { floorCount } from "@/lib/os/count";
 
 const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
   follow_up: PhoneCall,
@@ -43,9 +44,12 @@ const PILL_TONE: Record<NeedsYouTone, string> = {
   info: "bg-bg-elev text-fg-muted",
 };
 
-/** Past 99 the pill is a floor anyway; below it, a capped read prints "N+". */
+/**
+ * Past 99 the pill is a floor anyway; below it, a capped read prints "N+"
+ * through the shell's one floor rule (lib/os/count.ts).
+ */
 function formatCount(n: number, capped = false): string {
-  return n > 99 ? "99+" : capped ? `${n}+` : String(n);
+  return n > 99 ? "99+" : floorCount(n, capped);
 }
 
 export function NeedsYouList({
