@@ -744,6 +744,44 @@ async function main() {
     }
   });
 
+  // ── a ticket on a project belongs to the project's client (Codex, #473) ──
+  const cx = await store.createCustomer(db, CLIENT_A, input({ display_name: "Link X", primary_email: "x@link.test", company_name: null }), null, T0);
+  const cy = await store.createCustomer(db, CLIENT_A, input({ display_name: "Link Y", primary_email: "y@link.test", company_name: null }), null, T0);
+  assert.ok(cx.ok && cy.ok, "precondition: two client records");
+  const X = cx.ok ? cx.customer.id : "";
+  const Y = cy.ok ? cy.customer.id : "";
+  const pX = await delivery.createProject(db, CLIENT_A, {
+    title: "Link project", description: null, client_tenant_id: null, client_name: null, client_email: null,
+    lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null, customer_id: X,
+  }, { userId: USERS.clientA.id, name: "Alice" }, T0);
+  const loose = (await delivery.createTicket(db, CLIENT_A, { ...ticketBase, title: "Link ticket", project_id: null, client_email: null }, T0)).ticket;
+  const author = { userId: USERS.clientA.id, name: "Alice" };
+  const customerOf = async (ticketId: string) =>
+    String((await db.execute({ sql: "SELECT customer_id FROM support_tickets WHERE id = ?", args: [ticketId] })).rows[0]?.customer_id ?? "");
+  await check("links: a ticket put on a project inherits the project's client record", async () => {
+    const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { project_id: pX }, author, T0);
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(await customerOf(loose.id), X);
+  });
+  await check("links: re-pointing that ticket to another client is refused while it sits on the project", async () => {
+    const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { customer_id: Y }, author, T0);
+    assert.deepEqual(r, { ok: false, status: 409, error: "project_belongs_to_another_customer" });
+    assert.equal(await customerOf(loose.id), X, "nothing changed");
+  });
+  await check("links: moving the project to another client moves its tickets with it", async () => {
+    assert.equal(await delivery.updateProject(db, CLIENT_A, pX, { customer_id: Y }, author, T0), true);
+    assert.equal(await customerOf(loose.id), Y);
+  });
+  await login(USERS.clientA);
+  await check("links: the desk API refuses a new ticket naming a project AND a different client", async () => {
+    const r = await call(tickets.POST(req("POST", "/api/tickets?scope=desk", { title: "Mismatch", project_id: pX, customer_id: X })));
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "project_belongs_to_another_customer");
+    const ok = await call(tickets.POST(req("POST", "/api/tickets?scope=desk", { title: "Inherits", project_id: pX })));
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.equal(await customerOf(String(ok.body.id)), Y, "no client given: the project's is inherited");
+  });
+
   finish("os-customers");
 }
 

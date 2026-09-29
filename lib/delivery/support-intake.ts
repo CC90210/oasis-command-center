@@ -58,6 +58,7 @@ import {
   listUnticketedSupportSubmissions,
   matchClientByEmail,
   matchDeskProjectByEmail,
+  projectCustomerId,
   type Attachment,
   type ClientMatch,
 } from "@/lib/delivery/store";
@@ -573,6 +574,10 @@ async function createTicketFromSubmission(
     console.error("[support-intake] client match failed", err instanceof Error ? err.message : err);
     match = { client_tenant_id: null, project_id: null, client_match: "lookup_failed", customer_id: null };
   }
+  // A ticket on a project belongs to that project's client record. The email
+  // match can name another; the project wins here, because refusing would cost
+  // the requester their request (Codex, PR #473).
+  const projectCustomer = match.project_id ? await projectCustomerId(db, desk.tenantId, match.project_id) : null;
   return createTicket(
     db,
     desk.tenantId,
@@ -594,7 +599,7 @@ async function createTicketFromSubmission(
       assigned_to: null,
       attachments: input.attachments,
       form_submission_id: input.submissionId,
-      customer_id: match.customer_id,
+      customer_id: projectCustomer ?? match.customer_id,
     },
     now,
   );

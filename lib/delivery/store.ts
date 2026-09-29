@@ -637,6 +637,27 @@ export async function deskCustomerExists(db: Client, tenantId: string, customerI
   return rs.rows.length > 0;
 }
 
+/**
+ * The client record a project belongs to, or null. A ticket on a project
+ * belongs to the same client (Codex, PR #473): tickets inherit it, a different
+ * one is refused, and changing the project's client moves its tickets. A
+ * database without migration bravo__188 has no client records, so null.
+ */
+export async function projectCustomerId(db: Client, tenantId: string, projectId: string): Promise<string | null> {
+  try {
+    const r = rows(
+      await db.execute({
+        sql: "SELECT customer_id FROM delivery_projects WHERE tenant_id = ? AND id = ? LIMIT 1",
+        args: [requireTenant(tenantId), projectId],
+      }),
+    )[0];
+    return s(r?.customer_id);
+  } catch (err) {
+    if (/no such column: customer_id/i.test(err instanceof Error ? err.message : String(err))) return null;
+    throw err;
+  }
+}
+
 /** Name + email for a signed-in person, from their profile in the workspace they act in. */
 export async function profileContact(
   db: Client,
@@ -823,12 +844,25 @@ export async function updateProject(
   if (sets.length === 0) return true;
   sets.push("updated_at = ?");
   args.push(at);
+  // A project's tickets belong to its client: re-pointing the project moves
+  // them in the same batch, so the client record and the project never
+  // disagree about who a ticket is for.
+  const ticketsFollow: InStatement[] =
+    "customer_id" in changes
+      ? [
+          {
+            sql: "UPDATE support_tickets SET customer_id = ?, updated_at = ? WHERE tenant_id = ? AND project_id = ?",
+            args: [changes.customer_id ?? null, at, tenantId, id],
+          },
+        ]
+      : [];
   await db.batch(
     [
       {
         sql: `UPDATE delivery_projects SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
         args: [...args, tenantId, id],
       },
+      ...ticketsFollow,
       ...timeline,
     ],
     "write",
@@ -1081,7 +1115,8 @@ export type TicketUpdateResult =
         | "project_belongs_to_another_client"
         | "project_not_found"
         | "no_inferred_client_link"
-        | "customer_not_found";
+        | "customer_not_found"
+        | "project_belongs_to_another_customer";
     };
 
 /**
@@ -1210,6 +1245,17 @@ export async function updateTicket(
     set("customer_id", changes.customer_id ?? null);
     const who = names.customer?.(changes.customer_id ?? null);
     notes.push(changes.customer_id ? `Linked to client ${who ? `"${who}"` : "record"}.` : "Unlinked from its client record.");
+  }
+  // A ticket on a project belongs to the project's client record: inherited
+  // when the ticket has none, refused when it names another.
+  if ("project_id" in changes || "customer_id" in changes) {
+    const projectId = "project_id" in changes ? changes.project_id ?? null : s(cur.project_id);
+    const customerId = "customer_id" in changes ? changes.customer_id ?? null : s(cur.customer_id);
+    const projectCustomer = projectId ? await projectCustomerId(db, tenantId, projectId) : null;
+    if (projectCustomer && customerId && projectCustomer !== customerId) {
+      return { ok: false, status: 409, error: "project_belongs_to_another_customer" };
+    }
+    if (projectCustomer && !customerId) set("customer_id", projectCustomer);
   }
 
   if ("assigned_to" in changes && (changes.assigned_to ?? null) !== s(cur.assigned_to)) {

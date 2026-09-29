@@ -149,6 +149,9 @@ export async function POST(req: NextRequest) {
       if (project.client_tenant_id && clientTenant && project.client_tenant_id !== clientTenant) {
         return deliveryError(409, "project_belongs_to_another_client", undefined, { field: "project_id" });
       }
+      if (project.customer_id && customerId && project.customer_id !== customerId) {
+        return deliveryError(409, "project_belongs_to_another_customer", undefined, { field: "customer_id" });
+      }
       clientTenant = clientTenant ?? project.client_tenant_id;
       customerId = customerId ?? project.customer_id;
     }
