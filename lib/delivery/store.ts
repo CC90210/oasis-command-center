@@ -6,16 +6,24 @@
  * here than through the PostgREST adapter.
  *
  * TWO RULES EVERY FUNCTION FOLLOWS
- *   1. Every statement is pinned to the OASIS workspace (tenant_id), and every
- *      READ takes a DeliveryViewer and builds its WHERE from access.ts. Child
- *      rows (tasks, updates, comments, a project's tickets) are read THROUGH a
- *      join to their scoped parent, so a caller that forgot to check the parent
- *      first still cannot read another client's rows.
+ *   1. Every statement is pinned to ONE workspace's desk (tenant_id). Every
+ *      READ takes a DeliveryViewer and builds its WHERE from access.ts; every
+ *      WRITE takes the desk's `tenantId` as its second argument, which the
+ *      route takes from the viewer it resolved from the SESSION (never from a
+ *      request body). Child rows (tasks, updates, comments, a project's
+ *      tickets) are read THROUGH a join to their scoped parent, so a caller
+ *      that forgot to check the parent first still cannot read another
+ *      client's rows, and every write matches (tenant_id, id) together, so a
+ *      desk can never change another desk's row by naming its id.
  *   2. Nothing is swallowed. A failed statement throws; the route turns it into
  *      a loud 500. An empty list here means the query ran and matched nothing.
  *
  * Writes take already-validated input (lib/delivery/rules.ts) and a clock, so
  * tests drive them against a local libSQL file with a fixed `now`.
+ *
+ * customer_id (migration bravo__188) is READ through `t.*` / `p.*`, so it is
+ * simply absent before that migration, and it is only ever WRITTEN when it has
+ * a value — so OASIS's desk keeps working on a database that has not had 188.
  */
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
@@ -73,6 +81,16 @@ const n = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v)
 
 const OPEN_STATUS_SQL = OPEN_TICKET_STATUSES.map((x) => `'${x}'`).join(", ");
 
+function requireTenant(tenantId: string): string {
+  if (typeof tenantId !== "string" || !tenantId.trim()) throw new Error("delivery.store: a desk tenant id is required");
+  return tenantId;
+}
+
+/** A system reader for one desk (notifications, the cron). Never acts. */
+export function deskReader(tenantId: string): DeliveryViewer {
+  return { kind: "founder", tenantId: requireTenant(tenantId), userId: "system", canAct: false };
+}
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
@@ -86,6 +104,8 @@ export type Project = {
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
+  /** The client record (customers.id) this project is for. Null before migration bravo__188. */
+  customer_id: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: string | null;
@@ -113,6 +133,7 @@ function mapProject(r: Row): Project {
     client_name: s(r.client_name),
     client_email: s(r.client_email),
     lead_id: s(r.lead_id),
+    customer_id: s(r.customer_id),
     stage: (isOneOf(PROJECT_STAGES, r.stage) ? r.stage : "discovery") as ProjectStage,
     priority: (s(r.priority) ?? "medium") as ProjectPriority,
     assigned_to: s(r.assigned_to),
@@ -182,6 +203,8 @@ export type Ticket = {
   client_company: string | null;
   client_match: string | null;
   project_hint: string | null;
+  /** The client record (customers.id) the requester is. Null before migration bravo__188. */
+  customer_id: string | null;
   reporter_user_id: string | null;
   assigned_to: string | null;
   resolution: string | null;
@@ -238,6 +261,7 @@ function mapTicket(r: Row): Ticket {
     client_company: s(r.client_company),
     client_match: s(r.client_match),
     project_hint: s(r.project_hint),
+    customer_id: s(r.customer_id),
     reporter_user_id: s(r.reporter_user_id),
     assigned_to: s(r.assigned_to),
     resolution: s(r.resolution),
@@ -308,6 +332,8 @@ export type ProjectFilters = {
   assignee?: string | null;
   q?: string | null;
   includeArchived?: boolean;
+  /** A client record's projects (the team only; needs migration bravo__188). */
+  customer_id?: string | null;
 };
 
 function projectSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
@@ -350,6 +376,10 @@ export async function listProjects(
   if (filters.stage && isOneOf(PROJECT_STAGES, filters.stage)) {
     where.push("p.stage = ?");
     args.push(filters.stage);
+  }
+  if (viewer.kind === "founder" && filters.customer_id) {
+    where.push("p.customer_id = ?");
+    args.push(filters.customer_id);
   }
   // Assignee and free-text search are founder tools; a client's view is small.
   if (viewer.kind === "founder" && filters.assignee) {
@@ -444,13 +474,18 @@ export async function listProjectUpdates(
 // ---------------------------------------------------------------------------
 
 export type TicketFilters = {
-  /** "open" (default) = the working statuses; "closed" = resolved + closed; "all"; or one status. */
+  /**
+   * "open" (default) = the working statuses; "team" = open + in progress (the
+   * ball is in the team's court); "closed" = resolved + closed; "all"; or one status.
+   */
   status?: string | null;
   severity?: string | null;
   project_id?: string | null;
   /** An auth user id, or "unassigned". */
   assignee?: string | null;
   q?: string | null;
+  /** A client record's tickets (the team only; needs migration bravo__188). */
+  customer_id?: string | null;
 };
 
 function ticketSelect(viewer: DeliveryViewer): { sql: string; args: string[] } {
@@ -487,6 +522,7 @@ export async function listTickets(
   const args: string[] = [...head.args, ...scope.args];
   const status = filters.status || "open";
   if (status === "open") where.push(`t.status IN (${OPEN_STATUS_SQL})`);
+  else if (status === "team") where.push("t.status IN ('open', 'in_progress')");
   else if (status === "closed") where.push("t.status IN ('resolved', 'closed')");
   else if (isOneOf(TICKET_STATUSES, status)) {
     where.push("t.status = ?");
@@ -499,6 +535,10 @@ export async function listTickets(
   if (filters.project_id) {
     where.push("t.project_id = ?");
     args.push(filters.project_id);
+  }
+  if (viewer.kind === "founder" && filters.customer_id) {
+    where.push("t.customer_id = ?");
+    args.push(filters.customer_id);
   }
   if (viewer.kind === "founder" && filters.assignee) {
     if (filters.assignee === "unassigned") where.push("t.assigned_to IS NULL");
@@ -561,7 +601,10 @@ export async function listTicketComments(
 
 export type ClientTenant = { id: string; name: string; slug: string | null };
 
-/** Workspaces a project/ticket may belong to: every tenant except OASIS itself. */
+/**
+ * Client workspaces an OASIS project/ticket may belong to: every tenant except
+ * OASIS itself. OASIS's desk only — no other desk links rows to a workspace.
+ */
 export async function listClientTenants(db: Client): Promise<ClientTenant[]> {
   const rs = await db.execute({
     sql: "SELECT id, name, slug FROM tenants WHERE id <> ? ORDER BY name, id LIMIT 500",
@@ -576,10 +619,20 @@ export async function clientTenantExists(db: Client, tenantId: string): Promise<
   return rs.rows.length > 0;
 }
 
-export async function oasisLeadExists(db: Client, leadId: string): Promise<boolean> {
+/** Is `leadId` a lead in THIS desk's own pipeline? */
+export async function deskLeadExists(db: Client, tenantId: string, leadId: string): Promise<boolean> {
   const rs = await db.execute({
     sql: "SELECT 1 AS ok FROM tenant_records WHERE tenant_id = ? AND id = ? AND entity_type = 'lead' LIMIT 1",
-    args: [DELIVERY_TENANT_ID, leadId],
+    args: [requireTenant(tenantId), leadId],
+  });
+  return rs.rows.length > 0;
+}
+
+/** Is `customerId` a client record of THIS desk's workspace? (Needs migration bravo__188.) */
+export async function deskCustomerExists(db: Client, tenantId: string, customerId: string): Promise<boolean> {
+  const rs = await db.execute({
+    sql: "SELECT 1 AS ok FROM customers WHERE tenant_id = ? AND id = ? LIMIT 1",
+    args: [requireTenant(tenantId), customerId],
   });
   return rs.rows.length > 0;
 }
@@ -619,12 +672,15 @@ export type NewProject = {
   priority: ProjectPriority;
   assigned_to: string | null;
   due_date: string | null;
+  /** Written only when set (migration bravo__188). */
+  customer_id?: string | null;
 };
 
 const STARTED_STAGES: readonly ProjectStage[] = ["building", "review", "live", "maintenance"];
 const LAUNCHED_STAGES: readonly ProjectStage[] = ["live", "maintenance"];
 
 function updateStatement(
+  tenantId: string,
   projectId: string,
   author: Author,
   body: string,
@@ -635,41 +691,54 @@ function updateStatement(
   return {
     sql: `INSERT INTO delivery_updates (id, project_id, tenant_id, author_user_id, author_name, body, visibility, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    args: [id, projectId, DELIVERY_TENANT_ID, author.userId, author.name, body, visibility, at],
+    args: [id, projectId, tenantId, author.userId, author.name, body, visibility, at],
   };
 }
 
-export async function createProject(db: Client, input: NewProject, author: Author, now: Date): Promise<string> {
+export async function createProject(
+  db: Client,
+  tenantId: string,
+  input: NewProject,
+  author: Author,
+  now: Date,
+): Promise<string> {
+  requireTenant(tenantId);
   const id = randomUUID();
   const at = now.toISOString();
+  const cols = [
+    "id", "tenant_id", "title", "description", "client_tenant_id", "client_name", "client_email", "lead_id",
+    "stage", "priority", "assigned_to", "due_date", "started_at", "launched_at", "created_by", "created_at", "updated_at",
+  ];
+  const vals: Array<string | null> = [
+    id,
+    tenantId,
+    input.title,
+    input.description,
+    input.client_tenant_id,
+    input.client_name,
+    input.client_email,
+    input.lead_id,
+    input.stage,
+    input.priority,
+    input.assigned_to,
+    input.due_date,
+    STARTED_STAGES.includes(input.stage) ? at : null,
+    LAUNCHED_STAGES.includes(input.stage) ? at : null,
+    author.userId,
+    at,
+    at,
+  ];
+  if (input.customer_id) {
+    cols.push("customer_id");
+    vals.push(input.customer_id);
+  }
   await db.batch(
     [
       {
-        sql: `INSERT INTO delivery_projects
-                (id, tenant_id, title, description, client_tenant_id, client_name, client_email, lead_id,
-                 stage, priority, assigned_to, due_date, started_at, launched_at, created_by, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [
-          id,
-          DELIVERY_TENANT_ID,
-          input.title,
-          input.description,
-          input.client_tenant_id,
-          input.client_name,
-          input.client_email,
-          input.lead_id,
-          input.stage,
-          input.priority,
-          input.assigned_to,
-          input.due_date,
-          STARTED_STAGES.includes(input.stage) ? at : null,
-          LAUNCHED_STAGES.includes(input.stage) ? at : null,
-          author.userId,
-          at,
-          at,
-        ],
+        sql: `INSERT INTO delivery_projects (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+        args: vals,
       },
-      updateStatement(id, author, `Project created in the ${PROJECT_STAGE_LABELS[input.stage]} stage.`, "internal", at),
+      updateStatement(tenantId, id, author, `Project created in the ${PROJECT_STAGE_LABELS[input.stage]} stage.`, "internal", at),
     ],
     "write",
   );
@@ -683,6 +752,7 @@ export type ProjectChanges = Partial<{
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
+  customer_id: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: string | null;
@@ -697,6 +767,7 @@ const PROJECT_COLUMNS = [
   "client_name",
   "client_email",
   "lead_id",
+  "customer_id",
   "stage",
   "priority",
   "assigned_to",
@@ -706,15 +777,17 @@ const PROJECT_COLUMNS = [
 /** Returns false when the project does not exist in the workspace. */
 export async function updateProject(
   db: Client,
+  tenantId: string,
   id: string,
   changes: ProjectChanges,
   author: Author,
   now: Date,
 ): Promise<boolean> {
+  requireTenant(tenantId);
   const cur = rows(
     await db.execute({
       sql: "SELECT stage, started_at, launched_at, archived_at FROM delivery_projects WHERE tenant_id = ? AND id = ?",
-      args: [DELIVERY_TENANT_ID, id],
+      args: [tenantId, id],
     }),
   )[0];
   if (!cur) return false;
@@ -739,13 +812,13 @@ export async function updateProject(
     }
     const fromLabel = isOneOf(PROJECT_STAGES, fromStage) ? PROJECT_STAGE_LABELS[fromStage] : fromStage;
     timeline.push(
-      updateStatement(id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[changes.stage]}.`, "internal", at),
+      updateStatement(tenantId, id, author, `Stage moved from ${fromLabel} to ${PROJECT_STAGE_LABELS[changes.stage]}.`, "internal", at),
     );
   }
   if (changes.archived !== undefined && changes.archived !== Boolean(cur.archived_at)) {
     sets.push("archived_at = ?");
     args.push(changes.archived ? at : null);
-    timeline.push(updateStatement(id, author, changes.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
+    timeline.push(updateStatement(tenantId, id, author, changes.archived ? "Project archived." : "Project restored from the archive.", "internal", at));
   }
   if (sets.length === 0) return true;
   sets.push("updated_at = ?");
@@ -754,7 +827,7 @@ export async function updateProject(
     [
       {
         sql: `UPDATE delivery_projects SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
-        args: [...args, DELIVERY_TENANT_ID, id],
+        args: [...args, tenantId, id],
       },
       ...timeline,
     ],
@@ -765,39 +838,41 @@ export async function updateProject(
 
 export async function addProjectUpdate(
   db: Client,
+  tenantId: string,
   projectId: string,
   input: { body: string; visibility: UpdateVisibility },
   author: Author,
   now: Date,
 ): Promise<string | null> {
-  if (!(await projectExists(db, projectId))) return null;
+  if (!(await projectExists(db, tenantId, projectId))) return null;
   const at = now.toISOString();
   const id = randomUUID();
   await db.batch(
     [
-      updateStatement(projectId, author, input.body, input.visibility, at, id),
-      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, DELIVERY_TENANT_ID, projectId] },
+      updateStatement(tenantId, projectId, author, input.body, input.visibility, at, id),
+      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, tenantId, projectId] },
     ],
     "write",
   );
   return id;
 }
 
-export async function projectExists(db: Client, projectId: string): Promise<boolean> {
+export async function projectExists(db: Client, tenantId: string, projectId: string): Promise<boolean> {
   const rs = await db.execute({
     sql: "SELECT 1 AS ok FROM delivery_projects WHERE tenant_id = ? AND id = ? LIMIT 1",
-    args: [DELIVERY_TENANT_ID, projectId],
+    args: [requireTenant(tenantId), projectId],
   });
   return rs.rows.length > 0;
 }
 
 export async function createTask(
   db: Client,
+  tenantId: string,
   projectId: string,
   input: { title: string; notes: string | null; due_date: string | null; assigned_to: string | null },
   now: Date,
 ): Promise<string | null> {
-  if (!(await projectExists(db, projectId))) return null;
+  if (!(await projectExists(db, tenantId, projectId))) return null;
   const id = randomUUID();
   const at = now.toISOString();
   await db.batch(
@@ -806,9 +881,9 @@ export async function createTask(
         sql: `INSERT INTO delivery_tasks (id, project_id, tenant_id, title, status, assigned_to, notes, due_date, sort_order, created_at, updated_at)
               SELECT ?, ?, ?, ?, 'todo', ?, ?, ?, COALESCE(MAX(sort_order), 0) + 1, ?, ?
               FROM delivery_tasks WHERE tenant_id = ? AND project_id = ?`,
-        args: [id, projectId, DELIVERY_TENANT_ID, input.title, input.assigned_to, input.notes, input.due_date, at, at, DELIVERY_TENANT_ID, projectId],
+        args: [id, projectId, tenantId, input.title, input.assigned_to, input.notes, input.due_date, at, at, tenantId, projectId],
       },
-      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, DELIVERY_TENANT_ID, projectId] },
+      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, tenantId, projectId] },
     ],
     "write",
   );
@@ -818,11 +893,13 @@ export async function createTask(
 /** Returns false when the task does not exist on that project in the workspace. */
 export async function updateTask(
   db: Client,
+  tenantId: string,
   projectId: string,
   taskId: string,
   changes: Partial<{ title: string; notes: string | null; due_date: string | null; status: TaskStatus; sort_order: number; assigned_to: string | null }>,
   now: Date,
 ): Promise<boolean> {
+  requireTenant(tenantId);
   const at = now.toISOString();
   const sets: string[] = [];
   const args: Array<string | number | null> = [];
@@ -842,9 +919,9 @@ export async function updateTask(
     [
       {
         sql: `UPDATE delivery_tasks SET ${sets.join(", ")} WHERE tenant_id = ? AND project_id = ? AND id = ?`,
-        args: [...args, DELIVERY_TENANT_ID, projectId, taskId],
+        args: [...args, tenantId, projectId, taskId],
       },
-      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, DELIVERY_TENANT_ID, projectId] },
+      { sql: "UPDATE delivery_projects SET updated_at = ? WHERE tenant_id = ? AND id = ?", args: [at, tenantId, projectId] },
     ],
     "write",
   );
@@ -874,17 +951,17 @@ export type NewTicket = {
   assigned_to: string | null;
   attachments?: Attachment[];
   form_submission_id?: string | null;
+  /** The client record the requester is. Written only when set (migration bravo__188). */
+  customer_id?: string | null;
 };
 
-async function findTicketIdBySubmission(db: Client, submissionId: string): Promise<string | null> {
+async function findTicketIdBySubmission(db: Client, tenantId: string, submissionId: string): Promise<string | null> {
   const rs = await db.execute({
     sql: "SELECT id FROM support_tickets WHERE tenant_id = ? AND form_submission_id = ? LIMIT 1",
-    args: [DELIVERY_TENANT_ID, submissionId],
+    args: [tenantId, submissionId],
   });
   return rs.rows.length ? String(rows(rs)[0].id) : null;
 }
-
-const FOUNDER_READ: DeliveryViewer = { kind: "founder", userId: "system", canAct: false };
 
 /**
  * Create a ticket and allocate its number in the same statement.
@@ -899,33 +976,43 @@ const FOUNDER_READ: DeliveryViewer = { kind: "founder", userId: "system", canAct
  * which is unique per tenant. Creating it a second time — the reconcile sweep
  * racing the live request, a retried after() callback — returns the ticket
  * that already exists with created:false instead of a duplicate.
+ *
+ * Numbering and idempotency are both PER DESK: each workspace's tickets start
+ * at T-0001, and a submission id only ever matches its own desk's ticket.
  */
 export async function createTicket(
   db: Client,
+  tenantId: string,
   input: NewTicket,
   now: Date,
 ): Promise<{ ticket: Ticket; created: boolean }> {
+  requireTenant(tenantId);
+  const reader = deskReader(tenantId);
   if (input.form_submission_id) {
-    const existing = await findTicketIdBySubmission(db, input.form_submission_id);
-    if (existing) return { ticket: (await getTicket(db, FOUNDER_READ, existing))!, created: false };
+    const existing = await findTicketIdBySubmission(db, tenantId, input.form_submission_id);
+    if (existing) return { ticket: (await getTicket(db, reader, existing))!, created: false };
   }
   const id = input.id ?? randomUUID();
   const at = now.toISOString();
   const slaTarget = slaTargetFor(at, input.severity);
+  // customer_id only when there is one, so a database without migration
+  // bravo__188 still takes every ticket OASIS's desk files today.
+  const customerCol = input.customer_id ? ", customer_id" : "";
+  const customerVal = input.customer_id ? ", ?" : "";
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
       await db.execute({
         sql: `INSERT INTO support_tickets
                 (id, tenant_id, ticket_seq, ticket_number, title, description, category, severity, status, source,
                  project_id, client_tenant_id, client_name, client_email, client_company, client_match, project_hint,
-                 reporter_user_id, assigned_to, attachments, form_submission_id, sla_target, created_at, updated_at)
+                 reporter_user_id, assigned_to, attachments, form_submission_id, sla_target, created_at, updated_at${customerCol})
               SELECT ?, ?, n.seq, 'T-' || printf('%04d', n.seq), ?, ?, ?, ?, 'open', ?,
                      ?, ?, ?, ?, ?, ?, ?,
-                     ?, ?, ?, ?, ?, ?, ?
+                     ?, ?, ?, ?, ?, ?, ?${customerVal}
               FROM (SELECT COALESCE(MAX(ticket_seq), 0) + 1 AS seq FROM support_tickets WHERE tenant_id = ?) AS n`,
         args: [
           id,
-          DELIVERY_TENANT_ID,
+          tenantId,
           input.title,
           input.description,
           input.category,
@@ -945,16 +1032,17 @@ export async function createTicket(
           slaTarget,
           at,
           at,
-          DELIVERY_TENANT_ID,
+          ...(input.customer_id ? [input.customer_id] : []),
+          tenantId,
         ],
       });
-      return { ticket: (await getTicket(db, FOUNDER_READ, id))!, created: true };
+      return { ticket: (await getTicket(db, reader, id))!, created: true };
     } catch (err) {
       const e = err as { message?: string; code?: string };
       if (!isUniqueViolationError(e)) throw err;
       if (input.form_submission_id) {
-        const existing = await findTicketIdBySubmission(db, input.form_submission_id);
-        if (existing) return { ticket: (await getTicket(db, FOUNDER_READ, existing))!, created: false };
+        const existing = await findTicketIdBySubmission(db, tenantId, input.form_submission_id);
+        if (existing) return { ticket: (await getTicket(db, reader, existing))!, created: false };
       }
       if (attempt === 5) {
         throw new Error(`ticket_number_allocation_failed after ${attempt} attempts: ${e.message ?? String(err)}`);
@@ -978,31 +1066,46 @@ export type TicketChanges = Partial<{
   client_company: string | null;
   assigned_to: string | null;
   confirm_client_link: true;
+  /** Link the ticket to a client record of this desk's workspace (null unlinks). */
+  customer_id: string | null;
 }>;
 
 export type TicketUpdateResult =
   | { ok: true; changed: string[] }
-  | { ok: false; status: 404 | 409; error: "not_found" | "invalid_transition" | "project_belongs_to_another_client" | "project_not_found" | "no_inferred_client_link" };
+  | {
+      ok: false;
+      status: 404 | 409;
+      error:
+        | "not_found"
+        | "invalid_transition"
+        | "project_belongs_to_another_client"
+        | "project_not_found"
+        | "no_inferred_client_link"
+        | "customer_not_found";
+    };
 
 /**
  * Apply a founder's edit. Status moves are checked against TICKET_TRANSITIONS;
  * a severity change on an unanswered ticket re-targets its SLA; linking a
  * project refuses a project that belongs to a different client, and a ticket
  * with no client inherits the project's (the founder just said whose it is).
+ * A client record can only be one of THIS desk's (tenant_id, id) pairs.
  * Every change leaves an internal system line in the thread.
  */
 export async function updateTicket(
   db: Client,
+  tenantId: string,
   id: string,
   changes: TicketChanges,
   author: Author,
   now: Date,
-  names: { assignee?: (id: string | null) => string | null } = {},
+  names: { assignee?: (id: string | null) => string | null; customer?: (id: string | null) => string | null } = {},
 ): Promise<TicketUpdateResult> {
+  requireTenant(tenantId);
   const cur = rows(
     await db.execute({
       sql: "SELECT * FROM support_tickets WHERE tenant_id = ? AND id = ?",
-      args: [DELIVERY_TENANT_ID, id],
+      args: [tenantId, id],
     }),
   )[0];
   if (!cur) return { ok: false, status: 404, error: "not_found" };
@@ -1066,7 +1169,7 @@ export async function updateTicket(
       const p = rows(
         await db.execute({
           sql: "SELECT id, title, client_tenant_id FROM delivery_projects WHERE tenant_id = ? AND id = ?",
-          args: [DELIVERY_TENANT_ID, changes.project_id],
+          args: [tenantId, changes.project_id],
         }),
       )[0];
       if (!p) return { ok: false, status: 409, error: "project_not_found" };
@@ -1091,13 +1194,22 @@ export async function updateTicket(
     const p = rows(
       await db.execute({
         sql: "SELECT client_tenant_id FROM delivery_projects WHERE tenant_id = ? AND id = ?",
-        args: [DELIVERY_TENANT_ID, String(cur.project_id)],
+        args: [tenantId, String(cur.project_id)],
       }),
     )[0];
     const projectClient = s(p?.client_tenant_id);
     if (projectClient && projectClient !== clientTenant) {
       return { ok: false, status: 409, error: "project_belongs_to_another_client" };
     }
+  }
+
+  if ("customer_id" in changes && (changes.customer_id ?? null) !== s(cur.customer_id)) {
+    if (changes.customer_id && !(await deskCustomerExists(db, tenantId, changes.customer_id))) {
+      return { ok: false, status: 409, error: "customer_not_found" };
+    }
+    set("customer_id", changes.customer_id ?? null);
+    const who = names.customer?.(changes.customer_id ?? null);
+    notes.push(changes.customer_id ? `Linked to client ${who ? `"${who}"` : "record"}.` : "Unlinked from its client record.");
   }
 
   if ("assigned_to" in changes && (changes.assigned_to ?? null) !== s(cur.assigned_to)) {
@@ -1109,13 +1221,13 @@ export async function updateTicket(
   if (sets.length === 0) return { ok: true, changed: [] };
   set("updated_at", at);
   const stmts: InStatement[] = [
-    { sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`, args: [...args, DELIVERY_TENANT_ID, id] },
+    { sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`, args: [...args, tenantId, id] },
   ];
   if (notes.length) {
     stmts.push({
       sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
             VALUES (?, ?, ?, 'system', ?, ?, ?, 1, ?)`,
-      args: [randomUUID(), id, DELIVERY_TENANT_ID, author.userId, author.name, notes.join(" "), at],
+      args: [randomUUID(), id, tenantId, author.userId, author.name, notes.join(" "), at],
     });
   }
   await db.batch(stmts, "write");
@@ -1139,14 +1251,16 @@ export type CommentResult =
  */
 export async function addTicketComment(
   db: Client,
+  tenantId: string,
   ticketId: string,
   input: { body: string; is_internal: boolean; author_type: "client" | "team"; author: Author },
   now: Date,
 ): Promise<CommentResult> {
+  requireTenant(tenantId);
   const cur = rows(
     await db.execute({
       sql: "SELECT status, first_response_at FROM support_tickets WHERE tenant_id = ? AND id = ?",
-      args: [DELIVERY_TENANT_ID, ticketId],
+      args: [tenantId, ticketId],
     }),
   )[0];
   if (!cur) return { ok: false, status: 404, error: "not_found" };
@@ -1159,7 +1273,7 @@ export async function addTicketComment(
     {
       sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, ticketId, DELIVERY_TENANT_ID, input.author_type, input.author.userId, input.author.name, input.body, isInternal ? 1 : 0, at],
+      args: [id, ticketId, tenantId, input.author_type, input.author.userId, input.author.name, input.body, isInternal ? 1 : 0, at],
     },
   ];
   const firstResponse = input.author_type === "team" && !isInternal && !cur.first_response_at;
@@ -1176,7 +1290,7 @@ export async function addTicketComment(
   }
   stmts.push({
     sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
-    args: [...args, DELIVERY_TENANT_ID, ticketId],
+    args: [...args, tenantId, ticketId],
   });
   await db.batch(stmts, "write");
   return {
@@ -1197,10 +1311,10 @@ export async function addTicketComment(
   };
 }
 
-export async function setCommentEmailStatus(db: Client, commentId: string, status: string): Promise<void> {
+export async function setCommentEmailStatus(db: Client, tenantId: string, commentId: string, status: string): Promise<void> {
   await db.execute({
     sql: "UPDATE ticket_comments SET email_status = ? WHERE tenant_id = ? AND id = ?",
-    args: [status.slice(0, 300), DELIVERY_TENANT_ID, commentId],
+    args: [status.slice(0, 300), requireTenant(tenantId), commentId],
   });
 }
 
@@ -1223,33 +1337,45 @@ const STATUS_COLUMN: Record<ClaimColumn, string> = {
  * repeating it; the status column then stays empty, which the ticket page
  * shows as "claimed, no outcome recorded".
  */
-export async function claimNotification(db: Client, ticketId: string, column: ClaimColumn, now: Date): Promise<boolean> {
+export async function claimNotification(
+  db: Client,
+  tenantId: string,
+  ticketId: string,
+  column: ClaimColumn,
+  now: Date,
+): Promise<boolean> {
   const rs = await db.execute({
     sql: `UPDATE support_tickets SET ${column} = ? WHERE tenant_id = ? AND id = ? AND ${column} IS NULL`,
-    args: [now.toISOString(), DELIVERY_TENANT_ID, ticketId],
+    args: [now.toISOString(), requireTenant(tenantId), ticketId],
   });
   return rs.rowsAffected === 1;
 }
 
-export async function recordNotification(db: Client, ticketId: string, column: ClaimColumn, status: string): Promise<void> {
+export async function recordNotification(
+  db: Client,
+  tenantId: string,
+  ticketId: string,
+  column: ClaimColumn,
+  status: string,
+): Promise<void> {
   await db.execute({
     sql: `UPDATE support_tickets SET ${STATUS_COLUMN[column]} = ? WHERE tenant_id = ? AND id = ?`,
-    args: [status.slice(0, 500), DELIVERY_TENANT_ID, ticketId],
+    args: [status.slice(0, 500), requireTenant(tenantId), ticketId],
   });
 }
 
 /**
- * Flag every unanswered, still-open ticket whose first-response target has
- * passed. Idempotent: an already-flagged ticket is not flagged again.
+ * Flag every unanswered, still-open ticket on one desk whose first-response
+ * target has passed. Idempotent: an already-flagged ticket is not flagged again.
  */
-export async function flagSlaBreaches(db: Client, now: Date): Promise<string[]> {
+export async function flagSlaBreaches(db: Client, tenantId: string, now: Date): Promise<string[]> {
   const at = now.toISOString();
   const rs = await db.execute({
     sql: `UPDATE support_tickets SET sla_breached_at = ?, updated_at = ?
           WHERE tenant_id = ? AND first_response_at IS NULL AND sla_breached_at IS NULL
             AND status IN (${OPEN_STATUS_SQL}) AND sla_target < ?
           RETURNING id`,
-    args: [at, at, DELIVERY_TENANT_ID, at],
+    args: [at, at, requireTenant(tenantId), at],
   });
   return rows(rs).map((r) => String(r.id));
 }
@@ -1260,7 +1386,8 @@ export async function flagSlaBreaches(db: Client, now: Date): Promise<string[]> 
  * and the alert needs no alert). One statement, so two concurrent cron runs
  * split the tickets between them rather than both alerting on each.
  */
-export async function claimBreachAlerts(db: Client, now: Date, limit = 50): Promise<string[]> {
+export async function claimBreachAlerts(db: Client, tenantId: string, now: Date, limit = 50): Promise<string[]> {
+  requireTenant(tenantId);
   const at = now.toISOString();
   const rs = await db.execute({
     sql: `UPDATE support_tickets SET sla_breach_alert_at = ?
@@ -1272,7 +1399,7 @@ export async function claimBreachAlerts(db: Client, now: Date, limit = 50): Prom
             LIMIT ?
           )
           RETURNING id`,
-    args: [at, DELIVERY_TENANT_ID, DELIVERY_TENANT_ID, limit],
+    args: [at, tenantId, tenantId, limit],
   });
   return rows(rs).map((r) => String(r.id));
 }
@@ -1306,9 +1433,11 @@ export const BREACH_RETRY_LEASE_MS = 10 * 60_000;
  */
 export async function reclaimFailedBreachAlerts(
   db: Client,
+  tenantId: string,
   now: Date,
   limit = 50,
 ): Promise<Array<{ id: string; previous_status: string }>> {
+  requireTenant(tenantId);
   const at = now.toISOString();
   const leaseExpired = new Date(now.getTime() - BREACH_RETRY_LEASE_MS).toISOString();
   const candidates = rows(
@@ -1320,7 +1449,7 @@ export async function reclaimFailedBreachAlerts(
               AND first_response_at IS NULL AND status IN (${OPEN_STATUS_SQL})
             ORDER BY sla_target, id
             LIMIT ?`,
-      args: [DELIVERY_TENANT_ID, BREACH_ALERT_RETRYING.length, BREACH_ALERT_RETRYING, leaseExpired, at, limit],
+      args: [tenantId, BREACH_ALERT_RETRYING.length, BREACH_ALERT_RETRYING, leaseExpired, at, limit],
     }),
   );
   const won: Array<{ id: string; previous_status: string }> = [];
@@ -1331,7 +1460,7 @@ export async function reclaimFailedBreachAlerts(
       sql: `UPDATE support_tickets SET sla_breach_alert_at = ?, sla_breach_alert_status = ?
             WHERE tenant_id = ? AND id = ? AND sla_breach_alert_at = ? AND sla_breach_alert_status = ?
               AND first_response_at IS NULL AND status IN (${OPEN_STATUS_SQL})`,
-      args: [at, BREACH_ALERT_RETRYING + failed, DELIVERY_TENANT_ID, String(c.id), String(c.sla_breach_alert_at), read],
+      args: [at, BREACH_ALERT_RETRYING + failed, tenantId, String(c.id), String(c.sla_breach_alert_at), read],
     });
     if (rs.rowsAffected === 1) won.push({ id: String(c.id), previous_status: failed });
   }
@@ -1339,13 +1468,18 @@ export async function reclaimFailedBreachAlerts(
 }
 
 /** Tickets that claimed a founder alert or client ack but never recorded it being sent. */
-export async function listPendingIntakeNotifications(db: Client, olderThan: Date, limit = 25): Promise<string[]> {
+export async function listPendingIntakeNotifications(
+  db: Client,
+  tenantId: string,
+  olderThan: Date,
+  limit = 25,
+): Promise<string[]> {
   const rs = await db.execute({
     sql: `SELECT id FROM support_tickets
           WHERE tenant_id = ? AND source IN ('form', 'portal') AND created_at < ?
             AND (founder_alert_at IS NULL OR (client_ack_at IS NULL AND client_email IS NOT NULL))
           ORDER BY created_at, id LIMIT ?`,
-    args: [DELIVERY_TENANT_ID, olderThan.toISOString(), limit],
+    args: [requireTenant(tenantId), olderThan.toISOString(), limit],
   });
   return rows(rs).map((r) => String(r.id));
 }
@@ -1374,6 +1508,9 @@ export type ClientMatch = {
  *
  * The public form's email is UNVERIFIED. client_match records that the link was
  * inferred, so the ticket page can say so.
+ *
+ * OASIS's desk only: it is the one desk whose rows name client WORKSPACES.
+ * Every other desk matches its own projects with matchDeskProjectByEmail.
  */
 export async function matchClientByEmail(
   db: Client,
@@ -1426,17 +1563,51 @@ export async function matchClientByEmail(
 }
 
 /**
- * Support-form submissions that have no ticket: the live request crashed after
- * recording the submission. The SLA cron re-drives them through the same
- * idempotent createTicket, keyed on the submission id.
+ * A submitter's project on ANY desk other than OASIS's: their email is the
+ * client email on exactly one of this desk's active projects (or the hint
+ * names one of several). Same rule as step 1 of matchClientByEmail, pinned to
+ * the desk's own tenant, and with no client-workspace step: only OASIS's rows
+ * name workspaces.
+ */
+export async function matchDeskProjectByEmail(
+  db: Client,
+  tenantId: string,
+  email: string,
+  projectHint: string | null,
+): Promise<string | null> {
+  const projects = rows(
+    await db.execute({
+      sql: `SELECT id, title FROM delivery_projects
+            WHERE tenant_id = ? AND client_email = ? AND archived_at IS NULL
+            ORDER BY updated_at DESC, id LIMIT 20`,
+      args: [requireTenant(tenantId), email],
+    }),
+  );
+  if (projects.length === 1) return String(projects[0].id);
+  if (projects.length > 1 && projectHint) {
+    const hint = projectHint.trim().toLowerCase();
+    const exact = projects.filter((p) => String(p.title).trim().toLowerCase() === hint);
+    const partial = projects.filter((p) => String(p.title).toLowerCase().includes(hint) || hint.includes(String(p.title).toLowerCase()));
+    const one = exact.length === 1 ? exact[0] : partial.length === 1 ? partial[0] : undefined;
+    return one ? String(one.id) : null;
+  }
+  return null;
+}
+
+/**
+ * Support-form submissions on one desk that have no ticket: the live request
+ * crashed after recording the submission. The SLA cron re-drives them through
+ * the same idempotent createTicket, keyed on the submission id.
  */
 export async function listUnticketedSupportSubmissions(
   db: Client,
+  tenantId: string,
   formSlug: string,
   olderThan: Date,
   newerThan: Date,
   limit = 25,
 ): Promise<Array<{ id: string; lead_id: string; payload: string; submitted_at: string }>> {
+  requireTenant(tenantId);
   const rs = await db.execute({
     sql: `SELECT fs.id, fs.lead_id, fs.payload, fs.submitted_at
           FROM form_submissions fs
@@ -1446,7 +1617,7 @@ export async function listUnticketedSupportSubmissions(
             AND fs.submitted_at < ? AND fs.submitted_at > ?
           ORDER BY fs.submitted_at, fs.id
           LIMIT ?`,
-    args: [DELIVERY_TENANT_ID, formSlug, olderThan.toISOString(), newerThan.toISOString(), limit],
+    args: [tenantId, formSlug, olderThan.toISOString(), newerThan.toISOString(), limit],
   });
   return rows(rs).map((r) => ({
     id: String(r.id),

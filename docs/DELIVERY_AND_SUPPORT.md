@@ -7,6 +7,19 @@
 
 ---
 
+## Every workspace runs its own desk (2026-09-28, migration bravo__188)
+
+"Clients" is the business's OWN customers (docs/os-revamp/PLAN.md decision 5). Since `database/turso/bravo__188_os_customers.sql`:
+
+- **`customers`** (+ `customer_contacts`) is a first-class, per-workspace table: display name, company, primary email (lowercased, unique per workspace), phone (E.164 when readable), lifecycle (`prospect | onboarding | active | paused | churned`, values in `lib/os/customers/rules.ts`), owner, `source_lead_id` (unique per workspace), Stripe customer id, tags, custom fields, `archived_at`. Code: `lib/os/customers/{rules,store,session}.ts`; API `app/api/customers/**`; pages `/clients` and `/clients/[id]` (tabs Overview, Tickets, Projects, Files, Activity).
+- **Convert to client.** A WON deal (stage won, onboarding, in_build, client_review or launched) shows a "Client record" card on `/pipeline/[id]` and on a workspace's manifest lead record. Converting creates the record linked by `source_lead_id`, idempotently (a repeat or a race returns the same record), merges into a hand-made record with the same email, and links the deal's existing projects and tickets. The deal itself is not changed.
+- **`support_tickets.customer_id` and `delivery_projects.customer_id`** link work to a client. Written only when set, so OASIS's desk keeps working on a database without bravo__188.
+- **The desk is per workspace.** `tenant_id` on a ticket or project is the business that runs the desk; the requester is its customer. `lib/delivery/access.ts` names two relationships: `desk` (the viewer's own workspace; owners and admins) and `vendor` (OASIS read by a client workspace, exactly the rules below). `/tickets` is the viewer's own desk, with the views Open, Breaching, Waiting on client and Resolved; a client workspace also sees "Your requests to OASIS" there. The API keeps its pre-desk default (`vendor`) and takes `?scope=desk` for the own desk; routes that address one ticket or project by id try the own desk first, then vendor. Every store write takes the desk's tenant as an explicit argument from the session.
+- **Every workspace's public support form.** The desk's owner turns it on (`POST /api/support-desk`), which creates the workspace's `support` form and registers it in `support_desks`. `/f/<slug>/support` then files a ticket on THAT workspace's desk, matched by email to one of its client records (and its projects), never a lead. A workspace's existing `support` form that is not registered keeps creating leads. OASIS's form is recognised exactly as before.
+- **Notifications stay OASIS's.** The Telegram lane and the OASIS mailbox serve OASIS's desk only. On any other desk each notification is claimed once and recorded as "not sent (… for this workspace yet)"; the SLA cron flags that desk's breaches (its Breaching view) but does not claim an alert it cannot send. Per-workspace lanes are the next step.
+
+The rest of this document describes OASIS's own desk, which is unchanged.
+
 ## Why this was rebuilt
 
 The tables behind /projects and /tickets were never created: their SQL sat in `database/176-178_*.sql`, outside `database/turso/`, so nothing applied it. Both pages caught the "no such table" error and showed "No projects yet". `GET /api/tickets` let any signed-in user of any workspace list every ticket. The SLA cron wrote to a column `agent_events` does not have. Forms never created tickets, and the client portal showed ROI only.

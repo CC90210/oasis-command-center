@@ -1,11 +1,13 @@
 /**
  * /api/cron/sla-check — support first-response SLA watcher.
  *
- * Guarded by lib/cron-auth.ts (CRON_SECRET bearer + platform proof). Flags
- * first-response breaches, alerts the founders ONCE per breach (Telegram
- * operator lane + email from the OASIS mailbox; a lane that failed is retried
- * on the next run), and reconciles support-form intake. See
- * lib/delivery/sla-cron.ts.
+ * Guarded by lib/cron-auth.ts (CRON_SECRET bearer + platform proof). Runs over
+ * every desk (OASIS's and each workspace desk registered in support_desks):
+ * flags first-response breaches, alerts OASIS's founders ONCE per breach on
+ * OASIS's desk (Telegram operator lane + email from the OASIS mailbox; a lane
+ * that failed is retried on the next run) — another desk's breach is flagged
+ * but never sent through OASIS's lanes — and reconciles support-form intake.
+ * See lib/delivery/sla-cron.ts.
  *
  * Before 2026-09-24 this inserted into agent_events with a column that table
  * does not have (agent_name), against a support_tickets table that did not

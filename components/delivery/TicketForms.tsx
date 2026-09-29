@@ -36,10 +36,19 @@ export function TicketCreateForm({
   roster,
   projects,
   clientTenants,
+  customers = [],
+  initialCustomerId = "",
+  label = "New ticket",
 }: {
   roster: Option[];
   projects: ProjectOption[];
+  /** Client portal workspaces — OASIS's desk only. Empty hides the field. */
   clientTenants: Option[];
+  /** The desk's client records. Empty hides the field. */
+  customers?: Option[];
+  /** Pre-selects the client (the client record's "New ticket"). */
+  initialCustomerId?: string;
+  label?: string;
 }) {
   const router = useRouter();
   const { run, busy, error } = useDeliveryAction();
@@ -51,6 +60,7 @@ export function TicketCreateForm({
     severity: "medium",
     project_id: "",
     client_tenant_id: "",
+    customer_id: initialCustomerId,
     client_name: "",
     client_email: "",
     client_company: "",
@@ -60,7 +70,7 @@ export function TicketCreateForm({
   if (!open) {
     return (
       <button type="button" className="btn-primary" onClick={() => setOpen(true)}>
-        New ticket
+        {label}
       </button>
     );
   }
@@ -75,10 +85,13 @@ export function TicketCreateForm({
       className="w-full max-w-3xl rounded-xl border border-bg-border bg-bg-panel p-5 space-y-4 shadow-card"
       onSubmit={async (e) => {
         e.preventDefault();
-        const data = await run("/api/tickets", "POST", {
+        // scope=desk: the viewer's own workspace's desk (the same desk as before
+        // inside OASIS; in any other workspace, never OASIS's).
+        const data = await run("/api/tickets?scope=desk", "POST", {
           ...f,
           project_id: f.project_id || null,
           client_tenant_id: f.client_tenant_id || null,
+          customer_id: f.customer_id || null,
           assigned_to: f.assigned_to || null,
         });
         if (data?.id) router.push(`/tickets/${String(data.id)}`);
@@ -123,15 +136,28 @@ export function TicketCreateForm({
             ))}
           </select>
         </label>
-        <label>
-          <span className="label">Client portal workspace</span>
-          <select className="select" value={f.client_tenant_id} onChange={set("client_tenant_id")}>
-            <option value="">From the project / none</option>
-            {clientTenants.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </label>
+        {customers.length > 0 && (
+          <label>
+            <span className="label">Client</span>
+            <select className="select" value={f.customer_id} onChange={set("customer_id")}>
+              <option value="">From the project / none</option>
+              {customers.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {clientTenants.length > 0 && (
+          <label>
+            <span className="label">Client portal workspace</span>
+            <select className="select" value={f.client_tenant_id} onChange={set("client_tenant_id")}>
+              <option value="">From the project / none</option>
+              {clientTenants.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           <span className="label">Client name</span>
           <input className="input" maxLength={160} value={f.client_name} onChange={set("client_name")} />
@@ -182,6 +208,8 @@ export type EditableTicket = {
   resolution: string | null;
   /** How the client link was made; email_* links are unverified. */
   client_match?: string | null;
+  /** The client record (customers.id), when the desk has client records. */
+  customer_id?: string | null;
 };
 
 export function TicketControls({
@@ -189,11 +217,15 @@ export function TicketControls({
   roster,
   projects,
   clientTenants,
+  customers = null,
 }: {
   ticket: EditableTicket;
   roster: Option[];
   projects: ProjectOption[];
+  /** Client portal workspaces — OASIS's desk only. Empty hides the field. */
   clientTenants: Option[];
+  /** The desk's client records; null hides the field (none readable here). */
+  customers?: Option[] | null;
 }) {
   const { run, busy, error } = useDeliveryAction();
   const [resolution, setResolution] = useState(ticket.resolution ?? "");
@@ -255,15 +287,31 @@ export function TicketControls({
             ))}
           </select>
         </label>
-        <label>
-          <span className="label">Client portal workspace</span>
-          <select className="select" value={ticket.client_tenant_id ?? ""} disabled={busy} onChange={(e) => patch({ client_tenant_id: e.target.value || null })}>
-            <option value="">None</option>
-            {clientTenants.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </label>
+        {customers && (
+          <label>
+            <span className="label">Client</span>
+            <select className="select" value={ticket.customer_id ?? ""} disabled={busy} onChange={(e) => patch({ customer_id: e.target.value || null })}>
+              <option value="">Not linked</option>
+              {ticket.customer_id && !customers.some((c) => c.value === ticket.customer_id) && (
+                <option value={ticket.customer_id}>Archived client</option>
+              )}
+              {customers.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {clientTenants.length > 0 && (
+          <label>
+            <span className="label">Client portal workspace</span>
+            <select className="select" value={ticket.client_tenant_id ?? ""} disabled={busy} onChange={(e) => patch({ client_tenant_id: e.target.value || null })}>
+              <option value="">None</option>
+              {clientTenants.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {ticket.client_tenant_id &&
         (ticket.client_match === "email_project" || ticket.client_match === "email_tenant") && (

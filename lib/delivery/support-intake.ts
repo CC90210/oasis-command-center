@@ -1,13 +1,21 @@
 /**
- * lib/delivery/support-intake.ts — a Client Support Ticket form submission
- * becomes a support ticket. Called from ONE early branch in
- * app/api/forms/submit/route.ts, before any lead, upload, drip or stage code
- * in that route can run.
+ * lib/delivery/support-intake.ts — a support form submission becomes a support
+ * ticket on the desk that owns the form. Called from TWO early branches in
+ * app/api/forms/submit/route.ts, before any lead, upload, drip or stage code in
+ * that route can run:
+ *   - OASIS's Client Support Ticket form (/f/oasis-ai-cc/support), recognised
+ *     by its exact tenant + slug with no query (isSupportFormSubmission);
+ *   - every other workspace's own support form (/f/<slug>/support), recognised
+ *     by its registration in support_desks (matchWorkspaceSupportDesk; see
+ *     lib/delivery/desks.ts for why a registration and not the slug alone).
+ * Both run the same steps below; the desk decides the tenant every statement
+ * is pinned to, and it comes from the FORM's own row, never from the body.
  *
  * WHAT IT DOES, IN ORDER
- *   1. Confirms the form: the exact OASIS tenant + `support` slug, enabled, one
- *      step. Anything else is not_found (same single answer the public resolver
- *      gives, so the route cannot be used to enumerate forms).
+ *   1. Confirms the form: the desk's exact tenant + `support` slug (and, for a
+ *      registered desk, its registered form id), enabled, one step. Anything
+ *      else is not_found (same single answer the public resolver gives, so the
+ *      route cannot be used to enumerate forms).
  *   2. Validates the answers: the form's own required fields, then the ticket
  *      rules (lib/delivery/rules.ts parseSupportSubmission). Then the rate
  *      limits, per IP and per address (see PER_IP below).
@@ -18,13 +26,17 @@
  *      there is no lead, so it carries `ticket:<ticket id>` — a value that can
  *      never match a tenant_records id, so no lead surface ever picks it up.
  *      The insert lands only while the sender is under both limits.
- *   5. Stores the attachment in private object storage under the ticket id
- *      (never the lead-documents path: a ticket is not a lead). After step 4,
- *      so a refused request stores nothing.
- *   6. Matches the client by email (server-side only, never echoed back).
+ *   5. Stores the attachment in private object storage under the desk's tenant
+ *      and the ticket id (never the lead-documents path: a ticket is not a
+ *      lead). After step 4, so a refused request stores nothing.
+ *   6. Matches the requester by email (server-side only, never echoed back):
+ *      to one of the desk's client records (customers, migration bravo__188)
+ *      and to one of its projects; on OASIS's desk also to a client workspace.
  *   7. Creates the ticket, keyed on the submission id (idempotent).
- *   8. After the response: founders' Telegram + email, and the client's
- *      confirmation email with the ticket number. Each exactly once.
+ *   8. After the response: the desk team's alert and the requester's
+ *      confirmation, each exactly once. OASIS's desk sends them through OASIS's
+ *      lanes; any other desk records them as not sent until it has lanes of its
+ *      own (lib/delivery/notify.ts).
  *
  * WHAT IT NEVER DOES: create or update a lead, enrol anything in a drip,
  * advance a pipeline stage, or mint a form token.
@@ -45,6 +57,7 @@ import {
   listPendingIntakeNotifications,
   listUnticketedSupportSubmissions,
   matchClientByEmail,
+  matchDeskProjectByEmail,
   type Attachment,
   type ClientMatch,
 } from "@/lib/delivery/store";
@@ -58,10 +71,11 @@ import {
   SUPPORT_ATTACHMENT_MAX_BYTES,
   SUPPORT_ATTACHMENT_MIME,
   SUPPORT_FORM_SLUG,
-  SUPPORT_FORM_TENANT_ID,
   SUPPORT_FORM_TENANT_SLUG,
   sniffAttachmentType,
 } from "@/lib/delivery/support-form";
+import { OASIS_DESK, findRegisteredDeskBySlug, listRegisteredDesks, type SupportDesk } from "@/lib/delivery/desks";
+import { isMissingCustomersSchema, matchCustomerByEmail } from "@/lib/os/customers/store";
 
 /** Private object-storage bucket (a key prefix on R2) for ticket attachments. */
 export const SUPPORT_ATTACHMENT_BUCKET = "support-attachments";
@@ -72,7 +86,7 @@ export function supportSubmissionLeadRef(ticketId: string): string {
 }
 
 /**
- * Is this request body a submission to the Client Support Ticket form?
+ * Is this request body a submission to OASIS's Client Support Ticket form?
  *
  * Pure string comparison on the body — no query — so it adds nothing to any
  * other form's submission. A token-bearing body is never this form: the
@@ -90,6 +104,29 @@ export function isSupportFormSubmission(body: unknown): boolean {
     tenant.trim().toLowerCase() === SUPPORT_FORM_TENANT_SLUG &&
     form.trim().toLowerCase() === SUPPORT_FORM_SLUG
   );
+}
+
+/**
+ * Is this request body a submission to ANOTHER workspace's registered support
+ * form? The body test is pure (an anonymous step-0 body naming a `support`
+ * form outside OASIS), so every other form pays nothing; only a body that
+ * passes it costs one registry read. Null = not a desk form: the route carries
+ * on down its ordinary lead path, exactly as it did before desks existed.
+ * A registry read that FAILS throws: the route's catch dead-letters the
+ * submission (recoverable) instead of filing a customer's support request as a
+ * sales lead.
+ */
+export async function matchWorkspaceSupportDesk(body: unknown, deps: { db?: Client } = {}): Promise<SupportDesk | null> {
+  if (!body || typeof body !== "object") return null;
+  const b = body as { token?: unknown; anonymous_init?: { tenant_slug?: unknown; form_slug?: unknown } | null };
+  if (b.token) return null;
+  const tenant = b.anonymous_init?.tenant_slug;
+  const form = b.anonymous_init?.form_slug;
+  if (typeof tenant !== "string" || typeof form !== "string") return null;
+  const slug = tenant.trim().toLowerCase();
+  if (!slug || slug === SUPPORT_FORM_TENANT_SLUG || form.trim().toLowerCase() !== SUPPORT_FORM_SLUG) return null;
+  if (!deps.db && !tursoConfigured()) return null;
+  return findRegisteredDeskBySlug(deps.db ?? getTursoClient(), slug);
 }
 
 type InlineFile = { inline_base64: string; filename: string; mime_type: string; size_bytes: number };
@@ -156,8 +193,8 @@ const FIELD_MESSAGES: Record<string, string> = {
 
 /**
  * How often one sender may file a ticket. Every accepted ticket alerts the
- * founders and emails a confirmation to an address the sender typed, so this
- * is what keeps the form from becoming a way to mail-bomb someone.
+ * desk's team and may email a confirmation to an address the sender typed, so
+ * this is what keeps the form from becoming a way to mail-bomb someone.
  *
  * Enforced twice, over the same windows:
  *   - rateLimit(), an in-memory bucket: the cheap first gate. It lives in ONE
@@ -168,6 +205,7 @@ const FIELD_MESSAGES: Record<string, string> = {
  *     and counted again inside the INSERT itself (step 4): the database runs
  *     writes one at a time, so of N parallel requests that all passed the first
  *     count, only as many land as the limit allows.
+ * Both are per desk: one workspace's form traffic never spends another's limit.
  */
 const PER_IP = { max: 5, windowSec: 60 };
 const PER_EMAIL = { max: 3, windowSec: 600 };
@@ -182,8 +220,21 @@ const RATE_LIMITED_MESSAGE = {
   either: "Too many requests just now. Please wait a few minutes and try again.",
 };
 
-function rateLimited(limit: keyof typeof RATE_LIMITED_MESSAGE, retryInSec: number) {
-  return fail(429, "rate_limited", { retry_in_sec: retryInSec, message: RATE_LIMITED_MESSAGE[limit] });
+// A workspace desk sends no confirmation until it has a mailbox of its own, so
+// its copy must not point the sender at one.
+const RATE_LIMITED_EMAIL_NO_ACK =
+  `We already have several requests from this email address in the last ${PER_EMAIL.windowSec / 60} minutes. ` +
+  "Please wait a few minutes and try again.";
+
+function rateLimited(limit: keyof typeof RATE_LIMITED_MESSAGE, retryInSec: number, desk: SupportDesk = OASIS_DESK) {
+  const message = limit === "email" && !desk.oasis ? RATE_LIMITED_EMAIL_NO_ACK : RATE_LIMITED_MESSAGE[limit];
+  return fail(429, "rate_limited", { retry_in_sec: retryInSec, message });
+}
+
+/** In-memory bucket keys. OASIS's keep their original names, so its limits are unchanged. */
+function bucketKey(desk: SupportDesk, kind: "ip" | "email", value: string): string {
+  const base = kind === "ip" ? "support-form" : "support-form-email";
+  return desk.oasis ? `${base}:${value}` : `${base}:${desk.tenantId}:${value}`;
 }
 
 // This form's submissions inside a window, from one IP (NULL is "could not be
@@ -196,26 +247,47 @@ const TO_EMAIL_SQL = `SELECT count(*) FROM form_submissions
   WHERE form_id = ? AND tenant_id = ? AND submitted_at > ?
     AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.email') END = ?`;
 
-function recentSubmissionArgs(formId: string, ip: string | null, email: string, now: Date) {
+function recentSubmissionArgs(desk: SupportDesk, formId: string, ip: string | null, email: string, now: Date) {
   const since = (sec: number) => new Date(now.getTime() - sec * 1000).toISOString();
   return {
-    ip: [formId, SUPPORT_FORM_TENANT_ID, since(PER_IP.windowSec), ip],
-    email: [formId, SUPPORT_FORM_TENANT_ID, since(PER_EMAIL.windowSec), email],
+    ip: [formId, desk.tenantId, since(PER_IP.windowSec), ip],
+    email: [formId, desk.tenantId, since(PER_EMAIL.windowSec), email],
   };
 }
 
-export async function handleSupportFormSubmission(
+/** OASIS's Client Support Ticket form (/f/oasis-ai-cc/support). */
+export function handleSupportFormSubmission(
   req: NextRequest,
   rawBody: unknown,
   deps: IntakeDeps = {},
+): Promise<NextResponse> {
+  return handleDeskSubmission(req, rawBody, OASIS_DESK, deps);
+}
+
+/** Another workspace's own support form; `desk` comes from matchWorkspaceSupportDesk. */
+export function handleWorkspaceSupportSubmission(
+  req: NextRequest,
+  rawBody: unknown,
+  desk: SupportDesk,
+  deps: IntakeDeps = {},
+): Promise<NextResponse> {
+  if (desk.oasis || !desk.formId) throw new Error("handleWorkspaceSupportSubmission: not a registered workspace desk");
+  return handleDeskSubmission(req, rawBody, desk, deps);
+}
+
+async function handleDeskSubmission(
+  req: NextRequest,
+  rawBody: unknown,
+  desk: SupportDesk,
+  deps: IntakeDeps,
 ): Promise<NextResponse> {
   const body = (rawBody || {}) as SubmitBody;
   if (Number(body.step_index) !== 0) return fail(400, "anonymous_init_requires_step_0");
 
   const resolvedIp = getClientIp(req);
   const ip = resolvedIp === "unknown" ? "no-ip" : resolvedIp;
-  const ipLimit = rateLimit({ key: `support-form:${ip}`, capacity: PER_IP.max, refillPerSec: PER_IP.max / PER_IP.windowSec });
-  if (!ipLimit.allowed) return rateLimited("ip", ipLimit.resetIn);
+  const ipLimit = rateLimit({ key: bucketKey(desk, "ip", ip), capacity: PER_IP.max, refillPerSec: PER_IP.max / PER_IP.windowSec });
+  if (!ipLimit.allowed) return rateLimited("ip", ipLimit.resetIn, desk);
 
   if (!deps.db && !tursoConfigured()) return fail(503, "server_error");
   const db = deps.db ?? getTursoClient();
@@ -228,12 +300,17 @@ export async function handleSupportFormSubmission(
     sql: `SELECT f.id, f.tenant_id, f.steps, f.enabled, f.redirect_url
           FROM forms f JOIN tenants t ON t.id = f.tenant_id
           WHERE t.slug = ? AND f.slug = ? LIMIT 1`,
-    args: [SUPPORT_FORM_TENANT_SLUG, SUPPORT_FORM_SLUG],
+    args: [desk.tenantSlug, SUPPORT_FORM_SLUG],
   });
   const form = formRs.rows[0] as unknown as
     | { id: string; tenant_id: string; steps: string; enabled: number; redirect_url: string | null }
     | undefined;
-  if (!form || Number(form.enabled) !== 1 || String(form.tenant_id) !== SUPPORT_FORM_TENANT_ID) {
+  if (
+    !form ||
+    Number(form.enabled) !== 1 ||
+    String(form.tenant_id) !== desk.tenantId ||
+    (desk.formId !== null && String(form.id) !== desk.formId)
+  ) {
     return fail(404, "not_found");
   }
   let fields: FormField[];
@@ -242,12 +319,12 @@ export async function handleSupportFormSubmission(
     if (steps.length !== 1) {
       // Refuse loudly. A second step is unreachable here (no token is ever
       // minted), so accepting step 0 would file half a request as a ticket.
-      console.error("[support-intake] support form has", steps.length, "steps; it must have exactly one");
+      console.error("[support-intake] support form has", steps.length, "steps; it must have exactly one", { tenant: desk.tenantId });
       return fail(500, "form_definition_corrupt", { reason: "support_form_must_be_single_step" });
     }
     fields = steps[0].fields;
   } catch (err) {
-    console.error("[support-intake] support form definition unreadable", err);
+    console.error("[support-intake] support form definition unreadable", { tenant: desk.tenantId }, err);
     return fail(500, "form_definition_corrupt", {
       path: err instanceof FormDefinitionError ? err.path : undefined,
     });
@@ -283,15 +360,15 @@ export async function handleSupportFormSubmission(
   const sub: SupportSubmission = parsed.value;
 
   // Per-address limit: the form must not become a way to mail-bomb someone
-  // with OASIS confirmations by typing their address repeatedly.
-  const emailLimit = rateLimit({ key: `support-form-email:${sub.email}`, capacity: PER_EMAIL.max, refillPerSec: PER_EMAIL.max / PER_EMAIL.windowSec });
-  if (!emailLimit.allowed) return rateLimited("email", emailLimit.resetIn);
+  // with confirmations by typing their address repeatedly.
+  const emailLimit = rateLimit({ key: bucketKey(desk, "email", sub.email), capacity: PER_EMAIL.max, refillPerSec: PER_EMAIL.max / PER_EMAIL.windowSec });
+  if (!emailLimit.allowed) return rateLimited("email", emailLimit.resetIn, desk);
 
   // The durable limit (see PER_IP), before anything is stored, uploaded or
   // sent. A count that cannot run refuses: an unmetered public form is exactly
   // what this limit exists to prevent.
   const storedIp = resolvedIp === "unknown" ? null : resolvedIp;
-  const recentArgs = recentSubmissionArgs(String(form.id), storedIp, sub.email, now);
+  const recentArgs = recentSubmissionArgs(desk, String(form.id), storedIp, sub.email, now);
   let recent: { ip: number; email: number };
   try {
     const rs = await db.execute({
@@ -306,8 +383,8 @@ export async function handleSupportFormSubmission(
       message: "We could not take your request just now. Please wait a minute and try again.",
     });
   }
-  if (recent.email >= PER_EMAIL.max) return rateLimited("email", PER_EMAIL.windowSec);
-  if (recent.ip >= PER_IP.max) return rateLimited("ip", PER_IP.windowSec);
+  if (recent.email >= PER_EMAIL.max) return rateLimited("email", PER_EMAIL.windowSec, desk);
+  if (recent.ip >= PER_IP.max) return rateLimited("ip", PER_IP.windowSec, desk);
 
   const ticketId = randomUUID();
   const submissionId = randomUUID();
@@ -354,7 +431,7 @@ export async function handleSupportFormSubmission(
       continue;
     }
     const kept = { ...meta, mime_type: actualType };
-    const path = `${SUPPORT_FORM_TENANT_ID}/${ticketId}/${now.getTime()}_${filename}`;
+    const path = `${desk.tenantId}/${ticketId}/${now.getTime()}_${filename}`;
     uploads.push({ index: attachments.length, key, path, bytes, meta: kept });
     attachments.push({ ...kept, storage_path: null, error: "upload did not finish" });
   }
@@ -373,7 +450,7 @@ export async function handleSupportFormSubmission(
     args: [
       submissionId,
       String(form.id),
-      SUPPORT_FORM_TENANT_ID,
+      desk.tenantId,
       supportSubmissionLeadRef(ticketId),
       JSON.stringify(payload),
       storedIp,
@@ -385,7 +462,7 @@ export async function handleSupportFormSubmission(
       PER_EMAIL.max,
     ],
   });
-  if (recorded.rowsAffected !== 1) return rateLimited("either", PER_IP.windowSec);
+  if (recorded.rowsAffected !== 1) return rateLimited("either", PER_IP.windowSec, desk);
 
   // 5. Upload, now that the request has been let in.
   for (const u of uploads) {
@@ -404,7 +481,7 @@ export async function handleSupportFormSubmission(
     try {
       await db.execute({
         sql: "UPDATE form_submissions SET payload = ? WHERE tenant_id = ? AND id = ?",
-        args: [JSON.stringify(payload), SUPPORT_FORM_TENANT_ID, submissionId],
+        args: [JSON.stringify(payload), desk.tenantId, submissionId],
       });
     } catch (err) {
       console.error("[support-intake] upload outcome not recorded on the submission", {
@@ -415,12 +492,12 @@ export async function handleSupportFormSubmission(
   }
 
   // 6 + 7. Match and create.
-  const { ticket } = await createTicketFromSubmission(db, { ticketId, submissionId, sub, attachments }, now);
+  const { ticket } = await createTicketFromSubmission(db, desk, { ticketId, submissionId, sub, attachments }, now);
 
   // 8. After the response, never before it.
   const notify = deps.notify;
   const schedule = deps.schedule ?? scheduleAfterResponse;
-  schedule(() => runIntakeNotifications(db, ticket.id, notify ?? defaultNotifyDeps(), now));
+  schedule(() => runIntakeNotifications(db, desk.tenantId, ticket.id, notify ?? defaultNotifyDeps(), now));
 
   // The public form reads next_step / redirect_url / next_forms; the rest of
   // the generic response shape is kept so the client needs no special case.
@@ -438,23 +515,67 @@ export async function handleSupportFormSubmission(
   });
 }
 
+let customersMissingLogged = false;
+
+/**
+ * The desk's client record for this address, or null. A database without
+ * migration bravo__188 has no client records to match, which is an answer
+ * (logged once per isolate), not a reason to lose the customer's request; any
+ * other failure is recorded by the caller as lookup_failed.
+ */
+async function matchCustomer(db: Client, desk: SupportDesk, email: string): Promise<string | null> {
+  try {
+    return await matchCustomerByEmail(db, desk.tenantId, email);
+  } catch (err) {
+    if (!isMissingCustomersSchema(err)) throw err;
+    if (!customersMissingLogged) {
+      customersMissingLogged = true;
+      console.error("[support-intake.customers] migration bravo__188 not applied: tickets are not linked to client records");
+    }
+    return null;
+  }
+}
+
+type Match = { client_tenant_id: string | null; project_id: string | null; client_match: string; customer_id: string | null };
+
+async function matchRequester(db: Client, desk: SupportDesk, sub: SupportSubmission): Promise<Match> {
+  if (desk.oasis) {
+    const m: ClientMatch = await matchClientByEmail(db, sub.email, sub.project_hint);
+    return { ...m, customer_id: await matchCustomer(db, desk, sub.email) };
+  }
+  // Any other desk: its own client records and projects. Its rows never name a
+  // client workspace — that is OASIS's vendor relationship, not theirs.
+  const [customerId, projectId] = await Promise.all([
+    matchCustomer(db, desk, sub.email),
+    matchDeskProjectByEmail(db, desk.tenantId, sub.email, sub.project_hint),
+  ]);
+  return {
+    client_tenant_id: null,
+    project_id: projectId,
+    client_match: projectId ? "email_project" : "none",
+    customer_id: customerId,
+  };
+}
+
 async function createTicketFromSubmission(
   db: Client,
+  desk: SupportDesk,
   input: { ticketId: string; submissionId: string; sub: SupportSubmission; attachments: Attachment[] },
   now: Date,
 ) {
   const { sub } = input;
-  let match: ClientMatch | { client_tenant_id: null; project_id: null; client_match: "lookup_failed" };
+  let match: Match;
   try {
-    match = await matchClientByEmail(db, sub.email, sub.project_hint);
+    match = await matchRequester(db, desk, sub);
   } catch (err) {
     // Matching enriches the ticket; it must not cost the client their request.
     // Recorded on the ticket, so the founder sees "lookup failed", not "none".
     console.error("[support-intake] client match failed", err instanceof Error ? err.message : err);
-    match = { client_tenant_id: null, project_id: null, client_match: "lookup_failed" };
+    match = { client_tenant_id: null, project_id: null, client_match: "lookup_failed", customer_id: null };
   }
   return createTicket(
     db,
+    desk.tenantId,
     {
       id: input.ticketId,
       title: sub.title,
@@ -473,19 +594,21 @@ async function createTicketFromSubmission(
       assigned_to: null,
       attachments: input.attachments,
       form_submission_id: input.submissionId,
+      customer_id: match.customer_id,
     },
     now,
   );
 }
 
 /**
- * The safety net, run by the SLA cron.
+ * The safety net, run by the SLA cron, for every desk (OASIS's and each
+ * registered workspace's).
  *   - A support submission with no ticket (the request died between recording
  *     the submission and creating the ticket) gets its ticket now, with the id
  *     it was always going to have.
  *   - A form ticket whose after() never ran (the instance was torn down) gets
- *     its founder alert and client confirmation now. The claims make both
- *     no-ops for tickets that were already notified.
+ *     its notifications now. The claims make both no-ops for tickets that were
+ *     already notified.
  */
 export async function reconcileSupportIntake(
   db: Client,
@@ -494,32 +617,38 @@ export async function reconcileSupportIntake(
 ): Promise<{ ticketsCreated: string[]; notificationsRetried: number; unparseable: string[] }> {
   const olderThan = new Date(now.getTime() - 2 * 60_000);
   const newerThan = new Date(now.getTime() - 7 * 24 * 60 * 60_000);
-  const orphans = await listUnticketedSupportSubmissions(db, SUPPORT_FORM_SLUG, olderThan, newerThan);
+  const desks = [OASIS_DESK, ...(await listRegisteredDesks(db))];
   const ticketsCreated: string[] = [];
   const unparseable: string[] = [];
-  for (const o of orphans) {
-    let payload: Record<string, unknown> = {};
-    try {
-      payload = JSON.parse(o.payload) as Record<string, unknown>;
-    } catch {
-      /* handled as unparseable below */
+  let notificationsRetried = 0;
+  for (const desk of desks) {
+    const orphans = await listUnticketedSupportSubmissions(db, desk.tenantId, SUPPORT_FORM_SLUG, olderThan, newerThan);
+    for (const o of orphans) {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = JSON.parse(o.payload) as Record<string, unknown>;
+      } catch {
+        /* handled as unparseable below */
+      }
+      const parsed = parseSupportSubmission(payload);
+      if (!parsed.ok) {
+        console.error("[support-intake.reconcile] submission cannot become a ticket", { submission: o.id, error: parsed.error });
+        unparseable.push(o.id);
+        continue;
+      }
+      const ref = /^ticket:([0-9a-f-]{36})$/i.exec(o.lead_id);
+      const attachments = Array.isArray(payload.attachment) ? (payload.attachment as Attachment[]) : [];
+      const { ticket, created } = await createTicketFromSubmission(
+        db,
+        desk,
+        { ticketId: ref ? ref[1] : randomUUID(), submissionId: o.id, sub: parsed.value, attachments },
+        new Date(o.submitted_at),
+      );
+      if (created) ticketsCreated.push(ticket.ticket_number);
     }
-    const parsed = parseSupportSubmission(payload);
-    if (!parsed.ok) {
-      console.error("[support-intake.reconcile] submission cannot become a ticket", { submission: o.id, error: parsed.error });
-      unparseable.push(o.id);
-      continue;
-    }
-    const ref = /^ticket:([0-9a-f-]{36})$/i.exec(o.lead_id);
-    const attachments = Array.isArray(payload.attachment) ? (payload.attachment as Attachment[]) : [];
-    const { ticket, created } = await createTicketFromSubmission(
-      db,
-      { ticketId: ref ? ref[1] : randomUUID(), submissionId: o.id, sub: parsed.value, attachments },
-      new Date(o.submitted_at),
-    );
-    if (created) ticketsCreated.push(ticket.ticket_number);
+    const pending = await listPendingIntakeNotifications(db, desk.tenantId, olderThan);
+    for (const id of pending) await runIntakeNotifications(db, desk.tenantId, id, deps, now);
+    notificationsRetried += pending.length;
   }
-  const pending = await listPendingIntakeNotifications(db, olderThan);
-  for (const id of pending) await runIntakeNotifications(db, id, deps, now);
-  return { ticketsCreated, notificationsRetried: pending.length, unparseable };
+  return { ticketsCreated, notificationsRetried, unparseable };
 }

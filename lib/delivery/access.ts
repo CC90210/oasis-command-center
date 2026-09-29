@@ -5,22 +5,39 @@
  * PURE (no session, no DB) so tests/delivery-access.test.ts covers the whole
  * matrix without credentials. lib/delivery/session.ts feeds it the session.
  *
- * THE MODEL
- *   founder  persona "founder" standing in the OASIS workspace (CC, Adon).
- *            Sees and does everything in the workspace.
- *   client   anyone signed in to ANOTHER workspace. Sees only rows whose
- *            client_tenant_id is their own workspace, only the client-safe
- *            fields, only public comments and client-visible updates. May
- *            file a ticket and comment publicly on their own tickets.
- *   denied   a non-founder inside the OASIS workspace (reps, builders,
- *            marketing). Fails CLOSED: delivery holds every client's name,
- *            email and issues, and no persona below founder has been granted
- *            that. Opening it to assigned builders is a founder decision, not
- *            a default — see docs/DELIVERY_AND_SUPPORT.md.
+ * EVERY WORKSPACE HAS ITS OWN DESK (2026-09-28). A support desk and a project
+ * board belong to the business that runs them: tenant_id is that business, and
+ * the requester is ITS customer (docs/os-revamp/01-product-surface-ia-ux.md,
+ * `/tickets` REBUILD). OASIS's desk is simply OASIS's instance, and is the one
+ * with a second audience: the client workspaces OASIS builds for.
  *
- * GATE ON WORKSPACE AND PERSONA, NEVER ROLE ALONE (lib/role-surfaces.ts rule 1):
- * "owner" of a client's workspace is persona founder too, and is a CLIENT here,
- * because the workspace they stand in is not OASIS.
+ * TWO RELATIONSHIPS, NAMED BY THE CALLER
+ *   "desk"    the viewer's OWN workspace's desk. The team that runs it sees
+ *             and does everything on it.
+ *   "vendor"  OASIS as the viewer's vendor (the pre-2026-09-28 model, kept
+ *             byte-for-byte). Inside OASIS it is the same as "desk"; anyone
+ *             signed in to ANOTHER workspace reads OASIS's desk as a client:
+ *             only rows whose client_tenant_id is their workspace, only the
+ *             client-safe fields, only public comments and client-visible
+ *             updates; they may file a ticket and comment publicly on their
+ *             own. /client-portal and a client workspace's "Your requests to
+ *             OASIS" read this.
+ *   A caller that names neither gets "vendor", so every surface written before
+ *   desks existed behaves exactly as it did.
+ *
+ * THE VIEWERS
+ *   founder  the TEAM that runs the desk of `tenantId`: persona "founder" (an
+ *            owner or admin) standing in that workspace. Sees and does
+ *            everything on that desk, and on no other.
+ *   client   a member of workspace `clientTenantId` reading OASIS's desk.
+ *   denied   a non-founder persona asking for a desk (reps, builders,
+ *            marketing, read-only). Fails CLOSED: a desk holds every customer's
+ *            name, email and issues, and no persona below founder has been
+ *            granted that. Opening it to assigned builders is an owner's
+ *            decision, not a default — see docs/DELIVERY_AND_SUPPORT.md. (In a
+ *            client workspace such a person still reads OASIS as vendor.)
+ *
+ * GATE ON WORKSPACE AND PERSONA, NEVER ROLE ALONE (lib/role-surfaces.ts rule 1).
  *
  * The SQL scope below is the authorization boundary. libSQL has no RLS, so a
  * read that forgets it is a leak — which is why the store takes a viewer and
@@ -30,8 +47,10 @@ import type { Persona } from "@/lib/role-surfaces";
 import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
 
 export type DeliveryViewer =
-  | { kind: "founder"; userId: string; canAct: boolean }
+  | { kind: "founder"; tenantId: string; userId: string; canAct: boolean }
   | { kind: "client"; userId: string; clientTenantId: string; canAct: boolean };
+
+export type DeliveryRelation = "desk" | "vendor";
 
 export type DeliveryAccessInput =
   | { ok: false }
@@ -43,21 +62,38 @@ export type DeliveryAccess =
 
 export function resolveDeliveryViewer(
   input: DeliveryAccessInput,
-  oasisTenantId: string = DELIVERY_TENANT_ID,
+  opts: { relation?: DeliveryRelation } = {},
 ): DeliveryAccess {
   if (!input.ok || !input.userId || !input.tenantId) {
     return { ok: false, status: 401, error: "not_signed_in" };
   }
   const userId = input.userId.trim().toLowerCase();
-  if (input.tenantId === oasisTenantId) {
+  const relation = opts.relation ?? "vendor";
+  if (input.tenantId === DELIVERY_TENANT_ID || relation === "desk") {
     return input.persona === "founder"
-      ? { ok: true, viewer: { kind: "founder", userId, canAct: input.canAct } }
+      ? { ok: true, viewer: { kind: "founder", tenantId: input.tenantId, userId, canAct: input.canAct } }
       : { ok: false, status: 403, error: "forbidden" };
   }
   return {
     ok: true,
     viewer: { kind: "client", userId, clientTenantId: input.tenantId, canAct: input.canAct },
   };
+}
+
+/** Is this viewer the team running OASIS's own desk (the one with a client portal)? */
+export function isOasisDesk(viewer: DeliveryViewer): boolean {
+  return viewer.kind === "founder" && viewer.tenantId === DELIVERY_TENANT_ID;
+}
+
+/**
+ * The workspace whose rows this viewer reads: the desk's own tenant for the
+ * team, OASIS for a client (OASIS is the only vendor desk). Throws for a team
+ * viewer with no tenant — an unscoped read is a leak, so it must not run.
+ */
+export function deskTenantOf(viewer: DeliveryViewer): string {
+  if (viewer.kind === "client") return DELIVERY_TENANT_ID;
+  if (typeof viewer.tenantId !== "string" || !viewer.tenantId) throw new Error("delivery: viewer has no desk tenant");
+  return viewer.tenantId;
 }
 
 export type DeliveryAction =
@@ -83,17 +119,18 @@ export type SqlScope = { sql: string; args: string[] };
 
 /**
  * WHERE fragment for delivery_projects / support_tickets under `alias`.
- * Always pinned to the OASIS workspace; a client is further pinned to their
- * own client_tenant_id. A NULL client_tenant_id never matches a client.
+ * Always pinned to the viewer's desk; a client is further pinned to their own
+ * client_tenant_id on OASIS's desk. A NULL client_tenant_id never matches a client.
  */
 export function rowScope(viewer: DeliveryViewer, alias: string): SqlScope {
   if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) throw new Error(`rowScope: bad alias ${alias}`);
+  const tenant = deskTenantOf(viewer);
   if (viewer.kind === "founder") {
-    return { sql: `${alias}.tenant_id = ?`, args: [DELIVERY_TENANT_ID] };
+    return { sql: `${alias}.tenant_id = ?`, args: [tenant] };
   }
   return {
     sql: `${alias}.tenant_id = ? AND ${alias}.client_tenant_id = ?`,
-    args: [DELIVERY_TENANT_ID, viewer.clientTenantId],
+    args: [tenant, viewer.clientTenantId],
   };
 }
 

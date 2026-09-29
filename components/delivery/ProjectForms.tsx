@@ -183,16 +183,22 @@ export type EditableProject = {
   client_email: string | null;
   lead_id: string | null;
   archived_at: string | null;
+  /** The client record (customers.id), when the desk has client records. */
+  customer_id?: string | null;
 };
 
 export function ProjectControls({
   project,
   roster,
   clientTenants,
+  customers = null,
 }: {
   project: EditableProject;
   roster: Option[];
+  /** Client portal workspaces — OASIS's desk only. Empty hides the field. */
   clientTenants: Option[];
+  /** The desk's client records; null hides the field. */
+  customers?: Option[] | null;
 }) {
   const { run, busy, error } = useDeliveryAction();
   const [editing, setEditing] = useState(false);
@@ -241,6 +247,20 @@ export function ProjectControls({
             }}
           />
         </label>
+        {customers && (
+          <label>
+            <span className="label">Client</span>
+            <select className="select" value={project.customer_id ?? ""} disabled={busy} onChange={(e) => patch({ customer_id: e.target.value || null })}>
+              <option value="">Not linked</option>
+              {project.customer_id && !customers.some((c) => c.value === project.customer_id) && (
+                <option value={project.customer_id}>Archived client</option>
+              )}
+              {customers.map((c) => (
+                <option key={c.value} value={c.value}>{c.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       {editing ? (
@@ -251,7 +271,8 @@ export function ProjectControls({
             const ok = await patch({
               title: d.title,
               description: d.description || null,
-              client_tenant_id: d.client_tenant_id || null,
+              // Only OASIS's desk has client workspaces; any other desk's API refuses the field.
+              ...(clientTenants.length > 0 ? { client_tenant_id: d.client_tenant_id || null } : {}),
               client_name: d.client_name || null,
               client_email: d.client_email || null,
               lead_id: d.lead_id.trim() || null,
@@ -264,15 +285,17 @@ export function ProjectControls({
               <span className="label">Title</span>
               <input className="input" required maxLength={200} value={d.title} onChange={(e) => setD({ ...d, title: e.target.value })} />
             </label>
-            <label>
-              <span className="label">Client portal workspace</span>
-              <select className="select" value={d.client_tenant_id} onChange={(e) => setD({ ...d, client_tenant_id: e.target.value })}>
-                <option value="">No portal (email only)</option>
-                {clientTenants.map((t) => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-            </label>
+            {clientTenants.length > 0 && (
+              <label>
+                <span className="label">Client portal workspace</span>
+                <select className="select" value={d.client_tenant_id} onChange={(e) => setD({ ...d, client_tenant_id: e.target.value })}>
+                  <option value="">No portal (email only)</option>
+                  {clientTenants.map((t) => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label>
               <span className="label">Client email</span>
               <input className="input" type="email" value={d.client_email} onChange={(e) => setD({ ...d, client_email: e.target.value })} />

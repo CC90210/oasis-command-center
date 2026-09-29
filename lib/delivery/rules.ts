@@ -14,7 +14,13 @@
  */
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
-/** Every delivery/support row belongs to the OASIS workspace (slug oasis-ai-cc). */
+/**
+ * OASIS's own workspace (slug oasis-ai-cc). Every workspace now runs its own
+ * desk (lib/delivery/access.ts); this one is special only because it is the
+ * VENDOR desk: its rows may name a client workspace (client_tenant_id), whose
+ * members read them through the portal. It is never a default for anyone
+ * else's desk.
+ */
 export const DELIVERY_TENANT_ID = WEBDEV_TENANT_ID;
 
 // ---------------------------------------------------------------------------
@@ -216,6 +222,40 @@ export function retargetForSeverity(
   return { sla_target, clearBreach: Date.parse(sla_target) > now.getTime() };
 }
 
+// ---------------------------------------------------------------------------
+// Support desk views (Clients › Support desk)
+// ---------------------------------------------------------------------------
+
+/**
+ * The desk's four views (docs/os-revamp/01-product-surface-ia-ux.md, Support
+ * desk): Open — the team owes the next move (open, in progress); Breaching —
+ * any working ticket unanswered past its first-response target (slaStatus, the
+ * same rule the SLA cron flags), a subset the desk pulls out because it is
+ * late; Waiting — on the client; Resolved — resolved or closed.
+ */
+export const TICKET_DESK_VIEWS = ["open", "breaching", "waiting", "resolved"] as const;
+export type TicketDeskView = (typeof TICKET_DESK_VIEWS)[number];
+export const TICKET_DESK_VIEW_LABELS: Record<TicketDeskView, string> = {
+  open: "Open",
+  breaching: "Breaching",
+  waiting: "Waiting on client",
+  resolved: "Resolved",
+};
+
+/** The store status filter a view reads, and whether it keeps only SLA breaches. */
+export function deskViewQuery(view: TicketDeskView): { status: string; breachingOnly: boolean } {
+  switch (view) {
+    case "open":
+      return { status: "team", breachingOnly: false };
+    case "breaching":
+      return { status: "open", breachingOnly: true };
+    case "waiting":
+      return { status: "waiting_on_client", breachingOnly: false };
+    case "resolved":
+      return { status: "closed", breachingOnly: false };
+  }
+}
+
 /** "3h 20m", "45m", "2d 4h" — for the SLA clock. */
 export function formatDuration(minutes: number): string {
   const m = Math.abs(Math.trunc(minutes));
@@ -414,6 +454,7 @@ export type ProjectCreateInput = {
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
+  customer_id: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: unknown;
@@ -430,6 +471,7 @@ export function validateProjectCreate(raw: unknown): Validation<ProjectCreateInp
     ["client_name", text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", email(b, "client_email", false)],
     ["lead_id", id(b, "lead_id")],
+    ["customer_id", id(b, "customer_id")],
     ["stage", enumOf(b, "stage", PROJECT_STAGES, "discovery")],
     ["priority", enumOf(b, "priority", PROJECT_PRIORITIES, "medium")],
     ["due_date", date(b, "due_date")],
@@ -446,6 +488,7 @@ export type ProjectPatch = Partial<{
   client_name: string | null;
   client_email: string | null;
   lead_id: string | null;
+  customer_id: string | null;
   stage: ProjectStage;
   priority: ProjectPriority;
   assigned_to: unknown;
@@ -466,6 +509,7 @@ export function validateProjectPatch(raw: unknown): Validation<ProjectPatch> {
     ["client_name", () => text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", () => email(b, "client_email", false)],
     ["lead_id", () => id(b, "lead_id")],
+    ["customer_id", () => id(b, "customer_id")],
     ["stage", () => (b.stage === null || b.stage === "" ? invalid("stage_invalid", "stage") : enumOf(b, "stage", PROJECT_STAGES, null))],
     ["priority", () => (b.priority === null || b.priority === "" ? invalid("priority_invalid", "priority") : enumOf(b, "priority", PROJECT_PRIORITIES, null))],
     ["due_date", () => date(b, "due_date")],
@@ -566,6 +610,8 @@ export type TicketCreateInput = {
   client_name: string | null;
   client_email: string | null;
   client_company: string | null;
+  /** A client record of the desk's own workspace (checked by the caller). */
+  customer_id: string | null;
   assigned_to: unknown;
 };
 
@@ -587,6 +633,7 @@ export function validateTicketCreate(raw: unknown): Validation<TicketCreateInput
     ["client_name", text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", email(b, "client_email", false)],
     ["client_company", text(b, "client_company", LIMITS.company, false)],
+    ["customer_id", id(b, "customer_id")],
   ]);
   if (!r.ok) return r;
   return { ok: true, value: { ...r.value, assigned_to: b.assigned_to } };
@@ -604,6 +651,7 @@ export type TicketPatch = Partial<{
   client_name: string | null;
   client_email: string | null;
   client_company: string | null;
+  customer_id: string | null;
   assigned_to: unknown;
   confirm_client_link: true;
 }>;
@@ -625,6 +673,7 @@ export function validateTicketPatch(raw: unknown): Validation<TicketPatch> {
     ["client_name", () => text(b, "client_name", LIMITS.clientName, false)],
     ["client_email", () => email(b, "client_email", false)],
     ["client_company", () => text(b, "client_company", LIMITS.company, false)],
+    ["customer_id", () => id(b, "customer_id")],
     // A founder vouches for a client link that was only inferred from the
     // public form's unverified email; until then the client cannot see it.
     ["confirm_client_link", () => (b.confirm_client_link === true ? { ok: true, value: true } : invalid("confirm_client_link_invalid", "confirm_client_link"))],

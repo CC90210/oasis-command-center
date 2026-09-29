@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { dirname } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
-import { CLIENT_A, CLIENT_B, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
+import { CLIENT_A, CLIENT_B, OASIS, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
 
 // tsconfig.json sets jsx:"preserve" for Next, so tsx compiles the pages' JSX
 // with the classic runtime, which expects a global `React` (see
@@ -87,20 +87,20 @@ async function main() {
     client_name: null, client_email: null, client_company: null, client_match: "manual", project_hint: null,
     reporter_user_id: null, assigned_to: null,
   };
-  const pA = await store.createProject(db, {
+  const pA = await store.createProject(db, OASIS, {
     title: "ALPHA-PROJECT", description: null, client_tenant_id: CLIENT_A, client_name: null, client_email: null,
     lead_id: null, stage: "building", priority: "high", assigned_to: null, due_date: null,
   }, founder, now);
-  const pB = await store.createProject(db, {
+  const pB = await store.createProject(db, OASIS, {
     title: "BRAVO-PROJECT", description: null, client_tenant_id: CLIENT_B, client_name: null, client_email: null,
     lead_id: null, stage: "review", priority: "low", assigned_to: null, due_date: null,
   }, founder, now);
-  await store.addProjectUpdate(db, pA, { body: "ALPHA-SHARED-UPDATE", visibility: "client" }, founder, now);
-  await store.addProjectUpdate(db, pA, { body: "ALPHA-INTERNAL-UPDATE", visibility: "internal" }, founder, now);
-  const tA = (await store.createTicket(db, { ...base, title: "ALPHA-TICKET", project_id: pA, client_tenant_id: CLIENT_A }, now)).ticket;
-  const tB = (await store.createTicket(db, { ...base, title: "BRAVO-TICKET", project_id: pB, client_tenant_id: CLIENT_B }, now)).ticket;
-  await store.addTicketComment(db, tA.id, { body: "ALPHA-INTERNAL-NOTE", is_internal: true, author_type: "team", author: founder }, now);
-  await store.addTicketComment(db, tA.id, { body: "ALPHA-PUBLIC-REPLY", is_internal: false, author_type: "team", author: founder }, now);
+  await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-SHARED-UPDATE", visibility: "client" }, founder, now);
+  await store.addProjectUpdate(db, OASIS, pA, { body: "ALPHA-INTERNAL-UPDATE", visibility: "internal" }, founder, now);
+  const tA = (await store.createTicket(db, OASIS, { ...base, title: "ALPHA-TICKET", project_id: pA, client_tenant_id: CLIENT_A }, now)).ticket;
+  const tB = (await store.createTicket(db, OASIS, { ...base, title: "BRAVO-TICKET", project_id: pB, client_tenant_id: CLIENT_B }, now)).ticket;
+  await store.addTicketComment(db, OASIS, tA.id, { body: "ALPHA-INTERNAL-NOTE", is_internal: true, author_type: "team", author: founder }, now);
+  await store.addTicketComment(db, OASIS, tA.id, { body: "ALPHA-PUBLIC-REPLY", is_internal: false, author_type: "team", author: founder }, now);
 
   const projects = (await import("../app/projects/page")).default;
   const project = (await import("../app/projects/[id]/page")).default;

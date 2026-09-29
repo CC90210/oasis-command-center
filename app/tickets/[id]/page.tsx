@@ -1,11 +1,16 @@
 /**
  * /tickets/[id] — one ticket.
  *
- * Founders: the SLA clock, triage controls, client details (including how the
- * client link was made and whether it was inferred from an unverified email),
- * notification outcomes, attachments, and the full thread with internal notes
- * set apart. Clients: their own ticket's public thread and a reply box. Out of
- * scope is a 404, the same as a ticket that does not exist.
+ * Looked up through the viewer's own desk first, then (outside OASIS) through
+ * OASIS as their vendor — the same order as the API (lib/delivery/session.ts
+ * resolveTicketAccess).
+ *
+ * The desk team: the SLA clock, triage controls (including the client record),
+ * client details (including how the client link was made and whether it was
+ * inferred from an unverified email), notification outcomes, attachments, and
+ * the full thread with internal notes set apart. Clients of OASIS: their own
+ * ticket's public thread and a reply box. Out of scope is a 404, the same as a
+ * ticket that does not exist.
  */
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -22,7 +27,13 @@ import { TicketComposer, TicketControls } from "@/components/delivery/TicketForm
 import { timeAgo } from "@/lib/fmt";
 import { formatForFounders } from "@/lib/delivery/messages";
 import { memberDisplayName, slaStatus } from "@/lib/delivery/rules";
-import { getDeliveryAccess, getDeliveryDb, loadAssignmentRoster, loadMemberDirectory } from "@/lib/delivery/session";
+import { isOasisDesk, type DeliveryViewer } from "@/lib/delivery/access";
+import {
+  getDeliveryAccessChain,
+  getDeliveryDb,
+  loadAssignmentRoster,
+  loadMemberDirectory,
+} from "@/lib/delivery/session";
 import {
   getTicket,
   listClientTenants,
@@ -31,6 +42,7 @@ import {
   type Ticket,
   type TicketComment,
 } from "@/lib/delivery/store";
+import { loadCustomerOptions, type CustomerOptions } from "@/lib/os/customers/session";
 
 export const dynamic = "force-dynamic";
 
@@ -91,26 +103,35 @@ function Thread({ comments, founder }: { comments: TicketComment[]; founder: boo
 
 export default async function TicketDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const access = await getDeliveryAccess();
-  if (!access.ok) {
-    if (access.status === 403) notFound();
+  const { desk, vendor } = await getDeliveryAccessChain();
+  if (!desk.ok && !vendor?.ok) {
+    if (desk.status === 403) notFound();
     return <Card><EmptyState message="Sign in to see this ticket." /></Card>;
   }
-  const viewer = access.viewer;
   const db = getDeliveryDb();
   if (!db) return <LoadError what="this ticket" detail="The database is not configured on this deployment." />;
 
+  let viewer: DeliveryViewer | null = null;
   let ticket: Ticket | null = null;
   let comments: TicketComment[] = [];
   try {
-    ticket = await getTicket(db, viewer, id);
-    if (ticket) comments = await listTicketComments(db, viewer, id);
+    for (const access of [desk, vendor]) {
+      if (!access?.ok) continue;
+      ticket = await getTicket(db, access.viewer, id);
+      if (ticket) {
+        viewer = access.viewer;
+        break;
+      }
+    }
+    if (ticket && viewer) comments = await listTicketComments(db, viewer, id);
   } catch (err) {
     console.error("[tickets.detail.page]", err);
-    const detail = viewer.kind === "founder" ? (err instanceof Error ? err.message : String(err)) : undefined;
+    // The driver's text is for OASIS's own team, never a client workspace's.
+    const oasisTeam = desk.ok && isOasisDesk(desk.viewer);
+    const detail = oasisTeam ? (err instanceof Error ? err.message : String(err)) : undefined;
     return <LoadError what="this ticket" detail={detail} />;
   }
-  if (!ticket) notFound();
+  if (!ticket || !viewer) notFound();
   const now = new Date();
   const closed = ticket.status === "closed";
 
@@ -144,26 +165,33 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
     );
   }
 
+  const oasis = isOasisDesk(viewer);
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
   let projects: Awaited<ReturnType<typeof listProjects>>["rows"] = [];
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
+  let customers: CustomerOptions = { state: "not_set_up" };
   let sideFailure: string | null = null;
   try {
-    const [ro, dir, pr, te] = await Promise.all([
-      loadAssignmentRoster(),
-      loadMemberDirectory(),
+    const [ro, dir, pr, te, cu] = await Promise.all([
+      loadAssignmentRoster(viewer.tenantId),
+      loadMemberDirectory(viewer.tenantId),
       listProjects(db, viewer, { includeArchived: false }),
-      listClientTenants(db),
+      // Client workspaces are OASIS's vendor relationship; no other desk has them.
+      oasis ? listClientTenants(db) : Promise.resolve([]),
+      loadCustomerOptions(db, viewer.tenantId),
     ]);
     roster = ro;
     directory = dir;
     projects = pr.rows;
     tenants = te;
+    customers = cu;
   } catch (err) {
     console.error("[tickets.detail.page.side]", err);
     sideFailure = err instanceof Error ? err.message : String(err);
   }
+  const customerOptions = customers.state === "ok" ? customers.options : null;
+  const customerLabel = ticket.customer_id ? customerOptions?.find((c) => c.value === ticket.customer_id)?.label ?? null : null;
   const rosterOptions = roster
     .filter((m) => m.auth_user_id)
     .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }));
@@ -213,7 +241,14 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
               </ul>
             </Card>
           )}
-          <Card title="Thread" subtitle="Replies are emailed to the client. Internal notes never leave this page.">
+          <Card
+            title="Thread"
+            subtitle={
+              oasis
+                ? "Replies are emailed to the client. Internal notes never leave this page."
+                : "Replies are saved on the ticket; no mailbox is connected yet, so they are not emailed. Internal notes never leave this page."
+            }
+          >
             <Thread comments={comments} founder />
             <div className="mt-5 border-t border-bg-border pt-5">
               <TicketComposer ticketId={ticket.id} mode="founder" closed={closed} />
@@ -241,17 +276,31 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
                 roster={rosterOptions}
                 projects={projectOptions}
                 clientTenants={tenants.map((t) => ({ value: t.id, label: t.name }))}
+                customers={customerOptions}
               />
             </Card>
           )}
           <Card title="Client">
             <div className="space-y-3">
+              {customers.state !== "not_set_up" && (
+                <Field label="Client record">
+                  {ticket.customer_id ? (
+                    <Link className="text-accent hover:underline" href={`/clients/${ticket.customer_id}`} prefetch={false}>
+                      {customerLabel ?? "Open client"}
+                    </Link>
+                  ) : customers.state === "error" ? (
+                    "Couldn't load client records"
+                  ) : (
+                    "Not linked"
+                  )}
+                </Field>
+              )}
               <Field label="Name">{ticket.client_name ?? "Unknown"}</Field>
               <Field label="Email">
                 {ticket.client_email ? <a className="text-accent hover:underline" href={`mailto:${ticket.client_email}`}>{ticket.client_email}</a> : "None"}
               </Field>
               {ticket.client_company && <Field label="Company">{ticket.client_company}</Field>}
-              <Field label="Portal workspace">{ticket.client_tenant_name ?? "None"}</Field>
+              {oasis && <Field label="Portal workspace">{ticket.client_tenant_name ?? "None"}</Field>}
               <Field label="Project">
                 {ticket.project_id ? <Link className="text-accent hover:underline" href={`/projects/${ticket.project_id}`}>{ticket.project_title ?? "Open project"}</Link> : "Not linked"}
               </Field>
@@ -263,7 +312,7 @@ export default async function TicketDetailPage({ params }: { params: Promise<{ i
           {(ticket.source === "form" || ticket.source === "portal") && (
             <Card title="Notifications">
               <div className="space-y-3">
-                <Field label="Founders">{ticket.founder_alert_status ?? (ticket.founder_alert_at ? "Claimed, no outcome recorded" : "Not sent yet")}</Field>
+                <Field label={oasis ? "Founders" : "Team alert"}>{ticket.founder_alert_status ?? (ticket.founder_alert_at ? "Claimed, no outcome recorded" : "Not sent yet")}</Field>
                 <Field label="Client confirmation">{ticket.client_ack_status ?? (ticket.client_ack_at ? "Claimed, no outcome recorded" : "Not sent yet")}</Field>
               </div>
             </Card>

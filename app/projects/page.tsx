@@ -144,8 +144,8 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         q: sp.q || null,
         includeArchived: sp.archived === "1",
       }),
-      loadAssignmentRoster(),
-      loadMemberDirectory(),
+      loadAssignmentRoster(viewer.tenantId),
+      loadMemberDirectory(viewer.tenantId),
       listClientTenants(db),
     ]);
   } catch (err) {
