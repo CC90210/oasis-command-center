@@ -123,11 +123,28 @@ export const isLedgerCode = (v: unknown): v is string => typeof v === "string" &
  * server's own zone, so the same event would land at different instants, and
  * hash differently, on two hosts.
  */
-const ZONED_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ZONED_TIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
-/** The instant as UTC ISO-8601 (ms), or null when it is not a zoned timestamp. */
+/**
+ * The instant as UTC ISO-8601 (ms), or null when it is not a real zoned timestamp.
+ *
+ * The shape check is not enough: Date.parse rolls impossible values over
+ * (2026-02-30 becomes 2026-03-02), and the ledger is append-only, so a
+ * producer's bad date would be stored as a different day for good. Calendar
+ * days, clock fields and the offset are checked before parsing.
+ */
 export function zonedTimeToIso(v: unknown): string | null {
-  if (typeof v !== "string" || !ZONED_TIME_RE.test(v)) return null;
+  if (typeof v !== "string") return null;
+  const m = ZONED_TIME_RE.exec(v);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, oh, om] = m;
+  const month = Number(mo);
+  const daysInMonth = new Date(Date.UTC(Number(y), month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || Number(d) < 1 || Number(d) > daysInMonth) return null;
+  if (Number(h) > 23 || Number(mi) > 59 || (s !== undefined && Number(s) > 59)) return null;
+  // Real offsets run from -12:00 to +14:00.
+  if (oh !== undefined && (Number(oh) > 14 || Number(om) > 59)) return null;
   const ms = Date.parse(v);
   return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
@@ -301,9 +318,9 @@ const DEFS: readonly CatalogEntry[] = [
     payload: { channel: CHANNEL, provider: code(), provider_message_id: id(), intent: code(), priority: opt(code()) },
     idempotency: "{provider}:{message_id}", description: "An inbound message arrived, with its classified intent code." }),
   ev({ key: "lead.qualified", department: "sales", owningModule: "lib/oasis-lead-stage-engine.ts", subjectTypes: ["lead"], requiredJoinKeys: ["contact_id"],
-    payload: { reason: code(), attempt: int(1) }, idempotency: "qual:{contact_id}:{n}", description: "A lead was qualified." }),
+    payload: { reason: code(), attempt: int(1) }, idempotency: "qual:{contact_id}:qualified:{n}", description: "A lead was qualified." }),
   ev({ key: "lead.disqualified", department: "sales", owningModule: "lib/oasis-lead-stage-engine.ts", subjectTypes: ["lead"], requiredJoinKeys: ["contact_id"],
-    payload: { reason: code(), attempt: int(1) }, idempotency: "qual:{contact_id}:{n}", description: "A lead was disqualified, with a reason code." }),
+    payload: { reason: code(), attempt: int(1) }, idempotency: "qual:{contact_id}:disqualified:{n}", description: "A lead was disqualified, with a reason code." }),
 
   // ── Nurture ───────────────────────────────────────────────────────────────
   ev({ key: "stage.changed", department: "sales", owningModule: "lib/lead-stage-engine.ts", subjectTypes: ["lead", "deal"], requiredJoinKeys: ["contact_id"],
@@ -449,11 +466,11 @@ const DEFS: readonly CatalogEntry[] = [
     payload: { routine_key: code(), error_code: code(), duration_ms: opt(int(0)) }, idempotency: "run:{producer}:{routine_run_id}",
     writers: RUN_WRITERS, description: "A scheduled routine failed." }),
   ev({ key: "consent.granted", department: "sales", owningModule: "lib/sms/consent.ts", subjectTypes: ["contact"], requiredJoinKeys: ["contact_id"],
-    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:{n}", description: "A contact gave consent on a channel." }),
+    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:granted:{n}", description: "A contact gave consent on a channel." }),
   ev({ key: "consent.revoked", department: "sales", owningModule: "lib/sms/consent.ts", producers: ["bea"], subjectTypes: ["contact"], requiredJoinKeys: ["contact_id"],
-    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:{n}",
+    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:revoked:{n}",
     // The app handles SMS STOP; BEA handles email, DM and call opt-outs.
-    writers: { native: keyRe(`consent:${SEG}:sms:\\d+`), bea: keyRe(`consent:${SEG}:(?:email|dm|call):\\d+`) },
+    writers: { native: keyRe(`consent:${SEG}:sms:revoked:\\d+`), bea: keyRe(`consent:${SEG}:(?:email|dm|call):revoked:\\d+`) },
     description: "A contact withdrew consent on a channel." }),
   ev({ key: "suppression.added", department: "sales", owningModule: "lib/sms/consent.ts", producers: ["bea"], subjectTypes: ["contact"], requiredJoinKeys: [],
     payload: { channel: CHANNEL, reason: code() }, idempotency: "suppress:{channel}:{suppression_id}",

@@ -434,6 +434,45 @@ async function main() {
     assert.match(meeting("2026-10-01T15:00:00-04:00").args.at(-2) as string, /"starts_at":"2026-10-01T19:00:00.000Z"/);
   });
 
+  await check("an impossible date or clock is refused, never rolled over into another day (CodeRabbit #481)", () => {
+    for (const bad of [
+      "2026-02-30T10:00:00Z", // Date.parse would store 2026-03-02
+      "2026-04-31T10:00:00Z",
+      "2027-02-29T10:00:00Z", // not a leap year
+      "2026-13-01T10:00:00Z",
+      "2026-00-10T10:00:00Z",
+      "2026-09-20T24:30:00Z",
+      "2026-09-20T10:60:00Z",
+      "2026-09-20T10:00:60Z",
+      "2026-09-20T10:00:00+25:00",
+      "2026-09-20T10:00:00+05:75",
+    ]) {
+      assert.equal(catalog.zonedTimeToIso(bad), null, bad);
+      refused(() => emit(base({ occurredAt: bad })), "occurred_at_invalid", "occurred_at");
+    }
+    assert.equal(catalog.zonedTimeToIso("2028-02-29T10:00:00Z"), "2028-02-29T10:00:00.000Z", "a real leap day passes");
+    assert.equal(catalog.zonedTimeToIso("2026-09-20T23:59:59+14:00"), "2026-09-20T09:59:59.000Z");
+  });
+
+  await check("no two event keys share an idempotency template, so one event can never swallow another's key (CodeRabbit #481)", () => {
+    // Two event keys may share a template only when the key can never collide:
+    //   - mutually exclusive outcomes of ONE thing (a meeting is held or missed,
+    //     a run completes or fails, never both);
+    //   - the template ends in the provider's own per-event id, unique for every
+    //     event whatever its type (a delivery and a bounce never share one).
+    // A counter such as {n} restarts per event type, so it must never be shared.
+    const exclusive = new Set(["meeting.held|meeting.no_show", "routine.run_completed|routine.run_failed"]);
+    const perEventId = /\{(?:provider_event_id|event_id|approval_event_id)\}$/;
+    const byTemplate = new Map<string, string[]>();
+    for (const e of catalog.CATALOG_ENTRIES) byTemplate.set(e.idempotency, [...(byTemplate.get(e.idempotency) ?? []), e.key]);
+    const collisions = [...byTemplate]
+      .filter(([template, keys]) => keys.length > 1 && !perEventId.test(template) && !exclusive.has([...keys].sort().join("|")))
+      .map(([template, keys]) => `${keys.join(" and ")} share ${template}`);
+    assert.deepEqual(collisions, [], collisions.join("; "));
+    assert.match(catalog.LEDGER_CATALOG.get("consent.revoked")!.idempotency, /:revoked:/);
+    assert.match(catalog.LEDGER_CATALOG.get("consent.granted")!.idempotency, /:granted:/);
+  });
+
   await check("value_cents is never negative: money going back is refund.issued, not a negative payment", () => {
     const pay = { eventKey: "payment.received", subject: { type: "payment", id: "ch_neg" }, contactId: null,
       payload: { provider_payment_id: "ch_neg" }, source: "stripe" as const, idempotencyKey: "stripe:ch_neg", currency: "CAD" };
@@ -572,7 +611,7 @@ async function main() {
       "meeting.booked": { native: "cal:google:ev1:booked:1", bea: "cal:google:ev1:booked:1" },
       "meeting.rescheduled": { native: "cal:google:ev1:rescheduled:2", bea: "cal:google:ev1:rescheduled:2" },
       "meeting.cancelled": { native: "cal:google:ev1:cancelled:3", bea: "cal:google:ev1:cancelled:3" },
-      "consent.revoked": { native: "consent:lead-1:sms:1", bea: "consent:lead-1:email:1" },
+      "consent.revoked": { native: "consent:lead-1:sms:revoked:1", bea: "consent:lead-1:email:revoked:1" },
       "suppression.added": { native: "suppress:sms:sup-1", bea: "suppress:email:sup-2" },
       "routine.run_completed": { bea: runKey("bea"), maven: runKey("maven"), atlas: runKey("atlas") },
       "routine.run_failed": { bea: runKey("bea"), maven: runKey("maven"), atlas: runKey("atlas") },
