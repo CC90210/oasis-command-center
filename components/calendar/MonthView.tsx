@@ -123,7 +123,19 @@ export function MonthView({ anchor, occurrences, calendars, prefs, now, selected
           const need = week.map(() => 0);
           for (const s of segs) for (let c = s.startCol; c < s.startCol + s.span; c++) need[c] = Math.max(need[c], s.row + 1);
           const rowsFor = (col: number) => (need[col] > capacity ? capacity - 1 : capacity);
-          const hidden = week.map((_, c) => (need[c] > capacity ? segs.filter((s) => s.startCol <= c && c < s.startCol + s.span && s.row >= capacity - 1).length : 0));
+          const hidden = week.map((_, c) => segs.filter((s) => s.startCol <= c && c < s.startCol + s.span && s.row >= rowsFor(c)).length);
+          // A bar is drawn in runs over the days where its row fits, so a
+          // neighbour's overflow never hides it from a day that has room.
+          const pieces = segs.flatMap((s) => {
+            const runs: { s: typeof s; from: number; to: number }[] = [];
+            for (let c = s.startCol; c < s.startCol + s.span; c++) {
+              if (s.row >= rowsFor(c)) continue;
+              const last = runs[runs.length - 1];
+              if (last && last.to === c - 1) last.to = c;
+              else runs.push({ s, from: c, to: c });
+            }
+            return runs;
+          });
           return (
             <div key={wi} className="relative grid grid-cols-7 border-b border-hairline last:border-b-0">
               {week.map((day, di) => {
@@ -166,15 +178,13 @@ export function MonthView({ anchor, occurrences, calendars, prefs, now, selected
                   </div>
                 );
               })}
-              {segs.map((s) => {
-                const fits = Array.from({ length: s.span }, (_, k) => s.row < rowsFor(s.startCol + k)).every(Boolean);
-                if (!fits) return null;
+              {pieces.map(({ s, from, to }) => {
                 const bar = s.occ.allDay || s.span > 1;
                 const hue = hueOf(s.occ, calendars);
                 const title = s.occ.event.title || "(No title)";
                 return (
                   <button
-                    key={s.occ.key}
+                    key={`${s.occ.key}:${from}`}
                     type="button"
                     data-hue={hue}
                     data-selected={selectedKey === s.occ.key}
@@ -182,8 +192,8 @@ export function MonthView({ anchor, occurrences, calendars, prefs, now, selected
                     style={{
                       top: HEAD_H + s.row * ROW_H,
                       height: ROW_H - 2,
-                      left: `calc(${(s.startCol / 7) * 100}% + 3px)`,
-                      width: `calc(${(s.span / 7) * 100}% - 6px)`,
+                      left: `calc(${(from / 7) * 100}% + 3px)`,
+                      width: `calc(${((to - from + 1) / 7) * 100}% - 6px)`,
                     }}
                     title={title}
                     onPointerDown={(e) => {

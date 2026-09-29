@@ -26,7 +26,7 @@ const DAY_MS = 86_400_000;
 
 type Drag =
   | { mode: "create"; dayIdx: number; fromMin: number; toMin: number; moved: boolean; x: number; y: number }
-  | { mode: "move" | "resize"; occ: Occurrence; grabOffset: number; dayIdx: number; min: number; moved: boolean; x: number; y: number; originDayIdx: number };
+  | { mode: "move" | "resize"; occ: Occurrence; /** ms from the event's true start to the grab point */ grabOffset: number; dayIdx: number; min: number; moved: boolean; x: number; y: number; originDayIdx: number };
 
 export type TimeGridProps = {
   days: Date[];
@@ -146,7 +146,9 @@ export function TimeGrid({ days, occurrences, calendars, prefs, now, selectedKey
     if (d.mode === "create") return null;
     const duration = d.occ.end.getTime() - d.occ.start.getTime();
     if (d.mode === "move") {
-      const start = atMinute(days[d.dayIdx], Math.max(0, Math.min(DAY_MINUTES - SNAP, d.min - d.grabOffset)));
+      // Measured from the event's real start, so grabbing the second-day
+      // segment of an overnight event keeps its previous-day portion.
+      const start = new Date(atMinute(days[d.dayIdx], Math.min(DAY_MINUTES, d.min)).getTime() - d.grabOffset);
       return { start, end: new Date(start.getTime() + duration) };
     }
     // The end is on the day of the segment being dragged (an overnight event
@@ -167,8 +169,7 @@ export function TimeGrid({ days, occurrences, calendars, prefs, now, selectedKey
     if (e.button !== 0) return;
     e.stopPropagation();
     const { dayIdx, min } = locate(e.clientX, e.clientY);
-    const startMin = sameDay(occ.start, days[dayIdx]) ? minutesIntoDay(occ.start) : 0;
-    setDrag({ mode, occ, grabOffset: snap(min, SNAP) - startMin, dayIdx, originDayIdx: dayIdx, min: snap(min, SNAP), moved: false, x: e.clientX, y: e.clientY });
+    setDrag({ mode, occ, grabOffset: atMinute(days[dayIdx], snap(min, SNAP)).getTime() - occ.start.getTime(), dayIdx, originDayIdx: dayIdx, min: snap(min, SNAP), moved: false, x: e.clientX, y: e.clientY });
   };
 
   const moving = drag && drag.mode !== "create" && drag.moved ? drag : null;

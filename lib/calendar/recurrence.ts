@@ -322,7 +322,16 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     // The first instance moves by the same number of calendar days and takes
     // the edited wall-clock time, in the chosen representation. Wall-clock,
     // not elapsed milliseconds: a move across a DST change keeps 9am at 9am.
-    const { start, end } = placeAt(next, keyDay(dayKeyIn(master, eventStart(master))) + dayShift, newStartDate, durationMs);
+    // The series keeps its own time of day, shifted by exactly what the user
+    // changed on this occurrence: a title-only edit of an instance that was
+    // moved to 11:00 must not drag the 9:00 series to 11:00.
+    const minuteShift = next.allDay || master.allDay ? 0 : wallMinutes(newStartDate, next.timeZone) - wallMinutes(occ.start, master.timeZone);
+    const masterFirst = eventStart(master);
+    const total = (master.allDay ? 0 : wallMinutes(masterFirst, master.timeZone)) + minuteShift;
+    const extraDays = Math.floor(total / 1440);
+    const minuteOfDay = ((total % 1440) + 1440) % 1440;
+    const timed = !next.allDay && !master.allDay;
+    const { start, end } = placeAt(next, keyDay(dayKeyIn(master, masterFirst)) + dayShift + extraDays, newStartDate, durationMs, timed ? minuteOfDay : undefined);
     const rule = sameRule(next.recurrence, master.recurrence) ? follow(next.recurrence, occ.start, newStartDate) : next.recurrence;
     // A changed rule (shorter, other days) can leave edits whose slot is gone:
     // delete those rows rather than keep data the calendar will never show.
@@ -372,6 +381,12 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
   ];
 }
 
+/** Minutes past midnight of an instant's wall-clock time in `tz`. */
+function wallMinutes(instant: Date, tz: string): number {
+  const w = wallParts(instant, tz);
+  return w.h * 60 + w.mi;
+}
+
 /** `YYYY-MM-DD` of an instant in an event's own calendar. */
 function dayKeyIn(e: Pick<EventRecord, "allDay" | "timeZone">, instant: Date): string {
   return e.allDay ? toDateKey(instant) : wallDateKey(instant, e.timeZone);
@@ -383,10 +398,10 @@ function keyOfDay(n: number): string {
 }
 
 /** Start/end strings for an event placed on day `day`, at `timeOf`'s wall time in its zone. */
-function placeAt(e: Pick<EventInput, "allDay" | "timeZone">, day: number, timeOf: Date, durationMs: number): { start: string; end: string } {
+function placeAt(e: Pick<EventInput, "allDay" | "timeZone">, day: number, timeOf: Date, durationMs: number, minuteOfDay?: number): { start: string; end: string } {
   if (e.allDay) return { start: keyOfDay(day), end: keyOfDay(day + Math.max(1, Math.round(durationMs / DAY_MS))) };
   const p = fromDayNumber(day);
-  const w = wallParts(timeOf, e.timeZone);
+  const w = minuteOfDay === undefined ? wallParts(timeOf, e.timeZone) : { h: Math.floor(minuteOfDay / 60), mi: minuteOfDay % 60 };
   const s = instantOf({ y: p.y, m: p.m, d: p.d, h: w.h, mi: w.mi, s: 0 }, e.timeZone);
   return { start: s.toISOString(), end: new Date(s.getTime() + durationMs).toISOString() };
 }

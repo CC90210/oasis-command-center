@@ -242,6 +242,26 @@ const take = <T>(g: Generator<T>, n: number) => {
   assert.ok(ops[1].op === "delete" && ops[1].id === "third");
 }
 
+// ── Codex review round 6 (2026-09-29) ─────────────────────────────────────
+
+{
+  // [P2] "All events" from an instance moved on its own to 11:00, title only:
+  // the 9:00 series stays at 9:00 and the moved instance survives.
+  const nine = ev({ id: "nine", start: local("2026-09-28T09:00").toISOString(), end: local("2026-09-28T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1 } });
+  const at11 = ev({ id: "at11", recurringEventId: "nine", originalStart: local("2026-10-05T09:00").toISOString(), start: local("2026-10-05T11:00").toISOString(), end: local("2026-10-05T12:00").toISOString() });
+  const occ11 = expandOccurrences([nine, at11], local("2026-10-05T00:00"), local("2026-10-06T00:00"))[0];
+  assert.equal(occ11.event.id, "at11");
+  const ops = planEdit(occ11, { ...inputForOccurrence(occ11), title: "renamed" }, "all", [nine, at11]);
+  assert.deepEqual(ops.map((o) => o.op), ["update"], "nothing deleted");
+  assert.ok(ops[0].op === "update");
+  assert.equal(new Date(ops[0].patch.start!).getHours(), 9, "the series stays at 9:00");
+  assert.equal(toDateKey(new Date(ops[0].patch.start!)), "2026-09-28");
+  // Moving that same instance one hour later, for all, moves the series to 10:00.
+  const later = { ...inputForOccurrence(occ11), start: local("2026-10-05T12:00").toISOString(), end: local("2026-10-05T13:00").toISOString() };
+  const moved = planEdit(occ11, later, "all", [nine, at11]);
+  assert.ok(moved[0].op === "update" && new Date(moved[0].patch.start!).getHours() === 10);
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────
 
 {
