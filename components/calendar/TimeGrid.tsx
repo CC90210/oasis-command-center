@@ -12,7 +12,6 @@ import {
   minutesIntoDay,
   sameDay,
   snap,
-  startOfDay,
   weekdayShort,
 } from "@/lib/calendar/dates";
 import { layoutDay, layoutSpans } from "@/lib/calendar/layout";
@@ -150,9 +149,11 @@ export function TimeGrid({ days, occurrences, calendars, prefs, now, selectedKey
       const start = atMinute(days[d.dayIdx], Math.max(0, Math.min(DAY_MINUTES - SNAP, d.min - d.grabOffset)));
       return { start, end: new Date(start.getTime() + duration) };
     }
-    const endMin = Math.max(minutesIntoDay(d.occ.start) + SNAP, d.min);
-    const endDay = startOfDay(d.occ.start);
-    return { start: d.occ.start, end: atMinute(endDay, endMin) };
+    // The end is on the day of the segment being dragged (an overnight event
+    // is resized from its second day), and never earlier than start + 15 min.
+    const end = atMinute(days[d.originDayIdx], d.min);
+    const floor = d.occ.start.getTime() + SNAP * 60_000;
+    return { start: d.occ.start, end: end.getTime() < floor ? new Date(floor) : end };
   };
 
   const beginCreate = (e: ReactPointerEvent<HTMLDivElement>) => {

@@ -203,6 +203,9 @@ export function expandOccurrences(events: EventRecord[], rangeStart: Date, range
   for (const o of overrides.values()) {
     const master = masters.get(o.recurringEventId!);
     if (!master || master.exdates.includes(o.originalStart!)) continue;
+    // An edit whose slot the series no longer has (it was shortened, or its
+    // days changed) is not shown: it would be an event the rule excludes.
+    if (!isInstanceOf(master, o.originalStart!)) continue;
     const s = eventStart(o);
     const en = eventEnd(o);
     if (!intersects(s, en)) continue;
@@ -321,6 +324,14 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     // not elapsed milliseconds: a move across a DST change keeps 9am at 9am.
     const { start, end } = placeAt(next, keyDay(dayKeyIn(master, eventStart(master))) + dayShift, newStartDate, durationMs);
     const rule = sameRule(next.recurrence, master.recurrence) ? follow(next.recurrence, occ.start, newStartDate) : next.recurrence;
+    // A changed rule (shorter, other days) can leave edits whose slot is gone:
+    // delete those rows rather than keep data the calendar will never show.
+    const probe: EventRecord = { ...master, allDay: next.allDay, timeZone: next.timeZone, start, end, recurrence: rule };
+    const stale = reshaped
+      ? []
+      : allRows
+          .filter((r) => r.recurringEventId === master.id && r.originalStart && !isInstanceOf(probe, r.originalStart))
+          .map((r) => ({ op: "delete" as const, id: r.id }));
     return [
       {
         op: "update",
@@ -329,7 +340,7 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
       },
       // Re-keyed instances leave single-occurrence edits pointing at nothing;
       // they would render as duplicates. Google Calendar discards them too.
-      ...(reshaped ? overridesFrom(-Infinity) : []),
+      ...(reshaped ? overridesFrom(-Infinity) : stale),
     ];
   }
 
@@ -430,6 +441,17 @@ export function durationMinutes(e: Pick<EventRecord, "allDay" | "start" | "end">
 }
 
 export { inputOf };
+
+/** True when `key` is an instance key the series' current rule still produces. */
+export function isInstanceOf(master: EventRecord, key: string): boolean {
+  const target = keyTime(key, master.allDay);
+  for (const s of seriesStarts(master)) {
+    const t = s.getTime();
+    if (t === target) return true;
+    if (t > target) return false;
+  }
+  return false;
+}
 
 /**
  * What removing a calendar must write, besides deleting its rows.

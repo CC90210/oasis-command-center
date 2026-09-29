@@ -60,6 +60,8 @@ export function messageFor(code: string, detail?: string): string {
       return "Your session has ended. Sign in again to see your calendar.";
     case "default_calendar_protected":
       return "Your main calendar cannot be deleted.";
+    case "calendar_delete_too_large":
+      return "This calendar was not deleted: you have more than 5,000 events, and deleting from a partial list could leave some behind.";
     case "calendar_limit_reached":
       return "You have reached the 50-calendar limit.";
     case "event_not_found":

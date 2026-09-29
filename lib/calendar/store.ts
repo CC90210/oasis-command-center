@@ -205,7 +205,10 @@ export async function deleteCalendar(owner: Owner, id: string): Promise<void> {
   if (!cal) throw new CalendarStoreError("calendar_not_found", 404);
   if (cal.isDefault) throw new CalendarStoreError("default_calendar_protected", 409);
   const db = getServiceSupabase();
-  const { events } = await listEvents(owner);
+  const { events, truncated } = await listEvents(owner);
+  // Planning from a partial list would orphan the rows it never saw (there is
+  // no cascading key). Fail closed rather than half-delete.
+  if (truncated) throw new CalendarStoreError("calendar_delete_too_large", 409, "more than 5,000 events; not deleted");
   const plan = planCalendarRemoval(events, id);
   // Exceptions first: if a later delete fails, the surviving series already
   // skips the instance, so nothing reappears.

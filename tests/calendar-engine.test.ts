@@ -225,6 +225,23 @@ const take = <T>(g: Generator<T>, n: number) => {
   assert.deepEqual(whole.deleteIds.sort(), ["oth", "ser"], "overrides go with their series' calendar");
 }
 
+// ── Codex review round 3 (2026-09-29) ─────────────────────────────────────
+
+{
+  // [P2] Shortening a series hides, and on an "all" save deletes, an edit
+  // whose slot the new rule no longer has.
+  const five = ev({ id: "five", start: local("2026-09-28T09:00").toISOString(), end: local("2026-09-28T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1, count: 5 } });
+  const third = ev({ id: "third", recurringEventId: "five", originalStart: local("2026-10-12T09:00").toISOString(), start: local("2026-10-12T15:00").toISOString(), end: local("2026-10-12T16:00").toISOString(), title: "edited third" });
+  const range = [local("2026-09-27T00:00"), local("2026-11-30T00:00")] as const;
+  assert.ok(expandOccurrences([five, third], ...range).some((o) => o.event.id === "third"));
+  const shortened = { ...five, recurrence: { freq: "WEEKLY" as const, interval: 1, count: 1 } };
+  assert.ok(!expandOccurrences([shortened, third], ...range).some((o) => o.event.id === "third"), "the excluded edit is not shown");
+  const firstOcc = expandOccurrences([five, third], ...range)[0];
+  const ops = planEdit(firstOcc, { ...inputForOccurrence(firstOcc), recurrence: { freq: "WEEKLY", interval: 1, count: 1 } }, "all", [five, third]);
+  assert.deepEqual(ops.map((o) => o.op), ["update", "delete"]);
+  assert.ok(ops[1].op === "delete" && ops[1].id === "third");
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────
 
 {
