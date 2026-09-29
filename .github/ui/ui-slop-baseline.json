@@ -1,0 +1,681 @@
+{
+  "_comment": "Known AI-tell visual patterns. Each entry is a reason a business owner reads our software as generated. Shrink, never grow.",
+  "root": "C:\\Users\\echel\\AppData\\Local\\Temp\\claude\\c--Users-echel-JARVIS\\eacee293-4a60-4b8a-af1b-ae56d1a89a60\\scratchpad\\occ-gate",
+  "known": [
+    {
+      "file": "app/globals.css",
+      "line": 224,
+      "rule": "named-decor"
+    },
+    {
+      "file": "app/globals.css",
+      "line": 230,
+      "rule": "named-decor"
+    },
+    {
+      "file": "app/globals.css",
+      "line": 246,
+      "rule": "named-decor"
+    },
+    {
+      "file": "app/globals.css",
+      "line": 250,
+      "rule": "named-decor"
+    },
+    {
+      "file": "app/loading.tsx",
+      "line": 7,
+      "rule": "named-decor"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 305,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 315,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 325,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/(marketing)/marketing.css",
+      "line": 361,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/configure/page.tsx",
+      "line": 33,
+      "rule": "drifting-orb"
+    },
+    {
+      "file": "app/configure/page.tsx",
+      "line": 36,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/download/page.tsx",
+      "line": 69,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "app/download/page.tsx",
+      "line": 102,
+      "rule": "gradient-text"
+    },
+    {
+      "file": "app/playbook/drills/page.tsx",
+      "line": 263,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/Card.tsx",
+      "line": 69,
+      "rule": "named-decor"
+    },
+    {
+      "file": "components/Card.tsx",
+      "line": 70,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/ChatWidget.tsx",
+      "line": 2699,
+      "rule": "named-decor"
+    },
+    {
+      "file": "components/Sidebar.tsx",
+      "line": 397,
+      "rule": "named-decor"
+    },
+    {
+      "file": "components/Sidebar.tsx",
+      "line": 591,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/calls/CallsClient.tsx",
+      "line": 53,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/calls/CallsClient.tsx",
+      "line": 206,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 173,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 430,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/calls/CallSheet.tsx",
+      "line": 459,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/charts/LeadSourceBreakdown.tsx",
+      "line": 45,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AIDraftBanner.tsx",
+      "line": 21,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AIDraftBanner.tsx",
+      "line": 42,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 174,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 181,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISuggestionRail.tsx",
+      "line": 192,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 25,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 27,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 36,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 43,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/AISummaryCard.tsx",
+      "line": 44,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 259,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 279,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 337,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 394,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 398,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 424,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 464,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallsBoard.tsx",
+      "line": 478,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 277,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 283,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 323,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 324,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 361,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 363,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 364,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 420,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 428,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 449,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 516,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 517,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 532,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 539,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 558,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/CallSchedulerModal.tsx",
+      "line": 606,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/Composer.tsx",
+      "line": 280,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/Composer.tsx",
+      "line": 372,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/GhostTextSuggestion.tsx",
+      "line": 27,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 28,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 34,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 37,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 39,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 46,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 47,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/conversations/KeyPointsAccordion.tsx",
+      "line": 61,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/forms/SunBizFormsClient.tsx",
+      "line": 342,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/forms/SunBizFormsClient.tsx",
+      "line": 392,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/founders/marketing-shared.tsx",
+      "line": 194,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/founders/marketing-shared.tsx",
+      "line": 244,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/landing/ConfigureFlow.tsx",
+      "line": 65,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/leads/LeadTimelinePanel.tsx",
+      "line": 61,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/leads/ScheduleCallControl.tsx",
+      "line": 192,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/metrics/MetricsDashboard.tsx",
+      "line": 115,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/metrics/MetricsDashboard.tsx",
+      "line": 608,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/offers/OffersByDealClient.tsx",
+      "line": 75,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/renewals/RecordFundedDeal.tsx",
+      "line": 348,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/schedule/ScheduleClient.tsx",
+      "line": 67,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/schedule/ScheduleClient.tsx",
+      "line": 336,
+      "rule": "drifting-orb"
+    },
+    {
+      "file": "components/schedule/ScheduleClient.tsx",
+      "line": 406,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/shopping-out/ShoppingOutClient.tsx",
+      "line": 110,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/sunbiz/SunBizDashboard.tsx",
+      "line": 235,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 29,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 32,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/battle-hud.ts",
+      "line": 50,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 516,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 748,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 1560,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 1572,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 1573,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 1579,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 1687,
+      "rule": "drifting-orb"
+    },
+    {
+      "file": "components/web-leads/BattleCard.tsx",
+      "line": 2637,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/BattleSection.tsx",
+      "line": 166,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/BattleSection.tsx",
+      "line": 175,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/BattleSection.tsx",
+      "line": 182,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/BattleSection.tsx",
+      "line": 278,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/CompetitorArena3D.tsx",
+      "line": 355,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "components/web-leads/ObjectionCard.tsx",
+      "line": 103,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/ObjectionCard.tsx",
+      "line": 415,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/ObjectionConsole.tsx",
+      "line": 120,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "components/web-leads/ObjectionConsole.tsx",
+      "line": 157,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/agents.ts",
+      "line": 149,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "lib/agents.ts",
+      "line": 296,
+      "rule": "ai-accent"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 21,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 21,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 28,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 28,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 35,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 42,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 49,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ad-creatives.generated.ts",
+      "line": 49,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
+      "line": 22,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
+      "line": 27,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
+      "line": 28,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
+      "line": 13,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
+      "line": 19,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
+      "line": 19,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
+      "line": 27,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/framed_card_post.html",
+      "line": 13,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/framed_card_post.html",
+      "line": 48,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/framed_card_post.html",
+      "line": 48,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/hero_amount_post.html",
+      "line": 13,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/hero_amount_post.html",
+      "line": 21,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/hero_amount_post.html",
+      "line": 56,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/hero_amount_post.html",
+      "line": 57,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 14,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 22,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 24,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 27,
+      "rule": "radial-wash"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 27,
+      "rule": "halo-shadow"
+    },
+    {
+      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
+      "line": 40,
+      "rule": "halo-shadow"
+    }
+  ]
+}
