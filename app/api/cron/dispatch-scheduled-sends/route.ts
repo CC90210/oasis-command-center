@@ -56,6 +56,7 @@ import { operatorHasGmailOAuth, sendGmailAsOperator } from "@/lib/integrations/g
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { memberStanding, type MemberStanding } from "@/lib/team";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import {
   recoverStaleDashboardEmailReservations,
   type DashboardEmailReservationRecovery,
@@ -432,12 +433,15 @@ async function handleDispatch(req: NextRequest): Promise<NextResponse> {
     console.error("[dispatch-scheduled-sends] stale reclaim failed", err);
   }
 
-  // 2) Find due pending work.
+  // 2) Find due pending work. A retired tenant's rows are excluded in the
+  // query, before the LIMIT: they must never be claimed or sent, and filtering
+  // afterwards would let them occupy every slot of the batch.
   const dueRes = await db
     .from("scheduled_sends")
     .select("id")
     .eq("status", "pending")
     .lte("scheduled_for", nowIso)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("scheduled_for", { ascending: true })
     .limit(BATCH_LIMIT);
   if (dueRes.error) {

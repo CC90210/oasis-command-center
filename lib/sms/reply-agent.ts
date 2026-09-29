@@ -17,6 +17,7 @@ import {
 } from "@/lib/sms/meeting-intent";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { memberStanding } from "@/lib/team";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 import { getTursoClient } from "@/lib/turso";
 import {
   activateVerifiedFounderMeeting,
@@ -2070,6 +2071,10 @@ export async function runSmsReplyAgentWorker(overrides: {
       for (const candidate of runnableCandidates) {
         if (claimedCount >= BATCH_LIMIT) break;
         if (Date.now() - runStartedAt >= RUN_CLAIM_BUDGET_MS) break;
+        // A retired tenant's job is left untouched: never claimed, drafted,
+        // sent or dead-lettered. The queue pages by cursor, so skipping it
+        // cannot starve the jobs behind it.
+        if (isRetiredTenant(candidate.tenant_id)) continue;
         if (candidate.attempts >= MAX_ATTEMPTS) {
           const dead = await db.from("sms_agent_jobs").update({
             status: "dead_letter",

@@ -173,11 +173,16 @@ assert.match(
 // order, the literal `",` separator and 2-space layout, none of which anything
 // enforces (no prettier/editorconfig in this repo). A reformat would have
 // silently un-asserted this.
+//
+// 2026-09-28: the drain serves the SunBiz submissions mailbox only (any other
+// tenant's row is terminal-failed as unsupported_tenant_for_bulk_email), and
+// SunBiz was RETIRED (runbook C-6a). Its 5-minute schedule was removed so a
+// rollback cannot restart sends or writes for that tenant. Inverted rather
+// than dropped, so re-adding the schedule fails here by name. The queue
+// writer's inline kick in app/api/leads/bulk is untouched.
 assert.ok(
-  (cronRegistry.crons ?? []).some(
-    (c) => c.path === "/api/cron/dispatch-bulk-email" && c.schedule === "*/5 * * * *",
-  ),
-  "the drain must be scheduled in config/cron-registry.json — without the cron entry nothing ever sends",
+  !(cronRegistry.crons ?? []).some((c) => c.path.split("?")[0] === "/api/cron/dispatch-bulk-email"),
+  "the retired SunBiz bulk-email drain must not be scheduled in config/cron-registry.json",
 );
 
 console.log("bulk-email dispatch tests passed");

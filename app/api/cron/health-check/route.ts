@@ -20,16 +20,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { runHealthChecks, checkFleetHeartbeat, tenantOutcomeChecks, OASIS_GLOBAL_CHECKS } from "@/lib/health/runner";
+import { runHealthChecks, checkFleetHeartbeat, OASIS_GLOBAL_CHECKS, ESTATE_WIDE_CHECKS } from "@/lib/health/runner";
 import { worstVerdict } from "@/lib/health/checks-core";
-import { runGuardAudit, announceGuardAudit } from "@/lib/health/guard-audit";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-const SUNBIZ_TENANT_ID = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const denied = checkCronAuth(req);
@@ -46,47 +43,35 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     // probe owns one 30s wall-clock budget (including an 8s delete reserve), so
     // it cannot be queued behind tenant checks and run into this route's 60s
     // platform ceiling before removing its synthetic event.
-    const [calendarSummary, summary, heartbeat, guards] = await Promise.all([
+    //
+    // SUNBIZ'S LANE IS GONE (2026-09-28, SunBiz retired). This route used to
+    // run SunBiz's tenant outcome checks and its guard audit every 15 minutes,
+    // which kept writing health_check_runs (~208 rows / 2h) and
+    // health_alert_state for a tenant whose data is being exported and
+    // deleted. Its drip, email-drip, shop-out, phone-lookup and extraction
+    // checks graded SunBiz only, so they stop with it. The estate-wide checks
+    // that had ridden along (production serves main, alert delivery, the form
+    // dead-letter table) now run under the OASIS tenant instead.
+    const [calendarSummary, estateSummary, heartbeat] = await Promise.all([
       runHealthChecks(WEBDEV_TENANT_ID, {
         notify,
         checks: OASIS_GLOBAL_CHECKS,
       }),
-      runHealthChecks(SUNBIZ_TENANT_ID, {
+      runHealthChecks(WEBDEV_TENANT_ID, {
         notify,
-        checks: tenantOutcomeChecks(),
+        checks: ESTATE_WIDE_CHECKS,
       }),
       checkFleetHeartbeat(getServiceSupabase()),
-      runGuardAudit(SUNBIZ_TENANT_ID).catch(() => null),
     ]);
-    const results = [...summary.results, ...calendarSummary.results];
-
-    // DID EACH GUARD ACTUALLY DO ANYTHING?
-    //
-    // The checks above measure OUTCOMES (did texts go out, did email volume
-    // hold). This measures the MECHANISMS, and it exists because all three bugs
-    // found on 2026-08-20 were guards that ran, raised nothing, and affected
-    // nothing. A filter that excludes 100% of its input is indistinguishable
-    // from a quiet upstream unless something asks.
-    //
-    // Runs every tick but only PAGES once a day: the reading is a weekly
-    // window, so re-alerting every 15 minutes would say the same thing 96 times
-    // and get the channel muted. Failures here are swallowed for the same
-    // reason the alerting is — a broken self-check must not take down the
-    // health check it rides on.
-    if (notify && guards) {
-      await announceGuardAudit(SUNBIZ_TENANT_ID, guards).catch(() => undefined);
-    }
+    const results = [...estateSummary.results, ...calendarSummary.results];
 
     return NextResponse.json({
       ok: true,
       worst: worstVerdict(results),
-      ran: summary.ran + calendarSummary.ran,
-      alerted: [...summary.alerted, ...calendarSummary.alerted],
-      recovered: [...summary.recovered, ...calendarSummary.recovered],
+      ran: estateSummary.ran + calendarSummary.ran,
+      alerted: [...estateSummary.alerted, ...calendarSummary.alerted],
+      recovered: [...estateSummary.recovered, ...calendarSummary.recovered],
       fleet_heartbeat: { verdict: heartbeat.verdict, reason: heartbeat.reason },
-      guard_audit: guards
-        ? { summary: guards.summary, findings: guards.findings.filter((f) => f.severity !== "info") }
-        : { summary: "guard audit could not run", findings: [] },
       results: results.map((r) => ({
         id: r.id, verdict: r.verdict, observed: r.observed, baseline: r.baseline, reason: r.reason,
       })),

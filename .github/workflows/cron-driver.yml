@@ -109,50 +109,29 @@ jobs:
           # tests/cron-driver-coverage.test.ts pins both lists together.
           SCHEDULE="${{ github.event.schedule }}"
 
+          # 2026-09-28, SunBiz retired (runbook C-6a): the SunBiz-only routes
+          # are gone from this map as well as from the Worker table, so a
+          # rollback cannot restart writes for a tenant whose data is being
+          # exported and deleted. See workers/oasis-cc-cron/src/index.ts.
           case "${SCHEDULE}" in
             "*/5 * * * *")
               ROUTES="/api/cron/dispatch-drips
                       /api/cron/dispatch-scheduled-sends
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/sms-reply-agent
-                      /api/cron/dispatch-scheduled-calls
-                      /api/cron/dispatch-bulk-email" ;;
+                      /api/cron/dispatch-scheduled-calls" ;;
             "*/10 * * * *")
-              # scan-lender-replies runs write=1 so lender thread statuses, the
-              # Offers tab and the outcome ledger actually populate. Whether a
-              # DEAL moves is a separate gate (LENDER_AUTOROUTE_LIVE), off by
-              # default — see lib/lenders/auto-route.ts.
-              ROUTES="/api/cron/operator-email-agent?write=1
-                      /api/cron/tps-enroll?write=1
-                      /api/cron/scan-lender-replies?write=1" ;;
+              ROUTES="/api/cron/operator-email-agent?write=1" ;;
             "*/15 * * * *")
-              # health-check is the outcome watchdog, and now covers shop-out.
+              # health-check is the outcome watchdog.
               ROUTES="/api/cron/enroll-drips
-                      /api/cron/enroll-accelerated
                       /api/cron/reconcile-sms
                       /api/cron/health-check
                       /api/cron/sla-check" ;;
-            "*/30 * * * *")
-              # Inbound scanning. Without these an approval sits unread, which
-              # is what happened for six days in August.
-              ROUTES="/api/cron/scan-bounces?write=1
-                      /api/cron/scan-bounces?write=1&brand=bluerise
-                      /api/cron/scan-funmate-replies?write=1
-                      /api/cron/sync-tt-inbox
-                      /api/cron/sync-tt-inbox?account=followup" ;;
-            "0 * * * *")     ROUTES="/api/cron/collect-outreach-intel?write=1" ;;
             "15 * * * *")    ROUTES="/api/cron/collect-cc-metrics?write=1" ;;
             "17 * * * *")    ROUTES="/api/cron/reconcile-drip-telemetry
                                       /api/cron/reconcile-website-sales-payments" ;;
-            "0 */6 * * *")   ROUTES="/api/cron/tps-backlog-watch" ;;
             "0 3 * * *")     ROUTES="/api/cron/materialize-plans" ;;
-            "0 6,18 * * *")  ROUTES="/api/cron/sync-sms-numbers" ;;
-            "0 13 * * *")    ROUTES="/api/cron/sweep-stale-sent-app" ;;
-            "10 13 * * *")   ROUTES="/api/cron/kixie-compliance-scan" ;;
-            "15 13 * * *")   ROUTES="/api/cron/renewal-thresholds" ;;
-            # A distinct registration, not a duplicate of the daily scan —
-            # dropping the query string skips the weekly code path entirely.
-            "40 13 * * 1")   ROUTES="/api/cron/kixie-compliance-scan?mode=weekly" ;;
             "")
               # Manual workflow_dispatch: drive the paths that move mail plus
               # the watchdog. Deliberately not everything — a hand-run should
@@ -163,7 +142,6 @@ jobs:
                       /api/cron/dispatch-founder-meeting-reminders
                       /api/cron/sms-reply-agent
                       /api/cron/dispatch-scheduled-calls
-                      /api/cron/dispatch-bulk-email
                       /api/cron/health-check" ;;
             *)
               # A schedule with no mapping means someone added a cron entry and

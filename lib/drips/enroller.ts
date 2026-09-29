@@ -45,6 +45,7 @@ import { loadDealGates } from "./deal-state-store";
 import { stageDripsOffBoard } from "./offboard-stages-core";
 import { applyLeadsBoardFilter, isOnLeadsBoard } from "@/lib/leads/board-visibility";
 import { memberStanding } from "@/lib/team";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 type Db = ReturnType<typeof getServiceSupabase>;
 
@@ -693,10 +694,13 @@ export async function runEnrollDrips(): Promise<EnrollDripsResult> {
     if (used >= 0) enrollBudget = Math.max(0, enrollDailyCap - used);
   }
 
+  // A retired tenant's sequences never enrol anyone, even if a row is
+  // re-enabled by hand: its leads are being exported and deleted.
   const seqRes = await db
     .from("drip_sequences")
     .select("id, tenant_id, name, enabled, trigger_filter, steps")
-    .eq("enabled", true);
+    .eq("enabled", true)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST);
   if (seqRes.error) {
     return { live, sequencesScanned: 0, perSequence: [], totals: { candidates: 0, enrolled: 0, skipped: 0 } };
   }

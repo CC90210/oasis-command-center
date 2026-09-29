@@ -9,6 +9,7 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 import {
   destinationVerdict, normalizeLast10, lineTypeFor, isVerifiedMobile,
   wirelessCandidates, chooseTextableNumber,
@@ -30,6 +31,12 @@ export async function refreshDestinationHealth(
   tenantId: string,
   opts: { sinceMs?: number } = {},
 ): Promise<{ examined: number; untextable: number; verified: number; written: number; error: string | null }> {
+  // A retired tenant is being exported and deleted; recomputing its verdicts
+  // would refill sms_destination_health behind the deletion. Reported, not
+  // silent: the caller sees that nothing ran and why.
+  if (isRetiredTenant(tenantId)) {
+    return { examined: 0, untextable: 0, verified: 0, written: 0, error: "skipped: tenant retired" };
+  }
   const db: Db = getServiceSupabase();
   const since = new Date(opts.sinceMs ?? Date.now() - 90 * 24 * 3_600_000).toISOString();
 

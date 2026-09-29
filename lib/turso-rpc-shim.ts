@@ -23,6 +23,7 @@ import {
   type PartyInput,
 } from "@/lib/website-sales-comp";
 import { buildBriefForOnboarding } from "@/lib/website-sales-build-brief";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 function driverError(error: unknown): DriverError {
   return error && typeof error === "object"
@@ -1183,6 +1184,12 @@ export async function consume_texttorrent_rate_token(client: Client, args: Recor
     throw new Error(`invalid input syntax for type uuid: "${rawTid}"`);
   }
   const tid = rawTid.toLowerCase(); // Postgres uuid canonicalizes to lowercase
+
+  // No token for a retired tenant (2026-09-28, SunBiz). This is the only writer
+  // of sunbiz_provider_rate_state; its callers are the in-app TextTorrent
+  // client and the JARVIS runtime through /api/pg. `false` is the existing
+  // "no token" answer, so a caller defers instead of writing the bucket.
+  if (isRetiredTenant(tid)) return false;
 
   // effective_limit := greatest(1, least(p_limit, CASE priority tiers END))
   // 90+ (compliance) uses all tokens; 80+ (approved replies) retains 5;

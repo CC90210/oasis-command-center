@@ -37,6 +37,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getClientIp } from "@/lib/api-helpers";
 import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -123,6 +124,11 @@ export async function GET(
     }
 
     if (!tenantId) return gifResponse(); // unknown id — silently drop, return pixel
+    // A retired tenant's old mail is still being opened (SunBiz, 2026-09-28).
+    // The recipient gets the pixel; nothing is written — no email_open_events,
+    // no agent_events, no stage advance — because that tenant's rows are being
+    // exported and deleted.
+    if (isRetiredTenant(tenantId)) return gifResponse();
 
     const ua = req.headers.get("user-agent") || null;
     const resolvedIp = getClientIp(req);

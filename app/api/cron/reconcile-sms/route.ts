@@ -17,6 +17,7 @@ import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { reconcileReceipts, tenantsWithOpenReceipts } from "@/lib/sms/delivery-receipts";
 import { smsSendAllowed, resetBreakerCache } from "@/lib/sms/send-breaker";
 import { refreshDestinationHealth } from "@/lib/sms/destination-health";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,8 +29,6 @@ export const dynamic = "force-dynamic";
 // deadline below ends the flood without touching the shared health lib.
 export const maxDuration = 300;
 
-const SUNBIZ_TENANT_ID = process.env.SUNBIZ_TENANT_ID || "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110";
-
 function esc(s: string): string {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -40,13 +39,16 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const startedAt = Date.now();
 
   try {
-    // Reconcile EVERY tenant with open receipts, not just SunBiz. The executor
-    // opens receipts under each drip row's own tenant_id, so pinning this to one
-    // tenant would leave every other tenant's receipts open forever — and an
-    // all-open history reads as "nothing terminal yet", which the breaker
-    // permits. The protection would silently cover one tenant on a multi-tenant
-    // platform. SunBiz is always included so a run still happens when the queue
-    // is empty.
+    // Reconcile EVERY tenant with open receipts. The executor opens receipts
+    // under each drip row's own tenant_id, so pinning this to one tenant would
+    // leave every other tenant's receipts open forever — and an all-open
+    // history reads as "nothing terminal yet", which the breaker permits.
+    //
+    // RETIRED TENANTS ARE SKIPPED (2026-09-28). SunBiz used to be forced into
+    // this list; once it was retired, this route was still writing its
+    // destination-health rows every 15 minutes (~539 after the freeze) into
+    // tables that are about to be exported and deleted. A retired tenant sends
+    // nothing, so it has no verdicts to wait for.
     const discovered = await tenantsWithOpenReceipts();
     if (discovered === null) {
       // Could not enumerate. Not the same as "no work": say so loudly rather
@@ -56,7 +58,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         { status: 500 },
       );
     }
-    const all = [...new Set([SUNBIZ_TENANT_ID, ...discovered])].sort();
+    const all = [...new Set(discovered)].filter((t) => !isRetiredTenant(t)).sort();
 
     // ROTATE the order. Each thread costs a sequential API call, so a big
     // backlog on whichever tenant goes first can consume the whole 60s budget.
@@ -134,7 +136,6 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     }
     const breakers: Record<string, Awaited<ReturnType<typeof smsSendAllowed>>> = {};
     for (const t of tenants) breakers[t] = await smsSendAllowed(t, { force: true });
-    const breaker = breakers[SUNBIZ_TENANT_ID];
     const halted = tenants.filter((t) => breakers[t]?.halt);
 
     // Page through writeAgentAlert, NOT raw sendTelegram. This cron runs every
@@ -164,7 +165,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       ).catch(() => undefined);
     }
 
-    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breaker, halted, destination_health: destinationHealth });
+    return NextResponse.json({ ok: true, tenants: tenants.length, ...r, breakers, halted, destination_health: destinationHealth });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[reconcile-sms] failed", message);

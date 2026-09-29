@@ -15,37 +15,30 @@ import { cronMatches } from "./cron-match";
 
 // Verbatim from config/cron-registry.json. Do not "dedupe" or reformat — the
 // coverage test compares this live table with the inert registry exactly.
+//
+// 2026-09-28, SunBiz retired (runbook C-6a): the routes that served SunBiz and
+// no other tenant are no longer scheduled — collect-outreach-intel,
+// scan-lender-replies, sync-tt-inbox (x2), scan-bounces (x2),
+// scan-funmate-replies, sweep-stale-sent-app, kixie-compliance-scan (x2),
+// enroll-accelerated, tps-enroll, tps-backlog-watch, renewal-thresholds,
+// sync-sms-numbers and dispatch-bulk-email. Multi-tenant routes stay and skip
+// retired tenants (lib/tenant/retired.ts). Re-adding one of these would restart
+// writes for a tenant whose data is being exported and deleted.
 export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/materialize-plans", schedule: "0 3 * * *" },
-  { path: "/api/cron/collect-outreach-intel?write=1", schedule: "0 * * * *" },
   { path: "/api/cron/collect-cc-metrics?write=1", schedule: "15 * * * *" },
   { path: "/api/cron/dispatch-scheduled-sends", schedule: "*/5 * * * *" },
   { path: "/api/cron/dispatch-founder-meeting-reminders", schedule: "*/5 * * * *" },
   { path: "/api/cron/sms-reply-agent", schedule: "*/5 * * * *" },
   { path: "/api/cron/enroll-drips", schedule: "*/15 * * * *" },
-  { path: "/api/cron/scan-lender-replies?write=1", schedule: "*/10 * * * *" },
   { path: "/api/cron/dispatch-drips", schedule: "*/5 * * * *" },
   { path: "/api/cron/reconcile-drip-telemetry", schedule: "17 * * * *" },
   { path: "/api/cron/reconcile-website-sales-payments", schedule: "17 * * * *" },
   { path: "/api/cron/dispatch-scheduled-calls", schedule: "*/5 * * * *" },
-  { path: "/api/cron/sync-tt-inbox", schedule: "*/30 * * * *" },
-  { path: "/api/cron/sync-tt-inbox?account=followup", schedule: "*/30 * * * *" },
   { path: "/api/cron/operator-email-agent?write=1", schedule: "*/10 * * * *" },
-  { path: "/api/cron/scan-bounces?write=1", schedule: "*/30 * * * *" },
-  { path: "/api/cron/scan-bounces?write=1&brand=bluerise", schedule: "*/30 * * * *" },
-  { path: "/api/cron/scan-funmate-replies?write=1", schedule: "*/30 * * * *" },
-  { path: "/api/cron/sweep-stale-sent-app", schedule: "0 13 * * *" },
-  { path: "/api/cron/kixie-compliance-scan", schedule: "10 13 * * *" },
-  { path: "/api/cron/kixie-compliance-scan?mode=weekly", schedule: "40 13 * * 1" },
-  { path: "/api/cron/enroll-accelerated", schedule: "*/15 * * * *" },
-  { path: "/api/cron/tps-enroll?write=1", schedule: "*/10 * * * *" },
-  { path: "/api/cron/tps-backlog-watch", schedule: "0 */6 * * *" },
-  { path: "/api/cron/renewal-thresholds", schedule: "15 13 * * *" },
   { path: "/api/cron/health-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
-  { path: "/api/cron/sync-sms-numbers", schedule: "0 6,18 * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
-  { path: "/api/cron/dispatch-bulk-email", schedule: "*/5 * * * *" },
 ];
 
 // Self-contained runtime types: this dir sits inside the Next app's tsconfig
