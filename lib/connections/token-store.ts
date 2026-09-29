@@ -60,9 +60,12 @@ export type OAuthTokens = {
 /** A refresh call must finish well inside the lease. */
 export const REFRESH_TIMEOUT_MS = 30_000;
 /**
- * The most a save of refreshed tokens may take. Refresh plus save stay well
- * inside REFRESH_LEASE_MS (tests/os-connections.test.ts holds the sum under it),
- * so a lease cannot lapse while its holder is still writing.
+ * How long a holder WAITS for its token save. Refresh plus this stay well
+ * inside REFRESH_LEASE_MS (tests/os-connections.test.ts holds the sum under
+ * it). It stops the wait, not the write: a save stalled past the lease could
+ * still land after a newer holder's. The fix is a write fenced by the holder's
+ * token_version; until then the "[gate]" test keeps every OAuth provider from
+ * going live (nothing calls getAccessToken while they are all coming_soon).
  */
 export const TOKEN_SAVE_TIMEOUT_MS = 30_000;
 
@@ -261,8 +264,9 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
 
   // The lease must cover the save too (CodeRabbit #472): past it, another
   // caller may already have taken the lease and refreshed with the old refresh
-  // token. So the save is bounded, it only starts while the lease still covers
-  // it, and a lease that turns out to be lost returns no token.
+  // token. So the wait for the save is bounded, the save only starts while the
+  // lease still covers it, and a lease that turns out to be lost returns no
+  // token. (The write itself is not fenced yet: see TOKEN_SAVE_TIMEOUT_MS.)
   let saved = false;
   try {
     if (now().getTime() + TOKEN_SAVE_TIMEOUT_MS >= leaseEndsMs) {
