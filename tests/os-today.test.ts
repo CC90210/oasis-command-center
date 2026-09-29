@@ -467,6 +467,25 @@ async function main() {
   assert.match(nc, /Not connected Connect/);
   assert.doesNotMatch(nc, /(^|\s)0(\s|$)/);
 
+  // "Within SLA" is a claim about every open ticket. A capped read with nothing
+  // breached in the rows it DID see cannot make it (CodeRabbit #469).
+  const quietDelivery = { ...delivery, breached: [], atRisk: [] };
+  const slaCard = (truncated: boolean) =>
+    buildDepartmentCards({
+      departments: OS_DEPARTMENTS.filter((d) => d.key === "client_success").map((d) => ({ key: d.key, label: d.label, href: d.href })),
+      needsYou: { items: [], unavailable: [] },
+      sales: failed,
+      delivery: { ok: true, value: { ...quietDelivery, truncated } },
+      content: { ok: true, value: 0 },
+      goal: null,
+      stripeConnected: null,
+    })[0];
+  assert.equal(slaCard(false).status, "Within SLA");
+  assert.equal(slaCard(false).tone, "ok");
+  assert.equal(slaCard(true).status, "SLA not fully checked", "a capped read never says Within SLA");
+  assert.equal(slaCard(true).tone, "attention");
+  assert.equal(slaCard(true).metric.kind === "live" && slaCard(true).metric.value, "3+", "the open count is a floor too");
+
   const gapsList = render(createElement(NeedsYouList, { needsYou: gaps }));
   assert.match(gapsList, /Couldn.t check support tickets, pipeline follow-ups, inbound replies/);
   assert.doesNotMatch(gapsList, /Nothing needs you right now/, "an unread source is not 'all clear'");

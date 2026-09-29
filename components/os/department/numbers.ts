@@ -54,6 +54,8 @@ export type AttentionItem = {
   href: string | null;
   /** How many things this line stands for; the header's "Needs you" sums them. */
   count: number;
+  /** The count came from a capped read, so it is a floor (and so is any sum that includes it). */
+  capped?: boolean;
 };
 
 export type DepartmentNumbers = {
@@ -185,7 +187,7 @@ function pipelineTiles(p: Read<PipelineFigures> | null, compact: boolean): KpiTi
     first,
     {
       label: v.own ? "Your new leads 7d" : "New leads 7d",
-      value: v.capped ? `${n(v.new7d)}+` : n(v.new7d),
+      value: tileCount(v.new7d, v.capped),
       status: "live",
       hint: "Created in the last 7 days",
     },
@@ -260,6 +262,7 @@ function breachAttention(d: DeliveryFigures): AttentionItem[] {
     {
       id: "sla-breached",
       count: d.breached,
+      capped: d.truncated,
       label: `${tileCount(d.breached, d.truncated)} ticket${d.breached === 1 && !d.truncated ? "" : "s"} past the first-response target`,
       href: "/tickets?sla=breached",
     },
@@ -339,7 +342,7 @@ async function marketingNumbers(viewer: OsViewer): Promise<DepartmentNumbers> {
       forms.ok
         ? {
             label: "Form submissions 7d",
-            value: forms.value.capped ? `${n(forms.value.submissions)}+` : n(forms.value.submissions),
+            value: tileCount(forms.value.submissions, forms.value.capped),
             status: "live",
             hint: "People who submitted a form",
           }

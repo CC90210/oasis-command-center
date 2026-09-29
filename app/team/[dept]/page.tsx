@@ -93,13 +93,15 @@ export default async function DepartmentPage({
       }
     : routines;
   const needsYou = numbers.attention.reduce((sum, item) => sum + item.count, 0);
+  // Any floor in the sum makes the total a floor too.
+  const needsYouCapped = numbers.attention.some((item) => item.capped === true);
   const profile = departmentProfile(dept.key);
 
   return (
     <DepartmentTab
       dept={dept}
       purpose={profile.purpose}
-      status={statusFor(channel.kind === "ready", needsYou)}
+      status={statusFor(channel.kind === "ready", needsYou, needsYouCapped)}
       channel={channel}
       prefill={prefill}
       overview={{

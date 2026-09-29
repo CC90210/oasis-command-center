@@ -52,6 +52,10 @@ export function watchPopup(args: {
   };
   function onMessage(e: MessageEvent) {
     if (e.origin !== env.origin) return;
+    // Only the popup this watch opened may finish it: another same-origin
+    // window (a second connect attempt, a stale tab) posting the same connector
+    // source must not close this popup or report its result (CodeRabbit #469).
+    if (e.source !== (popup as unknown as MessageEventSource)) return;
     const d = e.data as { source?: string; status?: string; reason?: string } | null;
     if (!d || d.source !== source) return;
     finish({ status: d.status, reason: d.reason });

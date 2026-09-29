@@ -436,8 +436,9 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.ca
         },
         clearInterval: (id: unknown) => void timers.delete(id as number),
       },
-      post: (origin: string, data: unknown) => {
-        for (const fn of [...listeners]) fn({ origin, data } as MessageEvent);
+      // `from` is the window that sent the message (MessageEvent.source).
+      post: (origin: string, data: unknown, from?: unknown) => {
+        for (const fn of [...listeners]) fn({ origin, data, source: from ?? null } as unknown as MessageEvent);
       },
       tick: () => {
         for (const fn of [...timers.values()]) fn();
@@ -449,15 +450,21 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.ca
   {
     const w = fakeWindow();
     const done: unknown[] = [];
-    watchPopup({ popup: { closed: false }, source: "constant_contact", env: w.env, onDone: (r) => done.push(r) });
+    const popup = { closed: false };
+    const otherWindow = { closed: false };
+    watchPopup({ popup, source: "constant_contact", env: w.env, onDone: (r) => done.push(r) });
     assert.equal(w.listeners.size, 1);
     assert.equal(w.timers.size, 1);
-    w.post("https://evil.test", { source: "constant_contact", status: "connected" });
-    w.post("https://app.test", { source: "other", status: "connected" });
-    w.post("https://app.test", null);
-    assert.deepEqual(done, [], "another origin or source is not this popup's answer");
-    w.post("https://app.test", { source: "constant_contact", status: "error", reason: "admin_only" });
+    w.post("https://evil.test", { source: "constant_contact", status: "connected" }, popup);
+    w.post("https://app.test", { source: "other", status: "connected" }, popup);
+    w.post("https://app.test", null, popup);
+    // Same origin, same connector source, but ANOTHER window (a second connect
+    // attempt, a stale tab): it must not finish this popup (CodeRabbit #469).
+    w.post("https://app.test", { source: "constant_contact", status: "connected" }, otherWindow);
     w.post("https://app.test", { source: "constant_contact", status: "connected" });
+    assert.deepEqual(done, [], "another origin, source or window is not this popup's answer");
+    w.post("https://app.test", { source: "constant_contact", status: "error", reason: "admin_only" }, popup);
+    w.post("https://app.test", { source: "constant_contact", status: "connected" }, popup);
     assert.deepEqual(done, [{ status: "error", reason: "admin_only" }], "one answer, once");
     assert.equal(w.listeners.size + w.timers.size, 0, "the listener and the poll are gone after the answer");
   }
@@ -486,7 +493,7 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.ca
     assert.equal(w.listeners.size + w.timers.size, 0, "stop removes the listener and clears the poll");
     popup.closed = true;
     w.tick();
-    w.post("https://app.test", { source: "constant_contact", status: "connected" });
+    w.post("https://app.test", { source: "constant_contact", status: "connected" }, popup);
     assert.deepEqual(done, [], "no callback after stop");
   }
   const hub = read("components/os/connections/ConnectionsHub.tsx");

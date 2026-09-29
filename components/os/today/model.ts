@@ -680,14 +680,19 @@ function departmentCard(
       const d = r.value;
       // Breached / at-risk come from the same capped ticket read as the open
       // count, so all three are floors whenever it was capped (lib/os/count.ts).
+      // "Within SLA" is a claim about EVERY open ticket; a capped read cannot
+      // make it, since tickets past the ceiling may be breached (CodeRabbit
+      // #469). Such a read says the check is incomplete instead.
       return {
         ...base,
-        tone: d.breached.length > 0 ? "needs_you" : d.atRisk.length > 0 ? "attention" : "ok",
+        tone: d.breached.length > 0 ? "needs_you" : d.atRisk.length > 0 || d.truncated ? "attention" : "ok",
         status: d.breached.length > 0
           ? `${floorCount(d.breached.length, d.truncated)} past SLA`
           : d.atRisk.length > 0
             ? `${floorCount(d.atRisk.length, d.truncated)} close to SLA`
-            : "Within SLA",
+            : d.truncated
+              ? "SLA not fully checked"
+              : "Within SLA",
         metric: {
           kind: "live",
           value: floorCount(d.openTickets, d.truncated),

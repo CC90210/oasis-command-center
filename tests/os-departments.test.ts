@@ -30,6 +30,7 @@ import {
   suggestedAsksFor,
 } from "../components/os/department/config";
 import { tileCount } from "../components/os/department/count-rules";
+import { statusFor } from "../components/os/department/StatusPill";
 import {
   describeSchedule,
   failedWithin,
@@ -344,6 +345,22 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
     2,
     "Chief of Staff and Client Success both print open tickets through tileCount",
   );
+  // No hand-rolled floor anywhere in the tile builders (CodeRabbit #469 found
+  // two: new leads this week and form submissions).
+  assert.doesNotMatch(numbers, /\$\{n\([^)]*\)\}\+/, "a tile hand-rolls a floor marker instead of tileCount");
+
+  // The header's "Needs you" total is a floor whenever any item behind it is
+  // (CodeRabbit #469): the header must not print "2" over a line saying "2+".
+  assert.deepEqual(statusFor(true, 2, true), { kind: "needs_you", count: 2, capped: true });
+  assert.deepEqual(statusFor(true, 2), { kind: "needs_you", count: 2, capped: false }, "uncapped by default");
+  assert.deepEqual(statusFor(true, 0, true), { kind: "working" });
+  assert.deepEqual(statusFor(false, 2, true), { kind: "not_connected" });
+  const pill = read("components/os/department/StatusPill.tsx");
+  assert.match(pill, /floorCount\(status\.count, status\.capped\)/, "the pill prints the total through the shared floor rule");
+  assert.match(numbers, /capped: d\.truncated/, "a breach item carries its read's cap");
+  const page = read("app/team/[dept]/page.tsx");
+  assert.match(page, /numbers\.attention\.some\(\(item\) => item\.capped === true\)/);
+  assert.match(page, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
 }
 
 console.log(
