@@ -160,6 +160,7 @@ function splitSql(sql: string): string[] {
 }
 
 const MIGRATION = join(ROOT, "database", "turso", "bravo__186_os_approvals.sql");
+const LEDGER_MIGRATION = join(ROOT, "database", "turso", "bravo__190_ledger_core.sql");
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const req = (url: string, body?: unknown, raw?: string) =>
   new Request(url, {
@@ -229,6 +230,9 @@ async function main() {
       created_at TEXT DEFAULT (datetime('now')), started_at TEXT, finished_at TEXT);
   `);
   for (const stmt of splitSql(readFileSync(MIGRATION, "utf8"))) await raw.execute(stmt);
+  // Every lifecycle write mirrors into the Business Ledger in the same batch
+  // (bravo__190). executeMultiple, because its triggers carry their own `;`.
+  await raw.executeMultiple(readFileSync(LEDGER_MIGRATION, "utf8"));
 
   const { parseManifest } = await import("../lib/manifest/schema");
   const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
