@@ -883,42 +883,74 @@ export async function claimForExecution(db: Client, tenantId: string, id: string
   return results[0].rowsAffected === 1;
 }
 
+type ExecutionOutcome = { status: "executed" | "failed"; result: ExecutionResult };
+/** What the finish's ledger row needs from the approval; neither changes after create. */
+export type ExecutionLedgerFacts = Pick<ApprovalRow, "action_kind" | "department_key">;
+
+/**
+ * The ledger mirror of a finish. Codes only: the executor's full account
+ * (message, from, would_send) stays in execution_result and the
+ * approval_events meta.
+ */
+function executionLedger(approval: ExecutionLedgerFacts, outcome: ExecutionOutcome) {
+  const r = outcome.result as { outcome?: unknown; provider?: unknown; reason?: unknown };
+  return outcome.status === "executed"
+    ? {
+        key: "approval.executed" as const,
+        department: approval.department_key,
+        payload: {
+          action_kind: approval.action_kind,
+          outcome: isLedgerCode(r.outcome) ? r.outcome : "unspecified",
+          ...(isLedgerCode(r.provider) ? { provider: r.provider } : {}),
+        },
+      }
+    : {
+        key: "approval.failed" as const,
+        department: approval.department_key,
+        payload: { action_kind: approval.action_kind, reason: isLedgerCode(r.reason) ? r.reason : "unspecified" },
+      };
+}
+
+/**
+ * BEFORE the claim (execute.ts): prove the finish can record its ledger row.
+ * The finish runs after the send; if its batch failed there (outcome_events
+ * missing, or a row the ledger refuses), it would roll back and leave the
+ * approval `executing` with the provider's result lost, although the email
+ * went out. So both possible finish rows are built (and validated) now, and
+ * outcome_events is read once. Either failing throws here, while the approval
+ * is still `approved` and nothing has left the business.
+ */
+export async function assertExecutionLedgerReady(db: Client, approval: ApprovalRow, now: Date): Promise<void> {
+  const t = requireTenant(approval.tenant_id);
+  const nowIso = now.toISOString();
+  const system: Actor = { type: "system", id: null };
+  const probes: ExecutionOutcome[] = [
+    { status: "executed", result: { outcome: "sent", provider: "readiness" } },
+    { status: "failed", result: { outcome: "failed", reason: "readiness", message: "" } },
+  ];
+  for (const o of probes) eventWithLedger(t, approval.id, o.status, system, null, nowIso, executionLedger(approval, o));
+  await db.execute({ sql: "SELECT 1 FROM outcome_events WHERE tenant_id = ? LIMIT 1", args: [t] });
+}
+
 /**
  * executing → executed | failed, with the executor's own account. Throws if
  * the row is not `executing`: under the claim above that cannot happen, and if
  * it ever does, a second writer exists and that is a loud bug, not a detail.
+ *
+ * `approval` is the row the executor already read after its claim. Nothing is
+ * read here: this runs after the outward action, so it does only the one batch.
  */
 export async function finishExecution(
   db: Client,
   tenantId: string,
   id: string,
-  outcome: { status: "executed" | "failed"; result: ExecutionResult },
+  outcome: ExecutionOutcome,
   now: Date,
+  approval: ExecutionLedgerFacts,
 ): Promise<void> {
   const t = requireTenant(tenantId);
   const nowIso = now.toISOString();
   const resultJson = JSON.stringify(outcome.result);
-  const row = await getApprovalInTenant(db, t, id);
-  if (!row) throw new Error(`approvals: finishExecution found ${id} not executing`);
-  // Codes only in the ledger; the executor's full account (message, from,
-  // would_send) stays in execution_result and the approval_events meta.
-  const r = outcome.result as { outcome?: unknown; provider?: unknown; reason?: unknown };
-  const ledger =
-    outcome.status === "executed"
-      ? {
-          key: "approval.executed" as const,
-          department: row.department_key,
-          payload: {
-            action_kind: row.action_kind,
-            outcome: isLedgerCode(r.outcome) ? r.outcome : "unspecified",
-            ...(isLedgerCode(r.provider) ? { provider: r.provider } : {}),
-          },
-        }
-      : {
-          key: "approval.failed" as const,
-          department: row.department_key,
-          payload: { action_kind: row.action_kind, reason: isLedgerCode(r.reason) ? r.reason : "unspecified" },
-        };
   const results = await db.batch(
     [
       {
@@ -926,7 +958,15 @@ export async function finishExecution(
               WHERE tenant_id = ? AND id = ? AND status = 'executing'`,
         args: [outcome.status, nowIso, resultJson, nowIso, t, id],
       },
-      ...eventWithLedger(t, id, outcome.status, { type: "system", id: null }, outcome.result as Record<string, unknown>, nowIso, ledger),
+      ...eventWithLedger(
+        t,
+        id,
+        outcome.status,
+        { type: "system", id: null },
+        outcome.result as Record<string, unknown>,
+        nowIso,
+        executionLedger(approval, outcome),
+      ),
     ],
     "write",
   );

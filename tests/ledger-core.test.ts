@@ -153,6 +153,8 @@ async function main() {
   const route = await import("../app/api/ledger/ingest/route");
   const store = await import("../lib/os/approvals/store");
 
+  // A native emit names the key's owning module as its producer (one writer per key).
+  const ownerOf = (key: string) => catalog.LEDGER_CATALOG.get(key)?.owningModule ?? "unknown-module";
   const base = (over: Partial<EmitInput> = {}): EmitInput => ({
     tenantId: OASIS,
     eventKey: "lead.captured",
@@ -165,7 +167,7 @@ async function main() {
     idempotencyKey: "form:sub-1",
     confidence: "verified",
     payload: { capture_channel: "form", form_id: "form-1" },
-    producer: "app/api/forms/submit/route.ts",
+    producer: ownerOf(over.eventKey ?? "lead.captured"),
     ...over,
   });
   const refused = (fn: () => unknown, code: string, field?: string) => {
@@ -212,6 +214,31 @@ async function main() {
     await assert.rejects(db.execute({ sql: "UPDATE outcome_events SET tenant_id = ?", args: [CLIENT] }), /append-only/);
     await assert.rejects(db.execute({ sql: "DELETE FROM outcome_events WHERE tenant_id = ?", args: [OASIS] }), /append-only/);
     assert.equal(await ledgerCount("tenant_id = ?", [OASIS]), 1);
+  });
+
+  await check("REPLACE cannot rewrite a row: INSERT OR REPLACE / REPLACE INTO on a stored key or id are no-ops", async () => {
+    // SQLite fires no DELETE trigger for a REPLACE's delete while recursive_triggers is off.
+    assert.equal(Number((await db.execute("PRAGMA recursive_triggers")).rows[0]?.recursive_triggers), 0);
+    await db.batch([emit(base({ idempotencyKey: "form:replace-1" }))], "write");
+    const stored = async () =>
+      (await db.execute({ sql: "SELECT * FROM outcome_events WHERE tenant_id = ? AND idempotency_key = 'form:replace-1'", args: [OASIS] })).rows;
+    const [before] = await stored();
+    const asReplace = (sql: string, verb: string) => sql.replace(/^INSERT INTO/, verb).replace(/\s*ON CONFLICT[\s\S]*$/, "");
+    // The same key, different content and an older time.
+    const other = emit(base({ idempotencyKey: "form:replace-1", occurredAt: "2020-01-01T00:00:00.000Z", payload: { capture_channel: "dm" } }));
+    for (const verb of ["INSERT OR REPLACE INTO", "REPLACE INTO"]) {
+      assert.equal((await db.execute({ sql: asReplace(other.sql, verb), args: other.args })).rowsAffected, 0, `${verb} on the key`);
+    }
+    // The same id under a new key.
+    const sameId = emit(base({ idempotencyKey: "form:replace-2", payload: { capture_channel: "dm" } }));
+    const args = [...sameId.args];
+    args[0] = before.id;
+    assert.equal((await db.execute({ sql: asReplace(sameId.sql, "INSERT OR REPLACE INTO"), args })).rowsAffected, 0, "on the id");
+    assert.equal((await db.execute({ sql: "REPLACE INTO outcome_events SELECT * FROM outcome_events WHERE id = ?", args: [before.id] })).rowsAffected, 0);
+    assert.deepEqual(await stored(), [before], "the stored row is untouched");
+    assert.equal(await ledgerCount("idempotency_key = 'form:replace-2'"), 0);
+    // A new key still inserts through the same trigger.
+    assert.equal((await db.batch([emit(base({ idempotencyKey: "form:replace-3" }))], "write"))[0].rowsAffected, 1);
   });
 
   await check("tenant_id is required: emit refuses an empty or blank tenant, and the column refuses NULL", async () => {
@@ -261,6 +288,19 @@ async function main() {
     assert.equal(await count(db, "SELECT COUNT(*) AS n FROM ledger_purge_grants"), 0, "no grant survives the purge");
   });
 
+  await check("purge: an id typed in another case purges the stored (lower-case) tenant, never reports 0 over a full ledger", async () => {
+    await db.batch(
+      [
+        emit(base({ tenantId: SUNBIZ, idempotencyKey: "form:sb-3", subject: { type: "lead", id: "sb-lead" }, contactId: "sb-lead" })),
+        emit(base({ tenantId: SUNBIZ, idempotencyKey: "form:sb-4", subject: { type: "lead", id: "sb-lead" }, contactId: "sb-lead" })),
+      ],
+      "write",
+    );
+    const r = await purgeTenantLedger(db, { tenantId: ` ${SUNBIZ.toUpperCase()} `, operator: "cc", reason: "Law 25 offboard", now: new Date() });
+    assert.deepEqual(r, { tenantId: SUNBIZ, deleted: 2 });
+    assert.equal(await ledgerCount("tenant_id = ?", [SUNBIZ]), 0);
+  });
+
   // ── 3. Idempotency ───────────────────────────────────────────────────────
   console.log("idempotency");
   await check("the same key and content twice is one row; the conflict check is clean", async () => {
@@ -290,6 +330,41 @@ async function main() {
     const rs = await db.execute("SELECT payload_json FROM outcome_events WHERE idempotency_key = 'form:idem-2'");
     assert.equal(rs.rows.length, 1);
     assert.match(String(rs.rows[0].payload_json), /"form"/);
+  });
+
+  await check("payload_hash covers the fact (when, who, counted where, linked to what) and not how it was recorded", () => {
+    const hash = (over: Partial<EmitInput>, now = new Date("2026-09-29T00:00:00.000Z")) =>
+      emit(base({ idempotencyKey: "form:hash-1", ...over }), now).ledger.payloadHash;
+    const ref = hash({});
+    const fact: [string, Partial<EmitInput>][] = [
+      ["occurred_at", { occurredAt: "2025-01-01T00:00:00.000Z" }],
+      ["department_key", { department: "finance" }],
+      ["actor_type", { actor: { type: "agent", id: null } }],
+      ["actor_id", { actor: { type: "system", id: "scheduler-1" } }],
+      ["touch_id", { touchId: "touch-other" }],
+      ["approval_id", { approvalId: "appr-9" }],
+      ["routine_run_id", { routineRunId: "run-9" }],
+      ["subject_id", { subject: { type: "lead", id: "lead-oasis-2" }, contactId: "lead-oasis-2" }],
+      ["contact_id", { contactId: "lead-oasis-2" }],
+      ["deal_id", { dealId: "deal-9" }],
+      ["customer_id", { customerId: "cust-oasis-1" }],
+      ["payload", { payload: { capture_channel: "dm" } }],
+    ];
+    for (const [field, over] of fact) assert.notEqual(hash(over), ref, `${field} is part of the fact`);
+    const recording: [string, Partial<EmitInput>][] = [
+      ["source", { source: "import" }],
+      ["source_ref", { sourceRef: "row-17" }],
+      ["confidence", { confidence: "inferred" }],
+      ["causation_id", { causationId: "cause-1" }],
+      ["correlation_id", { correlationId: "corr-1" }],
+    ];
+    for (const [field, over] of recording) assert.equal(hash(over), ref, `${field} describes the recording, not the fact`);
+    assert.equal(hash({}, new Date("2027-01-01T00:00:00.000Z")), ref, "server time and the minted id are not content");
+    // Changing the list re-hashes every stored key: pinned.
+    assert.deepEqual([...emitMod.FACT_COLUMNS].sort(), [
+      "actor_id", "actor_type", "approval_id", "contact_id", "currency", "customer_id", "deal_id", "department_key",
+      "event_key", "event_version", "occurred_at", "routine_run_id", "subject_id", "subject_type", "touch_id", "value_cents",
+    ]);
   });
 
   await check("an unconditional ledger statement that never ran is reported missing", async () => {
@@ -325,6 +400,52 @@ async function main() {
     refused(() => emit(base({ actor: { type: "human", id: "Jane Doe" } })), "not_an_id", "actor_id");
   });
 
+  await check("a phone number, a postal code or a name pair is not an id, even in id characters", () => {
+    const personal = [
+      "5145550199", "15145550199", "514-555-0199", "514.555.0199", "555-0199", "1-514-555-0199",
+      "H2X1Y4", "H2X-1Y4", "h2x1y4", "Jane.Doe", "Jean-Tremblay", "Jean_Tremblay", "Marie.Claire.Roy",
+    ];
+    for (const v of personal) {
+      assert.equal(catalog.isLedgerId(v), false, v);
+      refused(() => emit(base({ payload: { capture_channel: "form", form_id: v } })), "payload_not_an_id", "payload.form_id");
+    }
+    refused(() => emit(base({ subject: { type: "lead", id: "5145550199" } })), "not_an_id", "subject.id");
+    refused(() => emit(base({ contactId: "514-555-0199" })), "not_an_id", "contact_id");
+    refused(() => emit(base({ actor: { type: "human", id: "Jean.Tremblay" } })), "not_an_id", "actor_id");
+    refused(() => emit(base({ touchId: "H2X-1Y4" })), "not_an_id", "touch_id");
+    // Real ids keep working: uuids, slugs, provider ids, long platform ids, a namespaced numeric id.
+    for (const v of [OASIS, "lead-oasis-1", "form-1", "ch_3PabcDEF", "gmail-18f2a", "18f2a3b4c5d6e7f8", "17841400000000000",
+      "tg:5165125484", "sales.team", "cust_123456", "1234567", "01J9ZK3M4N5P6Q7R8S9T0V1W2X"]) {
+      assert.equal(catalog.isLedgerId(v), true, v);
+    }
+  });
+
+  await check("a timestamp must carry its zone: a naive one is refused, not read in the server's local time", () => {
+    refused(() => emit(base({ occurredAt: "2026-09-20T10:00:00" })), "occurred_at_invalid", "occurred_at");
+    refused(() => emit(base({ occurredAt: "2026-09-20T10:00:00.123456" })), "occurred_at_invalid", "occurred_at");
+    const at = (occurredAt: string) => emit(base({ idempotencyKey: "form:tz-1", occurredAt })).args[4];
+    assert.equal(at("2026-09-20T10:00:00Z"), "2026-09-20T10:00:00.000Z");
+    assert.equal(at("2026-09-20T10:00:00.123456+00:00"), "2026-09-20T10:00:00.123Z", "Python's aware isoformat()");
+    assert.equal(at("2026-09-20T06:00:00-04:00"), "2026-09-20T10:00:00.000Z");
+    const meeting = (startsAt: string) =>
+      emit(base({ eventKey: "meeting.booked", subject: { type: "meeting", id: "ev1" }, idempotencyKey: "cal:google:ev1:booked:1",
+        payload: { provider: "google", provider_event_id: "ev1", starts_at: startsAt } }));
+    refused(() => meeting("2026-10-01T15:00:00"), "payload_not_a_time", "payload.starts_at");
+    assert.match(meeting("2026-10-01T15:00:00-04:00").args.at(-2) as string, /"starts_at":"2026-10-01T19:00:00.000Z"/);
+  });
+
+  await check("value_cents is never negative: money going back is refund.issued, not a negative payment", () => {
+    const pay = { eventKey: "payment.received", subject: { type: "payment", id: "ch_neg" }, contactId: null,
+      payload: { provider_payment_id: "ch_neg" }, source: "stripe" as const, idempotencyKey: "stripe:ch_neg", currency: "CAD" };
+    refused(() => emit(base({ ...pay, valueCents: -500000 })), "value_cents_negative", "value_cents");
+    refused(() => emit(base({ ...pay, eventKey: "invoice.paid", subject: { type: "invoice", id: "in_1" },
+      payload: { invoice_id: "in_1", source_system: "stripe" }, idempotencyKey: "inv:in_1:paid", valueCents: -1 })), "value_cents_negative", "value_cents");
+    refused(() => emit(base({ ...pay, eventKey: "refund.issued", subject: { type: "refund", id: "re_1" },
+      payload: { provider_refund_id: "re_1" }, idempotencyKey: "stripe:re_1", valueCents: -100 })), "value_cents_negative", "value_cents");
+    assert.ok(emit(base({ ...pay, valueCents: 0 })));
+    assert.ok(emit(base({ ...pay, valueCents: 500000 })));
+  });
+
   await check("value, vocabulary and backfill rules", () => {
     refused(() => emit(base({ valueCents: 5000, currency: "CAD" })), "value_not_allowed", "value_cents");
     const pay = { eventKey: "payment.received", subject: { type: "payment", id: "ch_1" }, contactId: null,
@@ -337,7 +458,7 @@ async function main() {
     refused(() => emit(base({ source: "fax" as never })), "source_unknown", "source");
     refused(() => emit(base({ confidence: "sure" as never })), "confidence_unknown", "confidence");
     refused(() => emit(base({ source: "backfill", confidence: "verified" })), "backfill_must_be_inferred", "confidence");
-    assert.ok(emit(base({ source: "backfill", confidence: "inferred", idempotencyKey: "import:b:1" })));
+    assert.ok(emit(base({ source: "backfill", confidence: "inferred", idempotencyKey: "form:backfill-1" })));
     refused(() => emit(base({ department: "legal" as never })), "department_unknown", "department_key");
     refused(() => emit(base({ idempotencyKey: "has a space" })), "idempotency_key_invalid", "idempotency_key");
   });
@@ -431,6 +552,69 @@ async function main() {
     assert.ok(emitters >= 1, "the approvals store emits, so the scan is not vacuous");
   });
 
+  await check("a key with more than one writer declares, per writer, the keys it may build; emit enforces the writer", () => {
+    let shared = 0;
+    for (const e of catalog.CATALOG_ENTRIES) {
+      const writers = [...(e.owningModule === catalog.INGEST_ONLY ? [] : ["native"]), ...e.producers];
+      if (writers.length > 1) {
+        shared += 1;
+        assert.ok(e.writers, `${e.key} has writers ${writers.join(", ")} and no writers declaration`);
+      }
+      if (e.writers) assert.deepEqual(Object.keys(e.writers).sort(), [...writers].sort(), `${e.key}: one pattern per writer, none for a non-writer`);
+    }
+    assert.ok(shared > 0, "the check is not vacuous");
+    // Every writer's pattern accepts the key its catalog template describes (a typo in a pattern refuses every real event).
+    const runKey = (p: string) => `run:${p}:r1`;
+    const examples: Record<string, Record<string, string>> = {
+      "message.sent": { native: "msg:gmail:18f2a", bea: "msg:gmail:18f2a" },
+      "content.published": { native: "post:instagram:17912345678901234", maven: "post:instagram:17912345678901234" },
+      "lead.captured": { native: "form:sub-1", bea: "email:18f2a" },
+      "meeting.booked": { native: "cal:google:ev1:booked:1", bea: "cal:google:ev1:booked:1" },
+      "meeting.rescheduled": { native: "cal:google:ev1:rescheduled:2", bea: "cal:google:ev1:rescheduled:2" },
+      "meeting.cancelled": { native: "cal:google:ev1:cancelled:3", bea: "cal:google:ev1:cancelled:3" },
+      "consent.revoked": { native: "consent:lead-1:sms:1", bea: "consent:lead-1:email:1" },
+      "suppression.added": { native: "suppress:sms:sup-1", bea: "suppress:email:sup-2" },
+      "routine.run_completed": { bea: runKey("bea"), maven: runKey("maven"), atlas: runKey("atlas") },
+      "routine.run_failed": { bea: runKey("bea"), maven: runKey("maven"), atlas: runKey("atlas") },
+    };
+    for (const e of catalog.CATALOG_ENTRIES) {
+      if (!e.writers) continue;
+      const ex = examples[e.key];
+      assert.ok(ex, `${e.key}: add an example key per writer here`);
+      for (const [writer, pattern] of Object.entries(e.writers)) {
+        assert.ok(pattern?.test(ex[writer] ?? ""), `${e.key}: ${writer}'s pattern accepts ${ex[writer]}`);
+      }
+    }
+    // A partition is a partition: no writer's example fits another writer's slice.
+    for (const key of ["lead.captured", "consent.revoked", "suppression.added", "routine.run_completed", "routine.run_failed"]) {
+      const w = catalog.LEDGER_CATALOG.get(key)?.writers ?? {};
+      for (const [a, pa] of Object.entries(w)) {
+        for (const [b, keyB] of Object.entries(examples[key])) if (a !== b) assert.equal(pa?.test(keyB), false, `${key}: ${a} may not build ${keyB}`);
+      }
+    }
+
+    // Native: only the owning module, and never for a key that arrives only through ingest.
+    refused(() => emit(base({ producer: "lib/drips/send.ts" })), "producer_not_owner", "producer");
+    refused(() => emit(base({ eventKey: "message.received", subject: { type: "message", id: "m1" }, contactId: null, producer: catalog.INGEST_ONLY,
+      payload: { channel: "email", provider: "gmail", provider_message_id: "m1", intent: "pricing_question" } })), "producer_not_owner", "producer");
+    // Ingest: only a listed producer.
+    refused(() => emit(base({ producer: "ingest:maven", idempotencyKey: "email:x1" })), "producer_not_allowed_for_event", "producer");
+    // Partitioned: the app records form captures; BEA records DM, email and import captures.
+    refused(() => emit(base({ idempotencyKey: "email:x1" })), "idempotency_key_off_template", "idempotency_key");
+    refused(() => emit(base({ producer: "ingest:bea", idempotencyKey: "form:x1" })), "idempotency_key_off_template", "idempotency_key");
+    assert.ok(emit(base({ producer: "ingest:bea:scripts/integrations/email_engine.py", idempotencyKey: "email:x1" })));
+    // Shared template: both writers of message.sent build msg:{provider}:{provider_message_id}, so one send lands once.
+    const sent = { eventKey: "message.sent", subject: { type: "message", id: "m1" }, payload: { channel: "email", provider: "gmail", provider_message_id: "m1" } };
+    refused(() => emit(base({ ...sent, idempotencyKey: "send:appr-1" })), "idempotency_key_off_template", "idempotency_key");
+    const native = emit(base({ ...sent, idempotencyKey: "msg:gmail:m1" }));
+    const viaBea = emit(base({ ...sent, producer: "ingest:bea", idempotencyKey: "msg:gmail:m1" }));
+    assert.equal(native.ledger.payloadHash, viaBea.ledger.payloadHash, "the same send from either writer is the same fact");
+    // Routine runs: each harness numbers its own, in its own namespace.
+    const run = { eventKey: "routine.run_completed", subject: { type: "routine_run", id: "r1" }, contactId: null, payload: { routine_key: "inbox_sweep" } };
+    assert.ok(emit(base({ ...run, producer: "ingest:bea", idempotencyKey: "run:bea:r1" })));
+    refused(() => emit(base({ ...run, producer: "ingest:bea", idempotencyKey: "run:maven:r1" })), "idempotency_key_off_template", "idempotency_key");
+  });
+
   // ── 7. Ingest ────────────────────────────────────────────────────────────
   console.log("ingest");
   const received = (over: Record<string, unknown> = {}) => ({
@@ -484,6 +668,81 @@ async function main() {
     assert.equal((await post(ingestRequest(body, { ts: now, sig: sign(raw, now - 400), raw }))).status, 401);
     assert.equal(await ledgerCount(), rows);
     assert.equal(await deadLetters(), letters, "unauthenticated input never reaches the database");
+  });
+
+  await check("the signature is over the raw bytes as sent: Python's spaced json.dumps verifies, a re-serialised body does not", async () => {
+    // json.dumps() with its default separators: ", " and ": ".
+    const pyDumps = (v: unknown): string =>
+      Array.isArray(v)
+        ? `[${v.map(pyDumps).join(", ")}]`
+        : v !== null && typeof v === "object"
+          ? `{${Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => `${JSON.stringify(k)}: ${pyDumps(x)}`).join(", ")}}`
+          : JSON.stringify(v);
+    const body = { events: [received({ idempotency_key: "gmail:py-spaced-1", payload: { channel: "email", provider: "gmail", provider_message_id: "py1", intent: "pricing_question" } })] };
+    const spaced = pyDumps(body);
+    assert.notEqual(spaced, JSON.stringify(body));
+    const ok = await post(ingestRequest(null, { raw: spaced }));
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const ts = Math.floor(Date.now() / 1000);
+    const signedCompact = await post(ingestRequest(null, { raw: spaced, ts, sig: sign(JSON.stringify(body), ts) }));
+    assert.equal(signedCompact.status, 401, "a signature over another serialisation of the same JSON is not this body's");
+  });
+
+  await check("a producer may not re-file a department, claim a human did it, or mark it human_confirmed", async () => {
+    const rows = await ledgerCount();
+    const r = await post(
+      ingestRequest({
+        events: [
+          received({ idempotency_key: "gmail:claim-1", department_key: "finance" }),
+          received({ idempotency_key: "gmail:claim-2", actor: { type: "human", id: CC_USER } }),
+          received({ idempotency_key: "gmail:claim-3", confidence: "human_confirmed" }),
+          received({ idempotency_key: "gmail:claim-4", department_key: "sales" }),
+        ],
+      }),
+    );
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body.results?.map((x) => [x.status, x.error ?? null, x.field ?? null]), [
+      ["rejected", "department_not_allowed", "department_key"],
+      ["rejected", "actor_not_allowed", "actor_type"],
+      ["rejected", "confidence_not_allowed", "confidence"],
+      ["written", null, null],
+    ]);
+    assert.equal(await ledgerCount(), rows + 1);
+    const row = (await db.execute("SELECT department_key, actor_type, confidence FROM outcome_events WHERE idempotency_key = 'gmail:claim-4'")).rows[0];
+    assert.deepEqual([row.department_key, row.actor_type, row.confidence], ["sales", "external", "verified"]);
+  });
+
+  await check("BEA may not write the app's slice of a shared key (a form capture)", async () => {
+    const r = await post(ingestRequest({ events: [captured({ idempotency_key: "form:sub-from-bea" })] }));
+    assert.equal(r.status, 422);
+    assert.equal(r.body.results?.[0].error, "idempotency_key_off_template");
+    assert.equal(await ledgerCount("idempotency_key = 'form:sub-from-bea'"), 0);
+  });
+
+  await check("a chunked body with no Content-Length is cut off at the cap, not read whole before the signature check", async () => {
+    let pulled = 0;
+    const chunk = new Uint8Array(64 * 1024).fill(0x20);
+    const total = 128;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled += 1;
+        if (pulled > total) c.close();
+        else c.enqueue(chunk.slice());
+      },
+    });
+    const req = new Request("https://occ.test/api/ledger/ingest", {
+      method: "POST",
+      headers: { "x-ledger-producer": "bea", "x-ledger-timestamp": String(Math.floor(Date.now() / 1000)), "x-ledger-signature": "0".repeat(64) },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    assert.equal(req.headers.get("content-length"), null, "chunked: no declared length");
+    const letters = await deadLetters();
+    const r = await post(req);
+    assert.equal(r.status, 413);
+    const cap = Math.ceil(ingestMod.MAX_BODY_BYTES / chunk.byteLength);
+    assert.ok(pulled <= cap + 3, `read ${pulled} of ${total} chunks; the cap is ${cap}`);
+    assert.equal(await deadLetters(), letters, "unauthenticated: nothing written");
   });
 
   await check("a producer whose secret is not configured is 503, never open", async () => {
@@ -583,6 +842,36 @@ async function main() {
     assert.match(String(dl.payload_json), /\[redacted\]/);
   });
 
+  await check("a dead letter keeps no phone number (as text or as a number) and no PII in a payload KEY, in any column", async () => {
+    const mk = (key: string, payload: Record<string, unknown>) => received({ idempotency_key: key, payload: { channel: "sms", provider: "kixie", intent: "callback", ...payload } });
+    const r = await post(
+      ingestRequest({
+        events: [
+          mk("sms:pii-2", { provider_message_id: "514-555-0199" }),
+          mk("sms:pii-3", { provider_message_id: "m3", phone: 5145550199 }),
+          mk("sms:pii-4", { provider_message_id: "m4", "jane.doe@harbour.test": 1 }),
+          mk("sms:pii-5", { provider_message_id: "m5", "5145550199": true }),
+          mk("5145550199", { provider_message_id: "Jean.Tremblay" }),
+        ],
+      }),
+    );
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body.results?.map((x) => x.error), [
+      "payload_not_an_id", "payload_field_unknown", "payload_field_unknown", "payload_field_unknown", "payload_not_an_id",
+    ]);
+    const letters = (await db.execute(
+      "SELECT idempotency_key, payload_json, error FROM ledger_dead_letters WHERE last_seen = (SELECT MAX(last_seen) FROM ledger_dead_letters)",
+    )).rows;
+    assert.ok(letters.length >= 5, `${letters.length} dead letters`);
+    const stored = JSON.stringify(letters);
+    for (const pii of [/5145550199/, /514-555-0199/, /harbour/, /Tremblay/]) assert.doesNotMatch(stored, pii);
+    const byKey = new Map(letters.map((l) => [String(l.idempotency_key), l]));
+    assert.equal(byKey.get("sms:pii-4")?.error, "payload_field_unknown:payload.[redacted-key]");
+    assert.equal(byKey.get("sms:pii-5")?.error, "payload_field_unknown:payload.[redacted-key]");
+    assert.match(String(byKey.get("sms:pii-3")?.payload_json), /"phone":"\[redacted\]"/);
+    assert.equal(byKey.get("sms:pii-3")?.error, "payload_field_unknown:payload.phone", "a plain key is kept, so Operations can see what was sent");
+  });
+
   await check("the same key re-sent with different content is refused as idempotency_key_reused; a repeat bumps attempts", async () => {
     const r = await post(ingestRequest({ events: [received({ payload: { channel: "email", provider: "gmail", provider_message_id: "18f2a", intent: "complaint" } })] }));
     assert.equal(r.status, 422);
@@ -596,6 +885,18 @@ async function main() {
     const dl = (await db.execute("SELECT attempts FROM ledger_dead_letters WHERE idempotency_key = 'gmail:pii-1'")).rows;
     assert.equal(dl.length, 1, "one row per distinct refused event");
     assert.equal(Number(dl[0].attempts), 2);
+  });
+
+  await check("a re-send that moves the fact in time or re-attributes it is idempotency_key_reused, not a silent duplicate", async () => {
+    // gmail:18f2a was written above, occurred 2026-09-28T14:00Z, no touch.
+    for (const over of [{ occurred_at: "2025-01-01T00:00:00.000Z" }, { touch_id: "touch-other" }, { actor: { type: "agent", id: "bea" } }]) {
+      const r = await post(ingestRequest({ events: [received(over)] }));
+      assert.equal(r.body.results?.[0].error, "idempotency_key_reused", JSON.stringify(over));
+    }
+    const same = await post(ingestRequest({ events: [received({ source_ref: "retry-2", producer_ref: "scripts/other.py" })] }));
+    assert.equal(same.body.results?.[0].status, "duplicate", "how it was sent is not the fact");
+    const row = (await db.execute("SELECT occurred_at, touch_id FROM outcome_events WHERE idempotency_key = 'gmail:18f2a'")).rows;
+    assert.deepEqual([row.length, row[0].occurred_at, row[0].touch_id], [1, "2026-09-28T14:00:00.000Z", null]);
   });
 
   await check("a signed body that is not {events:[1..100]} is 400 and dead-lettered", async () => {
@@ -731,7 +1032,7 @@ async function main() {
     // Execute: claim (not mirrored) then finish; the provider's message id and
     // sender address stay out of the ledger.
     assert.ok(await store.claimForExecution(db, OASIS, a.id, NOW));
-    await store.finishExecution(db, OASIS, a.id, { status: "executed", result: { outcome: "sent", provider: "oasis_mailbox", message_id: "<m1@oasisai.work>", from: "cc@oasisai.work" } }, NOW);
+    await store.finishExecution(db, OASIS, a.id, { status: "executed", result: { outcome: "sent", provider: "oasis_mailbox", message_id: "<m1@oasisai.work>", from: "cc@oasisai.work" } }, NOW, a);
     const executed = (await mirror(a.id)).filter((r) => r.event_key === "approval.executed");
     assert.equal(executed.length, 1);
     assert.deepEqual(JSON.parse(String(executed[0].payload_json)), { action_kind: "send_email", outcome: "sent", provider: "oasis_mailbox" });
@@ -753,7 +1054,7 @@ async function main() {
     const ok = await store.decideApproval(db, scope, b.id, { kind: "approve", payloadHash: b.payload_hash }, NOW);
     assert.ok(ok.ok);
     assert.ok(await store.claimForExecution(db, OASIS, b.id, NOW));
-    await store.finishExecution(db, OASIS, b.id, { status: "failed", result: { outcome: "failed", reason: "read_failed", message: "The draft for Lee could not be read." } }, NOW);
+    await store.finishExecution(db, OASIS, b.id, { status: "failed", result: { outcome: "failed", reason: "read_failed", message: "The draft for Lee could not be read." } }, NOW, b);
     const failed = (await mirror(b.id)).find((r) => r.event_key === "approval.failed");
     assert.deepEqual(JSON.parse(String(failed?.payload_json)), { action_kind: "send_email", reason: "read_failed" });
 
@@ -782,6 +1083,63 @@ async function main() {
     const after = await store.getApprovalInTenant(db, OASIS, a.id);
     assert.equal(after?.status, "pending", "the decision rolled back with its ledger row");
     assert.equal(await count(db, "SELECT COUNT(*) AS n FROM approval_events WHERE approval_id = ? AND event = 'approved'", [a.id]), 0);
+  });
+
+  await check("execute: a ledger that cannot record the outcome refuses BEFORE the claim; nothing is sent and the row stays approved", async () => {
+    const { executeApproval } = await import("../lib/os/approvals/execute");
+    type ExecutorDeps = import("../lib/os/approvals/executors").ExecutorDeps;
+    const sent: unknown[] = [];
+    const deps: ExecutorDeps = {
+      isDryRun: () => false,
+      sendEmail: async (args) => {
+        sent.push(args);
+        return { ok: true, provider: "oasis_shared_gmail", gmail_message_id: "<m-ready@oasisai.work>", from_address: "team@oasisai.work" };
+      },
+      emailSuppression: async () => ({ suppressed: false, checkFailed: false }),
+      marketingDb: () => {
+        throw new Error("not used by send_email");
+      },
+      marketingSql: () => db,
+      foundersTenantIds: () => [OASIS],
+      signerFor: () => null,
+      publishEvent: async () => {},
+    };
+    // An approval approved before bravo__190 was applied, executed against a
+    // database that still lacks it: every statement naming outcome_events
+    // fails there exactly as it would in production.
+    const missing = () => new Error("SQLITE_ERROR: no such table: outcome_events");
+    const names = (s: unknown) => /\boutcome_events\b/.test(typeof s === "string" ? s : String((s as { sql?: unknown }).sql ?? ""));
+    const unmigrated = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "execute") {
+          return async (s: Parameters<Client["execute"]>[0]) => {
+            if (names(s)) throw missing();
+            return target.execute(s);
+          };
+        }
+        if (prop === "batch") {
+          return async (stmts: Parameters<Client["batch"]>[0], mode?: Parameters<Client["batch"]>[1]) => {
+            if (stmts.some(names)) throw missing();
+            return target.batch(stmts, mode);
+          };
+        }
+        const v = (target as unknown as Record<string | symbol, unknown>)[prop];
+        return typeof v === "function" ? (v as (...x: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as Client;
+    const a = await newApproval({ idempotencyKey: "ready-1" });
+    assert.ok((await store.decideApproval(db, scope, a.id, { kind: "approve", payloadHash: a.payload_hash }, NOW)).ok);
+
+    await assert.rejects(executeApproval(unmigrated, { tenantId: OASIS, approvalId: a.id }, deps), /no such table: outcome_events/);
+    assert.equal(sent.length, 0, "nothing left the business");
+    assert.equal((await store.getApprovalInTenant(db, OASIS, a.id))?.status, "approved", "still approved: pressing again once the migration is in runs it");
+
+    const done = await executeApproval(db, { tenantId: OASIS, approvalId: a.id }, deps);
+    assert.ok(done.ok);
+    assert.equal(done.approval.status, "executed");
+    assert.equal(sent.length, 1);
+    const executed = (await mirror(a.id)).filter((r) => r.event_key === "approval.executed");
+    assert.deepEqual(JSON.parse(String(executed[0]?.payload_json)), { action_kind: "send_email", outcome: "sent", provider: "oasis_shared_gmail" });
   });
 
   console.log(`ledger-core: ${passed} passed, ${failures} failed`);

@@ -8,10 +8,11 @@
  * anything this file does not describe; nothing is inferred.
  *
  * PAYLOADS ARE IDS AND CODES ONLY. A field is an id, a code, an integer, a
- * boolean or a UTC time. There is no free-text field type, unknown fields are
- * refused, and an id cannot hold an email address, a phone number in E.164
- * form or a sentence. Names, addresses and message bodies stay in the entity
- * tables, so a Law 25 erasure never has to rewrite the ledger.
+ * boolean or a zoned time. There is no free-text field type, unknown fields
+ * are refused, and an id cannot hold an email address, a phone number, a
+ * postal code, a name pair or a sentence (PERSONAL_SHAPES). Names, addresses
+ * and message bodies stay in the entity tables, so a Law 25 erasure never has
+ * to rewrite the ledger.
  *
  * The repo has no zod; the validator below is hand-rolled in the shape of
  * lib/os/approvals/rules.ts (a Valid<T> result, never a throw).
@@ -79,7 +80,7 @@ export function isOneOf<T extends string>(list: readonly T[], v: unknown): v is 
 /**
  * An id: a provider or database identifier. Letters, digits and `_ . : / -`,
  * starting with a letter or digit. No `@` (an email), no `+` (an E.164 phone),
- * no whitespace (a sentence).
+ * no whitespace (a sentence), and none of the PERSONAL_SHAPES below.
  */
 export const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}$/;
 /** A code: a lowercase machine word from a known vocabulary (intent, reason, stage). */
@@ -87,8 +88,49 @@ export const CODE_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 /** ISO 4217, upper case. */
 export const CURRENCY_RE = /^[A-Z]{3}$/;
 
-export const isLedgerId = (v: unknown): v is string => typeof v === "string" && ID_RE.test(v);
+/**
+ * Values made only of id characters that are still a person, not an id. The
+ * harnesses' SMS and voice providers key contacts by phone number, so these
+ * are the shapes that actually arrive:
+ *   - a North American number, bare: 5145550199, 15145550199;
+ *   - any digits-and-separators run of phone length (7 to 15 digits):
+ *     514-555-0199, 514.555.0199, 555-0199 (a bare date is refused too; a time
+ *     belongs in a time field);
+ *   - a Canadian postal code: H2X1Y4, H2X-1Y4;
+ *   - a Title-case name pair: Jean.Tremblay, Jane-Doe, Jean_Tremblay.
+ * A lowercase slug (jane.doe) cannot be told from an id like sales.team, and an
+ * opaque id still points at a person through the entity tables; the erasure
+ * rewrites those tables, which is why the ledger holds only ids. A provider id
+ * that happens to be a bare 10-digit number goes in namespaced (tg:5165125484).
+ */
+const PERSONAL_SHAPES: readonly RegExp[] = [
+  /^1?\d{10}$/,
+  /^(?=(?:\D*\d){7,15}\D*$)\d+(?:[-.]\d+)+$/,
+  /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z][-.]?\d[ABCEGHJ-NPRSTV-Z]\d$/i,
+  /^[A-Z][a-z]+(?:[._-][A-Z][a-z]+)+$/,
+];
+
+export function looksPersonal(v: string): boolean {
+  return PERSONAL_SHAPES.some((re) => re.test(v));
+}
+
+export const isLedgerId = (v: unknown): v is string => typeof v === "string" && ID_RE.test(v) && !looksPersonal(v);
 export const isLedgerCode = (v: unknown): v is string => typeof v === "string" && CODE_RE.test(v);
+
+/**
+ * A timestamp WITH its zone: `Z` or `±hh:mm`. A naive one ("2026-09-20T10:00:00",
+ * what Python's datetime.utcnow().isoformat() prints) would be read in the
+ * server's own zone, so the same event would land at different instants, and
+ * hash differently, on two hosts.
+ */
+const ZONED_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** The instant as UTC ISO-8601 (ms), or null when it is not a zoned timestamp. */
+export function zonedTimeToIso(v: unknown): string | null {
+  if (typeof v !== "string" || !ZONED_TIME_RE.test(v)) return null;
+  const ms = Date.parse(v);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+}
 
 export type FieldSpec =
   | { kind: "id"; optional?: boolean }
@@ -125,10 +167,8 @@ function checkField(name: string, spec: FieldSpec, v: unknown): Valid<unknown> {
     case "bool":
       return typeof v === "boolean" ? { ok: true, value: v } : { ok: false, error: "payload_not_a_boolean", field };
     case "time": {
-      if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(v) || Number.isNaN(Date.parse(v))) {
-        return { ok: false, error: "payload_not_a_time", field };
-      }
-      return { ok: true, value: new Date(v).toISOString() };
+      const iso = zonedTimeToIso(v);
+      return iso ? { ok: true, value: iso } : { ok: false, error: "payload_not_a_time", field };
     }
   }
 }
@@ -176,20 +216,45 @@ export type CatalogEntry = {
   producers: readonly LedgerProducer[];
   subjectTypes: readonly SubjectType[];
   requiredJoinKeys: readonly JoinKey[];
-  /** required: value_cents and currency must be set; none: they must not be. */
+  /**
+   * required: value_cents and currency must be set; none: they must not be.
+   * value_cents is an amount, never negative: the key says which way the money
+   * moved (refund.issued, not a negative payment.received).
+   */
   value: "required" | "optional" | "none";
   payload: PayloadSchema;
   /** The idempotency key every emitter of this event builds. */
   idempotency: string;
+  /**
+   * Required when more than one writer may record this key: the native owner
+   * and an ingest producer, or several producers. Each writer's idempotency
+   * keys must match its own pattern, and emit refuses one that does not. The
+   * patterns are how two writers never count one fact twice: either both build
+   * the SAME key from the provider's own id (a fact both of them see lands
+   * once), or they own disjoint slices (each records only what it originated).
+   */
+  writers?: Readonly<Partial<Record<LedgerWriter, RegExp>>>;
   description: string;
 };
+
+/** Who wrote an event: the owning module ("native") or an ingest producer. */
+export type LedgerWriter = "native" | LedgerProducer;
 
 type Def = Omit<CatalogEntry, "version" | "producers" | "value"> &
   Partial<Pick<CatalogEntry, "version" | "producers" | "value">>;
 const ev = (d: Def): CatalogEntry => ({ version: 1, producers: [], value: "none", ...d });
 
-const INGEST_ONLY = "app/api/ledger/ingest/route.ts";
+/** owningModule for a key that arrives only from producers: nothing in the app emits it. */
+export const INGEST_ONLY = "app/api/ledger/ingest/route.ts";
 const CHANNEL = code(["email", "sms", "dm", "call"]);
+/** One idempotency key segment, and the rest of a key. */
+const SEG = "[^:\\s]+";
+const REST = "[\\x21-\\x7E]+";
+const keyRe = (source: string): RegExp => new RegExp(`^${source}$`);
+const both = (re: RegExp, producer: LedgerProducer): Partial<Record<LedgerWriter, RegExp>> => ({ native: re, [producer]: re });
+
+/** Each harness numbers its own runs, so each owns its own run: namespace. */
+const RUN_WRITERS: Partial<Record<LedgerWriter, RegExp>> = Object.fromEntries(PRODUCERS.map((p) => [p, keyRe(`run:${p}:${REST}`)]));
 
 const DEFS: readonly CatalogEntry[] = [
   // ── Outreach ──────────────────────────────────────────────────────────────
@@ -198,8 +263,8 @@ const DEFS: readonly CatalogEntry[] = [
     description: "A contact was enrolled in an outreach sequence." }),
   ev({ key: "message.sent", department: "sales", owningModule: "lib/drips/send.ts", producers: ["bea"], subjectTypes: ["message"], requiredJoinKeys: ["contact_id"],
     payload: { channel: CHANNEL, provider: code(), provider_message_id: opt(id()), template_id: opt(id()) },
-    idempotency: "msg:{provider}:{provider_message_id}, or send:{approval_id} before the provider id exists",
-    description: "An outbound message left the business." }),
+    idempotency: "msg:{provider}:{provider_message_id}", writers: both(keyRe(`msg:${SEG}:${REST}`), "bea"),
+    description: "An outbound message left the business (recorded once the provider has given it an id)." }),
   ev({ key: "message.delivered", department: "sales", owningModule: "lib/drips/reconcile-email-telemetry.ts", subjectTypes: ["message"], requiredJoinKeys: [],
     payload: { channel: CHANNEL, provider: code(), provider_message_id: id() }, idempotency: "{provider}:{provider_event_id}",
     description: "The provider confirmed delivery." }),
@@ -217,7 +282,7 @@ const DEFS: readonly CatalogEntry[] = [
     description: "A recipient unsubscribed from a message." }),
   ev({ key: "content.published", department: "marketing", owningModule: "lib/founders-marketing-core.ts", producers: ["maven"], subjectTypes: ["content"], requiredJoinKeys: [],
     payload: { platform: code(), platform_post_id: id(), asset_id: opt(id()) }, idempotency: "post:{platform}:{platform_post_id}",
-    description: "A post went live on a platform." }),
+    writers: both(keyRe(`post:${SEG}:${REST}`), "maven"), description: "A post went live on a platform." }),
 
   // ── Lead ──────────────────────────────────────────────────────────────────
   ev({ key: "touch.recorded", department: "marketing", owningModule: "app/api/forms/view/route.ts", subjectTypes: ["touch"], requiredJoinKeys: [],
@@ -229,6 +294,8 @@ const DEFS: readonly CatalogEntry[] = [
   ev({ key: "lead.captured", department: "sales", owningModule: "app/api/forms/submit/route.ts", producers: ["bea"], subjectTypes: ["lead"], requiredJoinKeys: ["contact_id"],
     payload: { capture_channel: code(["form", "dm", "email", "call", "import", "referral"]), form_id: opt(id()), lead_source: opt(code()) },
     idempotency: "form:{submission_id} | ig:{conversation_id} | email:{message_id} | import:{batch}:{row}",
+    // The app captures form submissions; BEA captures DMs, email and imports.
+    writers: { native: keyRe(`form:${REST}`), bea: keyRe(`(?:ig|email|import):${REST}`) },
     description: "A new lead entered the pipeline (touch_id carries the attribution)." }),
   ev({ key: "message.received", department: "sales", owningModule: INGEST_ONLY, producers: ["bea"], subjectTypes: ["message"], requiredJoinKeys: [],
     payload: { channel: CHANNEL, provider: code(), provider_message_id: id(), intent: code(), priority: opt(code()) },
@@ -250,13 +317,16 @@ const DEFS: readonly CatalogEntry[] = [
   // ── Book ──────────────────────────────────────────────────────────────────
   ev({ key: "meeting.booked", department: "sales", owningModule: "lib/website-sales-booking.ts", producers: ["bea"], subjectTypes: ["meeting"], requiredJoinKeys: ["contact_id"],
     payload: { provider: code(), provider_event_id: id(), meeting_kind: opt(code()), starts_at: time() },
-    idempotency: "cal:{provider}:{event_id}:booked:{rev}", description: "A meeting was booked." }),
+    idempotency: "cal:{provider}:{event_id}:booked:{rev}", writers: both(keyRe(`cal:${SEG}:${SEG}:booked:\\d+`), "bea"),
+    description: "A meeting was booked." }),
   ev({ key: "meeting.rescheduled", department: "sales", owningModule: "lib/website-sales-booking.ts", producers: ["bea"], subjectTypes: ["meeting"], requiredJoinKeys: ["contact_id"],
     payload: { provider: code(), provider_event_id: id(), starts_at: time(), rev: int(1) },
-    idempotency: "cal:{provider}:{event_id}:rescheduled:{rev}", description: "A booked meeting moved." }),
+    idempotency: "cal:{provider}:{event_id}:rescheduled:{rev}", writers: both(keyRe(`cal:${SEG}:${SEG}:rescheduled:\\d+`), "bea"),
+    description: "A booked meeting moved." }),
   ev({ key: "meeting.cancelled", department: "sales", owningModule: "lib/website-sales-booking.ts", producers: ["bea"], subjectTypes: ["meeting"], requiredJoinKeys: ["contact_id"],
     payload: { provider: code(), provider_event_id: id(), cancelled_by: opt(code(["contact", "host", "system"])) },
-    idempotency: "cal:{provider}:{event_id}:cancelled:{rev}", description: "A booked meeting was cancelled." }),
+    idempotency: "cal:{provider}:{event_id}:cancelled:{rev}", writers: both(keyRe(`cal:${SEG}:${SEG}:cancelled:\\d+`), "bea"),
+    description: "A booked meeting was cancelled." }),
 
   // ── Call ──────────────────────────────────────────────────────────────────
   ev({ key: "meeting.held", department: "sales", owningModule: "app/api/call-appointments/[id]/route.ts", subjectTypes: ["meeting"], requiredJoinKeys: ["contact_id"],
@@ -373,15 +443,22 @@ const DEFS: readonly CatalogEntry[] = [
 
   // ── Cross-cutting: routines and consent ───────────────────────────────────
   ev({ key: "routine.run_completed", department: "operations", owningModule: INGEST_ONLY, producers: ["bea", "maven", "atlas"], subjectTypes: ["routine_run"], requiredJoinKeys: [],
-    payload: { routine_key: code(), duration_ms: opt(int(0)) }, idempotency: "run:{routine_run_id}", description: "A scheduled routine finished." }),
+    payload: { routine_key: code(), duration_ms: opt(int(0)) }, idempotency: "run:{producer}:{routine_run_id}", writers: RUN_WRITERS,
+    description: "A scheduled routine finished." }),
   ev({ key: "routine.run_failed", department: "operations", owningModule: INGEST_ONLY, producers: ["bea", "maven", "atlas"], subjectTypes: ["routine_run"], requiredJoinKeys: [],
-    payload: { routine_key: code(), error_code: code(), duration_ms: opt(int(0)) }, idempotency: "run:{routine_run_id}", description: "A scheduled routine failed." }),
+    payload: { routine_key: code(), error_code: code(), duration_ms: opt(int(0)) }, idempotency: "run:{producer}:{routine_run_id}",
+    writers: RUN_WRITERS, description: "A scheduled routine failed." }),
   ev({ key: "consent.granted", department: "sales", owningModule: "lib/sms/consent.ts", subjectTypes: ["contact"], requiredJoinKeys: ["contact_id"],
     payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:{n}", description: "A contact gave consent on a channel." }),
   ev({ key: "consent.revoked", department: "sales", owningModule: "lib/sms/consent.ts", producers: ["bea"], subjectTypes: ["contact"], requiredJoinKeys: ["contact_id"],
-    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:{n}", description: "A contact withdrew consent on a channel." }),
+    payload: { channel: CHANNEL, basis: opt(code()) }, idempotency: "consent:{contact_id}:{channel}:{n}",
+    // The app handles SMS STOP; BEA handles email, DM and call opt-outs.
+    writers: { native: keyRe(`consent:${SEG}:sms:\\d+`), bea: keyRe(`consent:${SEG}:(?:email|dm|call):\\d+`) },
+    description: "A contact withdrew consent on a channel." }),
   ev({ key: "suppression.added", department: "sales", owningModule: "lib/sms/consent.ts", producers: ["bea"], subjectTypes: ["contact"], requiredJoinKeys: [],
-    payload: { channel: CHANNEL, reason: code() }, idempotency: "suppress:{channel}:{suppression_id}", description: "An address or number was suppressed." }),
+    payload: { channel: CHANNEL, reason: code() }, idempotency: "suppress:{channel}:{suppression_id}",
+    writers: { native: keyRe(`suppress:sms:${REST}`), bea: keyRe(`suppress:(?:email|dm|call):${REST}`) },
+    description: "An address or number was suppressed." }),
 ];
 
 /** Every entry, in catalog order. tests/ledger-core.test.ts pins that no key appears twice. */

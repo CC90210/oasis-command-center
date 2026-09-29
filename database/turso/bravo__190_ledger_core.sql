@@ -39,7 +39,11 @@
 -- Not applied by the author: the lead applies it to production BEFORE the code
 -- that ships with it is deployed. The approvals store mirrors every decision
 -- into outcome_events in the same batch, so without this table an approval
--- write fails loudly (it never half-writes).
+-- write fails loudly (it never half-writes). That includes approvals approved
+-- BEFORE the deploy: executing one checks that outcome_events exists before it
+-- claims the row, so until this is applied an approved email or post is
+-- refused before it goes out (the row stays `approved` and can be pressed
+-- again), never sent with its outcome unrecorded.
 
 -- ── outcome_events ─────────────────────────────────────────────────────────
 -- event_key / event_version  a catalog entry (lib/ledger/catalog.ts).
@@ -53,7 +57,9 @@
 -- confidence    verified | inferred | human_confirmed; a backfill is always
 --               inferred.
 -- idempotency_key  UNIQUE per tenant. A re-sent event is a no-op.
--- payload_hash  sha256 of the canonical event content. The same key with a
+-- payload_hash  sha256 of the fact: what happened, when, to whom, by whom,
+--               counted where, linked to what, for how much
+--               (ledgerPayloadHash in lib/ledger/emit.ts). The same key with a
 --               DIFFERENT hash is a producer reusing a key for another fact,
 --               and the emitter raises it loudly.
 -- producer      the module that wrote it (a repo path, or ingest:<producer>).
@@ -135,6 +141,22 @@ BEFORE DELETE ON outcome_events
 WHEN NOT EXISTS (SELECT 1 FROM ledger_purge_grants g WHERE g.tenant_id = OLD.tenant_id)
 BEGIN
   SELECT RAISE(ABORT, 'outcome_events is append-only - only the tenant offboard purge deletes, a whole tenant at a time');
+END;
+
+-- REPLACE is a delete in disguise. INSERT OR REPLACE / REPLACE INTO on an
+-- existing id or (tenant_id, idempotency_key) deletes the stored row and
+-- writes new content, and SQLite fires no DELETE trigger for that delete while
+-- recursive_triggers is off (libSQL's default). So an insert that would
+-- collide is dropped before conflict resolution runs: it becomes the same
+-- no-op an ON CONFLICT DO NOTHING re-send already is, and the stored row
+-- stands. Only the colliding row is dropped; the rest of a multi-row insert
+-- still lands.
+CREATE TRIGGER IF NOT EXISTS outcome_events_no_replace
+BEFORE INSERT ON outcome_events
+WHEN EXISTS (SELECT 1 FROM outcome_events e WHERE e.id = NEW.id)
+  OR EXISTS (SELECT 1 FROM outcome_events e WHERE e.tenant_id = NEW.tenant_id AND e.idempotency_key = NEW.idempotency_key)
+BEGIN
+  SELECT RAISE(IGNORE);
 END;
 
 -- ── ledger_dead_letters ────────────────────────────────────────────────────

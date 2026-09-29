@@ -31,17 +31,21 @@ import {
   CONFIDENCES,
   CURRENCY_RE,
   DEPARTMENT_KEYS,
+  INGEST_ONLY,
   JOIN_KEYS,
+  PRODUCERS,
   SOURCES,
   catalogEntry,
   isLedgerId,
   isOneOf,
   validatePayload,
+  zonedTimeToIso,
   type CatalogEntry,
   type JoinKey,
   type LedgerActorType,
   type LedgerConfidence,
   type LedgerSource,
+  type LedgerWriter,
   type Valid,
 } from "@/lib/ledger/catalog";
 
@@ -170,28 +174,30 @@ export function newLedgerId(nowMs: number = Date.now()): string {
   return time + lastUlidRandom.map((d) => B32[d]).join("");
 }
 
+/** The columns that ARE the fact, and so feed payload_hash. */
+export const FACT_COLUMNS = [
+  "event_key", "event_version", "occurred_at", "subject_type", "subject_id", "contact_id", "deal_id", "customer_id",
+  "department_key", "actor_type", "actor_id", "approval_id", "routine_run_id", "touch_id", "value_cents", "currency",
+] as const satisfies readonly (keyof LedgerRow)[];
+export type LedgerFact = Pick<LedgerRow, (typeof FACT_COLUMNS)[number]> & { payload: Record<string, unknown> };
+
 /**
- * sha256 of the event's CONTENT: what happened, to what, for how much. Not the
- * server time, the actor or the trace ids, so an honest re-send hashes the same
- * and a key reused for a different fact does not.
+ * sha256 of the FACT: what happened, when at the source, to what, by whom,
+ * counted in which department, linked to which approval, run and touch, for how
+ * much, and its payload. A re-send that changes any of those is a different
+ * fact under a reused key, and is refused loudly (idempotency_key_reused).
+ *
+ * Left out, because they describe the recording, not the fact: id and
+ * recorded_at (minted by the server on every attempt), producer, source,
+ * source_ref and confidence (how the ledger came to know it: a backfill landing
+ * on a key the live path already wrote is the same fact, not a conflict), and
+ * causation_id / correlation_id (traces). Changing this list re-hashes every
+ * existing key, so it is pinned by tests/ledger-core.test.ts.
  */
-export function ledgerPayloadHash(row: Pick<
-  LedgerRow,
-  "event_key" | "event_version" | "subject_type" | "subject_id" | "contact_id" | "deal_id" | "customer_id" | "value_cents" | "currency"
-> & { payload: Record<string, unknown> }): string {
-  const content = canonicalJson({
-    event_key: row.event_key,
-    event_version: row.event_version,
-    subject_type: row.subject_type,
-    subject_id: row.subject_id,
-    contact_id: row.contact_id,
-    deal_id: row.deal_id,
-    customer_id: row.customer_id,
-    value_cents: row.value_cents,
-    currency: row.currency,
-    payload: row.payload,
-  });
-  return createHash("sha256").update(content, "utf8").digest("hex");
+export function ledgerPayloadHash(fact: LedgerFact): string {
+  const content: Record<string, unknown> = { payload: fact.payload };
+  for (const c of FACT_COLUMNS) content[c] = fact[c];
+  return createHash("sha256").update(canonicalJson(content), "utf8").digest("hex");
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +214,36 @@ function optionalId(v: unknown, field: string): Valid<string | null> {
   return isLedgerId(v) ? { ok: true, value: v } : bad("not_an_id", field);
 }
 
+/** A Date, or a string that carries its zone (zonedTimeToIso): never read in the server's local time. */
 function toIso(v: unknown): string | null {
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
-  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T/.test(v) && !Number.isNaN(Date.parse(v))) return new Date(v).toISOString();
-  return null;
+  return zonedTimeToIso(v);
+}
+
+const INGEST_PRODUCER_PREFIX = "ingest:";
+
+/**
+ * One writer per key, checked on every emit. A native emit must name the
+ * catalog's owning module as its producer (and a key that arrives only through
+ * ingest has no native writer). An ingest emit ("ingest:<producer>[:<ref>]")
+ * must come from a listed producer. When the key has several writers, the
+ * writer's idempotency key must match its own pattern (CatalogEntry.writers).
+ */
+function checkWriter(entry: CatalogEntry, producer: string, idempotencyKey: string): Valid<LedgerWriter> {
+  let writer: LedgerWriter;
+  if (producer.startsWith(INGEST_PRODUCER_PREFIX)) {
+    const name = producer.slice(INGEST_PRODUCER_PREFIX.length).split(":")[0];
+    if (!isOneOf(PRODUCERS, name) || !entry.producers.includes(name)) return bad("producer_not_allowed_for_event", "producer");
+    writer = name;
+  } else {
+    if (entry.owningModule === INGEST_ONLY || producer !== entry.owningModule) return bad("producer_not_owner", "producer");
+    writer = "native";
+  }
+  if (entry.writers) {
+    const pattern = entry.writers[writer];
+    if (!pattern || !pattern.test(idempotencyKey)) return bad("idempotency_key_off_template", "idempotency_key");
+  }
+  return { ok: true, value: writer };
 }
 
 /**
@@ -261,6 +293,9 @@ export function validateEvent(input: EmitInput, now: Date): Valid<{ row: LedgerR
   if (typeof input.idempotencyKey !== "string" || !REF_RE.test(input.idempotencyKey)) {
     return bad("idempotency_key_invalid", "idempotency_key");
   }
+  if (typeof input.producer !== "string" || !REF_RE.test(input.producer)) return bad("producer_invalid", "producer");
+  const writer = checkWriter(entry, input.producer, input.idempotencyKey);
+  if (!writer.ok) return writer;
 
   const trace: Record<string, string | null> = {};
   for (const [field, v] of [
@@ -280,6 +315,7 @@ export function validateEvent(input: EmitInput, now: Date): Valid<{ row: LedgerR
   if (valueCents !== null && !(typeof valueCents === "number" && Number.isSafeInteger(valueCents))) {
     return bad("value_cents_invalid", "value_cents");
   }
+  if (valueCents !== null && valueCents < 0) return bad("value_cents_negative", "value_cents");
   if (currency !== null && !(typeof currency === "string" && CURRENCY_RE.test(currency))) return bad("currency_invalid", "currency");
   if (entry.value === "none" && (valueCents !== null || currency !== null)) return bad("value_not_allowed", "value_cents");
   if (entry.value === "required" && valueCents === null) return bad("value_required", "value_cents");
@@ -293,37 +329,35 @@ export function validateEvent(input: EmitInput, now: Date): Valid<{ row: LedgerR
   const payload = validatePayload(entry.payload, input.payload);
   if (!payload.ok) return payload;
 
-  if (typeof input.producer !== "string" || !REF_RE.test(input.producer)) return bad("producer_invalid", "producer");
-
-  const content = {
+  const factColumns: Omit<LedgerFact, "payload"> = {
     event_key: entry.key,
     event_version: entry.version,
+    occurred_at: occurredAt,
     subject_type: subject.type,
     subject_id: subject.id,
     contact_id: joins.contact_id,
     deal_id: joins.deal_id,
     customer_id: joins.customer_id,
+    department_key: department,
+    actor_type: actor.type,
+    actor_id: actorId.value,
+    approval_id: trace.approval_id,
+    routine_run_id: trace.routine_run_id,
+    touch_id: trace.touch_id,
     value_cents: valueCents,
     currency,
   };
   const row: LedgerRow = {
     id: newLedgerId(now.getTime()),
     tenant_id: tenantId,
-    ...content,
-    occurred_at: occurredAt,
+    ...factColumns,
     recorded_at: now.toISOString(),
-    department_key: department,
-    actor_type: actor.type,
-    actor_id: actorId.value,
     source: input.source,
     source_ref: sourceRef,
     idempotency_key: input.idempotencyKey,
-    payload_hash: ledgerPayloadHash({ ...content, payload: payload.value }),
+    payload_hash: ledgerPayloadHash({ ...factColumns, payload: payload.value }),
     causation_id: trace.causation_id,
     correlation_id: trace.correlation_id,
-    approval_id: trace.approval_id,
-    routine_run_id: trace.routine_run_id,
-    touch_id: trace.touch_id,
     confidence: input.confidence,
     payload_json: canonicalJson(payload.value),
     producer: input.producer,

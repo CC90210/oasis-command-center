@@ -21,7 +21,11 @@ export async function purgeTenantLedger(
   db: Client,
   args: { tenantId: string; operator: string; reason: string; now: Date },
 ): Promise<PurgeResult> {
-  const tenantId = (args.tenantId || "").trim();
+  // Canonical form (lower case, as lib/tenant/retired.ts lists it and as rows
+  // store it). isRetiredTenant is case-insensitive, so an id typed in upper case
+  // would pass the check below and then match no row: a "done" purge that
+  // deleted nothing.
+  const tenantId = (args.tenantId || "").trim().toLowerCase();
   if (!tenantId) throw new Error("ledger purge: tenant id is required");
   if (!isRetiredTenant(tenantId)) throw new Error("ledger purge: refused - the tenant is not retired (lib/tenant/retired.ts)");
   const operator = (args.operator || "").trim();

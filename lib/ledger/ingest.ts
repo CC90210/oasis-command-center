@@ -19,6 +19,12 @@
  * (OASIS's own workspaces only, for now) and must not be retired. Join keys
  * (contact_id, deal_id, customer_id) must exist in that same tenant.
  *
+ * WHAT A PRODUCER MAY NOT CLAIM. The department is always the catalog's (a
+ * different department_key is refused, never used), and a harness is a
+ * machine: it may not record an event as a human's (actor.type "human") or as
+ * human_confirmed. A person's own action reaches the ledger through the app
+ * path that signed them in.
+ *
  * FAILURE IS LOUD. A refused event is written to ledger_dead_letters (redacted)
  * and the response is non-2xx, so the producer keeps it and retries; valid
  * events in the same request are still written, once. Re-sending a batch is
@@ -44,6 +50,8 @@ import {
   catalogEntry,
   isLedgerId,
   isOneOf,
+  looksPersonal,
+  type CatalogEntry,
   type LedgerProducer,
   type SubjectType,
 } from "@/lib/ledger/catalog";
@@ -92,21 +100,38 @@ const json = (status: number, body: Record<string, unknown>) => Response.json(bo
 // ---------------------------------------------------------------------------
 
 const SAFE_TOKEN = /^[A-Za-z0-9_.:/-]{0,200}$/;
+/** A string a dead letter may keep: plain id/code/time characters, and not a phone, postal code or name (catalog PERSONAL_SHAPES). */
+const isSafeToken = (v: string): boolean => SAFE_TOKEN.test(v) && !looksPersonal(v);
+/** An integer of phone length (7 to 15 digits): 5145550199 sent as a number is still a phone number. */
+const isPhoneLengthNumber = (v: number): boolean => Number.isInteger(v) && /^\d{7,15}$/.test(String(Math.abs(v)));
 
-/** The event as sent, with every string that is not a plain id/code/time replaced. */
+/** The event as sent, with every value and key that is not a plain id/code/time/small number replaced. */
 export function redactForDeadLetter(v: unknown, depth = 0): unknown {
   if (depth > 6) return "[truncated]";
-  if (v === null || typeof v === "number" || typeof v === "boolean") return v;
-  if (typeof v === "string") return SAFE_TOKEN.test(v) ? v : "[redacted]";
+  if (v === null || typeof v === "boolean") return v;
+  if (typeof v === "number") return isPhoneLengthNumber(v) ? "[redacted]" : v;
+  if (typeof v === "string") return isSafeToken(v) ? v : "[redacted]";
   if (Array.isArray(v)) return v.slice(0, 50).map((x) => redactForDeadLetter(x, depth + 1));
   if (typeof v === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 100)) {
-      out[SAFE_TOKEN.test(k) ? k : "[redacted-key]"] = redactForDeadLetter(x, depth + 1);
+      out[isSafeToken(k) ? k : "[redacted-key]"] = redactForDeadLetter(x, depth + 1);
     }
     return out;
   }
   return "[unsupported]";
+}
+
+/**
+ * The refused field's name, for the error column. Every field name is ours
+ * except payload.<key> of an undeclared key, which is whatever the producer
+ * sent (payload_field_unknown), so that key is held to the same rule as a value.
+ */
+function redactFieldName(field: string): string {
+  const PAYLOAD = "payload.";
+  if (!field.startsWith(PAYLOAD)) return field;
+  const key = field.slice(PAYLOAD.length);
+  return isSafeToken(key) ? field : `${PAYLOAD}[redacted-key]`;
 }
 
 function deadLetter(
@@ -118,7 +143,7 @@ function deadLetter(
   nowIso: string,
 ): InStatement {
   const ev = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  const safe = (v: unknown) => (typeof v === "string" && SAFE_TOKEN.test(v) && v ? v : null);
+  const safe = (v: unknown) => (typeof v === "string" && v && isSafeToken(v) ? v : null);
   const fingerprint = createHash("sha256").update(`${producer}\n${canonicalJson(raw ?? null)}`, "utf8").digest("hex");
   return {
     sql: `INSERT INTO ledger_dead_letters (id, tenant_hint, producer, event_key, idempotency_key, fingerprint, payload_json,
@@ -134,7 +159,7 @@ function deadLetter(
       safe(ev.idempotency_key),
       fingerprint,
       canonicalJson(redactForDeadLetter(raw ?? null)),
-      field ? `${error}:${field}` : error,
+      field ? `${error}:${redactFieldName(field)}` : error,
       nowIso,
       nowIso,
     ],
@@ -191,11 +216,22 @@ async function resolveTenant(producer: LedgerProducer, ev: Record<string, unknow
   return { ok: true, tenantId };
 }
 
-function toEmitInput(producer: LedgerProducer, tenantId: string, ev: Record<string, unknown>): EmitInput | { error: string; field: string } {
+function toEmitInput(
+  producer: LedgerProducer,
+  entry: CatalogEntry,
+  tenantId: string,
+  ev: Record<string, unknown>,
+): EmitInput | { error: string; field: string } {
   const producerRef = ev.producer_ref;
   if (producerRef !== undefined && producerRef !== null && !isLedgerId(producerRef)) return { error: "producer_ref_invalid", field: "producer_ref" };
+  // The catalog decides which department a key counts toward; a producer cannot re-file it.
+  if (ev.department_key !== undefined && ev.department_key !== null && ev.department_key !== entry.department) {
+    return { error: "department_not_allowed", field: "department_key" };
+  }
   const subject = ev.subject as { type: string; id: string };
   const actor = (ev.actor && typeof ev.actor === "object" ? ev.actor : {}) as { type?: unknown; id?: unknown };
+  if (actor.type === "human") return { error: "actor_not_allowed", field: "actor_type" };
+  if (ev.confidence === "human_confirmed") return { error: "confidence_not_allowed", field: "confidence" };
   return {
     tenantId,
     eventKey: ev.event_key as string,
@@ -205,7 +241,7 @@ function toEmitInput(producer: LedgerProducer, tenantId: string, ev: Record<stri
     contactId: ev.contact_id as string | null | undefined,
     dealId: ev.deal_id as string | null | undefined,
     customerId: ev.customer_id as string | null | undefined,
-    department: ev.department_key as EmitInput["department"],
+    department: entry.department,
     actor: { type: actor.type as EmitInput["actor"]["type"], id: actor.id as string | null | undefined },
     source: ev.source as EmitInput["source"],
     sourceRef: ev.source_ref as string | null | undefined,
@@ -227,6 +263,31 @@ function toEmitInput(producer: LedgerProducer, tenantId: string, ev: Record<stri
 // The handler
 // ---------------------------------------------------------------------------
 
+/**
+ * The body as text, reading at most `max` bytes. The body is read before the
+ * signature can be checked (the HMAC covers it), and a chunked request carries
+ * no Content-Length, so an unauthenticated caller must not be able to make the
+ * handler buffer an unbounded body: past `max` the stream is cancelled and the
+ * answer is null (413).
+ */
+async function readBodyCapped(req: Request, max: number): Promise<string | null> {
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel("body_too_large");
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 export async function handleLedgerIngest(req: Request, deps: Deps): Promise<Response> {
   const producerHeader = (req.headers.get("x-ledger-producer") || "").trim().toLowerCase();
   if (!isOneOf(PRODUCERS, producerHeader)) return json(401, { ok: false, error: "unauthorized" });
@@ -238,8 +299,8 @@ export async function handleLedgerIngest(req: Request, deps: Deps): Promise<Resp
 
   const declared = Number(req.headers.get("content-length") || "0");
   if (declared > MAX_BODY_BYTES) return json(413, { ok: false, error: "body_too_large" });
-  const raw = await req.text();
-  if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) return json(413, { ok: false, error: "body_too_large" });
+  const raw = await readBodyCapped(req, MAX_BODY_BYTES);
+  if (raw === null) return json(413, { ok: false, error: "body_too_large" });
 
   const ts = (req.headers.get("x-ledger-timestamp") || "").trim();
   const sig = (req.headers.get("x-ledger-signature") || "").trim().toLowerCase();
@@ -310,7 +371,7 @@ export async function handleLedgerIngest(req: Request, deps: Deps): Promise<Resp
       reject(i, ev, resolved.error, resolved.field, resolved.tenantHint);
       continue;
     }
-    const input = toEmitInput(producer, resolved.tenantId, ev);
+    const input = toEmitInput(producer, entry, resolved.tenantId, ev);
     if ("error" in input) {
       reject(i, ev, input.error, input.field, resolved.tenantId);
       continue;
