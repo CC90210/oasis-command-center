@@ -81,12 +81,20 @@ try {
   const signPage = readFileSync("app/sign/[token]/page.tsx", "utf8");
   assert.match(signPage, /clientIpFromHeaders\(h\)/);
 
+  // wrangler.jsonc stays comment-free: this parse is plain JSON.
   const wrangler = JSON.parse(readFileSync("wrangler.jsonc", "utf8")) as {
     vars?: Record<string, string>;
+    placement?: { mode?: string };
   };
   assert.equal(wrangler.vars?.DEPLOY_ENV, "production");
   assert.equal(wrangler.vars?.DEPLOY_PLATFORM, "cloudflare");
   assert.equal(wrangler.vars?.DEPLOY_SURFACE, "oasis");
+  // Smart Placement runs the Worker near Turso, not near the viewer. A page
+  // makes 3-4 SEQUENTIAL Turso reads (session, profile, workspace, data) and a
+  // round trip from the edge measured ~145 ms (2026-09-29, from Montreal), so
+  // the database distance, paid 3-4 times, was most of a tab switch (PR #475).
+  // Removing it is a deliberate performance decision, not a tidy-up.
+  assert.equal(wrangler.placement?.mode, "smart", "Smart Placement was removed from wrangler.jsonc");
 
   const health = readFileSync("app/api/health/route.ts", "utf8");
   assert.match(health, /deploymentGitSha\(\)/);
