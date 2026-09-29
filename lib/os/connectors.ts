@@ -101,7 +101,12 @@ export type ConnectorConnect =
    * A key pasted into the connector's drawer and posted to
    * /api/connections/[provider]/connect, which probes it live before saving.
    */
-  | { kind: "key_form"; label: string; provider: string };
+  | { kind: "key_form"; label: string; provider: string }
+  /**
+   * The app's fields in the shared key store (lib/tenant-integration-schemas.ts),
+   * saved, tested and removed in the connector's drawer (ServiceKeysForm).
+   */
+  | { kind: "keys"; label: string; service: string };
 
 export type ConnectorDef = {
   slug: string;
@@ -127,12 +132,19 @@ export type ConnectorDef = {
   plannedFor?: "Phase 2" | "Later";
   /** Why it is not live yet, in plain English. */
   pendingNote?: string;
+  /**
+   * A connection tied to each person's own login, shown in the drawer under
+   * the workspace's (Google: your own Gmail and Calendar).
+   */
+  yourAccount?: "google";
+  /** Where the rest of this app's setup lives, when it is not all here. */
+  seeAlso?: { href: string; label: string };
 };
 
-/** Where the shared key editor and your own Google connection live. */
-export const CREDENTIALS_ANCHOR = "/settings/connections#integrations";
-
-const keysLink = (label: string): ConnectorConnect => ({ kind: "link", href: CREDENTIALS_ANCHOR, label });
+/** Settings › Connections with this app's drawer open. */
+export function connectorHref(slug: string): string {
+  return `/settings/connections?app=${encodeURIComponent(slug)}`;
+}
 
 // ── The catalog ────────────────────────────────────────────────────────────
 
@@ -225,8 +237,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     keywords: ["gmail", "calendar", "email", "drive", "meet", "google"],
     live: {
       source: { kind: "workspace_heartbeat", service: "gws", requireAll: ["app_password", "from_address"] },
-      connect: keysLink("Connect Google"),
+      connect: { kind: "keys", label: "Connect Google", service: "gws" },
     },
+    yourAccount: "google",
   },
   {
     slug: "calendly",
@@ -338,8 +351,9 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     keywords: ["chat", "alerts", "bot"],
     live: {
       source: { kind: "workspace_heartbeat", service: "telegram", requireAll: ["bot_token", "chat_id"] },
-      connect: { kind: "link", href: "/settings/chat-apps", label: "Set up Telegram" },
+      connect: { kind: "keys", label: "Set up Telegram", service: "telegram" },
     },
+    seeAlso: { href: "/settings/chat-apps", label: "Your own Telegram alerts are under Chat apps" },
   },
   {
     slug: "twilio",
@@ -360,7 +374,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
         requireAny: ["from_number", "messaging_service_sid"],
         verifiable: true,
       },
-      connect: keysLink("Add your Twilio keys"),
+      connect: { kind: "keys", label: "Add your Twilio keys", service: "twilio" },
     },
   },
   {

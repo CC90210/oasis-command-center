@@ -27,6 +27,11 @@
  *      operator should disposition. Listed by stage so operator can
  *      see WHERE the pipeline is sticking.
  *
+ * Below them, the integration heartbeats (integrations_health) for every
+ * service this workspace's agents use, platform services included for an
+ * operator. They moved here from Settings › Connections, where each app's own
+ * card now carries its status (CC, 2026-09-29).
+ *
  * Page is server-rendered + dynamic (no caching) so the operator
  * always sees the current state. Refresh = page reload.
  */
@@ -39,7 +44,10 @@ import { resolveTenantId } from "@/lib/api-auth";
 import { requireSystemSurface } from "@/lib/role-surfaces-session";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { getTenant } from "@/lib/queries";
+import { aiServicesWithKey, getTenant, integrationsHealth } from "@/lib/queries";
+import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
+import { isVerifiedOperator } from "@/components/settings/settings-viewer";
+import { IntegrationDot } from "@/components/IntegrationDot";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { WEBDEV_TENANT_ID } from "@/lib/web-leads/tenant";
 import { CALENDAR_CHECKS } from "@/lib/health/calendar-checks";
@@ -227,11 +235,21 @@ export default async function HealthPage() {
   // Link base for the shop-outs card (sun-only, so the fallback matters only
   // while standing in the SunBiz workspace).
   const tenantSlug = profileSlug || "sun";
-  const { recentErrors, failedCrons, stuckThreads, stuckLeads } = await loadHealth(
-    tenantId,
-    enabledAgents,
-    isSunbizTenant,
-  );
+  const [{ recentErrors, failedCrons, stuckThreads, stuckLeads }, heartbeats, keyedAi, operator] = await Promise.all([
+    loadHealth(tenantId, enabledAgents, isSunbizTenant),
+    // null = the read failed, which is "unknown", never "no integrations".
+    integrationsHealth(tenantId).catch((err) => {
+      console.error("[health] integrations_health read failed", err instanceof Error ? err.message : err);
+      return null;
+    }),
+    aiServicesWithKey(tenantId).catch((err) => {
+      console.error("[health] AI key presence read failed", err instanceof Error ? err.message : err);
+      return new Set<string>();
+    }),
+    isVerifiedOperator(),
+  ]);
+  const heartbeatServices = new Set(visibleIntegrationsForTenant(enabledAgents, { isOperator: operator }).map((d) => d.service));
+  const visibleHeartbeats = heartbeats?.filter((h) => heartbeatServices.has(h.service)) ?? null;
 
   // The outcome checks count toward the HEADER, not just their own card.
   // Otherwise the page renders "All clear" directly above a failing check, a
@@ -485,6 +503,23 @@ export default async function HealthPage() {
               );
             })}
           </ul>
+        )}
+      </Card>
+
+      <Card
+        title="Integration heartbeats"
+        subtitle="The last check-in from each service this workspace's agents use. Whether an app is connected is on its own card in Settings › Connections."
+      >
+        {visibleHeartbeats === null ? (
+          <div className="text-sm text-fg-muted">The heartbeats could not be read just now, so none is shown as down. Refresh to try again.</div>
+        ) : visibleHeartbeats.length === 0 ? (
+          <div className="text-sm text-fg-muted">No integrations are in use by this workspace&apos;s agents.</div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {visibleHeartbeats.map((h) => (
+              <IntegrationDot key={h.service} health={h} connection={{ hasCredentials: keyedAi.has(h.service) }} />
+            ))}
+          </div>
         )}
       </Card>
     </div>

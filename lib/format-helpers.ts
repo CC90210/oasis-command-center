@@ -53,7 +53,7 @@ export function initialsOf(name: string): string {
  * Relative-time formatter — "5m ago", "2h ago", "3d ago", or
  * the absolute date once beyond 30 days. Used by every timeline-
  * adjacent surface (LeadTimelinePanel, LeadDetailDrawer header,
- * IntegrationKeysPanel last-tested label).
+ * ServiceKeysForm last-check label).
  */
 export function relTime(iso: string | null): string {
   if (!iso) return "";

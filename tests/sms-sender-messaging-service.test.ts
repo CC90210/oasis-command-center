@@ -34,8 +34,10 @@ const store = readFileSync("lib/tenant-integration-store.ts", "utf8");
 assert.match(store, /messaging_service_sid:\s*"TWILIO_MESSAGING_SERVICE_SID"/);
 const availability = readFileSync("lib/routing/provider-availability.ts", "utf8");
 assert.match(availability, /\["account_sid",\s*"auth_token",\s*"messaging_service_sid"\]/);
-const settings = readFileSync("components/settings/IntegrationKeysPanel.tsx", "utf8");
-assert.match(settings, /schema\.service === "twilio"/);
-assert.match(settings, /messaging_service_sid/);
+// Twilio's keys are set up in its Connections drawer: a messaging service
+// counts as a sender in place of the from-number.
+const settings = readFileSync("components/os/connections/ServiceKeysForm.tsx", "utf8");
+assert.match(settings, /service === "twilio"/);
+assert.match(settings, /has\("from_number"\) \|\| has\("messaging_service_sid"\)/);
 
 console.log("sms-sender-messaging-service: OK");
