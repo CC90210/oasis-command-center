@@ -147,16 +147,21 @@ export function ServiceKeysForm({
 
   const remove = () =>
     run("remove", async () => {
-      for (const r of stored) {
-        const res = await send("DELETE", "/api/integrations/keys", { service, field_key: r.field_key });
-        if (!res.ok) {
-          setNotice({ tone: "err", text: `Could not remove every saved value: ${res.msg}` });
-          break;
+      try {
+        for (const r of stored) {
+          const res = await send("DELETE", "/api/integrations/keys", { service, field_key: r.field_key });
+          if (!res.ok) {
+            setNotice({ tone: "err", text: `Could not remove every saved value: ${res.msg}` });
+            break;
+          }
         }
+      } finally {
+        // Some fields may be gone even when a later one failed: always re-read,
+        // so nothing removed is still shown as saved.
+        setConfirmRemove(false);
+        await reload();
+        onChanged();
       }
-      setConfirmRemove(false);
-      await reload();
-      onChanged();
     });
 
   return (

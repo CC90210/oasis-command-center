@@ -49,6 +49,22 @@ const POPUP_ERRORS: Record<string, string> = {
   login_required: "Your session expired. Sign in again, then retry.",
 };
 
+/** What opened a sheet on arrival: ?app=, and Google's sign-in result (page.tsx). */
+export const DEEP_LINK_PARAMS = ["app", "gmail_oauth", "reason", "gmail", "mailbox"] as const;
+
+/** A closed sheet stays closed: a refresh must not reopen it or replay a sign-in banner. */
+function clearDeepLink() {
+  const url = new URL(window.location.href);
+  let changed = false;
+  for (const key of DEEP_LINK_PARAMS) {
+    if (url.searchParams.has(key)) {
+      url.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  if (changed) window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 const CUSTOM_KEYS = {
   title: "Custom keys",
   summary: "Any other app your agents use",
@@ -82,14 +98,12 @@ export function ConnectionsHub({
   }, []);
   const closeDrawer = useCallback(() => {
     setDrawerOpen(false);
-    // The drawer that ?app= opened is closed: a refresh must not reopen it.
-    const url = new URL(window.location.href);
-    if (url.searchParams.has("app")) {
-      url.searchParams.delete("app");
-      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-    }
+    clearDeepLink();
   }, []);
-  const closeCustom = useCallback(() => setCustomOpen(false), []);
+  const closeCustom = useCallback(() => {
+    setCustomOpen(false);
+    clearDeepLink();
+  }, []);
 
   useEffect(() => {
     if (initialApp === "custom-keys") setCustomOpen(true);

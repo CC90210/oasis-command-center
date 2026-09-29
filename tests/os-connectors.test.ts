@@ -593,6 +593,14 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.c
   assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
   assert.match(page, /one\(sp\.gmail_oauth\) \? "google-workspace"/);
 
+  // A closed sheet stays closed on refresh: both close paths clear ?app= and
+  // Google's sign-in result params (CodeRabbit #477).
+  assert.match(hub, /const closeDrawer = useCallback\(\(\) => \{\s*setDrawerOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /const closeCustom = useCallback\(\(\) => \{\s*setCustomOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /DEEP_LINK_PARAMS = \["app", "gmail_oauth", "reason", "gmail", "mailbox"\]/);
+  // Remove always re-reads, even when a later DELETE fails part-way.
+  assert.match(read("components/os/connections/ServiceKeysForm.tsx"), /\} finally \{[\s\S]{0,300}await reload\(\);\s*onChanged\(\);/);
+
   // Custom keys are one card, opened in the same accessible sheet.
   assert.match(hub, /<CustomCredentialsVault \/>/);
   assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
