@@ -2,18 +2,19 @@
  * /settings/connections — Settings › Connections, the hub for every app OASIS
  * talks to (plan pillar 4; docs/os-revamp/01 §(c) "Connections hub").
  *
- * Top: the app grid with each app's real logo — "Your tools" first, then the
- * catalog grouped by purpose. Statuses are computed HERE, on the server, from
- * real sources only (lib/os/connectors.ts resolveConnectorStatus): an app with
- * no status source says "Coming soon", a failed lookup says "Status
+ * One card per app, and the card is the one place that app is set up
+ * (CC, 2026-09-29: the page used to list the same apps a second time under
+ * "Keys and accounts"). Statuses are computed HERE, on the server, from real
+ * sources only (lib/os/connectors.ts resolveConnectorStatus): an app with no
+ * status source says "Coming soon", a failed lookup says "Status
  * unavailable", and nothing is ever "Connected" without a passing check.
  *
- * Below: the existing Credentials (shared keys, your own Google, custom
- * secrets), Kixie and Integration health — SettingsContent's own cards, which
- * the live cards in the grid open.
+ * `?app=<slug>` opens that app's drawer (connectorHref), and Google's sign-in
+ * comes back to it with `?gmail_oauth=…`.
  *
- * The grid is for owners and admins: it reports workspace-level state. Everyone
- * else sees their own Google connection only, exactly as before the split.
+ * The hub is for owners and admins: it reports workspace-level state. Everyone
+ * else sees their own Google connection only, exactly as before. The
+ * integration heartbeats that used to sit under the hub moved to /health.
  * /integrations redirects here (lib/os/redirects.ts).
  */
 
@@ -24,44 +25,47 @@ import { ConnectionsHub } from "@/components/os/connections/ConnectionsHub";
 import { loadConnectorFacts } from "@/components/os/connections/connector-facts";
 import { CONNECTOR_CATALOG, resolveConnectorStatus, type ConnectorStatus } from "@/lib/os/connectors";
 import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
+import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 
 export const dynamic = "force-dynamic";
 
-export default async function SettingsConnectionsPage() {
+type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+
+function one(v: string | string[] | undefined): string | null {
+  return typeof v === "string" && v ? v : null;
+}
+
+export default async function SettingsConnectionsPage({ searchParams }: { searchParams: SearchParams }) {
   const viewer = await requireSettingsSection("connections");
 
-  let statuses: Record<string, ConnectorStatus> | null = null;
-  if (viewer.access.canManage) {
-    const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId });
-    const now = Date.now();
-    statuses = Object.fromEntries(
-      CONNECTOR_CATALOG.map((def) => [def.slug, resolveConnectorStatus(def, facts, now)]),
+  if (!viewer.access.canManage) {
+    return (
+      <PageFrame title="Connections" subtitle="The accounts OASIS uses on your behalf. Workspace apps are connected by an owner or admin.">
+        <SettingsContent section="connections" viewerAccess={viewer.viewerAccess} />
+      </PageFrame>
     );
   }
+
+  const facts = await loadConnectorFacts({ tenantId: viewer.tenantId, userId: viewer.userId });
+  const now = Date.now();
+  const statuses: Record<string, ConnectorStatus> = Object.fromEntries(
+    CONNECTOR_CATALOG.map((def) => [def.slug, resolveConnectorStatus(def, facts, now)]),
+  );
+  const sp = await searchParams;
+  // Google's sign-in returns here with ?gmail_oauth=…; its drawer shows the result.
+  const initialApp = one(sp.app) ?? (one(sp.gmail_oauth) ? "google-workspace" : null);
 
   return (
     <PageFrame
       title="Connections"
-      subtitle={
-        statuses
-          ? "The tools your business already runs on. Connect one and every department that uses it can work with it."
-          : "The accounts OASIS uses on your behalf. Workspace apps are connected by an owner or admin."
-      }
+      subtitle="The tools your business already runs on. Connect one and every department that uses it can work with it."
     >
-      <div className="space-y-10">
-        {statuses && <ConnectionsHub statuses={statuses} supportHref={SUPPORT_FORM_PATH} />}
-        <section aria-label="Credentials and health" className="space-y-4">
-          {statuses && (
-            <div>
-              <h2 className="text-sm font-semibold text-fg">Keys and accounts</h2>
-              <p className="mt-0.5 text-[13px] leading-5 text-fg-muted">
-                Where the connections above are set up, and the health of every system your agents use.
-              </p>
-            </div>
-          )}
-          <SettingsContent section="connections" viewerAccess={viewer.viewerAccess} />
-        </section>
-      </div>
+      <ConnectionsHub
+        statuses={statuses}
+        supportHref={SUPPORT_FORM_PATH}
+        initialApp={initialApp}
+        personalGoogle={!isSharedInboxTenant(viewer.tenantSlug)}
+      />
     </PageFrame>
   );
 }
