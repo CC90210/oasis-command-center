@@ -287,11 +287,17 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     // Moving an occurrence of an unchanged weekly rule moves its weekdays too.
     const shiftedRule =
       recurrence && sameRule(recurrence, master.recurrence) ? followMove(recurrence, occ.start, eventStart(next)) : recurrence;
-    return [{
+    const ops: EventOp[] = [{
       op: "update",
       id: master.id,
       patch: { ...next, start, end, recurrence: shiftedRule, exdates: delta === 0 ? master.exdates : [], recurringEventId: null, originalStart: null },
     }];
+    // Moving the whole series re-keys every instance, so single-occurrence
+    // edits no longer point at anything and would render as duplicates.
+    // Google Calendar discards them in this case; so do we.
+    if (delta !== 0)
+      for (const row of allRows) if (row.recurringEventId === master.id) ops.push({ op: "delete", id: row.id });
+    return ops;
   }
 
   // "following": end the old series the day before, start a new one here.

@@ -121,6 +121,11 @@ const take = <T>(g: Generator<T>, n: number) => {
   // All: the master shifts by the same delta, Monday rule becomes Tuesday.
   const all = planEdit(occ, next, "all", [m]);
   assert.ok(all[0].op === "update");
+  // A time change to the whole series drops its single-occurrence edits;
+  // a title-only change to all keeps them.
+  assert.deepEqual(planEdit(occ, next, "all", [m, override]).map((o) => o.op), ["update", "delete"]);
+  const titleOnly = { ...base, title: "renamed", start: occ.start.toISOString(), end: occ.end.toISOString() };
+  assert.deepEqual(planEdit(occ, titleOnly, "all", [m, override]).map((o) => o.op), ["update"]);
   assert.equal(new Date(all[0].patch.start!).getTime(), local("2026-09-29T11:00").getTime());
   assert.deepEqual(all[0].patch.recurrence?.byWeekday, [2]);
 

@@ -8,7 +8,7 @@
  */
 
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
   DEFAULT_PREFS,
@@ -127,13 +127,27 @@ export async function listCalendars(owner: Owner): Promise<CalendarRecord[]> {
   if (error) storageError(error, "calendar_read_failed");
   const rows = ((data ?? []) as CalendarRow[]).map(toCalendar);
   if (rows.length) return rows;
-  // First visit: give the user one calendar to put things in.
-  return [await createCalendar(owner, { name: "Personal", color: "tide", isDefault: true })];
+  // First visit: give the user one calendar to put things in. The id is
+  // derived from the owner, so two first loads racing each other collide on
+  // the primary key instead of creating two defaults; the loser re-reads.
+  const id = `default-${createHash("sha256").update(`${owner.tenantId}|${owner.userId}`).digest("hex").slice(0, 40)}`;
+  try {
+    return [await createCalendar(owner, { name: "Personal", color: "tide", isDefault: true, id })];
+  } catch (err) {
+    const again = await db
+      .from("calendar_calendars")
+      .select("*")
+      .eq("tenant_id", owner.tenantId)
+      .eq("user_id", owner.userId)
+      .order("position", { ascending: true });
+    if (again.error || !again.data?.length) throw err;
+    return (again.data as CalendarRow[]).map(toCalendar);
+  }
 }
 
 export async function createCalendar(
   owner: Owner,
-  input: { name: string; color: CalendarColor; isDefault?: boolean },
+  input: { name: string; color: CalendarColor; isDefault?: boolean; id?: string },
 ): Promise<CalendarRecord> {
   const db = getServiceSupabase();
   const now = new Date().toISOString();
@@ -146,7 +160,7 @@ export async function createCalendar(
   const rows = (existing.data ?? []) as CalendarRow[];
   if (rows.length >= LIMITS.calendars) throw new CalendarStoreError("calendar_limit_reached", 409);
   const row = {
-    id: randomUUID(),
+    id: input.id ?? randomUUID(),
     tenant_id: owner.tenantId,
     user_id: owner.userId,
     name: input.name,
