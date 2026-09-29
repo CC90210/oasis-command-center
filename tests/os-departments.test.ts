@@ -153,7 +153,9 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   const viewerSrc = read("components/os/department/viewer.ts");
   assert.match(viewerSrc, /isOperator: false/);
   assert.match(viewerSrc, /founders: null/);
-  assert.match(viewerSrc, /resolveOsModules\(\{ tenantSlug: surface\.tenantSlug, provisioned \}\)/, "modules come from the same resolver as the rail");
+  // One builder (navInputFor) serves the session viewer and the member lookup an agent tool uses.
+  assert.match(viewerSrc, /resolveOsModules\(\{ tenantSlug, provisioned \}\)/, "modules come from the same resolver as the rail");
+  assert.match(viewerSrc, /navInput: navInputFor\(surface\.persona, surface\.capabilities, surface\.tenantSlug, provisioned\)/);
 }
 
 // ── 5. A client workspace never meets OASIS's agents or copy ──────────────
@@ -353,7 +355,9 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   // (CodeRabbit #469): the header must not print "2" over a line saying "2+".
   assert.deepEqual(statusFor(true, 2, true), { kind: "needs_you", count: 2, capped: true });
   assert.deepEqual(statusFor(true, 2), { kind: "needs_you", count: 2, capped: false }, "uncapped by default");
-  assert.deepEqual(statusFor(true, 0, true), { kind: "working" });
+  // A floor of 0 (a count that could not be read) is not "nothing waiting".
+  assert.deepEqual(statusFor(true, 0, true), { kind: "unknown" });
+  assert.deepEqual(statusFor(true, 0), { kind: "working" });
   assert.deepEqual(statusFor(false, 2, true), { kind: "not_connected" });
   const pill = read("components/os/department/StatusPill.tsx");
   assert.match(pill, /floorCount\(status\.count, status\.capped\)/, "the pill prints the total through the shared floor rule");

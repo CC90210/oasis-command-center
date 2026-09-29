@@ -16,7 +16,7 @@
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { DEPARTMENT_KEYS, isOneOf } from "@/lib/os/approvals/rules";
-import { countPendingApprovals, listApprovals, type ApprovalListView } from "@/lib/os/approvals/store";
+import { countPendingApprovals, listApprovals, listLimit, type ApprovalListView } from "@/lib/os/approvals/store";
 import { buildApprovalViews } from "@/lib/os/approvals/view";
 import { approvalError, approvalServerError, resolveApprovalSession } from "@/lib/os/approvals/session";
 
@@ -35,7 +35,8 @@ export async function GET(req: NextRequest) {
     const rawDept = (sp.get("department") || "").trim().toLowerCase();
     if (rawDept && !isOneOf(DEPARTMENT_KEYS, rawDept)) return approvalError(400, "department_invalid");
     const department = isOneOf(DEPARTMENT_KEYS, rawDept) ? rawDept : null;
-    const limit = Number(sp.get("limit") || "") || undefined;
+    // A whole number in range, whatever the query string says (store.ts listLimit).
+    const limit = listLimit(sp.get("limit"));
 
     const now = new Date();
     const [listed, pending] = await Promise.all([

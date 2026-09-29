@@ -29,7 +29,7 @@ import { useState, type FormEvent } from "react";
 import { formatOperatorDate, operatorDateKey } from "@/lib/dates";
 import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
 import type { ApprovalView } from "@/lib/os/approvals/rules";
-import { describeOutcome, requesterLabel, type OutcomeTone } from "@/components/os/approvals/outcome";
+import { describeOutcome, newerApproval, requesterLabel, type OutcomeTone } from "@/components/os/approvals/outcome";
 
 type Busy = null | "approve" | "send_back" | "comment";
 
@@ -57,15 +57,17 @@ function str(v: unknown): string {
 
 function EmailPreview({ payload, clamp }: { payload: Record<string, unknown>; clamp: boolean }) {
   const cc = Array.isArray(payload.cc) ? payload.cc.map(String) : [];
+  // Every recipient in full, wrapped, never cut to an ellipsis: an approver
+  // who cannot read the whole address cannot tell who the email goes to.
   return (
     <div className="rounded-lg border border-hairline bg-bg-deep/40 px-3 py-2.5 text-[13px] leading-5">
       <dl className="grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5">
         <dt className="text-fg-dim">To</dt>
-        <dd className="truncate text-fg">{str(payload.to)}</dd>
+        <dd className="break-all text-fg">{str(payload.to)}</dd>
         {cc.length > 0 && (
           <>
             <dt className="text-fg-dim">Cc</dt>
-            <dd className="truncate text-fg-muted">{cc.join(", ")}</dd>
+            <dd className="break-all text-fg-muted">{cc.join(", ")}</dd>
           </>
         )}
         <dt className="text-fg-dim">Subject</dt>
@@ -127,6 +129,16 @@ export function ApprovalCard({
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(density === "full");
+  // A server render hands the card a fresh row (router.refresh): show it, the
+  // newer of it and the row this card's own click returned (newerApproval).
+  // Adjusted while rendering, React's pattern for state that follows a prop,
+  // and only between clicks: a click in flight sets the row from its own
+  // response. A half-written note (mode, text) is untouched.
+  const [synced, setSynced] = useState<ApprovalView>(initial);
+  if (initial !== synced && busy === null) {
+    setSynced(initial);
+    setApproval(newerApproval(approval, initial));
+  }
 
   const outcome = describeOutcome(approval, when, Date.now());
   const pending = approval.status === "pending";

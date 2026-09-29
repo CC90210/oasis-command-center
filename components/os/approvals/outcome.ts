@@ -89,6 +89,20 @@ export function describeOutcome(a: OutcomeInput, fmt: (iso: string) => string, n
   }
 }
 
+/**
+ * Which copy of an approval a card shows: the one its own click got back, or
+ * the one a later server render brought (router.refresh — the Feed refreshes
+ * every 30 s). The newer wins, so a refresh shows a teammate's comment or the
+ * executor's result, and a refresh that started before a click returned
+ * cannot roll the card back. Every transition moves updated_at; a comment
+ * moves only the comment list. A tie goes to the server's copy, which also
+ * carries what time alone changes (a pending card that has expired).
+ */
+export function newerApproval<T extends Pick<ApprovalView, "updated_at" | "comments">>(shown: T, incoming: T): T {
+  if (incoming.updated_at !== shown.updated_at) return incoming.updated_at > shown.updated_at ? incoming : shown;
+  return incoming.comments.length >= shown.comments.length ? incoming : shown;
+}
+
 /** Who asked, in words: "AI teammate", "Routine", "Teammate". */
 export function requesterLabel(type: ApprovalView["requested_by_type"]): string {
   return type === "agent" ? "AI teammate" : type === "routine" ? "Routine" : "Teammate";

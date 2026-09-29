@@ -227,6 +227,18 @@ export type ApprovalListFilter = {
 export type Listed<T> = { rows: T[]; truncated: boolean };
 
 /**
+ * A page size as SQL LIMIT needs it: a whole number from 1 to
+ * APPROVAL_LIST_LIMIT. A query string or a model hands over "2.7", "-5" or
+ * "abc"; a fraction reaching LIMIT is a datatype-mismatch 500 and NaN is a
+ * driver error, so every caller's number passes through here.
+ */
+export function listLimit(raw: unknown, fallback = 50): number {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(Math.trunc(n), APPROVAL_LIST_LIMIT));
+}
+
+/**
  * A viewer's approvals. `pending` is the Needs-you queue (not expired);
  * `decided` is the last RECENT_DECISIONS_DAYS of decisions and outcomes,
  * including pending rows that expired in that window.
@@ -239,7 +251,7 @@ export async function listApprovals(
 ): Promise<Listed<ApprovalRow>> {
   const tenantId = requireTenant(scope.tenantId);
   if (scopeSeesNothing(scope)) return { rows: [], truncated: false };
-  const limit = Math.max(1, Math.min(filter.limit ?? 50, APPROVAL_LIST_LIMIT));
+  const limit = listLimit(filter.limit);
   const nowIso = now.toISOString();
   const where: string[] = ["a.tenant_id = ?"];
   const args: InValue[] = [tenantId];
@@ -482,12 +494,25 @@ export async function createApproval(db: Client, input: unknown, now: Date): Pro
     if (!["pending", "sent_back", "cancelled"].includes(old.status)) {
       return { ok: false, error: "supersedes_not_revisable", status: old.status };
     }
-    const successor = await db.execute({
-      sql: "SELECT id FROM approvals WHERE tenant_id = ? AND supersedes_id = ? LIMIT 1",
-      args: [a.tenantId, old.id],
-    });
-    if (successor.rows.length) {
-      return { ok: false, error: "already_revised", successorId: String(successor.rows[0].id) };
+    const successor = rows(
+      await db.execute({
+        sql: `${SELECT_APPROVAL} WHERE a.tenant_id = ? AND a.supersedes_id = ? LIMIT 1`,
+        args: [a.tenantId, old.id],
+      }),
+    )[0];
+    if (successor) {
+      const prior = mapApproval(successor);
+      // A retry of THIS revision (the caller's own key) gets the row it
+      // already made, exactly as a retried create does; the same key with
+      // other words is a reused key. Anyone else's revision is already_revised.
+      if (a.idempotencyKey && prior.idempotency_key === idem) {
+        if (prior.payload_hash !== hash || prior.action_kind !== a.actionKind) {
+          console.error("[approvals.store] idempotency key reused with a different payload", { tenant: a.tenantId, key: idem });
+          return { ok: false, error: "idempotency_key_reused" };
+        }
+        return { ok: true, created: false, approval: prior };
+      }
+      return { ok: false, error: "already_revised", successorId: prior.id };
     }
     revision = old.revision + 1;
     // 1. A pending old row is withdrawn — unless this key is already taken, in

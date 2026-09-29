@@ -166,13 +166,21 @@ export default async function FeedPage({ searchParams }: { searchParams?: Promis
                 ) : decisions.value.items.length === 0 ? (
                   <p className="text-[13px] text-fg-muted">No decisions in the last 7 days.</p>
                 ) : (
-                  <ul className="space-y-3">
-                    {decisions.value.items.map((a) => (
-                      <li key={a.id}>
-                        <ApprovalCard approval={a} density="compact" />
-                      </li>
-                    ))}
-                  </ul>
+                  <>
+                    <ul className="space-y-3">
+                      {decisions.value.items.map((a) => (
+                        <li key={a.id}>
+                          <ApprovalCard approval={a} density="compact" />
+                        </li>
+                      ))}
+                    </ul>
+                    {/* More were decided than fit: say so, never imply the list is complete. */}
+                    {decisions.value.truncated && (
+                      <p className="text-xs text-fg-dim">
+                        Showing the latest {decisions.value.items.length} decisions from the last 7 days; older ones are not listed here.
+                      </p>
+                    )}
+                  </>
                 )}
               </section>
             )}

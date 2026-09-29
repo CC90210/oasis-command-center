@@ -15,7 +15,7 @@ import type { Client } from "@libsql/client";
 import {
   ACTION_KIND_LABELS,
   departmentLabel,
-  isExpired,
+  effectiveStatus,
   mayDecideApproval,
   type ApprovalScope,
   type ApprovalView,
@@ -35,8 +35,7 @@ export async function buildApprovalViews(
   const nowIso = opts.now.toISOString();
   const tenant = { id: scope.tenantId, slug: opts.tenantSlug };
   return approvals.map((a) => {
-    const expired = a.status === "pending" && isExpired(a.expires_at, nowIso);
-    const status = expired ? "expired" : a.status;
+    const status = effectiveStatus(a, nowIso);
     const readiness = executorReadiness(a.action_kind, tenant, deps);
     return {
       id: a.id,

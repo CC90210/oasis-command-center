@@ -43,11 +43,17 @@ import {
   DEPARTMENT_KEYS,
   canonicalJson,
   departmentForAgent,
+  effectiveStatus,
   isOneOf,
   validateSendEmailPayload,
   agentReadScope,
+  workspaceReadScope,
+  type ApprovalScope,
 } from "./os/approvals/rules";
 import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
+import { openDepartmentsFor } from "./os/approvals/scope";
+import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
+import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
 import { resolveClientProfileSlug } from "./client-profiles";
 import {
   getRecord as dataGet,
@@ -1162,10 +1168,12 @@ async function toolProposeEmail(input: Record<string, unknown>, ctx: ToolContext
     // An agent revises only ITS OWN card. createApproval checks the tenant and
     // the kind, not the requester, so without this any agent in the workspace
     // could withdraw a teammate's or another agent's pending card by
-    // "revising" it with its own text.
+    // "revising" it with its own text. An agent with no key owns nothing: a
+    // missing key must not match another keyless card as "the same agent".
+    if (!ctx.agentKey) throw new Error("supersedes_not_yours: this agent has no key, so it cannot revise a draft");
     const old = await getApprovalInTenant(db, ctx.tenantId, revises);
     if (!old) throw new Error("supersedes_not_found");
-    if (old.requested_by_type !== "agent" || old.requested_by_id !== (ctx.agentKey || null)) {
+    if (old.requested_by_type !== "agent" || old.requested_by_id !== ctx.agentKey) {
       throw new Error("supersedes_not_yours: only the agent that proposed a draft can revise it");
     }
   }
@@ -1214,15 +1222,23 @@ async function toolListProposals(input: Record<string, unknown>, ctx: ToolContex
   const limit = Math.max(1, Math.min(Number(input.limit) || 20, 50));
   // A read-only server scope over the SESSION's workspace, narrowed below to
   // this agent's own proposals. It can decide nothing. Any member may chat
-  // with any workspace agent, so a non-admin does not read the owner-only
-  // departments' cards (Chief of Staff, Finance, Operations) through it.
-  const scope = agentReadScope(ctx.tenantId, ctx.userId, ctx.isAdmin === true);
+  // with any workspace agent, so through it a member reads exactly the
+  // departments they may decide on screen, never more.
+  const scope = await proposalReadScope(ctx);
+  // A reviewer's note and a provider's failure text are other people's words
+  // on their way into the next model request: they get the same scrub as
+  // everything else the model or the transcript sees (lib/secret-redaction.ts,
+  // chat-persistence.ts), env secrets and this workspace's vault values alike.
+  const vault = await fetchTenantVaultSecretsForRedaction(ctx.tenantId);
+  const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+  const now = new Date();
   const { rows, truncated } = await listApprovals(
     getTursoClient(),
     scope,
     { view, limit, requestedBy: { type: "agent", id: ctx.agentKey || "unknown" } },
-    new Date(),
+    now,
   );
+  const nowIso = now.toISOString();
   return {
     count: rows.length,
     truncated,
@@ -1231,14 +1247,42 @@ async function toolListProposals(input: Record<string, unknown>, ctx: ToolContex
       kind: a.action_kind,
       title: a.title,
       revision: a.revision,
-      status: a.status,
+      // A pending card past its expiry is expired, as every card shows it.
+      status: effectiveStatus(a, nowIso),
       department: a.department_key,
       created_at: a.created_at,
       decided_at: a.decided_at,
-      reviewer_note: a.decision_note,
-      outcome: a.execution_result,
+      reviewer_note: a.decision_note === null ? null : scrub(a.decision_note),
+      outcome: a.execution_result === null ? null : scrubStrings(a.execution_result, scrub),
     })),
   };
+}
+
+/** Owners/admins read every department; anyone else what their own seats and rail give them. */
+async function proposalReadScope(ctx: ToolContext): Promise<ApprovalScope> {
+  if (ctx.isAdmin === true) return workspaceReadScope(ctx.tenantId, ctx.userId);
+  // Loaded here, not at the top: the viewer module brings the session and
+  // navigation chain, which only this branch needs.
+  const { resolveMemberNavInput } = await import("../components/os/department/viewer");
+  const member = await resolveMemberNavInput(ctx.tenantId, ctx.authUserId);
+  // An unknown seat is not "every seat": read nothing and say why.
+  if (!member.ok) throw new Error("approvals_unavailable: could not confirm which departments you sit in, so nothing was read");
+  return agentReadScope({
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    persona: member.persona,
+    openDepartments: openDepartmentsFor(member.navInput),
+  });
+}
+
+/** Every string inside a JSON-shaped value, passed through `scrub`. */
+function scrubStrings<T>(value: T, scrub: (text: string) => string): T {
+  if (typeof value === "string") return scrub(value) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubStrings(v, scrub)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubStrings(v, scrub)])) as T;
+  }
+  return value;
 }
 
 /**

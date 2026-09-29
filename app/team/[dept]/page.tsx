@@ -107,12 +107,14 @@ export default async function DepartmentPage({
         value: routinesForDepartment(routines.value, dept.key, binding.kind === "agent" ? [binding.agentSlug] : []),
       }
     : routines;
-  // Pending approvals are an exact COUNT(*); only an attention item from a
-  // capped read can make the total a floor.
+  // Pending approvals are an exact COUNT(*); an attention item from a capped
+  // read makes the total a floor, and so does an approvals read that failed:
+  // it added 0 for a number nobody knows.
   const needsYou =
     numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
-  // Any floor in the sum makes the total a floor too.
-  const needsYouCapped = numbers.attention.some((item) => item.capped === true);
+  // Any floor in the sum makes the total a floor too. A floor of 0 is not
+  // "nothing waiting", so the header cannot say Working (statusFor).
+  const needsYouCapped = numbers.attention.some((item) => item.capped === true) || !approvals.ok;
   const profile = departmentProfile(dept.key);
 
   return (

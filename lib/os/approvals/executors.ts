@@ -22,14 +22,20 @@
  *                 behind send_gateway, and it posts to OASIS's OWN accounts.
  *                 So it is allowed only for a founders tenant
  *                 (FOUNDERS_TENANT_IDS) and only for an own-brand asset; every
- *                 check the panel's route makes is made here too.
+ *                 check the panel's route makes is made here too. The intent
+ *                 names the asset, not its words, so the approval binds the
+ *                 asset's CONTENT (asset_hash, readPublishAsset below) and a
+ *                 changed asset is refused; and the in-flight check and the
+ *                 insert are one statement, so two approvals of one asset
+ *                 cannot both queue.
  *
  * Dependencies are injected (ExecutorDeps) so tests drive the real executors
  * with a fake mailbox and a temp database; production passes nothing.
  */
 import "server-only";
-import type { Client } from "@libsql/client";
+import type { Client, ResultSet } from "@libsql/client";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getTursoClient } from "@/lib/turso";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import type { BrandKey } from "@/lib/email/brands";
 import type { EmailSigner } from "@/lib/config/email-signature";
@@ -45,12 +51,13 @@ import { isFounderTenant, parseFoundersAllowlist, parseSlideUrls } from "@/lib/f
 import { PUBLISH_CHANNELS, refusalFor } from "@/lib/founders/publish-targets";
 import {
   ACTION_KIND_LABELS,
+  publishAssetSnapshot,
   validatePublishPostPayload,
   validateSendEmailPayload,
   type ApprovalActionKind,
   type ExecutionResult,
 } from "@/lib/os/approvals/rules";
-import type { ApprovalRow } from "@/lib/os/approvals/store";
+import { payloadHashOf, type ApprovalRow } from "@/lib/os/approvals/store";
 
 export type ExecutorTenant = { id: string; slug: string | null };
 
@@ -67,6 +74,12 @@ export type ExecutorDeps = {
   emailSuppression: (tenantId: string, email: string) => Promise<{ suppressed: boolean; checkFailed: boolean }>;
   /** The data plane the Post panel writes marketing_publish_intent through. */
   marketingDb: () => Pick<SupabaseClient, "from">;
+  /**
+   * The same database as SQL, for the one statement the query builder cannot
+   * say: queue a publish only while none is in flight (INSERT ... WHERE NOT
+   * EXISTS), atomically.
+   */
+  marketingSql: () => Client;
   foundersTenantIds: () => string[];
   signerFor: (email: string | null, brand: BrandKey) => EmailSigner | null;
   /** The Feed's event tape (agent_events). Best-effort: it logs, never throws. */
@@ -79,6 +92,15 @@ export function defaultExecutorDeps(): ExecutorDeps {
     sendEmail: sendOasisSharedGmail,
     emailSuppression: checkEmailSuppressed,
     marketingDb: () => getServiceSupabase(),
+    marketingSql: () => {
+      // getServiceSupabase().from() reads Turso only under turso_cloud; on any
+      // other backend this SQL would write to a different database than the
+      // Post panel reads, so it refuses (a recorded failure) instead.
+      if (process.env.EMPIRE_DATA_BACKEND !== "turso_cloud") {
+        throw new Error("the publish queue is not on Turso on this deployment, so nothing was queued");
+      }
+      return getTursoClient();
+    },
     foundersTenantIds: () => parseFoundersAllowlist(process.env.FOUNDERS_TENANT_IDS),
     signerFor: (email, brand) => (email ? resolveSignerForOperator(email, { brand }) : null),
     publishEvent: publishAgentEvent,
@@ -214,6 +236,38 @@ function publishReadiness(tenant: ExecutorTenant, deps: ExecutorDeps): string | 
   return null;
 }
 
+/**
+ * The columns the checks below read, plus every column the publisher builds
+ * the post from (rules.ts PUBLISH_ASSET_FIELDS).
+ */
+const PUBLISH_ASSET_COLUMNS = "id, title, status, brand_slug, format, asset_type, slide_count, media_urls, hook, body, cta, landing_url";
+
+export type PublishAssetRead =
+  | { ok: true; asset: Record<string, unknown> | null; media: Array<Record<string, unknown>>; assetHash: string | null }
+  | { ok: false; reason: "read_failed" | "media_check_failed"; message: string };
+
+/**
+ * One asset (tenant-pinned) and its media rows as the publisher would post
+ * them, with the sha256 a publish_post approval binds to (asset_hash). The
+ * executor reads through this; anything that CREATES a publish_post approval
+ * must read through it too and put `assetHash` in the payload.
+ */
+export async function readPublishAsset(
+  db: Pick<SupabaseClient, "from">,
+  tenantId: string,
+  assetId: string,
+): Promise<PublishAssetRead> {
+  const asset = await db.from("marketing_asset").select(PUBLISH_ASSET_COLUMNS).eq("tenant_id", tenantId).eq("id", assetId).maybeSingle();
+  if (asset.error) return { ok: false, reason: "read_failed", message: `The asset could not be read: ${asset.error.message}` };
+  const row = asset.data as Record<string, unknown> | null;
+  if (!row) return { ok: true, asset: null, media: [], assetHash: null };
+  const media = await db.from("marketing_asset_media").select("kind, storage_bucket, storage_path").eq("tenant_id", tenantId).eq("asset_id", assetId);
+  // Fail closed, like the route: a check that could not run is not a pass.
+  if (media.error) return { ok: false, reason: "media_check_failed", message: `Could not confirm the asset has media: ${media.error.message}` };
+  const files = (media.data || []) as Array<Record<string, unknown>>;
+  return { ok: true, asset: row, media: files, assetHash: payloadHashOf(publishAssetSnapshot(row, files)) };
+}
+
 const publishPost: Executor = {
   readiness: publishReadiness,
   async run(ctx) {
@@ -221,19 +275,13 @@ const publishPost: Executor = {
     if (notReady) return failed("no_publisher", notReady);
     const v = validatePublishPostPayload(ctx.payload);
     if (!v.ok) return failed("payload_invalid", `The stored post is not valid (${v.error}).`);
-    const { asset_id, platforms, note } = v.value;
-    const db = ctx.deps.marketingDb();
+    const { asset_id, asset_hash, platforms, note } = v.value;
     const tenantId = ctx.tenant.id;
 
     // Tenant-scoped, own brand only — the Post panel's rule.
-    const asset = await db
-      .from("marketing_asset")
-      .select("id, title, status, brand_slug, format, asset_type, slide_count, media_urls")
-      .eq("tenant_id", tenantId)
-      .eq("id", asset_id)
-      .maybeSingle();
-    if (asset.error) return failed("read_failed", `The asset could not be read: ${asset.error.message}`, PUBLISH_PROVIDER);
-    const a = asset.data as
+    const read = await readPublishAsset(ctx.deps.marketingDb(), tenantId, asset_id);
+    if (!read.ok) return failed(read.reason, read.message, PUBLISH_PROVIDER);
+    const a = read.asset as
       | { id: string; title: string | null; brand_slug: string | null; asset_type: string | null; slide_count: number | null; media_urls: unknown }
       | null;
     if (!a) return failed("asset_not_found", "That asset does not exist in this workspace.", PUBLISH_PROVIDER);
@@ -252,44 +300,52 @@ const publishPost: Executor = {
       if (refused.length) return failed("platform_media_limit", refused.join("; "), PUBLISH_PROVIDER);
     }
 
-    const media = await db.from("marketing_asset_media").select("id").eq("tenant_id", tenantId).eq("asset_id", asset_id).limit(1);
-    // Fail closed, like the route: a check that could not run is not a pass.
-    if (media.error) return failed("media_check_failed", `Could not confirm the asset has media: ${media.error.message}`, PUBLISH_PROVIDER);
-    if (!(media.data || []).length) return failed("no_media_attached", "The asset has no media attached, so every channel would refuse it.", PUBLISH_PROVIDER);
+    if (read.media.length === 0) return failed("no_media_attached", "The asset has no media attached, so every channel would refuse it.", PUBLISH_PROVIDER);
 
-    const inflight = await db
-      .from("marketing_publish_intent")
-      .select("id, state")
-      .eq("tenant_id", tenantId)
-      .eq("asset_id", asset_id)
-      .in("state", ["queued", "running"])
-      .limit(1);
-    if (inflight.error) {
-      return failed("inflight_check_failed", `Could not confirm no publish is already running: ${inflight.error.message}`, PUBLISH_PROVIDER);
+    // What was approved is what posts. The intent carries only the asset id
+    // and the drainer reads the asset when it runs, so an asset edited after
+    // the "yes" (a new caption, other slides, a swapped video) is refused here.
+    if (read.assetHash !== asset_hash) {
+      return failed(
+        "asset_changed",
+        "The post changed after it was approved (its caption, title, slides or media), so it was not queued. Ask for a new approval.",
+        PUBLISH_PROVIDER,
+      );
     }
-    if ((inflight.data || []).length) {
+
+    // ONE statement: queue it only while nothing for this asset is queued or
+    // running. A read-then-insert let two approvals of the same asset both see
+    // "nothing in flight" and both queue, and there is no unsending.
+    let queued: ResultSet;
+    try {
+      queued = await ctx.deps.marketingSql().execute({
+        sql: `INSERT INTO marketing_publish_intent (tenant_id, asset_id, platforms, requested_by, note, state)
+              SELECT ?, ?, ?, ?, ?, 'queued'
+              WHERE NOT EXISTS (SELECT 1 FROM marketing_publish_intent
+                                WHERE tenant_id = ? AND asset_id = ? AND state IN ('queued', 'running'))
+              RETURNING id`,
+        args: [
+          tenantId,
+          asset_id,
+          JSON.stringify(platforms),
+          // Provenance: the approval row names who approved it and when.
+          `approval:${ctx.approval.id}`,
+          note ?? null,
+          tenantId,
+          asset_id,
+        ],
+      });
+    } catch (err) {
+      return failed("queue_failed", `The publish could not be queued: ${err instanceof Error ? err.message : String(err)}`, PUBLISH_PROVIDER);
+    }
+    // The RETURNING row is the proof it was queued (a local libSQL file reports
+    // rowsAffected 0 for a statement with RETURNING, so that is not read).
+    if (queued.rows.length !== 1) {
       return failed("already_queued", "A publish for this asset is already in flight; there is no unsending, so this one was not queued.", PUBLISH_PROVIDER);
-    }
-
-    const created = await db
-      .from("marketing_publish_intent")
-      .insert({
-        tenant_id: tenantId,
-        asset_id,
-        platforms,
-        // Provenance: the approval row names who approved it and when.
-        requested_by: `approval:${ctx.approval.id}`,
-        note: note ?? null,
-        state: "queued",
-      })
-      .select("id, state, platforms, created_at")
-      .maybeSingle();
-    if (created.error || !created.data) {
-      return failed("queue_failed", `The publish could not be queued: ${created.error?.message || "insert returned no row"}`, PUBLISH_PROVIDER);
     }
     return {
       ok: true,
-      result: { outcome: "queued", provider: PUBLISH_PROVIDER, intent_id: String((created.data as { id: unknown }).id), platforms },
+      result: { outcome: "queued", provider: PUBLISH_PROVIDER, intent_id: String(queued.rows[0].id), platforms },
     };
   },
 };

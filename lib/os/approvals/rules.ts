@@ -20,6 +20,7 @@ import type { Persona } from "@/lib/role-surfaces";
 import type { DepartmentKey } from "@/lib/os/types";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { PUBLISH_CHANNELS } from "@/lib/founders/publish-targets";
+import { parseSlideUrls } from "@/lib/founders-marketing-core";
 
 // ---------------------------------------------------------------------------
 // Vocabularies
@@ -222,6 +223,13 @@ export type SendEmailPayload = {
 
 export type PublishPostPayload = {
   asset_id: string;
+  /**
+   * sha256 of the asset's content as the publisher would post it
+   * (publishAssetSnapshot below), taken when the approval was created. The
+   * executor re-reads the asset and refuses to queue if it no longer hashes to
+   * this: a "yes" is to THIS content, not to whatever the asset says later.
+   */
+  asset_hash: string;
   /** Channel ids from lib/founders/publish-targets.ts PUBLISH_CHANNELS. */
   platforms: string[];
   note?: string;
@@ -283,6 +291,10 @@ export function validatePublishPostPayload(raw: unknown): Valid<PublishPostPaylo
   const asset_id = typeof raw.asset_id === "string" ? raw.asset_id.trim() : "";
   if (!asset_id) return { ok: false, error: "asset_id_required", field: "asset_id" };
   if (asset_id.length > 64) return { ok: false, error: "asset_id_invalid", field: "asset_id" };
+  // No hash, no approval: without it the executor could only post whatever
+  // the asset says at run time, which is not what anyone was shown.
+  const asset_hash = raw.asset_hash;
+  if (!isPayloadHash(asset_hash)) return { ok: false, error: "asset_hash_required", field: "asset_hash" };
   if (!Array.isArray(raw.platforms) || raw.platforms.length === 0) {
     return { ok: false, error: "platforms_required", field: "platforms" };
   }
@@ -296,7 +308,47 @@ export function validatePublishPostPayload(raw: unknown): Valid<PublishPostPaylo
     if (raw.note.length > POST_NOTE_MAX) return { ok: false, error: "note_too_long", field: "note" };
     note = raw.note.trim();
   }
-  return { ok: true, value: { asset_id, platforms: asked, ...(note ? { note } : {}) } };
+  return { ok: true, value: { asset_id, asset_hash, platforms: asked, ...(note ? { note } : {}) } };
+}
+
+/**
+ * The asset columns the social publisher builds a post from
+ * (scripts/marketing_publish_drain.py): the caption is hook / body / cta /
+ * landing_url with the title as its fallback, the title is YouTube's title,
+ * and a carousel's slides go out in media_urls order. format, asset_type and
+ * slide_count ride along because the channel limits read them.
+ */
+export const PUBLISH_ASSET_FIELDS = [
+  "title",
+  "format",
+  "asset_type",
+  "slide_count",
+  "media_urls",
+  "hook",
+  "body",
+  "cta",
+  "landing_url",
+] as const;
+
+/**
+ * One asset as the publisher would post it, as canonical JSON: the fields
+ * above plus the media files attached (the drainer uploads those rows, and a
+ * swapped video is a different post). A publish_post approval carries the
+ * sha256 of this string as asset_hash.
+ */
+export function publishAssetSnapshot(
+  asset: Record<string, unknown>,
+  media: ReadonlyArray<Record<string, unknown>>,
+): string {
+  const fields: Record<string, unknown> = {};
+  for (const f of PUBLISH_ASSET_FIELDS) fields[f] = asset[f] ?? null;
+  // The same order-keeping reader the publisher and the Post panel use: a
+  // JSON string (Turso) and an array (Postgres) are the same slides.
+  fields.media_urls = parseSlideUrls(asset.media_urls);
+  fields.slide_count = asset.slide_count === null || asset.slide_count === undefined ? null : Number(asset.slide_count);
+  // Media rows carry no rank, so they are compared as a set.
+  const files = media.map((m) => [m.kind, m.storage_bucket, m.storage_path].map((v) => String(v ?? "")).join("\n")).sort();
+  return canonicalJson({ ...fields, media: files });
 }
 
 /** A kind with no dedicated validator still has to be a bounded plain object. */
@@ -427,6 +479,15 @@ export function isExpired(expiresAt: string | null | undefined, nowIso: string):
   return !!expiresAt && expiresAt <= nowIso;
 }
 
+/**
+ * The status every reader reports: a pending row past its expiry IS expired,
+ * whether or not anything has written that yet (decideApproval writes it when
+ * someone tries). The cards and the agent tool both read it through here.
+ */
+export function effectiveStatus(a: { status: ApprovalStatus; expires_at: string | null }, nowIso: string): ApprovalStatus {
+  return a.status === "pending" && isExpired(a.expires_at, nowIso) ? "expired" : a.status;
+}
+
 // ---------------------------------------------------------------------------
 // Who may see and decide
 // ---------------------------------------------------------------------------
@@ -510,29 +571,21 @@ export function workspaceReadScope(tenantId: string, userId: string): ApprovalSc
 }
 
 /**
- * What an agent tool may read back for the member it is working for. The chat
- * tool runner knows the session's tenant and whether the member is an
- * owner/admin (ToolContext.isAdmin), not their persona, so it cannot rebuild
- * the rail. Owners/admins read every department. Anyone else reads only the
- * departments a non-owner can be seated in (DEPARTMENT_SEATS without
- * `founder`) and never an unattributed row, so a Chief of Staff, Finance or
- * Operations card stays owner-only through an agent exactly as it does on
- * every screen. Decides nothing either way.
+ * What an agent tool may read back for the member it is working for: exactly
+ * the departments that member may decide on screen (their persona's
+ * DEPARTMENT_SEATS, cut by the departments their rail opens), never a wider
+ * set. A sales rep's agent reads Sales; a delivery worker's reads Client
+ * Success; an owner's reads every department and unattributed rows. Decides
+ * nothing either way. The caller resolves the persona and the rail for the
+ * member (components/os/department/viewer.ts resolveMemberNavInput).
  */
-export function agentReadScope(tenantId: string, userId: string, isAdmin: boolean): ApprovalScope {
-  if (isAdmin) return workspaceReadScope(tenantId, userId);
-  const seated = new Set<DepartmentKey>();
-  for (const [persona, seats] of Object.entries(DEPARTMENT_SEATS) as Array<[Persona, readonly DepartmentKey[]]>) {
-    if (persona !== "founder") for (const d of seats) seated.add(d);
-  }
-  return {
-    tenantId,
-    userId,
-    persona: "readonly",
-    canAct: false,
-    allDepartments: false,
-    departments: DEPARTMENT_KEYS.filter((d) => seated.has(d)),
-  };
+export function agentReadScope(input: {
+  tenantId: string;
+  userId: string;
+  persona: Persona;
+  openDepartments: ReadonlySet<DepartmentKey>;
+}): ApprovalScope {
+  return approvalScopeFor({ ...input, canAct: false });
 }
 
 /** May this viewer SEE an approval attributed to `department`? */

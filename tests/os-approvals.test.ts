@@ -40,6 +40,12 @@ for (const k of ["DASHBOARD_LIVE_SEND", "LIVE_SEND_EMAIL", "BRAVO_FORCE_DRY_RUN"
   delete process.env[k];
 }
 
+// A configured credential, set before anything snapshots the env for redaction
+// (lib/secret-redaction.ts caches the pairs on first use). list_proposals must
+// never hand it to a model, whoever typed it into a note.
+const CANARY_SECRET = "sk-approvals-canary-7f3e9d2c1b0a5566";
+process.env.OS_APPROVALS_CANARY_API_KEY = CANARY_SECRET;
+
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452"; // slug oasis-ai-cc
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b"; // slug client-co
 process.env.FOUNDERS_TENANT_IDS = OASIS;
@@ -110,6 +116,7 @@ const USERS = {
   reader: u(7, "reader@oasisai.work"), // OASIS read_only
   clientOwner: u(8, "owner@client.test"), // owner of the CLIENT workspace
   clientRep: u(9, "rep@client.test"), // CLIENT agent → sales persona
+  clientWorker: u(10, "worker@client.test"), // CLIENT member → worker persona (Client Success)
 } as const;
 type Who = keyof typeof USERS;
 
@@ -211,8 +218,10 @@ async function main() {
       status TEXT);
     -- The founders marketing tables, in their transpiled Turso shape.
     CREATE TABLE marketing_asset (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, title TEXT, status TEXT,
-      brand_slug TEXT, format TEXT, asset_type TEXT, slide_count INTEGER, media_urls TEXT);
-    CREATE TABLE marketing_asset_media (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL);
+      brand_slug TEXT, format TEXT, asset_type TEXT, slide_count INTEGER, media_urls TEXT,
+      hook TEXT, body TEXT, cta TEXT, landing_url TEXT);
+    CREATE TABLE marketing_asset_media (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL,
+      kind TEXT, storage_bucket TEXT, storage_path TEXT);
     CREATE TABLE marketing_publish_intent (
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL, asset_id TEXT NOT NULL,
       platforms TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', requested_by TEXT NOT NULL, note TEXT,
@@ -248,6 +257,7 @@ async function main() {
       profile("reader", OASIS, "read_only"),
       profile("clientOwner", CLIENT, "owner", 1, "Client Owner"),
       profile("clientRep", CLIENT, "agent"),
+      profile("clientWorker", CLIENT, "member"),
     ],
     "write",
   );
@@ -259,7 +269,8 @@ async function main() {
   const executors = await import("../lib/os/approvals/executors");
   const { buildApprovalViews } = await import("../lib/os/approvals/view");
   const { approvalScopeFromViewer } = await import("../lib/os/approvals/scope");
-  const { describeOutcome, EXECUTING_STALE_MS } = await import("../components/os/approvals/outcome");
+  const { describeOutcome, EXECUTING_STALE_MS, newerApproval } = await import("../components/os/approvals/outcome");
+  const { statusFor } = await import("../components/os/department/StatusPill");
   const { createTursoPostgrest } = await import("../lib/turso-postgrest");
   const { capabilitiesFor, resolvePersona } = await import("../lib/role-surfaces");
   const { resolveOsModules } = await import("../lib/os/modules");
@@ -285,6 +296,7 @@ async function main() {
     },
     emailSuppression: async () => ({ suppressed: false, checkFailed: false }),
     marketingDb: () => createTursoPostgrest(raw) as never,
+    marketingSql: () => raw,
     foundersTenantIds: () => [OASIS],
     signerFor: (email) => (email ? { name: "Test Signer", email } : null),
     ...over,
@@ -338,6 +350,12 @@ async function main() {
     assert.ok(r.ok, `create failed: ${JSON.stringify(r)}`);
     return r.approval;
   };
+  /** The asset_hash a publish_post approval carries, read exactly as the executor reads it. */
+  const publishHashOf = async (tenantId: string, assetId: string): Promise<string> => {
+    const r = await executors.readPublishAsset(createTursoPostgrest(raw) as never, tenantId, assetId);
+    if (!r.ok || !r.assetHash) throw new Error(`cannot hash ${assetId}: ${JSON.stringify(r)}`);
+    return r.assetHash;
+  };
   const events = async (tenantId: string, id: string) =>
     (await raw.execute({ sql: "SELECT event FROM approval_events WHERE tenant_id = ? AND approval_id = ? ORDER BY created_at, rowid", args: [tenantId, id] })).rows.map(
       (r) => String(r.event),
@@ -378,6 +396,73 @@ async function main() {
     assert.equal(rules.validatePublishPostPayload({ asset_id: "x", platforms: ["instagram", "myspace"] }).ok, false, "never fewer surfaces than asked");
     assert.equal(rules.validateNewApproval({ tenantId: OASIS, departmentKey: "sales", requestedBy: { type: "agent", id: "x" }, actionKind: "wire_money", title: "t", payload: {} }).ok, false);
     assert.deepEqual(rules.validateNewApproval({ tenantId: " ", actionKind: "send_email" }), { ok: false, error: "tenant_required" });
+  });
+
+  await check("rules: a post payload must carry the hash of the asset content it approves; the snapshot is what the publisher posts", () => {
+    const hash = sha("asset content");
+    assert.deepEqual(rules.validatePublishPostPayload({ asset_id: "a", platforms: ["instagram"] }), { ok: false, error: "asset_hash_required", field: "asset_hash" });
+    assert.equal(rules.validatePublishPostPayload({ asset_id: "a", asset_hash: "nope", platforms: ["instagram"] }).ok, false);
+    assert.deepEqual(rules.validatePublishPostPayload({ asset_id: "a", asset_hash: hash, platforms: ["Instagram"] }), {
+      ok: true,
+      value: { asset_id: "a", asset_hash: hash, platforms: ["instagram"] },
+    });
+    const asset = { title: "Reel", hook: "Stop scrolling", body: "Caption", cta: "Book", landing_url: "https://x.test", media_urls: '["b.png","a.png"]', slide_count: 2, asset_type: "carousel", format: "carousel" };
+    const media = [{ kind: "image", storage_bucket: "m", storage_path: "a.png" }, { kind: "image", storage_bucket: "m", storage_path: "b.png" }];
+    const base = rules.publishAssetSnapshot(asset, media);
+    assert.equal(rules.publishAssetSnapshot({ ...asset, media_urls: ["b.png", "a.png"] }, [...media].reverse()), base, "JSON text and array are the same slides; media rows are a set");
+    for (const [label, changed] of [
+      ["caption", rules.publishAssetSnapshot({ ...asset, body: "Other caption" }, media)],
+      ["hook", rules.publishAssetSnapshot({ ...asset, hook: "Other hook" }, media)],
+      ["cta", rules.publishAssetSnapshot({ ...asset, cta: "Call" }, media)],
+      ["landing", rules.publishAssetSnapshot({ ...asset, landing_url: "https://y.test" }, media)],
+      ["title", rules.publishAssetSnapshot({ ...asset, title: "Other" }, media)],
+      ["slide order", rules.publishAssetSnapshot({ ...asset, media_urls: '["a.png","b.png"]' }, media)],
+      ["a swapped file", rules.publishAssetSnapshot(asset, [media[0], { ...media[1], storage_path: "c.png" }])],
+    ] as const) {
+      assert.notEqual(changed, base, `${label} changes the snapshot`);
+    }
+  });
+
+  await check("department header: an approvals read that failed never lets the header say Working (statusFor + the page)", () => {
+    // The count behind the header is a floor when a read failed; a floor of 0 is unknown, not "nothing waiting".
+    assert.deepEqual(statusFor(true, 0, true), { kind: "unknown" });
+    assert.deepEqual(statusFor(true, 0, false), { kind: "working" });
+    assert.deepEqual(statusFor(true, 3, true), { kind: "needs_you", count: 3, capped: true }, "attention items still count, as a floor");
+    const code = readFileSync(join(ROOT, "app/team/[dept]/page.tsx"), "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    assert.match(
+      code,
+      /const needsYouCapped = numbers\.attention\.some\(\(item\) => item\.capped === true\) \|\| !approvals\.ok;/,
+      "a failed approvals read makes the header's total a floor",
+    );
+    assert.match(code, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
+  });
+
+  await check("card: a refreshed row replaces the shown one unless the shown one is newer, and the card follows its prop", () => {
+    const row = (updated_at: string, comments = 0) => ({
+      updated_at,
+      comments: Array.from({ length: comments }, (_, i) => ({ id: `c${i}`, body: "Looks right.", author_id: null, author_name: null, created_at: updated_at })),
+    });
+    const pendingAt0 = row("2026-09-28T10:00:00.000Z");
+    const executedAt1 = row("2026-09-28T10:01:00.000Z");
+    assert.equal(newerApproval(pendingAt0, executedAt1), executedAt1, "a refresh shows the executor's result");
+    assert.equal(newerApproval(executedAt1, pendingAt0), executedAt1, "a stale refresh cannot roll the card back");
+    const commented = row("2026-09-28T10:00:00.000Z", 1);
+    assert.equal(newerApproval(pendingAt0, commented), commented, "a teammate's comment arrives on refresh");
+    assert.equal(newerApproval(commented, pendingAt0), commented, "nor can it drop a comment this card just posted");
+    const again = row("2026-09-28T10:00:00.000Z");
+    assert.equal(newerApproval(pendingAt0, again), again, "a tie goes to the server's copy (it carries a virtual expiry)");
+    // The card applies it whenever its prop changes and no click is in flight.
+    const card = readFileSync(join(ROOT, "components/os/approvals/ApprovalCard.tsx"), "utf8");
+    assert.match(card, /if \(initial !== synced && busy === null\) \{\s*setSynced\(initial\);\s*setApproval\(newerApproval\(approval, initial\)\);/);
+  });
+
+  await check("card: every email recipient is shown in full, wrapped, never cut to an ellipsis", () => {
+    const card = readFileSync(join(ROOT, "components/os/approvals/ApprovalCard.tsx"), "utf8");
+    const preview = card.slice(card.indexOf("function EmailPreview"), card.indexOf("function PostPreview"));
+    assert.ok(preview.length > 200, "found EmailPreview");
+    assert.doesNotMatch(preview, /\btruncate\b|text-ellipsis|line-clamp-1\b/, "a recipient hidden behind an ellipsis");
+    assert.match(preview, /<dd className="break-all[^"]*">\{str\(payload\.to\)\}<\/dd>/);
+    assert.match(preview, /<dd className="break-all[^"]*">\{cc\.join\(", "\)\}<\/dd>/);
   });
 
   await check("rules: seats — owners decide everything; others only their own department, only if the rail opens it", () => {
@@ -929,6 +1014,26 @@ async function main() {
     assert.ok(!clientRep.has("SALES-MARKER"), "a sales seat in B is not a sales seat in A");
   });
 
+  await check("GET /api/approvals: ?limit= is a whole number in range whatever the query says (2.7, -5, abc)", async () => {
+    await login("cc");
+    const quiet = console.error;
+    console.error = () => {};
+    const sizes: Record<string, number> = {};
+    try {
+      for (const q of ["2.7", "-5", "abc"]) {
+        const res = await listRoute.GET(nreq(`http://t.test/api/approvals?view=all&limit=${q}`));
+        assert.equal(res.status, 200, `limit=${q} → ${res.status}`);
+        sizes[q] = ((await res.json()) as Body).approvals!.length;
+      }
+    } finally {
+      console.error = quiet;
+    }
+    assert.equal(sizes["2.7"], 2, "a fraction is truncated");
+    assert.equal(sizes["-5"], 1, "a negative is the smallest page");
+    assert.ok(sizes.abc > 2 && sizes.abc <= 50, `not a number → the default page (${sizes.abc})`);
+    assert.deepEqual([store.listLimit(2.7), store.listLimit(-5), store.listLimit(Number.NaN), store.listLimit("abc"), store.listLimit(10_000)], [2, 1, 50, 50, store.APPROVAL_LIST_LIMIT]);
+  });
+
   await check("POST approve: rep on Marketing's approval is 404 and nothing changes; B on A's is 404", async () => {
     await login("rep");
     const res = await approveRoute.POST(req("http://t.test", { payload_hash: byDept.marketing.payload_hash }) as never, ctx(byDept.marketing.id));
@@ -1034,7 +1139,8 @@ async function main() {
       ],
       "write",
     );
-    const a = await create({ departmentKey: "marketing", actionKind: "publish_post", title: "Post the reel", payload: { asset_id: "asset-1", platforms: ["instagram", "linkedin"], note: "Launch day" } });
+    const assetHash = await publishHashOf(OASIS, "asset-1");
+    const a = await create({ departmentKey: "marketing", actionKind: "publish_post", title: "Post the reel", payload: { asset_id: "asset-1", asset_hash: assetHash, platforms: ["instagram", "linkedin"], note: "Launch day" } });
     await login("marketer");
     const res = await approveRoute.POST(req("http://t.test", { payload_hash: a.payload_hash }) as never, ctx(a.id));
     assert.equal(res.status, 200);
@@ -1048,7 +1154,7 @@ async function main() {
       [OASIS, "asset-1", ["instagram", "linkedin"], "queued", `approval:${a.id}`, "Launch day"],
     );
     // A second approved post of the same asset while the first is in flight is refused, not double-queued.
-    const b = await create({ departmentKey: "marketing", actionKind: "publish_post", title: "Post it again", payload: { asset_id: "asset-1", platforms: ["threads"] } });
+    const b = await create({ departmentKey: "marketing", actionKind: "publish_post", title: "Post it again", payload: { asset_id: "asset-1", asset_hash: assetHash, platforms: ["threads"] } });
     const quiet = console.error;
     console.error = () => {};
     try {
@@ -1065,7 +1171,7 @@ async function main() {
   await check("publish_post in a client workspace fails loudly: the publisher posts to OASIS's own accounts only", async () => {
     const r = await store.createApproval(
       raw,
-      { tenantId: CLIENT, departmentKey: "marketing", requestedBy: { type: "agent", id: "maven" }, actionKind: "publish_post", title: "Client post", payload: { asset_id: "asset-1", platforms: ["instagram"] } },
+      { tenantId: CLIENT, departmentKey: "marketing", requestedBy: { type: "agent", id: "maven" }, actionKind: "publish_post", title: "Client post", payload: { asset_id: "asset-1", asset_hash: sha("client asset"), platforms: ["instagram"] } },
       new Date(),
     );
     assert.ok(r.ok);
@@ -1081,6 +1187,81 @@ async function main() {
       console.error = quiet;
     }
     assert.equal((await raw.execute({ sql: "SELECT COUNT(*) AS n FROM marketing_publish_intent WHERE tenant_id = ?", args: [CLIENT] })).rows[0].n, 0);
+  });
+
+  /** A fresh own-brand OASIS asset with one video attached. */
+  const insertPostAsset = async (assetId: string) =>
+    raw.batch(
+      [
+        {
+          sql: `INSERT INTO marketing_asset (id, tenant_id, title, status, brand_slug, format, asset_type, hook, body, cta, landing_url)
+                VALUES (?, ?, 'Launch reel', 'approved', 'oasis-ai', 'video', 'video', 'Stop guessing', 'The caption the reviewer read.', 'book a call', 'https://oasisai.work')`,
+          args: [assetId, OASIS],
+        },
+        { sql: "INSERT INTO marketing_asset_media (id, tenant_id, asset_id, kind, storage_bucket, storage_path) VALUES (?, ?, ?, 'video', 'marketing-media', ?)", args: [`${assetId}-m`, OASIS, assetId, `${OASIS}/${assetId}/reel.mp4`] },
+      ],
+      "write",
+    );
+  /** An approved post of that asset, bound to its content as it is now. */
+  const approvedPost = async (assetId: string, title: string) => {
+    const a = await create({ departmentKey: "marketing", actionKind: "publish_post", title, payload: { asset_id: assetId, asset_hash: await publishHashOf(OASIS, assetId), platforms: ["instagram"] } });
+    await store.decideApproval(raw, S.cc, a.id, { kind: "approve", payloadHash: a.payload_hash }, new Date());
+    return a;
+  };
+  const intentsFor = async (assetId: string) =>
+    Number((await raw.execute({ sql: "SELECT COUNT(*) AS n FROM marketing_publish_intent WHERE tenant_id = ? AND asset_id = ?", args: [OASIS, assetId] })).rows[0].n);
+
+  await check("publish_post: an asset edited after approval (caption or media) is refused as asset_changed and nothing is queued", async () => {
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      for (const [assetId, edit] of [
+        ["asset-edit-caption", "UPDATE marketing_asset SET body = 'A caption nobody approved.' WHERE tenant_id = ? AND id = ?"],
+        ["asset-edit-media", "UPDATE marketing_asset_media SET storage_path = 'other/video.mp4' WHERE tenant_id = ? AND asset_id = ?"],
+      ] as const) {
+        await insertPostAsset(assetId);
+        const a = await approvedPost(assetId, `Edited ${assetId}`);
+        await raw.execute({ sql: edit, args: [OASIS, assetId] });
+        const x = await executeApproval(raw, { tenantId: OASIS, approvalId: a.id }, fakeDeps());
+        assert.ok(x.ok);
+        assert.equal(x.approval.status, "failed", assetId);
+        assert.equal((x.approval.execution_result as { reason: string }).reason, "asset_changed", assetId);
+        assert.equal(await intentsFor(assetId), 0, `${assetId}: nothing queued`);
+      }
+    } finally {
+      console.error = quiet;
+    }
+    // Unedited, the same path queues.
+    await insertPostAsset("asset-unedited");
+    const ok = await approvedPost("asset-unedited", "Unedited");
+    const x = await executeApproval(raw, { tenantId: OASIS, approvalId: ok.id }, fakeDeps());
+    assert.equal(x.ok && x.approval.execution_result?.outcome, "queued");
+    assert.equal(await intentsFor("asset-unedited"), 1);
+  });
+
+  await check("exactly once: six approvals of the SAME asset executing concurrently queue ONE publish, the rest already_queued", async () => {
+    await insertPostAsset("asset-race");
+    // Six separate approvals (six people each said yes), one asset.
+    const approvals = [];
+    for (let i = 0; i < 6; i++) approvals.push(await approvedPost("asset-race", `Race ${i}`));
+    const clients: Client[] = approvals.map(() => createClient({ url: `file:${dbFile}` }));
+    const quiet = console.error;
+    console.error = () => {};
+    let results: Awaited<ReturnType<typeof executeApproval>>[];
+    try {
+      results = await Promise.all(
+        approvals.map((a, i) =>
+          executeApproval(clients[i], { tenantId: OASIS, approvalId: a.id }, fakeDeps({ marketingDb: () => createTursoPostgrest(clients[i]) as never, marketingSql: () => clients[i] })),
+        ),
+      );
+    } finally {
+      console.error = quiet;
+    }
+    const outcomes = results.map((r) => (r.ok ? (r.approval.execution_result as { outcome: string; reason?: string }) : null));
+    assert.equal(outcomes.filter((o) => o?.outcome === "queued").length, 1, JSON.stringify(outcomes));
+    assert.ok(outcomes.filter((o) => o?.outcome !== "queued").every((o) => o?.reason === "already_queued"), JSON.stringify(outcomes));
+    assert.equal(await intentsFor("asset-race"), 1, "one intent: there is no unsending");
+    for (const c of clients) c.close();
   });
 
   // ── 11. The agent tool proposes, never sends ───────────────────────────
@@ -1156,6 +1337,112 @@ async function main() {
     assert.ok(asAdmin.proposals.some((p) => p.approval_id === fin.approval_id), "an owner/admin reads every department");
   });
 
+  // The agent works for CLIENT's owner in the checks below unless it says otherwise.
+  const agentCtx = { tenantId: CLIENT, userId: USERS.clientOwner.id, agentKey: "sdr", authUserId: USERS.clientOwner.id, isAdmin: true };
+  type Proposal = { approval_id: string; status: string; department: string | null; reviewer_note: string | null; outcome: Record<string, unknown> | null };
+  const proposeAs = async (input: Record<string, unknown>, c: typeof agentCtx = agentCtx) => {
+    const runner = await import("../lib/cloud-tool-runner");
+    return runner.executeTool("propose_email", input, c);
+  };
+  const listAs = async (input: Record<string, unknown>, c: typeof agentCtx = agentCtx) => {
+    const runner = await import("../lib/cloud-tool-runner");
+    const r = await runner.executeTool("list_proposals", input, c);
+    assert.equal(r.is_error, false, r.content);
+    return { content: r.content, proposals: (JSON.parse(r.content) as { proposals: Proposal[] }).proposals };
+  };
+
+  await check("list_proposals: a member's agent reads back only the departments that member may decide (rep: Sales; worker: Client Success)", async () => {
+    const card = async (department: string) => JSON.parse((await proposeAs({ to: "seat@example.test", subject: `Seat: ${department}`, body: "Seat check.", department })).content) as { approval_id: string };
+    const cards = { sales: await card("sales"), marketing: await card("marketing"), client_success: await card("client_success"), finance: await card("finance") };
+    const as = (who: "clientRep" | "clientWorker") => ({ ...agentCtx, userId: USERS[who].id, authUserId: USERS[who].id, isAdmin: false });
+    const rep = (await listAs({ view: "all", limit: 50 }, as("clientRep"))).proposals;
+    assert.deepEqual([...new Set(rep.map((p) => p.department))], ["sales"], "a rep reads Sales only");
+    assert.ok(rep.some((p) => p.approval_id === cards.sales.approval_id));
+    const worker = (await listAs({ view: "all", limit: 50 }, as("clientWorker"))).proposals;
+    assert.deepEqual([...new Set(worker.map((p) => p.department))], ["client_success"], "a delivery worker reads Client Success only");
+    assert.ok(worker.some((p) => p.approval_id === cards.client_success.approval_id));
+    // Someone with no profile in this workspace is not "a member who sees nothing": the read refuses.
+    const runner = await import("../lib/cloud-tool-runner");
+    const stranger = await runner.executeTool("list_proposals", {}, { ...agentCtx, userId: USERS.rep.id, authUserId: USERS.rep.id, isAdmin: false });
+    assert.equal(stranger.is_error, true);
+    assert.match(stranger.content, /approvals_unavailable/);
+  });
+
+  await check("list_proposals: a pending card past its expiry is reported expired, the way every card shows it", async () => {
+    const r = await store.createApproval(
+      raw,
+      { tenantId: CLIENT, departmentKey: "sales", requestedBy: { type: "agent", id: "sdr" }, actionKind: "send_email", title: "Waited too long", payload: email("late@example.test", "Too late"), expiresAt: new Date(Date.now() - 60_000).toISOString() },
+      new Date(Date.now() - 120_000),
+    );
+    assert.ok(r.ok);
+    assert.equal(await statusOf(r.approval.id), "pending", "nothing has written the expiry yet");
+    const mine = (await listAs({ view: "all", limit: 50 })).proposals.find((p) => p.approval_id === r.approval.id);
+    assert.equal(mine?.status, "expired");
+  });
+
+  await check("list_proposals: a configured secret in a reviewer's note or a recorded outcome never reaches the model", async () => {
+    const noted = JSON.parse((await proposeAs({ to: "leak@example.test", subject: "Redaction: note", body: "Hello." })).content) as { approval_id: string };
+    await store.decideApproval(raw, S.clientOwner, noted.approval_id, { kind: "send_back", note: `Put ${CANARY_SECRET} in the footer.` }, new Date());
+    const failed = JSON.parse((await proposeAs({ to: "leak@example.test", subject: "Redaction: outcome", body: "Hello." })).content) as { approval_id: string };
+    await raw.execute({
+      sql: "UPDATE approvals SET status = 'failed', execution_result = ? WHERE tenant_id = ? AND id = ?",
+      args: [JSON.stringify({ outcome: "failed", reason: "send_failed", message: `The mail server refused it: bad key ${CANARY_SECRET}`, provider: "x" }), CLIENT, failed.approval_id],
+    });
+    const { content, proposals } = await listAs({ view: "all", limit: 50 });
+    assert.ok(!content.includes(CANARY_SECRET), "a configured secret reached the model");
+    assert.match(proposals.find((p) => p.approval_id === noted.approval_id)?.reviewer_note ?? "", /Put \[REDACTED:OS_APPROVALS_CANARY_API_KEY\] in the footer/);
+    assert.match(String(proposals.find((p) => p.approval_id === failed.approval_id)?.outcome?.message), /bad key \[REDACTED:OS_APPROVALS_CANARY_API_KEY\]/);
+  });
+
+  await check("revision retry: the same key and words return the revision already made; other words under that key are refused", async () => {
+    const a = await create();
+    const input = {
+      tenantId: OASIS,
+      departmentKey: "sales" as const,
+      requestedBy: { type: "agent" as const, id: "sdr" },
+      actionKind: "send_email" as const,
+      title: "Retried v2",
+      payload: email("x@y.test", "Retried subject"),
+      supersedesId: a.id,
+      idempotencyKey: `rev-retry-${a.id}`,
+    };
+    const first = await store.createApproval(raw, input, new Date());
+    assert.ok(first.ok && first.created);
+    const retry = await store.createApproval(raw, input, new Date());
+    assert.ok(retry.ok, JSON.stringify(retry));
+    assert.deepEqual([retry.created, retry.approval.id, retry.approval.revision], [false, first.approval.id, 2]);
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      assert.deepEqual(await store.createApproval(raw, { ...input, payload: email("x@y.test", "Other words") }, new Date()), { ok: false, error: "idempotency_key_reused" });
+    } finally {
+      console.error = quiet;
+    }
+    const otherKey = await store.createApproval(raw, { ...input, idempotencyKey: `rev-other-${a.id}` }, new Date());
+    assert.deepEqual(otherKey, { ok: false, error: "already_revised", successorId: first.approval.id });
+    assert.equal((await raw.execute({ sql: "SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND supersedes_id = ?", args: [OASIS, a.id] })).rows[0].n, 1);
+
+    // Through the agent tool: a model that retries its revision gets the same card back.
+    const v1 = JSON.parse((await proposeAs({ to: "retry@example.test", subject: "Retry v1", body: "One." })).content) as { approval_id: string };
+    await store.decideApproval(raw, S.clientOwner, v1.approval_id, { kind: "send_back", note: "Shorter." }, new Date());
+    const revise = { to: "retry@example.test", subject: "Retry v2", body: "Two.", revises_approval_id: v1.approval_id };
+    const r1 = await proposeAs(revise);
+    const r2 = await proposeAs(revise);
+    assert.equal(r2.is_error, false, r2.content);
+    assert.deepEqual([JSON.parse(r2.content).approval_id, JSON.parse(r2.content).deduplicated], [JSON.parse(r1.content).approval_id, true]);
+  });
+
+  await check("propose_email: an agent with no key cannot revise a draft, not even another keyless one", async () => {
+    const keyless = { ...agentCtx, agentKey: "" };
+    const orphan = JSON.parse((await proposeAs({ to: "orphan@example.test", subject: "Keyless", body: "One." }, keyless)).content) as { approval_id: string };
+    const row = (await raw.execute({ sql: "SELECT requested_by_id FROM approvals WHERE tenant_id = ? AND id = ?", args: [CLIENT, orphan.approval_id] })).rows[0];
+    assert.equal(row.requested_by_id, null, "a keyless agent's card has no owner id");
+    const revise = await proposeAs({ to: "orphan@example.test", subject: "Keyless v2", body: "Two.", revises_approval_id: orphan.approval_id }, keyless);
+    assert.equal(revise.is_error, true);
+    assert.match(revise.content, /supersedes_not_yours/);
+    assert.equal(await statusOf(orphan.approval_id), "pending", "the card is untouched");
+  });
+
   await check("propose_email and list_proposals are client-safe, never deferred, denied to read-only, stripped in plan mode", async () => {
     const runner = await import("../lib/cloud-tool-runner");
     const registry = await import("../lib/ai/tools/client-safe-registry");
@@ -1207,6 +1494,15 @@ async function main() {
       `a rep saw another department's card: ${repCards.map((c) => `${c.title}/${c.department_key}`).join(", ")}`,
     );
     assert.ok(!repCards.some((c) => c.title === "FINANCE-MARKER" || c.title === "MARKETING-MARKER"));
+  });
+
+  await check("Feed: when more decisions exist than it shows, it says so instead of implying the list is complete", async () => {
+    const FeedPage = (await import("../app/feed/page")).default;
+    const decided = await store.listApprovals(raw, S.cc, { view: "decided", limit: 200 }, new Date());
+    assert.ok(decided.rows.length > 20, `needs more than one page of decisions; has ${decided.rows.length}`);
+    await login("cc");
+    const text = walk(await FeedPage({ searchParams: Promise.resolve({ tab: "needs" }) })).strings.join(" ");
+    assert.match(text, /Showing the latest\s+20\s+decisions from the last 7 days/);
   });
 
   await check("Overview panel and Today render the cards, a failed read says so, and the placeholders are gone", async () => {
