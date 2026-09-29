@@ -71,12 +71,17 @@ export function DepartmentChannel({ label, state }: { label: string; state: Chan
 
   return (
     <section ref={root} aria-label={`${label} channel`}>
+      {/* No tenant slug: the route takes the workspace from the session. The
+          department makes the route answer AS the department (its label in
+          the stream, its identity lock), never as the agent behind it. */}
       <AgentChat
-        tenantSlug={state.tenantSlug}
+        department={state.department}
         agentSlug={state.agentSlug}
         agentName={label}
         agentSubtitle="Department channel"
         greeting={state.greeting}
+        canManageAi={state.canManageAi}
+        initialFailure={state.lastTurn.kind === "failed" ? state.lastTurn.code : null}
       />
     </section>
   );

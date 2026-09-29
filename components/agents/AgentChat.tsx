@@ -1,28 +1,40 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { AlertCircle, Loader2, Send, Sparkles } from "lucide-react";
-import { parseInput, renderHelp } from "@/lib/chat-modes/slash-parser";
+import { COMMAND_DESCRIPTIONS, parseInput, type SlashCommandName } from "@/lib/chat-modes/slash-parser";
 import { usePlanMode } from "@/lib/chat-modes/use-plan-mode";
+import { failureCopy } from "@/lib/os/channel/outcome";
 
 type ChatTurn = {
   role: "user" | "assistant" | "system";
   content: string;
   /** Which model+provider serviced this assistant turn. Captured from
    *  the `agent` SSE event the server emits right before streaming
-   *  text. Surfaces as a "via X" pill under the message so operators
-   *  can verify which runtime actually answered — same affordance as
-   *  the main /agents page chat. */
+   *  text. Surfaces as a "via X" pill under the message so the operator
+   *  can verify which runtime actually answered. The server sends the
+   *  model to the verified operator only, so clients never see it. */
   runtime?: string;
 };
 
 type Props = {
-  tenantSlug: string;
+  /** A workspace slug the viewer owns (the /t/<slug> preview). Omitted by a
+   *  department channel: the route takes the workspace from the session. */
+  tenantSlug?: string;
   agentSlug: string;
   agentName: string;
   agentSubtitle?: string;
   /** Optional welcome message rendered above the empty-state. */
   greeting?: string;
+  /** Set by a department channel; the route answers as that department. */
+  department?: string;
+  /** Owners/admins: failures carry a link to AI settings. Others are told
+   *  who can fix it, because the link would 404 for them. */
+  canManageAi?: boolean;
+  /** The channel's last recorded turn failed with this code: say so before
+   *  the next message is typed. */
+  initialFailure?: string | null;
 };
 
 // sessionStorage key for plan mode. Per-tab so a tenant-preview reload
@@ -30,24 +42,34 @@ type Props = {
 // Distinct from ChatWidget's key — separate surfaces, separate state.
 const PLAN_MODE_STORAGE_KEY = "oasis.tenant-chat.planMode.v1";
 
+/** The commands that work in this chat. /agent and /model belong to the
+ *  operator chat: a channel's agent is fixed, and its model is a setting. */
+const CHANNEL_COMMANDS: SlashCommandName[] = ["clear", "compact", "plan", "build", "help"];
+const CHANNEL_HELP = ["Slash commands:", ...CHANNEL_COMMANDS.map((c) => `  ${COMMAND_DESCRIPTIONS[c]}`)].join("\n");
+
 export function AgentChat({
   tenantSlug,
   agentSlug,
   agentName,
   agentSubtitle,
   greeting,
+  department,
+  canManageAi = false,
+  initialFailure = null,
 }: Props) {
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // A failure is a CODE (lib/os/channel/outcome.ts), rendered as one plain
+  // sentence with a fix link. Raw provider text never reaches the screen.
+  const [failure, setFailure] = useState<string | null>(initialFailure);
   const [modelLabel, setModelLabel] = useState<string | null>(null);
   // Plan vs Build — OpenCode-style state machine. /plan filters write
   // intent out of the agent's system prompt (server-side, see
   // app/api/agents/chat/route.ts); /build restores full behavior.
   // The shared usePlanMode hook owns sessionStorage hydration +
   // persistence; the per-surface key keeps this state isolated from
-  // the main /agents page chat.
+  // the operator's ChatWidget.
   const [planMode, setPlanMode] = usePlanMode(PLAN_MODE_STORAGE_KEY);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -60,13 +82,11 @@ export function AgentChat({
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || streaming) return;
-      setError(null);
+      setFailure(null);
 
       // Slash commands — intercepted client-side, never hit the server.
-      // Mirrors ChatWidget's surface but scoped to commands that make
-      // sense for a single-agent preview chat: /clear, /help, /plan,
-      // /build. /agent and /model don't apply here (agent is fixed by
-      // route; model swap belongs in Settings, not the tenant preview).
+      // Scoped to the commands that make sense for a single-agent chat:
+      // /clear, /help, /plan, /build, /compact.
       const parsed = parseInput(trimmed);
       if (parsed.kind === "command") {
         const appendSystem = (content: string) =>
@@ -77,7 +97,7 @@ export function AgentChat({
             setInput("");
             return;
           case "help":
-            appendSystem(renderHelp());
+            appendSystem(CHANNEL_HELP);
             setInput("");
             return;
           case "plan":
@@ -93,10 +113,11 @@ export function AgentChat({
             setInput("");
             return;
           case "agent":
+            appendSystem("/agent isn't available here. Each department has its own channel.");
+            setInput("");
+            return;
           case "model":
-            appendSystem(
-              `/${parsed.name} isn't available on the tenant preview chat — switch agents via the marketplace, or use the main /agents page for in-place /model + /agent.`,
-            );
+            appendSystem("/model isn't available here. The AI model is chosen in Settings > AI brain.");
             setInput("");
             return;
           case "compact": {
@@ -131,12 +152,9 @@ export function AgentChat({
                 const body = (await res.json().catch(() => ({}))) as {
                   ok?: boolean;
                   summary?: string;
-                  error?: string;
-                  message?: string;
                 };
                 if (!res.ok || !body.ok || !body.summary) {
-                  const detail = body.message || body.error || `http_${res.status}`;
-                  appendSystem(`Compact failed: ${detail}. History unchanged.`);
+                  appendSystem("Compact failed. History unchanged.");
                   return;
                 }
                 setTurns([
@@ -146,9 +164,8 @@ export function AgentChat({
                   },
                 ]);
               } catch (err) {
-                appendSystem(
-                  `Compact failed: ${err instanceof Error ? err.message : "network_error"}. History unchanged.`,
-                );
+                console.error("[agent-chat.compact]", err);
+                appendSystem("Compact failed. History unchanged.");
               }
             })();
             return;
@@ -165,13 +182,22 @@ export function AgentChat({
       setInput("");
       setStreaming(true);
 
+      // The assistant placeholder goes when no reply text arrived: a failed
+      // turn shows its reason under the conversation, not an empty bubble.
+      const dropEmptyPlaceholder = () =>
+        setTurns((prev) => {
+          const last = prev[prev.length - 1];
+          return last && last.role === "assistant" && !last.content ? prev.slice(0, -1) : prev;
+        });
+
       try {
         const res = await fetch("/api/agents/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            tenant_slug: tenantSlug,
+            ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
             agent_slug: agentSlug,
+            ...(department ? { department } : {}),
             // Filter out system pills — those are client-only chrome
             // (slash-command echoes, error banners) and would confuse
             // the model if sent as conversation history.
@@ -186,12 +212,9 @@ export function AgentChat({
         });
 
         if (!res.ok || !res.body) {
-          const body = await res.json().catch(() => ({}));
-          const detail = (body as { error?: string; message?: string }).message ||
-            (body as { error?: string }).error ||
-            `HTTP ${res.status}`;
-          setError(detail);
-          setTurns((prev) => prev.slice(0, -1));
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          setFailure(body.error || `http_${res.status}`);
+          dropEmptyPlaceholder();
           return;
         }
 
@@ -199,6 +222,7 @@ export function AgentChat({
         const decoder = new TextDecoder();
         let buffer = "";
         let assistantText = "";
+        let streamFailure: string | null = null;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -260,13 +284,21 @@ export function AgentChat({
                 });
               }
             } else if (eventName === "error" && payload && typeof payload === "object") {
-              setError((payload as { message?: string }).message || "stream_error");
+              streamFailure = (payload as { code?: string }).code || "provider_error";
+              setFailure(streamFailure);
             }
           }
         }
+        if (!assistantText) {
+          dropEmptyPlaceholder();
+          // A stream that closed with no text and no reason is still a turn
+          // that did not answer; say so rather than leave nothing.
+          if (!streamFailure) setFailure("empty_reply");
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "network_error");
-        setTurns((prev) => prev.slice(0, -1));
+        console.error("[agent-chat.send]", err);
+        setFailure("network");
+        dropEmptyPlaceholder();
       } finally {
         setStreaming(false);
         inputRef.current?.focus();
@@ -277,19 +309,25 @@ export function AgentChat({
     // callback. Both belong in the dep array per
     // react-hooks/exhaustive-deps. setPlanMode is stable (returned
     // from usePlanMode) so adding it is free.
-    [tenantSlug, agentSlug, streaming, turns, planMode, setPlanMode]
+    [tenantSlug, agentSlug, department, streaming, turns, planMode, setPlanMode]
   );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     void send(input);
   };
+  // Enter sends, Shift+Enter adds a line — the same as Today's Ask composer
+  // (components/os/today/AskComposer.tsx), so a message typed there and
+  // handed over here behaves the same way. isComposing: Enter that confirms
+  // an IME candidate is not a send.
   const handleKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void send(input);
     }
   };
+
+  const failureText = failure ? failureCopy(failure, { canManageAi }) : null;
 
   // Min-height: on phones a hardcoded 640px is taller than a lot of
   // viewports (iPhone SE = 667px). Use a viewport-relative floor on
@@ -341,7 +379,7 @@ export function AgentChat({
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-4">
         {turns.length === 0 && (
           <div className="rounded-xl border border-bg-border bg-bg-elev/40 px-4 py-3 text-sm text-fg-muted leading-relaxed">
-            {greeting || `Start chatting with ${agentName}. Use Cmd/Ctrl+Enter to send.`}
+            {greeting || `Start chatting with ${agentName}. Press Enter to send.`}
           </div>
         )}
         {turns.map((t, i) => {
@@ -387,10 +425,18 @@ export function AgentChat({
         })}
       </div>
 
-      {error && (
-        <div className="mx-5 mb-2 rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200 inline-flex items-start gap-2">
-          <AlertCircle className="h-3.5 w-3.5 mt-0.5" />
-          <span>{error}</span>
+      {failureText && (
+        <div
+          role="alert"
+          className="mx-5 mb-2 rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200 inline-flex flex-wrap items-start gap-x-2 gap-y-1"
+        >
+          <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
+          <span>{failureText.sentence}</span>
+          {failureText.fix && (
+            <Link href={failureText.fix.href} prefetch={false} className="font-semibold underline underline-offset-2">
+              {failureText.fix.label}
+            </Link>
+          )}
         </div>
       )}
 
@@ -400,12 +446,14 @@ export function AgentChat({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKey}
-          placeholder={`Message ${agentName}... (Cmd/Ctrl+Enter to send)`}
+          placeholder={`Message ${agentName}`}
+          aria-label={`Message ${agentName}`}
           disabled={streaming}
           rows={2}
           className="w-full resize-none rounded-xl border border-bg-border bg-bg-deep/80 px-4 py-2.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent/50 focus:outline-none disabled:opacity-50"
         />
-        <div className="flex items-center justify-end">
+        <div className="flex items-center justify-between gap-3">
+          <span className="pl-1 text-xs text-fg-dim">Enter to send, Shift+Enter for a new line</span>
           <button
             type="submit"
             disabled={!input.trim() || streaming}

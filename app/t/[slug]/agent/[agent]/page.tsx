@@ -6,7 +6,9 @@ import { AgentChat } from "@/components/agents/AgentChat";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
-import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
+import { ownsSlug } from "@/lib/manifest/tenant-scope";
+import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
+import { getSessionUser } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -20,16 +22,17 @@ export default async function TenantAgentChatPage({
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
+  // The viewer's ACTIVE workspace (the resolver the /team pages use): a
+  // `.maybeSingle()` over user_profiles errors for anyone seated in two
+  // workspaces and read them as having none.
   const user = await getSessionUser();
-  const service = getServiceSupabase();
-  const profileRes = user
-    ? await service
-        .from("user_profiles")
-        .select("tenant_id")
-        .eq("auth_user_id", user.id)
-        .maybeSingle()
-    : { data: null };
-  const tenantId = (profileRes.data as { tenant_id: string | null } | null)?.tenant_id || null;
+  const resolved = user ? await resolveActiveProfileForUser(user) : { profile: null, error: null };
+  if (resolved.error) console.error("[t.agent.profile]", resolved.error);
+  const tenantId = resolved.profile?.tenant_id || null;
+  // /api/agents/chat answers only in a workspace the caller owns (403
+  // otherwise), so a chat box over someone else's workspace would fail on
+  // its first message. Say so instead of rendering it.
+  const owned = await ownsSlug(normalised, tenantId);
 
   const agentDef = await getAgentBySlug(agent, tenantId);
   if (!agentDef) notFound();
@@ -73,7 +76,7 @@ export default async function TenantAgentChatPage({
         }
       />
 
-      {!binding?.enabled && (
+      {owned && !binding?.enabled && (
         <Card>
           <div className="text-sm text-fg-muted leading-relaxed">
             This agent isn&apos;t enabled on {manifest.brand.name} yet. You can chat with it right
@@ -89,13 +92,22 @@ export default async function TenantAgentChatPage({
         </Card>
       )}
 
-      <AgentChat
-        tenantSlug={normalised}
-        agentSlug={agentDef.slug}
-        agentName={displayName}
-        agentSubtitle={CATEGORY_LABELS[agentDef.category]}
-        greeting={agentDef.short_description}
-      />
+      {owned ? (
+        <AgentChat
+          tenantSlug={normalised}
+          agentSlug={agentDef.slug}
+          agentName={displayName}
+          agentSubtitle={CATEGORY_LABELS[agentDef.category]}
+          greeting={agentDef.short_description}
+        />
+      ) : (
+        <Card>
+          <div className="text-sm text-fg-muted leading-relaxed">
+            This chat belongs to a workspace you are not signed in to. Switch to that workspace to talk
+            to its agents.
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

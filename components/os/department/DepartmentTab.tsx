@@ -22,7 +22,7 @@ import type { ChannelState } from "./channel";
 import { ComposerProvider } from "./ComposerContext";
 import { DepartmentChannel } from "./DepartmentChannel";
 import { OverviewPanel, type OverviewPanelProps } from "./OverviewPanel";
-import { StatusPill, type DepartmentStatus } from "./StatusPill";
+import { StatusPill, withLastTurn, type DepartmentStatus } from "./StatusPill";
 
 export type DepartmentTabProps = {
   dept: OsDepartment;
@@ -36,8 +36,11 @@ export type DepartmentTabProps = {
 
 export function DepartmentTab({ dept, purpose, status, channel, prefill, overview }: DepartmentTabProps) {
   const ready = channel.kind === "ready";
+  // The header also answers "did the last turn work?": a connected key the
+  // provider refused reads Not working, in the words the channel used.
+  const header = ready ? withLastTurn(status, channel.lastTurn) : status;
   return (
-    <PageFrame title={dept.label} subtitle={purpose} actions={<StatusPill status={status} />}>
+    <PageFrame title={dept.label} subtitle={purpose} actions={<StatusPill status={header} />}>
       {/* Keyed by department: moving from Sales to Marketing is the same page
           component with new params, and without a key AgentChat would carry
           Sales' conversation — and its history — into Marketing's agent. A new

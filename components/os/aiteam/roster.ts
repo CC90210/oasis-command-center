@@ -2,11 +2,12 @@
  * components/os/aiteam/roster.ts — who is on this workspace's AI team.
  *
  * Two kinds of teammate:
- *   leads    the agent behind each department channel the viewer can open.
- *            Same binding and same gate as the department tabs
+ *   leads    the agent behind each department channel the viewer can open,
+ *            NAMED FOR ITS DEPARTMENTS ("Chief of Staff · Operations"), never
+ *            for the agent. Same binding and same gate as the department tabs
  *            (components/os/department/config.ts + gate.ts), so the roster
- *            never lists a department the viewer cannot open, and a client
- *            workspace never lists an OASIS persona.
+ *            never lists a department the viewer cannot open, and no
+ *            workspace, OASIS's own included, sees a persona's name.
  *   custom   agents this workspace built in the builder (the `agents` table,
  *            tenant-owned rows — what the marketplace calls "private").
  *
@@ -21,7 +22,7 @@ import { CATEGORY_LABELS, type AgentCategory } from "@/lib/agents/library";
 import { getAgentBySlug } from "@/lib/agents/loader";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getServiceSupabase } from "@/lib/supabase-server";
-import { departmentChannelFor } from "@/components/os/department/config";
+import { departmentChannelFor, departmentProfile } from "@/components/os/department/config";
 import { workspaceChatReadiness } from "@/components/os/department/channel";
 import { departmentGate } from "@/components/os/department/gate";
 import type { Read } from "@/components/os/department/routines";
@@ -113,13 +114,17 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
   const leads: LeadTeammate[] = [];
   for (const [i, slug] of slugs.entries()) {
     const agent = agents[i];
-    const departments = bindings
-      .filter((b) => b.binding.kind === "agent" && b.binding.agentSlug === slug)
-      .map((b) => ({ label: b.dept.label, href: b.dept.href }));
+    const led = bindings.filter((b) => b.binding.kind === "agent" && b.binding.agentSlug === slug);
+    const departments = led.map((b) => ({ label: b.dept.label, href: b.dept.href }));
+    // A department lead is named for its departments, never for the agent
+    // behind them: OASIS's leads are house agents with personal names, and
+    // clients (and CC, in OASIS's own workspace) address "Sales", not a
+    // persona. The summary is the department's own purpose line, written for
+    // any business (config.ts PROFILES), not the agent's library blurb.
     leads.push({
       id: slug,
-      name: agent?.name ?? departments.map((d) => d.label).join(" · "),
-      summary: agent?.short_description ?? "",
+      name: departments.map((d) => d.label).join(" · "),
+      summary: led[0] ? departmentProfile(led[0].dept.key).purpose : "",
       departments,
       web: agent ? web : "not_connected",
     });
