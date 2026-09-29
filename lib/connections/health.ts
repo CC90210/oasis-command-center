@@ -9,30 +9,38 @@
  *
  * STRIPE. A restricted key is probed with GET requests only — this module has
  * no code path that sends anything else to Stripe:
- *   GET /v1/balance         required: proves the key authenticates, says
- *                           live or test mode, and is what Finance's cash
- *                           view reads.
- *   GET /v1/events?limit=1  required: the Finance sync polls Events (doc 03
- *                           e.3), so a key that cannot read them is degraded.
- *   GET /v1/account         optional: the account id and business name. A
- *                           restricted key may not be allowed to read it;
- *                           then the account id comes from Stripe's own
- *                           permission error ("… on account 'acct_…'"). No
- *                           account id at all means the key cannot be pinned,
- *                           and it is refused.
+ *   one GET per advertised   required: every Read permission the setup steps
+ *   Read permission          ask for (registry STRIPE_READ_PERMISSIONS) is
+ *   (STRIPE_PERMISSION_      proven by reading it — /v1/balance, then one row
+ *   PROBES)                  (limit=1) of each list. A key missing any of them
+ *                            is degraded and says which ("Missing: Invoices
+ *                            read"), so a card is never green, and a connect
+ *                            never records, a scope the key cannot use.
+ *                            /v1/balance also says live or test mode.
+ *   GET /v1/account          optional: the account id and business name. A
+ *                            restricted key may not be allowed to read it;
+ *                            then the account id comes from Stripe's own
+ *                            permission error ("… on account 'acct_…'"). No
+ *                            account id at all means the key cannot be pinned,
+ *                            and it is refused.
+ * The GETs run in parallel under ONE deadline that also covers reading each
+ * body, so a probe finishes within STRIPE_TIMEOUT_MS whatever Stripe does.
  * Any 401 is final (the key is dead). A 429, 5xx, timeout or network error is
  * "unknown" — Stripe could not be asked, which is not the same as "broken".
  */
 import "server-only";
 import type { Client } from "@libsql/client";
 import { logTenantAudit } from "@/lib/audit/activity-feed";
+import { publishAgentEvent, type AgentEventPublish } from "@/lib/manifest/events";
 import { readTenantCredentialStrict } from "@/lib/tenant-integration-store";
-import { providerById, type ProviderDef } from "@/lib/connections/registry";
+import { STRIPE_READ_PERMISSIONS, providerById, type ProviderDef } from "@/lib/connections/registry";
 import {
   HEALTH_RECHECK_AFTER_MS,
   credentialServiceFor,
+  isVerifiedHealthy,
   mergeVerdicts,
   type ConnectionEnvironment,
+  type ConnectionStatus,
   type HealthCheckSource,
   type HealthVerdict,
   type ProbeErrorCode,
@@ -62,7 +70,29 @@ export type ProbeResult = {
 // ── Stripe ────────────────────────────────────────────────────────────────
 
 const STRIPE_API = "https://api.stripe.com";
-const STRIPE_TIMEOUT_MS = 10_000;
+/** One deadline for a whole Stripe probe: every GET, headers and body. */
+export const STRIPE_TIMEOUT_MS = 10_000;
+
+/**
+ * The GET that proves each Read permission OASIS asks the owner for. Keys are
+ * exactly registry STRIPE_READ_PERMISSIONS (tests/os-connections.test.ts holds
+ * the two together), so adding a permission to the setup steps without a probe
+ * fails CI. List endpoints ask for one row.
+ */
+export const STRIPE_PERMISSION_PROBES: Readonly<Record<string, string>> = {
+  Balance: "/v1/balance",
+  "Balance transactions": "/v1/balance_transactions?limit=1",
+  Charges: "/v1/charges?limit=1",
+  Refunds: "/v1/refunds?limit=1",
+  Customers: "/v1/customers?limit=1",
+  Disputes: "/v1/disputes?limit=1",
+  Events: "/v1/events?limit=1",
+  Invoices: "/v1/invoices?limit=1",
+  Payouts: "/v1/payouts?limit=1",
+  Prices: "/v1/prices?limit=1",
+  Products: "/v1/products?limit=1",
+  Subscriptions: "/v1/subscriptions?limit=1",
+};
 
 type Obj = Record<string, unknown>;
 const asObj = (v: unknown): Obj | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Obj) : null);
@@ -82,24 +112,57 @@ export function accountIdFromStripeError(body: unknown): string | null {
   return m ? m[1] : null;
 }
 
-async function stripeGet(key: string, path: string, fetchImpl: FetchImpl): Promise<StripeCall> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), STRIPE_TIMEOUT_MS);
+/**
+ * `work`, or a rejection the moment `signal` aborts — whichever comes first. A
+ * fetch honours its signal for the headers, but nothing makes an arbitrary
+ * body promise (or a fetch that ignores its signal) give up, so the deadline
+ * is enforced here rather than trusted to the callee.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error("aborted"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * One GET under the probe's shared deadline. The deadline stays armed until the
+ * body is read: headers that arrive on time followed by a body that never does
+ * are "timed out", not a hang.
+ */
+async function stripeGet(key: string, path: string, fetchImpl: FetchImpl, signal: AbortSignal): Promise<StripeCall> {
   let res: Response;
   try {
-    res = await fetchImpl(`${STRIPE_API}${path}`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
-      cache: "no-store",
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const aborted = err instanceof Error && err.name === "AbortError";
-    return { kind: "unreachable", detail: aborted ? "timed out" : "network error" };
-  } finally {
-    clearTimeout(timer);
+    res = await untilAborted(
+      fetchImpl(`${STRIPE_API}${path}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+        cache: "no-store",
+        signal,
+      }),
+      signal,
+    );
+  } catch {
+    return { kind: "unreachable", detail: signal.aborted ? "timed out" : "network error" };
   }
-  const body = asObj(await res.json().catch(() => null));
+  let body: Obj | null;
+  try {
+    body = asObj(await untilAborted(res.json(), signal));
+  } catch {
+    if (signal.aborted) return { kind: "unreachable", detail: "timed out" };
+    body = null; // not JSON: judged on the status alone, as before
+  }
   if (res.status === 200 && body) return { kind: "ok", body };
   if (res.status === 401) return { kind: "rejected" };
   if (res.status === 403) return { kind: "forbidden", accountId: accountIdFromStripeError(body) };
@@ -124,32 +187,42 @@ function accountLabelFrom(account: Obj | null, accountId: string): string {
  */
 export async function probeStripeRestrictedKey(
   key: string,
-  opts: { fetchImpl?: FetchImpl } = {},
+  opts: { fetchImpl?: FetchImpl; timeoutMs?: number } = {},
 ): Promise<ProbeResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const started = Date.now();
   const done = (r: Omit<ProbeResult, "latencyMs">): ProbeResult => ({ ...r, latencyMs: Date.now() - started });
   const empty = { accountId: null, accountLabel: null, environment: null } as const;
 
-  const balance = await stripeGet(key, "/v1/balance", fetchImpl);
-  if (balance.kind === "rejected") {
-    return done({
-      ...empty,
-      verdict: "down",
-      code: "key_rejected",
-      detail: "Stripe does not accept this key. It may have been deleted, expired or rolled in Stripe. Paste a new restricted key.",
-    });
+  const reads = STRIPE_READ_PERMISSIONS.map((permission) => {
+    const path = STRIPE_PERMISSION_PROBES[permission];
+    if (!path) throw new Error(`stripe_permission_has_no_probe:${permission}`);
+    return { permission, path };
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? STRIPE_TIMEOUT_MS);
+  let account: StripeCall;
+  let results: StripeCall[];
+  try {
+    [account, ...results] = await Promise.all([
+      stripeGet(key, "/v1/account", fetchImpl, controller.signal),
+      ...reads.map((r) => stripeGet(key, r.path, fetchImpl, controller.signal)),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
-  const events = await stripeGet(key, "/v1/events?limit=1", fetchImpl);
-  const account = await stripeGet(key, "/v1/account", fetchImpl);
-  const calls = [balance, events, account];
+  const balance = results[reads.findIndex((r) => r.permission === "Balance")] ?? null;
+  const calls = [account, ...results];
 
   if (calls.some((c) => c.kind === "rejected")) {
     return done({
       ...empty,
       verdict: "down",
       code: "key_rejected",
-      detail: "Stripe stopped accepting this key partway through the check. Paste a new restricted key.",
+      detail:
+        balance?.kind === "rejected"
+          ? "Stripe does not accept this key. It may have been deleted, expired or rolled in Stripe. Paste a new restricted key."
+          : "Stripe stopped accepting this key partway through the check. Paste a new restricted key.",
     });
   }
 
@@ -163,13 +236,12 @@ export async function probeStripeRestrictedKey(
     calls.map((c) => (c.kind === "forbidden" ? c.accountId : null)).find((id): id is string => !!id) ??
     null;
 
-  const livemode = balance.kind === "ok" ? balance.body.livemode : undefined;
+  const livemode = balance?.kind === "ok" ? balance.body.livemode : undefined;
   const environment: ConnectionEnvironment | null =
     livemode === true ? "live" : livemode === false ? "test" : key.startsWith("rk_live_") ? "live" : key.startsWith("rk_test_") ? "test" : null;
 
-  const missing: string[] = [];
-  if (balance.kind === "forbidden") missing.push("Balance");
-  if (events.kind === "forbidden") missing.push("Events");
+  // Every advertised permission Stripe refused, in the order the setup steps list them.
+  const missing = reads.filter((_, i) => results[i].kind === "forbidden").map((r) => r.permission);
 
   const verdicts: HealthVerdict[] = [];
   if (missing.length) verdicts.push("degraded");
@@ -197,7 +269,7 @@ export async function probeStripeRestrictedKey(
       environment,
       verdict,
       code: "missing_permissions",
-      detail: `The key works, but Stripe refused to show OASIS: ${missing.join(" and ")}. Edit the key in Stripe (Developers › API keys) and set ${missing.join(" and ")} to Read.`,
+      detail: `Missing: ${missing.map((p) => `${p} read`).join(", ")}. The key works, but Stripe refused to show OASIS ${missing.length === 1 ? "that" : "those"}. Edit the key in Stripe (Developers › API keys) and set ${missing.length === 1 ? "it" : "each"} to Read.`,
     });
   }
   if (verdict === "unknown") {
@@ -215,12 +287,15 @@ export async function probeStripeRestrictedKey(
   return done({ accountId, accountLabel, environment, verdict: "healthy", code: null, detail: null });
 }
 
+/** A provider's live probe. `timeoutMs` bounds the whole probe (default: the provider's own deadline). */
+export type Probe = (credential: string, fetchImpl: FetchImpl, timeoutMs?: number) => Promise<ProbeResult>;
+
 /** The live probe for each provider that has one. A provider without one cannot be green. */
-const PROBES: Readonly<Record<string, (credential: string, fetchImpl: FetchImpl) => Promise<ProbeResult>>> = {
-  stripe: (credential, fetchImpl) => probeStripeRestrictedKey(credential, { fetchImpl }),
+const PROBES: Readonly<Record<string, Probe>> = {
+  stripe: (credential, fetchImpl, timeoutMs) => probeStripeRestrictedKey(credential, { fetchImpl, timeoutMs }),
 };
 
-export function probeFor(provider: string): ((credential: string, fetchImpl: FetchImpl) => Promise<ProbeResult>) | null {
+export function probeFor(provider: string): Probe | null {
   return PROBES[provider] ?? null;
 }
 
@@ -235,6 +310,10 @@ export type ConnectionsDeps = {
   db: Client;
   fetchImpl?: FetchImpl;
   now: () => Date;
+  /** Bound on one provider probe; default the provider's own (STRIPE_TIMEOUT_MS). */
+  probeTimeoutMs?: number;
+  /** The Feed's tape; default lib/manifest/events publishAgentEvent. */
+  publishEvent?: (event: AgentEventPublish) => Promise<void>;
 };
 
 export type AuditActor = { userId: string | null; email: string | null };
@@ -280,7 +359,7 @@ export async function probeStoredConnection(
     if (credential.reason === "lookup_failed") throw new Error("credential_lookup_failed");
     outcome = { verdict: "down", ...CREDENTIAL_FAILURE[credential.reason], latencyMs: null, accountLabel: null, environment: null };
   } else {
-    const result = await probe(credential.value, deps.fetchImpl ?? fetch);
+    const result = await probe(credential.value, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
     if (result.accountId && row.external_account_id && result.accountId !== row.external_account_id) {
       // The key now answers for a different account than the one pinned: never
       // let another company's numbers flow into this workspace.
@@ -326,13 +405,84 @@ export async function probeStoredConnection(
         provider: row.provider,
         from: recorded.previousStatus,
         to: recorded.connection.status,
+        from_verdict: recorded.previousVerdict,
         verdict: outcome.verdict,
+        verified: isVerifiedHealthy(recorded.connection, deps.now().getTime()),
         code: outcome.code,
         source,
       },
     });
   }
+  if (recorded.worsened) {
+    await alertConnectionWorsened(deps, {
+      tenantId: row.tenant_id,
+      connectionId: row.id,
+      provider: row.provider,
+      from: recorded.previousStatus,
+      to: recorded.connection.status,
+      code: outcome.code,
+      detail: outcome.detail,
+      source,
+    });
+  }
   return recorded;
+}
+
+/** Where the owner fixes a connection (Settings › Connections). */
+export const CONNECTIONS_SETTINGS_HREF = "/settings/connections";
+
+/**
+ * Tell the workspace a connection got worse (doc 03 a.3: the health cron
+ * "flips status and alerts Operations and the owner"). In-app only: one
+ * agent_events row on the workspace's Feed, attributed to Operations. The
+ * owner's Today lists the connection under Needs you for as long as it stays
+ * in an attention status (components/os/today model reads tenant_connections),
+ * so a recovery clears that item with no second event. Client workspaces have
+ * no per-workspace email or Telegram channel yet, so nothing is sent outside
+ * the app. Best-effort like every tape write: a failure is logged, never thrown
+ * — the status is already recorded.
+ */
+export async function alertConnectionWorsened(
+  deps: Pick<ConnectionsDeps, "publishEvent">,
+  input: {
+    tenantId: string;
+    connectionId: string;
+    provider: string;
+    from: ConnectionStatus;
+    to: ConnectionStatus;
+    code: ProbeErrorCode | null;
+    detail: string | null;
+    source: HealthCheckSource;
+  },
+): Promise<void> {
+  const label = providerById(input.provider)?.label ?? input.provider;
+  try {
+    await (deps.publishEvent ?? publishAgentEvent)({
+      eventType: "CONNECTION_NEEDS_ATTENTION",
+      tenantId: input.tenantId,
+      // dept:<key> is the Feed's explicit department attribution.
+      publisher: "dept:operations",
+      severity: input.to === "degraded" ? "warn" : "error",
+      payload: {
+        // entity + from/to is what the Feed's one-line summary prints.
+        entity: `${label} connection`,
+        from: input.from,
+        to: input.to,
+        connection_id: input.connectionId,
+        provider: input.provider,
+        code: input.code,
+        detail: input.detail,
+        source: input.source,
+        href: CONNECTIONS_SETTINGS_HREF,
+      },
+    });
+  } catch (err) {
+    console.error("[connections.alert] feed event failed", {
+      tenantId: input.tenantId,
+      connectionId: input.connectionId,
+      error: err instanceof Error ? err.stack : err,
+    });
+  }
 }
 
 /**
@@ -370,40 +520,92 @@ export async function auditConnection(input: {
 export type HealthPassResult = {
   checked: number;
   healthy: number;
-  flipped: Array<{ connection_id: string; provider: string; from: string; to: string }>;
+  flipped: Array<{ connection_id: string; provider: string; from: string; to: string; verdict: HealthVerdict }>;
+  /** `error` is a stable code (PASS_ERROR_CODES or "probe_threw"); the full error is in the server log only. */
   errors: Array<{ connection_id: string; provider: string; error: string }>;
+  /** Due connections left for the next pass because the remaining time could not fit one more probe. */
+  deferred: number;
   pruned: { healthChecksDeleted: number; oauthStatesDeleted: number };
 };
 
 /**
- * One pass: re-probe every live connection whose last check is older than
- * HEALTH_RECHECK_AFTER_MS (oldest first, up to `limit`, `concurrency` at a
- * time — each probe is a few sequential Stripe calls, and different keys have
- * separate Stripe rate limits), then trim old history. Run every 15 minutes, a
- * pass of 40 keeps up to ~160 connections re-probed each hour. One connection
- * throwing never strands the rest; it is reported in `errors`, and the route
- * turns a non-empty `errors` into a 500 so the cron runner sees it.
+ * The pass's time budget: the route's maxDuration is 60s, and 15s of it stays
+ * for listing, pruning and the response.
+ */
+export const HEALTH_PASS_BUDGET_MS = 45_000;
+/** Probes in flight at once. Each is ~13 parallel GETs, and a Worker queues fetches past 6 open connections. */
+export const HEALTH_PASS_CONCURRENCY = 5;
+/** One probe at its worst: the provider deadline, plus the database reads and writes around it. */
+export const PROBE_WORST_CASE_MS = STRIPE_TIMEOUT_MS + 5_000;
+/**
+ * As many due connections as fit the budget even when EVERY probe runs to its
+ * deadline (a Stripe outage): 5 lanes × 3 rounds = 15. Every 15 minutes, that
+ * keeps ~60 connections re-probed each hour; past that, raise the concurrency
+ * or the schedule, not this cap.
+ */
+export const HEALTH_PASS_LIMIT = HEALTH_PASS_CONCURRENCY * Math.floor(HEALTH_PASS_BUDGET_MS / PROBE_WORST_CASE_MS);
+
+/**
+ * The cron response is printed to a public Actions log (cron-driver.yml), so a
+ * probe that throws is reported by code; the message and stack go to the
+ * server log only.
+ */
+const PASS_ERROR_CODES: ReadonlySet<string> = new Set([
+  "credential_lookup_failed",
+  "provider_not_probeable",
+  "connection_not_found",
+]);
+
+function passErrorCode(err: unknown): string {
+  const prefix = (err instanceof Error ? err.message : "").split(":")[0];
+  return PASS_ERROR_CODES.has(prefix) ? prefix : "probe_threw";
+}
+
+/**
+ * One pass. First trim old history (two indexed DELETEs), so a pass that runs
+ * out of time on probes still prunes. Then re-probe live connections whose last
+ * check is older than HEALTH_RECHECK_AFTER_MS, oldest first, at most `limit`,
+ * `concurrency` at a time. A lane starts another probe only while the time left
+ * in the budget still fits one at its worst; whatever is left is `deferred` and
+ * stays due, first in line next pass. One connection throwing never strands the
+ * rest; it is reported in `errors`, and the route turns a non-empty `errors`
+ * into a 500 so the cron runner sees it.
  */
 export async function runConnectionHealthPass(
   deps: ConnectionsDeps,
-  opts: { limit?: number; concurrency?: number } = {},
+  opts: {
+    limit?: number;
+    concurrency?: number;
+    budgetMs?: number;
+    probeWorstCaseMs?: number;
+    /** Monotonic-enough ms clock for the budget (tests pin it). */
+    clock?: () => number;
+  } = {},
 ): Promise<HealthPassResult> {
+  const clock = opts.clock ?? Date.now;
+  const startedAt = clock();
+  const budgetMs = opts.budgetMs ?? HEALTH_PASS_BUDGET_MS;
+  const worstMs = opts.probeWorstCaseMs ?? PROBE_WORST_CASE_MS;
   const now = deps.now();
+  const pruned = await pruneConnectionHistory(deps.db, now);
   const due = await listConnectionsDueForHealth(deps.db, {
     providers: probedProviders(),
     staleBefore: new Date(now.getTime() - HEALTH_RECHECK_AFTER_MS),
-    limit: opts.limit ?? 40,
+    limit: opts.limit ?? HEALTH_PASS_LIMIT,
   });
   const result: HealthPassResult = {
     checked: 0,
     healthy: 0,
     flipped: [],
     errors: [],
-    pruned: { healthChecksDeleted: 0, oauthStatesDeleted: 0 },
+    deferred: 0,
+    pruned,
   };
   const queue = [...due];
   const worker = async () => {
-    for (let row = queue.shift(); row; row = queue.shift()) await probeOne(row);
+    while (queue.length > 0 && budgetMs - (clock() - startedAt) >= worstMs) {
+      await probeOne(queue.shift()!);
+    }
   };
   const probeOne = async (row: ConnectionRow) => {
     try {
@@ -416,6 +618,7 @@ export async function runConnectionHealthPass(
           provider: row.provider,
           from: recorded.previousStatus,
           to: recorded.connection.status,
+          verdict: recorded.connection.last_health_verdict,
         });
       }
     } catch (err) {
@@ -425,15 +628,14 @@ export async function runConnectionHealthPass(
         provider: row.provider,
         error: err instanceof Error ? err.stack : err,
       });
-      result.errors.push({
-        connection_id: row.id,
-        provider: row.provider,
-        error: (err instanceof Error ? err.message : String(err)).slice(0, 300),
-      });
+      result.errors.push({ connection_id: row.id, provider: row.provider, error: passErrorCode(err) });
     }
   };
-  const lanes = Math.max(1, Math.min(opts.concurrency ?? 5, queue.length || 1));
+  const lanes = Math.max(1, Math.min(opts.concurrency ?? HEALTH_PASS_CONCURRENCY, queue.length || 1));
   await Promise.all(Array.from({ length: lanes }, () => worker()));
-  result.pruned = await pruneConnectionHistory(deps.db, now);
+  result.deferred = queue.length;
+  if (result.deferred > 0) {
+    console.warn("[connections.health_pass] out of time; deferred to the next pass", { deferred: result.deferred });
+  }
   return result;
 }

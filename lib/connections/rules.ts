@@ -257,6 +257,28 @@ export function statusAfterProbe(
 }
 
 /**
+ * Statuses where the connection is not doing its job and only the owner can
+ * fix it (reconnect, or give the key the permissions it lacks). The owner's
+ * Today lists a connection under Needs you for as long as it is in one of
+ * these, so a recovery clears the item by itself.
+ */
+export const ATTENTION_STATUSES = ["degraded", "expired", "error"] as const;
+
+const STATUS_SEVERITY: Partial<Record<string, number>> = { degraded: 1, expired: 2, error: 2 };
+
+export function needsAttention(status: string | null | undefined): boolean {
+  return (STATUS_SEVERITY[status ?? ""] ?? 0) > 0;
+}
+
+/**
+ * A status flip the owner must be told about: into an attention status, or to
+ * a worse one. A recovery, or a move between equally bad states, is not.
+ */
+export function isWorseStatus(from: ConnectionStatus, to: ConnectionStatus): boolean {
+  return (STATUS_SEVERITY[to] ?? 0) > (STATUS_SEVERITY[from] ?? 0);
+}
+
+/**
  * GREEN MEANS PROVEN. True only when the connection is connected AND its last
  * probe passed AND that probe is under HEALTH_FRESH_MS old (and not stamped in
  * the future). A saved key nobody checked, a stale pass, or a pass followed by

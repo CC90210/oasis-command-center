@@ -24,8 +24,10 @@ import {
   listRecentHealthChecks,
   markConnectionError,
   recordHealthCheck,
+  restoreRevokedClaim,
   revokeConnection,
   toPublicConnection,
+  type ClaimResult,
   type PublicConnection,
 } from "@/lib/connections/store";
 import {
@@ -92,8 +94,8 @@ const PROBE_REFUSAL_STATUS: Record<string, number> = {
  *   3. The account is CLAIMED for this tenant (pending). An account live in
  *      another tenant, or a second account while one is live here, is refused.
  *   4. The key is SAVED encrypted under the connection's own credential
- *      service. If that fails, a brand-new claim is removed and a reused one is
- *      marked error — a connection is never "connected" without its key.
+ *      service. If that fails, the claim is undone (undoUnsavedClaim) — a
+ *      connection is never "connected" without its key.
  *   5. The probe is RECORDED, which is what turns the connection (and the card)
  *      connected.
  */
@@ -112,7 +114,7 @@ export async function connectWithRestrictedKey(
 
   const probe = probeFor(provider.id);
   if (!probe) return fail(500, "probe_missing", `OASIS has no live check for ${provider.label}.`);
-  const result = await probe(check.key, deps.fetchImpl ?? fetch);
+  const result = await probe(check.key, deps.fetchImpl ?? fetch, deps.probeTimeoutMs);
   if (result.verdict !== "healthy" || !result.accountId) {
     const code = result.code ?? "unexpected_response";
     return fail(PROBE_REFUSAL_STATUS[code] ?? 422, code, result.detail ?? "The key did not pass the connection check.");
@@ -163,17 +165,7 @@ export async function connectWithRestrictedKey(
       connectionId: conn.id,
       error: saved.error,
     });
-    if (claim.created) {
-      await deleteUnprovenClaim(deps.db, actor.tenantId, conn.id);
-    } else {
-      await markConnectionError(deps.db, {
-        tenantId: actor.tenantId,
-        connectionId: conn.id,
-        code: "credential_missing",
-        detail: "OASIS could not save the new key. Paste it again.",
-        now: deps.now(),
-      });
-    }
+    await undoUnsavedClaim(deps, actor.tenantId, claim);
     return fail(500, "credential_save_failed", "OASIS could not save the key. Nothing was connected. Try again.");
   }
 
@@ -206,6 +198,52 @@ export async function connectWithRestrictedKey(
     status: 200,
     body: { ok: true, connection: toPublicConnection(recorded.connection, deps.now().getTime()) },
   };
+}
+
+/**
+ * Put back a claim whose credential could not be saved, so no connection is
+ * ever left looking set up without its key:
+ *   - a brand-new claim is deleted;
+ *   - a revoked row this connect REACTIVATED goes back to revoked, exactly as
+ *     the disconnect left it, with its history (never deleted);
+ *   - a live row (a new key for the same account) is marked error; its old key
+ *     is still the one stored.
+ * When the delete or restore does not happen — it throws, or the row has moved
+ * on — the row is marked error instead of staying pending: a pending orphan
+ * would refuse every later connect with provider_already_connected and tell
+ * the owner nothing, while an errored one says what happened and can be
+ * disconnected from its card.
+ */
+async function undoUnsavedClaim(
+  deps: ConnectionsDeps,
+  tenantId: string,
+  claim: Extract<ClaimResult, { ok: true }>,
+): Promise<void> {
+  const connectionId = claim.connection.id;
+  const reactivated = claim.previous?.revoked_at ? claim.previous : null;
+  if (claim.created || reactivated) {
+    let undone = false;
+    try {
+      undone = reactivated
+        ? await restoreRevokedClaim(deps.db, { tenantId, previous: reactivated, now: deps.now() })
+        : await deleteUnprovenClaim(deps.db, tenantId, connectionId);
+    } catch (err) {
+      console.error("[connections.connect] undoing the claim threw", {
+        tenantId,
+        connectionId,
+        error: err instanceof Error ? err.stack : err,
+      });
+    }
+    if (undone) return;
+    console.error("[connections.connect] claim could not be undone; marking it error", { tenantId, connectionId });
+  }
+  await markConnectionError(deps.db, {
+    tenantId,
+    connectionId,
+    code: "credential_missing",
+    detail: "OASIS could not save the new key. Paste it again.",
+    now: deps.now(),
+  });
 }
 
 // ── Test again ────────────────────────────────────────────────────────────

@@ -85,6 +85,7 @@ stub("next/navigation", {
 
 const TENANT_A = "a1a1a1a1-0000-4000-8000-0000000000a1";
 const TENANT_B = "b2b2b2b2-0000-4000-8000-0000000000b2";
+const TENANT_C = "c3c3c3c3-0000-4000-8000-0000000000c3"; // driven through the service directly
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 
 type U = { id: string; email: string };
@@ -114,12 +115,31 @@ type StripeAccount = {
   accountRead: boolean;
   /** Whether Stripe's 403 message names the account (it normally does). */
   accountInError: boolean;
-  balance: boolean;
-  events: boolean;
+  /** Endpoints this key's permissions do not cover (e.g. "/v1/invoices"): Stripe answers 403. */
+  refused: readonly string[];
 };
 type StripeBehavior = { kind: "ok"; acct: StripeAccount } | { kind: "dead" } | { kind: "down" };
 const STRIPE = new Map<string, StripeBehavior>();
-const stripeCalls: Array<{ method: string; path: string; key: string }> = [];
+const stripeCalls: Array<{ method: string; path: string; search: string; key: string }> = [];
+
+/**
+ * The Stripe list endpoints behind the Read permissions OASIS asks for — typed
+ * here from Stripe's API reference, not imported from lib/connections/health,
+ * so a probe that asks for the wrong path gets this mock's 404.
+ */
+const STRIPE_LISTS = [
+  "/v1/balance_transactions",
+  "/v1/charges",
+  "/v1/refunds",
+  "/v1/customers",
+  "/v1/disputes",
+  "/v1/events",
+  "/v1/invoices",
+  "/v1/payouts",
+  "/v1/prices",
+  "/v1/products",
+  "/v1/subscriptions",
+];
 
 const rk = (mode: "live" | "test", tag: string) => `rk_${mode}_${tag}${"Z9".repeat(14)}`;
 const acct = (over: Partial<StripeAccount> & { account: string }): StripeAccount => ({
@@ -127,8 +147,7 @@ const acct = (over: Partial<StripeAccount> & { account: string }): StripeAccount
   livemode: false,
   accountRead: true,
   accountInError: true,
-  balance: true,
-  events: true,
+  refused: [],
   ...over,
 });
 
@@ -139,9 +158,13 @@ const KEY_OTHER_FOR_A = rk("test", "charlieInAlpha");
 const KEY_B = rk("live", "bravoOne");
 const KEY_DEAD = rk("test", "deadKey");
 const KEY_NO_EVENTS = rk("test", "noEvents");
+const KEY_NO_INVOICES = rk("test", "noInvoices"); // Balance + Events fine, two advertised reads missing
 const KEY_NO_ACCOUNT = rk("test", "noAccount");
 const KEY_STRIPE_DOWN = rk("test", "stripeDown");
 const KEY_OASIS = rk("live", "oasisRead");
+const KEY_C = rk("test", "deltaOne"); // tenant C's own account
+const KEY_C_ECHO = rk("test", "echoOne");
+const KEY_C_FOX = rk("test", "foxOne");
 
 const ALPHA = acct({ account: "acct_1Alpha", name: "Alpha Co" });
 STRIPE.set(KEY_A, { kind: "ok", acct: ALPHA });
@@ -151,10 +174,17 @@ STRIPE.set(KEY_OTHER_FOR_A, { kind: "ok", acct: acct({ account: "acct_1Charlie",
 // B's key may not read /v1/account: the id must come from Stripe's own 403.
 STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false }) });
 STRIPE.set(KEY_DEAD, { kind: "dead" });
-STRIPE.set(KEY_NO_EVENTS, { kind: "ok", acct: acct({ account: "acct_1NoEvents", events: false }) });
+STRIPE.set(KEY_NO_EVENTS, { kind: "ok", acct: acct({ account: "acct_1NoEvents", refused: ["/v1/events"] }) });
+STRIPE.set(KEY_NO_INVOICES, {
+  kind: "ok",
+  acct: acct({ account: "acct_1NoInvoices", refused: ["/v1/invoices", "/v1/subscriptions"] }),
+});
 STRIPE.set(KEY_NO_ACCOUNT, { kind: "ok", acct: acct({ account: "acct_1Hidden", accountRead: false, accountInError: false }) });
 STRIPE.set(KEY_STRIPE_DOWN, { kind: "down" });
 STRIPE.set(KEY_OASIS, { kind: "ok", acct: acct({ account: "acct_1Oasis", name: "OASIS AI", livemode: true }) });
+STRIPE.set(KEY_C, { kind: "ok", acct: acct({ account: "acct_1Delta", name: "Delta Inc" }) });
+STRIPE.set(KEY_C_ECHO, { kind: "ok", acct: acct({ account: "acct_1Echo" }) });
+STRIPE.set(KEY_C_FOX, { kind: "ok", acct: acct({ account: "acct_1Fox" }) });
 
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -163,7 +193,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.hostname !== "api.stripe.com") throw new Error(`unexpected network call in test: ${href}`);
   const method = (init?.method || "GET").toUpperCase();
   const key = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
-  stripeCalls.push({ method, path: url.pathname, key });
+  stripeCalls.push({ method, path: url.pathname, search: url.search, key });
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const behavior = STRIPE.get(key);
@@ -179,18 +209,15 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         message: `The provided key 'rk_****' does not have the required permissions for this endpoint on account '${a.accountInError ? a.account : "(hidden)"}'. Having the '${perm}' permission would allow this request to continue.`,
       },
     });
-  switch (url.pathname) {
-    case "/v1/balance":
-      return a.balance ? json(200, { object: "balance", livemode: a.livemode, available: [], pending: [] }) : refuse("rak_balance_read");
-    case "/v1/events":
-      return a.events ? json(200, { object: "list", data: [], has_more: false }) : refuse("rak_event_read");
-    case "/v1/account":
-      return a.accountRead
-        ? json(200, { id: a.account, object: "account", settings: { dashboard: { display_name: a.name } } })
-        : refuse("rak_accounts_kyc_basic_read");
-    default:
-      return json(404, { error: { message: "no such endpoint" } });
+  if (a.refused.includes(url.pathname)) return refuse(`rak_${url.pathname.slice(4)}_read`);
+  if (url.pathname === "/v1/balance") return json(200, { object: "balance", livemode: a.livemode, available: [], pending: [] });
+  if (url.pathname === "/v1/account") {
+    return a.accountRead
+      ? json(200, { id: a.account, object: "account", settings: { dashboard: { display_name: a.name } } })
+      : refuse("rak_accounts_kyc_basic_read");
   }
+  if (STRIPE_LISTS.includes(url.pathname)) return json(200, { object: "list", data: [], has_more: false });
+  return json(404, { error: { message: "no such endpoint" } });
 }) as typeof fetch;
 
 // ── Harness ───────────────────────────────────────────────────────────────
@@ -238,6 +265,11 @@ async function main() {
       "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
       PRIMARY KEY ("id"));
     CREATE TABLE integrations_health (tenant_id TEXT, service TEXT, status TEXT, last_ping_at TEXT);
+    -- The Feed's tape (no tenant_id column; correlation_id carries the tenant).
+    CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+      event_type TEXT, publisher_agent TEXT, target_agent TEXT, severity TEXT, payload TEXT,
+      correlation_id TEXT, status TEXT, published_at TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
     CREATE TABLE user_integration_credentials (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, service TEXT,
       field_key TEXT, encrypted_value TEXT, last_tested_at TEXT, last_test_ok INTEGER, last_test_error TEXT,
       updated_at TEXT);
@@ -283,6 +315,13 @@ async function main() {
   const cronRoute = await import("../app/api/cron/connection-health/route");
   const keysRoute = await import("../app/api/integrations/keys/route");
   const { CRON_TABLE } = await import("../workers/oasis-cc-cron/src/index");
+  const health = await import("../lib/connections/health");
+  const service = await import("../lib/connections/service");
+  const todayModel = await import("../components/os/today/model");
+  const { loadConnectionAlerts } = await import("../components/os/today/loaders");
+  const { loadTenantFeed } = await import("../components/os/landings/feed-data");
+  const { departmentForEvent } = await import("../components/os/landings/feed-model");
+  const { projectEvent } = await import("../lib/event-projection");
 
   type Res = { status: number; body: Record<string, unknown>; text: string };
   const toRes = async (r: Response): Promise<Res> => {
@@ -321,6 +360,45 @@ async function main() {
       assert.ok(!text.includes(k), "a response echoed a Stripe key");
     }
   };
+  const attentionEvents = async (tenantId: string) =>
+    (
+      await db.execute({
+        sql: "SELECT publisher_agent, severity, payload FROM agent_events WHERE correlation_id = ? AND event_type = 'CONNECTION_NEEDS_ATTENTION' ORDER BY created_at",
+        args: [tenantId],
+      })
+    ).rows.map((r) => ({ publisher: String(r.publisher_agent), severity: String(r.severity), payload: JSON.parse(String(r.payload)) as Record<string, unknown> }));
+  const auditCount = async (tenantId: string, action: string) =>
+    Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM tenant_audit_log WHERE tenant_id = ? AND action_type = ?", args: [tenantId, action] })).rows[0].n);
+  const historyCount = async (connectionId: string) =>
+    Number((await db.execute({ sql: "SELECT COUNT(*) AS n FROM connection_health_checks WHERE connection_id = ?", args: [connectionId] })).rows[0].n);
+  /** The owner's Needs you, built from the real loader over the tenant's live connections. */
+  const needsYouFor = async (tenantId: string) =>
+    todayModel.buildNeedsYou({ sales: null, delivery: null, inbound: null, cash: null, connections: await loadConnectionAlerts(tenantId), nowMs: Date.now() });
+  /** The real client, with `hook` run just before each batch (to land a write between a read and a batch). */
+  const withBatchHook = (hook: () => Promise<void>) =>
+    new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (...args: Parameters<typeof db.batch>) => {
+            await hook();
+            return target.batch(...args);
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+  const deps = () => ({ db, now: () => new Date() });
+  const actorC = { tenantId: TENANT_C, userId: "0c000000-0000-4000-8000-0000000000c3", profileId: null, email: "owner@charlie.test" };
+  const cronCall = async () =>
+    toRes(
+      await cronRoute.GET(
+        new NextRequest("https://oasisai.work/api/cron/connection-health", {
+          headers: { authorization: `Bearer ${process.env.CRON_SECRET}`, "x-oasis-cron-attest": process.env.CRON_ATTEST_SECRET! },
+        }),
+      ),
+    );
+  const stripeDef = registry.providerById("stripe")!;
 
   console.log("os-connections:");
 
@@ -403,6 +481,29 @@ async function main() {
     assert.equal(rules.isVerifiedHealthy({ ...ok, last_health_verdict: "unknown" }, now), false, "unreachable");
     assert.equal(rules.isVerifiedHealthy({ ...ok, status: "pending" }, now), false, "saved, not proven");
     assert.equal(rules.isVerifiedHealthy({ ...ok, last_health_at: null }, now), false, "never probed");
+  });
+
+  await check("[1] every Read permission the setup steps ask for has a probe, and nothing else is probed", () => {
+    assert.deepEqual(Object.keys(health.STRIPE_PERMISSION_PROBES).sort(), [...registry.STRIPE_READ_PERMISSIONS].sort());
+    assert.deepEqual(registry.providerById("stripe")!.restrictedKey!.readPermissions, registry.STRIPE_READ_PERMISSIONS);
+  });
+
+  await check("[2] the probe deadline covers the body: headers on time, a body that never arrives → timed out, not a hang", async () => {
+    const stalledBody = (async () => ({ status: 200, json: () => new Promise<never>(() => {}) }) as unknown as Response) as typeof fetch;
+    const started = Date.now();
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const r = await Promise.race([
+      health.probeStripeRestrictedKey(KEY_A, { fetchImpl: stalledBody, timeoutMs: 100 }),
+      new Promise<"hung">((res) => {
+        guard = setTimeout(() => res("hung"), 3_000);
+      }),
+    ]);
+    clearTimeout(guard);
+    assert.notEqual(r, "hung", "the probe hung past its deadline");
+    const probe = r as Exclude<typeof r, "hung">;
+    assert.deepEqual([probe.verdict, probe.code], ["unknown", "provider_unreachable"]);
+    assert.match(String(probe.detail), /timed out/);
+    assert.ok(Date.now() - started < 1_500, `took ${Date.now() - started}ms against a 100ms deadline`);
   });
 
   // ── 3. Registry ──────────────────────────────────────────────────────────
@@ -489,6 +590,17 @@ async function main() {
     assert.equal((await connectionRows(TENANT_A)).length, 0);
   });
 
+  await check("[1] a key that reads Balance and Events but not every advertised permission is refused, naming exactly what is missing", async () => {
+    await login(USERS.ownerA);
+    const r = await connect("stripe", KEY_NO_INVOICES);
+    assert.deepEqual([r.status, r.body.error], [422, "missing_permissions"]);
+    assert.match(String(r.body.message), /^Missing: Invoices read, Subscriptions read\./);
+    assert.doesNotMatch(String(r.body.message), /Balance|Events|Charges/);
+    // Nothing recorded: no connection claims the advertised scope set for a key that cannot use it.
+    assert.equal((await connectionRows(TENANT_A)).length, 0);
+    assert.equal((await credentialRows(TENANT_A)).length, 0);
+  });
+
   // ── 5. Connect: the real thing ───────────────────────────────────────────
 
   let alphaConnectionId = "";
@@ -506,10 +618,14 @@ async function main() {
     assert.equal(conn.account_label, "Alpha Co (acct_1Alpha)");
     assert.equal(conn.environment, "test");
 
+    // Every advertised Read permission is proven (one GET each, lists one row), plus /v1/account.
     const calls = stripeCalls.slice(before);
-    assert.ok(calls.length >= 3);
+    assert.equal(calls.length, 2 + STRIPE_LISTS.length);
     assert.ok(calls.every((c) => c.method === "GET"), "a non-GET request went to Stripe");
-    assert.deepEqual(new Set(calls.map((c) => c.path)), new Set(["/v1/balance", "/v1/events", "/v1/account"]));
+    assert.deepEqual(new Set(calls.map((c) => c.path)), new Set(["/v1/balance", "/v1/account", ...STRIPE_LISTS]));
+    assert.ok(calls.filter((c) => STRIPE_LISTS.includes(c.path)).every((c) => c.search === "?limit=1"), "a list read asked for more than one row");
+    const recorded = (await connectionRows(TENANT_A))[0];
+    assert.deepEqual(JSON.parse(String(recorded.granted_scopes_json)), [...registry.providerById("stripe")!.scopes.base]);
 
     const stored = await credentialRows(TENANT_A);
     assert.equal(stored.length, 1);
@@ -691,6 +807,7 @@ async function main() {
   await check("Stripe unreachable on Test again: still connected, no longer green, and the card says why", async () => {
     await login(USERS.ownerB);
     STRIPE.set(KEY_B, { kind: "down" });
+    const auditsBefore = await auditCount(TENANT_B, "connection.health_changed");
     const r = await test("stripe");
     assert.equal(r.status, 200);
     const conn = r.body.connection as Record<string, unknown>;
@@ -699,9 +816,42 @@ async function main() {
     const card = await stripeCard(TENANT_B, USERS.ownerB.id);
     assert.equal(card.kind, "configured");
     assert.match(card.label, /did not answer/);
+    // [5] Same status, but the card lost its green: that is a health flip, and it is audited.
+    assert.equal(await auditCount(TENANT_B, "connection.health_changed"), auditsBefore + 1, "healthy → unknown was not audited");
+    const lost = (await db.execute({ sql: "SELECT after FROM tenant_audit_log WHERE tenant_id = ? AND action_type = 'connection.health_changed' ORDER BY created_at DESC LIMIT 1", args: [TENANT_B] })).rows[0];
+    assert.deepEqual(
+      (({ from, to, from_verdict, verdict, verified }) => ({ from, to, from_verdict, verdict, verified }))(JSON.parse(String(lost.after))),
+      { from: "connected", to: "connected", from_verdict: "healthy", verdict: "unknown", verified: false },
+    );
+    // One outage is not an alert.
+    assert.equal((await attentionEvents(TENANT_B)).length, 0);
     STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false }) });
     const back = await test("stripe");
     assert.equal((back.body.connection as Record<string, unknown>).verified, true);
+    assert.equal(await auditCount(TENANT_B, "connection.health_changed"), auditsBefore + 2, "the recovery to green was not audited");
+  });
+
+  await check("[1] a stored key that loses an advertised permission goes degraded, not green; Needs you shows it until it recovers", async () => {
+    await login(USERS.ownerB);
+    STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false, refused: ["/v1/subscriptions"] }) });
+    const r = await test("stripe");
+    const conn = r.body.connection as Record<string, unknown>;
+    assert.deepEqual([conn.status, conn.verified, conn.last_health_code], ["degraded", false, "missing_permissions"]);
+    const card = await stripeCard(TENANT_B, USERS.ownerB.id);
+    assert.equal(card.kind, "attention");
+    assert.match(String(card.detail), /^Missing: Subscriptions read\./);
+    // [6] A flip to a worse status alerts (warn for degraded) and puts it under Needs you.
+    const alerts = await attentionEvents(TENANT_B);
+    assert.deepEqual(alerts.map((a) => [a.severity, a.payload.to]), [["warn", "degraded"]]);
+    const item = (await needsYouFor(TENANT_B)).items.find((i) => i.id === "connection-stripe");
+    assert.deepEqual([item?.tone, item?.href], ["attention", "/settings/connections"]);
+    assert.match(String(item?.detail), /^Missing: Subscriptions read\./);
+
+    STRIPE.set(KEY_B, { kind: "ok", acct: acct({ account: "acct_1Bravo", livemode: true, accountRead: false }) });
+    assert.equal(((await test("stripe")).body.connection as Record<string, unknown>).verified, true);
+    // A recovery clears the item and raises nothing new.
+    assert.equal((await needsYouFor(TENANT_B)).items.length, 0);
+    assert.equal((await attentionEvents(TENANT_B)).length, 1);
   });
 
   await check("a passing probe older than a day stops being green", async () => {
@@ -1022,6 +1172,51 @@ async function main() {
     await assert.rejects(tokens.getAccessToken(db, { tenantId: TENANT_B, connectionId: id, refresh }), /connection_not_found/);
   });
 
+  await check("[4] only a refusal the provider confirmed counts: invalid_grant / 400 / 401, never a 5xx or a thrown blip", () => {
+    const { RefreshRefusedError, isConfirmedRefreshRefusal } = tokens;
+    assert.equal(isConfirmedRefreshRefusal(new RefreshRefusedError({ oauthError: "invalid_grant" })), true);
+    assert.equal(isConfirmedRefreshRefusal(new RefreshRefusedError({ httpStatus: 401 })), true);
+    assert.equal(isConfirmedRefreshRefusal(new RefreshRefusedError({ httpStatus: 503 })), false, "a 5xx says nothing about the grant");
+    assert.equal(isConfirmedRefreshRefusal(new Error("invalid_grant")), false, "an untyped error is not a confirmed refusal");
+  });
+
+  await check("[4] a transient refresh failure releases the lease and does NOT expire the connection", async () => {
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "rotating-2", expires_at: Date.now() - 1000 });
+    const statusBefore = row.status;
+    const historyBefore = await historyCount(row.id);
+    await assert.rejects(
+      tokens.getAccessToken(db, {
+        tenantId: TENANT_A,
+        connectionId: row.id,
+        refresh: async () => {
+          throw new Error("socket hang up");
+        },
+      }),
+      (e: unknown) => (e as { code?: string }).code === "refresh_unavailable",
+    );
+    const after = (await store.getConnection(db, TENANT_A, row.id))!;
+    assert.deepEqual([after.status, after.refresh_lease_until], [statusBefore, null], "one blip expired the account or kept the lease");
+    assert.equal(await historyCount(row.id), historyBefore, "a blip wrote a health row nothing would ever clear");
+  });
+
+  await check("[4] the lease is released even when recording a refusal throws", async () => {
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    const failingBatch = withBatchHook(async () => {
+      throw new Error("batch write failed");
+    });
+    await assert.rejects(
+      tokens.getAccessToken(failingBatch as unknown as typeof db, {
+        tenantId: TENANT_A,
+        connectionId: row.id,
+        refresh: async () => {
+          throw new tokens.RefreshRefusedError({ oauthError: "invalid_grant" });
+        },
+      }),
+    );
+    assert.equal((await store.getConnection(db, TENANT_A, row.id))!.refresh_lease_until, null, "a failed health write stranded the lease");
+  });
+
   await check("a refused refresh fails closed: expired, lease released, health row written", async () => {
     const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
     await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "rotating-2", expires_at: Date.now() - 1000 });
@@ -1030,15 +1225,221 @@ async function main() {
         tenantId: TENANT_A,
         connectionId: row.id,
         refresh: async () => {
-          throw new Error("invalid_grant");
+          throw new tokens.RefreshRefusedError({ oauthError: "invalid_grant" });
         },
       }),
-      /refresh/,
+      (e: unknown) => (e as { code?: string }).code === "refresh_failed",
     );
     const after = (await store.getConnection(db, TENANT_A, row.id))!;
     assert.deepEqual([after.status, after.last_health_code, after.refresh_lease_until], ["expired", "refresh_failed", null]);
     const latest = (await store.listRecentHealthChecks(db, TENANT_A, row.id, 1))[0];
     assert.deepEqual([latest.check_source, latest.error_code], ["refresh", "refresh_failed"]);
+  });
+
+  // ── 12b. Review fixes (#472): budget, error hygiene, undo, races ─────────
+
+  await check("[3] the health pass stops inside its budget, defers the rest (still due), and prunes first", async () => {
+    // Three connections due, one lane, and a clock that runs out after one probe.
+    // One throwaway workspace per row: a workspace holds ONE live Stripe
+    // connection (ux_tenant_connections_one_live).
+    const stale = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const ids: string[] = [];
+    try {
+    for (const n of [1, 2, 3]) {
+      const id = `budget-${n}-0000-4000-8000-000000000000`;
+      ids.push(id);
+      await db.execute({
+        sql: `INSERT INTO tenant_connections (id, tenant_id, provider, auth_kind, external_account_id, status, last_health_at, last_health_verdict, created_at, updated_at)
+              VALUES (?, ?, 'stripe', 'restricted_key', ?, 'connected', ?, 'healthy', ?, ?)`,
+        args: [id, `t-budget-${n}`, `acct_budget_${n}`, stale, stale, stale],
+      });
+    }
+    const due = await store.listConnectionsDueForHealth(db, {
+      providers: ["stripe"],
+      staleBefore: new Date(Date.now() - rules.HEALTH_RECHECK_AFTER_MS),
+      limit: 50,
+    });
+    const ticks = [0, 0, 70];
+    const clock = () => (ticks.length > 1 ? ticks.shift()! : ticks[0]);
+    const result = await health.runConnectionHealthPass(
+      { db, now: () => new Date() },
+      { limit: 50, concurrency: 1, budgetMs: 100, probeWorstCaseMs: 60, clock },
+    );
+    assert.equal(result.checked + result.errors.length, 1, "exactly one probe fit the budget");
+    assert.equal(result.deferred, due.length - 1, "everything else was deferred, and counted");
+    assert.ok(result.pruned && typeof result.pruned.healthChecksDeleted === "number", "pruning ran even though the pass ran out of time");
+    const stillDue = await store.listConnectionsDueForHealth(db, {
+      providers: ["stripe"],
+      staleBefore: new Date(Date.now() - rules.HEALTH_RECHECK_AFTER_MS),
+      limit: 50,
+    });
+    assert.equal(stillDue.length, due.length - 1, "a deferred connection must stay due for the next pass");
+    // The shipped limits fit the route's deadline even when every probe runs to its worst case.
+    assert.ok(
+      (health.HEALTH_PASS_LIMIT / health.HEALTH_PASS_CONCURRENCY) * health.PROBE_WORST_CASE_MS <= health.HEALTH_PASS_BUDGET_MS,
+      "the batch cap does not fit the pass budget",
+    );
+    assert.match(read("app/api/cron/connection-health/route.ts"), /export const maxDuration = 60;/);
+    assert.ok(health.HEALTH_PASS_BUDGET_MS < 60_000);
+    } finally {
+      for (const id of ids) await db.execute({ sql: "DELETE FROM connection_health_checks WHERE connection_id = ?", args: [id] });
+      for (const id of ids) await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [id] });
+    }
+  });
+
+  await check("[7] a probe that throws is reported by a stable code; its message never reaches the response", async () => {
+    const stale = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const id = "throws-00-0000-4000-8000-000000000000";
+    await db.execute({
+      sql: `INSERT INTO tenant_connections (id, tenant_id, provider, auth_kind, external_account_id, status, last_health_at, last_health_verdict, created_at, updated_at)
+            VALUES (?, ?, 'stripe', 'restricted_key', 'acct_throws', 'connected', ?, 'healthy', ?, ?)`,
+      args: [id, "t-throws", stale, stale, stale],
+    });
+    try {
+    // The health write fails with a message that must stay in the server log.
+    // Only the probe's write: pruning (also a batch) runs first and must pass.
+    const leaky = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "batch") {
+          return async (...args: Parameters<typeof db.batch>) => {
+            const stmts = args[0] as Array<string | { sql: string }>;
+            if (stmts.some((st) => (typeof st === "string" ? st : st.sql).includes("INSERT INTO connection_health_checks"))) {
+              throw new Error("SQLITE_IOERR: disk detail SECRET-DETAIL-XYZ at /var/db");
+            }
+            return target.batch(...args);
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const quiet = console.error;
+    console.error = () => {};
+    let result: Awaited<ReturnType<typeof health.runConnectionHealthPass>>;
+    try {
+      result = await health.runConnectionHealthPass({ db: leaky as unknown as typeof db, now: () => new Date() }, { limit: 50 });
+    } finally {
+      console.error = quiet;
+    }
+    const mine = result.errors.find((e) => e.connection_id === id);
+    assert.equal(mine?.error, "probe_threw");
+    assert.ok(!JSON.stringify(result).includes("SECRET-DETAIL"), "a raw error message reached the cron response");
+    // The route's own catch returns a code only (the body is printed to a public Actions log).
+    const routeSrc = read("app/api/cron/connection-health/route.ts");
+    assert.doesNotMatch(routeSrc, /err\.message|detail:/, "the route puts an exception message in its response");
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_connections WHERE id = ?", args: [id] });
+    }
+  });
+
+  // Makes every credential write fail (the save path returns { ok: false }), so
+  // connect has to undo its claim.
+  const failCredentialWrites = async () => {
+    await db.execute(
+      "CREATE TRIGGER test_fail_cred_insert BEFORE INSERT ON tenant_integration_credentials BEGIN SELECT RAISE(ABORT, 'forced credential write failure'); END",
+    );
+    await db.execute(
+      "CREATE TRIGGER test_fail_cred_update BEFORE UPDATE ON tenant_integration_credentials BEGIN SELECT RAISE(ABORT, 'forced credential write failure'); END",
+    );
+  };
+  const restoreCredentialWrites = async () => {
+    await db.execute("DROP TRIGGER IF EXISTS test_fail_cred_insert");
+    await db.execute("DROP TRIGGER IF EXISTS test_fail_cred_update");
+  };
+  const quietErrors = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      return await fn();
+    } finally {
+      console.error = quiet;
+    }
+  };
+
+  await check("[9] a failed RECONNECT puts the revoked row back, history intact, never deletes it", async () => {
+    const first = await service.connectWithRestrictedKey(deps(), actorC, stripeDef, KEY_C);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const id = String((first.body.connection as Record<string, unknown>).id);
+    assert.equal((await service.disconnectConnection(deps(), actorC, stripeDef)).status, 200);
+    const revoked = (await store.getConnection(db, TENANT_C, id))!;
+    const history = await historyCount(id);
+    assert.ok(history > 0, "precondition: the connection has health history");
+    await failCredentialWrites();
+    let again: Awaited<ReturnType<typeof service.connectWithRestrictedKey>>;
+    try {
+      again = await quietErrors(() => service.connectWithRestrictedKey(deps(), actorC, stripeDef, KEY_C));
+    } finally {
+      await restoreCredentialWrites();
+    }
+    assert.deepEqual([again.status, again.body.error], [500, "credential_save_failed"]);
+    const back = await store.getConnection(db, TENANT_C, id);
+    assert.ok(back, "the reactivated row with history was deleted");
+    assert.deepEqual([back!.status, back!.revoked_at], [revoked.status, revoked.revoked_at], "the row is not revoked exactly as the disconnect left it");
+    assert.equal(await historyCount(id), history, "health history was lost");
+  });
+
+  await check("[8] when the undo itself fails (throws, or deletes nothing), the claim is marked error, never left pending", async () => {
+    // A different account each round: reconnecting a revoked account is the
+    // restore path ([9]), not the brand-new-claim delete this case is about.
+    for (const [label, trigger, key] of [
+      ["throws", "CREATE TRIGGER test_block_delete BEFORE DELETE ON tenant_connections BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END", KEY_C_ECHO],
+      ["deletes nothing", "CREATE TRIGGER test_block_delete BEFORE DELETE ON tenant_connections BEGIN SELECT RAISE(IGNORE); END", KEY_C_FOX],
+    ] as const) {
+      await failCredentialWrites();
+      await db.execute(trigger);
+      let r: Awaited<ReturnType<typeof service.connectWithRestrictedKey>>;
+      try {
+        r = await quietErrors(() => service.connectWithRestrictedKey(deps(), actorC, stripeDef, key));
+      } finally {
+        await db.execute("DROP TRIGGER IF EXISTS test_block_delete");
+        await restoreCredentialWrites();
+      }
+      assert.deepEqual([r.status, r.body.error], [500, "credential_save_failed"], label);
+      const rows = (await connectionRows(TENANT_C)).filter((row) => row.provider === "stripe" && row.revoked_at === null);
+      assert.equal(rows.filter((row) => row.status === "pending").length, 0, `${label}: a pending orphan was left behind`);
+      assert.equal(rows.filter((row) => row.status === "error").length, 1, `${label}: the failed claim is not marked error`);
+      // The owner clears it from its card; the next case starts clean.
+      assert.equal((await service.disconnectConnection(deps(), actorC, stripeDef)).status, 200);
+    }
+  });
+
+  await check("[10] a probe that finishes after a disconnect writes no history and reports no flip", async () => {
+    const claim = await store.claimConnection(db, {
+      tenantId: TENANT_C,
+      provider: "calendly",
+      authKind: "oauth2",
+      scopeKind: "tenant",
+      userId: null,
+      externalAccountId: "calendly-charlie",
+      externalAccountLabel: "Charlie calendar",
+      environment: null,
+      grantedScopes: [],
+      scopeSetVersion: 1,
+      connectedBy: actorC.userId,
+      now: new Date(),
+    });
+    assert.ok(claim.ok);
+    const id = claim.connection.id;
+    // The disconnect lands between the probe's read and its write.
+    const racing = withBatchHook(async () => {
+      await db.execute({
+        sql: "UPDATE tenant_connections SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ? AND tenant_id = ?",
+        args: [new Date().toISOString(), new Date().toISOString(), id, TENANT_C],
+      });
+    });
+    const rec = await store.recordHealthCheck(racing as unknown as typeof db, {
+      tenantId: TENANT_C,
+      connectionId: id,
+      source: "cron",
+      verdict: "healthy",
+      code: null,
+      detail: null,
+      latencyMs: 5,
+      now: new Date(),
+    });
+    assert.deepEqual([rec.recorded, rec.flipped, rec.worsened], [false, false, false]);
+    assert.equal(rec.connection.status, "revoked");
+    assert.equal(await historyCount(id), 0, "a history row was written for a revoked connection");
   });
 
   // ── 13. Popup and cron registration ──────────────────────────────────────
@@ -1064,7 +1465,12 @@ async function main() {
     assert.deepEqual(reg.crons.find((c) => c.path === path), { path, schedule: "*/15 * * * *" });
     // Inside the driver's 15-minute group, not merely somewhere in the file.
     const driver = read(".github/workflows/cron-driver.yml");
-    const group = driver.slice(driver.indexOf('"*/15 * * * *")'), driver.indexOf('"*/30 * * * *")'));
+    // The group runs from its case label to the ";;" that closes it. (Ending
+    // at the next label broke silently when #467 removed the */30 group:
+    // indexOf returned -1 and the "group" became most of the file.)
+    const start = driver.indexOf('"*/15 * * * *")');
+    assert.ok(start >= 0, "the driver has no */15 group");
+    const group = driver.slice(start, driver.indexOf(";;", start));
     assert.match(group, /\/api\/cron\/connection-health/);
   });
 

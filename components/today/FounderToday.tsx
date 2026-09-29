@@ -4,7 +4,7 @@
  * WHAT IT IS NOW. Greeting and the Ask composer, then Needs you (approval
  * cards first — lib/os/approvals, scoped to this viewer's workspace and
  * departments — then follow-ups past due, tickets past SLA, hot replies,
- * overdue invoices), one card per
+ * overdue invoices, connections that need attention), one card per
  * department, and a right column with today's schedule, goal pace and cash.
  * The layout and the pieces live in components/os/today; this file does the
  * reading. It keeps its name and its place in app/page.tsx because
@@ -48,6 +48,7 @@ import {
 import {
   loadCalendarStatus,
   loadCash,
+  loadConnectionAlerts,
   loadContentWeek,
   loadDelivery,
   loadHotReplies,
@@ -148,13 +149,14 @@ export async function FounderToday({
     tenantSlug: viewer.tenantSlug,
     limit: TODAY_APPROVALS_SHOWN,
   });
+  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId) : Promise.resolve(null);
 
   // The money block. Entered only when the capability says so — the point of
   // the branch is that these reads never happen otherwise, not that their
   // results get dropped afterwards. lib/goals/oasis-money is the same loader
   // /analytics uses; its figures are the Finances ledger and live Stripe.
   const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
-  const [sales, delivery, inbound, content, calendar, cash, approvals] = await Promise.all([
+  const [sales, delivery, inbound, content, calendar, cash, approvals, connections] = await Promise.all([
     salesP,
     deliveryP,
     inboundP,
@@ -162,6 +164,7 @@ export async function FounderToday({
     calendarP,
     cashP,
     approvalsP,
+    connectionsP,
   ]);
 
   const paceSeries: GoalPacePoint[] = money?.paceSeries ?? [];
@@ -174,7 +177,7 @@ export async function FounderToday({
         collected: money.collected,
       })
     : null;
-  const needsYou = buildNeedsYou({ sales, delivery, inbound, cash, approvals, nowMs: day.nowMs });
+  const needsYou = buildNeedsYou({ sales, delivery, inbound, cash, approvals, connections, nowMs: day.nowMs });
   const cards = buildDepartmentCards({
     departments,
     needsYou,

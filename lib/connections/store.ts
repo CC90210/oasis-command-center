@@ -30,6 +30,7 @@ import {
   OAUTH_STATE_RETENTION_MS,
   isExclusiveProvider,
   isVerifiedHealthy,
+  isWorseStatus,
   statusAfterProbe,
   type AuthKind,
   type ConnectionEnvironment,
@@ -279,7 +280,17 @@ export type ClaimInput = {
 };
 
 export type ClaimResult =
-  | { ok: true; connection: ConnectionRow; created: boolean }
+  | {
+      ok: true;
+      connection: ConnectionRow;
+      created: boolean;
+      /**
+       * The reused row as it was before this claim (null for a new row). A
+       * revoked one here means the claim REACTIVATED it, and undoing the claim
+       * puts it back (restoreRevokedClaim), never deletes it.
+       */
+      previous: ConnectionRow | null;
+    }
   | { ok: false; error: "account_connected_elsewhere" }
   | { ok: false; error: "provider_already_connected"; current: ConnectionRow };
 
@@ -362,7 +373,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
       });
       const updated = await getConnection(db, input.tenantId, existing.id);
       if (!updated) throw new Error("connection_claim_vanished");
-      return { ok: true, connection: updated, created: false };
+      return { ok: true, connection: updated, created: false, previous: existing };
     }
 
     const id = randomUUID();
@@ -390,7 +401,7 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
     });
     const created = await getConnection(db, input.tenantId, id);
     if (!created) throw new Error("connection_claim_vanished");
-    return { ok: true, connection: created, created: true };
+    return { ok: true, connection: created, created: true, previous: null };
   } catch (err) {
     if (!isUniqueViolationError(err as { message?: string })) throw err;
     // Lost a race. Say which one, from the database's own state.
@@ -405,14 +416,78 @@ export async function claimConnection(db: Client, input: ClaimInput): Promise<Cl
 
 /**
  * Undo a claim that never got its credential: deletes the row only while it is
- * still a brand-new pending claim (never connected, never probed), so it can
- * never remove a connection with history.
+ * still a brand-new pending claim (never connected, never probed) with no
+ * health history at all, so it can never remove a connection with history. A
+ * REACTIVATED revoked row looks brand-new on its own columns (the claim cleared
+ * connected_at and last_health_at), which is why the history is checked too —
+ * and why such a row is put back with restoreRevokedClaim instead.
  */
 export async function deleteUnprovenClaim(db: Client, tenantId: string, connectionId: string): Promise<boolean> {
   const rs = await db.execute({
     sql: `DELETE FROM tenant_connections
-          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND connected_at IS NULL AND last_health_at IS NULL`,
-    args: [connectionId, tenantId],
+          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND connected_at IS NULL AND last_health_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM connection_health_checks h WHERE h.tenant_id = ? AND h.connection_id = ?
+            )`,
+    args: [connectionId, tenantId, tenantId, connectionId],
+  });
+  return rs.rowsAffected === 1;
+}
+
+/**
+ * Undo a claim that REACTIVATED a revoked row and never got its credential:
+ * put back every column the claim changed, so the row is revoked again exactly
+ * as the disconnect left it and its history stays attached. Only while the row
+ * is still that unproven claim (pending, live, not probed since); returns false
+ * otherwise.
+ */
+export async function restoreRevokedClaim(
+  db: Client,
+  input: { tenantId: string; previous: ConnectionRow; now: Date },
+): Promise<boolean> {
+  const p = input.previous;
+  if (!p.revoked_at) throw new Error("restore_needs_a_revoked_row");
+  const rs = await db.execute({
+    sql: `UPDATE tenant_connections SET
+            status = ?,
+            revoked_at = ?,
+            revoked_by = ?,
+            refresh_lease_until = ?,
+            auth_kind = ?,
+            external_account_label = ?,
+            environment = ?,
+            granted_scopes_json = ?,
+            scope_set_version = ?,
+            connected_by = ?,
+            connected_at = ?,
+            last_health_at = ?,
+            last_health_verdict = ?,
+            last_health_code = ?,
+            last_health_detail = ?,
+            consecutive_failures = ?,
+            updated_at = ?
+          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND revoked_at IS NULL AND last_health_at IS NULL`,
+    args: [
+      p.status,
+      p.revoked_at,
+      p.revoked_by,
+      p.refresh_lease_until,
+      p.auth_kind,
+      p.external_account_label,
+      p.environment,
+      p.granted_scopes_json,
+      p.scope_set_version,
+      p.connected_by,
+      p.connected_at,
+      p.last_health_at,
+      p.last_health_verdict,
+      p.last_health_code,
+      p.last_health_detail,
+      p.consecutive_failures,
+      input.now.toISOString(),
+      p.id,
+      input.tenantId,
+    ],
   });
   return rs.rowsAffected === 1;
 }
@@ -449,7 +524,17 @@ export type HealthRecordInput = {
 export type HealthRecordResult = {
   connection: ConnectionRow;
   previousStatus: ConnectionStatus;
+  previousVerdict: HealthVerdict;
+  /** False when the connection was revoked while the probe ran: nothing was written. */
+  recorded: boolean;
+  /**
+   * The connection's health changed: its status, its verdict, or whether the
+   * card is verified green (doc 03 a.2: every health flip is audited). A pass
+   * that turns "unknown" keeps the status but loses the green, and counts.
+   */
   flipped: boolean;
+  /** The status moved to a worse one that needs the owner (rules.isWorseStatus) — what raises an alert. */
+  worsened: boolean;
 };
 
 /**
@@ -459,7 +544,9 @@ export type HealthRecordResult = {
  * Both statements are pinned to the tenant: the UPDATE by its WHERE, the
  * INSERT by an EXISTS on the same (id, tenant_id), so a connection id from
  * another tenant writes nothing at all. A connection revoked while the probe
- * was in flight keeps its revoked status (the UPDATE skips revoked rows).
+ * was in flight writes nothing either: both statements require revoked_at IS
+ * NULL inside the same batch, and a probe that changed no row reports no flip
+ * (the disconnect changed the status, not the probe).
  */
 export async function recordHealthCheck(db: Client, input: HealthRecordInput): Promise<HealthRecordResult> {
   const before = await getConnection(db, input.tenantId, input.connectionId);
@@ -502,7 +589,7 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
       sql: `INSERT INTO connection_health_checks
               (id, tenant_id, connection_id, provider, check_source, checked_at, verdict, latency_ms, error_code, detail)
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            WHERE EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ?)`,
+            WHERE EXISTS (SELECT 1 FROM tenant_connections WHERE id = ? AND tenant_id = ? AND revoked_at IS NULL)`,
       args: [
         randomUUID(),
         input.tenantId,
@@ -519,10 +606,24 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
       ],
     },
   ];
-  await db.batch(statements, "write");
+  const [updated] = await db.batch(statements, "write");
   const after = await getConnection(db, input.tenantId, input.connectionId);
   if (!after) throw new Error("connection_not_found");
-  return { connection: after, previousStatus: before.status, flipped: after.status !== before.status };
+  const recorded = updated.rowsAffected === 1;
+  const nowMs = input.now.getTime();
+  const flipped =
+    recorded &&
+    (after.status !== before.status ||
+      after.last_health_verdict !== before.last_health_verdict ||
+      isVerifiedHealthy(after, nowMs) !== isVerifiedHealthy(before, nowMs));
+  return {
+    connection: after,
+    previousStatus: before.status,
+    previousVerdict: before.last_health_verdict,
+    recorded,
+    flipped,
+    worsened: recorded && isWorseStatus(before.status, after.status),
+  };
 }
 
 // ── Disconnect ────────────────────────────────────────────────────────────

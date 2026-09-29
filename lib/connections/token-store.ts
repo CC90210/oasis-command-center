@@ -18,9 +18,18 @@
  *      set in ONE statement (setTenantIntegrationBundle) and releases.
  *   3. A loser waits for the lease to clear and re-reads the tokens the winner
  *      saved. It never refreshes.
- *   4. A refused refresh fails CLOSED: the connection goes `expired` (with a
+ *   4. A REFUSED refresh fails CLOSED: the connection goes `expired` (with a
  *      health row), the lease is released, and the caller gets an error — never
- *      a stale token and never a silent success.
+ *      a stale token and never a silent success. Refused means the provider
+ *      said so (RefreshRefusedError: invalid_grant / invalid_client /
+ *      unauthorized_client, or a 400/401 answer). Anything else — a timeout, a
+ *      DNS or network failure, an abort, a 5xx — says nothing about the grant,
+ *      so it releases the lease and throws `refresh_unavailable` WITHOUT
+ *      expiring: one blip must never disconnect an account. No health row is
+ *      written for a blip either; the providers behind this store have no
+ *      health probe, so nothing would ever clear the "degraded" it would lead
+ *      to. The lease is released on every path, even when writing the health
+ *      row throws.
  *
  * Tokens live in tenant_integration_credentials under the connection's own
  * credential service (rules.credentialServiceFor). No env fallback can apply
@@ -33,6 +42,7 @@ import {
   setTenantIntegrationBundle,
 } from "@/lib/tenant-integration-store";
 import { REFRESH_LEASE_MS, REFRESH_SKEW_MS, credentialServiceFor } from "@/lib/connections/rules";
+import { alertConnectionWorsened } from "@/lib/connections/health";
 import {
   getConnection,
   recordHealthCheck,
@@ -51,12 +61,47 @@ export type OAuthTokens = {
 export const REFRESH_TIMEOUT_MS = 30_000;
 
 export class TokenStoreError extends Error {
-  code: "connection_not_found" | "connection_revoked" | "not_connected" | "refresh_failed" | "refresh_busy" | "save_failed";
+  code:
+    | "connection_not_found"
+    | "connection_revoked"
+    | "not_connected"
+    | "refresh_failed"
+    | "refresh_unavailable"
+    | "refresh_busy"
+    | "save_failed";
   constructor(code: TokenStoreError["code"], message?: string) {
     super(message ?? code);
     this.name = "TokenStoreError";
     this.code = code;
   }
+}
+
+/** OAuth token-endpoint errors (RFC 6749 §5.2) that mean the grant itself is refused. */
+export const REFRESH_REFUSAL_OAUTH_ERRORS: readonly string[] = ["invalid_grant", "invalid_client", "unauthorized_client"];
+
+/**
+ * What a provider's refresh function throws when the PROVIDER refused the
+ * refresh — it answered, and the answer was no. Anything else it throws is
+ * treated as "could not ask" (see getAccessToken).
+ */
+export class RefreshRefusedError extends Error {
+  /** The token endpoint's `error` field, e.g. "invalid_grant". */
+  oauthError: string | null;
+  /** The token endpoint's HTTP status. */
+  httpStatus: number | null;
+  constructor(input: { oauthError?: string | null; httpStatus?: number | null; message?: string }) {
+    super(input.message ?? input.oauthError ?? `refresh refused (HTTP ${input.httpStatus ?? "?"})`);
+    this.name = "RefreshRefusedError";
+    this.oauthError = input.oauthError ?? null;
+    this.httpStatus = input.httpStatus ?? null;
+  }
+}
+
+/** Only a refusal the provider confirmed. A 5xx or a rate limit wrapped in RefreshRefusedError is still not one. */
+export function isConfirmedRefreshRefusal(err: unknown): boolean {
+  if (!(err instanceof RefreshRefusedError)) return false;
+  if (err.oauthError && REFRESH_REFUSAL_OAUTH_ERRORS.includes(err.oauthError)) return true;
+  return err.httpStatus === 400 || err.httpStatus === 401;
 }
 
 /** Save a whole token set atomically. */
@@ -145,24 +190,43 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
     refreshed = await input.refresh(tokens.refresh_token, controller.signal);
   } catch (err) {
     clearTimeout(timer);
+    const refused = isConfirmedRefreshRefusal(err);
     const message = err instanceof Error ? err.message : String(err);
-    console.error("[connections.token_store] refresh refused", {
+    console.error(`[connections.token_store] refresh ${refused ? "refused" : "could not reach the provider"}`, {
       tenantId: input.tenantId,
       connectionId: input.connectionId,
       error: message.slice(0, 300),
     });
-    await recordHealthCheck(db, {
-      tenantId: input.tenantId,
-      connectionId: input.connectionId,
-      source: "refresh",
-      verdict: "down",
-      code: "refresh_failed",
-      detail: "The provider refused to refresh this connection. Reconnect it.",
-      latencyMs: null,
-      now: now(),
-    });
-    await releaseRefreshLease(db, { tenantId: input.tenantId, connectionId: input.connectionId, version, now: now() });
-    throw new TokenStoreError("refresh_failed", "The provider refused the refresh. Reconnect.");
+    try {
+      if (refused) {
+        const recorded = await recordHealthCheck(db, {
+          tenantId: input.tenantId,
+          connectionId: input.connectionId,
+          source: "refresh",
+          verdict: "down",
+          code: "refresh_failed",
+          detail: "The provider refused to refresh this connection. Reconnect it.",
+          latencyMs: null,
+          now: now(),
+        });
+        if (recorded.worsened) {
+          await alertConnectionWorsened({}, {
+            tenantId: input.tenantId,
+            connectionId: input.connectionId,
+            provider: recorded.connection.provider,
+            from: recorded.previousStatus,
+            to: recorded.connection.status,
+            code: "refresh_failed",
+            detail: recorded.connection.last_health_detail,
+            source: "refresh",
+          });
+        }
+      }
+    } finally {
+      await releaseRefreshLease(db, { tenantId: input.tenantId, connectionId: input.connectionId, version, now: now() });
+    }
+    if (refused) throw new TokenStoreError("refresh_failed", "The provider refused the refresh. Reconnect.");
+    throw new TokenStoreError("refresh_unavailable", "The provider could not be reached to refresh. Try again shortly.");
   }
   clearTimeout(timer);
 
