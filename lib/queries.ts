@@ -896,6 +896,9 @@ export async function integrationsHealth(
     .select("*")
     .eq("tenant_id", tenantId)
     .order("service", { ascending: true });
+  // A failed read is unknown, not "every service unconfigured": the
+  // placeholders below are for services a SUCCESSFUL read did not list.
+  if (r.error) throw new Error(`integrations_health read failed: ${r.error.message}`);
 
   const expected = KNOWN_INTEGRATIONS.map((integration) => integration.service);
   const existing = new Map(

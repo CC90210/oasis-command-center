@@ -24,9 +24,9 @@ import { useState } from "react";
 import { checkStripeRestrictedKey } from "@/lib/connections/rules";
 import type { RestrictedKeyConfig } from "@/lib/connections/registry";
 import type { ConnectorStatus } from "@/lib/os/connectors";
+import { Notice, type NoticeValue } from "@/components/os/connections/Notice";
 
 type Busy = "connect" | "test" | "disconnect" | null;
-type Notice = { tone: "ok" | "err"; text: string } | null;
 
 async function post(url: string, body?: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> | null }> {
   const res = await fetch(url, {
@@ -61,7 +61,7 @@ export function KeyConnectionPanel({
 }) {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState<Busy>(null);
-  const [notice, setNotice] = useState<Notice>(null);
+  const [notice, setNotice] = useState<NoticeValue>(null);
   const [confirming, setConfirming] = useState(false);
   const [replacing, setReplacing] = useState(false);
 
@@ -135,16 +135,7 @@ export function KeyConnectionPanel({
 
   return (
     <div className="space-y-5">
-      {notice && (
-        <p
-          role="status"
-          className={`rounded-lg border px-3 py-2 text-[13px] leading-5 text-fg ${
-            notice.tone === "ok" ? "border-status-engaged/30 bg-status-engaged/10" : "border-status-hot/30 bg-status-hot/10"
-          }`}
-        >
-          {notice.text}
-        </p>
-      )}
+      <Notice notice={notice} />
 
       {hasConnection && (
         <section>
