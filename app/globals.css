@@ -313,13 +313,9 @@ main > div {
  * Was `.top-glow`: a blue-to-cyan gradient shimmering on a 3.5s infinite loop
  * under the sidebar header. The Oasis motion doctrine forbids animating nav
  * chrome, and a perpetual animation costs a compositor layer for the entire
- * session while telling the user nothing. Now a static hairline, which is what
- * constitution rule 14 asks separation to be. The class name is kept because
- * Sidebar.tsx consumes it. */
-.top-glow {
-  background: rgb(var(--c-hairline));
-  height: 1px;
-}
+ * session while telling the user nothing. It was reduced to a static hairline,
+ * and the OS shell revamp then removed its last consumer in Sidebar.tsx, so the
+ * rule is deleted rather than left as dead CSS carrying a misleading name. */
 
 /* ============================================================================
  * Chat widget — futuristic surfaces
@@ -331,12 +327,16 @@ main > div {
  * 4s infinite loop. A radial wash behind content is the most recognisable
  * generated-UI backdrop there is, and it was decorative: it carried no state
  * and no hierarchy. Replaced by a flat panel tint and a static hairline, so
- * the header reads as a distinct surface without performing. */
-.chat-aurora {
+ * the header reads as a distinct surface without performing.
+ *
+ * Renamed from `.chat-aurora`: a class called "aurora" that paints a flat tint
+ * is a lie left in the codebase, and the name kept tripping the lint rule long
+ * after the effect was gone. Names should describe what the code does now. */
+.chat-header-surface {
   position: relative;
   background: rgba(148, 163, 184, 0.04);
 }
-.chat-aurora::after {
+.chat-header-surface::after {
   content: "";
   position: absolute;
   left: 0; right: 0; bottom: 0; height: 1px;

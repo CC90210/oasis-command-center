@@ -2696,7 +2696,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       }
     >
       {/* Aurora wash inside the bordered container */}
-      <div className="chat-aurora absolute inset-0 pointer-events-none" />
+      <div className="chat-header-surface absolute inset-0 pointer-events-none" />
 
       {/* Header — agent picker only. Routing (cloud-API-key vs local-bridge)
           is decided automatically: use the desktop bridge when it's paired

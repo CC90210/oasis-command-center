@@ -28,15 +28,10 @@ export default async function ConfigurePage() {
 
   return (
     <main className="min-h-screen bg-bg-deep relative overflow-hidden">
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10">
-        <div
-          className="absolute -top-[20%] left-1/2 -translate-x-1/2 w-[1200px] h-[700px] rounded-full opacity-30 blur-3xl"
-          style={{
-            background:
-              "radial-gradient(circle, rgba(59,130,246,0.4), transparent 70%)",
-          }}
-        />
-      </div>
+      {/* A 1200x700 blurred blue orb used to float behind this page. A blurred
+          gradient orb over a radial wash is the single most recognisable
+          signature of generated UI, and it carried no state and no hierarchy.
+          The page reads fine on the panel colour alone. */}
 
       <header className="relative z-10 mx-auto max-w-5xl px-6 py-5 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2.5">

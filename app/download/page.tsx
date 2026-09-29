@@ -99,9 +99,12 @@ export default function DownloadPage() {
       <section className="relative z-10 mx-auto flex max-w-3xl flex-col items-center px-6 pt-10 text-center sm:pt-16">
         <h1 className="text-5xl font-black leading-[1.02] tracking-tight text-fg sm:text-7xl">
           <span className="block">OASIS Desktop.</span>
-          <span className="block bg-gradient-to-r from-accent via-cyan-300 to-accent bg-clip-text text-transparent">
-            One click to install.
-          </span>
+          {/* Gradient-filled heading text removed: bg-clip-text with transparent
+              text is a reliable generated-UI signature, and it drops contrast
+              below the WCAG 2.2 AA floor this product is required to meet,
+              because the measured colour of the text is the gradient's lightest
+              stop. A solid accent carries the same emphasis and passes. */}
+          <span className="block text-accent">One click to install.</span>
         </h1>
         <p className="mt-5 max-w-md text-sm leading-relaxed text-fg-muted sm:text-base">
           The native shell for the Agent Command Center. Picks your OS

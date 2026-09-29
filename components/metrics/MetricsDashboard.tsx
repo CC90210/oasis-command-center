@@ -112,7 +112,7 @@ function KpiCard({ label, rate, prevRate, hasPrev, spark, primary }: {
 /* ---------------- health gauge (reuses Donut) ---------------- */
 function HealthGauge({ score, label }: { score: number; label: MetricsHealth }) {
   return (
-    <div className="rounded-xl border border-bg-border bg-bg-panel p-4 shadow-ironman flex flex-col items-center justify-center gap-2">
+    <div className="rounded-xl border border-bg-border bg-bg-panel p-4 shadow-raised flex flex-col items-center justify-center gap-2">
       <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">Deliverability</div>
       <Donut pct={score} size={116} stroke={9} tone="threshold" label={String(score)} sublabel="score" />
       <Tag tone={HEALTH_TONE[label]}>{HEALTH_LABEL[label]}</Tag>

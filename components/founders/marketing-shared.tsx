@@ -191,7 +191,7 @@ export function AssetTile({
   const platforms = parsePlatforms(platformsRaw);
   const slides = slideUrls ?? [];
   return (
-    <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-ironman group">
+    <article className="rounded-xl border border-bg-border bg-bg-panel shadow-card overflow-hidden transition-all hover:border-accent/40 hover:shadow-raised group">
       <div
         className={`relative ${frame} bg-bg-deep flex items-center justify-center overflow-hidden`}
         style={frameStyle}
