@@ -1243,6 +1243,17 @@ async function main() {
     }
   });
 
+  await check("[gate] no OAuth provider goes live until the token save is fenced by the lease version", () => {
+    // CodeRabbit #472: TOKEN_SAVE_TIMEOUT_MS stops WAITING for a save, it
+    // does not cancel it; a save stalled past the lease could still land after
+    // a newer holder's and overwrite its tokens. Nothing calls getAccessToken
+    // while every OAuth provider is coming_soon, so the gap cannot bite yet.
+    // Before the first one goes live, make the credential write conditional
+    // on the holder's token_version (a fenced write), then remove this gate.
+    const liveOauth = registry.PROVIDERS.filter((p) => p.authKind === "oauth2" && p.availability === "live").map((p) => p.id);
+    assert.deepEqual(liveOauth, [], `OAuth provider(s) went live before the token save is fenced: ${liveOauth.join(", ")}`);
+  });
+
   await check("[lease] a refresh that ran past its lease saves nothing and returns no token", async () => {
     const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
     await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "keep-me", expires_at: Date.now() - 1000 });
