@@ -195,7 +195,8 @@ async function main() {
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, agents_enabled TEXT,
-      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT);
+      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT, invited_by TEXT, joined_at TEXT,
+      manager_user_id TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
@@ -597,11 +598,23 @@ async function main() {
       assert.deepEqual(table?.rows.map((r) => [r.name, r.openTickets]), [["Harbour Dental", CLIENTS_DELIVERY_LIMIT]]);
       assert.equal(table?.floors.openTickets, true, "the per-client ticket count is marked as a floor");
       assert.equal(table?.floors.activeProjects, false, "the project list was not capped");
+      // Client records lead the page now (migration bravo__188), so the
+      // subtitle carries no counts: it cannot print an unfloored total. The
+      // derived list's floors are asserted on the table and the words below.
       const subtitle = els.find((e) => e.props && e.props.title === "Clients" && "subtitle" in e.props)?.props.subtitle;
-      assert.equal(subtitle, `1 client · ${CLIENTS_DELIVERY_LIMIT}+ open tickets · 1 active project`);
+      assert.equal(subtitle, "The customers your business serves.");
       const all = walk(tree).strings.join("");
       assert.ok(all.includes(`Only the first ${CLIENTS_DELIVERY_LIMIT} open tickets were read`), "the cap is said in words");
-      assert.ok(all.includes(`${CLIENTS_DELIVERY_LIMIT}+`), "the table cell prints the floor");
+      // walk() records elements without rendering function components, so the
+      // cell has to be rendered here: ClientsTable, then each Count in it.
+      // (Before client records, this check passed on the SUBTITLE's "500+",
+      // never on a cell.)
+      const tableEl = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)!;
+      const tableTree = (tableEl.type as (p: unknown) => unknown)(tableEl.props);
+      const cells = walk(tableTree)
+        .elements.filter((e) => e.props && "value" in e.props && "hidden" in e.props)
+        .map((e) => String(((e.type as (p: unknown) => { props: { children: unknown } })(e.props)).props.children));
+      assert.ok(cells.includes(`${CLIENTS_DELIVERY_LIMIT}+`), `the table cell prints the floor: ${JSON.stringify(cells)}`);
     } finally {
       await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
     }
