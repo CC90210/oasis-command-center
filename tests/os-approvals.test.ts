@@ -1593,7 +1593,7 @@ async function main() {
     // Today's (and Chief of Staff's) approvals are read by the shared Needs-you
     // loader, with the scope built from the rail's inputs the page hands it.
     assert.match(code("components/os/today/brief-load.ts"), /loadPendingApprovals\(\{\s*scope: approvalScopeFromViewer\(\{ surface: viewer, navInput: input\.navInput \}\)/);
-    assert.match(code("components/today/FounderToday.tsx"), /loadNeedsYouReads\(\{ viewer, navInput, plan,/);
+    assert.match(code("components/today/FounderToday.tsx"), /loadNeedsYouReads\(\{\s*viewer,\s*navInput,\s*plan,/);
   });
 
   await check("static: the approval surfaces carry no gradient, glow or perpetual animation", () => {

@@ -47,10 +47,18 @@ import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { ACTIVE_PROJECT_STAGES, slaStatus } from "@/lib/delivery/rules";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
-import { briefPlanFor, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import { briefPlanFor, empireRoutinesFor, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
 import { needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
-import { mergeRoutineReads, routineHealth, type RoutineHealth, type RoutineRow } from "./routine-rules";
+import {
+  failedRoutinesHref,
+  mergeRoutineReads,
+  OPERATIONS_HREF,
+  routineHealth,
+  type RoutineHealth,
+  type RoutineRow,
+} from "./routine-rules";
 import { loadEmpireRoutines, type Read } from "./routines";
 import type { OsViewer } from "./viewer";
 
@@ -302,14 +310,21 @@ function breachAttention(d: DeliveryFigures): AttentionItem[] {
 
 // ── Routines (Operations, Chief of Staff) ─────────────────────────────────
 
+/** The verified platform-operator check for this viewer's session (lib/platform-operator.ts). */
+function operatorCheck(viewer: OsViewer): () => Promise<boolean> {
+  return () => isPlatformOperatorForAuthUser(viewer.authUserId, viewer.email);
+}
+
 /**
  * The routines this viewer's health numbers cover: the workspace's own, plus —
- * for an owner standing in OASIS — the Empire scheduler's rows carrying the
- * OASIS workspace id (routines.ts loadEmpireRoutines). The same rule Today's
- * Operations card reads by (components/os/today/brief-load.ts).
+ * for the platform operator standing in OASIS — the Empire scheduler's rows
+ * carrying the OASIS workspace id (routines.ts loadEmpireRoutines). The same
+ * rule Today's Operations card reads by (brief-load.ts empireRoutinesFor).
  */
 async function routineHealthFor(viewer: OsViewer, workspace: Read<RoutineRow[]>): Promise<Read<RoutineHealth>> {
-  const empire = viewer.oasis && viewer.surface.persona === "founder" ? await loadEmpireRoutines(viewer.surface.tenantId) : null;
+  const empire = (await empireRoutinesFor(viewer.surface, operatorCheck(viewer)))
+    ? await loadEmpireRoutines(viewer.surface.tenantId)
+    : null;
   const merged = mergeRoutineReads(workspace, empire);
   return merged.ok ? { ok: true, value: routineHealth(merged.value, Date.now()) } : { ok: false };
 }
@@ -324,12 +339,15 @@ function routineTiles(r: Read<RoutineHealth>): KpiTileProps[] {
 
 function failureAttention(h: RoutineHealth): AttentionItem[] {
   if (h.failed24h.length === 0) return [];
+  const href = failedRoutinesHref(h.failed24h);
   return [
     {
       id: "routines-failed",
       count: h.failed24h.length,
       label: `${n(h.failed24h.length)} routine${h.failed24h.length === 1 ? "" : "s"} failed in the last 24 hours`,
-      href: null,
+      // The panel below lists the workspace lane: no link needed. An Empire
+      // failure is listed only in Automations, so the line goes there.
+      href: href === OPERATIONS_HREF ? null : href,
     },
   ];
 }
@@ -546,7 +564,15 @@ async function chiefOfStaffNumbers(viewer: OsViewer, routines: Read<RoutineRow[]
   const [pipeline, delivery, reads] = await Promise.all([
     loadPipeline(viewer),
     loadDelivery(viewer, false),
-    loadNeedsYouReads({ viewer: viewer.surface, navInput: viewer.navInput, plan, showFinancials, day, approvalsLimit: 1 }),
+    loadNeedsYouReads({
+      viewer: viewer.surface,
+      navInput: viewer.navInput,
+      plan,
+      showFinancials,
+      day,
+      approvalsLimit: 1,
+      isPlatformOperator: operatorCheck(viewer),
+    }),
   ]);
   const needs = needsYouFrom(reads, day.nowMs);
   const tiles: KpiTileProps[] = [...pipelineTiles(pipeline, true)];

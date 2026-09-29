@@ -218,7 +218,7 @@ async function main() {
   const brief = code("components/os/today/brief-load.ts");
   assert.match(founder, /const showFinancials = financialsAllowed && plan\.money;/, "the dispatcher's flag is narrowed by the plan");
   assert.match(founder, /showFinancials \? await loadOasisMoney\(tenantId, "today"\) : null/, "money read only behind showFinancials");
-  assert.match(founder, /loadNeedsYouReads\(\{ viewer, navInput, plan, showFinancials,/, "the shared reads get the narrowed flag, never the raw capability");
+  assert.match(founder, /loadNeedsYouReads\(\{\s*viewer,\s*navInput,\s*plan,\s*showFinancials,/, "the shared reads get the narrowed flag, never the raw capability");
   assert.match(brief, /input\.showFinancials && plan\.cash \? loadCash\(\) : Promise\.resolve\(null\)/, "cash read only behind the money gate");
   assert.equal((founder.match(/loadOasisMoney\(/g) || []).length, 1, "one money read");
   assert.equal((founder.match(/loadCash\(/g) || []).length, 0, "FounderToday reads cash only through brief-load");
@@ -232,7 +232,10 @@ async function main() {
     [brief, "brief-load.ts", "plan.routines", "loadRoutineHealth"],
     [founder, "FounderToday.tsx", "plan.content", "loadContentWeek"],
   ] as const) {
-    assert.match(src, new RegExp(`${flag.replace(".", "\\.")}\\s*\\?\\s*${loader}\\(`), `${file}: ${loader} runs only behind ${flag}`);
+    // Routines first ask whether the Empire lane counts for this viewer
+    // (empireRoutinesFor), still behind the flag: the read itself is in its .then.
+    const lead = loader === "loadRoutineHealth" ? "(?:empireRoutinesFor\\([^)]*\\)\\.then\\(\\(empire\\) => )?" : "";
+    assert.match(src, new RegExp(`${flag.replace(".", "\\.")}\\s*\\?\\s*${lead}${loader}\\(`), `${file}: ${loader} runs only behind ${flag}`);
     assert.equal((src.match(new RegExp(`${loader}\\(`, "g")) || []).length, 1, `${file}: ${loader} is called once`);
   }
   const dispatcher = code("app/page.tsx");
@@ -301,11 +304,12 @@ async function main() {
   ];
   // Past-due next steps, split at the cycle start (2026-09-24 here): "a" is a
   // fresh miss, "e" a promise carried over from before the cycle. Closed
-  // stages have nothing to follow up; m1/m2/m3 have no next step recorded.
+  // stages have nothing to follow up. m1/m2/m3 have no next_action_at: m1 and
+  // m3's booked meetings ARE their next step; m2's meeting was cancelled.
   const buckets = salesBuckets(rows, now, Date.parse("2026-09-24T00:00:00Z"));
   assert.deepEqual(buckets.overdue.map((r) => r.id), ["a"], "open + past due inside the cycle only");
   assert.deepEqual(buckets.carriedOver.map((r) => r.id), ["e"], "dated before the cycle: carried over, not fresh");
-  assert.deepEqual(buckets.noNextStep.map((r) => r.id), ["m2", "m1", "m3"], "open with no next step, by name");
+  assert.deepEqual(buckets.noNextStep.map((r) => r.id), ["m2"], "open with no next step; a booked meeting ahead is one");
   assert.deepEqual(buckets.outcomeMissing, [], "no booked meeting is in the past");
   assert.deepEqual(meetingsBetween(rows, day.startMs, day.endMs).map((r) => r.id), ["m1"], "today only, cancelled excluded");
   const board = summarizeBoard({
@@ -324,6 +328,7 @@ async function main() {
   );
 
   const delivery = summarizeDelivery({
+    viewerKind: "founder",
     tickets: [
       { id: "t1", ticket_number: "T-0001", title: "Site down", status: "open", severity: "critical", sla_target: "2026-09-28T14:00:00Z", first_response_at: null, created_at: "2026-09-28T13:00:00Z" },
       { id: "t2", ticket_number: "T-0002", title: "Copy change", status: "open", severity: "high", sla_target: "2026-09-28T15:30:00Z", first_response_at: null, created_at: "2026-09-28T11:30:00Z" },

@@ -53,6 +53,7 @@ import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { resolveOsModules } from "@/lib/os/modules";
 import { ASK_HREF, mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
 import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 import type { UserProfile } from "@/lib/supabase";
 
 /** Where a viewer connects their own Google Calendar today (Settings › Personal). */
@@ -107,7 +108,15 @@ export async function FounderToday({
   // The Needs-you reads (pipeline, support, inbound, cash, approvals,
   // connections, routines) are the SAME call the Chief of Staff tab makes
   // (components/os/today/brief-load.ts), so the two cannot count differently.
-  const needsP = loadNeedsYouReads({ viewer, navInput, plan, showFinancials, day, approvalsLimit: TODAY_APPROVALS_SHOWN });
+  const needsP = loadNeedsYouReads({
+    viewer,
+    navInput,
+    plan,
+    showFinancials,
+    day,
+    approvalsLimit: TODAY_APPROVALS_SHOWN,
+    isPlatformOperator,
+  });
   const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
   const calendarP = loadCalendarStatus(tenantId, viewer.userId, isOasisSurfaceTenant(viewer.tenantSlug));
 
@@ -139,6 +148,7 @@ export async function FounderToday({
     goal,
     stripeConnected: money?.stripeConnected ?? null,
     routines,
+    nowMs: day.nowMs,
   });
 
   const name = firstName(profile.display_name || profile.full_name);

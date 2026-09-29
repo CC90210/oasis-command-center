@@ -84,6 +84,30 @@ export function briefPlanFor(viewer: BriefViewer, navInput: BuildOsNavInput): { 
   return { departments, plan };
 }
 
+/**
+ * Does this viewer's routine health include the Empire lane (`cron_jobs` rows
+ * carrying the OASIS workspace id)? Only for the platform operator standing in
+ * OASIS: the verified check GET /api/cron-jobs lists those rows behind, so
+ * every Empire failure counted for a viewer can be looked up in Automations.
+ * The co-owner is not the operator and has no page that lists them, so for
+ * them the count stays the workspace's own lane.
+ *
+ * `isOperator` is asked only for an owner in OASIS (it costs a profile read).
+ * It fails closed; a throw is logged and answered "no", never rejected.
+ */
+export async function empireRoutinesFor(
+  viewer: Pick<BriefViewer, "persona" | "tenantSlug">,
+  isOperator: () => Promise<boolean>,
+): Promise<boolean> {
+  if (!isOasisSurfaceTenant(viewer.tenantSlug) || viewer.persona !== "founder") return false;
+  try {
+    return await isOperator();
+  } catch (err) {
+    console.error("[today.routines.operator]", err);
+    return false;
+  }
+}
+
 export type NeedsYouReads = {
   sales: Read<SalesSnapshot> | null;
   delivery: Read<DeliverySnapshot> | null;
@@ -103,6 +127,8 @@ export async function loadNeedsYouReads(input: {
   day: OperatorDay;
   /** Approval cards to fetch (the total is an exact count either way). */
   approvalsLimit: number;
+  /** The verified platform-operator check for this session (see empireRoutinesFor). */
+  isPlatformOperator: () => Promise<boolean>;
 }): Promise<NeedsYouReads> {
   const { viewer, plan, day } = input;
   const tenantId = viewer.tenantId;
@@ -129,10 +155,10 @@ export async function loadNeedsYouReads(input: {
     limit: input.approvalsLimit,
   });
   const connectionsP = plan.connections ? loadConnectionAlerts(tenantId) : Promise.resolve(null);
-  // The Empire scheduler's OASIS rows are OASIS's own routines; only an owner
-  // standing in the OASIS workspace reads them (routines.ts).
+  // The Empire scheduler's OASIS rows are OASIS's own routines; only the
+  // platform operator standing in OASIS counts them (empireRoutinesFor).
   const routinesP = plan.routines
-    ? loadRoutineHealth(tenantId, isOasisSurfaceTenant(viewer.tenantSlug) && viewer.persona === "founder", day.nowMs)
+    ? empireRoutinesFor(viewer, input.isPlatformOperator).then((empire) => loadRoutineHealth(tenantId, empire, day.nowMs))
     : Promise.resolve(null);
 
   const [sales, delivery, inbound, cash, approvals, connections, routines] = await Promise.all([

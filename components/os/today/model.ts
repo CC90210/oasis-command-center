@@ -35,8 +35,9 @@ import { formatOperatorDate } from "@/lib/dates";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 import { needsAttention } from "@/lib/connections/rules";
 import type { CashCoverage, CoverageAccount } from "@/lib/founders-finances/cash-coverage";
-import type { RoutineHealth } from "@/components/os/department/routine-rules";
+import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
+import { FOUNDER_MEETING_DURATION_MINUTES } from "@/lib/website-sales-meeting";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 export type Read<T> = { ok: true; value: T } | { ok: false };
@@ -159,6 +160,21 @@ function cancelledMeeting(data: Record<string, unknown>): boolean {
   return str(data, "founder_meeting_status").toLowerCase().startsWith("cancel");
 }
 
+/** Time to write the outcome down once a meeting has ended, before it counts as missing. */
+const OUTCOME_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * When a booked meeting's outcome becomes "missing": the meeting's end (its
+ * own length, audit_duration_minutes as the booking writes it, else the
+ * standard founder meeting) plus an hour to close it out. Before that the
+ * meeting is still running, or has just ended.
+ */
+function outcomeDueAt(meetingAt: number, data: Record<string, unknown>): number {
+  const minutes = Number(data.audit_duration_minutes);
+  const length = Number.isFinite(minutes) && minutes > 0 ? minutes : FOUNDER_MEETING_DURATION_MINUTES;
+  return meetingAt + length * 60_000 + OUTCOME_GRACE_MS;
+}
+
 /**
  * What the owner has to do about the open leads, one bucket per lead.
  *
@@ -168,12 +184,18 @@ function cancelledMeeting(data: Record<string, unknown>): boolean {
  * meetings had happened weeks earlier and were never closed out; and 42 of the
  * 57 open leads had no next step at all, which no check could flag. So:
  *
- *   outcomeMissing  booked meeting whose time has passed, still in the booked
- *                   stage: the meeting happened (or did not) and nobody said.
+ *   outcomeMissing  booked meeting that ended over an hour ago (outcomeDueAt),
+ *                   still in the booked stage: the meeting happened (or did
+ *                   not) and nobody said.
  *   overdue         next step dated inside this cycle and already past.
  *   carriedOver     next step dated BEFORE the cycle began: a promise from the
  *                   last cycle, shown on its own, never counted as fresh.
  *   noNextStep      open, and no next step recorded at all.
+ *
+ * A booked meeting that has not reached outcomeDueAt IS the lead's next step
+ * (the booking writes next_action_at = the meeting time), so a meeting still
+ * ahead or still running is in no bucket: not "no next step", not "overdue".
+ * Only a follow-up promised for BEFORE the meeting can still be late.
  *
  * The buckets are exclusive, in that order, so a lead is counted once: a past
  * meeting with a stale follow-up date is a missing outcome, not also a
@@ -195,11 +217,15 @@ export function salesBuckets(rows: readonly LeadRow[], nowMs: number, cycleStart
     if (CLOSED_STAGES.has(stage)) continue;
     const name = leadName(data);
     const meetingAt = Date.parse(str(data, "founder_meeting_at"));
-    if (stage === BOOKED_MEETING_STAGE && Number.isFinite(meetingAt) && meetingAt < nowMs && !cancelledMeeting(data)) {
-      out.outcomeMissing.push({ id: row.id, name, at: meetingAt });
-      continue;
-    }
     const next = Date.parse(str(data, "next_action_at"));
+    if (stage === BOOKED_MEETING_STAGE && Number.isFinite(meetingAt) && !cancelledMeeting(data)) {
+      if (outcomeDueAt(meetingAt, data) < nowMs) {
+        out.outcomeMissing.push({ id: row.id, name, at: meetingAt });
+        continue;
+      }
+      // The meeting is the next step; only an earlier promise can be late.
+      if (!Number.isFinite(next) || next >= meetingAt) continue;
+    }
     if (!Number.isFinite(next)) {
       // Updated recently first would be a guess; oldest-created is not in the
       // row. Name order keeps the list stable between reloads.
@@ -300,6 +326,13 @@ export function summarizeBoard(input: {
 export type TicketLite = { id: string; number: string; title: string };
 
 export type DeliverySnapshot = {
+  /**
+   * Whose desk this is to the viewer (lib/delivery/access.ts DeliveryViewer
+   * kind). "founder": the team that runs the desk and owes the replies.
+   * "client": someone reading OASIS's desk as its client, whose requests these
+   * are: a missed SLA there is OASIS's miss, not their task.
+   */
+  viewerKind: "founder" | "client";
   openTickets: number;
   breached: TicketLite[];
   atRisk: TicketLite[];
@@ -321,6 +354,7 @@ export type DeliverySnapshot = {
 const ACTIVE_PROJECT: ReadonlySet<string> = new Set(["discovery", "building", "review"]);
 
 export function summarizeDelivery(input: {
+  viewerKind: DeliverySnapshot["viewerKind"];
   tickets: ReadonlyArray<{
     id: string;
     ticket_number: string;
@@ -351,6 +385,7 @@ export function summarizeDelivery(input: {
   }
   const active = input.projects.filter((p) => ACTIVE_PROJECT.has(p.stage));
   return {
+    viewerKind: input.viewerKind,
     openTickets: open.length,
     breached,
     atRisk,
@@ -632,7 +667,10 @@ export function buildNeedsYou(input: {
 
   if (input.delivery) {
     if (!input.delivery.ok) unavailable.push("support tickets");
-    else {
+    // A client reading OASIS's desk is told nothing here: a breach on their
+    // own request is the vendor's miss, not their task, and it must not add
+    // to their count (the rule the department tabs keep, numbers.ts).
+    else if (input.delivery.value.viewerKind === "founder") {
       const d = input.delivery.value;
       if (d.breached.length > 0) {
         items.push({
@@ -664,15 +702,18 @@ export function buildNeedsYou(input: {
   if (input.routines) {
     if (!input.routines.ok) unavailable.push("routine runs");
     else if (input.routines.value.failed24h.length > 0) {
-      const n = input.routines.value.failed24h.length;
+      const failed = input.routines.value.failed24h;
+      // Sent where the failed rows are LISTED: the Operations panel shows the
+      // workspace lane only, Automations the Empire lane (routine-rules.ts).
+      const href = failedRoutinesHref(failed);
       items.push({
         id: "routines-failed",
         tone: "urgent",
         icon: "routine",
-        title: `${plural(n, "routine", "routines")} failed in the last 24 hours`,
-        detail: "Open Operations to see which, and what the last run said",
-        count: n,
-        href: OPERATIONS_HREF,
+        title: `${plural(failed.length, "routine", "routines")} failed in the last 24 hours`,
+        detail: `Open ${href === AUTOMATIONS_HREF ? "Automations" : "Operations"} to see which, and what the last run said`,
+        count: failed.length,
+        href,
       });
     }
   }
@@ -735,15 +776,20 @@ export function buildNeedsYou(input: {
           href: "/pipeline",
         });
       }
-      if (s.meetingsToday.length > 0) {
-        const first = s.meetingsToday[0];
+      // Today's booked meetings, less any already in the meeting-outcomes row:
+      // an earlier meeting with no outcome was counted in both, so the same
+      // lead added 2 to the total. The schedule still lists the whole day.
+      const missing = new Set(s.outcomeMissing.map((l) => l.id));
+      const booked = s.meetingsToday.filter((m) => !missing.has(m.id));
+      if (booked.length > 0) {
+        const first = booked[0];
         items.push({
           id: "meetings-today",
           tone: "info",
           icon: "meeting",
-          title: `${plural(s.meetingsToday.length, "meeting", "meetings")} booked today`,
+          title: `${plural(booked.length, "meeting", "meetings")} booked today`,
           detail: `First at ${time(first.at)} with ${first.name}`,
-          count: s.meetingsToday.length,
+          count: booked.length,
           href: "/pipeline?stage=founder_meeting_booked",
         });
       }
@@ -873,16 +919,16 @@ export type DeptCardModel = {
 export const CONNECTIONS_HREF = "/settings/connections";
 /** Where Stripe is pinned for the Finances book today. */
 export const FINANCE_STRIPE_HREF = "/founders/finances/settings#stripe";
-/** The Operations department tab: routines, their last runs and failures. */
-export const OPERATIONS_HREF = "/team/operations";
 
 /**
  * The calendars behind today's schedule (loaders.ts loadCalendarStatus):
  *
  *   personal   the viewer's own Google Calendar login (Settings › Personal).
- *   workspace  the OASIS workspace calendar founder meetings are booked on
- *              (lib/integrations/google-calendar systemCalendarConfig). Null
- *              outside OASIS: it is OASIS's identity, not the viewer's.
+ *   workspace  the OASIS workspace calendar a booking falls back to when its
+ *              host has no Google Calendar connected (lib/integrations/
+ *              google-calendar systemCalendarConfig; "configured" means its
+ *              credentials are present, not that they work). Null outside
+ *              OASIS: it is OASIS's identity, not the viewer's.
  */
 export type CalendarStatus = {
   personal: { connected: boolean; address: string | null };
@@ -896,6 +942,9 @@ export type ContentWeek = {
   /** The newest post_analytics sync for this workspace. Null = nothing has ever synced. */
   lastSyncedAt: string | null;
 };
+
+/** The window the Marketing card counts published pieces over (momentumMetrics contentPublished7d). */
+const CONTENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** The catalog's name for the app Marketing's number comes from (lib/os/connectors.ts). */
 function marketingSourceLabel(): string {
@@ -919,6 +968,8 @@ export function buildDepartmentCards(input: {
   stripeConnected: boolean | null;
   /** The workspace's routine health (the Operations card). Null = not read for this viewer. */
   routines: Read<RoutineHealth> | null;
+  /** Now, for freshness: a Marketing sync older than its own 7-day window cannot count that week. */
+  nowMs: number;
   formatWhen?: (ms: number) => string;
 }): DeptCardModel[] {
   return input.departments.flatMap((d): DeptCardModel[] => {
@@ -1018,6 +1069,18 @@ function departmentCard(
       // posting" about a source that has never reported.
       if (connection.state === "no_data") {
         return { ...base, tone: "quiet", status: "No posts synced yet", metric: { kind: "no_data", label: "No published posts have synced yet" }, connection };
+      }
+      // The last sync is older than the week being counted: every post of
+      // that week could be missing, so the count is not a count. The sync runs
+      // on the operator's machine, and a week with it off read as a real 0.
+      if (input.nowMs - syncedMs > CONTENT_WINDOW_MS) {
+        return {
+          ...base,
+          tone: "attention",
+          status: "Sync stopped",
+          metric: { kind: "error", label: "Too old to count this week's posts" },
+          connection: { label, state: "error", note: `Last synced ${when(syncedMs)}: too old to count this week`, href: null },
+        };
       }
       return {
         ...base,

@@ -21,8 +21,10 @@
  *
  * INCOMPLETE when either holds:
  *   - a bank or cash account that is in use (it has ledger lines or imported
- *     bank lines) has no opening-balance entry (source "opening_balance", the
- *     one the Wise feed posts — wise-feed.ts OPENING_BALANCE_SOURCE);
+ *     bank lines) has no opening-balance entry IN FORCE (source
+ *     "opening_balance", the one the Wise feed posts — wise-feed.ts
+ *     OPENING_BALANCE_SOURCE — with status "posted": a reversed one no longer
+ *     records a starting point);
  *   - Stripe clearing has card money in it and no payout has ever moved money
  *     out of it into a bank or cash account.
  * A payout is recognised by its SHAPE, not a source name: one entry that
@@ -87,6 +89,29 @@ function span(first: string | null, last: string | null): string {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/**
+ * How an account's missing opening balance gets fixed, said with the gap so it
+ * is not a dead end. Only Business chequing has a feed that posts one (the Wise
+ * card, wise-feed-io.ts postWiseOpeningBalance); no screen records one for any
+ * other bank or cash account yet, and the gap says that instead of implying a
+ * button exists.
+ */
+function openingBalanceFix(code: string): string {
+  return code === SYS.chequing
+    ? "(post it from the Wise card in Finances › Settings)"
+    : "(no bank feed or screen can record one for it yet)";
+}
+
+/**
+ * What a cash surface prints in place of "Cash on hand" when the books are
+ * incomplete, or null when the ledger total may be called a balance. The
+ * Finances Overview prints it; Today's Cash glance prints the same sentence
+ * and the /money tile the same gaps, from the same coverage.
+ */
+export function incompleteBooksNote(coverage: Pick<CashCoverage, "complete" | "gaps">): string | null {
+  return coverage.complete ? null : `Not a cash balance yet: ${coverage.gaps.join("; ")}.`;
+}
+
 export function cashCoverage(input: {
   accounts: readonly ReportAccount[];
   lines: readonly ReportLine[];
@@ -113,7 +138,9 @@ export function cashCoverage(input: {
     const lastDate = dates[dates.length - 1] ?? null;
     const entries = new Set(lines.map((l) => l.entryId)).size;
     const balanceCents = lines.reduce((s, l) => s + l.cadDebitCents - l.cadCreditCents, 0);
-    const hasOpeningBalance = lines.some((l) => l.source === OPENING_BALANCE_SOURCE);
+    // In force only: a reversed opening balance (replaced or removed from the
+    // Wise card; ledger-io buildReversal) records no starting point at all.
+    const hasOpeningBalance = lines.some((l) => l.source === OPENING_BALANCE_SOURCE && l.status === "posted");
     let covers: string;
 
     if (a.code === SYS.stripeClearing) {
@@ -134,7 +161,7 @@ export function cashCoverage(input: {
       covers = `${plural(entries, "entry", "entries")}${span(firstDate, lastDate)}; ${
         hasOpeningBalance ? "opening balance recorded" : "no opening balance"
       }; ${bankLines > 0 ? `${plural(bankLines, "bank line")} imported` : "no bank import"}`;
-      if (!hasOpeningBalance) gaps.push(`${a.name} has no opening balance`);
+      if (!hasOpeningBalance) gaps.push(`${a.name} has no opening balance ${openingBalanceFix(a.code)}`);
     } else {
       covers = `${plural(entries, "entry", "entries")}${span(firstDate, lastDate)}`;
     }

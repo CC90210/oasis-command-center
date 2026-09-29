@@ -10,8 +10,10 @@
  *
  * Scoped by the SESSION tenant id, the same predicate GET /api/cron-jobs uses
  * for its tenant lane. The operator Empire lane (`cron_jobs`) is read only by
- * loadEmpireRoutines below, only for an OASIS owner, and only for the health
- * counts (routine-rules.ts routineHealth): the panel never lists its rows.
+ * loadEmpireRoutines below, only for the platform operator standing in OASIS
+ * (the verified check GET /api/cron-jobs lists the same rows behind), and only
+ * for the health counts (routine-rules.ts routineHealth): the panel never
+ * lists its rows, and a failure in it links to Automations, which does.
  */
 
 import "server-only";
@@ -48,7 +50,7 @@ export async function loadTenantRoutines(tenantId: string): Promise<Read<Routine
  * analytics sync, inbound email sweep, …) even though they run on the
  * operator's machine rather than the bridge.
  *
- * The caller decides who may ask (an OASIS owner). The status comes from
+ * The caller decides who may ask (the platform operator in OASIS). The status comes from
  * lib/cron-empire-row normalizeEmpireRow, the classifier the Automations tab
  * and the watchdog share, so `{"errors": 3}` is a failure here too and an
  * unresolved fail_count keeps a row red until a clean run clears it.
@@ -74,6 +76,7 @@ export async function loadEmpireRoutines(tenantId: string): Promise<Read<Routine
           enabled: job.enabled,
           last_run_at: job.last_run_at,
           last_run_status: job.last_run_status,
+          lane: "empire",
         });
       }),
     };

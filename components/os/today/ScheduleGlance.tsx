@@ -4,9 +4,11 @@
  * Real sources and no more:
  *   - meetings booked through the pipeline today (a lead's founder_meeting_at,
  *     read by the board query), each linking to its lead;
- *   - in an OASIS workspace, whether the workspace calendar founder meetings
- *     are booked on is set up (lib/integrations/google-calendar
- *     systemCalendarConfig) — the calendar that actually holds the bookings;
+ *   - in an OASIS workspace, whether the workspace calendar is set up
+ *     (lib/integrations/google-calendar systemCalendarConfig: its credentials
+ *     are present, not proof they work). It is the FALLBACK: a booking goes
+ *     on the host's own Google Calendar when they have connected one, and on
+ *     the workspace calendar only when they have not;
  *   - whether the viewer's own Google Calendar is connected (Settings ›
  *     Personal).
  *
@@ -84,8 +86,8 @@ export function ScheduleGlance({ meetings, partial, calendar, connectHref }: Sch
             {calendar.value.workspace && (
               <p className="text-fg-muted">
                 {calendar.value.workspace.configured
-                  ? `Workspace calendar${calendar.value.workspace.address ? ` (${calendar.value.workspace.address})` : ""} · Set up: founder meetings are booked on it.`
-                  : "Workspace calendar · Not set up: founder meetings book on each host's own calendar."}
+                  ? `Workspace calendar${calendar.value.workspace.address ? ` (${calendar.value.workspace.address})` : ""} · Set up: meetings book here when a host has no Google Calendar connected.`
+                  : "Workspace calendar · Not set up: a host without a connected calendar cannot be booked."}
               </p>
             )}
             {calendar.value.personal.connected ? (

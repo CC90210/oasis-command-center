@@ -147,6 +147,7 @@ export function loadDelivery(input: {
     const closedTicketsExist =
       tickets.rows.length === 0 ? (await listTickets(db, access.viewer, { status: "closed" })).rows.length > 0 : false;
     return summarizeDelivery({
+      viewerKind: access.viewer.kind,
       tickets: tickets.rows,
       projects: projects.rows,
       ticketsTruncated: tickets.truncated,

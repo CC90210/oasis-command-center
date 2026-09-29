@@ -11,7 +11,11 @@
  * that carry the OASIS workspace's own tenant_id are counted in OASIS's
  * routine HEALTH (routineHealth, below; read in ./routines.ts), because they
  * are that workspace's routines and a health card that skips them says
- * "nothing measured" about a fleet that runs every few minutes.
+ * "nothing measured" about a fleet that runs every few minutes. They are
+ * counted only for the platform operator, the one viewer the Automations page
+ * lists them for, and each row keeps its `lane`, so a failure in that lane
+ * points at Automations (failedRoutinesHref), never at a panel that cannot
+ * show it.
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
@@ -26,6 +30,8 @@ export type RoutineRow = {
   lastRunAt: string | null;
   /** tenant_cron_jobs.last_run_status: "success" | "error" | "unknown" | null. */
   lastRunStatus: string | null;
+  /** "workspace": tenant_cron_jobs, listed on the panel. "empire": cron_jobs, listed only in Automations. */
+  lane: "workspace" | "empire";
 };
 
 /** SQLite hands booleans back as 0/1 (and sometimes "1"); Postgres as true. */
@@ -47,6 +53,7 @@ export function normalizeRoutineRow(raw: Record<string, unknown>): RoutineRow {
     enabled: asBool(raw.enabled),
     lastRunAt: raw.last_run_at ? asText(raw.last_run_at) : null,
     lastRunStatus: raw.last_run_status ? asText(raw.last_run_status) : null,
+    lane: raw.lane === "empire" ? "empire" : "workspace",
   };
 }
 
@@ -120,6 +127,21 @@ export function routineHealth(rows: readonly RoutineRow[], now: number): Routine
     }
   }
   return { total: rows.length, on: on.length, failed24h: failedWithin(on, 24, now), lastSuccessAt };
+}
+
+/** The Operations tab: its panel lists the workspace's own routines. */
+export const OPERATIONS_HREF = "/team/operations";
+/** Automations: the only page that lists the Empire lane (operator-only). */
+export const AUTOMATIONS_HREF = "/automations";
+
+/**
+ * Where someone goes to see WHICH routines failed. The Operations panel lists
+ * the workspace lane only, so a failure in the Empire lane is seen in
+ * Automations: a "see which" link to a page that cannot show the row is not
+ * a link.
+ */
+export function failedRoutinesHref(failed: readonly Pick<RoutineRow, "lane">[]): string {
+  return failed.some((r) => r.lane === "empire") ? AUTOMATIONS_HREF : OPERATIONS_HREF;
 }
 
 /** "lead_engine" → "Lead engine". Names people typed ("Weekly digest") pass through. */

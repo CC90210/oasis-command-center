@@ -42,8 +42,9 @@ export async function loadLedger(entityId: string, before: string): Promise<{ ac
       memo: string;
       entry_memo: string;
       source: string;
+      status: string;
     }>(
-      `SELECT l.entry_id, e.entry_date, l.account_id, l.cad_debit_cents, l.cad_credit_cents, l.memo, e.memo AS entry_memo, e.source
+      `SELECT l.entry_id, e.entry_date, l.account_id, l.cad_debit_cents, l.cad_credit_cents, l.memo, e.memo AS entry_memo, e.source, e.status
          FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
         WHERE l.entity_id = ? AND e.entry_date < ?`,
       [entityId, before],
@@ -60,6 +61,7 @@ export async function loadLedger(entityId: string, before: string): Promise<{ ac
       memo: l.memo || "",
       entryMemo: l.entry_memo || "",
       source: l.source,
+      status: l.status,
     })),
   };
 }

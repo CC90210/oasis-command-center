@@ -6,6 +6,7 @@ import { safe } from "@/lib/api-helpers";
 import { formatMoney } from "@/lib/fmt";
 import { requireSystemSurface, resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
+import { analyticsMrrState, MRR_COPY } from "./mrr-state";
 
 export const dynamic = "force-dynamic";
 
@@ -18,18 +19,22 @@ export default async function AnalyticsPage() {
   const profile = await safe("analytics.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
   // An OASIS workspace reads the same money block as Today (live Stripe MRR +
-  // collected vs the revenue goal). Any other workspace has no live MRR source
-  // yet, so it says "Not connected": the Finances ledger is OASIS's books and
-  // must never render there, and the typed profile MRR it used to show (with
-  // an invented $5,000 target and a synthetic decline curve when no history
-  // existed) was a number nothing measured.
+  // collected vs the revenue goal). A confirmed non-OASIS workspace has no
+  // live MRR source yet, so it says "Not connected": the Finances ledger is
+  // OASIS's books and must never render there, and the typed profile MRR it
+  // used to show (with an invented $5,000 target and a synthetic decline
+  // curve when no history existed) was a number nothing measured. A workspace
+  // that could not be confirmed says "Couldn't check" (./mrr-state.ts).
   const surface = await resolveViewerSurface();
-  const oasisMoney = surface.ok && surface.capabilities.canSeeCompanyFinancials;
+  const mrrState = analyticsMrrState(surface);
   const [money, pipeline] = await Promise.all([
-    oasisMoney ? loadOasisMoney(tenantId, "analytics") : Promise.resolve(null),
+    mrrState === "oasis" ? loadOasisMoney(tenantId, "analytics") : Promise.resolve(null),
     safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
   ]);
   const dollars = (cents: number) => formatMoney(cents / 100);
+  // The words for a page with no money block. Read only when `money` is null,
+  // which is never the "oasis" state: loadOasisMoney always answers.
+  const noMoney = mrrState === "oasis" ? "unconfirmed" : mrrState;
 
   const totalLeads = pipeline.total;
   const won = pipeline.stages["won"] || 0;
@@ -59,7 +64,7 @@ export default async function AnalyticsPage() {
             accent
           />
         ) : (
-          <Stat label="Net MRR" value="Not connected" hint="MRR comes from a live Stripe connection" accent />
+          <Stat label="Net MRR" value={MRR_COPY[noMoney].value} hint={MRR_COPY[noMoney].hint} accent />
         )}
         <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
         <Stat label="Won" value={won} />
@@ -81,7 +86,7 @@ export default async function AnalyticsPage() {
         )
       ) : (
         <Card title="MRR">
-          <EmptyState message="Not connected. MRR here comes from a live Stripe connection, never a typed number, and this workspace has none feeding it yet." />
+          <EmptyState message={MRR_COPY[noMoney].card} />
         </Card>
       )}
 
