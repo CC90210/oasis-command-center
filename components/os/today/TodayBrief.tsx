@@ -36,6 +36,8 @@ export type TodayBriefProps = {
   /** Chief of Staff, when this viewer's rail has it. Null hides the composer. */
   askHref: string | null;
   needsYou: NeedsYou;
+  /** The Feed's Needs-you tab, when this viewer's rail has the Feed. */
+  feedHref?: string | null;
   departments: DeptCardModel[];
   schedule: ScheduleGlanceProps;
   /** Null = company money is not this viewer's (never fetched). */
@@ -56,7 +58,7 @@ export function TodayBrief(props: TodayBriefProps) {
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0 space-y-6">
-            <NeedsYouList needsYou={props.needsYou} />
+            <NeedsYouList needsYou={props.needsYou} feedHref={props.feedHref ?? null} />
 
             {props.departments.length > 0 && (
               <section aria-labelledby="departments-heading">

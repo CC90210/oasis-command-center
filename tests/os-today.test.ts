@@ -513,6 +513,9 @@ async function main() {
   const exactNeeds = buildNeedsYou({ sales: null, delivery: deliveryRead, inbound: null, cash: null, nowMs: now, formatTime: () => "10:00 AM" });
   assert.equal(exactNeeds.items.find((i) => i.id === "sla-breached")?.capped, false);
   assert.doesNotMatch(render(createElement(NeedsYouList, { needsYou: exactNeeds })), /\d\+/, "an exact read prints exact counts");
+  const needsYouSrc = code("components/os/today/NeedsYouList.tsx");
+  assert.match(needsYouSrc, /from "@\/lib\/os\/count"/, "the pill floors through the shell's one rule");
+  assert.doesNotMatch(needsYouSrc, /`\$\{\w+\}\+`/, "NeedsYouList hand-rolls a floor marker instead of floorCount");
 
   const gapsList = render(createElement(NeedsYouList, { needsYou: gaps }));
   assert.match(gapsList, /Couldn.t check support tickets, pipeline follow-ups, inbound replies/);

@@ -11,6 +11,9 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { KpiTile, type KpiTileProps } from "@/components/os/KpiTile";
+import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
+import type { ApprovalsRead } from "@/components/os/approvals/load";
+import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 import { timeAgo } from "@/lib/fmt";
 import type { SuggestedAsk } from "./config";
 import type { AttentionItem } from "./numbers";
@@ -30,9 +33,41 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function NeedsYou({ items }: { items: readonly AttentionItem[] }) {
+function NeedsYou({
+  items,
+  approvals,
+  feedHref,
+}: {
+  items: readonly AttentionItem[];
+  approvals: ApprovalsRead<ApprovalsBlock>;
+  feedHref: string | null;
+}) {
+  const block = approvals.ok ? approvals.value : null;
+  const more = block ? block.total - block.items.length : 0;
+  const nothing = !!block && block.total === 0 && items.length === 0;
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
+      {block && block.items.length > 0 && (
+        <ul className="space-y-2.5" aria-label="Approvals waiting on you">
+          {block.items.map((a) => (
+            <li key={a.id}>
+              <ApprovalCard approval={a} density="compact" />
+            </li>
+          ))}
+        </ul>
+      )}
+      {more > 0 &&
+        (feedHref ? (
+          <Link href={feedHref} prefetch={false} className="inline-block text-[13px] font-medium text-accent hover:underline">
+            All {block?.total} in Feed
+          </Link>
+        ) : (
+          <p className="text-xs leading-4 text-fg-dim">{more} more waiting.</p>
+        ))}
+      {!approvals.ok && (
+        // A failed read is not "nothing waiting": say which half is missing.
+        <p className="text-[13px] leading-5 text-status-warm">Couldn’t load approvals. Reload in a minute.</p>
+      )}
       {items.length > 0 && (
         <ul className="space-y-1.5">
           {items.map((item) => (
@@ -49,11 +84,11 @@ function NeedsYou({ items }: { items: readonly AttentionItem[] }) {
           ))}
         </ul>
       )}
-      {/* Approvals do not exist yet (Phase 2 `approvals` table). Said plainly,
-          so an empty list is not read as "your team has nothing for you". */}
-      <p className="text-[13px] leading-5 text-fg-dim">
-        Approvals arrive here. When an AI teammate drafts something that goes out, it waits here for your yes.
-      </p>
+      {nothing && (
+        <p className="text-[13px] leading-5 text-fg-dim">
+          Nothing is waiting on you. When this department drafts something that goes out, it waits here for your yes.
+        </p>
+      )}
     </div>
   );
 }
@@ -149,6 +184,10 @@ function Connections({
 
 export type OverviewPanelProps = {
   attention: readonly AttentionItem[];
+  /** This department's approvals waiting on the viewer (top few + total). */
+  approvals: ApprovalsRead<ApprovalsBlock>;
+  /** The Feed's Needs-you tab filtered to this department, when the viewer's rail has the Feed. */
+  feedHref: string | null;
   tiles: readonly KpiTileProps[];
   routines: Read<RoutineRow[]>;
   connections: readonly string[];
@@ -158,6 +197,8 @@ export type OverviewPanelProps = {
 
 export function OverviewPanel({
   attention,
+  approvals,
+  feedHref,
   tiles,
   routines,
   connections,
@@ -167,7 +208,7 @@ export function OverviewPanel({
   return (
     <aside aria-label="Overview" className="rounded-xl border border-hairline bg-bg-panel">
       <Section title="Needs you">
-        <NeedsYou items={attention} />
+        <NeedsYou items={attention} approvals={approvals} feedHref={feedHref} />
       </Section>
       {tiles.length > 0 && (
         <Section title="Numbers">

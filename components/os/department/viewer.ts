@@ -19,9 +19,10 @@ import { resolveClientProfileSlug } from "@/lib/client-profiles";
 import { getManifest } from "@/lib/manifest/loader";
 import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import type { TenantManifest } from "@/lib/manifest/schema";
-import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { capabilitiesFor, isOasisSurfaceTenant, resolvePersona, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
 import { resolveViewerSurface, type ViewerSurface } from "@/lib/role-surfaces-session";
-import { getSessionUser } from "@/lib/supabase-server";
+import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
+import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import type { BuildOsNavInput } from "@/lib/os/nav";
 import { resolveOsModules } from "@/lib/os/modules";
 
@@ -84,15 +85,63 @@ export async function resolveOsViewer(): Promise<OsViewerResult> {
     manifest,
     email,
     authUserId,
-    navInput: {
-      persona: surface.persona,
-      capabilities: surface.capabilities,
-      isOperator: false,
-      tenantSlug: surface.tenantSlug,
-      isOasisTenant: oasis,
-      modules: resolveOsModules({ tenantSlug: surface.tenantSlug, provisioned }),
-      provisioned,
-      founders: null,
-    },
+    navInput: navInputFor(surface.persona, surface.capabilities, surface.tenantSlug, provisioned),
   };
+}
+
+function navInputFor(
+  persona: Persona,
+  capabilities: SurfaceCapabilities,
+  tenantSlug: string,
+  provisioned: boolean,
+): BuildOsNavInput {
+  return {
+    persona,
+    capabilities,
+    isOperator: false,
+    tenantSlug,
+    isOasisTenant: isOasisSurfaceTenant(tenantSlug),
+    modules: resolveOsModules({ tenantSlug, provisioned }),
+    provisioned,
+    founders: null,
+  };
+}
+
+/**
+ * The same rail input for a member a server caller already knows by id: an
+ * agent tool inside a chat turn has the session's tenant and auth user
+ * (ToolContext), not a request to read cookies from. The persona comes from
+ * the member's profile in THIS workspace, the way lib/api-auth.ts
+ * resolveSessionContext derives it for a session. No profile here, or a
+ * workspace that cannot be read, is { ok: false } — never a guess.
+ */
+export async function resolveMemberNavInput(
+  tenantId: string,
+  authUserId: string,
+): Promise<{ ok: true; persona: Persona; navInput: BuildOsNavInput } | { ok: false }> {
+  if (!tenantId || !authUserId) return { ok: false };
+  try {
+    const [profiles, tenant] = await Promise.all([
+      getServiceSupabase().from("user_profiles").select("*").eq("auth_user_id", authUserId).eq("tenant_id", tenantId).limit(20),
+      getTenant(tenantId),
+    ]);
+    if (profiles.error) throw new Error(profiles.error.message);
+    const rows = (profiles.data || []) as ActiveUserProfile[];
+    const tenantSlug = tenant?.slug?.trim().toLowerCase() || null;
+    if (rows.length === 0 || !tenantSlug) return { ok: false };
+    const profile = chooseActiveProfile(rows, null);
+    // Fail closed, as resolveSessionContext does: no role is read-only.
+    const teamRole = profile.team_role || "read_only";
+    const persona = resolvePersona({
+      teamRole,
+      isTrueAdmin: !!profile.is_owner || teamRole === "admin" || teamRole === "owner",
+      adminAccess: profile.admin_access === true,
+    });
+    const manifest = await getManifest(resolveClientProfileSlug(tenant), tenantId);
+    const provisioned = !isUnprovisionedManifest(manifest);
+    return { ok: true, persona, navInput: navInputFor(persona, capabilitiesFor(persona, tenantSlug), tenantSlug, provisioned) };
+  } catch (err) {
+    console.error("[os.viewer.member]", err);
+    return { ok: false };
+  }
 }

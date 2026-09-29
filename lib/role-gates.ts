@@ -38,6 +38,10 @@ export const READ_ONLY_DENIED_TOOLS = new Set<string>([
   "texttorrent_add_contact",
   "texttorrent_block",
   "texttorrent_unblock",
+  // OASIS OS approvals (2026-09-28). propose_email sends nothing, but it puts
+  // a card in front of the team on the member's behalf: a write, and a
+  // read_only member makes none.
+  "propose_email",
 ]);
 
 /**

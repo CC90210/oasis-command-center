@@ -38,6 +38,22 @@ import { getServiceSupabase } from "./supabase-server";
 import { getManifest } from "./manifest/loader";
 import { resolveAgentToolPalette } from "./manifest/schema";
 import { isClientSafeTool, isOasisInternalTenant } from "./ai/tools/client-safe-registry";
+import { getTursoClient, tursoConfigured } from "./turso";
+import {
+  DEPARTMENT_KEYS,
+  canonicalJson,
+  departmentForAgent,
+  effectiveStatus,
+  isOneOf,
+  validateSendEmailPayload,
+  agentReadScope,
+  workspaceReadScope,
+  type ApprovalScope,
+} from "./os/approvals/rules";
+import { createApproval, getApprovalInTenant, listApprovals, payloadHashOf } from "./os/approvals/store";
+import { openDepartmentsFor } from "./os/approvals/scope";
+import { redactAll, redactTenantVaultSecrets } from "./secret-redaction";
+import { fetchTenantVaultSecretsForRedaction } from "./chat-persistence";
 import { resolveClientProfileSlug } from "./client-profiles";
 import {
   getRecord as dataGet,
@@ -439,6 +455,58 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
         },
       },
       required: ["attachment_id"],
+    },
+  },
+
+  // ──────────────────────────────────────────────────────────────────
+  // Approval-gated drafts (OASIS OS, 2026-09-28; docs/os-revamp/03 §d.4
+  // "draft" class). These NEVER send. propose_email writes one `approvals`
+  // row (lib/os/approvals/store.ts) in the SESSION's workspace; a person
+  // approves or sends it back in Needs you, and only then does the server
+  // execute the stored payload, once, through the workspace's own sender.
+  // Client-safe (lib/ai/tools/client-safe-registry.ts), so a department agent
+  // in any workspace can only ever PROPOSE an outward action.
+  // ──────────────────────────────────────────────────────────────────
+  {
+    name: "propose_email",
+    description:
+      "Draft an email for a person on the team to approve. NOTHING IS SENT by this tool: it puts an approval card in Needs you, and the email goes out only after a teammate approves it, through this workspace's own sender with its opt-out and brand checks. Use it for any email that leaves the business. Tell the operator it is waiting for approval; never say it was sent. To revise a draft someone sent back, pass revises_approval_id with the new text (see list_proposals for their note).",
+    input_schema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient email address." },
+        subject: { type: "string", description: "Subject line (one line, at most 200 characters)." },
+        body: { type: "string", description: "Plain-text body, exactly as it should be sent." },
+        cc: { type: "array", items: { type: "string" }, description: "Optional addresses to copy." },
+        department: {
+          type: "string",
+          // The department list's only copy (lib/os/departments.ts via rules.ts).
+          enum: [...DEPARTMENT_KEYS],
+          description: "The department this email is for. Defaults to your own department.",
+        },
+        lead_id: { type: "string", description: "Optional id of the lead this email is about." },
+        revises_approval_id: {
+          type: "string",
+          description: "When revising a draft that was sent back: the id of that approval.",
+        },
+      },
+      required: ["to", "subject", "body"],
+    },
+  },
+  {
+    name: "list_proposals",
+    description:
+      "List the drafts you proposed for approval and where each stands: waiting, sent back (with the reviewer's note to revise against), sent, or failed (with the reason). Read-only.",
+    input_schema: {
+      type: "object",
+      properties: {
+        view: {
+          type: "string",
+          enum: ["pending", "decided", "all"],
+          description: "pending = still waiting; decided = the last 7 days of decisions; all = everything. Default all.",
+        },
+        limit: { type: "number", description: "Max rows, default 20, max 50." },
+      },
     },
   },
 
@@ -951,6 +1019,10 @@ async function dispatch(
       return await toolListLeadDocuments(input, ctx);
     case "import_leads_from_attachment":
       return await toolImportLeadsFromAttachment(input, ctx);
+    case "propose_email":
+      return await toolProposeEmail(input, ctx);
+    case "list_proposals":
+      return await toolListProposals(input, ctx);
     case "kixie_call":
       return await toolKixieCall(input, ctx);
     case "kixie_send_sms":
@@ -1067,6 +1139,153 @@ async function toolSaveKnownFact(input: Record<string, unknown>, ctx: ToolContex
   if (upd.error) throw new Error(upd.error.message);
 
   return { ok: true, saved: bullet, total_chars: next.length };
+}
+
+/**
+ * propose_email — the approval-gated wrapper for email (docs/os-revamp/01
+ * §(f)). Writes ONE approvals row in the session's workspace (ctx.tenantId,
+ * which executeTool already stripped of anything the model wrote) and sends
+ * nothing. The row's idempotency key is the agent, the UTC day and the payload
+ * hash, so a model that retries the same call gets the same card back instead
+ * of a second one, while the same text proposed on another day is a new card.
+ */
+async function toolProposeEmail(input: Record<string, unknown>, ctx: ToolContext) {
+  if (!tursoConfigured()) throw new Error("approvals_unavailable: the database is not configured on this deployment");
+  const payload = validateSendEmailPayload({
+    to: input.to,
+    cc: input.cc,
+    subject: input.subject,
+    body: input.body,
+    lead_id: input.lead_id,
+  });
+  if (!payload.ok) throw new Error(payload.error);
+  const dept = typeof input.department === "string" && input.department.trim() ? input.department.trim() : null;
+  if (dept !== null && !isOneOf(DEPARTMENT_KEYS, dept)) throw new Error("department_invalid");
+  const departmentKey = dept ?? departmentForAgent(ctx.agentKey);
+  const revises = typeof input.revises_approval_id === "string" && input.revises_approval_id.trim() ? input.revises_approval_id.trim() : null;
+  const db = getTursoClient();
+  if (revises) {
+    // An agent revises only ITS OWN card. createApproval checks the tenant and
+    // the kind, not the requester, so without this any agent in the workspace
+    // could withdraw a teammate's or another agent's pending card by
+    // "revising" it with its own text. An agent with no key owns nothing: a
+    // missing key must not match another keyless card as "the same agent".
+    if (!ctx.agentKey) throw new Error("supersedes_not_yours: this agent has no key, so it cannot revise a draft");
+    const old = await getApprovalInTenant(db, ctx.tenantId, revises);
+    if (!old) throw new Error("supersedes_not_found");
+    if (old.requested_by_type !== "agent" || old.requested_by_id !== ctx.agentKey) {
+      throw new Error("supersedes_not_yours: only the agent that proposed a draft can revise it");
+    }
+  }
+  const hash = payloadHashOf(canonicalJson(payload.value));
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+
+  const r = await createApproval(
+    db,
+    {
+      tenantId: ctx.tenantId,
+      departmentKey,
+      requestedBy: { type: "agent", id: ctx.agentKey || null },
+      actionKind: "send_email",
+      title: `Email to ${payload.value.to}: ${payload.value.subject}`.slice(0, 200),
+      targetRef: payload.value.lead_id ? `lead:${payload.value.lead_id}` : null,
+      payload: payload.value,
+      idempotencyKey: `agent:${ctx.agentKey || "unknown"}:${day}:${revises ?? "new"}:${hash}`,
+      supersedesId: revises,
+    },
+    now,
+  );
+  if (!r.ok) throw new Error(r.error + (r.status ? `: approval is ${r.status}` : "") + (r.successorId ? `: already revised as ${r.successorId}` : ""));
+  const a = r.approval;
+  return {
+    ok: true,
+    sent: false,
+    status: a.status,
+    approval_id: a.id,
+    revision: a.revision,
+    department: a.department_key,
+    deduplicated: !r.created,
+    // The tool itself never sends, so this reports the CARD's state, whatever it is.
+    note:
+      a.status === "pending"
+        ? "Waiting for a teammate's approval in Needs you. Nothing has been sent."
+        : `This exact email was already proposed today and is now ${a.status.replace("_", " ")}. Nothing new was created.`,
+  };
+}
+
+/** list_proposals — this agent's own approvals in the session's workspace, with the reviewer's notes. */
+async function toolListProposals(input: Record<string, unknown>, ctx: ToolContext) {
+  if (!tursoConfigured()) throw new Error("approvals_unavailable: the database is not configured on this deployment");
+  // A keyless agent owns no proposals (propose_email stores its id as null),
+  // so there is nothing of its own to read back: the same rule as revise.
+  if (!ctx.agentKey) throw new Error("agent_key_required: this agent has no key, so it has no proposals of its own to read back");
+  const rawView = typeof input.view === "string" ? input.view : "all";
+  const view = rawView === "pending" || rawView === "decided" ? rawView : "all";
+  const limit = Math.max(1, Math.min(Number(input.limit) || 20, 50));
+  // A read-only server scope over the SESSION's workspace, narrowed below to
+  // this agent's own proposals. It can decide nothing. Any member may chat
+  // with any workspace agent, so through it a member reads exactly the
+  // departments they may decide on screen, never more.
+  const scope = await proposalReadScope(ctx);
+  // A reviewer's note and a provider's failure text are other people's words
+  // on their way into the next model request: they get the same scrub as
+  // everything else the model or the transcript sees (lib/secret-redaction.ts,
+  // chat-persistence.ts), env secrets and this workspace's vault values alike.
+  const vault = await fetchTenantVaultSecretsForRedaction(ctx.tenantId);
+  const scrub = (text: string) => redactTenantVaultSecrets(redactAll(text), vault);
+  const now = new Date();
+  const { rows, truncated } = await listApprovals(
+    getTursoClient(),
+    scope,
+    { view, limit, requestedBy: { type: "agent", id: ctx.agentKey } },
+    now,
+  );
+  const nowIso = now.toISOString();
+  return {
+    count: rows.length,
+    truncated,
+    proposals: rows.map((a) => ({
+      approval_id: a.id,
+      kind: a.action_kind,
+      title: a.title,
+      revision: a.revision,
+      // A pending card past its expiry is expired, as every card shows it.
+      status: effectiveStatus(a, nowIso),
+      department: a.department_key,
+      created_at: a.created_at,
+      decided_at: a.decided_at,
+      reviewer_note: a.decision_note === null ? null : scrub(a.decision_note),
+      outcome: a.execution_result === null ? null : scrubStrings(a.execution_result, scrub),
+    })),
+  };
+}
+
+/** Owners/admins read every department; anyone else what their own seats and rail give them. */
+async function proposalReadScope(ctx: ToolContext): Promise<ApprovalScope> {
+  if (ctx.isAdmin === true) return workspaceReadScope(ctx.tenantId, ctx.userId);
+  // Loaded here, not at the top: the viewer module brings the session and
+  // navigation chain, which only this branch needs.
+  const { resolveMemberNavInput } = await import("../components/os/department/viewer");
+  const member = await resolveMemberNavInput(ctx.tenantId, ctx.authUserId);
+  // An unknown seat is not "every seat": read nothing and say why.
+  if (!member.ok) throw new Error("approvals_unavailable: could not confirm which departments you sit in, so nothing was read");
+  return agentReadScope({
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    persona: member.persona,
+    openDepartments: openDepartmentsFor(member.navInput),
+  });
+}
+
+/** Every string inside a JSON-shaped value, passed through `scrub`. */
+function scrubStrings<T>(value: T, scrub: (text: string) => string): T {
+  if (typeof value === "string") return scrub(value) as T;
+  if (Array.isArray(value)) return value.map((v) => scrubStrings(v, scrub)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubStrings(v, scrub)])) as T;
+  }
+  return value;
 }
 
 /**
@@ -2066,6 +2285,17 @@ function humanSummary(name: string, input: Record<string, unknown>, data: unknow
       return d.dry_run
         ? `parsed ${d.parsed_rows || 0} lead rows from attachment`
         : `imported ${d.inserted || 0} lead rows from attachment`;
+    }
+    case "propose_email": {
+      const d = data as { deduplicated?: boolean; revision?: number; status?: string };
+      const to = String(input.to || "").slice(0, 80);
+      return d.deduplicated
+        ? `email to ${to} was already proposed today (${String(d.status || "pending").replace("_", " ")}; nothing new sent)`
+        : `drafted an email to ${to} for approval${d.revision && d.revision > 1 ? ` (v${d.revision})` : ""} (not sent)`;
+    }
+    case "list_proposals": {
+      const d = data as { count?: number };
+      return `listed ${d.count || 0} proposal${d.count === 1 ? "" : "s"}`;
     }
     case "kixie_call": {
       const d = data as { dry_run?: boolean; target?: string };

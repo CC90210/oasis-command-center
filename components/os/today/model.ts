@@ -30,6 +30,7 @@ import type { BoardSummary } from "@/lib/oasis-board-summary-rules";
 import { WON_STAGES } from "@/lib/oasis-board-summary-rules";
 import { OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
 import { formatOperatorDate } from "@/lib/dates";
+import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 export type Read<T> = { ok: true; value: T } | { ok: false };
@@ -444,6 +445,12 @@ export type NeedsYou = {
   items: NeedsYouItem[];
   /** Sources that could not be read, named, so an empty list is never mistaken for "all clear". */
   unavailable: string[];
+  /**
+   * Approval cards waiting on this viewer (lib/os/approvals), always drawn
+   * first. Absent when the approvals block was not read for this viewer; a
+   * failed read is absent here and named in `unavailable`.
+   */
+  approvals?: ApprovalsBlock | null;
 };
 
 const TONE_ORDER: Record<NeedsYouTone, number> = { urgent: 0, attention: 1, info: 2 };
@@ -459,12 +466,21 @@ export function buildNeedsYou(input: {
   delivery: Read<DeliverySnapshot> | null;
   inbound: Read<HotReply[]> | null;
   cash: Read<CashSnapshot> | null;
+  /** Approvals waiting on this viewer. Null/absent = not read for this viewer. */
+  approvals?: Read<ApprovalsBlock> | null;
   nowMs: number;
   formatTime?: (ms: number) => string;
 }): NeedsYou {
   const time = input.formatTime ?? operatorTime;
   const items: NeedsYouItem[] = [];
   const unavailable: string[] = [];
+
+  // Approvals first: they are the one thing here only this person can unblock.
+  let approvals: ApprovalsBlock | null = null;
+  if (input.approvals) {
+    if (!input.approvals.ok) unavailable.push("approvals");
+    else approvals = input.approvals.value;
+  }
 
   if (input.delivery) {
     if (!input.delivery.ok) unavailable.push("support tickets");
@@ -576,7 +592,12 @@ export function buildNeedsYou(input: {
   }
 
   items.sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
-  return { items, unavailable };
+  return { items, unavailable, ...(input.approvals ? { approvals } : {}) };
+}
+
+/** Everything waiting on the viewer: approvals plus the other Needs-you rows. */
+export function needsYouCount(n: NeedsYou): number {
+  return n.items.length + (n.approvals?.total ?? 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,7 +653,7 @@ function departmentCard(
   const base = { key: d.key, label: d.label, href: d.href, detail: null, connection: null };
   switch (d.key) {
     case "chief_of_staff": {
-      const n = input.needsYou.items.length;
+      const n = needsYouCount(input.needsYou);
       const gaps = input.needsYou.unavailable;
       return {
         ...base,

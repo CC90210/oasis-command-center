@@ -6,8 +6,8 @@
  * WHO SEES THE TAPE. Until 2026-09-28 these rows were reachable only on
  * /operations (/feed redirected there), behind requireSystemSurface. The Feed
  * is now a Team row for everyone, so the tape keeps its old audience:
- * `canSeeSystemSurfaces`. Everyone else gets the Feed's Needs-you tab, which
- * is where approvals land once they ship, and no raw event rows. A rep does not
+ * `canSeeSystemSurfaces`. Everyone else gets the Feed's Needs-you tab (their
+ * approval cards, lib/os/approvals), and no raw event rows. A rep does not
  * get a firehose of other reps' call and email events by way of a new tab.
  *
  * Within the tape, two more cuts, both server-side before render:
@@ -153,8 +153,9 @@ export function parseFeedTab(raw: unknown, canSeeTape: boolean): FeedTab {
   if (!canSeeTape) return "needs";
   const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
   if (v === "needs" || v === "shipped" || v === "all") return v;
-  // Default: All. Needs you is honest-empty until approvals ship, and a Feed
-  // that opens on an empty tab reads as a broken one.
+  // Default: All. The page opens on Needs you instead when approvals are
+  // waiting (app/feed/page.tsx): a Feed that opens on an empty tab reads as a
+  // broken one, and one that hides a waiting approval behind a tab is worse.
   return "all";
 }
 

@@ -44,6 +44,11 @@ export const SAFE_TENANT_TOOL_PALETTE: string[] = [
   "send_sms",
   // KNOWN FACTS append — per-user, auth_user_id-scoped inside the tool.
   "save_known_fact",
+  // Approval-gated email (OASIS OS): writes an approvals row, sends nothing.
+  // For a client workspace this is the ONLY email tool that survives the
+  // client-safe registry, so its agents can only ever propose.
+  "propose_email",
+  "list_proposals",
   // Custom credentials vault — admin-gated inside each tool (ctx.isAdmin).
   "get_credential",
   "add_credential",

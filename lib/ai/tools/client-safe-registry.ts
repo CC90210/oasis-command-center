@@ -70,7 +70,10 @@ export function isOasisInternalTenant(tenantId: string | null | undefined): bool
  *   authority the member already has in the UI, and the chat route still
  *   strips these for read_only members (lib/role-gates.ts
  *   READ_ONLY_DENIED_TOOLS) and plan mode strips them too. The approval-row
- *   draft tools from doc 03 §d.4 join this class when they exist.
+ *   draft tools from doc 03 §d.4 are in this class: propose_email writes ONE
+ *   `approvals` row (lib/os/approvals) and sends nothing; the email goes out
+ *   only after a person approves it, executed server-side from the stored
+ *   payload.
  *
  * There is deliberately no `execute` class here. An outward action (an SMS,
  * an email, a payment, a call) is never model-callable for a client; in the
@@ -95,11 +98,16 @@ export const CLIENT_SAFE_TOOLS: ReadonlyMap<string, ClientSafeToolClass> = new M
   // assertResolvedIpIsPublic SSRF guard, auth-shaped headers stripped.
   ["web_fetch", "read"],
   ["http_get", "read"],
+  // read: this agent's own approval rows in the session's workspace.
+  ["list_proposals", "read"],
   // draft: writes that stay inside the tenant's own workspace.
   ["create_record", "draft"],
   ["update_record", "draft"],
   ["import_leads_from_attachment", "draft"],
   ["save_known_fact", "draft"],
+  // draft: the approval-gated wrapper for an outward action. It creates an
+  // approvals row and NEVER sends (lib/cloud-tool-runner.ts toolProposeEmail).
+  ["propose_email", "draft"],
 ]);
 
 /** True when `name` may be offered to, and dispatched for, a client tenant. */

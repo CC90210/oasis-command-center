@@ -40,7 +40,7 @@ export function FeedTabs({
   active: FeedTab;
   tabs: readonly FeedTab[];
   deptSlug: string | null;
-  /** Shown only for tabs with a known count; Needs you has none yet. */
+  /** Shown only for tabs with a known count: a failed read shows no number, never 0. */
   counts: Partial<Record<FeedTab, number>>;
 }) {
   return (
@@ -101,16 +101,20 @@ export function FeedDepartmentChips({
   );
 }
 
-/** Honest empty Needs-you: approvals do not exist yet, so nothing is held. */
-export function NeedsYouEmpty() {
+/**
+ * Honest empty Needs-you: the approvals read ran and nothing is waiting on
+ * this viewer. A FAILED read never renders this (the page says it failed).
+ */
+export function NeedsYouEmpty({ department = null }: { department?: string | null }) {
   return (
     <Card>
       <div className="py-6">
-        <p className="text-sm font-medium text-fg">Nothing is waiting on you.</p>
+        <p className="text-sm font-medium text-fg">
+          Nothing is waiting on you{department ? ` from ${department}` : ""}.
+        </p>
         <p className="mt-1 max-w-prose text-[13px] leading-5 text-fg-muted">
-          When a department drafts something that leaves the business (an email, a text, a post, an ad change), it
-          waits here until you approve it or send it back. Approvals arrive with department channels. Until then,
-          nothing is being held for you.
+          When a department drafts something that leaves the business (an email, a post), it waits here until you
+          approve it or send it back with a note. Nothing goes out before someone says yes.
         </p>
       </div>
     </Card>
