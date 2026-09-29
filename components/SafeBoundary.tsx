@@ -7,8 +7,8 @@ import { Component, type ReactNode } from "react";
  * behaving client component doesn't blow up the whole page.
  *
  * Usage:
- *   <SafeBoundary label="Integration keys">
- *     <IntegrationKeysPanel ... />
+ *   <SafeBoundary label="Personal integrations">
+ *     <PersonalIntegrationsPanel ... />
  *   </SafeBoundary>
  *
  * When a child throws during render, the boundary catches it, logs to

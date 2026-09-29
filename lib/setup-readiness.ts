@@ -19,6 +19,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { aiServicesWithKey } from "@/lib/queries";
 import { isSharedInboxTenant as checkSharedInbox } from "@/lib/shared-inbox-tenants";
+import { connectorHref } from "@/lib/os/connectors";
 import type { ManifestRequiredService } from "@/lib/manifest/schema";
 
 export type ReadinessItem = {
@@ -109,7 +110,7 @@ export async function loadReadinessReport(args: {
           : "Not connected — outbound mail will fall back to the shared address.",
         cta: hasGmail
           ? undefined
-          : { href: "/settings#integrations", label: "Connect Gmail" },
+          : { href: connectorHref("google-workspace"), label: "Connect Gmail" },
       });
     }
   }
@@ -187,7 +188,7 @@ export async function loadReadinessReport(args: {
       detail: present ? "Key on file." : req.detail || "Not yet wired.",
       cta: present
         ? undefined
-        : req.cta || { href: "/settings#integrations", label: "Add key" },
+        : req.cta || { href: "/settings/connections", label: "Add key" },
     });
   }
 

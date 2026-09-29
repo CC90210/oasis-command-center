@@ -18,12 +18,15 @@ assert.ok(
 
 const settings = read("components/settings/SettingsContent.tsx");
 const personalBranch = settings.indexOf("if (profile && !canManageTenant)");
-const integrationHealthRead = settings.indexOf('safe("settings.integrations_health"');
+// The system reads that remain (AI keys, bridge heartbeat). The integration
+// heartbeats moved to the operator /health page with the one-card Connections hub.
+const systemReads = ['safe("settings.ai_keys"', 'safe("settings.bridge_online"'].map((m) => settings.indexOf(m));
 assert.ok(personalBranch >= 0, "non-admins need an explicit personal-only Settings branch");
 assert.ok(
-  integrationHealthRead > personalBranch,
+  systemReads.every((at) => at > personalBranch),
   "the personal-only branch must return before system integration/provider/device data is queried",
 );
+assert.equal(settings.includes("settings.integrations_health"), false, "integration heartbeats are not read by Settings");
 assert.ok(settings.includes("showTeamPerformance={canSeeTeamPerformance && oasisSalesWorkspace}"));
 assert.ok(
   read("app/settings/page.tsx").includes("degraded: surface.degraded") &&

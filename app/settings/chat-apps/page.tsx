@@ -25,7 +25,7 @@ import { loadConnectorFacts } from "@/components/os/connections/connector-facts"
 import {
   connectorBySlug,
   resolveConnectorStatus,
-  CREDENTIALS_ANCHOR,
+  connectorHref,
   type ConnectorDef,
   type ConnectorStatus,
 } from "@/lib/os/connectors";
@@ -81,7 +81,7 @@ export default async function SettingsChatAppsPage() {
                   <div className="font-medium text-fg">Team alerts bot</div>
                   <div className="text-fg-muted">One bot and one chat that receive the workspace&apos;s shared alerts.</div>
                 </div>
-                <Link href={CREDENTIALS_ANCHOR} prefetch={false} className="text-[13px] text-accent hover:underline">
+                <Link href={connectorHref("telegram")} prefetch={false} className="text-[13px] text-accent hover:underline">
                   Set up in Connections
                 </Link>
               </div>
