@@ -4,27 +4,17 @@
   "known": [
     {
       "file": "app/globals.css",
-      "line": 224,
+      "line": 319,
       "rule": "named-decor"
     },
     {
       "file": "app/globals.css",
-      "line": 230,
+      "line": 335,
       "rule": "named-decor"
     },
     {
       "file": "app/globals.css",
-      "line": 246,
-      "rule": "named-decor"
-    },
-    {
-      "file": "app/globals.css",
-      "line": 250,
-      "rule": "named-decor"
-    },
-    {
-      "file": "app/loading.tsx",
-      "line": 7,
+      "line": 339,
       "rule": "named-decor"
     },
     {
@@ -73,29 +63,9 @@
       "rule": "ai-accent"
     },
     {
-      "file": "components/Card.tsx",
-      "line": 69,
-      "rule": "named-decor"
-    },
-    {
-      "file": "components/Card.tsx",
-      "line": 70,
-      "rule": "halo-shadow"
-    },
-    {
       "file": "components/ChatWidget.tsx",
       "line": 2699,
       "rule": "named-decor"
-    },
-    {
-      "file": "components/Sidebar.tsx",
-      "line": 397,
-      "rule": "named-decor"
-    },
-    {
-      "file": "components/Sidebar.tsx",
-      "line": 591,
-      "rule": "halo-shadow"
     },
     {
       "file": "components/calls/CallsClient.tsx",
@@ -363,11 +333,6 @@
       "rule": "halo-shadow"
     },
     {
-      "file": "components/founders/marketing-shared.tsx",
-      "line": 244,
-      "rule": "halo-shadow"
-    },
-    {
       "file": "components/landing/ConfigureFlow.tsx",
       "line": 65,
       "rule": "ai-accent"
@@ -385,11 +350,6 @@
     {
       "file": "components/metrics/MetricsDashboard.tsx",
       "line": 115,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/metrics/MetricsDashboard.tsx",
-      "line": 608,
       "rule": "halo-shadow"
     },
     {
@@ -444,11 +404,6 @@
     },
     {
       "file": "components/web-leads/BattleCard.tsx",
-      "line": 516,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/BattleCard.tsx",
       "line": 748,
       "rule": "ai-accent"
     },
@@ -478,54 +433,9 @@
       "rule": "drifting-orb"
     },
     {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 2637,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/BattleSection.tsx",
-      "line": 166,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/BattleSection.tsx",
-      "line": 175,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/BattleSection.tsx",
-      "line": 182,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/BattleSection.tsx",
-      "line": 278,
-      "rule": "halo-shadow"
-    },
-    {
       "file": "components/web-leads/CompetitorArena3D.tsx",
       "line": 355,
       "rule": "radial-wash"
-    },
-    {
-      "file": "components/web-leads/ObjectionCard.tsx",
-      "line": 103,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/ObjectionCard.tsx",
-      "line": 415,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/ObjectionConsole.tsx",
-      "line": 120,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "components/web-leads/ObjectionConsole.tsx",
-      "line": 157,
-      "rule": "halo-shadow"
     },
     {
       "file": "lib/agents.ts",
