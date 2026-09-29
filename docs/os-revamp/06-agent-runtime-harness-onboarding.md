@@ -84,7 +84,7 @@ CC's goal: a client signs, claims their portal, answers a Setup AI, connects the
 | Cloud agent runner | `BEA/apps/agent-runner` | Scaffold only. Supabase JWTs, never deployed | Replaced by the runner in §5.3 |
 | Job queue design | Doc 03 §d.1: `agent_jobs` with a DB lease, a Worker lane and a VPS lane | Designed, not built | The spine of §5 |
 | Tool sandbox for the portal | Doc 03 §d.4, `lib/ai/tools/client-safe-registry.ts` | Built (default-deny) | Kept for desk agents |
-| Department channels | OCC `/team/[dept]` | Built (Phase 1) | Where the desk agents talk |
+| Department channels | OCC `/team/[dept]` | **UI only.** The channel posts to the old text-only `/api/agents/chat`: no tools, data, approvals, history or metering. It resolves to a May key on a drained account, and prompts name Bravo/Maven/Atlas (verified 2026-09-29). The desk-agent route `/api/os/departments/[dept]/chat` was never built | Plan v2 F1.2 makes it honest, F5 builds the desk agent |
 | AI Team page | OCC `/agents` (roster, builder, 6 templates); rail row is OASIS-only and system-surface | Built | Folds into Team (§7) |
 | AI brain settings | OCC `/settings/ai`, `agent_model_config` (encrypted) | Built for keys and overrides | The brain step in onboarding writes here |
 | Onboarding wizard | OCC `/onboarding/wizard`: industry → questions → agents → agent setup → brand → confirm | Built for the retired self-signup flow | Its steps become the Setup AI's structured cards (§6) |
@@ -104,7 +104,14 @@ CC's goal: a client signs, claims their portal, answers a Setup AI, connects the
    - It may run Claude on the client's own API key (Anthropic, or Claude through Amazon Bedrock or Google Vertex).
    - The same page: the SDK is governed by Anthropic's Commercial Terms "including when you use it to power products and services that you make available to your own customers".
    - Branding: we may say "Powered by Claude", but never call our product "Claude Code".
-2. **Other providers' CLI logins are unverified.** OpenAI's Codex CLI ("Sign in with ChatGPT") and Google's Gemini CLI (Google login) may have similar rules. **Do not offer either as a client login until Lex has read their current terms.** API keys for both are fine under their API terms.
+2. **Other providers, verified 2026-09-29** (research workflow `wf_f93e7e2e-98e`):
+   - **Google: forbidden.** Gemini CLI "Login with Google" for consumer tiers ended 2026-06-18, and third-party software using it is a terms violation. The free Gemini API tier may have humans read inputs, so it is never used for client data. The paid tier or Vertex is fine.
+   - **OpenAI: needs approval.** "Sign in with ChatGPT" plan usage launched 2026-09-29; paid or remotely hosted apps file the interest form (draft in `07-provider-applications.md`). Reusing Codex's own OAuth client in a product is not allowed.
+   - **GitHub Copilot SDK: allowed.** It officially supports SaaS products running on each user's own Copilot subscription through GitHub sign-in (Advanced option; needs a runner).
+   - **OpenRouter: allowed.** It has one-click OAuth (PKCE) for users to connect their own account.
+   - **Anthropic, more precisely than above.** The Claude Code legal page also allows an end user to sign in to the **unmodified Claude Code binary** with their own subscription, even where a platform hosts it, as long as tokens are never collected, stored or proxied and usage is never resold. Whether that covers unattended business automation is unconfirmed; that is question 2 in `07`.
+   - **The legitimate "use my existing subscription" path is inverted:** OASIS becomes a connector (remote MCP server) inside the client's own Claude or ChatGPT app.
+   - API keys for every provider are fine under their API terms.
 3. **CC's own accounts never power a client.** No CC subscription, no OASIS bridge (`bravo_cli` exposes bash and file writes), no CC keys. This is already law in `PLAN.md`; it is restated here because the runner makes it easy to get wrong.
 4. **No client ever receives CC's or OASIS's data.** That covers identity, clients, memory, deals, voice samples and credentials. Enforced by the builder's leak scan (§4.3), not by care.
 5. **An agent with a terminal is a real attack surface.** Client content (emails, web pages, form fills) is untrusted. It can try to steer the agent. Every runner is isolated per client (§9).
