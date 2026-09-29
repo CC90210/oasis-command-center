@@ -12,7 +12,8 @@
  *      endpoint so the dashboard knows what "from" address to surface.
  *   4. Encrypt + store the whole bundle in user_integration_credentials
  *      under service='gmail_oauth'.
- *   5. Redirect back to /settings#integrations with success/error
+ *   5. Redirect back to the Google drawer in Settings › Connections
+ *      (/settings/connections?app=google-workspace) with success/error
  *      query param so the Settings UI can show a status banner.
  *
  * Required env (same as start):
@@ -36,7 +37,7 @@ export const dynamic = "force-dynamic";
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
-const SETTINGS_RETURN_PATH = "/settings#integrations";
+const SETTINGS_RETURN_PATH = "/settings/connections?app=google-workspace";
 // Must mirror start/route.ts. work → send+monitor; personal → monitor only.
 const MAILBOX_SERVICE: Record<string, string> = {
   work: "gmail_oauth",
