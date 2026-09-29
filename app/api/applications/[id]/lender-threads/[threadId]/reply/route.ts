@@ -25,7 +25,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { sendGmail } from "@/lib/integrations/submissions-gmail-send";
 import { getAgents } from "@/lib/config/agents";
 import { dropDeactivatedEmails } from "@/lib/lenders/derive-agent-ccs";
@@ -87,7 +87,7 @@ export async function POST(
     .eq("id", sess.tenantId)
     .maybeSingle();
   const tenantSlug = (tenantRow.data as { slug: string } | null)?.slug || "";
-  if (tenantSlug !== "submissions" && !isOperatorEmail(sess.email)) {
+  if (tenantSlug !== "submissions" && !(await isPlatformOperatorForAuthUser(sess.userId, sess.email))) {
     return jsonError(403, "shop_out_not_enabled_for_tenant");
   }
 

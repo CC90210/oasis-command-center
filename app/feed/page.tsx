@@ -19,7 +19,7 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { formatEventType, formatPublisher } from "@/lib/event-bus-display";
 import { getActiveProfile } from "@/lib/queries";
 import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { FeedRefresher } from "./refresher";
 
 export const dynamic = "force-dynamic";
@@ -123,7 +123,9 @@ export default async function FeedPage() {
     getActiveProfile().catch(() => null),
     getSessionUser().catch(() => null),
   ]);
-  const isOperator = isOperatorEmail(user?.email || undefined);
+  // The operator sees every tenant's events: verified check only (alias AND
+  // owner/admin OASIS membership by auth id). Fails closed to the tenant view.
+  const isOperator = await isPlatformOperatorForAuthUser(user?.id, user?.email);
   const agentNames = await getTenantAwareEnabledAgents({
     userTenantId: profile?.tenant_id ?? null,
     profileAgentsEnabled: profile?.agents_enabled ?? null,

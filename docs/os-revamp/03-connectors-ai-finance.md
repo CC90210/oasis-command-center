@@ -71,7 +71,7 @@ Ownership (BEA `brain/OWNERSHIP_MAP.yaml:85-118`):
 | `lib/setup-readiness.ts` (extend) | The readiness checklist driven by manifest `required_services` becomes the "connect your stack" step of the done-for-you install | `lib/manifest/schema.ts:393-429` |
 
 ### a.4 Safety fixes that belong in Phase 0 (my domain)
-1. **Env fallback is default-deny.** `tenantMayUseEnvFallback(tenantId, service)` returns `isOasisSurfaceTenant(slug)` for every service. Test: `tests/tenant-integration-env-fallback.test.ts`, a matrix of every `ENV_FALLBACKS` service against OASIS and non-OASIS tenants.
+1. **Env fallback is default-deny, scoped by tenant ID and by service.** `tenantMayUseEnvFallback(tenantId)` is true only for an exact tenant ID in `OASIS_ENV_CREDENTIAL_TENANT_IDS`, never a slug match such as `isOasisSurfaceTenant(slug)` (a slug is display text a workspace can claim). A fallback exists only for a (service, field_key) pair listed in the explicit `ENV_FALLBACKS` allowlist; anything unlisted is DB-only. OAuth app credentials are not on that allowlist: Constant Contact's `client_id` / `client_secret` move out of `ENV_FALLBACKS` and are read from Worker secrets directly (principle 2). Test: `tests/env-fallback-oasis-only.test.ts`, a matrix of every `ENV_FALLBACKS` service against OASIS and non-OASIS tenant IDs, plus an assertion that no OAuth app credential is in the allowlist.
 2. **Decryption failures fail closed** with the status `credential_unreadable`, never the env value (fixes F3).
 3. **Encryption v2.**
    - Format: `v2:<kid>:<iv>.<tag>.<ct>`, with AAD = `${tenant_id}|${service}|${field_key}`.
@@ -317,7 +317,7 @@ Cache reads cost about 0.1× the input price.
 - **`ai_usage_events`**: `tenant_id, user_id, department, session_id|job_id, provider, model, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, cost_micro_usd, billing_mode managed|byo_key|subscription, created_at`. It is written from the usage totals the loop already tracks (`totalIn/totalOut`, `lib/cloud-tool-runner.ts:2100-2106`).
 - **`model_prices`**: provider, model, per-token prices, `effective_from`.
 - **`tenant_ai_budgets`**: `tenant_id, period_month, included_micro_usd (tier), hard_cap_micro_usd (set by owner), soft_alert_pct, spent_micro_usd, reserved_micro_usd`.
-- **Before a call**, reserve the worst case (max_tokens × output price) with `UPDATE … SET reserved=reserved+? WHERE spent+reserved+? <= cap`. **After**, settle to the actual cost.
+- **Before each call**, reserve the worst case with `UPDATE … SET reserved=reserved+? WHERE spent+reserved+? <= cap`. The worst case covers input and output: the counted input tokens priced at the higher of the base-input and cache-write rates (a call may write the cache; cache-read discounts are known only afterwards), plus `max_tokens` × output price. Every model call in a tool loop is its own call and takes its own reservation before dispatch; one reservation never covers a whole loop. The hard-cap check is on the full reservation. **After** each call, settle to the actual cost from its usage (release the reservation, add the real spend).
 - **At the cap**, return HTTP 402 `ai_budget_exhausted` with honest copy: "This month's AI budget is used. The owner can raise it." Fall back to the tenant's own key if one is configured. **Never quietly downgrade to a free model.**
 - A generic **`usage_events`** table (SMS, numbers, Recall hours, Plaid Items, transcription) feeds the monthly pass-through line items on OASIS's own Stripe. Atlas sets the margin per tier.
 
@@ -374,8 +374,10 @@ Add a `departments[]` block to the manifest:
 2. Backfill the OASIS entities with the OASIS tenant id.
 3. Add triggers, a pattern already used in migrations 149, 150, 156, 159 and 162:
    - `BEFORE INSERT … WHEN NEW.tenant_id IS NULL` → abort.
-   - `BEFORE INSERT … WHEN NEW.tenant_id <> (SELECT tenant_id FROM fin_entities WHERE id=NEW.entity_id)` → abort.
+   - `BEFORE INSERT … WHEN NEW.tenant_id IS NOT (SELECT tenant_id FROM fin_entities WHERE id=NEW.entity_id)` → abort.
    - `BEFORE UPDATE OF tenant_id` → abort.
+   - `BEFORE UPDATE OF entity_id … WHEN NEW.tenant_id IS NOT (SELECT tenant_id FROM fin_entities WHERE id=NEW.entity_id)` → abort. Without it, an update that changes only `entity_id` passes both checks above and attaches the row to another tenant's entity.
+   - Use `IS NOT`, not `<>`: for an unknown `entity_id` the subquery is NULL, `<>` yields NULL, and the trigger would let the row through.
 4. Add indexes `(tenant_id, entity_id, …)`.
 5. Replace the global unique indexes on Stripe ids (`:363-370`) with `(entity_id, stripe_*)` versions. This is `DROP INDEX`, not `DROP TABLE`; confirm exec_guard allows it, and get Codex review.
 

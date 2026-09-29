@@ -43,7 +43,15 @@ const labelText = readFileSync(join(root, LABEL_PATH), "utf8");
 const label = JSON.parse(labelText) as {
   tracking: { thirdPartyAnalyticsSdks: unknown[]; advertisingPixels: unknown[] };
   subprocessors: { name: string; dpaInPlace: boolean }[];
-  dataCollected: { category: string; sensitive: boolean; sharedWith?: string[] }[];
+  dataCollected: {
+    category: string;
+    sensitive: boolean;
+    sharedWith?: string[];
+    formerRecipients?: string[];
+    retention?: string;
+  }[];
+  legacyDataLocations?: { name: string; status: string }[];
+  openGaps?: string[];
 };
 
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as {
@@ -256,6 +264,24 @@ for (const s of SUBPROCESSORS) {
   const privacyPage = readFileSync(join(root, "app/(marketing)/privacy/page.tsx"), "utf8");
   assert.match(privacyPage, /Former database provider[\s\S]*Supabase/, "/privacy must disclose the legacy Supabase copy");
   assert.match(privacyPage, /Former hosting provider[\s\S]*Vercel/, "/privacy must disclose the former Vercel hosting and its retained logs");
+
+  // The JSON manifest must disclose the same former holders the page does, or
+  // an app-store declaration omits a party still holding personal data
+  // (CodeRabbit on #465).
+  const legacy = (label.legacyDataLocations ?? []).map((l) => l.name).join(" | ");
+  assert.match(legacy, /Supabase/, `${LABEL_PATH} legacyDataLocations must list the legacy Supabase copy /privacy discloses.`);
+  assert.match(legacy, /Vercel/, `${LABEL_PATH} legacyDataLocations must list Vercel, which /privacy says still holds request logs.`);
+  const diagnostics = label.dataCollected.find((d) => /diagnostic/i.test(d.category));
+  assert.ok(diagnostics, `${LABEL_PATH} has no diagnostics category.`);
+  assert.ok(
+    (diagnostics.formerRecipients ?? []).some((r) => /Vercel/.test(r)),
+    `${LABEL_PATH} diagnostics must name Vercel as a former recipient of request logs.`,
+  );
+  assert.match(
+    diagnostics.retention ?? "",
+    /Vercel/,
+    `${LABEL_PATH} diagnostics retention must state what applies to the logs Vercel still holds.`,
+  );
 }
 for (const d of DATA_MATRIX) {
   assert.doesNotMatch(
@@ -426,6 +452,70 @@ for (const field of ["PRIVACY_OFFICER.name", "PRIVACY_OFFICER.title.en", "PRIVAC
     privacySource.includes(field),
     `/privacy does not render ${field}; Law 25 requires the person in charge to be published.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// 8. Model-provider sharing is disclosed per category wherever /privacy says
+//    it happens. Section 3 says lead and application records go to the model
+//    provider when included in agent context; those records carry contact AND
+//    business fields, so both categories must name the model provider on both
+//    surfaces. The business row once named only Turso and the tenant
+//    (CodeRabbit on #465).
+// ---------------------------------------------------------------------------
+
+assert.match(
+  privacySource,
+  /Lead and application records when they are included in the context of\s+an agent task/,
+  "/privacy no longer says lead and application records reach model providers. If that " +
+    "changed, update this section deliberately rather than letting it pass.",
+);
+const LEAD_RECORD_CATEGORIES: { matrix: string; label: string }[] = [
+  { matrix: "Contact identifiers", label: "Contact Info" },
+  { matrix: "Business identifiers", label: "Business & Financial Info" },
+];
+for (const c of LEAD_RECORD_CATEGORIES) {
+  const row = DATA_MATRIX.find((d) => d.category === c.matrix);
+  assert.ok(row, `DATA_MATRIX has no "${c.matrix}" row.`);
+  assert.match(
+    row.sharedWith,
+    /model provider/i,
+    `DATA_MATRIX "${c.matrix}" omits the model provider, but /privacy section 3 says lead and ` +
+      `application records are sent to it when included in agent context.`,
+  );
+  const cat = label.dataCollected.find((d) => d.category === c.label);
+  assert.ok(cat, `${LABEL_PATH} has no "${c.label}" category.`);
+  assert.ok(
+    (cat.sharedWith ?? []).some((w) => /model provider/i.test(w)),
+    `${LABEL_PATH} "${c.label}" omits the model provider that /privacy section 3 discloses.`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 9. Law 25 s.17: the transfer section must not claim an assessment that does
+//    not exist. It once implied the processors not marked "Under review" had
+//    been assessed; none has. While the assessment is open, the page says so
+//    and the manifest carries it as an open gap.
+// ---------------------------------------------------------------------------
+
+{
+  const start = privacySource.indexOf('title="International transfers"');
+  assert.ok(start >= 0, "/privacy has no International transfers section.");
+  const end = privacySource.indexOf("<LegalSection", start);
+  // JSX wraps prose across lines; collapse whitespace so a phrase split by a
+  // line break still matches.
+  const transfers = privacySource.slice(start, end > start ? end : undefined).replace(/\s+/g, " ");
+  assert.match(transfers, /privacy impact assessment/, "The transfers section must name the Law 25 s.17 assessment.");
+  assert.doesNotMatch(
+    transfers,
+    /assessments? (?:is|are|was|were|has been|have been) (?:complete|completed|done)|we have (?:completed|conducted|carried out) (?:the|an|that|our) assessment/i,
+    "The transfers section claims a completed Law 25 transfer assessment. Say that only once one exists.",
+  );
+  if (/in progress/.test(transfers)) {
+    assert.ok(
+      (label.openGaps ?? []).some((g) => /s\.17/.test(g) && /not yet completed/.test(g)),
+      `/privacy says the transfer assessments are in progress, so ${LABEL_PATH} openGaps must list them.`,
+    );
+  }
 }
 
 console.log("legal-compliance-drift: ok");

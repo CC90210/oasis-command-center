@@ -8,8 +8,7 @@ import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { catalogFor } from "@/lib/agent-catalog";
 import { getAgentStats } from "@/lib/agent-stats";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
-import { isOperatorEmail } from "@/lib/operator-credentials";
-import { requireSystemSurface } from "@/lib/role-surfaces-session";
+import { isPlatformOperatorForAuthUser, requireSystemSurface } from "@/lib/role-surfaces-session";
 import { Clock, Cog, Download, Workflow } from "lucide-react";
 import Link from "next/link";
 
@@ -49,7 +48,10 @@ export default async function AgentsPage() {
   await requireSystemSurface();
   const profile = await getActiveProfile();
   const user = await getSessionUser();
-  const isAdmin = isOperatorEmail(user?.email);
+  // Verified operator (alias AND owner/admin OASIS membership by auth id): the
+  // same verdict /api/chat reaches before it hands over the platform key, so
+  // the widget never promises a key the server will refuse.
+  const isAdmin = await isPlatformOperatorForAuthUser(user?.id, user?.email);
 
   // Resolve manifest BEFORE the parallel fetch so we can scope
   // agentStates() by the tenant's enabled agents. agent_state_snapshot

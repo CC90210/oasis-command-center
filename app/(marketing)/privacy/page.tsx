@@ -268,11 +268,25 @@ export default function PrivacyPage() {
           are located in the United States, and our application runs on
           Cloudflare&rsquo;s global network; section 6 lists each
           processor&rsquo;s region. Your information is therefore transferred
-          outside Quebec, and in most cases outside Canada. Under Quebec Law 25 we
-          are required to assess whether the destination jurisdiction provides
-          adequate protection before transferring personal information outside
-          the province; that assessment is in progress for the processors marked
-          &ldquo;Under review&rdquo; above.
+          outside Quebec, and in most cases outside Canada.
+        </p>
+        <p>
+          Before personal information is communicated outside Quebec, Law 25
+          requires a privacy impact assessment that takes into account the
+          sensitivity of the information, the purposes for which it will be used,
+          the protection measures (including contractual ones) that would apply
+          to it, and the legal framework of the destination, and it permits the
+          transfer only if that assessment establishes adequate protection. We
+          have not yet completed that assessment for any of the processors in
+          section 6. The assessments are in progress. The transfers described
+          above are already taking place, so this is an open gap in our
+          compliance, not a completed step.
+        </p>
+        <p>
+          What is in place today is the processor list in section 6, which states
+          where each processor is located and whether a data processing agreement
+          covers that data path. For the processors marked &ldquo;Under
+          review&rdquo;, we have not confirmed one.
         </p>
       </LegalSection>
 

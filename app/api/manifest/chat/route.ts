@@ -29,7 +29,8 @@ import { decryptField } from "@/lib/field-encryption";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
-import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
+import { operatorPlatformFallback } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import {
   applyMutations,
@@ -126,7 +127,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
   } else {
-    const fallback = isOperatorEmail(user.email || "") ? operatorPlatformFallback() : null;
+    // The platform key bills OASIS: verified operator only (lib/platform-operator.ts).
+    const fallback = (await isPlatformOperatorForAuthUser(user.id, user.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
         { ok: false, error: "agent_not_configured", hint: "Configure your Bravo provider key in Settings before using the manifest editor." },

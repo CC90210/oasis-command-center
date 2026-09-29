@@ -25,7 +25,7 @@
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { testConnection } from "@/lib/integrations/submissions-gmail";
 
 export const runtime = "nodejs";
@@ -62,7 +62,7 @@ export async function GET(
     .eq("id", sess.tenantId)
     .maybeSingle();
   const tenantSlug = (tenantRow.data as { slug: string } | null)?.slug || "";
-  if (tenantSlug !== "submissions" && !isOperatorEmail(sess.email)) {
+  if (tenantSlug !== "submissions" && !(await isPlatformOperatorForAuthUser(sess.userId, sess.email))) {
     return NextResponse.json(
       { ok: false, error: "shop_out_not_enabled_for_tenant" },
       { status: 403 },

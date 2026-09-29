@@ -33,7 +33,7 @@ import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
 import type { NavItem } from "@/lib/nav-config";
 import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
-import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { isPlatformOperator, resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { PerfVitals } from "@/components/PerfVitals";
 
@@ -155,6 +155,12 @@ export default async function RootLayout({
     // so a stuck sidebar indicator is searchable in Vercel logs instead
     // of silently rendering as "offline".
     profile = await timed("profile", safe("layout.profile", getActiveProfile(), null), perfSpans);
+    // The verified platform-operator verdict (alias AND owner/admin OASIS
+    // membership by auth id), started now and awaited by the two readers
+    // below: the /t/<slug> path override and the chat shell's admin flag. Only
+    // an alias session pays its read, and it runs beside the others rather
+    // than in front of them. Resolves false on any failure, loudly.
+    const platformOperatorP = safe("layout.platform_operator", isPlatformOperator(), false);
 
     // Demo cookie is honoured ONLY when:
     //   - the operator is on /demo/sun (explicit opt-in via URL), OR
@@ -243,7 +249,7 @@ export default async function RootLayout({
     if (!demoProfileSlug && pathTenantSlug) {
       const allowed = canPreviewTenantSlug(
         {
-          email: profile?.email,
+          isPlatformOperator: await platformOperatorP,
           tenant_slug: tenantProfileSlug,
           command_center_profile_slug: tenantProfileSlug,
         },
@@ -265,10 +271,17 @@ export default async function RootLayout({
     // "online means last_seen_at within 5 minutes" definition still lives
     // solely in the shared bridge helper (lib/queries.ts), now called by
     // the status route instead of here.
+    const chatProfile = profile;
     const [chatPropsResolved, surfaceResolved] = await timed("side_channels", Promise.all([
       safe(
         "layout.chat_props",
-        resolveChatShellProps({ profile, userEmail: profile?.email }),
+        platformOperatorP.then((platformOperator) =>
+          resolveChatShellProps({
+            profile: chatProfile,
+            userEmail: chatProfile?.email,
+            isPlatformOperator: platformOperator,
+          }),
+        ),
         null,
       ),
       safe("layout.viewer_surface", resolveViewerSurface(), null),

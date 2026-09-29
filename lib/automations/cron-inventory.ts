@@ -43,8 +43,8 @@ export type AutomationInventoryMetadata = {
    * predicate answers both today. `queried` is about what the route did;
    * `empire_included` is about who the route decided the caller is. The 4/1
    * outage turned on that distinction: every Empire guarantee in this file —
-   * the non-empty requirement, the fail-loud 500 — is armed by
-   * isOperatorEmail(), so an identity the predicate does not cover disarms all
+   * the non-empty requirement, the fail-loud 500 — is armed by the one
+   * platform-operator check, so an identity the predicate does not cover disarms all
    * of them at once and the tab returns a perfectly valid, perfectly plausible
    * tenant-only 200. CC cannot tell that apart from "the Empire schedules were
    * deleted". Stating the verdict on the wire is what lets the client say which

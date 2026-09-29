@@ -199,7 +199,7 @@
    - `lib/packs/{schema,apply}.ts`: versioned, code-reviewed TypeScript packs holding stages, forms, KPIs, starter skills, routines and objection taxonomies.
    - Packs, in order: **agency-consulting** (OASIS dogfoods it) → **home-services** → coaching-education → clinic-practice (the last only after Lex reviews health data).
 2. **Channels and approvals.**
-   - New tables: `channels`, `channel_members`, `channel_messages` (visibility `internal|client`; source `native|slack|discord`), `channel_bridges`, `approvals`, `approval_events`, `deliverables`, `feed_items`.
+   - New tables: `channels`, `channel_members`, `channel_messages` (visibility `internal|client`; source `native|slack|telegram`, with `discord` reserved for after v1), `channel_bridges`, `approvals`, `approval_events`, `deliverables`, `feed_items`.
    - Built on `components/agents/AgentChat.tsx`, `lib/providers.ts`, `lib/chat-sse-helpers.ts` and `lib/realtime/nudge-store.ts`.
    - **The 4,170-line ChatWidget becomes operator-only.**
 3. **Managed AI runtime.**
@@ -238,7 +238,7 @@
    - `outcome_events`: an append-only outbox in the same write path; loud on failure.
    - `attribution_touches`: UTMs, fbclid and ad ids on every funnel.
    - A nightly `deal_outcome_labels` job over ad angle → booked → objection (with quote spans) → closed → **paid (verified in Stripe)** → retained.
-   - **Retrieval stays within each tenant. No cross-tenant training.** Benchmarks come only later: opt-in, k≥10, OASIS-native metrics only.
+   - **Retrieval stays within each tenant. No cross-tenant training.** Benchmarks come only later: opt-in, k≥10 as a floor plus a passing re-identification assessment and disclosure controls (doc 04 d.4), OASIS-native metrics only.
 10. **Chat-app bridges: Slack and Telegram as two-way agent surfaces** (new, per CC's direction).
     - **Shared core:** `lib/os/bridges/{router,identity,render}.ts`.
       - An inbound message becomes a `channel_messages` row with `source=slack|telegram`.
@@ -292,12 +292,12 @@
 2. **Python kill switch:** `pause_controller.py pause global --tenant aa04fa1f… --reason "SunBiz retired 2026-09-28"`, then silent mode.
 3. **Worker secrets:** `DRIPS_CIRCUIT_OPEN=1` (no other tenant has sequences) and `LIVE_SEND_{TEXTTORRENT,KIXIE,CONSTANT_CONTACT}=0`.
 4. **Silence the SunBiz health and Telegram lanes** so the freeze doesn't page anyone.
-5. **Lock down `/api/quests`** (require auth, or delete it if OASIS Town is dead).
+5. **Lock down `/api/quests` to platform operators**, not merely signed-in users (it serves CC's task rows). The route checks `resolvePlatformOperator()` (the rule behind `requireOperator()`) before any read: 401 without a session, 404 for a signed-in non-operator. Delete it instead if OASIS Town is dead.
 6. **Operator alias audit.** `scripts/audit-operator-emails.ts` prints only whether each alias is set and whether a live auth user exists; it never prints values. Remove any alias that has no auth user.
 7. **Gate `/api/state-health` and `/system-health`** to operators.
 8. **Re-verify oasisai.work:** renewal, card, MX/TXT records, Search Console.
 
-**Gate:** 1 h and again 24 h later, SunBiz outbound since the freeze = **0**, pending drip runs = 0, and an unauthenticated `/api/quests` request returns 401.
+**Gate:** 1 h and again 24 h later, SunBiz outbound since the freeze = **0**, pending drip runs = 0, an unauthenticated `/api/quests` request returns 401, and a signed-in non-operator gets 404 with no rows.
 
 ### Phase 0 — safety, in-flight triage, day-1 applications (2–3 wks / 4–6 days)
 **Coordination**

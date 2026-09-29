@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { resolveClientProfileSlug } from "@/lib/client-profiles";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { safeInternalPath } from "@/lib/turso-auth-admin";
 
 type ProfileRouteRow = {
@@ -18,7 +18,8 @@ type ProfileRouteRow = {
 export type PostLoginTenantContext = {
   tenantSlug?: string | null;
   commandCenterProfileSlug?: string | null;
-  // Empire operators (OPERATOR_EMAIL / ADMIN_EMAILS) default to the master
+  // Empire operators (verified: an OPERATOR_EMAIL / ADMIN_EMAILS alias AND an
+  // owner/admin OASIS membership — lib/platform-operator.ts) default to the master
   // dashboard on login even when their user_profiles row resolves to a
   // client tenant — they're frequently listed as the operator on a
   // client's tenants row (e.g. CC on SunBiz), and auto-routing them
@@ -128,7 +129,11 @@ function isClientBrand(brand: string | null): boolean {
   return CLIENT_BRAND_PATTERNS.some((re) => re.test(s));
 }
 
-function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | undefined): ProfileRouteRow | null {
+function chooseProfileForLogin(
+  rows: ProfileRouteRow[],
+  email: string | null | undefined,
+  isEmpireOperator: boolean,
+): ProfileRouteRow | null {
   if (rows.length === 0) return null;
   if (rows.length === 1) return rows[0];
 
@@ -150,7 +155,7 @@ function chooseProfileForLogin(rows: ProfileRouteRow[], email: string | null | u
   //      candidates intact and let the find chain pick its best.
   //
   // Non-operators get the full row set unchanged.
-  if (isOperatorEmail(email || undefined)) {
+  if (isEmpireOperator) {
     const operatorHome = candidates.filter((row) => isOperatorHomeBrand(row.brand));
     if (operatorHome.length > 0) {
       candidates = operatorHome;
@@ -294,6 +299,11 @@ export async function resolvePostLoginRedirect({
   email?: string | null;
   requestedNext?: string | null;
 }): Promise<string> {
+  // Evaluated ONCE per login and keyed on the auth user: an alias email alone
+  // is what anyone can register, so it must not steer an operator's routing
+  // (the any-tenant deep link, the OASIS-home profile pick). A failed lookup
+  // routes the login like any member's — every destination has its own gate.
+  const isEmpireOperator = await isPlatformOperatorForAuthUser(authUserId, email);
   let rows = await fetchProfileRows(db, authUserId, email);
 
   // Provisioning race recovery (2026-05-24): when a brand-new OAuth
@@ -307,7 +317,7 @@ export async function resolvePostLoginRedirect({
     rows = await fetchProfileRows(db, authUserId, email);
   }
 
-  let profile = chooseProfileForLogin(rows, email);
+  let profile = chooseProfileForLogin(rows, email, isEmpireOperator);
 
   // Orphan recovery (2026-05-29): if there's still no tenant attachment
   // after the provisioning-race retry, check for an active invite pinned
@@ -318,7 +328,7 @@ export async function resolvePostLoginRedirect({
     const recovered = await tryRecoverOrphanInvite(db, authUserId, email);
     if (recovered) {
       rows = await fetchProfileRows(db, authUserId, email);
-      profile = chooseProfileForLogin(rows, email);
+      profile = chooseProfileForLogin(rows, email, isEmpireOperator);
     }
   }
 
@@ -346,6 +356,6 @@ export async function resolvePostLoginRedirect({
   return normalizePostLoginRedirect(requestedNext, {
     tenantSlug: tenant?.slug || null,
     commandCenterProfileSlug: profileSlug,
-    isEmpireOperator: isOperatorEmail(email || profile.email || undefined),
+    isEmpireOperator,
   });
 }

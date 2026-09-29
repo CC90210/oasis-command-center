@@ -18,7 +18,7 @@
 import { notFound } from "next/navigation";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { deriveSigner } from "@/lib/config/agents";
 import {
   jordanSubject,
@@ -74,8 +74,7 @@ export default async function ShopOutPage({ params, searchParams }: PageProps) {
     .eq("id", sess.tenantId)
     .maybeSingle();
   const tenantSlug = (tenantRow.data as { slug: string } | null)?.slug || "";
-  const isOperator = isOperatorEmail(sess.email);
-  if (tenantSlug !== "submissions" && !isOperator) {
+  if (tenantSlug !== "submissions" && !(await isPlatformOperatorForAuthUser(sess.userId, sess.email))) {
     return (
       <main className="mx-auto max-w-3xl px-6 py-12 text-zinc-100">
         <h1 className="text-2xl font-semibold">Shop-out</h1>

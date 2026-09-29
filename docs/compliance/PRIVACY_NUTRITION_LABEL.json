@@ -53,7 +53,7 @@
       "linkedToUser": true,
       "usedForTracking": false,
       "sensitive": false,
-      "sharedWith": ["Turso", "Submitting tenant"],
+      "sharedWith": ["Turso", "The workspace's model provider (when included in agent context)", "Submitting tenant"],
       "retention": "Life of account, then 24 months"
     },
     {
@@ -85,7 +85,8 @@
       "usedForTracking": false,
       "sensitive": false,
       "sharedWith": ["Cloudflare"],
-      "retention": "Up to 30 days"
+      "formerRecipients": ["Vercel, Inc. (request logs from the period it hosted the application, until September 2026)"],
+      "retention": "Up to 30 days (Cloudflare). Vercel request logs from before September 2026 remain under Vercel's own retention until the Vercel account is closed; see legacyDataLocations."
     }
   ],
 
@@ -153,6 +154,11 @@
       "name": "Supabase, Inc.",
       "region": "United States",
       "status": "Legacy copy of records created before the August 2026 move to Turso. No longer used by the application; planned for deletion."
+    },
+    {
+      "name": "Vercel, Inc.",
+      "region": "United States",
+      "status": "Former application host, until September 2026. No longer receives traffic. Request logs (IP address, request path, timestamp, user agent) and build artifacts from that period remain under Vercel's own retention until the Vercel account is closed."
     }
   ],
 
@@ -170,9 +176,10 @@
   "openGaps": [
     "No signed DPA covering the LLM providers for the document-extraction path.",
     "No DPA confirmed with Turso (primary database), OpenRouter, Google (Gemini API path), or Telegram.",
-    "Law 25 privacy impact assessment not yet completed for cross-border transfer of sensitive identifiers.",
+    "Law 25 s.17 privacy impact assessment not yet completed for any transfer outside Quebec (including sensitive identifiers); the assessments are in progress while the transfers continue.",
     "Sensitive identifiers (SSN, DOB, EIN) are not encrypted at the application level.",
     "Legacy Supabase copy of pre-August-2026 records not yet deleted.",
+    "Vercel request logs and build artifacts from before September 2026 remain with Vercel until the account is closed.",
     "No French-language version of the privacy policy or terms (Charter of the French Language, art. 55, for consumer contracts of adhesion in Quebec).",
     "DMCA Designated Agent not yet registered with the U.S. Copyright Office.",
     "Legal copy has not been reviewed by counsel."

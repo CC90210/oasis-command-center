@@ -241,7 +241,8 @@ export const DATA_MATRIX: DataCategory[] = [
     category: "Business identifiers",
     examples: "company, address, city, state, zip, revenue",
     purpose: "Qualifying and routing an application to the correct workflow",
-    sharedWith: "Turso (storage), and the tenant whose form was submitted",
+    sharedWith:
+      "Turso (storage); the workspace's model provider when included in agent context; and the tenant whose form was submitted",
     sensitive: false,
     retention: "Life of the account, then 24 months",
   },
@@ -271,7 +272,8 @@ export const DATA_MATRIX: DataCategory[] = [
     purpose: "Security, abuse prevention, and debugging",
     sharedWith: "Cloudflare (hosting logs)",
     sensitive: false,
-    retention: "Up to 30 days (platform logs)",
+    retention:
+      "Up to 30 days (platform logs). Request logs from before September 2026 remain with our former hosting provider until that account is closed (section 6).",
   },
 ];
 

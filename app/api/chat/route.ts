@@ -59,7 +59,6 @@ import { resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
-import { isOperatorEmail } from "@/lib/operator-credentials";
 import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
@@ -310,9 +309,13 @@ export async function POST(req: NextRequest) {
   //   - run_script (arbitrary Python execution)
   //   - delete_record without an explicit operator confirmation flow
   //
-  // Operators (OPERATOR_EMAIL / ADMIN_EMAILS) get the full unrestricted
-  // palette so CC's own multi-tool workflows aren't crippled.
-  const isOperator = isOperatorEmail(user.email);
+  // Verified platform operators get the full unrestricted palette so CC's own
+  // multi-tool workflows aren't crippled. The verdict is the one
+  // resolveChatContext already reached (lib/platform-operator.ts: alias AND
+  // owner/admin OASIS membership by auth id) — re-deriving it here from the
+  // email would hand bash/write_file/run_script to anyone who registered an
+  // unclaimed alias.
+  const isOperator = ctxResult.isOperator;
   if (!toolPalette && !isOperator) {
     toolPalette = SAFE_TENANT_TOOL_PALETTE;
   }

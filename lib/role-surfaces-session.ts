@@ -15,16 +15,28 @@
 
 import { notFound } from "next/navigation";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { chooseActiveProfile, type ActiveUserProfile } from "@/lib/active-profile-resolver";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import {
+  resolvePlatformOperatorForAuthUser,
+  type PlatformOperatorCheck,
+} from "@/lib/platform-operator";
 import { getTenant } from "@/lib/queries";
-import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
+import { getSessionUser } from "@/lib/supabase-server";
 import {
   capabilitiesFor,
   resolvePersona,
   type Persona,
   type SurfaceCapabilities,
 } from "@/lib/role-surfaces";
+
+// The verified operator rule lives in lib/platform-operator.ts so route
+// handlers and lib code can use it without loading next/navigation. Re-exported
+// here so a page reaches every operator helper from one import.
+export {
+  OASIS_OPERATOR_TENANT_ID,
+  isPlatformOperatorForAuthUser,
+  resolvePlatformOperatorForAuthUser,
+  type PlatformOperatorCheck,
+} from "@/lib/platform-operator";
 
 export type ViewerSurface = {
   ok: true;
@@ -127,51 +139,12 @@ export async function requireSystemSurface(): Promise<void> {
 }
 
 /**
- * The OASIS home tenant (slug `oasis-ai-cc`). A platform operator is a founder
- * HERE — not merely someone whose email is on a list.
- *
- * Declared rather than imported from lib/web-leads/tenant.ts (WEBDEV_TENANT_ID
- * holds the same uuid today): that constant has been repointed once already, to
- * move the web-design leads, and a lead-routing change must never silently move
- * who holds operator powers across every tenant.
- */
-export const OASIS_OPERATOR_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
-
-export type PlatformOperatorCheck =
-  | { operator: true; userId: string }
-  | {
-      operator: false;
-      reason: "no_session" | "not_operator_email" | "not_oasis_founder" | "lookup_failed";
-    };
-
-type OperatorProfileRow = ActiveUserProfile & { deactivated_at?: string | null };
-
-/**
  * Is the signed-in AUTH USER a platform operator (P0-7 interim, 2026-09-28)?
  *
- * Both must hold:
- *   1. the session email is an operator alias (isOperatorEmail), and
- *   2. that auth user id is an active owner/admin member of the OASIS tenant.
- *
- * Why (2) exists: isOperatorEmail alone trusts an email string, and signup
- * issues a session to any address with no proof of ownership. Any alias in
- * OPERATOR_EMAIL / ADMIN_EMAILS with no live auth user could be registered by
- * a stranger, who then held operator access to every tenant. A stranger who
- * registers an alias gets their OWN new tenant, never an owner/admin row in
- * OASIS's, so the membership check closes that without a migration. The
- * durable fix is a platform_operators table keyed by auth id (doc 02 P0-7).
- *
- * Membership is read by auth_user_id ONLY. The email fallback in
- * resolveActiveProfileForUser is exactly the path an alias squatter would ride,
- * so it is not used here, and neither is the viewer's ACTIVE profile — CC stays
- * an operator while standing in another workspace.
- *
- * "Owner/admin" is resolvePersona's founder rule with the admin_access toggle
- * forced off: that toggle hands someone the full screen of ONE workspace and
- * explicitly confers no escalation powers, and operator is the biggest one.
- * Duplicate OASIS rows resolve through chooseActiveProfile, the same canonical
- * pick every session makes, so a stale admin duplicate cannot elevate a
- * current non-admin row; a deactivated canonical row is refused.
+ * Reads the session, then applies lib/platform-operator.ts
+ * resolvePlatformOperatorForAuthUser — the alias AND an active owner/admin
+ * OASIS membership read by auth_user_id. The full rule and the reasons for each
+ * half are documented there; this function adds only the session read.
  *
  * Fails CLOSED: any session or profile lookup error is logged and answers
  * "not an operator".
@@ -185,38 +158,7 @@ export async function resolvePlatformOperator(): Promise<PlatformOperatorCheck> 
     return { operator: false, reason: "lookup_failed" };
   }
   if (!user?.id) return { operator: false, reason: "no_session" };
-  // Cheap check first: a session that is not on the alias list never costs a
-  // database read, which is every client member on every gated request.
-  if (!isOperatorEmail(user.email)) return { operator: false, reason: "not_operator_email" };
-
-  let rows: OperatorProfileRow[];
-  try {
-    const { data, error } = await getServiceSupabase()
-      .from("user_profiles")
-      .select("id, email, tenant_id, team_role, is_owner, admin_access, onboarding_completed_at, updated_at, deactivated_at")
-      .eq("auth_user_id", user.id)
-      .eq("tenant_id", OASIS_OPERATOR_TENANT_ID)
-      .limit(20);
-    if (error) throw new Error(error.message);
-    rows = (data || []) as OperatorProfileRow[];
-  } catch (err) {
-    console.error("[role-surfaces.platform_operator.membership]", err);
-    return { operator: false, reason: "lookup_failed" };
-  }
-  if (rows.length === 0) return { operator: false, reason: "not_oasis_founder" };
-
-  const profile = chooseActiveProfile(rows, user.email) as OperatorProfileRow;
-  const founder =
-    !profile.deactivated_at &&
-    resolvePersona({
-      teamRole: profile.team_role,
-      // Number(): true and 1 both count, and a stringly "0" cannot read as truthy.
-      isTrueAdmin: Number(profile.is_owner) === 1,
-      adminAccess: false,
-    }) === "founder";
-  return founder
-    ? { operator: true, userId: user.id }
-    : { operator: false, reason: "not_oasis_founder" };
+  return resolvePlatformOperatorForAuthUser(user.id, user.email);
 }
 
 /** Boolean form of resolvePlatformOperator, for callers that only branch. */
