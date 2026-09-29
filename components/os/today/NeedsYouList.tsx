@@ -38,8 +38,9 @@ const PILL_TONE: Record<NeedsYouTone, string> = {
   info: "bg-bg-elev text-fg-muted",
 };
 
-function formatCount(n: number): string {
-  return n > 99 ? "99+" : String(n);
+/** Past 99 the pill is a floor anyway; below it, a capped read prints "N+". */
+function formatCount(n: number, capped = false): string {
+  return n > 99 ? "99+" : capped ? `${n}+` : String(n);
 }
 
 export function NeedsYouList({ needsYou }: { needsYou: NeedsYou }) {
@@ -89,7 +90,7 @@ export function NeedsYouList({ needsYou }: { needsYou: NeedsYou }) {
                     <span
                       className={`mt-0.5 inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${PILL_TONE[item.tone]}`}
                     >
-                      {formatCount(item.count)}
+                      {formatCount(item.count, item.capped === true)}
                     </span>
                   )}
                   <ChevronRight

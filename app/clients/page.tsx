@@ -16,8 +16,18 @@ import Link from "next/link";
 import { Card } from "@/components/Card";
 import { PageFrame } from "@/components/os/PageFrame";
 import { requireOsRoute } from "@/components/os/landings/page-gate";
-import { CLIENTS_LEAD_LIMIT, loadClientSources, type SourceState } from "@/components/os/landings/clients-data";
-import { buildClientRows, type ClientRow } from "@/components/os/landings/clients-model";
+import {
+  CLIENTS_DELIVERY_LIMIT,
+  CLIENTS_LEAD_LIMIT,
+  loadClientSources,
+  type SourceState,
+} from "@/components/os/landings/clients-data";
+import {
+  buildClientRows,
+  shownCount,
+  type ClientFloors,
+  type ClientRow,
+} from "@/components/os/landings/clients-model";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
 
@@ -78,16 +88,29 @@ export default async function ClientsPage() {
   }
 
   const leads = rowsOf(sources.wonDeals) ?? [];
-  const built = buildClientRows({ leads, projects: rowsOf(sources.projects), tickets: rowsOf(sources.tickets) });
+  const projectsCapped = sources.projects.state === "ok" && sources.projects.truncated;
+  const ticketsCapped = sources.tickets.state === "ok" && sources.tickets.truncated;
+  const built = buildClientRows({
+    leads,
+    projects: rowsOf(sources.projects),
+    tickets: rowsOf(sources.tickets),
+    capped: {
+      leads: sources.wonDeals.state === "ok" && sources.wonDeals.truncated,
+      projects: projectsCapped,
+      tickets: ticketsCapped,
+    },
+  });
+  const { floors } = built;
   const openTickets = sumKnown(built.rows.map((r) => r.openTickets));
   const activeProjects = sumKnown(built.rows.map((r) => r.activeProjects));
   const subtitle = [
-    `${built.rows.length} client${built.rows.length === 1 ? "" : "s"}`,
-    openTickets === null ? null : `${openTickets} open ticket${openTickets === 1 ? "" : "s"}`,
-    activeProjects === null ? null : `${activeProjects} active project${activeProjects === 1 ? "" : "s"}`,
+    counted(built.rows.length, floors.clients, "client"),
+    openTickets === null ? null : counted(openTickets, floors.openTickets, "open ticket"),
+    activeProjects === null ? null : counted(activeProjects, floors.activeProjects, "active project"),
   ]
     .filter(Boolean)
     .join(" · ");
+  const cappedLists = [projectsCapped ? "projects" : null, ticketsCapped ? "open tickets" : null].filter(Boolean);
   const failed = [
     sources.wonDeals.state === "error" ? "won deals from Pipeline" : null,
     sources.projects.state === "error" ? "projects" : null,
@@ -111,12 +134,13 @@ export default async function ClientsPage() {
         {built.rows.length === 0 && failed.length === 0 ? (
           <HowClientsAppear lead="No clients yet." canOpenPipeline={canOpen("/pipeline")} />
         ) : built.rows.length > 0 ? (
-          <ClientsTable rows={built.rows} deliveryHidden={deliveryHidden} />
+          <ClientsTable rows={built.rows} deliveryHidden={deliveryHidden} floors={floors} />
         ) : null}
 
         {built.unlinkedTickets !== null && built.unlinkedTickets > 0 && (
           <p className="text-[13px] text-fg-muted">
-            {built.unlinkedTickets} open ticket{built.unlinkedTickets === 1 ? " is" : "s are"} not linked to a client yet.{" "}
+            {shownCount(built.unlinkedTickets, floors.unlinkedTickets)} open ticket
+            {built.unlinkedTickets === 1 && !floors.unlinkedTickets ? " is" : "s are"} not linked to a client yet.{" "}
             {canOpen("/tickets") && (
               <Link href="/tickets" prefetch={false} className="text-accent hover:underline">
                 Review in Support desk
@@ -126,6 +150,12 @@ export default async function ClientsPage() {
         )}
         {sources.wonDeals.state === "ok" && sources.wonDeals.truncated && (
           <p className="text-xs text-fg-dim">Showing the {CLIENTS_LEAD_LIMIT} most recently updated won deals.</p>
+        )}
+        {cappedLists.length > 0 && (
+          <p className="text-xs text-fg-dim">
+            Only the first {CLIENTS_DELIVERY_LIMIT} {cappedLists.join(" and ")} were read, so counts marked + are
+            minimums, not totals.
+          </p>
         )}
       </div>
     </PageFrame>
@@ -140,6 +170,11 @@ function sumKnown(values: ReadonlyArray<number | null>): number | null {
     total += v;
   }
   return total;
+}
+
+/** "3 clients", "1 client", "500+ open tickets" — a floor is never singular. */
+function counted(value: number, floor: boolean, noun: string): string {
+  return `${shownCount(value, floor)} ${noun}${value === 1 && !floor ? "" : "s"}`;
 }
 
 function HowClientsAppear({ lead, canOpenPipeline }: { lead: string; canOpenPipeline: boolean }) {
@@ -161,7 +196,7 @@ function HowClientsAppear({ lead, canOpenPipeline }: { lead: string; canOpenPipe
   );
 }
 
-function Count({ value, hidden }: { value: number | null; hidden: boolean }) {
+function Count({ value, hidden, floor }: { value: number | null; hidden: boolean; floor: boolean }) {
   if (value === null) {
     return (
       <span className="text-fg-dim" title={hidden ? "Owners only" : "Couldn't load"} aria-label={hidden ? "Owners only" : "Couldn't load"}>
@@ -169,10 +204,25 @@ function Count({ value, hidden }: { value: number | null; hidden: boolean }) {
       </span>
     );
   }
-  return <span className={value > 0 ? "text-fg" : "text-fg-muted"}>{value}</span>;
+  return (
+    <span
+      className={value > 0 ? "text-fg" : "text-fg-muted"}
+      title={floor ? `At least ${value}: the list stopped at its read limit` : undefined}
+    >
+      {shownCount(value, floor)}
+    </span>
+  );
 }
 
-function ClientsTable({ rows, deliveryHidden }: { rows: readonly ClientRow[]; deliveryHidden: boolean }) {
+function ClientsTable({
+  rows,
+  deliveryHidden,
+  floors,
+}: {
+  rows: readonly ClientRow[];
+  deliveryHidden: boolean;
+  floors: ClientFloors;
+}) {
   const th = "px-4 py-2 text-left text-xs font-medium text-fg-dim";
   const td = "px-4 py-2.5 align-middle";
   return (
@@ -203,10 +253,10 @@ function ClientsTable({ rows, deliveryHidden }: { rows: readonly ClientRow[]; de
                 </td>
                 <td className={`${td} text-fg-muted`}>{r.status}</td>
                 <td className={`${td} text-right tabular-nums`}>
-                  <Count value={r.openTickets} hidden={deliveryHidden} />
+                  <Count value={r.openTickets} hidden={deliveryHidden} floor={floors.openTickets} />
                 </td>
                 <td className={`${td} text-right tabular-nums`}>
-                  <Count value={r.activeProjects} hidden={deliveryHidden} />
+                  <Count value={r.activeProjects} hidden={deliveryHidden} floor={floors.activeProjects} />
                 </td>
                 <td className={`${td} whitespace-nowrap text-right tabular-nums text-fg-muted`} title={r.lastTouch ?? undefined}>
                   {r.lastTouch ? timeAgo(r.lastTouch) : "—"}

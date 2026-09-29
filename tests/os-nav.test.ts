@@ -41,6 +41,7 @@ import {
   type Persona,
 } from "../lib/role-surfaces";
 import type { OsSectionKey } from "../lib/os/types";
+import { activeRailMode, lastNormalMode, modeToRemember } from "../components/os/rail-mode";
 
 const PERSONAS: Persona[] = ["founder", "manager", "sales", "marketing", "builder", "worker", "readonly", "legacy"];
 const OASIS = "oasis-ai-cc";
@@ -224,8 +225,10 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     for (const href of DAILY) assert.ok(rows.includes(href), `${persona} lost ${href}`);
     assert.ok(rows.includes("/team/sales"), `${persona} works in the Sales department`);
     assert.ok(rows.includes("/team/chief-of-staff"), `${persona} can ask Chief of Staff`);
+    // The Feed row is for everyone; a rep's page is Needs you only (tests/os-landings.test.ts).
+    assert.ok(rows.includes("/feed"), `${persona} gets the Feed`);
     for (const forbidden of ["/team/marketing", "/team/finance", "/team/operations", "/team/client-success",
-      "/founders/marketing", "/forms", "/clients", "/tickets", "/projects", "/feed", "/agents"]) {
+      "/founders/marketing", "/forms", "/clients", "/tickets", "/projects", "/agents"]) {
       assert.ok(!rows.includes(forbidden), `${persona} must not get ${forbidden}`);
     }
     // Zero-row sections vanish: a rep has nothing in Clients or Money.
@@ -234,12 +237,12 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
   }
   // Marketing and the builder keep what they had, plus their departments.
   const marketing = hrefs(oasisViewer("marketing", { founders: { content: true, finances: false } }));
-  for (const href of ["/", "/schedule", "/pipeline", "/playbook", "/founders/marketing", "/team/marketing", "/growth/ads"]) {
+  for (const href of ["/", "/feed", "/schedule", "/pipeline", "/playbook", "/founders/marketing", "/team/marketing", "/growth/ads"]) {
     assert.ok(marketing.includes(href), `marketing lost ${href}`);
   }
   assert.ok(!marketing.includes("/web-leads"), "marketing does not prospect");
   const builder = hrefs(oasisViewer("builder", { founders: { content: true, finances: false } }));
-  for (const href of ["/", "/pipeline", "/web-leads", "/commissions", "/founders/marketing", "/team/sales", "/team/marketing"]) {
+  for (const href of ["/", "/feed", "/pipeline", "/web-leads", "/commissions", "/founders/marketing", "/team/sales", "/team/marketing"]) {
     assert.ok(builder.includes(href), `builder lost ${href}`);
   }
   assert.ok(!builder.includes("/automations") && !builder.includes("/operations"), "never the machine controls");
@@ -264,6 +267,12 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     for (const href of list) {
       assert.ok(href === "/settings" || catalogHrefs.has(href), `${name} allowlists ${href}, which no rail row carries`);
     }
+  }
+  // The Feed row's audience is "everyone" (feed-model.ts: without the tape you
+  // still get Needs you), so no persona allowlist may filter it back out —
+  // CodeRabbit #468 found four that did.
+  for (const persona of PERSONAS) {
+    assert.ok(hrefs(oasisViewer(persona)).includes("/feed"), `${persona} lost the Feed row`);
   }
 }
 
@@ -326,6 +335,38 @@ function oasisViewer(persona: Persona, over: Partial<BuildOsNavInput> = {}): Bui
     const src = readFileSync(join(dir, name), "utf8");
     assert.ok(!/bg-gradient|from-accent|blur-|shadow-glow|animate-pulse|drop-shadow/.test(src), `components/os/${name} has a gradient/glow/perpetual animation`);
   }
+}
+
+// ── 12. The rail remembers the mode actually used (components/os/rail-mode.ts) ─
+// CodeRabbit #468: the remembered mode was read once on mount, so a tab that
+// mounted in Team, moved to Growth and toggled Admin on and off landed on Team.
+{
+  const available: OsSectionKey[] = ["team", "growth", "clients", "admin"];
+  const step = (remembered: OsSectionKey | null, active: OsSectionKey | null) => modeToRemember(active, true) ?? remembered;
+
+  let remembered: OsSectionKey | null = "team"; // what the mount read from sessionStorage
+  let active = activeRailMode({ manual: null, pathMode: "growth", remembered, available });
+  assert.equal(active, "growth", "the path owns the mode");
+  remembered = step(remembered, active);
+  active = activeRailMode({ manual: "admin", pathMode: "growth", remembered, available });
+  assert.equal(active, "admin", "the shield opens Admin");
+  remembered = step(remembered, active);
+  assert.equal(remembered, "growth", "Admin is never the remembered mode");
+  assert.equal(lastNormalMode({ remembered, available }), "growth", "leaving Admin returns to the mode last used, not the mount-time one");
+  // A page no row owns (/settings) keeps the mode last used, not the first one.
+  assert.equal(activeRailMode({ manual: null, pathMode: null, remembered, available }), "growth");
+
+  // Mount race: the first render (before storage is read) falls back to the
+  // first mode, and must not be remembered over the stored one.
+  assert.equal(activeRailMode({ manual: null, pathMode: null, remembered: null, available }), "team");
+  assert.equal(modeToRemember("team", false), null, "nothing is remembered before storage has been read");
+  assert.equal(modeToRemember("admin", true), null);
+  assert.equal(modeToRemember(null, true), null);
+
+  // A remembered mode the viewer no longer has (or a tampered value) falls back.
+  assert.equal(lastNormalMode({ remembered: "money", available }), "team");
+  assert.equal(lastNormalMode({ remembered: "admin", available }), "team");
+  assert.equal(activeRailMode({ manual: "money", pathMode: null, remembered: null, available }), "team", "a tab the viewer lacks is ignored");
 }
 
 console.log(

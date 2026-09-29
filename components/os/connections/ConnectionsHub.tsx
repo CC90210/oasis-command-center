@@ -17,11 +17,12 @@
  * button, so the drawer is one click away for live apps too.
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Info, Search } from "lucide-react";
 import { ConnectorIcon } from "@/components/os/connections/ConnectorIcon";
 import { ConnectorDrawer } from "@/components/os/connections/ConnectorDrawer";
+import { watchPopup } from "@/components/os/connections/popup-watch";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import {
   CONNECTOR_CATALOG,
@@ -79,8 +80,21 @@ export function ConnectionsHub({
   }, []);
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
+  // The one popup being watched. Stopped on unmount and before another popup
+  // starts, so its listener and poll never outlive this hub (popup-watch.ts).
+  const stopWatch = useRef<(() => void) | null>(null);
+  useEffect(
+    () => () => {
+      stopWatch.current?.();
+      stopWatch.current = null;
+    },
+    [],
+  );
+
   const runPopup = useCallback(
     (def: ConnectorDef, href: string, source: string) => {
+      stopWatch.current?.();
+      stopWatch.current = null;
       setBanner(null);
       setBusySlug(def.slug);
       const popup = window.open(href, `${source}_connect`, "popup,width=620,height=780");
@@ -90,40 +104,39 @@ export function ConnectionsHub({
         window.location.href = href;
         return;
       }
-      const h: { onMsg?: (e: MessageEvent) => void; poll?: ReturnType<typeof setInterval> } = {};
-      const finish = (status?: string, reason?: string) => {
-        if (h.onMsg) window.removeEventListener("message", h.onMsg);
-        if (h.poll) clearInterval(h.poll);
-        setBusySlug(null);
-        if (status === "connected") {
-          setBanner({ tone: "ok", text: `${def.name} connected.` });
-        } else if (status === "denied") {
-          setBanner({ tone: "err", text: "Connection cancelled." });
-        } else if (status) {
-          setBanner({
-            tone: "err",
-            text: POPUP_ERRORS[reason || ""] ?? `${def.name} could not connect (${reason || "unknown error"}).`,
-          });
-        }
-        // Re-read every status from the server either way: a popup closed with
-        // no message may still have finished.
-        router.refresh();
-        try {
-          popup.close();
-        } catch {
-          /* already closed */
-        }
-      };
-      h.onMsg = (e: MessageEvent) => {
-        if (e.origin !== window.location.origin) return;
-        const d = e.data as { source?: string; status?: string; reason?: string } | null;
-        if (!d || d.source !== source) return;
-        finish(d.status, d.reason);
-      };
-      window.addEventListener("message", h.onMsg);
-      h.poll = setInterval(() => {
-        if (popup.closed) finish();
-      }, 800);
+      stopWatch.current = watchPopup({
+        popup,
+        source,
+        env: {
+          origin: window.location.origin,
+          addMessageListener: (fn) => window.addEventListener("message", fn),
+          removeMessageListener: (fn) => window.removeEventListener("message", fn),
+          setInterval: (fn, ms) => window.setInterval(fn, ms),
+          clearInterval: (handle) => window.clearInterval(handle as number),
+        },
+        onDone: ({ status, reason }) => {
+          stopWatch.current = null;
+          setBusySlug(null);
+          if (status === "connected") {
+            setBanner({ tone: "ok", text: `${def.name} connected.` });
+          } else if (status === "denied") {
+            setBanner({ tone: "err", text: "Connection cancelled." });
+          } else if (status) {
+            setBanner({
+              tone: "err",
+              text: POPUP_ERRORS[reason || ""] ?? `${def.name} could not connect (${reason || "unknown error"}).`,
+            });
+          }
+          // Re-read every status from the server either way: a popup closed with
+          // no message may still have finished.
+          router.refresh();
+          try {
+            popup.close();
+          } catch {
+            /* already closed */
+          }
+        },
+      });
     },
     [router],
   );

@@ -393,6 +393,13 @@ assert.equal(personaMayVisit("manager", "/commissions"), true);
 assert.equal(personaMayVisit("builder", "/commissions"), true);
 assert.equal(personaMayVisit("marketing", "/commissions"), false);
 assert.ok(SALES_NAV_ALLOWLIST.includes("/"), "Today is on the allowlist");
+// The OASIS OS Feed is a row for everyone (lib/os/nav.ts). None of these
+// personas has canSeeSystemSurfaces, so their Feed is Needs you only and the
+// event tape is never read for them (tests/os-landings.test.ts).
+for (const persona of ["sales", "manager", "marketing", "builder"] as Persona[]) {
+  assert.equal(personaMayVisit(persona, "/feed"), true, `${persona} reaches the Feed`);
+  assert.equal(capabilitiesFor(persona, OASIS).canSeeSystemSurfaces, false, `${persona} must not get the event tape`);
+}
 
 for (const persona of ["founder", "sales", "manager", "builder"] as Persona[]) {
   assert.equal(

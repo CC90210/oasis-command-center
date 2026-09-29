@@ -12,14 +12,21 @@
  * for anyone who cannot see the colour.
  */
 
+import { floorCount } from "@/lib/os/count";
+
 export type DepartmentStatus =
   | { kind: "working" }
-  | { kind: "needs_you"; count: number }
+  | { kind: "needs_you"; count: number; capped: boolean }
   | { kind: "not_connected" };
 
-export function statusFor(channelReady: boolean, needsYou: number): DepartmentStatus {
+/**
+ * `capped`: at least one item behind the total came from a read that hit its
+ * ceiling, so the total is a floor and prints as "2+" (lib/os/count.ts) — the
+ * header must not print "2" over a line that says "2+" (CodeRabbit #469).
+ */
+export function statusFor(channelReady: boolean, needsYou: number, capped = false): DepartmentStatus {
   if (!channelReady) return { kind: "not_connected" };
-  if (needsYou > 0) return { kind: "needs_you", count: needsYou };
+  if (needsYou > 0) return { kind: "needs_you", count: needsYou, capped };
   return { kind: "working" };
 }
 
@@ -28,7 +35,7 @@ export function StatusPill({ status }: { status: DepartmentStatus }) {
     return (
       <span className="inline-flex h-7 items-center gap-1.5 rounded-full bg-unread px-2.5 text-xs font-semibold text-white">
         Needs you
-        <span className="tabular-nums">{status.count}</span>
+        <span className="tabular-nums">{floorCount(status.count, status.capped)}</span>
       </span>
     );
   }

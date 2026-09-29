@@ -316,7 +316,8 @@ async function main() {
       { stage: "review", due_date: null },
       { stage: "live", due_date: "2026-09-01" },
     ],
-    truncated: false,
+    ticketsTruncated: false,
+    projectsTruncated: false,
     now: new Date(now),
     todayKey: "2026-09-28",
   });
@@ -466,6 +467,52 @@ async function main() {
   );
   assert.match(nc, /Not connected Connect/);
   assert.doesNotMatch(nc, /(^|\s)0(\s|$)/);
+
+  // "Within SLA" is a claim about every open ticket. A capped read with nothing
+  // breached in the rows it DID see cannot make it (CodeRabbit #469).
+  const quietDelivery = { ...delivery, breached: [], atRisk: [] };
+  const slaCard = (ticketsTruncated: boolean, projectsTruncated = false) =>
+    buildDepartmentCards({
+      departments: OS_DEPARTMENTS.filter((d) => d.key === "client_success").map((d) => ({ key: d.key, label: d.label, href: d.href })),
+      needsYou: { items: [], unavailable: [] },
+      sales: failed,
+      delivery: { ok: true, value: { ...quietDelivery, ticketsTruncated, projectsTruncated } },
+      content: { ok: true, value: 0 },
+      goal: null,
+      stripeConnected: null,
+    })[0];
+  assert.equal(slaCard(false).status, "Within SLA");
+  assert.equal(slaCard(false).tone, "ok");
+  assert.equal(slaCard(false).detail, "2 active projects · 1 past due");
+  assert.equal(slaCard(true).status, "SLA not fully checked", "a capped ticket read never says Within SLA");
+  assert.equal(slaCard(true).tone, "attention");
+  assert.equal(slaCard(true).metric.kind === "live" && slaCard(true).metric.value, "3+", "the open count is a floor too");
+  // Each read carries its own cap (CodeRabbit #469, second pass): a capped
+  // PROJECT list leaves a complete ticket read complete, and floors only the
+  // project line.
+  const projectsCapped = slaCard(false, true);
+  assert.equal(projectsCapped.status, "Within SLA", "a capped project read says nothing about the tickets");
+  assert.equal(projectsCapped.tone, "ok");
+  assert.equal(projectsCapped.metric.kind === "live" && projectsCapped.metric.value, "3");
+  assert.equal(projectsCapped.detail, "2+ active projects · 1+ past due");
+
+  // A breach found in a capped ticket read is a floor in the Needs-you list
+  // too: "At least" in the title and "1+" on the pill.
+  const cappedNeeds = buildNeedsYou({
+    sales: null,
+    delivery: { ok: true, value: { ...delivery, ticketsTruncated: true } },
+    inbound: null,
+    cash: null,
+    nowMs: now,
+    formatTime: () => "10:00 AM",
+  });
+  const breachItem = cappedNeeds.items.find((i) => i.id === "sla-breached");
+  assert.ok(breachItem && breachItem.capped === true);
+  assert.match(breachItem.title, /^At least 1 ticket is past/);
+  assert.match(render(createElement(NeedsYouList, { needsYou: cappedNeeds })), /Site down 1\+ /, "the pill prints the floor");
+  const exactNeeds = buildNeedsYou({ sales: null, delivery: deliveryRead, inbound: null, cash: null, nowMs: now, formatTime: () => "10:00 AM" });
+  assert.equal(exactNeeds.items.find((i) => i.id === "sla-breached")?.capped, false);
+  assert.doesNotMatch(render(createElement(NeedsYouList, { needsYou: exactNeeds })), /\d\+/, "an exact read prints exact counts");
 
   const gapsList = render(createElement(NeedsYouList, { needsYou: gaps }));
   assert.match(gapsList, /Couldn.t check support tickets, pipeline follow-ups, inbound replies/);

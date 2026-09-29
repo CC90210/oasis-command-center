@@ -29,6 +29,8 @@ import {
   departmentProfile,
   suggestedAsksFor,
 } from "../components/os/department/config";
+import { tileCount } from "../components/os/department/count-rules";
+import { statusFor } from "../components/os/department/StatusPill";
 import {
   describeSchedule,
   failedWithin,
@@ -308,6 +310,57 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   // SQLite hands booleans back as 0/1: a disabled routine must not read "On".
   assert.equal(normalizeRoutineRow({ id: 1, enabled: 0, agent_key: "BRAVO" }).enabled, false);
   assert.equal(normalizeRoutineRow({ id: 1, enabled: 1, agent_key: "BRAVO" }).agentKey, "bravo");
+}
+
+// ── 11. A capped ticket count is a floor on every tab ─────────────────────
+// CodeRabbit #468: Client Success printed "500+" for a ticket list at its read
+// ceiling while Chief of Staff printed the same count as an exact "500".
+{
+  assert.equal(tileCount(500, true), "500+");
+  assert.equal(tileCount(1234, false), "1,234");
+  assert.equal(tileCount(0, false), "0");
+  const numbers = read("components/os/department/numbers.ts");
+  assert.doesNotMatch(numbers, /\bn\(d\.open\)/, "an open-ticket tile printed the raw count, dropping the floor marker");
+  // Breached / at-risk come from the same capped ticket read, active projects
+  // from a capped project read: all floors when the read hit its ceiling.
+  assert.doesNotMatch(
+    numbers,
+    /\bn\(d\.(breached|atRisk|activeProjects)\)/,
+    "a delivery tile printed a raw count from a capped read, dropping the floor marker",
+  );
+  assert.match(numbers, /tileCount\(d\.breached, d\.truncated\)/);
+  assert.match(numbers, /tileCount\(d\.atRisk, d\.truncated\)/);
+  assert.match(numbers, /tileCount\(d\.activeProjects, d\.projectsTruncated\)/);
+  // ONE floor rule for the whole shell: Today and Clients use lib/os/count.ts
+  // too, so the same queue can never print "≥500" on one screen and "500+" on
+  // another (three hand-rolled copies had drifted exactly that way).
+  const today = read("components/os/today/model.ts");
+  const clients = read("components/os/landings/clients-model.ts");
+  assert.match(today, /from "@\/lib\/os\/count"/);
+  assert.match(clients, /from "@\/lib\/os\/count"/);
+  assert.doesNotMatch(today, /["`]≥/, "Today hand-rolls a floor marker instead of floorCount");
+  assert.doesNotMatch(clients, /\$\{value\}\+`/, "Clients hand-rolls a floor marker instead of floorCount");
+  assert.equal(
+    (numbers.match(/tileCount\(d\.open, d\.truncated\)/g) || []).length,
+    2,
+    "Chief of Staff and Client Success both print open tickets through tileCount",
+  );
+  // No hand-rolled floor anywhere in the tile builders (CodeRabbit #469 found
+  // two: new leads this week and form submissions).
+  assert.doesNotMatch(numbers, /\$\{n\([^)]*\)\}\+/, "a tile hand-rolls a floor marker instead of tileCount");
+
+  // The header's "Needs you" total is a floor whenever any item behind it is
+  // (CodeRabbit #469): the header must not print "2" over a line saying "2+".
+  assert.deepEqual(statusFor(true, 2, true), { kind: "needs_you", count: 2, capped: true });
+  assert.deepEqual(statusFor(true, 2), { kind: "needs_you", count: 2, capped: false }, "uncapped by default");
+  assert.deepEqual(statusFor(true, 0, true), { kind: "working" });
+  assert.deepEqual(statusFor(false, 2, true), { kind: "not_connected" });
+  const pill = read("components/os/department/StatusPill.tsx");
+  assert.match(pill, /floorCount\(status\.count, status\.capped\)/, "the pill prints the total through the shared floor rule");
+  assert.match(numbers, /capped: d\.truncated/, "a breach item carries its read's cap");
+  const page = read("app/team/[dept]/page.tsx");
+  assert.match(page, /numbers\.attention\.some\(\(item\) => item\.capped === true\)/);
+  assert.match(page, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
 }
 
 console.log(

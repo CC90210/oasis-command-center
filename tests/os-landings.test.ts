@@ -453,13 +453,26 @@ async function main() {
     assert.ok(!t.includes("OASIS-MARKER-FINANCE"), "company money reached a non-owner");
     assert.ok(!t.includes("CLIENT-MARKER"));
   });
-  await check("/feed: a rep (Feed is not on their rail) gets a 404 and never triggers the event read", async () => {
-    for (const tab of [undefined, "all", "shipped"]) {
-      const run = await feedFor("rep", tab);
-      assert.ok(run.result instanceof Error && /404/.test(run.result.message), `tab=${tab}: ${String(run.result)}`);
-      assert.deepEqual(touchesEvents(run.sql), [], `tab=${tab}: agent_events was read for a rep`);
-    }
-  });
+  // The Feed row is for everyone (CodeRabbit #468 found four persona allowlists
+  // filtering it out). Without the tape, the page is Needs you and nothing else.
+  for (const who of ["rep", "manager", "marketer"] as const) {
+    await check(`/feed: a ${who} (no system surfaces) gets Needs you only and never triggers the event read`, async () => {
+      const { NeedsYouEmpty, FeedTabs } = await import("../components/os/landings/FeedView");
+      for (const tab of [undefined, "all", "shipped"]) {
+        const run = await feedFor(who, tab);
+        assert.ok(!(run.result instanceof Error), `tab=${tab}: ${String(run.result)}`);
+        assert.deepEqual(touchesEvents(run.sql), [], `tab=${tab}: agent_events was read for a ${who}`);
+        const els = walk(run.result).elements;
+        assert.ok(els.some((e) => e.type === NeedsYouEmpty), `tab=${tab}: the Needs-you panel renders`);
+        const tabs = els.find((e) => e.type === FeedTabs)?.props;
+        assert.deepEqual([tabs?.active, tabs?.tabs], ["needs", ["needs"]], `tab=${tab}: only Needs you, whatever ?tab= says`);
+        const t = text(run.result);
+        for (const m of ["OASIS-MARKER-PLAIN", "OASIS-MARKER-SHIPPED", "OASIS-MARKER-FINANCE", "CLIENT-MARKER"]) {
+          assert.ok(!t.includes(m), `tab=${tab}: ${m} reached a ${who}`);
+        }
+      }
+    });
+  }
   await check("/feed: Shipped holds the send, not the record change", async () => {
     const run = await feedFor("cc", "shipped");
     const rows = walk(run.result).elements.find((e) => e.props && "rows" in e.props && "departmentLabels" in e.props)?.props.rows as
@@ -537,6 +550,37 @@ async function main() {
     assert.ok(!text(run.result).includes("Harbour"));
     assert.deepEqual(run.sql.filter((s) => /tenant_records|delivery_projects|support_tickets/i.test(s)), []);
   });
+  await check("/clients: a ticket list past its read cap shows floors (N+), never a total", async () => {
+    const { CLIENTS_DELIVERY_LIMIT } = await import("../components/os/landings/clients-data");
+    // One more open ticket than the read returns, all on Harbour's project and
+    // newer than the fixture's two, so the capped read is exactly these.
+    await raw.batch(
+      Array.from({ length: CLIENTS_DELIVERY_LIMIT + 1 }, (_, i) => ({
+        sql: `INSERT INTO support_tickets (id, tenant_id, ticket_seq, ticket_number, title, status, project_id, sla_target)
+              VALUES (?, ?, ?, ?, 'Capped', 'open', 'proj-1', ?)`,
+        args: [`cap-${i}`, OASIS, 1000 + i, `T-C${i}`, iso(-60 * MINUTE)],
+      })),
+      "write",
+    );
+    try {
+      await login("cc");
+      const tree = await ClientsPage();
+      const els = walk(tree).elements;
+      const table = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)?.props as
+        | { rows: Array<{ name: string; openTickets: number | null }>; floors: Record<string, boolean> }
+        | undefined;
+      assert.deepEqual(table?.rows.map((r) => [r.name, r.openTickets]), [["Harbour Dental", CLIENTS_DELIVERY_LIMIT]]);
+      assert.equal(table?.floors.openTickets, true, "the per-client ticket count is marked as a floor");
+      assert.equal(table?.floors.activeProjects, false, "the project list was not capped");
+      const subtitle = els.find((e) => e.props && e.props.title === "Clients" && "subtitle" in e.props)?.props.subtitle;
+      assert.equal(subtitle, `1 client · ${CLIENTS_DELIVERY_LIMIT}+ open tickets · 1 active project`);
+      const all = walk(tree).strings.join("");
+      assert.ok(all.includes(`Only the first ${CLIENTS_DELIVERY_LIMIT} open tickets were read`), "the cap is said in words");
+      assert.ok(all.includes(`${CLIENTS_DELIVERY_LIMIT}+`), "the table cell prints the floor");
+    } finally {
+      await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
+    }
+  });
 
   // ── /growth/ads ────────────────────────────────────────────────────────
   await check("/growth/ads: no number on the page; every tile says Not connected", async () => {
@@ -601,6 +645,34 @@ async function main() {
     });
     assert.deepEqual(built.rows.map((r) => [r.name, r.contact, r.status, r.openTickets, r.activeProjects]), [["Nine Co", "Nina", "Live", 1, 0]]);
     assert.equal(built.unlinkedTickets, 0);
+  });
+  await check("clients-model: a capped list makes its counts floors (N+), never totals", () => {
+    const leads = [{ id: "l1", data: { stage: "won", company: "Acme", email: "a@acme.test" } }];
+    const projects = [
+      { id: "p1", title: "Site", lead_id: "l1", client_tenant_id: null, client_tenant_name: null, client_name: "Acme", client_email: null, stage: "building", last_client_update_at: null },
+    ];
+    const tickets = [
+      { id: "k1", project_id: "p1", client_tenant_id: null, client_email: null, created_at: "2026-09-20T00:00:00Z", last_public_reply_at: null },
+      { id: "k2", project_id: null, client_tenant_id: null, client_email: "who@nowhere.test", created_at: "2026-09-20T00:00:00Z", last_public_reply_at: null },
+    ];
+    const none = { clients: false, openTickets: false, activeProjects: false, unlinkedTickets: false };
+    const exact = cm.buildClientRows({ leads, projects, tickets });
+    assert.deepEqual(exact.floors, none, "nothing capped: every count is a total");
+    assert.equal(exact.unlinkedTickets, 1);
+    const t = cm.buildClientRows({ leads, projects, tickets, capped: { tickets: true } });
+    assert.deepEqual(t.floors, { ...none, openTickets: true, unlinkedTickets: true });
+    assert.equal(t.unlinkedTickets, 1, "a capped ticket list still counts what it read, as a floor");
+    const p = cm.buildClientRows({ leads, projects, tickets, capped: { projects: true } });
+    assert.deepEqual(p.floors, { ...none, clients: true, openTickets: true, activeProjects: true });
+    assert.equal(p.unlinkedTickets, null, "a ticket whose project was not read lands in unlinked: unknown, not a number");
+    const l = cm.buildClientRows({ leads, projects, tickets, capped: { leads: true } });
+    assert.deepEqual(l.floors, { ...none, clients: true });
+    assert.equal(l.unlinkedTickets, null);
+    // Unreadable stays unknown; a cap on a list the viewer cannot read changes nothing.
+    const hidden = cm.buildClientRows({ leads, projects: null, tickets: null, capped: { projects: true, tickets: true } });
+    assert.deepEqual(hidden.floors, none);
+    assert.equal(cm.shownCount(500, true), "500+");
+    assert.equal(cm.shownCount(3, false), "3");
   });
 
   const mm = await import("../components/os/landings/money-model");
