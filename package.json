@@ -13,6 +13,7 @@
     "test:sunbiz": "node tests/_suite.mjs",
     "test:web-leads": "node tests/_suite-web-leads.mjs",
     "test:lead-advancements": "node --conditions=react-server --import tsx tests/lead-declined-transfer.test.ts && node --conditions=react-server --import tsx tests/lead-drawer-layout.test.ts",
+    "test:calendar": "node --conditions=react-server --import tsx tests/calendar-engine.test.ts && node --conditions=react-server --import tsx tests/schedule-model.test.ts",
     "test:chat-modes": "node --conditions=react-server --import tsx tests/chat-modes.test.ts",
     "test:event-bus": "node --conditions=react-server --import tsx tests/event-bus-display.test.ts",
     "test:streaming-redactor": "node --conditions=react-server --import tsx tests/streaming-redactor.test.ts",
