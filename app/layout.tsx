@@ -75,7 +75,7 @@ export const metadata: Metadata = {
   icons: { icon: "/favicon.ico" },
 };
 
-/** The only seed slugs the public demo cookie may select (set by /api/demo/sun). */
+/** The only seed slugs the public demo cookie may select. /api/demo/sun, which set it, was deleted 2026-09-29; a browser can still carry one until it expires. */
 const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
 
 export default async function RootLayout({
@@ -105,9 +105,8 @@ export default async function RootLayout({
     // itself: the matcher would swallow every route in the app and strip
     // the operator chrome site-wide.
     ...ALL_MARKETING_PATHS,
-    "/welcome",   // legacy URL; next.config.js 308s it to /start before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
+    "/welcome",   // legacy URL; next.config.js 308s it to "/" before middleware or this layout ever see it. Inert backstop, same reasoning as the middleware entry.
     "/download",
-    "/configure",
     "/login",
     "/signup",
     "/forgot-password",

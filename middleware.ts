@@ -1,7 +1,8 @@
 /**
  * Auth middleware — gates every page behind a Supabase session.
  *
- * Public routes: auth pages, public webhooks, install scripts, brand assets.
+ * Public routes: auth pages, public webhooks, brand assets, and routes that
+ * gate themselves inside (the operator-only install scripts among them).
  * Everything else redirects to /login when there's no session.
  */
 
@@ -15,16 +16,19 @@ import { OS_REDIRECTS } from "./lib/os/redirects";
 
 export const PUBLIC_PATH_PREFIXES = [
   // Public marketing site — /home (served at "/" via the rewrite below),
-  // /fleet, /work, /about, /contact, /start. Sourced from
+  // /fleet, /work, /about, /contact. Sourced from
   // lib/marketing/routes.ts so this list and the root layout's
   // FULL_BLEED_PREFIXES can never disagree about what is public. The three
   // legal pages are listed individually further down — they predate the
   // marketing site and their comments explain why each must stay public.
   ...MARKETING_PATHS,
-  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to /start, and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
-  "/download",             // public OASIS Desktop downloads
-  "/configure",            // public agent configurator (pre-signup)
-  "/demo/sun",             // public Sun Biz review shell; demo data only
+  "/welcome",              // Legacy landing URL. app/welcome/ no longer exists — next.config.js 308s it to "/", and config redirects run BEFORE middleware, so this entry is never actually consulted today. Kept as a backstop: if that redirect is ever removed, /welcome should 404 rather than bounce an anonymous visitor to /login.
+  "/download",             // OASIS Desktop page. Public, but the page decides what it shows: the release links for a verified platform operator, a "private beta" notice with no links for everyone else (the release repo is private).
+  // /configure, /start and /demo/sun removed 2026-09-29 (F0 containment): the
+  // developer install funnel and the retired SunBiz demo. Each page now calls
+  // notFound(); tests/f0-containment.test.ts pins both halves.
+  "/install.ps1",          // Operator-only install scripts. Public HERE only so a signed-out `irm | iex` or `curl | bash` gets the route's plain 404 instead of an HTML login page piped into a shell; the route itself (lib/install-scripts.ts) serves the script to a verified platform operator session and 404s everyone else.
+  "/install.sh",           // Same as /install.ps1.
   "/oasis-loop",           // public static OASIS Loop HTML deliverables under /public/oasis-loop
   "/unsubscribe",          // CASL-compliant email unsubscribe landing — reached from email footers (DEFAULT_UNSUBSCRIBE_BASE in BEA/scripts/casl_compliance.py). Recipients may not have an account; the confirmation page reads ?email=&brand=&token= from the URL and POSTs to /api/unsubscribe (also public, service-role insert into email_suppressions). MUST be public or every unsub link 401s before the form renders, which is itself a CASL violation.
   "/api/unsubscribe",      // companion API for /unsubscribe — POST records the suppression via service-role Supabase client. Token-validated INSIDE the route when OASIS_UNSUBSCRIBE_HMAC_SECRET is set; otherwise email-only opt-out is accepted (matches the URL format casl_compliance.py emits today).
@@ -62,8 +66,8 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/auth/provision-cli", // setup-wizard operator-account creation, called by install/bootstrap.py — CLI_SIGNUP_SECRET bearer gated INSIDE the route, no session. MUST be public or installer account-creation 401s before its secret check ("/api/auth/provision" can't cover the "-cli" suffix — matchesPathPrefix needs prefix+"/").
   "/api/auth/pair",        // setup-wizard pairing (Bearer-auth gated inside)
   "/api/auth/pair-code/redeem", // machine-facing pair-code redemption — the CODE is the auth (no session); the route is IP-rate-limited + code-shape-validated + single-use + 15-min TTL. MUST be public or every machine pairing 401s before reaching the handler (matchesPathPrefix won't let the `/api/auth/pair` entry cover `pair-code`). NOTE: the mint endpoint `/api/auth/pair-code` stays session-gated — only `/redeem` is public.
-  "/api/demo/sun",         // sets Sun demo shell cookie; never exposes live tenant data
-  "/api/download/desktop", // public OS-aware desktop download redirect
+  // /api/demo/sun removed 2026-09-29 with /demo/sun (the route is deleted).
+  "/api/download/desktop", // OS-aware desktop download redirect. Public so a signed-out click lands somewhere; the route sends a verified platform operator to the release file and everyone else back to /download.
   "/api/bridge",           // local-bridge daemon heartbeat (Bearer token gated inside)
   "/api/cron-jobs/poll",   // local-bridge cron poll — Bearer bridge_pairings token gated + rate-limited INSIDE the route (resolveBridge), no session. MUST be public or the bridge's cron poll 401s before its bearer-auth runs (the `/api/cron` entry can't cover it — matchesPathPrefix needs prefix+"/", and it's `cron-jobs`). This is what blocks all cron automations from firing. Only `/poll` is public; the session-authed `/api/cron-jobs` CRUD stays gated.
   "/api/integrations/registry",  // canonical service+env_key list — used by the bridge to decide what to ping; non-sensitive (names only, no values), 5min Cache-Control
@@ -82,7 +86,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // CC's ACTIVE_TASKS mirror (oasis_quests) to the whole internet. The route
   // now requires a platform-operator session.
   "/api/track",            // Email-open tracking pixel (Phase 19 SunBiz CRM, 2026-05-17). Must be public — mail clients fetch the pixel without a session. Route resolves tenant_id by lookup against the interaction row (never trusts the URL parameter) and always returns a 1x1 GIF, so 401-gating it would silently break every operator's open-rate tracking. Migration 050 dedupes by (outbound_message_id, ip_hash) so a known reservation_id can't be replayed to inflate row counts.
-  "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. The route returns a static JSON status with no sensitive payload, so 401-gating it would silently break health monitoring across the deploy.
+  "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. Public callers get build info only; the per-secret presence map is added for a verified platform operator session alone (gated inside the route). 401-gating it would silently break health monitoring across the deploy.
   // /api/forms is intentionally NOT a public prefix — /api/forms (list),
   // /api/forms/[id] (CRUD), and /api/forms/[id]/mint-link are all
   // admin-only (session-authed). The two PUBLIC form endpoints below
@@ -119,10 +123,11 @@ export const PUBLIC_PATH_PREFIXES = [
 // itself can never be added to PUBLIC_PATH_PREFIXES.
 
 // Public static-asset extensions. Anything served from /public with one of
-// these suffixes is allowed without auth — install scripts (curl|bash) and
-// brand assets MUST be reachable anonymously.
+// these suffixes is allowed without auth — brand assets MUST be reachable
+// anonymously. ".sh" and ".ps1" were here for the install one-liners until
+// 2026-09-29; those are operator-gated routes now, listed by exact path above,
+// so a blanket extension rule would only make the next *.sh route public.
 const PUBLIC_FILE_EXTENSIONS = [
-  ".sh", ".ps1",                              // install one-liners
   ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",  // images
   ".txt", ".webmanifest", ".xml", ".json",    // robots / manifests
   ".woff", ".woff2", ".ttf",                  // fonts

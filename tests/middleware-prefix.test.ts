@@ -51,12 +51,19 @@ for (const open of [
   "/work",
   "/about",
   "/contact",
-  "/start",
   "/privacy",
   "/terms",
   "/dmca",
 ]) {
   assert.equal(isPublic(open), true, `${open} is public marketing`);
+}
+
+// /start left the marketing site on 2026-09-29 (F0 containment): it fed the
+// developer install funnel, whose repo went private. It is a 404 now, and off
+// the public list with /configure and /demo/sun; tests/f0-containment.test.ts
+// pins the rest.
+for (const retired of ["/start", "/configure", "/demo/sun"]) {
+  assert.equal(isPublic(retired), false, `${retired} is retired and must not be public`);
 }
 
 // The marketing prefixes must not over-match a future dashboard route

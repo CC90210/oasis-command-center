@@ -89,10 +89,9 @@ const PHASES: Phase[] = [
       "Run the one-line installer. The wizard pairs the machine to your dashboard automatically (HMAC-based self-pair, no token paste required).",
     steps: [
       {
-        title: "Send the OS-detected install command",
+        title: "Send the install script for their OS",
         detail:
-          "From /configure, the appropriate one-liner is auto-detected. Copy it, send to client. They paste, hit Enter, the wizard runs through their pre-collected answers.",
-        cta: { label: "Open /configure", href: "/configure" },
+          "/install.ps1 (Windows) or /install.sh (macOS/Linux). Both are operator-only since 2026-09-29, and /configure, which used to generate the one-liner, is retired: open the script for the client's OS while signed in here, save it, and send them the file to run. A pasted `irm | iex` or `curl | bash` line gets a 404, because a terminal carries no session. The script clones a private repository, so the client's machine needs GitHub access to it until the desktop runner replaces this step.",
       },
       {
         title: "Watch for the auto-pair confirmation",
