@@ -92,7 +92,7 @@ stub("next/link", {
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
 
-const OASIS ="ef8d389e-3f15-43f2-ae00-3660f69a1452";
+const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
@@ -323,7 +323,7 @@ async function main() {
     assert.equal(f([], "dept:sales"), null);
   });
   await check("a turn older than the one on record does not overwrite it", async () => {
-    await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__190_agent_turn_outcomes.sql"), "utf8"));
+    await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
     const { recordTurnOutcome } = await import("../lib/os/channel/turns");
     const base = { tenantId: "t-race", channelKey: "dept:sales", agentSlug: "sdr" };
     await recordTurnOutcome(db, { ...base, ok: true, code: null, at: "2026-09-29T12:00:00Z" });
@@ -359,7 +359,7 @@ async function main() {
     );
   });
   // The migration, applied as written (it is what the lead will run).
-  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__190_agent_turn_outcomes.sql"), "utf8"));
+  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
   await check("a person seated in two workspaces chats in their ACTIVE one", async () => {
     await login(USERS.multi);
     const res = await post(say({ agent_slug: "sdr", department: "sales" }));

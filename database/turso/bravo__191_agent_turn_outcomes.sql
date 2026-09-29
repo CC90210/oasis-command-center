@@ -1,4 +1,4 @@
--- bravo__190_agent_turn_outcomes.sql — each chat channel's LAST turn, ok or
+-- bravo__191_agent_turn_outcomes.sql — each chat channel's LAST turn, ok or
 -- with its failure code (OASIS OS plan v2 §F1.2 "Channels honest", 2026-09-29).
 --
 -- WHY. A department channel's header said "Working" whenever a key was on

@@ -1,6 +1,6 @@
 /**
  * lib/os/channel/turns.ts — every channel turn's outcome, kept as the
- * channel's LAST turn (migration bravo__190_agent_turn_outcomes).
+ * channel's LAST turn (migration bravo__191_agent_turn_outcomes).
  *
  * WHY. "Ready" used to mean "a key is on file". The header said Working over a
  * key the provider was refusing, because nothing remembered that the last turn
@@ -46,7 +46,7 @@ function noteMissing(where: string): void {
   if (missingLogged) return;
   missingLogged = true;
   console.error(
-    `[os.channel.turns.${where}] agent_turn_outcomes is missing (migration bravo__190 not applied): channel readiness uses the key alone`,
+    `[os.channel.turns.${where}] agent_turn_outcomes is missing (migration bravo__191 not applied): channel readiness uses the key alone`,
   );
 }
 
