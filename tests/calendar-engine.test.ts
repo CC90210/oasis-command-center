@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { addDays, fromDateKey, toDateKey } from "../lib/calendar/dates";
 import { layoutDay, layoutSpans } from "../lib/calendar/layout";
-import { describeRecurrence, expandOccurrences, planDelete, planEdit, seriesStarts } from "../lib/calendar/recurrence";
+import { describeRecurrence, expandOccurrences, planCalendarRemoval, planDelete, planEdit, seriesStarts } from "../lib/calendar/recurrence";
 import { shabbatForWeekOf, sunTimes } from "../lib/calendar/sun";
 import { DEFAULT_PREFS, type EventRecord } from "../lib/calendar/types";
 import { pickLegacyWeek, planLegacyImport } from "../lib/calendar/legacy";
@@ -175,6 +175,54 @@ const take = <T>(g: Generator<T>, n: number) => {
 
   // [P1] An unknown zone is refused rather than silently expanded in the server's zone.
   assert.equal((validateEventInput({ ...wbase, timeZone: "Mars/Olympus" }) as { error: string }).error, "time_zone_invalid");
+}
+
+// ── Codex review round 2 (2026-09-29) ─────────────────────────────────────
+
+{
+  // [P2] "This and following" on an occurrence that was moved on its own
+  // splits at its original slot, not where it was dragged.
+  const mon = ev({ id: "mon", start: local("2026-09-28T09:00").toISOString(), end: local("2026-09-28T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1, count: 5 } });
+  const slot = local("2026-10-05T09:00").toISOString();
+  const movedRow = ev({ id: "mv", recurringEventId: "mon", originalStart: slot, start: local("2026-10-14T09:00").toISOString(), end: local("2026-10-14T10:00").toISOString() });
+  const rows = [mon, movedRow];
+  const movedOcc = expandOccurrences(rows, local("2026-09-27T00:00"), local("2026-11-30T00:00")).find((o) => o.event.id === "mv")!;
+  const draft = inputForOccurrence(movedOcc);
+  const ops = planEdit(movedOcc, { ...draft, title: "renamed" }, "following", rows);
+  assert.ok(ops[1].op === "update" && ops[1].patch.recurrence?.until === "2026-10-04", "old series ends before Oct 5, not Oct 13");
+  assert.ok(ops[0].op === "create" && ops[0].event.recurrence?.count === 4, "4 of 5 remain");
+  assert.ok(ops.some((o) => o.op === "delete" && o.id === "mv"), "the moved instance's override goes with the old tail");
+
+  // [P2] "All events" across the Nov 1 DST change keeps 9am at 9am.
+  const fall = ev({ id: "fall", start: local("2026-10-19T09:00").toISOString(), end: local("2026-10-19T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1 } });
+  const oct26 = expandOccurrences([fall], local("2026-10-26T00:00"), local("2026-10-27T00:00"))[0];
+  const toNov2 = { ...inputForOccurrence(oct26), start: local("2026-11-02T09:00").toISOString(), end: local("2026-11-02T10:00").toISOString() };
+  const allOps = planEdit(oct26, toNov2, "all", [fall]);
+  assert.ok(allOps[0].op === "update");
+  const newFirst = new Date(allOps[0].patch.start!);
+  assert.equal(toDateKey(newFirst), "2026-10-26");
+  assert.equal(newFirst.getHours(), 9, "9am, not 10am");
+
+  // [P2] A one-day edit of a series is judged on what it writes, not on the
+  // whole rule: moving only a June Friday to 5pm is legal although the same
+  // rule would reach winter Fridays after candle lighting.
+  const fri = ev({ id: "fri", start: local("2026-06-05T09:00").toISOString(), end: local("2026-06-05T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1 } });
+  const june5 = expandOccurrences([fri], local("2026-06-05T00:00"), local("2026-06-06T00:00"))[0];
+  const late = { ...inputForOccurrence(june5), start: local("2026-06-05T17:00").toISOString(), end: local("2026-06-05T18:00").toISOString() };
+  assert.ok(shabbatConflict(late, DEFAULT_PREFS), "the draft, rule included, would clash in winter");
+  const thisOnly = planEdit(june5, late, "this", [fri]);
+  assert.ok(thisOnly[0].op === "create" && shabbatConflict(thisOnly[0].event, DEFAULT_PREFS) === null, "the single planned write does not");
+
+  // [P2] Removing a calendar that holds a moved occurrence adds an exception
+  // to the surviving series, so the instance does not reappear.
+  const series = ev({ id: "ser", calendarId: "work", start: local("2026-09-28T09:00").toISOString(), end: local("2026-09-28T10:00").toISOString(), recurrence: { freq: "DAILY", interval: 1 } });
+  const inOther = ev({ id: "oth", calendarId: "side", recurringEventId: "ser", originalStart: local("2026-09-30T09:00").toISOString() });
+  const lone = ev({ id: "lone", calendarId: "side" });
+  const removal = planCalendarRemoval([series, inOther, lone], "side");
+  assert.deepEqual(removal.deleteIds.sort(), ["lone", "oth"]);
+  assert.deepEqual(removal.exdates.get("ser"), [inOther.originalStart]);
+  const whole = planCalendarRemoval([series, inOther, lone], "work");
+  assert.deepEqual(whole.deleteIds.sort(), ["oth", "ser"], "overrides go with their series' calendar");
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────

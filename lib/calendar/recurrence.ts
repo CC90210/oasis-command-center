@@ -11,7 +11,6 @@ import {
   fromDateKey,
   isDateKey,
   ordinal,
-  startOfDay,
   toDateKey,
   weekdayLong,
   weekdayShort,
@@ -261,9 +260,7 @@ function weekdayIn(e: Pick<EventRecord, "allDay" | "timeZone">, instant: Date): 
 
 /** `YYYY-MM-DD` of the day before an instance, in the series' own calendar. */
 function dayBeforeIn(e: Pick<EventRecord, "allDay" | "timeZone">, instant: Date): string {
-  const key = e.allDay ? toDateKey(instant) : wallDateKey(instant, e.timeZone);
-  const p = fromDayNumber(keyDay(key) - 1);
-  return `${p.y}-${String(p.m + 1).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+  return keyOfDay(keyDay(dayKeyIn(e, instant)) - 1);
 }
 
 /** How many instances of a series start before `beforeMs` (exdates included, as count does). */
@@ -298,14 +295,14 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     return [{ op: "create", event: single }];
   }
 
-  const oldStart = occ.start.getTime();
   const newStartDate = eventStart(next);
-  const delta = newStartDate.getTime() - oldStart;
   const durationMs = eventEnd(next).getTime() - newStartDate.getTime();
   // Instances are re-keyed when they move or change between timed and all-day.
-  const reshaped = delta !== 0 || next.allDay !== master.allDay;
+  const reshaped = newStartDate.getTime() !== occ.start.getTime() || next.allDay !== master.allDay;
+  // Whole calendar days the user moved this instance, in each side's own calendar.
+  const dayShift = keyDay(dayKeyIn(next, newStartDate)) - keyDay(dayKeyIn(master, occ.start));
   // Moving an occurrence of an unchanged weekly rule moves its weekdays too.
-  const follow = (r: Recurrence) => followMove(r, weekdayIn(master, occ.start), weekdayIn(next, newStartDate));
+  const follow = (r: Recurrence, from: Date, to: Date) => followMove(r, weekdayIn(master, from), weekdayIn(next, to));
   const overridesFrom = (fromMs: number) =>
     allRows
       .filter((r) => r.recurringEventId === master.id && r.originalStart && keyTime(r.originalStart, master.allDay) >= fromMs)
@@ -319,20 +316,11 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
         ...overridesFrom(-Infinity),
       ];
     }
-    // The series' first instance moves by the same shift, written in the
-    // representation the user chose (a timed series can become all-day).
-    const firstMs = eventStart(master).getTime() + delta;
-    let start: string;
-    let end: string;
-    if (next.allDay) {
-      const s = master.allDay ? addDays(fromDateKey(master.start), Math.round(delta / DAY_MS)) : startOfDay(new Date(firstMs));
-      start = toDateKey(s);
-      end = toDateKey(addDays(s, Math.max(1, Math.round(durationMs / DAY_MS))));
-    } else {
-      start = new Date(firstMs).toISOString();
-      end = new Date(firstMs + durationMs).toISOString();
-    }
-    const rule = sameRule(next.recurrence, master.recurrence) ? follow(next.recurrence) : next.recurrence;
+    // The first instance moves by the same number of calendar days and takes
+    // the edited wall-clock time, in the chosen representation. Wall-clock,
+    // not elapsed milliseconds: a move across a DST change keeps 9am at 9am.
+    const { start, end } = placeAt(next, keyDay(dayKeyIn(master, eventStart(master))) + dayShift, newStartDate, durationMs);
+    const rule = sameRule(next.recurrence, master.recurrence) ? follow(next.recurrence, occ.start, newStartDate) : next.recurrence;
     return [
       {
         op: "update",
@@ -345,23 +333,51 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     ];
   }
 
-  // "following": end the old series the day before, start a new one here.
-  if (eventStart(master).getTime() === oldStart) return planEdit(occ, next, "all", allRows);
+  // "following": end the old series the day before this instance's ORIGINAL
+  // slot and start a new one there. An instance that was moved on its own is
+  // still split at its place in the series, never at where it was dragged to,
+  // or the cutoff, the remaining count and the old slot would all be wrong.
+  const origTime = keyTime(origKey, master.allDay);
+  const origDate = new Date(origTime);
+  if (eventStart(master).getTime() === origTime) return planEdit(occ, next, "all", allRows);
+  const moved = origTime !== occ.start.getTime();
+  // The new series starts at the original slot, shifted by whatever days the
+  // user just moved the instance, at the time they chose.
+  const anchored = moved ? { ...next, ...placeAt(next, keyDay(dayKeyIn(master, origDate)) + dayShift, newStartDate, durationMs) } : next;
   const oldRule = master.recurrence!;
   let newRule: Recurrence | null;
   if (!next.recurrence) newRule = null;
   else if (sameRule(next.recurrence, oldRule)) {
     // Same rule: the new series carries on where the old one stops, so a
     // count-limited series keeps only the instances it had left.
-    const remaining = oldRule.count ? Math.max(1, oldRule.count - startsBefore(master, oldStart)) : undefined;
-    newRule = follow({ ...oldRule, count: remaining });
+    const remaining = oldRule.count ? Math.max(1, oldRule.count - startsBefore(master, origTime)) : undefined;
+    newRule = follow({ ...oldRule, count: remaining }, origDate, eventStart(anchored));
   } else newRule = { ...next.recurrence };
   return [
-    { op: "create", event: { ...next, recurrence: newRule, exdates: [], recurringEventId: null, originalStart: null } },
-    { op: "update", id: master.id, patch: { recurrence: { ...oldRule, count: undefined, until: dayBeforeIn(master, occ.start) } } },
+    { op: "create", event: { ...anchored, recurrence: newRule, exdates: [], recurringEventId: null, originalStart: null } },
+    { op: "update", id: master.id, patch: { recurrence: { ...oldRule, count: undefined, until: dayBeforeIn(master, origDate) } } },
     // Overrides at or after the split belonged to the old tail; Google drops them.
-    ...overridesFrom(keyTime(origKey, master.allDay)),
+    ...overridesFrom(origTime),
   ];
+}
+
+/** `YYYY-MM-DD` of an instant in an event's own calendar. */
+function dayKeyIn(e: Pick<EventRecord, "allDay" | "timeZone">, instant: Date): string {
+  return e.allDay ? toDateKey(instant) : wallDateKey(instant, e.timeZone);
+}
+
+function keyOfDay(n: number): string {
+  const p = fromDayNumber(n);
+  return `${p.y}-${String(p.m + 1).padStart(2, "0")}-${String(p.d).padStart(2, "0")}`;
+}
+
+/** Start/end strings for an event placed on day `day`, at `timeOf`'s wall time in its zone. */
+function placeAt(e: Pick<EventInput, "allDay" | "timeZone">, day: number, timeOf: Date, durationMs: number): { start: string; end: string } {
+  if (e.allDay) return { start: keyOfDay(day), end: keyOfDay(day + Math.max(1, Math.round(durationMs / DAY_MS))) };
+  const p = fromDayNumber(day);
+  const w = wallParts(timeOf, e.timeZone);
+  const s = instantOf({ y: p.y, m: p.m, d: p.d, h: w.h, mi: w.mi, s: 0 }, e.timeZone);
+  return { start: s.toISOString(), end: new Date(s.getTime() + durationMs).toISOString() };
 }
 
 function keyTime(key: string, allDay: boolean): number {
@@ -386,7 +402,7 @@ function followMove(rule: Recurrence, fromWd: number, toWd: number): Recurrence 
 export function planDelete(occ: Occurrence, scope: EditScope, allRows: EventRecord[]): EventOp[] {
   const master = occ.master;
   if (!master) return [{ op: "delete", id: occ.event.id }];
-  if (scope === "all" || (scope === "following" && eventStart(master).getTime() === occ.start.getTime() && occ.event.id === master.id)) {
+  if (scope === "all" || (scope === "following" && occ.originalStart !== null && eventStart(master).getTime() === keyTime(occ.originalStart, master.allDay))) {
     return [
       ...allRows.filter((r) => r.recurringEventId === master.id).map((r) => ({ op: "delete" as const, id: r.id })),
       { op: "delete", id: master.id },
@@ -414,3 +430,28 @@ export function durationMinutes(e: Pick<EventRecord, "allDay" | "start" | "end">
 }
 
 export { inputOf };
+
+/**
+ * What removing a calendar must write, besides deleting its rows.
+ *
+ * A single occurrence can be moved into another calendar, which makes it an
+ * override row living in a different calendar from its series. Deleting that
+ * calendar deletes the override; without an exception on the surviving
+ * series, the original instance would reappear. Conversely, overrides whose
+ * series is being deleted go with it.
+ */
+export function planCalendarRemoval(rows: EventRecord[], calendarId: string): { deleteIds: string[]; exdates: Map<string, string[]> } {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const deleteIds = new Set<string>();
+  const exdates = new Map<string, string[]>();
+  for (const r of rows) {
+    const master = r.recurringEventId ? byId.get(r.recurringEventId) : undefined;
+    if (r.calendarId === calendarId || master?.calendarId === calendarId) deleteIds.add(r.id);
+    if (r.calendarId === calendarId && master && master.calendarId !== calendarId && r.originalStart) {
+      const list = exdates.get(master.id) ?? [...master.exdates];
+      if (!list.includes(r.originalStart)) list.push(r.originalStart);
+      exdates.set(master.id, list);
+    }
+  }
+  return { deleteIds: [...deleteIds], exdates };
+}

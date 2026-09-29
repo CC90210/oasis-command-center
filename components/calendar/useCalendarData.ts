@@ -200,9 +200,10 @@ export function useCalendarData() {
 
   const removeCalendar = useCallback(async (id: string) => {
     await call(`/api/calendar/calendars/${encodeURIComponent(id)}`, { method: "DELETE" });
-    setCalendars((c) => c.filter((x) => x.id !== id));
-    setEvents((e) => e.filter((x) => x.calendarId !== id));
-  }, []);
+    // The server also removed overrides in other calendars and added
+    // exceptions to surviving series; re-read rather than guess.
+    await reload();
+  }, [reload]);
 
   const savePrefs = useCallback(async (next: CalendarPrefs) => {
     const { prefs: saved } = await call<{ prefs: CalendarPrefs }>("/api/calendar/prefs", {

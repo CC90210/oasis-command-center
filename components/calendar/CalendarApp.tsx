@@ -16,7 +16,7 @@ import {
   toDateKey,
 } from "@/lib/calendar/dates";
 import { LEGACY_KEY_PREFIX, pickLegacyWeek, planLegacyImport } from "@/lib/calendar/legacy";
-import { eventStart, expandOccurrences, planDelete, planEdit, sameRule } from "@/lib/calendar/recurrence";
+import { eventStart, expandOccurrences, inputOf, planDelete, planEdit, sameRule } from "@/lib/calendar/recurrence";
 import type { CalendarView, EditScope, EventInput, EventOp, Occurrence } from "@/lib/calendar/types";
 import { shabbatConflict, validateEventInput } from "@/lib/calendar/validate";
 import { DayListPopover } from "./DayListPopover";
@@ -200,6 +200,11 @@ export function CalendarApp() {
     return `That overlaps Shabbat (${formatShortDate(hit.start)}, ${formatTime(hit.start)} to ${formatShortDate(hit.end)}, ${formatTime(hit.end)}), which is protected. Pick another time${input.recurrence ? ", or end the series before then" : ""}.`;
   };
 
+  const mergedInput = (id: string, patch: Partial<EventInput>): EventInput | null => {
+    const row = events.find((e) => e.id === id);
+    return row ? { ...inputOf(row), ...patch } : null;
+  };
+
   const run = useCallback(
     async (ops: EventOp[], done: string, undoable = true) => {
       try {
@@ -232,12 +237,14 @@ export function CalendarApp() {
       setPanelError(checked.error === "end_before_start" ? "The event has to end after it starts." : "Some details are not valid. Check the dates and guest emails.");
       return;
     }
-    const clash = conflictText(checked.value);
-    if (clash) return setPanelError(clash);
+    // A repeating event is checked after the scope is chosen: a one-day edit
+    // must not be refused because of a winter Friday elsewhere in the series.
     if (occ?.master) {
       setPanel({ kind: "scope", action: "edit", occ, next: checked.value, fromEditor });
       return;
     }
+    const clash = conflictText(checked.value);
+    if (clash) return setPanelError(clash);
     const ops: EventOp[] = occ ? [{ op: "update", id: occ.event.id, patch: checked.value }] : [{ op: "create", event: checked.value }];
     setPanel(null);
     await run(ops, occ ? "Event saved" : "Event created");
@@ -245,10 +252,31 @@ export function CalendarApp() {
 
   const applyScope = async (scope: EditScope) => {
     if (panel?.kind !== "scope") return;
-    const { occ, next, action } = panel;
+    const { occ, next, action, fromEditor } = panel;
+    if (action === "delete") {
+      setPanel(null);
+      await run(planDelete(occ, scope, events), "Event deleted");
+      return;
+    }
+    if (!next) return setPanel(null);
+    const ops = planEdit(occ, next, scope, events);
+    // Check exactly what will be written: each created event, and each
+    // updated row as it will stand after the patch.
+    for (const op of ops) {
+      const after = op.op === "create" ? op.event : op.op === "update" ? mergedInput(op.id, op.patch) : null;
+      const clash = after && conflictText(after);
+      if (!clash) continue;
+      if (fromEditor) {
+        setPanelError(clash);
+        setPanel({ kind: "editor", draft: next, occ });
+      } else {
+        setPanel(null);
+        toast(clash, { tone: "error" });
+      }
+      return;
+    }
     setPanel(null);
-    if (action === "delete") await run(planDelete(occ, scope, events), "Event deleted");
-    else if (next) await run(planEdit(occ, next, scope, events), "Event saved");
+    await run(ops, "Event saved");
   };
 
   const moveOcc = (occ: Occurrence, start: Date, end: Date) => {
@@ -256,9 +284,10 @@ export function CalendarApp() {
     const next: EventInput = occ.allDay
       ? { ...base, start: toDateKey(start), end: toDateKey(end) }
       : { ...base, start: start.toISOString(), end: end.toISOString() };
+    // Repeating events are checked once the scope is chosen (applyScope).
+    if (occ.master) return setPanel({ kind: "scope", action: "edit", occ, next, fromEditor: false });
     const clash = conflictText(next);
     if (clash) return toast(clash, { tone: "error" });
-    if (occ.master) return setPanel({ kind: "scope", action: "edit", occ, next, fromEditor: false });
     void run([{ op: "update", id: occ.event.id, patch: next }], "Event moved");
   };
 

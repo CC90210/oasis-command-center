@@ -20,6 +20,7 @@ import {
   type EventRecord,
   type Recurrence,
 } from "./types";
+import { planCalendarRemoval } from "./recurrence";
 import { LIMITS, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
 
 export class CalendarStoreError extends Error {
@@ -204,13 +205,28 @@ export async function deleteCalendar(owner: Owner, id: string): Promise<void> {
   if (!cal) throw new CalendarStoreError("calendar_not_found", 404);
   if (cal.isDefault) throw new CalendarStoreError("default_calendar_protected", 409);
   const db = getServiceSupabase();
-  const ev = await db
-    .from("calendar_events")
-    .delete()
-    .eq("tenant_id", owner.tenantId)
-    .eq("user_id", owner.userId)
-    .eq("calendar_id", id);
-  if (ev.error) storageError(ev.error, "calendar_write_failed");
+  const { events } = await listEvents(owner);
+  const plan = planCalendarRemoval(events, id);
+  // Exceptions first: if a later delete fails, the surviving series already
+  // skips the instance, so nothing reappears.
+  for (const [masterId, exdates] of plan.exdates) {
+    const { error } = await db
+      .from("calendar_events")
+      .update({ exdates: JSON.stringify(exdates), updated_at: new Date().toISOString() })
+      .eq("tenant_id", owner.tenantId)
+      .eq("user_id", owner.userId)
+      .eq("id", masterId);
+    if (error) storageError(error, "calendar_write_failed");
+  }
+  if (plan.deleteIds.length) {
+    const ev = await db
+      .from("calendar_events")
+      .delete()
+      .eq("tenant_id", owner.tenantId)
+      .eq("user_id", owner.userId)
+      .in("id", plan.deleteIds);
+    if (ev.error) storageError(ev.error, "calendar_write_failed");
+  }
   const { error } = await db
     .from("calendar_calendars")
     .delete()
