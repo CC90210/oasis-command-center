@@ -6,6 +6,8 @@ import {
   LEGAL_CONTACTS,
   LEGAL_ENTITY,
   LEGAL_PRINCIPAL_PLACE,
+  PRIVACY_LAST_UPDATED,
+  PRIVACY_OFFICER,
 } from "@/lib/legal/constants";
 
 export const metadata: Metadata = {
@@ -20,12 +22,25 @@ export default function PrivacyPage() {
       title="Privacy Policy"
       subtitle={`How ${LEGAL_ENTITY} collects, uses, shares, and retains personal information — including what is sent to third-party AI providers.`}
     >
+      <div className="mb-9 space-y-1.5">
+        <p className="font-data text-[11px] uppercase tracking-[0.18em] text-fg-dim">
+          Last updated {PRIVACY_LAST_UPDATED}
+        </p>
+        <p className="text-[13.5px] leading-relaxed text-fg-dim">
+          A French version of this policy is in preparation.{" "}
+          <span lang="fr">
+            Une version française de la présente politique est en préparation.
+          </span>
+        </p>
+      </div>
+
       <LegalSection n={1} title="Who we are">
         <p>
           {LEGAL_ENTITY} (&ldquo;we&rdquo;, &ldquo;us&rdquo;) operates the OASIS
           Agent Command Center at oasisai.work. Our principal place of business is{" "}
           {LEGAL_PRINCIPAL_PLACE}. For privacy questions, or to exercise any right
-          described below, contact{" "}
+          described below, contact our person in charge of the protection of
+          personal information (section 2) at{" "}
           <a href={`mailto:${LEGAL_CONTACTS.privacy}`}>{LEGAL_CONTACTS.privacy}</a>.
         </p>
         <p>
@@ -36,7 +51,32 @@ export default function PrivacyPage() {
         </p>
       </LegalSection>
 
-      <LegalSection n={2} title="AI data processing and machine learning">
+      <LegalSection n={2} title="Person in charge of the protection of personal information">
+        <p>
+          Under Quebec&rsquo;s{" "}
+          <em>Act respecting the protection of personal information in the private
+          sector</em> (Law 25), {LEGAL_ENTITY} has designated a person in charge of
+          the protection of personal information. That person is responsible for
+          ensuring we comply with the Act, and handles requests to access, correct,
+          or delete personal information and complaints about how we handle it.
+        </p>
+        <p>
+          <strong>{PRIVACY_OFFICER.name}</strong>
+          <br />
+          {PRIVACY_OFFICER.title.en}{" "}
+          <span lang="fr">({PRIVACY_OFFICER.title.fr})</span>
+          <br />
+          {LEGAL_ENTITY}, {LEGAL_PRINCIPAL_PLACE}
+          <br />
+          <a href={`mailto:${PRIVACY_OFFICER.email}`}>{PRIVACY_OFFICER.email}</a>
+        </p>
+        <p>
+          If you are not satisfied with our response, you may file a complaint with
+          the Commission d&rsquo;accès à l&rsquo;information du Québec.
+        </p>
+      </LegalSection>
+
+      <LegalSection n={3} title="AI data processing and machine learning">
         <p>
           This product is built on artificial intelligence. Automated systems and
           large language models read, classify, summarise, and act on the data you
@@ -67,10 +107,12 @@ export default function PrivacyPage() {
 
         <h3>Which providers</h3>
         <p>
-          Depending on the task, content may be routed to Anthropic PBC (Claude),
-          OpenAI, L.L.C. (GPT), or Google LLC (Gemini). All three process data on
-          servers located in the United States. The full subprocessor list, and
-          what each one receives, is in section 5.
+          Depending on the task and how a workspace is configured, content may be
+          sent to Anthropic PBC (Claude), OpenAI, L.L.C. (GPT), Google LLC
+          (Gemini), or OpenRouter, which forwards a request to the provider hosting
+          the model the workspace selects. These providers are based in the United
+          States. The full subprocessor list, and what each one receives, is in
+          section 6.
         </p>
 
         <h3>Automated decision-making</h3>
@@ -85,11 +127,9 @@ export default function PrivacyPage() {
           any financial action.
         </p>
         <p>
-          If you are in Quebec, you have the right under the{" "}
-          <em>Act respecting the protection of personal information in the private
-          sector</em> (Law 25) to be informed when a decision about you is based
-          exclusively on automated processing, and to submit observations to a
-          human. Write to{" "}
+          If you are in Quebec, you have the right under Law 25 to be informed when
+          a decision about you is based exclusively on automated processing, and to
+          submit observations to a human. Write to{" "}
           <a href={`mailto:${LEGAL_CONTACTS.privacy}`}>{LEGAL_CONTACTS.privacy}</a>{" "}
           to exercise that right.
         </p>
@@ -100,11 +140,11 @@ export default function PrivacyPage() {
           Model providers operate under their own terms; where a provider&rsquo;s
           consumer-tier terms permit training on submitted content, we treat that
           as a limitation to be closed rather than a permission we rely on, and we
-          disclose the current state honestly in section 5.
+          disclose the current state honestly in section 6.
         </p>
       </LegalSection>
 
-      <LegalSection n={3} title="Privacy data matrix">
+      <LegalSection n={4} title="Privacy data matrix">
         <p>
           The table below lists every category of personal information the
           Command Center collects, why, and who receives it. Rows marked{" "}
@@ -143,13 +183,13 @@ export default function PrivacyPage() {
           </table>
         </div>
         <p className="text-white/55">
-          A machine-readable version of this matrix is published at{" "}
-          <code>docs/compliance/PRIVACY_NUTRITION_LABEL.json</code> in the product
-          repository and is the source used for app-store privacy declarations.
+          A machine-readable copy of this matrix is kept in the product repository
+          at <code>docs/compliance/PRIVACY_NUTRITION_LABEL.json</code> and is the
+          source used for app-store privacy declarations.
         </p>
       </LegalSection>
 
-      <LegalSection n={4} title="Analytics and tracking">
+      <LegalSection n={5} title="Analytics and tracking">
         <p>
           The Command Center does <strong>not</strong> load third-party analytics
           SDKs, advertising pixels, or cross-site trackers. There is no Google
@@ -164,7 +204,7 @@ export default function PrivacyPage() {
         </p>
       </LegalSection>
 
-      <LegalSection n={5} title="Subprocessors">
+      <LegalSection n={6} title="Subprocessors">
         <p>
           We share personal information with the following processors. Each entry
           states whether a data processing agreement is currently in place for
@@ -184,7 +224,14 @@ export default function PrivacyPage() {
             <tbody className="text-white/75">
               {SUBPROCESSORS.map((s) => (
                 <tr key={s.name} className="border-t border-white/10 align-top">
-                  <td className="px-3 py-3 font-medium text-white">{s.name}</td>
+                  <td className="px-3 py-3">
+                    <span className="font-medium text-white">{s.name}</span>
+                    {s.note ? (
+                      <span className="mt-1.5 block text-[12.5px] leading-snug text-white/55">
+                        {s.note}
+                      </span>
+                    ) : null}
+                  </td>
                   <td className="px-3 py-3">{s.role}</td>
                   <td className="px-3 py-3 text-white/60">{s.dataReceived}</td>
                   <td className="px-3 py-3 text-white/60">{s.region}</td>
@@ -200,21 +247,50 @@ export default function PrivacyPage() {
             </tbody>
           </table>
         </div>
-      </LegalSection>
-
-      <LegalSection n={6} title="International transfers">
         <p>
-          We are based in Quebec, Canada. Our hosting, database, and model
-          providers are located in the United States, so your information is
-          transferred outside Canada and outside the European Economic Area. Under
-          Quebec Law 25 we are required to assess whether the destination
-          jurisdiction provides adequate protection before transferring personal
-          information outside the province; that assessment is in progress for the
-          model-provider paths marked &ldquo;Under review&rdquo; above.
+          <strong>Former database provider.</strong> Records created before we
+          moved our database to Turso in August 2026 also remain in a legacy
+          database hosted by Supabase, Inc. in the United States. The application
+          no longer uses that database, and we plan to delete it.
+        </p>
+        <p>
+          <strong>Former hosting provider.</strong> Until September 2026 the
+          application was served by Vercel, Inc. in the United States. That
+          deployment no longer receives traffic, but request logs and build
+          artifacts from that period remain with Vercel under its own retention
+          until we close the account.
         </p>
       </LegalSection>
 
-      <LegalSection n={7} title="Your rights">
+      <LegalSection n={7} title="International transfers">
+        <p>
+          We are based in Quebec, Canada. Our database and most of our processors
+          are located in the United States, and our application runs on
+          Cloudflare&rsquo;s global network; section 6 lists each
+          processor&rsquo;s region. Your information is therefore transferred
+          outside Quebec, and in most cases outside Canada.
+        </p>
+        <p>
+          Before personal information is communicated outside Quebec, Law 25
+          requires a privacy impact assessment that takes into account the
+          sensitivity of the information, the purposes for which it will be used,
+          the protection measures (including contractual ones) that would apply
+          to it, and the legal framework of the destination, and it permits the
+          transfer only if that assessment establishes adequate protection. We
+          have not yet completed that assessment for any of the processors in
+          section 6. The assessments are in progress. The transfers described
+          above are already taking place, so this is an open gap in our
+          compliance, not a completed step.
+        </p>
+        <p>
+          What is in place today is the processor list in section 6, which states
+          where each processor is located and whether a data processing agreement
+          covers that data path. For the processors marked &ldquo;Under
+          review&rdquo;, we have not confirmed one.
+        </p>
+      </LegalSection>
+
+      <LegalSection n={8} title="Your rights">
         <p>
           Subject to your jurisdiction, you may request access to the personal
           information we hold about you, correction of inaccurate information,
@@ -225,42 +301,65 @@ export default function PrivacyPage() {
           are defined by the CPRA.
         </p>
         <p>
-          Send requests to{" "}
+          Send requests to our person in charge of the protection of personal
+          information at{" "}
           <a href={`mailto:${LEGAL_CONTACTS.privacy}`}>{LEGAL_CONTACTS.privacy}</a>.
           We respond within 30 days. We will not discriminate against you for
           exercising a privacy right.
         </p>
       </LegalSection>
 
-      <LegalSection n={8} title="Security and breach notification">
+      <LegalSection n={9} title="Security and breach notification">
         <p>
-          Data is encrypted in transit and at rest. Access to tenant data is
-          restricted by row-level security, and administrative access is limited
-          to personnel who need it. No system is perfectly secure. If a
-          confidentiality incident presents a risk of serious injury, we will
-          notify affected individuals and the Commission d&rsquo;accès à
-          l&rsquo;information du Québec as required by Law 25, and any other
-          regulator required by applicable law.
+          Data is encrypted in transit between your browser, our application, and
+          our processors. Credentials you connect to the service — AI provider
+          API keys, email account passwords, and OAuth tokens — are encrypted by
+          our application with AES-256-GCM before they are stored. Uploaded
+          documents are kept in private Cloudflare R2 storage, which encrypts
+          stored objects, and are served only through short-lived signed links.
+          Other database fields, including the categories marked Sensitive in
+          section 4, are not separately encrypted by our application.
+        </p>
+        <p>
+          All customers&rsquo; workspaces share one database. Customer records are
+          tagged with the workspace they belong to, and our application limits its
+          queries to the workspace of the signed-in user. This separation is
+          enforced by our application code; the database itself does not enforce
+          per-customer access rules. OASIS staff who operate the service can
+          access customer workspaces to provide support and keep the service
+          running.
+        </p>
+        <p>
+          Changes to team membership and access, AI provider settings, automation
+          controls, and e-signature events are recorded in a per-workspace audit
+          log.
+        </p>
+        <p>
+          No system is perfectly secure. If a confidentiality incident presents a
+          risk of serious injury, we will notify affected individuals and the
+          Commission d&rsquo;accès à l&rsquo;information du Québec as required by
+          Law 25, and any other regulator required by applicable law.
         </p>
       </LegalSection>
 
-      <LegalSection n={9} title="Children">
+      <LegalSection n={10} title="Children">
         <p>
           The Command Center is a business tool and is not directed to children.
           We do not knowingly collect personal information from anyone under 18.
         </p>
       </LegalSection>
 
-      <LegalSection n={10} title="Changes">
+      <LegalSection n={11} title="Changes">
         <p>
-          We will post any change here and update the effective date. Material
-          changes affecting how we share data with model providers will be
-          communicated to account holders by email before taking effect.
+          We will post any change here and update the &ldquo;last updated&rdquo;
+          date at the top of this policy. Material changes affecting how we share
+          data with model providers will be communicated to account holders by
+          email before taking effect.
         </p>
         <LegalCallout>
-          This policy describes current engineering reality as verified on
-          2026-07-27, including gaps that are still open. It has not yet been
-          reviewed by counsel and is not a substitute for legal advice.
+          This policy describes current engineering reality as verified on{" "}
+          {PRIVACY_LAST_UPDATED}, including gaps that are still open. It has not
+          yet been reviewed by counsel and is not a substitute for legal advice.
         </LegalCallout>
       </LegalSection>
     </LegalPage>

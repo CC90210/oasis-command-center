@@ -30,6 +30,7 @@ import { downloadChatAttachmentText } from "./chat-attachments";
 import { parseLeadImportCsv } from "./leads-import-parser";
 import { importLeadsForTenant } from "./leads-import-service";
 import { readBrainDoc, searchMemory } from "./cloud-knowledge-tools";
+import { isClientSafeTool, isOasisInternalTenant } from "./ai/tools/client-safe-registry";
 
 export type CloudToolContext = {
   tenantId: string;
@@ -341,6 +342,17 @@ export async function runCloudTool(
   const tool = CLOUD_TOOLS[spec.name];
   if (!tool) {
     return { ok: false, name: spec.name, error: `unknown_cloud_tool:${spec.name}` };
+  }
+  // The legacy marker path (non-native providers) has no palette filter, so
+  // apply the same sandbox executeTool applies: a client tenant runs only
+  // client-safe tools. Without this, read_brain_doc / search_memory would
+  // read OASIS's brain repo for any tenant (docs/os-revamp/03 F2).
+  if (!isOasisInternalTenant(ctx.tenantId) && !isClientSafeTool(spec.name)) {
+    console.error("[cloud-tools] refused non-client-safe tool for a non-OASIS tenant", {
+      tenantId: ctx.tenantId || "(none)",
+      tool: spec.name,
+    });
+    return { ok: false, name: spec.name, error: "tool_not_available_in_this_workspace" };
   }
   try {
     return await tool.execute(spec.input, ctx);

@@ -5,10 +5,14 @@ import { AgentDecisionsCard } from "@/components/AgentDecisionsCard";
 import { QuickActionsGrid } from "@/components/reasoning/QuickActionsGrid";
 import { quickActionsFor } from "@/lib/quick-actions";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
+import { requireOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
 export default async function ReasoningPage() {
+  // Operator-only (P0-5), before any query: the decisions tape has no
+  // tenant_id column and is scoped by agent name, which every tenant shares.
+  await requireOperator();
   // Phase 5 — manifest is the source of truth for enabled agents per tenant.
   // QuickActionsGrid downstream takes the slug array so it keeps rendering
   // the right per-agent prompts as the manifest evolves.

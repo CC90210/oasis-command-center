@@ -34,7 +34,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { resolveSessionContext } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { executeShopOutRun } from "@/lib/lenders/shop-out-run";
 import { getAgents, deriveSigner, findAgentByEmail } from "@/lib/config/agents";
 import { extractSubmissionDeal } from "@/lib/lenders/extract-submission-deal";
@@ -154,8 +154,10 @@ async function handleShopOutRun(
     .eq("id", sess.tenantId)
     .maybeSingle();
   const tenantSlug = (tenantRow.data as { slug: string } | null)?.slug || "";
-  const isOperator = isOperatorEmail(sess.email);
-  if (tenantSlug !== "submissions" && !isOperator) {
+  // Operator = the verified check (alias AND owner/admin OASIS membership by
+  // auth id), asked only when the tenant gate would otherwise refuse. Fails
+  // closed: a failed lookup is a 403, never a send.
+  if (tenantSlug !== "submissions" && !(await isPlatformOperatorForAuthUser(sess.userId, sess.email))) {
     return jsonError(403, "shop_out_not_enabled_for_tenant");
   }
 

@@ -28,7 +28,7 @@
 
 import "server-only";
 import { createHash } from "crypto";
-import { queueInfer } from "@/lib/bridge-infer";
+import { queueInferForTenant } from "@/lib/ai/infer";
 import { redactAll } from "@/lib/secret-redaction";
 import {
   parseClassification,
@@ -126,9 +126,9 @@ export async function classifyLenderReply(
   // is actually stored and sent.
   const dedupeKey = createHash("sha256").update(content).digest("hex").slice(0, 32);
 
-  let q: Awaited<ReturnType<typeof queueInfer>>;
+  let q: Awaited<ReturnType<typeof queueInferForTenant>>;
   try {
-    q = await queueInfer(
+    q = await queueInferForTenant(
       {
         source: "lender-reply-classify",
         system: SYSTEM,

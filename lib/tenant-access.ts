@@ -6,7 +6,9 @@
  * with Google could land on the SunBiz Command Center (2026-05-17 incident).
  *
  * Rule:
- *   - Empire operators (OPERATOR_EMAIL / ADMIN_EMAILS) can preview any slug.
+ *   - VERIFIED platform operators (lib/platform-operator.ts: an alias on
+ *     OPERATOR_EMAIL / ADMIN_EMAILS AND an owner/admin OASIS membership read
+ *     by auth id) can preview any slug.
  *   - Every other operator may only preview slugs that match their own
  *     tenant's slug or their command_center_profile_slug.
  *
@@ -14,11 +16,18 @@
  * already has the profile + tenant slug; this helper just compares strings.
  */
 import { redirect } from "next/navigation";
-import { isOperatorEmail } from "./operator-credentials";
+import { isPlatformOperatorForAuthUser } from "./platform-operator";
 import { getServiceSupabase, getSessionUser } from "./supabase-server";
 
 export type TenantAccessProfile = {
-  email?: string | null;
+  /**
+   * The verified platform-operator verdict, computed by the caller on the
+   * server (isPlatformOperatorForAuthUser / isPlatformOperator). This used to
+   * be an `email` field matched against the alias list, which let anyone who
+   * registered an unclaimed alias preview every tenant. Absent or false means
+   * "not an operator" — the check fails closed if a caller forgets it.
+   */
+  isPlatformOperator?: boolean | null;
   tenant_slug?: string | null;
   command_center_profile_slug?: string | null;
 };
@@ -30,7 +39,7 @@ export function canPreviewTenantSlug(
   const target = (slug || "").trim().toLowerCase();
   if (!target) return false;
   if (!profile) return false;
-  if (isOperatorEmail(profile.email)) return true;
+  if (profile.isPlatformOperator === true) return true;
   const own = (profile.tenant_slug || "").trim().toLowerCase();
   if (own && own === target) return true;
   const profileSlug = (profile.command_center_profile_slug || "").trim().toLowerCase();
@@ -46,18 +55,19 @@ export function canPreviewTenantSlug(
  * policy can't drift.
  *
  * Returns null when there's no signed-in user. Returns a partially-
- * populated profile (email only, tenant slugs null) when the user has
- * no user_profiles row yet — empire operators on a fresh OAuth still
- * get full access through canPreviewTenantSlug's isOperatorEmail
- * short-circuit.
+ * populated profile (operator verdict only, tenant slugs null) when the
+ * user has no user_profiles row yet. The operator verdict is the verified
+ * check keyed on the session's auth user — never a user_profiles.email,
+ * which is a column its owner can edit.
  */
 export async function resolveCallerTenantAccess(): Promise<TenantAccessProfile | null> {
   const user = await getSessionUser().catch(() => null);
   if (!user) return null;
+  const isPlatformOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   const db = getServiceSupabase();
   const profile = await db
     .from("user_profiles")
-    .select("email, tenant_id")
+    .select("tenant_id")
     .eq("auth_user_id", user.id)
     .maybeSingle();
   const tenantId = profile.data?.tenant_id || null;
@@ -75,7 +85,7 @@ export async function resolveCallerTenantAccess(): Promise<TenantAccessProfile |
     commandSlug = typeof cf === "string" ? cf : null;
   }
   return {
-    email: profile.data?.email ?? user.email,
+    isPlatformOperator,
     tenant_slug: tenantSlug,
     command_center_profile_slug: commandSlug,
   };

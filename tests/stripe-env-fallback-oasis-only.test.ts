@@ -9,6 +9,11 @@
  * payment links in OASIS's account. The store runs for real against a local
  * libSQL file; nothing is stubbed.
  *
+ * 2026-09-28 (P0-1): the gate now covers every service and resolves OASIS by
+ * tenant ID, not slug — a workspace that claims an OASIS slug gets nothing.
+ * tests/env-fallback-oasis-only.test.ts is the full per-service matrix; this
+ * file keeps the Stripe story that started it.
+ *
  * Run: node --conditions=react-server --import tsx tests/stripe-env-fallback-oasis-only.test.ts
  */
 import assert from "node:assert/strict";
@@ -27,7 +32,9 @@ process.env.STRIPE_SECRET_KEY = "sk_test_oasis_env_key";
 process.env.N8N_OUTBOUND_URL = "https://n8n.example.test/hook";
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
-const WEBDEV = "0a0a0a0a-0000-4000-8000-00000000000a";
+const WEBDEV = "42423fde-be8b-454f-932a-750e8c9b743d";
+// Carries the slug "oasis-webdev" under an id that is not OASIS's.
+const SLUG_CLAIMANT = "0a0a0a0a-0000-4000-8000-00000000000a";
 const SUNBIZ = "5b5b5b5b-0000-4000-8000-00000000005b";
 const SUNBIZ_OWN_KEY = "5c5c5c5c-0000-4000-8000-00000000005c";
 const UNKNOWN = "9f9f9f9f-0000-4000-8000-00000000009f";
@@ -56,7 +63,7 @@ async function main() {
   `);
   const { encryptField } = await import("../lib/field-encryption");
   await seed.batch([
-    { sql: `INSERT INTO tenants (id, slug) VALUES (?, 'oasis-ai-cc'), (?, 'oasis-webdev'), (?, 'submissions'), (?, 'sunbiz-own')`, args: [OASIS, WEBDEV, SUNBIZ, SUNBIZ_OWN_KEY] },
+    { sql: `INSERT INTO tenants (id, slug) VALUES (?, 'oasis-ai-cc'), (?, 'oasis-webdev'), (?, 'submissions'), (?, 'sunbiz-own'), (?, 'oasis-webdev')`, args: [OASIS, WEBDEV, SUNBIZ, SUNBIZ_OWN_KEY, SLUG_CLAIMANT] },
     {
       sql: `INSERT INTO tenant_integration_credentials (id, tenant_id, service, field_key, encrypted_value) VALUES ('c1', ?, 'stripe', 'secret_key', ?)`,
       args: [SUNBIZ_OWN_KEY, encryptField("sk_test_sunbiz_own_key")],
@@ -90,19 +97,21 @@ async function main() {
     assert.deepEqual(await store.getTenantIntegrationPresenceForStatus(OASIS, "stripe", ["secret_key"]), { secret_key: true });
   });
 
-  await check("other services keep their platform-wide env fallback", async () => {
-    assert.equal(await store.getTenantIntegrationValue(SUNBIZ, "n8n", "outbound_url"), "https://n8n.example.test/hook");
+  await check("other services are OASIS-only too (no platform-wide env fallback)", async () => {
+    assert.equal(await store.getTenantIntegrationValue(SUNBIZ, "n8n", "outbound_url"), null);
+    assert.equal(await store.getTenantIntegrationValue(OASIS, "n8n", "outbound_url"), "https://n8n.example.test/hook");
   });
 
-  await check("a failed tenant lookup refuses the Stripe fallback (fails closed)", async () => {
+  await check("a workspace that claims an OASIS slug under another id is refused", async () => {
+    assert.equal(await store.getTenantIntegrationValue(SLUG_CLAIMANT, "stripe", "secret_key"), null);
+    assert.equal((await store.getTenantIntegrationBundle(SLUG_CLAIMANT, "stripe")).secret_key, undefined);
+  });
+
+  await check("the decision is by id: losing the tenants table changes nothing", async () => {
     await seed.execute("DROP TABLE tenants");
-    const originalError = console.error;
-    console.error = () => {};
-    try {
-      assert.equal(await store.getTenantIntegrationValue(OASIS, "stripe", "secret_key"), null);
-    } finally {
-      console.error = originalError;
-    }
+    assert.equal(await store.getTenantIntegrationValue(OASIS, "stripe", "secret_key"), "sk_test_oasis_env_key");
+    assert.equal(await store.getTenantIntegrationValue(SUNBIZ, "stripe", "secret_key"), null);
+    assert.equal(await store.getTenantIntegrationValue(SLUG_CLAIMANT, "stripe", "secret_key"), null);
   });
 
   if (failures > 0) {

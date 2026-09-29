@@ -60,7 +60,7 @@ import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getSessionUser } from "@/lib/supabase-server";
 import type { IntegrationHealth } from "@/lib/supabase";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
@@ -131,7 +131,9 @@ export async function SettingsContent({
   const effectiveAgentKeys = manifestAgentKeys;
   const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
   const enabledChatAgentKeys = chatAgentKeys().filter((k) => enabledAgents.includes(k));
-  const isOperator = isOperatorEmail(user?.email || undefined);
+  // Gates the local-CLI provider controls and the platform-infra integrations:
+  // verified operator only (alias AND owner/admin OASIS membership by auth id).
+  const isOperator = await isPlatformOperatorForAuthUser(user?.id, user?.email);
   const teamProfile = profile as
     | (typeof profile & { is_owner?: boolean; team_role?: string; admin_access?: boolean | null })
     | null;

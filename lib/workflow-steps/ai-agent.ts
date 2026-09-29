@@ -20,7 +20,7 @@
 
 import type { StepContext, StepResult, WorkflowStep } from "./types";
 import { getPersona } from "@/lib/agent-personas";
-import { inferText } from "@/lib/subscription-infer";
+import { inferForTenant } from "@/lib/ai/infer";
 
 type AiAgentInput = {
   agent_slug?: string;
@@ -80,12 +80,11 @@ const handler: WorkflowStep = {
       // Subscription, not the paid API. A workflow step runs unattended, so
       // this was billable on a trigger rather than on a click.
       // See lib/subscription-infer.ts.
-      const inf = await inferText({
+      const inf = await inferForTenant(ctx.tenant_id ?? null, {
         source: `workflow:${input.agent_slug}`,
         system: systemPrompt,
         prompt: userPrompt,
         maxTokens,
-        tenantId: ctx.tenant_id ?? null,
         modelTier: "smart",
       });
       if (!inf.ok) {

@@ -20,7 +20,7 @@
 
 import "server-only";
 import { createHash } from "node:crypto";
-import { queueInfer } from "@/lib/bridge-infer";
+import { queueInferForTenant } from "@/lib/ai/infer";
 import { redactAll } from "@/lib/secret-redaction";
 
 export type DealEmailType = "lender_reply" | "merchant_reply" | "internal" | "other";
@@ -80,9 +80,9 @@ export async function classifyDealEmail(
   // redaction so the key matches what is actually stored and sent.
   const dedupeKey = createHash("sha256").update(content).digest("hex").slice(0, 32);
 
-  let q: Awaited<ReturnType<typeof queueInfer>>;
+  let q: Awaited<ReturnType<typeof queueInferForTenant>>;
   try {
-    q = await queueInfer(
+    q = await queueInferForTenant(
       {
         source: "operator-email-classify",
         system: SYSTEM,

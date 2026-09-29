@@ -15,13 +15,28 @@
 
 import { notFound } from "next/navigation";
 import { resolveSessionContext } from "@/lib/api-auth";
+import {
+  resolvePlatformOperatorForAuthUser,
+  type PlatformOperatorCheck,
+} from "@/lib/platform-operator";
 import { getTenant } from "@/lib/queries";
+import { getSessionUser } from "@/lib/supabase-server";
 import {
   capabilitiesFor,
   resolvePersona,
   type Persona,
   type SurfaceCapabilities,
 } from "@/lib/role-surfaces";
+
+// The verified operator rule lives in lib/platform-operator.ts so route
+// handlers and lib code can use it without loading next/navigation. Re-exported
+// here so a page reaches every operator helper from one import.
+export {
+  OASIS_OPERATOR_TENANT_ID,
+  isPlatformOperatorForAuthUser,
+  resolvePlatformOperatorForAuthUser,
+  type PlatformOperatorCheck,
+} from "@/lib/platform-operator";
 
 export type ViewerSurface = {
   ok: true;
@@ -121,4 +136,45 @@ export async function resolveViewerSurface(): Promise<ViewerSurface> {
 export async function requireSystemSurface(): Promise<void> {
   const surface = await resolveViewerSurface();
   if (surface.ok && !surface.capabilities.canSeeSystemSurfaces) notFound();
+}
+
+/**
+ * Is the signed-in AUTH USER a platform operator (P0-7 interim, 2026-09-28)?
+ *
+ * Reads the session, then applies lib/platform-operator.ts
+ * resolvePlatformOperatorForAuthUser — the alias AND an active owner/admin
+ * OASIS membership read by auth_user_id. The full rule and the reasons for each
+ * half are documented there; this function adds only the session read.
+ *
+ * Fails CLOSED: any session or profile lookup error is logged and answers
+ * "not an operator".
+ */
+export async function resolvePlatformOperator(): Promise<PlatformOperatorCheck> {
+  let user: Awaited<ReturnType<typeof getSessionUser>>;
+  try {
+    user = await getSessionUser();
+  } catch (err) {
+    console.error("[role-surfaces.platform_operator.session]", err);
+    return { operator: false, reason: "lookup_failed" };
+  }
+  if (!user?.id) return { operator: false, reason: "no_session" };
+  return resolvePlatformOperatorForAuthUser(user.id, user.email);
+}
+
+/** Boolean form of resolvePlatformOperator, for callers that only branch. */
+export async function isPlatformOperator(): Promise<boolean> {
+  return (await resolvePlatformOperator()).operator;
+}
+
+/**
+ * Page guard for operator-only admin surfaces (/runs, /inbox, /reasoning,
+ * /system-health). Call it as the FIRST statement of the page, before any
+ * query, exactly like requireSystemSurface.
+ *
+ * Unlike requireSystemSurface, an unresolved session also 404s: these pages
+ * belong to no persona of any client workspace, so there is no empty state to
+ * preserve, and middleware has already sent a signed-out browser to /login.
+ */
+export async function requireOperator(): Promise<void> {
+  if (!(await isPlatformOperator())) notFound();
 }

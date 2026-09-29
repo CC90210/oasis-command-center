@@ -33,7 +33,7 @@ import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
 import type { NavItem } from "@/lib/nav-config";
 import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
-import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { isPlatformOperator, resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { PerfVitals } from "@/components/PerfVitals";
 
@@ -62,6 +62,9 @@ export const metadata: Metadata = {
   // nothing that links /favicon.ico changes.
   icons: { icon: "/favicon.ico" },
 };
+
+/** The only seed slugs the public demo cookie may select (set by /api/demo/sun). */
+const DEMO_PROFILE_SLUGS: ReadonlySet<string> = new Set(["sun"]);
 
 export default async function RootLayout({
   children,
@@ -152,6 +155,12 @@ export default async function RootLayout({
     // so a stuck sidebar indicator is searchable in Vercel logs instead
     // of silently rendering as "offline".
     profile = await timed("profile", safe("layout.profile", getActiveProfile(), null), perfSpans);
+    // The verified platform-operator verdict (alias AND owner/admin OASIS
+    // membership by auth id), started now and awaited by the two readers
+    // below: the /t/<slug> path override and the chat shell's admin flag. Only
+    // an alias session pays its read, and it runs beside the others rather
+    // than in front of them. Resolves false on any failure, loudly.
+    const platformOperatorP = safe("layout.platform_operator", isPlatformOperator(), false);
 
     // Demo cookie is honoured ONLY when:
     //   - the operator is on /demo/sun (explicit opt-in via URL), OR
@@ -181,9 +190,12 @@ export default async function RootLayout({
       }
     }
 
+    // Only the public SunBiz preview is a demo shell. A hand-set cookie naming
+    // any other seed (e.g. "oasis-ai-cc") must not render OASIS's own nav to a
+    // tenantless visitor.
     const normalisedDemo = (requestedDemoProfile || "").trim().toLowerCase();
     demoProfileSlug =
-      normalisedDemo && normalisedDemo !== "default" && SEED_MANIFESTS[normalisedDemo]
+      DEMO_PROFILE_SLUGS.has(normalisedDemo) && SEED_MANIFESTS[normalisedDemo]
         ? normalisedDemo
         : null;
 
@@ -237,7 +249,7 @@ export default async function RootLayout({
     if (!demoProfileSlug && pathTenantSlug) {
       const allowed = canPreviewTenantSlug(
         {
-          email: profile?.email,
+          isPlatformOperator: await platformOperatorP,
           tenant_slug: tenantProfileSlug,
           command_center_profile_slug: tenantProfileSlug,
         },
@@ -259,10 +271,17 @@ export default async function RootLayout({
     // "online means last_seen_at within 5 minutes" definition still lives
     // solely in the shared bridge helper (lib/queries.ts), now called by
     // the status route instead of here.
+    const chatProfile = profile;
     const [chatPropsResolved, surfaceResolved] = await timed("side_channels", Promise.all([
       safe(
         "layout.chat_props",
-        resolveChatShellProps({ profile, userEmail: profile?.email }),
+        platformOperatorP.then((platformOperator) =>
+          resolveChatShellProps({
+            profile: chatProfile,
+            userEmail: chatProfile?.email,
+            isPlatformOperator: platformOperator,
+          }),
+        ),
         null,
       ),
       safe("layout.viewer_surface", resolveViewerSurface(), null),
@@ -276,7 +295,12 @@ export default async function RootLayout({
   const manifestSlug = demoMode
     ? demoProfileSlug
     : pathOverrideSlug ?? tenantProfileSlug;
-  const manifest = isFullBleed ? null : await timed("manifest", getManifest(manifestSlug), perfSpans);
+  // The viewer's tenant id lets an OASIS operator whose tenant-slug read
+  // degraded (manifestSlug null → "default") keep OASIS_SEED instead of the
+  // unprovisioned placeholder; it changes nothing for any other tenant.
+  const manifest = isFullBleed
+    ? null
+    : await timed("manifest", getManifest(manifestSlug, profile?.tenant_id ?? null), perfSpans);
   // One `[perf]` line per shell render: the measured session tax. This is
   // the P1 before/after number; remove only when the instant-load work ends.
   logPerfSummary("layout", pathname, perfSpans, Date.now() - perfT0);

@@ -1,12 +1,24 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getClientProfileSlugForBrand } from "./client-profiles";
+import { getClientCommandCenterProfileById } from "./client-profiles";
 import { getTursoClient, tursoConfigured } from "./turso";
 
 type ProvisioningInput = {
   db: SupabaseClient;
   tenantId: string;
   profileId: string;
+  /**
+   * The shell to give this tenant, chosen explicitly by whoever provisions it
+   * (an operator). Omitted -> nothing is written. It must be a registered
+   * profile id in lib/client-profiles.ts; anything else throws.
+   *
+   * This replaced deriving the shell from brand text (P0-8, 2026-09-28): a
+   * "Sunrise Funding" signup got SunBiz's shell because its brand contained
+   * "sun" and "funding".
+   */
+  clientProfileSlug?: string | null;
+  /** @deprecated Ignored — brand text no longer selects a shell (P0-8). */
   brand?: string | null;
+  /** @deprecated Ignored — see `brand`. */
   email?: string | null;
 };
 
@@ -14,12 +26,17 @@ export async function applyClientProvisioningProfile({
   db,
   tenantId,
   profileId,
-  brand,
-  email,
+  clientProfileSlug: requestedSlug,
 }: ProvisioningInput): Promise<{ clientProfileSlug: string | null; primaryAgent: string | null }> {
-  const clientProfileSlug = getClientProfileSlugForBrand(brand, email);
+  const clientProfileSlug = (requestedSlug || "").trim().toLowerCase();
   if (!clientProfileSlug) {
     return { clientProfileSlug: null, primaryAgent: null };
+  }
+  // getClientCommandCenterProfileById degrades an unknown id to the default
+  // profile; a typo'd slug must fail here rather than write a shell no code
+  // path recognises.
+  if (getClientCommandCenterProfileById(clientProfileSlug).id !== clientProfileSlug) {
+    throw new Error(`applyClientProvisioningProfile: unknown client profile "${clientProfileSlug}"`);
   }
 
   const tenantRes = await db

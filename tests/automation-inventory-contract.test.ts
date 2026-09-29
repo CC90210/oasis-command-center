@@ -43,13 +43,18 @@ assert.match(listRoute, /inventory[^}]*\}/,
 // armed by one predicate, so an identity it does not cover disarms all three at
 // once and returns a plausible tenant-only 200. Evaluated once, and the verdict
 // travels on the wire so the omission cannot be read as an inventory.
-assert.match(listRoute, /const isOperator = isOperatorEmail\(user\.email\)/,
+// The predicate is the VERIFIED operator check (alias AND owner/admin OASIS
+// membership by auth id, 2026-09-28) — the bare email check let anyone who
+// registered an unclaimed alias read and toggle the Empire lane.
+assert.match(listRoute, /const isOperator = await isPlatformOperatorForAuthUser\(user\.id, user\.email\)/,
   "the operator verdict must be bound once, not re-derived per use");
 assert.equal(
-  (listRoute.match(/isOperatorEmail\(/g) || []).length,
+  (listRoute.match(/isPlatformOperatorForAuthUser\(/g) || []).length,
   1,
   "one call site only — three copies of the predicate are three chances to drift apart",
 );
+assert.doesNotMatch(listRoute, /isOperatorEmail/,
+  "the Empire lane must not be armed by an email string alone");
 assert.match(listRoute, /requireEmpireRows: isOperator,\s*\n\s*isOperator,/,
   "GET must report the operator verdict alongside the lane counts");
 assert.doesNotMatch(listRoute, /VALID_ACTION_TYPES[^\n]*agent_prompt/,

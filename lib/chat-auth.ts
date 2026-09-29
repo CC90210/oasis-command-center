@@ -20,7 +20,8 @@
  *      no user override exists. cfgScope is "tenant".
  *
  *   3. PLATFORM FALLBACK (operatorPlatformFallback env var):
- *      Last-resort default for the platform operator's email only.
+ *      Last-resort default for the VERIFIED platform operator only
+ *      (lib/platform-operator.ts — an alias email is not enough).
  *      Used when:
  *        - No row exists at all (fresh tenant pre-AI-setup), OR
  *        - A row exists but its encrypted_api_key is null.
@@ -35,7 +36,8 @@
 import type { Provider } from "./providers";
 import { getServiceSupabase } from "./supabase-server";
 import { decryptField } from "./field-encryption";
-import { isOperatorEmail, operatorPlatformFallback } from "./operator-credentials";
+import { operatorPlatformFallback } from "./operator-credentials";
+import { isPlatformOperatorForAuthUser } from "./platform-operator";
 
 export type ChatAuthContext = {
   tenantId: string;
@@ -50,8 +52,10 @@ export type ChatAuthContext = {
    *  (chat header, persona self-introduction). Backend daemon logs
    *  still use the canonical agent name. Null = canonical name. */
   displayNameOverride: string | null;
-  /** True when the user matches isOperatorEmail. Useful for routes that
-   *  want to grant operator-only features beyond what auth covers. */
+  /** True when the user passed the VERIFIED platform-operator check
+   *  (lib/platform-operator.ts: alias AND owner/admin OASIS membership by
+   *  auth id). Routes that grant operator-only features beyond what auth
+   *  covers read this rather than re-deriving it. */
   isOperator: boolean;
   /** Which config row actually supplied the model/key, if any. */
   cfgScope: "user" | "tenant" | null;
@@ -134,7 +138,9 @@ export async function resolveChatContext(
       ? "tenant"
       : null;
 
-  const isOperator = isOperatorEmail(user.email || "");
+  // Keyed on the auth user, not the email alone: the platform key bills OASIS,
+  // and anyone could register an unclaimed alias. Fails closed (logged).
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   let provider: Provider;
   let model: string;
   let apiKey = "";

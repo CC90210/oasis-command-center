@@ -190,30 +190,26 @@ export function getClientCommandCenterProfileById(
   return CLIENT_PROFILES[id.trim().toLowerCase()] || DEFAULT_PROFILE;
 }
 
+/**
+ * Brand text no longer selects a shell (P0-8, 2026-09-28) — always null.
+ *
+ * This used to map free-typed text onto a client shell: anything containing
+ * "sun" and "funding" got SunBiz's (so a "Sunrise Funding" signup got the SunBiz
+ * nav, agents and /t/sun home), and "suga" / "o malley" got Suga's. A shell picks
+ * the nav, the primary agent and the post-login home, so it cannot come from
+ * text a stranger typed into a signup form. A tenant's shell now comes only from
+ * its own row (`resolveClientProfileSlug`: custom_fields.command_center_profile_slug,
+ * then slug), set explicitly when an operator provisions it — see
+ * `clientProfileSlug` in lib/client-provisioning.ts. The one live client shell,
+ * SunBiz's `submissions` tenant, already carries command_center_profile_slug
+ * "sun", so it never depended on this.
+ *
+ * Kept only because lib/auth-routing.ts still calls it as a fallback; delete it
+ * once that call is removed.
+ */
 export function getClientProfileSlugForBrand(
-  brand: string | null | undefined,
-  email?: string | null
+  _brand: string | null | undefined,
+  _email?: string | null
 ): string | null {
-  const text = `${brand || ""} ${email || ""}`.toLowerCase();
-  const compact = text.replace(/[^a-z0-9]+/g, " ").trim();
-  if (
-    compact.includes("sun biz") ||
-    compact.includes("sunbiz") ||
-    (compact.includes("sun") && compact.includes("funding"))
-  ) {
-    return "sun";
-  }
-  if (
-    // Current brand (post-rename, 2026-05-13)
-    compact.includes("suga brand command") ||
-    // Legacy brand-string matches kept for backward compat — pre-existing
-    // signups under the old name still resolve to the suga profile.
-    compact.includes("suga sean") ||
-    compact.includes("sugasean") ||
-    compact.includes("o malley") ||
-    compact.includes("omalley")
-  ) {
-    return "suga";
-  }
   return null;
 }

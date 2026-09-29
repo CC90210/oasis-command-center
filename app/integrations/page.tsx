@@ -8,7 +8,7 @@ import {
   type IntegrationCategory,
 } from "@/lib/integrations-registry";
 import { resolveAgentKey } from "@/lib/agents";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getSessionUser } from "@/lib/supabase-server";
 import { getTenantAwareEnabledAgents } from "@/lib/manifest/tenant-scope";
 import type { IntegrationHealth } from "@/lib/supabase";
@@ -39,7 +39,9 @@ export default async function IntegrationsPage() {
   // profile column → empty). Never falls back to a hardcoded empire
   // default. Visible integrations narrow to just what these agents need.
   const enabledAgents = enabledRaw.map(resolveAgentKey);
-  const isOperator = isOperatorEmail(user?.email || undefined);
+  // Developer-only platform integrations are for the verified operator (alias
+  // AND owner/admin OASIS membership by auth id), not for an email match.
+  const isOperator = await isPlatformOperatorForAuthUser(user?.id, user?.email);
   const visibleDefinitions = visibleIntegrationsForTenant(enabledAgents, { isOperator });
 
   const dbByService = new Map(dbRows.map((row) => [row.service, row] as const));

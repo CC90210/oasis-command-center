@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { OnboardingWizardClient } from "@/components/onboarding/OnboardingWizardClient";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
-import { ProvisioningProgress } from "@/components/onboarding/ProvisioningProgress";
+import { OasisLogo } from "@/components/brand/OasisLogo";
 
 export const dynamic = "force-dynamic";
 
@@ -50,7 +50,7 @@ export default async function OnboardingWizardPage() {
           });
           const run = r.rows[0];
           if (run && run.status !== "complete" && run.status !== "failed") {
-            return <ProvisioningProgress run={run as any} />;
+            return <WorkspaceBeingSetUp />;
           }
         }
       }
@@ -64,4 +64,35 @@ export default async function OnboardingWizardPage() {
   }
 
   return <OnboardingWizardClient userEmail={user.email || ""} />;
+}
+
+/**
+ * Shown while a provisioning run is open for this workspace.
+ *
+ * WHY THIS REPLACED ProvisioningProgress (2026-09-28, P0-2). That screen said
+ * "Payment verified", listed the run's steps and refreshed every 3 seconds.
+ * The only writer of provisioning_runs was /api/webhooks/stripe-provision,
+ * which checked no signature and took the tenant id from the request body, so
+ * anyone could make any workspace's owner see a payment confirmation and
+ * progress that never happened. The route is deleted. Until a verified billing
+ * webhook writes real runs, this page claims nothing it cannot know: no
+ * payment status, no steps, no polling.
+ */
+function WorkspaceBeingSetUp() {
+  return (
+    <div className="min-h-screen bg-bg-deep flex flex-col items-center justify-center p-6">
+      <div className="w-full max-w-md space-y-4">
+        <div className="flex justify-center mb-6">
+          <OasisLogo />
+        </div>
+        <div className="rounded-2xl border border-bg-border bg-bg-elev p-6 space-y-2">
+          <h1 className="text-lg font-bold text-fg">OASIS sets up your workspace</h1>
+          <p className="text-sm text-fg-muted leading-relaxed">
+            Your workspace is being prepared by the OASIS team. It opens here once setup is done,
+            and there is nothing you need to do on this page.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }

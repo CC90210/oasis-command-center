@@ -20,7 +20,6 @@
 import "server-only";
 import { safe } from "@/lib/api-helpers";
 import { getTenant, integrationsHealth } from "@/lib/queries";
-import { isOperatorEmail } from "@/lib/operator-credentials";
 import { operatorNameOverride } from "@/lib/operator-name";
 import { resolveAgentKey } from "@/lib/agents";
 import {
@@ -64,8 +63,17 @@ function firstNameOf(name: string | null | undefined, fallback = "Jordan"): stri
 export async function resolveChatShellProps(args: {
   profile: ProfileLike;
   userEmail: string | null | undefined;
+  /**
+   * The VERIFIED platform-operator verdict (lib/platform-operator.ts), computed
+   * by the caller on the server. It drives `isAdmin`, which tells the widget the
+   * OASIS platform key is behind the chat; the key itself is only ever handed
+   * out by lib/chat-auth.ts, which runs the same check. Required, not derived
+   * from `userEmail` here: an email match alone is what a registered alias
+   * squatter holds.
+   */
+  isPlatformOperator: boolean;
 }): Promise<ChatShellProps | null> {
-  const { profile, userEmail } = args;
+  const { profile, userEmail, isPlatformOperator } = args;
   const tenantId = profile?.tenant_id ?? null;
   if (!tenantId) {
     // No tenant yet (fresh signup pre-provisioning, or a profile that isn't
@@ -75,7 +83,7 @@ export async function resolveChatShellProps(args: {
     return {
       agentKeys: ["bravo"],
       defaultAgent: "bravo",
-      isAdmin: isOperatorEmail(userEmail),
+      isAdmin: isPlatformOperator,
       welcomeMessages: undefined,
       advancedPicker: false,
     };
@@ -132,7 +140,7 @@ export async function resolveChatShellProps(args: {
   return {
     agentKeys,
     defaultAgent: primary,
-    isAdmin: isOperatorEmail(userEmail),
+    isAdmin: isPlatformOperator,
     welcomeMessages,
     advancedPicker: manifest?.ui?.advanced_picker ?? false,
   };

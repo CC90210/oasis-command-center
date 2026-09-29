@@ -18,7 +18,8 @@ import { resolveSessionContext } from "@/lib/api-auth";
 import { canWriteCrm } from "@/lib/role-gates";
 import { streamChat, type ChatMessage, type Provider } from "@/lib/providers";
 import { getAgentModelForUser } from "@/lib/agent-resolver";
-import { isOperatorEmail, operatorPlatformFallback } from "@/lib/operator-credentials";
+import { operatorPlatformFallback } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { redactAll } from "@/lib/secret-redaction";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import {
@@ -157,7 +158,8 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "key_decrypt_failed" }, { status: 500 });
     }
   } else {
-    const fallback = isOperatorEmail(sess.email || "") ? operatorPlatformFallback() : null;
+    // The platform key bills OASIS: verified operator only (lib/platform-operator.ts).
+    const fallback = (await isPlatformOperatorForAuthUser(sess.userId, sess.email)) ? operatorPlatformFallback() : null;
     if (!fallback) {
       return NextResponse.json(
         { ok: false, error: "agent_not_configured", hint: "Configure the Solara (or Bravo) provider in Settings to generate variants." },

@@ -16,7 +16,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
 import { isMissingTableError, jsonRoute, missingTablePayload } from "@/lib/api-helpers";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import { classifyUrlForSsrf } from "@/lib/url-safety";
 import {
@@ -132,7 +132,11 @@ export const GET = jsonRoute("api/cron-jobs GET", async () => {
   // indistinguishable from "every Empire schedule was deleted", which is the
   // exact shape of the 4-of-41 outage. Three separate calls to the predicate
   // could also drift apart under an edit; one binding cannot.
-  const isOperator = isOperatorEmail(user.email);
+  //
+  // The predicate is the VERIFIED check (alias AND owner/admin OASIS membership
+  // by auth id): the email alone was registrable by anyone. A failed membership
+  // lookup answers false — and the verdict on the wire says so, as above.
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   let empireJobs: Array<ReturnType<typeof normalizeEmpireRow> & { daemon: DaemonState | null }> = [];
   if (isOperator) {
     const empireQuery = await db

@@ -25,7 +25,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { bad } from "@/lib/api-helpers";
 import { resolveTenantId } from "@/lib/api-auth";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,7 +36,10 @@ export async function GET(req: NextRequest) {
   // open scrape, tenant-scoped read = honest per-tenant feed.
   const user = await getSessionUser().catch(() => null);
   if (!user) return bad(401, "unauthorized");
-  const isOperator = isOperatorEmail(user.email || undefined);
+  // The operator reads every tenant's events, so this is the verified check
+  // (alias AND owner/admin OASIS membership by auth id), never the email alone.
+  // A failed lookup answers "not an operator" and scopes the read to a tenant.
+  const isOperator = await isPlatformOperatorForAuthUser(user.id, user.email);
   const tenantId = isOperator ? null : await resolveTenantId();
   if (!isOperator && !tenantId) return bad(401, "unauthorized");
 

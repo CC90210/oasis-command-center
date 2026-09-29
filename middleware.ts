@@ -77,7 +77,9 @@ export const PUBLIC_PATH_PREFIXES = [
   // pass 4): payloads carry record IDs / lead context / command
   // summaries — not safe for unauthenticated callers. Route now
   // requires a session.
-  "/api/quests",           // OASIS Town Quest Log polls ACTIVE_TASKS.md mirror. Read-only, public for Phase 5 proof-of-life.
+  // /api/quests removed from public allowlist 2026-09-28 (P0-6): it served
+  // CC's ACTIVE_TASKS mirror (oasis_quests) to the whole internet. The route
+  // now requires a platform-operator session.
   "/api/track",            // Email-open tracking pixel (Phase 19 SunBiz CRM, 2026-05-17). Must be public — mail clients fetch the pixel without a session. Route resolves tenant_id by lookup against the interaction row (never trusts the URL parameter) and always returns a 1x1 GIF, so 401-gating it would silently break every operator's open-rate tracking. Migration 050 dedupes by (outbound_message_id, ip_hash) so a known reservation_id can't be replayed to inflate row counts.
   "/api/health",           // Liveness probe — Docker healthcheck, the desktop wizard's "dashboard reachable?" check, any external uptime monitor. The route returns a static JSON status with no sensitive payload, so 401-gating it would silently break health monitoring across the deploy.
   // /api/forms is intentionally NOT a public prefix — /api/forms (list),

@@ -2,13 +2,14 @@
  * /api/cron-jobs/[id] — per-row PATCH / DELETE for scheduled jobs.
  *
  * Both storage lanes are tenant-scoped. Empire writes additionally require a
- * recognized platform-operator email and are limited to enabled-state toggles.
+ * VERIFIED platform operator (lib/platform-operator.ts — alias AND owner/admin
+ * OASIS membership by auth id) and are limited to enabled-state toggles.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { getSessionContext, canManageTeam } from "@/lib/team";
-import { isOperatorEmail } from "@/lib/operator-credentials";
+import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getTenantEnabledAgents } from "@/lib/manifest/tenant-scope";
 import {
   normalizeEmpireRow,
@@ -63,7 +64,7 @@ export async function PATCH(
   if (source !== "tenant" && source !== "empire") {
     return NextResponse.json({ ok: false, error: "source_required" }, { status: 400 });
   }
-  if (source === "empire" && !isOperatorEmail(user?.email || undefined)) {
+  if (source === "empire" && !(await isPlatformOperatorForAuthUser(user?.id, user?.email))) {
     return NextResponse.json({ ok: false, error: "not_found_or_forbidden" }, { status: 404 });
   }
 
