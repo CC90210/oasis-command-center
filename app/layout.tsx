@@ -18,7 +18,7 @@ import {
   manifestNavToNavItems,
   manifestPrimaryAgentSlug,
 } from "@/lib/manifest/loader";
-import { SEED_MANIFESTS } from "@/lib/manifest/seeds";
+import { SEED_MANIFESTS, isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { canPreviewTenantSlug } from "@/lib/tenant-access";
 import { resolveChatShellProps, type ChatShellProps } from "@/lib/chat-shell-props";
@@ -32,8 +32,20 @@ import { isFounderTenant, shouldShowFoundersNav } from "@/lib/founders-marketing
 import { FOUNDERS_NAV } from "@/lib/portals/registry";
 import { isFinanceOwnerEmail } from "@/lib/founders-finances/access";
 import type { NavItem } from "@/lib/nav-config";
-import { filterNavForPersona, SURFACE_CAPABILITIES, type Persona } from "@/lib/role-surfaces";
-import { isPlatformOperator, resolveViewerSurface } from "@/lib/role-surfaces-session";
+import {
+  filterNavForPersona,
+  isOasisSurfaceTenant,
+  SURFACE_CAPABILITIES,
+  type Persona,
+} from "@/lib/role-surfaces";
+import {
+  isPlatformOperator,
+  resolveViewerSurface,
+  type ViewerSurface,
+} from "@/lib/role-surfaces-session";
+import { askHrefFor, buildOsNav, osNavRows } from "@/lib/os/nav";
+import { resolveOsModules } from "@/lib/os/modules";
+import type { OsNavSection } from "@/lib/os/types";
 import { timed, logPerfSummary, type PerfSpan } from "@/lib/perf/server-timing";
 import { PerfVitals } from "@/components/PerfVitals";
 
@@ -132,6 +144,14 @@ export default async function RootLayout({
    * were the only defence it would be the wrong default.
    */
   let navPersona: Persona | null = null;
+  /** The viewer's resolved surface (persona, capabilities, raw tenant slug). */
+  let viewerSurface: ViewerSurface | null = null;
+  /**
+   * Platform operator, verified by AUTH USER (resolvePlatformOperator), never
+   * by an email string. Drives the Admin shield and the operator status dots.
+   * Fails closed: any lookup failure is "not an operator".
+   */
+  let isOperator = false;
   if (!isFullBleed) {
     const cookieStore = await cookies();
     // Path-based tenant slug (Phase 1): `/t/<slug>/...` URLs anchor the shell to
@@ -271,8 +291,13 @@ export default async function RootLayout({
     // "online means last_seen_at within 5 minutes" definition still lives
     // solely in the shared bridge helper (lib/queries.ts), now called by
     // the status route instead of here.
+    //
+    // The operator verdict is the one platformOperatorP computed above (the
+    // verified check: alias AND an OASIS owner/admin profile by auth id). It
+    // gates the tenant preview, the chat props and the Admin rail alike — one
+    // decision, awaited here, never a second email-based guess.
     const chatProfile = profile;
-    const [chatPropsResolved, surfaceResolved] = await timed("side_channels", Promise.all([
+    const [chatPropsResolved, surfaceResolved, operatorResolved] = await timed("side_channels", Promise.all([
       safe(
         "layout.chat_props",
         platformOperatorP.then((platformOperator) =>
@@ -285,9 +310,12 @@ export default async function RootLayout({
         null,
       ),
       safe("layout.viewer_surface", resolveViewerSurface(), null),
+      platformOperatorP,
     ]), perfSpans);
     chatProps = chatPropsResolved;
+    viewerSurface = surfaceResolved;
     navPersona = surfaceResolved?.ok ? surfaceResolved.persona : null;
+    isOperator = operatorResolved === true;
     // tenantProfileSlug already resolved above so canPreviewTenantSlug
     // could use it on the path-override gate. Nothing more to do here.
   }
@@ -327,7 +355,7 @@ export default async function RootLayout({
   // Supabase round-trip on every authenticated page render. Same decision, same
   // pure predicate — this is exactly why the check was split out of the
   // session-touching wrapper.
-  const foundersNavItems: NavItem[] = shouldShowFoundersNav({
+  const foundersGateOpen = shouldShowFoundersNav({
     // TENANT **AND** CAPABILITY, matching lib/founders/gate.ts. The tenant
     // check alone showed the Marketing tab to everyone standing in the OASIS
     // workspace — including the 43 `member` profiles — while the page itself
@@ -345,18 +373,51 @@ export default async function RootLayout({
     demoMode,
     pathOverrideSlug,
     tenantProfileSlug,
-  })
+  });
+  // Finances is narrower than the founders gate: only the two owners.
+  // Cosmetic here — its pages 404 for anyone else (access-io.ts).
+  const financeOwner = isFinanceOwnerEmail(profile?.email);
+  // Rows for the manifest shell (the /t/<own-slug> path only — demo and
+  // preview shells close the gate above). The OS rail carries the same two
+  // gates as Growth › Content and Money › Overview, via buildOsNav's
+  // `founders` input below.
+  const foundersNavItems: NavItem[] = foundersGateOpen
     // Labels and hrefs come from FOUNDERS_NAV, NOT from a second hardcoded list
     // here. Hardcoding them is what let the sidebar and the header chips in
     // app/founders/layout.tsx disagree in PR #175, and what put an inactive
     // shell into CC's primary nav labelled "Marketing" while the live hub was
     // relabelled "Content". One list, both navs.
     ? FOUNDERS_NAV
-        // Finances is narrower than the founders gate: only the two owners.
-        // Cosmetic here — its pages 404 for anyone else (access-io.ts).
-        .filter((n) => n.audience !== "finance_owners" || isFinanceOwnerEmail(profile?.email))
+        .filter((n) => n.audience !== "finance_owners" || financeOwner)
         .map(({ audience: _audience, ...n }) => ({ group: "Founders", ...n }))
     : [];
+
+  // ── OASIS OS rail ────────────────────────────────────────────────────────
+  // Every workspace's OWN shell renders the OS rail, computed by the pure
+  // buildOsNav from the viewer's persona, capabilities, operator status,
+  // workspace and modules. The /t/<slug> path shells and /demo/sun keep the
+  // manifest nav: they render a workspace's stored manifest (another tenant's,
+  // for a preview), and demo mode rewrites every link to the demo landing.
+  //
+  // An unprovisioned workspace (UNPROVISIONED_SEED) gets Today only, and a
+  // viewer whose persona did not resolve gets the same — buildOsNav fails
+  // closed on both rather than guessing.
+  const osShell = !isFullBleed && !!manifest && !demoMode && !pathOverrideSlug;
+  const viewerTenantSlug = viewerSurface?.ok ? viewerSurface.tenantSlug : null;
+  const provisioned = !!manifest && !isUnprovisionedManifest(manifest);
+  const osSections: OsNavSection[] | null = osShell
+    ? buildOsNav({
+        persona: navPersona,
+        capabilities: viewerSurface?.ok ? viewerSurface.capabilities : null,
+        isOperator,
+        tenantSlug: viewerTenantSlug,
+        isOasisTenant: isOasisSurfaceTenant(viewerTenantSlug),
+        modules: resolveOsModules({ tenantSlug: viewerTenantSlug, provisioned }),
+        provisioned,
+        founders: { content: foundersGateOpen, finances: foundersGateOpen && financeOwner },
+      })
+    : null;
+  const osWorkspaceName = profile?.brand || manifest?.brand.name || "Workspace";
   // The chat-shell-vs-constrained <main> decision lives in MainShell (a CLIENT
   // component using usePathname) — NOT here. This root layout is a Server
   // Component that reads headers() once per full load and does NOT re-render on
@@ -438,6 +499,15 @@ export default async function RootLayout({
                 [...manifestNavToNavItems(manifest.nav), ...foundersNavItems],
                 navPersona,
               )}
+              // The OS rail. When set, Sidebar renders it instead of `items`
+              // (the manifest nav above is then only the preview/demo shells').
+              sections={osSections}
+              isOperator={isOperator}
+              // Connections are workspace configuration: owners/admins only.
+              showConnections={osShell && provisioned && navPersona === "founder"}
+              // No connection-health source exists yet (Phase 2), so no dot:
+              // an unmeasured status is not a green one.
+              connectionsStatus={null}
               operatorName={
                 demoMode
                   ? "Sun Demo Operator"
@@ -454,14 +524,14 @@ export default async function RootLayout({
               primaryAgentLive={false}
               bridgeOnline={false}
               deferStatus={
-                // The dots start OFF and self-resolve from
-                // /api/shell/status after paint (P1 instant-load) —
-                // except in demo/preview shells, where they stay
-                // forced off: the live indicator would read the
-                // OPERATOR's heartbeat while showing the previewed
-                // tenant's agent label, misrepresenting the dot
-                // (same suppression this prop replaced).
-                !(demoMode || (!!pathOverrideSlug && pathOverrideSlug !== tenantProfileSlug))
+                // The dots self-resolve from /api/shell/status after paint
+                // (P1 instant-load). They describe OASIS's own machinery and
+                // now live in the operator's Admin view, so only a platform
+                // operator on their own OS shell pays for the read (it costs
+                // 1.5-2.5 s). Never in demo/preview shells: the indicator
+                // would read the OPERATOR's heartbeat under a previewed
+                // tenant's agent label.
+                osShell && isOperator
               }
               demoMode={demoMode}
               demoLabel={`${manifest.brand.name} demo`}
@@ -475,6 +545,17 @@ export default async function RootLayout({
               footerLabel={manifest.brand.footer_label}
               footerTagline={manifest.brand.footer_tagline}
               chat={chatProps}
+              // "Workspace › Page" + Ask, on the OS shell only. Ask appears
+              // only when this viewer's rail has the Chief of Staff channel.
+              header={
+                osSections
+                  ? {
+                      workspace: osWorkspaceName,
+                      entries: osNavRows(osSections).map(({ href, label }) => ({ href, label })),
+                      askHref: askHrefFor(osSections),
+                    }
+                  : null
+              }
             >
               {children}
             </MainShell>

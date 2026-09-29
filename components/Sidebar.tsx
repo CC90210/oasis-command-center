@@ -1,96 +1,35 @@
 "use client";
 
+/**
+ * Sidebar — the rail's container: the fixed <aside>, its collapse transform,
+ * the mobile drawer semantics, the deferred operator status read, and intent
+ * prefetch. What goes INSIDE depends on the shell:
+ *
+ *   `sections` present → the OASIS OS rail (components/os/OsRail.tsx), built
+ *                        on the server by lib/os/nav.ts. Every workspace's own
+ *                        shell takes this path.
+ *   `sections` absent  → the manifest nav (`items`), flat and grouped. Only the
+ *                        /t/<slug> preview and /demo/sun shells take this path:
+ *                        they render ANOTHER workspace's manifest, and demo mode
+ *                        rewrites every link to the demo landing (demoHref).
+ *
+ * The rail sits on the window ground with no right border (OS spec §(d)); the
+ * canvas edge in MainShell is the separation. On mobile the drawer overlays the
+ * page, so there it takes a hairline and an overlay shadow.
+ */
+
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import {
-  Activity,
-  BadgeDollarSign,
-  BarChart3,
-  BookOpen,
-  BookUser,
-  Bot,
-  Brain,
-  ChevronRight,
-  ClipboardCheck,
-  Code2,
-  Crown,
-  DollarSign,
-  FileCode2,
-  FileSearch,
-  FileText,
-  GitBranch,
-  HandCoins,
-  Heart,
-  History,
-  Inbox,
-  Landmark,
-  LayoutDashboard,
-  LogOut,
-  Mail,
-  Megaphone,
-  MessageSquare,
-  PanelLeftClose,
-  PhoneCall,
-  Plug,
-  Radio,
-  RefreshCcw,
-  Settings,
-  ShieldAlert,
-  ShieldCheck,
-  ShoppingBag,
-  Sparkles,
-  SunMedium,
-  Ticket,
-  Upload,
-  Users,
-  UsersRound,
-  X,
-  type LucideIcon,
-} from "lucide-react";
-import { OasisLogo } from "@/components/brand/OasisLogo";
-import { CC_NAV, type NavIconKey, type NavItem } from "@/lib/nav-config";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { ChevronRight, Crown, PanelLeftClose, LogOut, SunMedium, X } from "lucide-react";
+import { OsRail } from "@/components/os/OsRail";
+import { iconFor } from "@/components/os/RailRow";
+import type { ConnectionsStatus } from "@/components/os/RailFooter";
+import { CC_NAV, type NavItem } from "@/lib/nav-config";
+import type { OsNavSection } from "@/lib/os/types";
 import { demoHref } from "@/lib/demo-href";
 import { prefetchRememberedWebLeads } from "@/lib/web-leads/client-cache";
-
-const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
-  Activity,
-  BadgeDollarSign,
-  BarChart3,
-  BookOpen,
-  BookUser,
-  Bot,
-  Brain,
-  ClipboardCheck,
-  Code2,
-  DollarSign,
-  FileCode2,
-  FileSearch,
-  FileText,
-  GitBranch,
-  HandCoins,
-  Heart,
-  History,
-  Inbox,
-  Landmark,
-  LayoutDashboard,
-  Mail,
-  Megaphone,
-  MessageSquare,
-  PhoneCall,
-  Plug,
-  Radio,
-  RefreshCcw,
-  Settings,
-  ShieldAlert,
-  ShieldCheck,
-  ShoppingBag,
-  Sparkles,
-  Ticket,
-  Upload,
-  Users,
-  UsersRound,
-};
 
 export function Sidebar({
   // Neutralized 2026-05-25 — these defaults used to silently fall
@@ -102,6 +41,11 @@ export function Sidebar({
   logo = "oasis",
   subtitle = "Agent Command Center",
   items,
+  sections = null,
+  isOperator = false,
+  showConnections = false,
+  connectionsStatus = null,
+  notifications,
   badges,
   operatorName,
   operatorEmail,
@@ -121,8 +65,18 @@ export function Sidebar({
   brand?: string;
   logo?: "oasis" | "sunbiz" | "suga";
   subtitle?: string;
-  /** Nav items to render. Defaults to CC's empire nav for backwards compat. */
+  /** Manifest nav for the preview/demo shells. Ignored when `sections` is set. */
   items?: NavItem[];
+  /** OASIS OS sections from lib/os/nav.ts buildOsNav. Set = the OS rail. */
+  sections?: OsNavSection[] | null;
+  /** resolvePlatformOperator(): the Admin shield. OS rail only. */
+  isOperator?: boolean;
+  /** Owners/admins get the Connections door in the footer. OS rail only. */
+  showConnections?: boolean;
+  /** Measured connection health, or null for no dot. OS rail only. */
+  connectionsStatus?: ConnectionsStatus | null;
+  /** Notifications slot in the footer. OS rail only. */
+  notifications?: ReactNode;
   /** Counter map keyed by NavItem.badgeKey (e.g. {inbox: 3, applications: 247}). */
   badges?: Record<string, number>;
   operatorName?: string;
@@ -133,7 +87,9 @@ export function Sidebar({
   /** P1 instant-load: when true, the live/bridge dots start from the passed
    *  booleans (typically false) and self-resolve from /api/shell/status
    *  after paint — the layout no longer blocks first byte on those reads.
-   *  Preview/demo shells pass false and keep their forced-off dots. */
+   *  The layout passes true only for a platform operator on their own
+   *  shell: the dots live in the Admin view, so nobody else pays for the
+   *  read. Preview/demo shells pass false. */
   deferStatus?: boolean;
   inboxUnread?: number;
   demoMode?: boolean;
@@ -251,14 +207,22 @@ export function Sidebar({
   const bridgeOnline = deferStatus
     ? fetchedStatus?.bridgeOnline ?? bridgeOnlineProp
     : bridgeOnlineProp;
+  // Before the deferred read answers, the dots are UNKNOWN, not "off".
+  const statusKnown = deferStatus ? fetchedStatus !== null : true;
   const navItems = items && items.length > 0 ? items : CC_NAV;
   const onWebLeads = pathname === "/web-leads" || pathname.startsWith("/web-leads/");
-  const canPrefetchWebLeads =
-    !demoMode && !onWebLeads && navItems.some((item) => item.href === "/web-leads");
+  const railHasWebLeads = sections
+    ? sections.some((s) => s.groups.some((g) => g.rows.some((r) => r.href === "/web-leads")))
+    : navItems.some((item) => item.href === "/web-leads");
+  const canPrefetchWebLeads = !demoMode && !onWebLeads && railHasWebLeads;
   const prefetchWebLeads = useCallback(() => {
     if (!canPrefetchWebLeads) return;
     void prefetchRememberedWebLeads();
   }, [canPrefetchWebLeads]);
+  const intentFor = useCallback(
+    (href: string) => (href === "/web-leads" ? prefetchWebLeads : undefined),
+    [prefetchWebLeads],
+  );
 
   // ═══ NO UNCONDITIONAL IDLE PREFETCH ═══════════════════════════════════════
   //
@@ -331,6 +295,7 @@ export function Sidebar({
     groups[idx].items.push(item);
   }
 
+
   return (
     <aside
       id="sidebar-drawer"
@@ -346,185 +311,182 @@ export function Sidebar({
       // off-screen. Mobile drawer transform takes priority on small
       // screens. CSS variable on <html> drives the main element's left
       // margin so the page expands smoothly.
-      className={`fixed left-0 top-0 bottom-0 w-60 border-r border-bg-border bg-bg-panel flex flex-col z-40 md:z-20 transition-transform duration-200 ${
-        isMobileOpen ? "translate-x-0" : "-translate-x-full"
+      // The overlay shadow only while the drawer is OPEN: a closed drawer
+      // sits at translateX(-100%) and its 32px blur would smear a dark band
+      // down the left edge of every phone screen.
+      className={`fixed left-0 top-0 bottom-0 w-60 bg-bg-rail flex flex-col z-40 md:z-20 transition-transform duration-150 max-md:border-r max-md:border-hairline ${
+        isMobileOpen ? "translate-x-0 max-md:shadow-elev" : "-translate-x-full"
       } ${isDesktopCollapsed ? "md:-translate-x-full" : "md:translate-x-0"}`}
     >
-      {/* Brand block */}
-      <div className="px-5 py-5 border-b border-bg-border relative shrink-0">
-        {/* Mobile-only close button. Sits over the brand block so the
-            operator can dismiss the drawer without reaching for the
-            outer backdrop. md+ never renders this. autoFocus is
-            conditional on isMobileOpen so desktop renders don't yank
-            focus away from whatever the operator is doing. */}
-        {onMobileClose && (
-          <button
-            type="button"
-            onClick={onMobileClose}
-            aria-label="Close menu"
-            autoFocus={isMobileOpen}
-            className="md:hidden absolute top-3 right-3 inline-flex h-8 w-8 items-center justify-center rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-        {/* Desktop-only collapse button — slides the sidebar off-screen.
-            Floating reopen affordance lives in SidebarShell so it can
-            render when the sidebar itself isn't visible. */}
-        {onDesktopCollapse && (
-          <button
-            type="button"
-            onClick={onDesktopCollapse}
-            aria-label="Collapse navigation"
-            className="hidden md:inline-flex absolute top-3 right-3 h-8 w-8 items-center justify-center rounded-md text-fg-muted hover:text-fg hover:bg-bg-elev transition-colors"
-            title="Collapse sidebar (full-width view)"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </button>
-        )}
-        <Link href="/" className="flex items-center gap-2.5 group">
-          <BrandMark logo={logo} />
-          <div className="leading-tight">
-            <div className="text-fg font-bold text-sm tracking-tight">
-              {brand}
-            </div>
-            <div className="text-fg-dim text-[10px] uppercase tracking-[0.18em] font-semibold">
-              {subtitle}
-            </div>
-          </div>
-        </Link>
-        {/* Animated thin accent line under brand */}
-        <div className="absolute bottom-0 left-0 right-0 top-glow" />
-      </div>
-
-      {/* Nav — min-h-0 is REQUIRED: a flex child won't scroll (overflow-y-auto
-          is inert) unless it can shrink below its content height, so without it
-          the full nav (OPERATIONS→SYSTEM) overflowed and the operator footer
-          rendered on top of the lower groups on mobile (the 2026-06-30 "items
-          folding on top of each other" report). */}
-      <nav className="flex-1 min-h-0 px-3 py-4 overflow-y-auto overscroll-contain">
-        {groups.map((g) => (
-          <NavGroup key={g.label} label={g.label}>
-            {g.items.map((item) => (
-              <NavLink
-                key={item.href}
-                item={item}
-                isActive={item.href === bestMatchHref}
-                badgeCount={item.badgeKey ? badgeMap[item.badgeKey] || 0 : 0}
-                demoMode={demoMode}
-                demoLandingPath={demoLandingPath}
-                onIntent={item.href === "/web-leads" ? prefetchWebLeads : undefined}
-              />
-            ))}
-          </NavGroup>
-        ))}
-      </nav>
-
-      {/* Operator — shrink-0 so the footer keeps its full height and pins to the
-          bottom while the nav above scrolls (never compressed by a tall nav). */}
-      <div className="border-t border-bg-border px-4 py-3 space-y-2 shrink-0">
-        {demoMode && (
-          <div className="rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-[10px] text-accent">
-            <div className="font-bold uppercase tracking-[0.14em]">{demoLabel}</div>
-            <Link href="/api/demo/clear" className="mt-1 inline-block text-fg-muted hover:text-fg">
-              Exit demo mode
+      {sections ? (
+        <OsRail
+          sections={sections}
+          brand={brand}
+          logo={logo}
+          operatorName={operatorName}
+          operatorEmail={operatorEmail}
+          isOperator={isOperator}
+          primaryAgent={primaryAgent}
+          primaryAgentLive={primaryAgentLive}
+          bridgeOnline={bridgeOnline}
+          statusKnown={statusKnown}
+          badges={badgeMap}
+          showConnections={showConnections}
+          connectionsStatus={connectionsStatus}
+          notifications={notifications}
+          intentFor={intentFor}
+          isMobileOpen={isMobileOpen}
+          onMobileClose={onMobileClose}
+          onDesktopCollapse={onDesktopCollapse}
+        />
+      ) : (
+        <>
+          {/* Brand block */}
+          <div className="relative shrink-0 border-b border-hairline px-4 py-4">
+            {/* Mobile-only close button. Sits over the brand block so the
+                operator can dismiss the drawer without reaching for the
+                outer backdrop. md+ never renders this. autoFocus is
+                conditional on isMobileOpen so desktop renders don't yank
+                focus away from whatever the operator is doing. */}
+            {onMobileClose && (
+              <button
+                type="button"
+                onClick={onMobileClose}
+                aria-label="Close menu"
+                autoFocus={isMobileOpen}
+                className="md:hidden absolute top-3 right-3 inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-dim hover:text-fg hover:bg-active-hover"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+            {/* Desktop-only collapse button — slides the sidebar off-screen.
+                Floating reopen affordance lives in SidebarShell so it can
+                render when the sidebar itself isn't visible. */}
+            {onDesktopCollapse && (
+              <button
+                type="button"
+                onClick={onDesktopCollapse}
+                aria-label="Collapse navigation"
+                className="hidden md:inline-flex absolute top-3 right-3 h-8 w-8 items-center justify-center rounded-lg text-fg-dim hover:text-fg hover:bg-active-hover transition-colors duration-150"
+                title="Collapse sidebar (full-width view)"
+              >
+                <PanelLeftClose className="w-4 h-4" />
+              </button>
+            )}
+            <Link href="/" prefetch={false} className="flex items-center gap-2.5 pr-8">
+              <BrandMark logo={logo} brand={brand} />
+              <div className="min-w-0 leading-tight">
+                <div className="truncate text-sm font-semibold text-fg">{brand}</div>
+                <div className="truncate text-xs text-fg-dim">{subtitle}</div>
+              </div>
             </Link>
           </div>
-        )}
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-bg-elev border border-bg-border flex items-center justify-center text-fg-muted text-xs font-bold">
-            {(operatorName || "U").charAt(0).toUpperCase()}
-          </div>
-          <div className="flex-1 leading-tight min-w-0">
-            <div className="text-fg text-xs font-medium truncate">
-              {operatorName || "Operator"}
+
+          {/* Nav — min-h-0 is REQUIRED: a flex child won't scroll (overflow-y-auto
+              is inert) unless it can shrink below its content height, so without it
+              the full nav (OPERATIONS→SYSTEM) overflowed and the operator footer
+              rendered on top of the lower groups on mobile (the 2026-06-30 "items
+              folding on top of each other" report). */}
+          <nav className="flex-1 min-h-0 px-2.5 py-3 overflow-y-auto overscroll-contain">
+            {groups.map((g) => (
+              <NavGroup key={g.label} label={g.label}>
+                {g.items.map((item) => (
+                  <NavLink
+                    key={item.href}
+                    item={item}
+                    isActive={item.href === bestMatchHref}
+                    badgeCount={item.badgeKey ? badgeMap[item.badgeKey] || 0 : 0}
+                    demoMode={demoMode}
+                    demoLandingPath={demoLandingPath}
+                    onIntent={item.href === "/web-leads" ? prefetchWebLeads : undefined}
+                  />
+                ))}
+              </NavGroup>
+            ))}
+          </nav>
+
+          {/* Viewer — shrink-0 so the footer keeps its full height and pins to the
+              bottom while the nav above scrolls (never compressed by a tall nav).
+              The agent/bridge dots are gone from this shell: they describe
+              OASIS's own machinery and now live in the operator's Admin view
+              (components/os/OsRail.tsx). Here they only ever read "off" anyway,
+              because preview and demo shells force them off. */}
+          <div className="shrink-0 space-y-2 border-t border-hairline px-2.5 py-2.5">
+            {demoMode && (
+              <div className="rounded-lg border border-hairline bg-bg-panel px-3 py-2 text-xs">
+                <div className="font-medium text-fg">{demoLabel}</div>
+                <Link href="/api/demo/clear" prefetch={false} className="mt-0.5 inline-block text-accent hover:underline">
+                  Exit demo mode
+                </Link>
+              </div>
+            )}
+            <div className="flex items-center gap-2.5 px-1">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-hairline bg-bg-elev text-xs font-semibold text-fg-muted">
+                {(operatorName || "U").charAt(0).toUpperCase()}
+              </div>
+              <div className="min-w-0 flex-1 leading-tight">
+                <div className="truncate text-[13px] font-medium text-fg">{operatorName || "Operator"}</div>
+                <div className="truncate text-xs text-fg-dim">{operatorEmail || ""}</div>
+              </div>
+              <form action="/api/auth/signout" method="post">
+                <button
+                  type="submit"
+                  aria-label="Sign out"
+                  title="Sign out"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-fg-dim transition-colors duration-150 hover:bg-active-hover hover:text-fg"
+                >
+                  <LogOut size={16} strokeWidth={1.75} aria-hidden />
+                </button>
+              </form>
             </div>
-            <div className="text-fg-dim text-[10px] truncate font-mono">
-              {operatorEmail || ""}
-            </div>
           </div>
-        </div>
-        {/* Status row — agent live + bridge online, both compact, both
-            on the left. Sign-out gets its own row below so a wide
-            bridge label can never collide with the logout button (the
-            old flex-between layout did, especially on narrow sidebars
-            and zoomed viewports — CC reported the overlap 2026-05-24). */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] uppercase tracking-wider">
-          <span
-            className="text-fg-dim flex items-center gap-1.5 min-w-0"
-            title={
-              primaryAgentLive
-                ? `${primaryAgent} ticked in the last 15 min`
-                : `${primaryAgent} hasn't ticked recently`
-            }
-          >
-            <span className={primaryAgentLive ? "text-status-engaged animate-pulse-slow" : "text-fg-faint"}>●</span>
-            <span className="truncate">{primaryAgent}</span>
-            <span className={primaryAgentLive ? "text-status-engaged" : "text-fg-faint"}>
-              {primaryAgentLive ? "live" : "idle"}
-            </span>
-          </span>
-          <span
-            className="text-fg-dim flex items-center gap-1.5 min-w-0"
-            title={bridgeOnline
-              ? "Local bridge daemon pinged within last 5 min"
-              : "Local bridge offline — pair a machine from Settings → Devices"}
-          >
-            <span className={bridgeOnline ? "text-accent animate-pulse-slow" : "text-fg-faint"}>◆</span>
-            <span className="truncate">bridge</span>
-            <span className={bridgeOnline ? "text-accent" : "text-fg-faint"}>
-              {bridgeOnline ? "online" : "offline"}
-            </span>
-          </span>
-        </div>
-        <form action="/api/auth/signout" method="post" className="pt-1">
-          <button
-            type="submit"
-            className="w-full text-[10px] uppercase tracking-wider text-fg-dim hover:text-status-hot transition-colors flex items-center justify-center gap-1.5 rounded-md border border-bg-border/60 hover:border-status-hot/30 px-2 py-1.5"
-          >
-            <LogOut size={11} />
-            <span>Sign out</span>
-          </button>
-        </form>
-      </div>
+        </>
+      )}
     </aside>
   );
 }
 
-function BrandMark({ logo }: { logo: "oasis" | "sunbiz" | "suga" }) {
-  if (logo === "sunbiz") {
+/**
+ * Brand tile for the preview/demo shells. Flat: the old SunBiz and Suga marks
+ * were gradient tiles with a blurred coloured halo, and the OASIS one wrapped
+ * OasisLogo in a blue blur — three glows on the one element every screen shows.
+ */
+function BrandMark({ logo, brand }: { logo: "oasis" | "sunbiz" | "suga"; brand: string }) {
+  if (logo === "sunbiz" || logo === "suga") {
+    const Glyph = logo === "sunbiz" ? SunMedium : Crown;
     return (
-      <div className="relative flex h-10 w-10 items-center justify-center rounded-2xl border border-amber-300/40 bg-gradient-to-br from-amber-300/25 via-orange-500/15 to-bg-elev text-amber-200 shadow-[0_0_28px_-8px_rgba(251,191,36,0.72)]">
-        <SunMedium size={19} strokeWidth={2.15} />
-        <div className="absolute inset-[3px] rounded-[14px] border border-white/8" />
-        <div className="absolute -inset-1 rounded-2xl bg-amber-300/20 blur opacity-60 -z-10" />
-      </div>
-    );
-  }
-  if (logo === "suga") {
-    return (
-      <div className="relative flex h-10 w-10 items-center justify-center rounded-2xl border border-pink-400/40 bg-gradient-to-br from-pink-400/25 via-fuchsia-500/15 to-bg-elev text-pink-200 shadow-[0_0_28px_-8px_rgba(236,72,153,0.72)]">
-        <Crown size={19} strokeWidth={2.15} />
-        <div className="absolute inset-[3px] rounded-[14px] border border-white/8" />
-        <div className="absolute -inset-1 rounded-2xl bg-pink-400/20 blur opacity-60 -z-10" />
+      <div
+        aria-hidden
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-bg-elev ${
+          logo === "sunbiz" ? "text-amber-300" : "text-pink-300"
+        }`}
+      >
+        <Glyph size={16} strokeWidth={1.75} />
       </div>
     );
   }
   return (
-    <div className="relative">
-      <OasisLogo size={36} className="group-hover:ring-accent/70 transition-all" />
-      <div className="absolute -inset-0.5 rounded-lg bg-accent/20 blur opacity-50 -z-10" />
+    <div
+      aria-hidden
+      className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-hairline bg-bg-elev text-xs font-semibold text-fg-muted"
+    >
+      {logo === "oasis" ? (
+        <Image src="/oasis-logo.jpg" alt="" width={32} height={32} className="h-full w-full object-cover" />
+      ) : (
+        (brand.trim().charAt(0) || "W").toUpperCase()
+      )}
     </div>
   );
 }
 
 function NavGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="mb-4">
-      <div className="px-3 mb-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-fg-faint">
+    <div className="mb-3">
+      {/* Sentence-case 12.5px heading (was a 10px uppercase tracked label). */}
+      <div className="mb-px flex h-7 items-center px-2.5 text-[12.5px] font-medium text-fg-dim">
         {label}
       </div>
-      <ul className="space-y-0.5">{children}</ul>
+      <ul className="space-y-px">{children}</ul>
     </div>
   );
 }
@@ -545,7 +507,7 @@ function NavLink({
   onIntent?: () => void;
 }) {
   const active = isActive;
-  const Icon = NAV_ICONS[item.icon] || LayoutDashboard;
+  const Icon = iconFor(item.icon);
   const href = demoHref(item.href, { demoMode, landingPath: demoLandingPath });
   const router = useRouter();
   // Warm the route only when the operator SHOWS INTENT. Hover/focus fires
@@ -575,37 +537,36 @@ function NavLink({
           boundary still render server-side to satisfy it, so ~3.1 s of work
           still fired for pages the operator never opened. Turning prefetch
           off and warming on hover/focus instead is what actually removes it,
-          and a hover lands 150-300 ms before the click on a real pointer. */}
+          and a hover lands 150-300 ms before the click on a real pointer.
+          The OS rail's links follow the same rule (components/os/RailRow.tsx). */}
       <Link
         href={href}
         prefetch={false}
         onMouseEnter={warm}
         onFocus={warm}
-        className={`group flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all relative ${
-          active
-            ? "bg-accent-soft text-accent shadow-[inset_0_0_0_1px_rgba(59,130,246,0.25)]"
-            : "text-fg-muted hover:bg-bg-hover hover:text-fg"
+        aria-current={active ? "page" : undefined}
+        // Neutral active row — no blue fill, no inset ring, no glow bar. The
+        // accent is for actions, and a selected row is not one.
+        className={`group flex h-8 items-center gap-2.5 rounded-lg px-2.5 text-sm font-medium transition-colors duration-150 ${
+          active ? "bg-active text-fg" : "text-fg-muted hover:bg-active-hover hover:text-fg"
         }`}
       >
-        {active && (
-          <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-4 bg-accent rounded-r-full shadow-glow" />
-        )}
         <Icon
           size={16}
-          className={active ? "text-accent" : "text-fg-dim group-hover:text-fg-muted"}
-          strokeWidth={2}
+          className={active ? "shrink-0 text-fg" : "shrink-0 text-fg-dim group-hover:text-fg-muted"}
+          strokeWidth={1.75}
         />
-        <span className="font-medium flex-1">{item.label}</span>
+        <span className="min-w-0 flex-1 truncate">{item.label}</span>
         {badgeCount > 0 && (
           <span
-            className="ml-auto px-1.5 py-0.5 rounded-full bg-accent text-bg-deep text-[10px] font-bold leading-none min-w-[16px] text-center"
+            className="ml-auto min-w-[18px] rounded-full bg-unread px-1.5 text-center text-[11px] font-semibold leading-[18px] text-white tabular-nums"
             title={`${badgeCount} unread`}
           >
             {badgeCount > 99 ? "99+" : badgeCount}
           </span>
         )}
         {item.expandable && badgeCount === 0 && (
-          <ChevronRight size={12} className="text-fg-faint" />
+          <ChevronRight size={12} className="text-fg-dim" />
         )}
       </Link>
     </li>

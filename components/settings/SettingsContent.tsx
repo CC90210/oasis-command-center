@@ -19,6 +19,17 @@
  *
  * Real-mode rendering is byte-identical to the prior SettingsPage. The
  * only logical change is the `previewMode` short-circuit at the top.
+ *
+ * ONE PAGE PER SECTION (OASIS OS, 2026-09-28). /settings is now split into
+ * section pages (Profile, Team, Connections, Chat apps, AI brain, Brand &
+ * domain, Devices…), each rendering `<SettingsContent section="…" />`. Every
+ * card below is tagged with the section it belongs to and renders only there;
+ * with no `section` (the /t/<slug>/settings mount) the whole body renders in
+ * section order, as before. So each card still has exactly one definition,
+ * one gate and one data source — the split moved where cards appear, not how
+ * any of them behaves. Data reads follow the section: a Brand page never
+ * queries integration health, and the personal (non-admin) branch still
+ * returns before any workspace read.
  */
 
 import Link from "next/link";
@@ -60,10 +71,10 @@ import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
 import { resolveAgentKey } from "@/lib/agents";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { getSessionUser } from "@/lib/supabase-server";
 import type { IntegrationHealth } from "@/lib/supabase";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
+import { canManageWorkspaceSettings } from "@/components/settings/settings-sections";
+import { isVerifiedOperator } from "@/components/settings/settings-viewer";
 
 type ViewerSettingsAccess = {
   persona: Persona;
@@ -72,6 +83,20 @@ type ViewerSettingsAccess = {
   canSeeSystemSurfaces: boolean;
   degraded: boolean;
 };
+
+/**
+ * The section pages SettingsContent serves. Billing, Notifications, Data &
+ * privacy and Audit log have no card in here — their pages render their own
+ * content.
+ */
+export type SettingsContentSection =
+  | "profile"
+  | "team"
+  | "connections"
+  | "chat-apps"
+  | "ai"
+  | "brand"
+  | "devices";
 
 /**
  * `previewMode = true` is set by TenantSettings when the operator is
@@ -91,6 +116,7 @@ export async function SettingsContent({
   tenantSlug,
   hideHeader = false,
   viewerAccess,
+  section,
 }: {
   previewMode?: boolean;
   tenantSlug?: string;
@@ -103,17 +129,32 @@ export async function SettingsContent({
    * Top-level /settings (no outer PageHeader) leaves this false.
    */
   hideHeader?: boolean;
+  /**
+   * Render only this section's cards (a /settings/<section> page, which draws
+   * its own title). Omitted: every section, in order, with the header.
+   */
+  section?: SettingsContentSection;
 }) {
   if (previewMode) {
     return <PreviewSettings tenantSlug={tenantSlug ?? "this tenant"} hideHeader={hideHeader} />;
   }
 
+  const show = (s: SettingsContentSection) => !section || section === s;
+  // On a section's own page its sections start open: the page IS the section,
+  // and a column of closed bars would be one more click for nothing.
+  const focused = section !== undefined;
+  const showHeader = !hideHeader && !focused;
+
   const profile = await safe("settings.profile", getActiveProfile(), null);
-  const [tenant, user] = await Promise.all([
+  const [tenant, isOperator] = await Promise.all([
     profile?.tenant_id
       ? safe("settings.tenant", getTenant(profile.tenant_id), null)
       : Promise.resolve(null),
-    getSessionUser().catch(() => null),
+    // VERIFIED operator (email alias AND an owner/admin seat in OASIS, by auth
+    // id) — not isOperatorEmail alone, which trusts an unproven signup email.
+    // It gates the local-CLI card, the Devices section and the operator view of
+    // integration health.
+    isVerifiedOperator(),
   ]);
 
   const manifestSlug = tenant ? resolveClientProfileSlug(tenant) : null;
@@ -131,22 +172,14 @@ export async function SettingsContent({
   const effectiveAgentKeys = manifestAgentKeys;
   const enabledAgents = effectiveAgentKeys.map(resolveAgentKey);
   const enabledChatAgentKeys = chatAgentKeys().filter((k) => enabledAgents.includes(k));
-  // Gates the local-CLI provider controls and the platform-infra integrations:
-  // verified operator only (alias AND owner/admin OASIS membership by auth id).
-  const isOperator = await isPlatformOperatorForAuthUser(user?.id, user?.email);
   const teamProfile = profile as
     | (typeof profile & { is_owner?: boolean; team_role?: string; admin_access?: boolean | null })
     | null;
   // Full-admin capability: base owner/admin OR the admin_access toggle grant.
   // Unlocks Settings cards (branding, integration keys, plan templates, cron
   // jobs, automations, agent config) for a toggled agent. Admin-toggle 2026-07-07.
-  const canManageTenant =
-    !!teamProfile &&
-    (teamProfile.is_owner ||
-      teamProfile.team_role === "owner" ||
-      teamProfile.team_role === "admin" ||
-      teamProfile.admin_access === true) &&
-    (viewerAccess?.canSeeSystemSurfaces ?? true);
+  // The rule lives in settings-sections.ts so the section nav asks the same one.
+  const canManageTenant = canManageWorkspaceSettings(teamProfile, viewerAccess?.canSeeSystemSurfaces);
   const canSeeTeamPerformance = viewerAccess?.canSeeTeamPerformance === true;
   const oasisSalesWorkspace = isOasisSurfaceTenant(tenant?.slug ?? null);
 
@@ -166,14 +199,27 @@ export async function SettingsContent({
         showKixie={enabledAgents.includes("helios")}
         showTeamPerformance={canSeeTeamPerformance && oasisSalesWorkspace}
         accessDegraded={viewerAccess?.degraded === true}
+        section={section}
       />
     );
   }
 
+  // Only the reads the requested section renders. Integration health feeds
+  // Connections; the AI key set feeds AI setup and the health dots; the bridge
+  // heartbeat feeds AI setup and the provider override table.
+  const needsHealth = show("connections");
+  const needsAiKeys = show("ai") || show("connections");
+  const needsBridge = show("ai");
   const [integrations, connectedAiSet, bridgeOnline] = await Promise.all([
-    safe("settings.integrations_health", integrationsHealth(profile?.tenant_id || null), []),
-    safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>()),
-    safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false),
+    needsHealth
+      ? safe("settings.integrations_health", integrationsHealth(profile?.tenant_id || null), [])
+      : Promise.resolve([] as IntegrationHealth[]),
+    needsAiKeys
+      ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>())
+      : Promise.resolve(new Set<string>()),
+    needsBridge
+      ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false)
+      : Promise.resolve(false),
   ]);
   const visibleDefs = visibleIntegrationsForTenant(enabledAgents, { isOperator });
   const visibleServices = new Set(visibleDefs.map((d) => d.service));
@@ -181,7 +227,7 @@ export async function SettingsContent({
 
   return (
     <div className="space-y-6 animate-fade-in">
-      {!hideHeader && (
+      {showHeader && (
         <PageHeader
           title={tenant?.name ? `Settings · ${tenant.name}` : "Settings"}
           subtitle={
@@ -198,136 +244,71 @@ export async function SettingsContent({
           error sent you for stays hidden. This opens it. */}
       <OpenSectionOnHash />
 
-      {/* This bot is a SunBiz application-upload integration. Mounting it in
-          OASIS exposed SunBiz wording and a foreign workflow in the wrong
-          tenant's Settings surface. */}
-      {manifestSlug === "sun" && <TelegramLinkCard />}
-
       {!profile ? (
         <Card title="No profile loaded">
           <EmptyState message="Sign in to edit your profile." />
         </Card>
       ) : (
         <>
-          <SettingsSection
-            title="Profile"
-            subtitle={`Signed in as ${profile.email}`}
-            action={
-              <div className="flex items-center gap-2">
-                {canManageTenant && (
-                  <a
-                    href="/settings/audit-log"
-                    className="text-xs text-accent hover:text-accent/80 underline underline-offset-2"
-                  >
-                    Audit log →
-                  </a>
-                )}
-              </div>
-            }
-          >
-            <SafeBoundary label="Profile editor">
-              <ProfileEditor
-                key={manifestAgentKeys.join(":")}
-                profile={profile}
-                tenantAgents={manifestAgentKeys}
-              />
-            </SafeBoundary>
-          </SettingsSection>
-
-          <SettingsSection
-            title="Branding"
-            subtitle="Your logo is applied to every new form, public application page, and anywhere else the dashboard shows your brand."
-          >
-            <SafeBoundary label="Branding">
-              <BrandLogoCard initialLogoUrl={tenant?.logo_url ?? null} canManage={canManageTenant} />
-            </SafeBoundary>
-          </SettingsSection>
-
-          {/* Credentials — single parent Card with two clearly-labeled
-              sub-sections. Was previously two top-level cards
-              (Integration Keys + Custom Credentials) which CC read as
-              redundant ("there are two sections for uploading and
-              storing your credentials"). They actually serve different
-              purposes — structured known integrations with health
-              checks vs raw KEY=VALUE for anything else — but the
-              parent grouping makes that obvious. */}
-          <SettingsSection
-            defaultOpen
-            title="Credentials"
-            subtitle="Workspace app keys and the connections tied to your own login, in one place. Shared keys apply to the team; personal Google and Telegram connections apply only to you."
-          >
-            {/* FOLDED, 2026-08-17. Both panels rendered open, which made this one
-                card the tallest thing on the page and buried everything under it.
-                Known integrations opens by default because it is the one people
-                come here for; custom secrets is the long tail and starts closed.
-                Each header keeps its description while collapsed — a fold that
-                hides what is behind it just makes you open all of them. */}
-            <div className="space-y-3">
-              <SettingsSection
-                tone="nested"
-                title="Known integrations"
-                subtitle="Pre-configured slots for services your agents already know how to use (Gmail, Stripe, Telegram…). Live health check plus paste-once setup."
-                defaultOpen
-              >
-                <SafeBoundary label="Integration keys">
-                  <IntegrationKeysPanel canManage={canManageTenant} />
-                </SafeBoundary>
-              </SettingsSection>
-
-              <SettingsSection
-                tone="nested"
-                title="Your Google & Telegram"
-                subtitle="Connect the accounts used by your own seat. These controls never overwrite a teammate's personal connections."
-                defaultOpen
-              >
-                <div className="space-y-3">
-                  <SafeBoundary label="Personal integrations">
-                    <PersonalIntegrationsPanel
-                      showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
-                      showKixie={enabledAgents.includes("helios")}
-                    />
-                  </SafeBoundary>
-                  <SafeBoundary label="Personal Telegram bot">
-                    <TelegramConnectCard />
-                  </SafeBoundary>
+          {/* ── Profile ─────────────────────────────────────────────── */}
+          {show("profile") && (
+            <SettingsSection
+              defaultOpen={focused}
+              title="Profile"
+              subtitle={`Signed in as ${profile.email}`}
+              action={
+                <div className="flex items-center gap-2">
+                  {canManageTenant && !focused && (
+                    <a
+                      href="/settings/audit-log"
+                      className="text-xs text-accent hover:text-accent/80 underline underline-offset-2"
+                    >
+                      Audit log →
+                    </a>
+                  )}
                 </div>
-              </SettingsSection>
-
-              {canManageTenant && (
-                <SettingsSection
-                  tone="nested"
-                  title="Custom secrets"
-                  subtitle="Anything that doesn't fit a known slot — client tokens, one-off webhook URLs, internal keys. Encrypted at rest; agents read them via get_credential."
-                >
-                  <SafeBoundary label="Custom credentials vault">
-                    <CustomCredentialsVault />
-                  </SafeBoundary>
-                </SettingsSection>
-              )}
-            </div>
-          </SettingsSection>
-
-          {/* Kixie webhook auto-registration — only when the tenant
-              actually declares Kixie in its required_services list.
-              Avoids cluttering non-Kixie tenants (OASIS, etc.) with a
-              button that has no effect. */}
-          {!previewMode && (manifest?.required_services || []).some((s) => s.service === "kixie") && (
-            <SafeBoundary label="Kixie webhooks">
-              <KixieWebhookSyncCard isOwner={canManageTenant} />
-            </SafeBoundary>
+              }
+            >
+              <SafeBoundary label="Profile editor">
+                <ProfileEditor
+                  key={manifestAgentKeys.join(":")}
+                  profile={profile}
+                  tenantAgents={manifestAgentKeys}
+                />
+              </SafeBoundary>
+            </SettingsSection>
           )}
 
-          {canManageTenant && (
+          {/* "Known facts about you" removed 2026-08-17. It shipped with
+              placeholder text still in the box — "Your Name", "Your LLC",
+              "https://cal.com/your-handle" — which every cloud chat was
+              injecting as authoritative operator context. A field nobody filled
+              in is not neutral when its DEFAULT is fed to the model as fact. The
+              same context now lives where it is actually true: brain/USER.md and
+              the agent entry points. */}
+
+          {show("profile") && (
+            <SettingsSection defaultOpen={focused} title="Password" subtitle="Change your sign-in password">
+              <SafeBoundary label="Password form">
+                <ChangePasswordForm />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
+
+          {/* ── Team ────────────────────────────────────────────────── */}
+          {show("team") && canManageTenant && (
             <SettingsSection
+              defaultOpen={focused}
               title="Team"
               subtitle="Invite teammates by work email, and switch anyone Active or Inactive. Inactive people disappear from the pipeline, assign lists, and reports and can't sign in; their history is kept and they can be reactivated."
               action={
-                <a
+                <Link
                   href="/team"
+                  prefetch={false}
                   className="inline-flex items-center gap-1 text-xs text-accent hover:text-accent-bright"
                 >
                   Manage team, invites & active status →
-                </a>
+                </Link>
               }
             >
               <p className="text-sm text-fg-muted leading-relaxed">
@@ -336,8 +317,9 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {canManageTenant && oasisSalesWorkspace && (
+          {show("team") && canManageTenant && oasisSalesWorkspace && (
             <SettingsSection
+              defaultOpen={focused}
               title="Revenue goal"
               subtitle="The one goal Today counts down to: money collected in a period, computed from the Finances ledger. MRR is never typed — it is read live from Stripe."
             >
@@ -350,116 +332,225 @@ export async function SettingsContent({
             </SettingsSection>
           )}
 
-          {/* "Known facts about you" removed 2026-08-17. It shipped with
-              placeholder text still in the box — "Your Name", "Your LLC",
-              "https://cal.com/your-handle" — which every cloud chat was
-              injecting as authoritative operator context. A field nobody filled
-              in is not neutral when its DEFAULT is fed to the model as fact. The
-              same context now lives where it is actually true: brain/USER.md and
-              the agent entry points. */}
-
-          {/* Custom Credentials card removed 2026-06-06 — moved into the
-              unified "Credentials" parent Card above so the operator sees
-              one credentials surface, not two separate top-level cards
-              that look redundant. */}
-
-          <SettingsSection title="Password" subtitle="Change your sign-in password">
-            <SafeBoundary label="Password form">
-              <ChangePasswordForm />
+          {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
+              very important feature." Read-only operations view — daemons,
+              sequences, employee activity in one place. Mutations live on the
+              surfaces it tracks. It lives under Team now: it is the team's week
+              at a glance, and its full history link is the Audit log. */}
+          {show("team") && canSeeTeamPerformance && oasisSalesWorkspace && profile.tenant_id && (
+            <SafeBoundary label="sales-team-performance">
+              <SalesTeamOperationsPanel
+                tenantId={profile.tenant_id}
+                tenantName={tenant?.name ?? null}
+              />
             </SafeBoundary>
-          </SettingsSection>
+          )}
 
-          {canManageTenant && (
+          {show("team") && (
+            <SafeBoundary label="operations-tracker">
+              <OperationsTrackerPanel
+                tenantId={profile?.tenant_id ?? null}
+                tenantName={tenant?.name ?? null}
+              />
+            </SafeBoundary>
+          )}
+
+          {/* ── Connections ─────────────────────────────────────────── */}
+          {/* Credentials — single parent Card with clearly-labeled sub-sections.
+              Was previously two top-level cards (Integration Keys + Custom
+              Credentials) which CC read as redundant ("there are two sections
+              for uploading and storing your credentials"). They actually serve
+              different purposes — structured known integrations with health
+              checks vs raw KEY=VALUE for anything else — but the parent
+              grouping makes that obvious. id="integrations" is where the Google
+              OAuth callback and the setup checklist send people, and where the
+              Connections hub's cards open. */}
+          {show("connections") && (
             <SettingsSection
-              id="devices"
-              title="Devices (advanced)"
-              subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account below is enough for chat without ever pairing a machine."
-              action={
-                <Link
-                  href="/settings/devices/install"
-                  className="inline-flex items-center gap-1 rounded-lg bg-accent text-bg-deep px-3 py-1.5 text-xs font-bold hover:bg-accent-bright"
+              id="integrations"
+              defaultOpen
+              title="Credentials"
+              subtitle="Workspace app keys and the Google connection tied to your own login, in one place. Shared keys apply to the team; your personal Google connection applies only to you."
+            >
+              {/* FOLDED, 2026-08-17. Both panels rendered open, which made this one
+                  card the tallest thing on the page and buried everything under it.
+                  Known integrations opens by default because it is the one people
+                  come here for; custom secrets is the long tail and starts closed.
+                  Each header keeps its description while collapsed — a fold that
+                  hides what is behind it just makes you open all of them. */}
+              <div className="space-y-3">
+                <SettingsSection
+                  tone="nested"
+                  title="Known integrations"
+                  subtitle="Pre-configured slots for services your agents already know how to use (Gmail, Stripe, Telegram…). Live health check plus paste-once setup."
+                  defaultOpen
                 >
-                  Pair a machine →
-                </Link>
+                  <SafeBoundary label="Integration keys">
+                    <IntegrationKeysPanel canManage={canManageTenant} />
+                  </SafeBoundary>
+                </SettingsSection>
+
+                <SettingsSection
+                  tone="nested"
+                  title="Your Google account"
+                  subtitle="Connect the account used by your own seat. These controls never overwrite a teammate's personal connections. Your personal Telegram alert bot is under Chat apps."
+                  defaultOpen
+                >
+                  <SafeBoundary label="Personal integrations">
+                    <PersonalIntegrationsPanel
+                      showGmail={!isSharedInboxTenant(tenant?.slug ?? null)}
+                      showKixie={enabledAgents.includes("helios")}
+                    />
+                  </SafeBoundary>
+                </SettingsSection>
+
+                {canManageTenant && (
+                  <SettingsSection
+                    tone="nested"
+                    title="Custom secrets"
+                    subtitle="Anything that doesn't fit a known slot — client tokens, one-off webhook URLs, internal keys. Encrypted at rest; agents read them via get_credential."
+                  >
+                    <SafeBoundary label="Custom credentials vault">
+                      <CustomCredentialsVault />
+                    </SafeBoundary>
+                  </SettingsSection>
+                )}
+              </div>
+            </SettingsSection>
+          )}
+
+          {/* Kixie webhook auto-registration — only when the tenant
+              actually declares Kixie in its required_services list.
+              Avoids cluttering non-Kixie tenants (OASIS, etc.) with a
+              button that has no effect. */}
+          {show("connections") && !previewMode && (manifest?.required_services || []).some((s) => s.service === "kixie") && (
+            <SafeBoundary label="Kixie webhooks">
+              <KixieWebhookSyncCard isOwner={canManageTenant} />
+            </SafeBoundary>
+          )}
+
+          {show("connections") && (
+            <SettingsSection
+              title="Integration health"
+              subtitle={
+                isOperator
+                  ? "Read-only status across every connected system (operator view - includes platform infra). Save business app keys under Credentials above."
+                  : "Read-only status across the systems your enabled agents actually use. Save credentials under Credentials above; enable more agents to unlock additional integrations."
               }
             >
-              <SafeBoundary label="Devices">
-                <DevicesEditor />
+              <div className="grid sm:grid-cols-2 gap-3">
+                {visibleIntegrations.map((h: IntegrationHealth) => (
+                  <IntegrationDot
+                    key={h.service}
+                    health={h}
+                    connection={{ hasCredentials: connectedAiSet.has(h.service) }}
+                  />
+                ))}
+                {visibleIntegrations.length === 0 && (
+                  <div className="col-span-full text-sm text-fg-muted">
+                    No integrations active for your current agent set. Enable an agent under AI brain to see what they need.
+                  </div>
+                )}
+              </div>
+            </SettingsSection>
+          )}
+
+          {/* ── Chat apps ───────────────────────────────────────────── */}
+          {/* This bot is a SunBiz application-upload integration. Mounting it in
+              OASIS exposed SunBiz wording and a foreign workflow in the wrong
+              tenant's Settings surface. */}
+          {show("chat-apps") && manifestSlug === "sun" && <TelegramLinkCard />}
+
+          {show("chat-apps") && (
+            <SettingsSection
+              defaultOpen
+              title="Your Telegram alert bot"
+              subtitle="A bot that belongs only to your login and sends your own alerts to your phone. Set it up once; it is separate from every teammate's."
+            >
+              <SafeBoundary label="Personal Telegram bot">
+                <TelegramConnectCard />
               </SafeBoundary>
             </SettingsSection>
           )}
 
-          <SettingsSection
-            id="providers"
-            title="AI setup"
-            subtitle={
-              canManageTenant
-                ? "Connect one AI account here — every agent uses it by default. OpenRouter is the easiest (one key powers every model). Anthropic, OpenAI, and Google are the per-vendor alternatives."
-                : "These are the team's AI accounts. Your admin connects them once — your chats route through whichever account they pick."
-            }
-          >
-            <SafeBoundary label="AI provider accounts">
-              <ProviderAccountsCard
-                connectedServices={connectedAiSet}
-                bridgeOnline={bridgeOnline}
-                canManageTeam={canManageTenant}
-              />
-            </SafeBoundary>
-          </SettingsSection>
+          {/* ── AI brain ────────────────────────────────────────────── */}
+          {show("ai") && (
+            <SettingsSection
+              id="providers"
+              defaultOpen={focused}
+              title="AI setup"
+              subtitle={
+                canManageTenant
+                  ? "Connect one AI account here — every agent uses it by default. OpenRouter is the easiest (one key powers every model). Anthropic, OpenAI, and Google are the per-vendor alternatives."
+                  : "These are the team's AI accounts. Your admin connects them once — your chats route through whichever account they pick."
+              }
+            >
+              <SafeBoundary label="AI provider accounts">
+                <ProviderAccountsCard
+                  connectedServices={connectedAiSet}
+                  bridgeOnline={bridgeOnline}
+                  canManageTeam={canManageTenant}
+                />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
 
-          {isOperator && (
+          {show("ai") && isOperator && (
             <SafeBoundary label="Local CLI providers">
               <LocalCliProvidersCard serverBridgeOnline={bridgeOnline} />
             </SafeBoundary>
           )}
 
-          <SettingsSection
-            id="agents"
-            title="Override an agent's provider"
-            subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
-            action={
-              <Tag tone={bridgeOnline ? "engaged" : "neutral"}>
-                {bridgeOnline ? "Tool access: bridge online" : "Tool access: cloud only"}
-              </Tag>
-            }
-          >
-            {canManageTenant ? (
-              <SafeBoundary label="Override an agent's provider">
-                <AgentConfigEditor
-                  agentKeys={enabledChatAgentKeys}
-                  bridgeOnline={bridgeOnline}
-                  globallyConnectedServices={Array.from(connectedAiSet)}
-                  agentPalettes={Object.fromEntries(
-                    (manifest?.agents || []).map((a) => [
-                      a.slug.toLowerCase(),
-                      a.tool_palette,
-                    ])
-                  )}
-                  manifestSlug={manifestSlug}
-                  toolCatalog={TOOL_DEFINITIONS.map((t) => ({
-                    name: t.name,
-                    description: t.description,
-                    defer: !!t.defer,
-                  }))}
-                />
-              </SafeBoundary>
-            ) : (
-              <EmptyState message="Team-wide AI setup is managed by an owner or admin. Ask them to connect a provider, or set one per agent in the override table below." />
-            )}
-          </SettingsSection>
+          {show("ai") && (
+            <SettingsSection
+              id="agents"
+              defaultOpen={focused}
+              title="Override an agent's provider"
+              subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
+              action={
+                <Tag tone={bridgeOnline ? "engaged" : "neutral"}>
+                  {bridgeOnline ? "Tool access: bridge online" : "Tool access: cloud only"}
+                </Tag>
+              }
+            >
+              {canManageTenant ? (
+                <SafeBoundary label="Override an agent's provider">
+                  <AgentConfigEditor
+                    agentKeys={enabledChatAgentKeys}
+                    bridgeOnline={bridgeOnline}
+                    globallyConnectedServices={Array.from(connectedAiSet)}
+                    agentPalettes={Object.fromEntries(
+                      (manifest?.agents || []).map((a) => [
+                        a.slug.toLowerCase(),
+                        a.tool_palette,
+                      ])
+                    )}
+                    manifestSlug={manifestSlug}
+                    toolCatalog={TOOL_DEFINITIONS.map((t) => ({
+                      name: t.name,
+                      description: t.description,
+                      defer: !!t.defer,
+                    }))}
+                  />
+                </SafeBoundary>
+              ) : (
+                <EmptyState message="Team-wide AI setup is managed by an owner or admin. Ask them to connect a provider, or set one per agent in the override table below." />
+              )}
+            </SettingsSection>
+          )}
 
           {/* "Just-for-me overrides" removed 2026-08-17. It let an individual
               point their own chats at a different AI account — a team feature on
               a single-operator workspace, where it only ever added a second
               place for the provider to be configured and a second place for it
               to be wrong. Provider selection lives in AI Setup and, per agent,
-              in the override table below. */}
+              in the override table above. */}
 
           {/* Workspace agents (Bravo / Atlas / Maven add-on picker).
               Owner-only — non-owners see a read-only view of which
               agents the workspace has, but cannot toggle. Core agents
               (Solara/Helios for SunBiz) render as locked. */}
-          {!previewMode && manifest?.agents && (
+          {show("ai") && !previewMode && manifest?.agents && (
             <Card
               title="Workspace agents"
               subtitle="Manage which agents this workspace can use. Core agents are always on; add C-suite agents (Bravo / Atlas / Maven / Aura / Hermes) when your team needs them."
@@ -484,49 +575,44 @@ export async function SettingsContent({
               planner now. Configuring a template for a surface that no longer
               renders is a control with nothing on the other end. */}
 
-          <SettingsSection
-            title="Integration health"
-            subtitle={
-              isOperator
-                ? "Read-only status across every connected system (operator view - includes platform infra). Save business app keys in the Business app keys card above."
-                : "Read-only status across the systems your enabled agents actually use. Save credentials in Business app keys; enable more agents to unlock additional integrations."
-            }
-          >
-            <div className="grid sm:grid-cols-2 gap-3">
-              {visibleIntegrations.map((h: IntegrationHealth) => (
-                <IntegrationDot
-                  key={h.service}
-                  health={h}
-                  connection={{ hasCredentials: connectedAiSet.has(h.service) }}
-                />
-              ))}
-              {visibleIntegrations.length === 0 && (
-                <div className="col-span-full text-sm text-fg-muted">
-                  No integrations active for your current agent set. Enable an agent above to see what they need.
-                </div>
-              )}
-            </div>
-          </SettingsSection>
-
-          {/* CC ask 2026-06-11: "an overall tracker [hidden in Settings],
-              very important feature." Read-only operations view at the
-              very bottom — daemons, sequences, employee activity in
-              one place. Mutations live on the surfaces it tracks. */}
-          {canSeeTeamPerformance && oasisSalesWorkspace && profile.tenant_id && (
-            <SafeBoundary label="sales-team-performance">
-              <SalesTeamOperationsPanel
-                tenantId={profile.tenant_id}
-                tenantName={tenant?.name ?? null}
-              />
-            </SafeBoundary>
+          {/* ── Brand & domain ──────────────────────────────────────── */}
+          {show("brand") && (
+            <SettingsSection
+              defaultOpen={focused}
+              title="Branding"
+              subtitle="Your logo is applied to every new form, public application page, and anywhere else the dashboard shows your brand."
+            >
+              <SafeBoundary label="Branding">
+                <BrandLogoCard initialLogoUrl={tenant?.logo_url ?? null} canManage={canManageTenant} />
+              </SafeBoundary>
+            </SettingsSection>
           )}
 
-          <SafeBoundary label="operations-tracker">
-            <OperationsTrackerPanel
-              tenantId={profile?.tenant_id ?? null}
-              tenantName={tenant?.name ?? null}
-            />
-          </SafeBoundary>
+          {/* ── Devices (operators only) ────────────────────────────── */}
+          {/* The bridge gives an agent a shell, files and every MCP on the
+              paired machine. It is never client-facing (plan: "the bridge
+              becomes operator-only"), so the section follows the VERIFIED
+              operator check, not workspace admin. */}
+          {show("devices") && isOperator && (
+            <SettingsSection
+              id="devices"
+              defaultOpen={focused}
+              title="Devices (advanced)"
+              subtitle="Pair a machine on your network to run the local bridge — gives your agents file-system, bash, and full MCP access. Optional: a connected AI provider account under AI brain is enough for chat without ever pairing a machine."
+              action={
+                <Link
+                  href="/settings/devices/install"
+                  className="btn-primary inline-flex items-center gap-1 !px-3 !py-1.5 !text-xs"
+                >
+                  Pair a machine →
+                </Link>
+              }
+            >
+              <SafeBoundary label="Devices">
+                <DevicesEditor />
+              </SafeBoundary>
+            </SettingsSection>
+          )}
         </>
       )}
     </div>
@@ -542,6 +628,7 @@ async function PersonalSettingsView({
   showKixie,
   showTeamPerformance,
   accessDegraded,
+  section,
 }: {
   profile: NonNullable<Awaited<ReturnType<typeof getActiveProfile>>>;
   tenantName: string | null;
@@ -551,10 +638,12 @@ async function PersonalSettingsView({
   showKixie: boolean;
   showTeamPerformance: boolean;
   accessDegraded: boolean;
+  section?: SettingsContentSection;
 }) {
+  const show = (s: SettingsContentSection) => !section || section === s;
   return (
     <div className="space-y-6 animate-fade-in">
-      {!hideHeader && (
+      {!hideHeader && !section && (
         <PageHeader
           title={tenantName ? `Settings · ${tenantName}` : "Settings"}
           subtitle={
@@ -572,7 +661,7 @@ async function PersonalSettingsView({
         />
       )}
 
-      {accessDegraded && (
+      {show("profile") && accessDegraded && (
         <Card
           title="Team access status unavailable"
           subtitle="OASIS could not verify this workspace right now, so team performance is temporarily hidden instead of showing incomplete or unauthorized data. Refresh to retry."
@@ -584,45 +673,61 @@ async function PersonalSettingsView({
         </Card>
       )}
 
-      <SettingsSection
-        defaultOpen
-        title="Your profile"
-        subtitle={`Signed in as ${profile.email}. Only your identity and contact information are editable here.`}
-        action={
-          showTeamPerformance ? (
-            <Link href="/settings/audit-log" className="text-xs text-accent hover:text-accent-bright">
-              Sales activity →
-            </Link>
-          ) : null
-        }
-      >
-        <SafeBoundary label="Personal profile editor">
-          <ProfileEditor profile={profile} tenantAgents={[]} personalOnly />
-        </SafeBoundary>
-      </SettingsSection>
+      {show("profile") && (
+        <SettingsSection
+          defaultOpen
+          title="Your profile"
+          subtitle={`Signed in as ${profile.email}. Only your identity and contact information are editable here.`}
+          action={
+            showTeamPerformance ? (
+              <Link href="/settings/audit-log" className="text-xs text-accent hover:text-accent-bright">
+                Sales activity →
+              </Link>
+            ) : null
+          }
+        >
+          <SafeBoundary label="Personal profile editor">
+            <ProfileEditor profile={profile} tenantAgents={[]} personalOnly />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
 
-      <SettingsSection
-        defaultOpen
-        title="Credentials"
-        subtitle="Connect the Google and Telegram accounts used by your own login. These controls do not change the workspace's shared services or a teammate's account."
-      >
-        <div className="space-y-3">
+      {show("profile") && (
+        <SettingsSection defaultOpen={!!section} title="Password" subtitle="Change your sign-in password">
+          <SafeBoundary label="Password form">
+            <ChangePasswordForm />
+          </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {/* id="integrations": the Google OAuth callback and the setup checklist
+          land here, and /settings forwards the old fragment to this page. */}
+      {show("connections") && (
+        <SettingsSection
+          id="integrations"
+          defaultOpen
+          title="Credentials"
+          subtitle="Connect the Google account used by your own login. This does not change the workspace's shared services or a teammate's account. Workspace apps are connected by an owner or admin."
+        >
           <SafeBoundary label="Personal integrations">
             <PersonalIntegrationsPanel showGmail={showGmail} showKixie={showKixie} />
           </SafeBoundary>
+        </SettingsSection>
+      )}
+
+      {show("chat-apps") && (
+        <SettingsSection
+          defaultOpen
+          title="Your Telegram alert bot"
+          subtitle="A bot that belongs only to your login and sends your own alerts to your phone. It does not change the workspace's shared services or a teammate's account."
+        >
           <SafeBoundary label="Personal Telegram bot">
             <TelegramConnectCard />
           </SafeBoundary>
-        </div>
-      </SettingsSection>
+        </SettingsSection>
+      )}
 
-      <SettingsSection title="Password" subtitle="Change your sign-in password">
-        <SafeBoundary label="Password form">
-          <ChangePasswordForm />
-        </SafeBoundary>
-      </SettingsSection>
-
-      {showTeamPerformance && tenantId && (
+      {show("team") && showTeamPerformance && tenantId && (
         <SafeBoundary label="sales-team-performance">
           <SalesTeamOperationsPanel tenantId={tenantId} tenantName={tenantName} />
         </SafeBoundary>

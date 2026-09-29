@@ -11,6 +11,7 @@ import { verifySessionEdge } from "@/lib/turso-auth-edge";
 import { matchesPathPrefix } from "./lib/path-prefix";
 import { shouldRedirectToOnboarding } from "./lib/onboarding-gate";
 import { MARKETING_PATHS, MARKETING_HOME_PATH } from "./lib/marketing/routes";
+import { OS_REDIRECTS } from "./lib/os/redirects";
 
 export const PUBLIC_PATH_PREFIXES = [
   // Public marketing site — /home (served at "/" via the rewrite below),
@@ -172,15 +173,12 @@ export function isPublic(pathname: string): boolean {
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Phase 6b/7 — redirect routes still folded into bigger surfaces.
-  // /playbook was restored in V6.8.5 (app/playbook/page.tsx is daily-use,
-  // not reference) so it no longer redirects. The remaining two really
-  // are merged elsewhere and shouldn't be reachable at their old URLs:
-  //   /feed → /operations         (Activity Tape is the same stream)
-  //   /integrations → /settings   (setup under Settings)
+  // Routes folded into bigger surfaces. The OASIS OS moves live in
+  // lib/os/redirects.ts (pure, so tests/os-redirects.test.ts can prove every
+  // target is a real route). /feed no longer redirects to /operations: Feed is
+  // a Team page again. /integrations now lands on Settings › Connections.
   const REDIRECT_MAP: Record<string, string> = {
-    "/feed": "/operations",
-    "/integrations": "/settings",
+    ...OS_REDIRECTS,
     // The marketing home is a real route so the rewrite below has
     // something to resolve to, which also makes it directly reachable —
     // two URLs serving one page. Collapse it here so "/" is the only

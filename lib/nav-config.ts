@@ -1,13 +1,16 @@
 /**
  * Navigation primitives for the command-center shell.
  *
- * Each client/product profile (see lib/client-profiles.ts) picks one of
- * these nav arrays and can layer its own branding, runtime, and transport
- * rules on top. Sidebar.tsx stays fully tenant-agnostic.
+ * THE LIVE RAIL IS NOT BUILT FROM THESE ARRAYS ANY MORE. A workspace's own
+ * shell renders OASIS OS sections computed by lib/os/nav.ts (buildOsNav). The
+ * arrays below still feed the manifest seeds (lib/manifest/seeds.ts,
+ * lib/client-profiles.ts), which is what the /t/<slug> preview and /demo/sun
+ * shells render — so they stay until those shells move to the OS model.
  *
  * Keep icons as string keys. These profiles are resolved in a Server
  * Component and then passed to the client Sidebar; passing icon functions
- * across that boundary crashes production rendering.
+ * across that boundary crashes production rendering. The key → component map
+ * is NAV_ICONS in components/os/RailRow.tsx.
  */
 
 export type NavIconKey =
@@ -46,7 +49,25 @@ export type NavIconKey =
   | "Sparkles"
   | "FileSearch"
   | "ClipboardCheck"
-  | "Ticket";
+  | "Ticket"
+  // OASIS OS rail (lib/os/nav.ts). Not accepted in stored manifests:
+  // lib/manifest/schema.ts NAV_ICON_KEYS is a deliberate subset.
+  | "Home"
+  | "Rss"
+  | "CalendarDays"
+  | "FolderKanban"
+  | "Library"
+  | "Hash"
+  | "GraduationCap"
+  | "Building2"
+  | "LifeBuoy"
+  | "Wallet"
+  | "TrendingUp"
+  | "Handshake"
+  | "Shield"
+  | "SquareTerminal"
+  | "Cpu"
+  | "HeartPulse";
 
 /**
  * NavItem - one entry in the sidebar.

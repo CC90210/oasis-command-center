@@ -32,7 +32,8 @@
  */
 
 import Link from "next/link";
-import { Card, EmptyState, PageHeader, Stat } from "@/components/Card";
+import { Card, EmptyState, Stat } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { LiveClock } from "@/components/LiveClock";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorDateKey } from "@/lib/dates";
@@ -161,79 +162,79 @@ export async function ManagerToday({
   const nameOf = (r: RepRow) => r.display_name || r.full_name || r.auth_user_id.slice(0, 8);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Today"
-        subtitle={
-          <span>
-            {managerName} · <LiveClock initialDateKey={dateKey} /> · your team
-          </span>
-        }
-      />
+    <PageFrame
+      title="Today"
+      subtitle={
+        <span>
+          {managerName} · <LiveClock initialDateKey={dateKey} /> · your team
+        </span>
+      }
+    >
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <Stat
+            label="OASIS sales reps"
+            value={teamRead.ok ? String(teamRead.value.length) : "—"}
+            hint={teamRead.ok ? "your direct reports" : "couldn't load your direct reports"}
+          />
+          <Stat
+            label="Team commissions earned"
+            value={linesRead.ok ? formatCommissionAmounts(linesRead.value.totals, [...activeStatuses]) : "—"}
+            hint={linesRead.ok ? "accrued, approved, and paid · currencies separated" : "couldn't load — this is not $0"}
+          />
+          <Stat
+            label="Your sales commissions"
+            value={ownSalesRead.ok ? formatCommissionAmounts(ownSalesRead.value.totals, [...activeStatuses]) : "—"}
+            hint={ownSalesRead.ok ? "your own opener, closer, and full-deal earnings" : "couldn't load — this is not $0"}
+          />
+          <Stat
+            label="Your override"
+            value={overrideRead.ok ? formatCommissionAmounts(overrideRead.value.totals, [...activeStatuses]) : "—"}
+            hint={`${(MANAGER_OVERRIDE_BPS / 100).toFixed(0)}% of what OASIS retains`}
+          />
+        </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <Stat
-          label="OASIS sales reps"
-          value={teamRead.ok ? String(teamRead.value.length) : "—"}
-          hint={teamRead.ok ? "your direct reports" : "couldn't load your direct reports"}
-        />
-        <Stat
-          label="Team commissions earned"
-          value={linesRead.ok ? formatCommissionAmounts(linesRead.value.totals, [...activeStatuses]) : "—"}
-          hint={linesRead.ok ? "accrued, approved, and paid · currencies separated" : "couldn't load — this is not $0"}
-        />
-        <Stat
-          label="Your sales commissions"
-          value={ownSalesRead.ok ? formatCommissionAmounts(ownSalesRead.value.totals, [...activeStatuses]) : "—"}
-          hint={ownSalesRead.ok ? "your own opener, closer, and full-deal earnings" : "couldn't load — this is not $0"}
-        />
-        <Stat
-          label="Your override"
-          value={overrideRead.ok ? formatCommissionAmounts(overrideRead.value.totals, [...activeStatuses]) : "—"}
-          hint={`${(MANAGER_OVERRIDE_BPS / 100).toFixed(0)}% of what OASIS retains`}
-        />
+        <Card
+          title="OASIS sales team"
+          subtitle="Your direct reports in the canonical OASIS sales roster."
+        >
+          {!teamRead.ok ? (
+            <EmptyState message="Couldn't load your direct reports. This read failed — it does not mean you have no reps. Reload in a minute." />
+          ) : teamRead.value.length === 0 ? (
+            <EmptyState message="No active sales reps are assigned to you as direct reports yet." />
+          ) : (
+            <div className="divide-y divide-hairline">
+              {teamRead.value.map((rep) => (
+                <div key={rep.auth_user_id} className="flex items-center justify-between py-2.5">
+                  <div className="min-w-0">
+                    <div className="text-sm text-fg truncate">{nameOf(rep)}</div>
+                    <div className="text-xs text-fg-dim">{rep.team_role ?? "—"}</div>
+                  </div>
+                  <div className="text-sm font-semibold text-fg tabular-nums">
+                    {linesRead.ok
+                      ? formatCommissionAmounts(linesRead.value.byRep[rep.auth_user_id] ?? [], [...activeStatuses])
+                      : "—"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card
+          title="Coaching"
+          subtitle="Open the workspace sales pipeline to review ownership, follow-up, and stage progress."
+        >
+          <EmptyState
+            message="The commission totals above include only your direct reports. The Pipeline shows the wider OASIS sales roster; use its rep filter to focus on one person."
+            cta={
+              <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2">
+                Go to pipeline
+              </Link>
+            }
+          />
+        </Card>
       </div>
-
-      <Card
-        title="OASIS sales team"
-        subtitle="Your direct reports in the canonical OASIS sales roster."
-      >
-        {!teamRead.ok ? (
-          <EmptyState message="Couldn't load your direct reports. This read failed — it does not mean you have no reps. Reload in a minute." />
-        ) : teamRead.value.length === 0 ? (
-          <EmptyState message="No active sales reps are assigned to you as direct reports yet." />
-        ) : (
-          <div className="divide-y divide-bg-border">
-            {teamRead.value.map((rep) => (
-              <div key={rep.auth_user_id} className="flex items-center justify-between py-2.5">
-                <div className="min-w-0">
-                  <div className="text-sm text-fg truncate">{nameOf(rep)}</div>
-                  <div className="text-xs text-fg-dim">{rep.team_role ?? "—"}</div>
-                </div>
-                <div className="text-sm font-semibold text-fg tabular-nums">
-                  {linesRead.ok
-                    ? formatCommissionAmounts(linesRead.value.byRep[rep.auth_user_id] ?? [], [...activeStatuses])
-                    : "—"}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-
-      <Card
-        title="Coaching"
-        subtitle="Open the workspace sales pipeline to review ownership, follow-up, and stage progress."
-      >
-        <EmptyState
-          message="The commission totals above include only your direct reports. The Pipeline shows the wider OASIS sales roster; use its rep filter to focus on one person."
-          cta={
-            <Link href="/pipeline" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
-              Go to pipeline
-            </Link>
-          }
-        />
-      </Card>
-    </div>
+    </PageFrame>
   );
 }

@@ -175,7 +175,9 @@ assert.doesNotMatch(catalog, /name: "content_pipeline"[\s\S]{0,120}schedule: "0 
 assert.match(catalog, /name: "Maven — Carousel Post"/);
 assert.match(catalog, /name: "Carousel Media Retention"/);
 
-const agentsPage = readFileSync("app/agents/page.tsx", "utf8");
+// The per-agent inventory moved with the fleet from /agents (now the AI Team)
+// to Admin › Fleet (/admin/agents), OASIS OS Phase 1.
+const agentsPage = readFileSync("components/os/landings/AgentFleet.tsx", "utf8");
 assert.match(agentsPage, /Registered schedules/);
 assert.match(agentsPage, /status in Automations/);
 assert.doesNotMatch(agentsPage, /what's running for it right now/);

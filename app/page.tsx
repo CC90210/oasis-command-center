@@ -14,6 +14,12 @@
  * literally never enters the render for a rep. Hiding a fetched number in CSS
  * still ships it in the RSC payload, which is a leak wearing a stylesheet.
  *
+ * OASIS OS (2026-09-28). The owner's branch renders the morning brief
+ * (FounderToday → components/os/today). Every other persona keeps its own
+ * screen inside the OS page frame. A workspace OASIS has not set up yet gets
+ * the "being set up" page and no reads at all (plan D6) — the same answer the
+ * rail gives it (Today only).
+ *
  * ORDER MATTERS HERE. The SunBiz redirect stays exactly where it was, ABOVE the
  * persona branch, so SunBiz operators (and their loan_officer / processor
  * roles) keep the behaviour they have today: straight to /t/sun, never through
@@ -26,7 +32,8 @@
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { Card, EmptyState, PageHeader } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
+import { WorkspaceSetupPending } from "@/components/os/today/WorkspaceSetupPending";
 import { getActiveProfile, getTenant } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import {
@@ -34,6 +41,8 @@ import {
   getClientCommandCenterProfileById,
   resolveClientProfileSlug,
 } from "@/lib/client-profiles";
+import { getManifest } from "@/lib/manifest/loader";
+import { isUnprovisionedManifest } from "@/lib/manifest/seeds";
 import { SunBizDashboard } from "@/components/sunbiz/SunBizDashboard";
 import { resolveViewerSurface } from "@/lib/role-surfaces-session";
 import { FounderToday } from "@/components/today/FounderToday";
@@ -48,12 +57,11 @@ export default async function TodayPage() {
   const profile = await getActiveProfile();
   if (!profile) {
     return (
-      <div>
-        <PageHeader title="Today" subtitle="No operator profile found." />
-        <Card title="Set up your profile">
-          <EmptyState message="Sign in to load your profile." />
-        </Card>
-      </div>
+      <PageFrame title="Today" subtitle="No profile found for this session.">
+        <section className="max-w-2xl rounded-xl border border-hairline bg-bg-panel p-4 text-sm text-fg-muted">
+          Sign in to load your profile.
+        </section>
+      </PageFrame>
     );
   }
 
@@ -88,6 +96,19 @@ export default async function TodayPage() {
     return <SunBizDashboard demoMode={isDemo} />;
   }
 
+  /**
+   * A WORKSPACE OASIS HAS NOT SET UP (plan D6) gets the "being set up" page
+   * before any session or tenant read. Same manifest the layout resolves for
+   * this path (getManifest is React-cached per request, so this is a warm hit),
+   * so the page and the Today-only rail cannot disagree. Only for a profile
+   * that HAS a workspace: one with none is an account-linking problem, and the
+   * unverified-session branch below says that instead.
+   */
+  if (tenantId) {
+    const manifest = await safe("today.manifest", getManifest(tenantProfileSlug, tenantId), null);
+    if (manifest && isUnprovisionedManifest(manifest)) return <WorkspaceSetupPending />;
+  }
+
   const surface = await resolveViewerSurface();
   const viewerName = profile.display_name || profile.full_name || "Operator";
 
@@ -114,22 +135,21 @@ export default async function TodayPage() {
    */
   if (!surface.ok) {
     return (
-      <div className="space-y-6 animate-fade-in">
-        <PageHeader title="Today" subtitle="Session not verified" />
-        <Card title="We could not confirm your workspace">
-          <EmptyState
-            message="You are signed in, but this account is not currently linked to a workspace, so nothing has been loaded. This is an account-linking problem, not missing data. Sign out and back in — if it persists, send CC your account email and he can relink it."
-            cta={
-              <Link
-                href="/login"
-                className="inline-flex items-center rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-xs font-bold uppercase tracking-wider text-accent transition-colors hover:bg-accent/15"
-              >
-                Sign in again
-              </Link>
-            }
-          />
-        </Card>
-      </div>
+      <PageFrame title="Today" subtitle="Session not verified">
+        <section className="max-w-2xl rounded-xl border border-hairline bg-bg-panel p-4">
+          <h2 className="text-sm font-semibold text-fg">We could not confirm your workspace</h2>
+          <p className="mt-2 text-sm leading-[22px] text-fg-muted">
+            You are signed in, but this account is not currently linked to a workspace, so nothing has been loaded.
+            This is an account-linking problem, not missing data. Sign out and back in — if it persists, send CC your
+            account email and he can relink it.
+          </p>
+          <div className="mt-4">
+            <Link href="/login" prefetch={false} className="btn-secondary inline-flex items-center">
+              Sign in again
+            </Link>
+          </div>
+        </section>
+      </PageFrame>
     );
   }
 
@@ -161,8 +181,8 @@ export default async function TodayPage() {
   }
 
   // Same reasoning as the manager branch above: without one, marketing falls
-  // through to FounderToday, which reads no capability but showFinancials and
-  // would render the whole pipeline and the company inbound tape.
+  // through to FounderToday, which would render the whole pipeline and the
+  // company inbound tape.
   if (surface.persona === "marketing") {
     return <MarketingToday viewerName={viewerName} />;
   }
@@ -186,12 +206,20 @@ export default async function TodayPage() {
     );
   }
 
-  // founder | legacy. `capabilities.canSeeCompanyFinancials` already folds in
-  // the workspace check, so a founder whose tenant lookup degraded gets the
-  // dashboard minus the money plus an explanation, rather than a page of zeros.
+  // founder | legacy — the morning brief. `capabilities.canSeeCompanyFinancials`
+  // already folds in the workspace check, so a founder whose tenant lookup
+  // degraded gets the brief minus the money plus an explanation, rather than a
+  // page of zeros.
   return (
     <FounderToday
       profile={profile}
+      viewer={{
+        persona: surface.persona,
+        capabilities: surface.capabilities,
+        tenantId: surface.tenantId,
+        userId: surface.userId,
+        tenantSlug: surface.tenantSlug,
+      }}
       showFinancials={surface.capabilities.canSeeCompanyFinancials}
       financialsNote={
         surface.degraded

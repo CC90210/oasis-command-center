@@ -22,28 +22,31 @@ export function Card({
   const sectionClass = [
     // `card-glow` (a 40px saturated-blue halo on hover) removed: a border
     // separates, a shadow elevates, and a coloured bloom does neither.
-    // Hover now moves the border, which is the cheapest honest affordance.
-    "rounded-xl border border-bg-border bg-bg-panel shadow-card transition-colors hover:border-bg-border-strong",
+    // OASIS OS: a card sits on the same plane as the canvas, so it takes a
+    // hairline and no shadow at all (shadows only lift overlays).
+    "rounded-xl border border-hairline bg-bg-panel transition-colors duration-150 hover:border-bg-border-strong",
     className || "",
   ].filter(Boolean).join(" ");
   return (
     <section id={id} className={sectionClass}>
       {(title || subtitle || action) && (
-        <header className="flex items-start justify-between gap-4 border-b border-bg-border px-5 py-3.5">
+        <header className="flex items-start justify-between gap-4 border-b border-hairline px-4 py-3">
           <div>
             {title && (
-              <h2 className="text-xs font-bold uppercase tracking-[0.14em] text-fg">
+              // Section heading: 14px semibold, sentence case. Uppercase with
+              // tracking is reserved for chips (Tag below).
+              <h2 className="text-sm font-semibold text-fg">
                 {title}
               </h2>
             )}
             {subtitle && (
-              <div className="text-xs text-fg-muted mt-1">{subtitle}</div>
+              <div className="text-[13px] leading-5 text-fg-muted mt-0.5">{subtitle}</div>
             )}
           </div>
           {action}
         </header>
       )}
-      <div className={noPadding ? "" : "p-5"}>{children}</div>
+      <div className={noPadding ? "" : "p-4"}>{children}</div>
     </section>
   );
 }
@@ -70,9 +73,9 @@ export function Stat({
     // `shadow-ironman` (a 40px blue halo) both removed. A stat tile shows a
     // number; perpetual motion on it competes with the number for attention and
     // costs a compositor layer per tile for the whole session.
-    <div className="rounded-xl border border-bg-border bg-bg-panel p-5 shadow-card transition-colors hover:border-accent/40 group">
+    <div className="rounded-xl border border-hairline bg-bg-panel p-4 transition-colors duration-150 hover:border-bg-border-strong group">
       <div className="flex items-center justify-between">
-        <div className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
+        <div className="text-[12.5px] font-medium text-fg-muted">
           {label}
         </div>
         {typeof delta === "number" && (
@@ -91,9 +94,11 @@ export function Stat({
           </span>
         )}
       </div>
+      {/* The accent variant is colour alone. Its 8px blue drop-shadow was a
+          glow, and a glow is not emphasis. */}
       <div
-        className={`mt-2 text-3xl font-bold tracking-tight tabular-nums ${
-          accent ? "text-accent drop-shadow-[0_0_8px_rgba(59,130,246,0.35)]" : "text-fg"
+        className={`mt-2 text-2xl font-semibold tracking-tight tabular-nums ${
+          accent ? "text-accent" : "text-fg"
         }`}
       >
         {value}
@@ -140,12 +145,14 @@ export function PageHeader({
     // 1024 and nothing else.
     <header className="mb-6 flex flex-col items-start justify-between gap-3 lg:flex-row lg:gap-4">
       <div className="min-w-0">
-        <h1 className="text-2xl font-bold tracking-tight text-fg flex items-center gap-3">
+        {/* Page title 20/28 semibold (OS type scale). The accent-to-transparent
+            gradient rule that trailed every title is gone: gradient decoration
+            is one of the generated-UI tells #464 removed elsewhere. */}
+        <h1 className="text-xl leading-7 font-semibold tracking-[-0.01em] text-fg">
           {title}
-          <span className="h-px w-10 bg-gradient-to-r from-accent to-transparent" aria-hidden />
         </h1>
         {subtitle && (
-          <div className="text-sm text-fg-muted mt-1.5">{subtitle}</div>
+          <div className="text-[13px] leading-5 text-fg-muted mt-1">{subtitle}</div>
         )}
       </div>
       {action && <div className="shrink-0">{action}</div>}
@@ -161,7 +168,7 @@ export function Tag({
   tone?: "neutral" | "accent" | "hot" | "warm" | "engaged" | "info";
 }) {
   const tones: Record<string, string> = {
-    neutral: "bg-bg-elev text-fg-muted border-bg-border",
+    neutral: "bg-bg-elev text-fg-muted border-hairline",
     accent: "bg-accent-soft text-accent border-accent/30",
     hot: "bg-status-hot/10 text-status-hot border-status-hot/30",
     warm: "bg-status-warm/10 text-status-warm border-status-warm/30",
@@ -170,7 +177,7 @@ export function Tag({
   };
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-bold uppercase tracking-wider ${tones[tone]}`}
+      className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[10.5px] font-semibold uppercase tracking-[0.06em] ${tones[tone]}`}
     >
       {children}
     </span>
