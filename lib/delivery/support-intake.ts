@@ -576,8 +576,16 @@ async function createTicketFromSubmission(
   }
   // A ticket on a project belongs to that project's client record. The email
   // match can name another; the project wins here, because refusing would cost
-  // the requester their request (Codex, PR #473).
-  const projectCustomer = match.project_id ? await projectCustomerId(db, desk.tenantId, match.project_id) : null;
+  // the requester their request (Codex, PR #473). A failed lookup keeps the
+  // email match, for the same reason (CodeRabbit, PR #473).
+  let projectCustomer: string | null = null;
+  if (match.project_id) {
+    try {
+      projectCustomer = await projectCustomerId(db, desk.tenantId, match.project_id);
+    } catch (err) {
+      console.error("[support-intake] project client lookup failed", err instanceof Error ? err.message : err);
+    }
+  }
   return createTicket(
     db,
     desk.tenantId,

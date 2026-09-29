@@ -795,6 +795,65 @@ async function main() {
     assert.equal(await delivery.updateProject(db, CLIENT_A, pX, { customer_id: Y }, author, T0), true);
     assert.equal(await customerOf(loose.id), Y);
   });
+  // The editor saves one field at a time (TicketForms patch), so moving a
+  // ticket arrives as { project_id } alone (CodeRabbit, #473).
+  const projectFor = (title: string, customerId: string | null, clientEmail: string | null = null) =>
+    delivery.createProject(db, CLIENT_A, {
+      title, description: null, client_tenant_id: null, client_name: null, client_email: clientEmail,
+      lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null, customer_id: customerId,
+    }, author, T0);
+  const pX2 = await projectFor("Link project X2", X);
+  const pNone = await projectFor("Link project, no client", null);
+  await check("links: moving a ticket to another client's project takes that project's client", async () => {
+    const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { project_id: pX2 }, author, T0, { customer: () => "Link X" });
+    assert.ok(r.ok, JSON.stringify(r));
+    assert.equal(await customerOf(loose.id), X);
+    const note = (await db.execute({ sql: "SELECT body FROM ticket_comments WHERE ticket_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", args: [loose.id] })).rows[0];
+    assert.match(String(note?.body), /Linked to client "Link X", the project's client\./);
+  });
+  await check("links: clearing the client while the ticket sits on a client's project is refused", async () => {
+    const r = await delivery.updateTicket(db, CLIENT_A, loose.id, { customer_id: null }, author, T0);
+    assert.deepEqual(r, { ok: false, status: 409, error: "project_belongs_to_another_customer" });
+    assert.equal(await customerOf(loose.id), X, "nothing changed");
+  });
+  await check("links: a project with no client leaves the ticket's own, which can then change freely", async () => {
+    const moved = await delivery.updateTicket(db, CLIENT_A, loose.id, { project_id: pNone }, author, T0);
+    assert.ok(moved.ok, JSON.stringify(moved));
+    assert.equal(await customerOf(loose.id), X);
+    assert.ok((await delivery.updateTicket(db, CLIENT_A, loose.id, { customer_id: Y }, author, T0)).ok);
+    assert.equal(await customerOf(loose.id), Y);
+    assert.ok((await delivery.updateTicket(db, CLIENT_A, loose.id, { customer_id: null }, author, T0)).ok);
+    assert.equal(await customerOf(loose.id), "");
+  });
+  await check("intake: a failed project-client lookup keeps the request and the email match (CodeRabbit, #473)", async () => {
+    const cz = await store.createCustomer(db, CLIENT_A, input({ display_name: "Intake Z", primary_email: "intake@link.test", company_name: null }), null, T0);
+    assert.ok(cz.ok, "precondition: the requester has a client record");
+    await projectFor("Intake project", X, "intake@link.test");
+    const flaky = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "execute") {
+          return async (stmt: Parameters<typeof db.execute>[0]) => {
+            const sql = typeof stmt === "string" ? stmt : stmt.sql;
+            if (/^SELECT customer_id FROM delivery_projects/.test(sql)) throw new Error("SQLITE_BUSY: database is locked");
+            return target.execute(stmt);
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    });
+    const desk = (await intake.matchWorkspaceSupportDesk({ anonymous_init: { tenant_slug: "client-a", form_slug: "support" } }, { db }))!;
+    const res = await intake.handleWorkspaceSupportSubmission(
+      new NextRequest("http://localhost/api/forms/submit", { method: "POST", headers: { "x-forwarded-for": "10.8.0.9" } }),
+      { step_index: 0, anonymous_init: { tenant_slug: "client-a", form_slug: "support" }, payload: { name: "Ivy", email: "intake@link.test", category: "other", priority: "low", description: "Lookup fails" } },
+      desk,
+      { db: flaky, notify: { telegram: async () => ({ ok: true }), email: async () => ({ ok: true }), founderEmails: [], appOrigin: "https://app.test" }, schedule: () => undefined, now: () => T0 },
+    );
+    const body = (await res.json()) as Json;
+    assert.equal(res.status, 200, JSON.stringify(body));
+    const row = (await db.execute({ sql: "SELECT customer_id FROM support_tickets WHERE form_submission_id = ?", args: [String(body.submission_id)] })).rows[0];
+    assert.equal(String(row?.customer_id), cz.ok ? cz.customer.id : "", "the email match stands in for the lookup that failed");
+  });
   await login(USERS.clientA);
   await check("links: the desk API refuses a new ticket naming a project AND a different client", async () => {
     const r = await call(tickets.POST(req("POST", "/api/tickets?scope=desk", { title: "Mismatch", project_id: pX, customer_id: X })));

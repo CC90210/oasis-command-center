@@ -1124,7 +1124,9 @@ export type TicketUpdateResult =
  * a severity change on an unanswered ticket re-targets its SLA; linking a
  * project refuses a project that belongs to a different client, and a ticket
  * with no client inherits the project's (the founder just said whose it is).
- * A client record can only be one of THIS desk's (tenant_id, id) pairs.
+ * A ticket moved onto a project takes that project's client record; naming a
+ * different one while it sits there is refused. A client record can only be
+ * one of THIS desk's (tenant_id, id) pairs.
  * Every change leaves an internal system line in the thread.
  */
 export async function updateTicket(
@@ -1238,24 +1240,31 @@ export async function updateTicket(
     }
   }
 
-  if ("customer_id" in changes && (changes.customer_id ?? null) !== s(cur.customer_id)) {
-    if (changes.customer_id && !(await deskCustomerExists(db, tenantId, changes.customer_id))) {
-      return { ok: false, status: 409, error: "customer_not_found" };
-    }
-    set("customer_id", changes.customer_id ?? null);
-    const who = names.customer?.(changes.customer_id ?? null);
-    notes.push(changes.customer_id ? `Linked to client ${who ? `"${who}"` : "record"}.` : "Unlinked from its client record.");
-  }
-  // A ticket on a project belongs to the project's client record: inherited
-  // when the ticket has none, refused when it names another.
+  // A ticket on a project belongs to the project's client record. Moving the
+  // ticket onto a project takes that project's client (the editor saves one
+  // field at a time, so the old client is not a contradiction); naming, or
+  // clearing, a different client while it sits on one is refused. A project
+  // with no client leaves the ticket's own.
   if ("project_id" in changes || "customer_id" in changes) {
     const projectId = "project_id" in changes ? changes.project_id ?? null : s(cur.project_id);
-    const customerId = "customer_id" in changes ? changes.customer_id ?? null : s(cur.customer_id);
     const projectCustomer = projectId ? await projectCustomerId(db, tenantId, projectId) : null;
-    if (projectCustomer && customerId && projectCustomer !== customerId) {
+    const named = "customer_id" in changes ? changes.customer_id ?? null : undefined;
+    if (projectCustomer && named !== undefined && named !== projectCustomer) {
       return { ok: false, status: 409, error: "project_belongs_to_another_customer" };
     }
-    if (projectCustomer && !customerId) set("customer_id", projectCustomer);
+    const next = projectCustomer ?? (named === undefined ? s(cur.customer_id) : named);
+    if (next !== s(cur.customer_id)) {
+      if (next && !projectCustomer && !(await deskCustomerExists(db, tenantId, next))) {
+        return { ok: false, status: 409, error: "customer_not_found" };
+      }
+      set("customer_id", next);
+      const who = names.customer?.(next);
+      notes.push(
+        next
+          ? `Linked to client ${who ? `"${who}"` : "record"}${named === undefined ? ", the project's client" : ""}.`
+          : "Unlinked from its client record.",
+      );
+    }
   }
 
   if ("assigned_to" in changes && (changes.assigned_to ?? null) !== s(cur.assigned_to)) {
