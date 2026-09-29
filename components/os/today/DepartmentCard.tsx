@@ -4,8 +4,14 @@
  *
  * The number follows "unknown is not zero": a live read prints its value (a
  * real 0 included), a failed read says it failed, a source the OS cannot see
- * says "Not connected" with a Connect link, and a department nothing measures
- * yet shows an em dash and says why. None of them can print a fallback 0.
+ * says "Not connected" with a Connect link, a source that has never held
+ * anything says so in words ("No tickets yet"), and a department nothing
+ * measures yet shows an em dash and says why. None of them can print a
+ * fallback 0.
+ *
+ * The line under the number names the source the number actually comes from
+ * and its state (model.ts DeptConnection); only a source that is not connected
+ * carries a Connect link.
  *
  * The card is a <section>, not one big link: a Connect link inside a card link
  * would be a link in a link. The department name is the way in.
@@ -71,6 +77,8 @@ export function DepartmentCard({ card }: { card: DeptCardModel }) {
             </span>
             <span className="min-w-0 truncate text-[13px] text-status-warm">Couldn&rsquo;t load · {m.label}</span>
           </>
+        ) : m.kind === "no_data" ? (
+          <span className="min-w-0 text-sm font-medium text-fg-muted">{m.label}</span>
         ) : (
           <>
             <span aria-hidden className="text-2xl font-semibold leading-8 text-fg-dim">
@@ -89,10 +97,12 @@ export function DepartmentCard({ card }: { card: DeptCardModel }) {
           <span aria-hidden className="text-fg-dim">
             ·
           </span>
-          <span>Not connected</span>
-          <Link href={card.connection.href} prefetch={false} className="ml-auto font-medium text-accent hover:underline">
-            Connect
-          </Link>
+          <span className={card.connection.state === "error" ? "text-status-warm" : undefined}>{card.connection.note}</span>
+          {card.connection.state === "not_connected" && card.connection.href && (
+            <Link href={card.connection.href} prefetch={false} className="ml-auto font-medium text-accent hover:underline">
+              Connect
+            </Link>
+          )}
         </p>
       )}
     </section>

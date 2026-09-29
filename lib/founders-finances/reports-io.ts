@@ -24,6 +24,7 @@ import { query, queryOne } from "./db";
 import { requireEntity, type EntityRow } from "./access-io";
 import { loadSettings } from "./settings-io";
 import { sweepOverdue } from "./invoices-io";
+import { cashCoverage } from "./cash-coverage";
 
 export const REPORT_KINDS = ["pnl", "balance", "trial", "cashflow", "ledger", "aging"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -222,12 +223,20 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       [entity.id],
     );
   };
-  const [{ accounts, lines }, invoices, unreviewed, threshold] = await Promise.all([
+  const [{ accounts, lines }, invoices, bankLines, threshold] = await Promise.all([
     loadLedger(entity.id, tomorrow),
     openInvoices(),
-    queryOne<{ n: number }>(`SELECT COUNT(*) AS n FROM fin_bank_transactions WHERE entity_id = ? AND status IN ('unreviewed', 'draft')`, [entity.id]),
+    // One read for both bank figures: the lines still to review, and every
+    // line ever imported per account — "no bank lines to review" is only news
+    // when a bank feed or import exists at all (cash-coverage.ts).
+    query<{ account_id: string; n: number; unreviewed: number }>(
+      `SELECT account_id, COUNT(*) AS n, SUM(CASE WHEN status IN ('unreviewed', 'draft') THEN 1 ELSE 0 END) AS unreviewed
+         FROM fin_bank_transactions WHERE entity_id = ? GROUP BY account_id`,
+      [entity.id],
+    ),
     business ? thresholdStatus(today) : Promise.resolve(null),
   ]);
+  const unreviewed = bankLines.reduce((s, r) => s + Number(r.unreviewed || 0), 0);
   const balances = new Map<string, number>();
   for (const l of lines) balances.set(l.accountId, (balances.get(l.accountId) || 0) + l.cadDebitCents - l.cadCreditCents);
   const cashAccounts = accounts
@@ -264,7 +273,14 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
     openAr,
     overdueAr,
     overdueCount,
-    unreviewed: Number(unreviewed?.n || 0),
+    unreviewed,
+    // Whether cashTotal may be called a balance, and what each account holds.
+    // Presentation only: cashTotal above is unchanged.
+    coverage: cashCoverage({
+      accounts,
+      lines,
+      bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
+    }),
     threshold,
   };
 }

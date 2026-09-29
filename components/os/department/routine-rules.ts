@@ -6,8 +6,12 @@
  * shapes rows, so tests/os-departments.test.ts can run it without a database.
  *
  * Routines are the workspace's own `tenant_cron_jobs` rows. The Empire lane
- * (`cron_jobs`, OASIS's operator schedules) is never read here: it belongs to
- * Admin, and a client owner has no business seeing CC's machine.
+ * (`cron_jobs`, OASIS's operator schedules) is never LISTED here: it belongs
+ * to Admin, and a client owner has no business seeing CC's machine. Its rows
+ * that carry the OASIS workspace's own tenant_id are counted in OASIS's
+ * routine HEALTH (routineHealth, below; read in ./routines.ts), because they
+ * are that workspace's routines and a health card that skips them says
+ * "nothing measured" about a fleet that runs every few minutes.
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
@@ -70,6 +74,52 @@ export function failedWithin(rows: readonly RoutineRow[], hours: number, now: nu
     const at = Date.parse(r.lastRunAt);
     return Number.isFinite(at) && at >= since;
   });
+}
+
+/**
+ * The health of a workspace's routines in three numbers: how many are on, how
+ * many of those failed in the last 24 hours, and when any of them last ran
+ * cleanly. Today's Operations card and the Operations tab both print this, so
+ * the two cannot disagree about the same rows.
+ *
+ * `total` 0 is "no routines set up", which a caller shows as no data, never as
+ * "0 failed" (a fleet of nothing has no failures to speak of).
+ */
+export type RoutineHealth = {
+  total: number;
+  on: number;
+  failed24h: RoutineRow[];
+  /** Newest successful run across the routines that are on. Null = none recorded. */
+  lastSuccessAt: string | null;
+};
+
+type RoutineRead = { ok: true; value: RoutineRow[] } | { ok: false };
+
+/**
+ * The workspace lane plus, when asked (null = not asked), the Empire lane: one
+ * list for the health counts. Either read failing fails the whole answer — a
+ * health card built from half the routines would call the other half fine.
+ */
+export function mergeRoutineReads(workspace: RoutineRead, empire: RoutineRead | null): RoutineRead {
+  if (!workspace.ok) return { ok: false };
+  if (empire === null) return workspace;
+  if (!empire.ok) return { ok: false };
+  return { ok: true, value: [...workspace.value, ...empire.value] };
+}
+
+export function routineHealth(rows: readonly RoutineRow[], now: number): RoutineHealth {
+  const on = rows.filter((r) => r.enabled);
+  let lastSuccessAt: string | null = null;
+  let lastMs = -Infinity;
+  for (const r of on) {
+    if (r.lastRunStatus !== "success" || !r.lastRunAt) continue;
+    const at = Date.parse(r.lastRunAt);
+    if (Number.isFinite(at) && at > lastMs) {
+      lastMs = at;
+      lastSuccessAt = r.lastRunAt;
+    }
+  }
+  return { total: rows.length, on: on.length, failed24h: failedWithin(on, 24, now), lastSuccessAt };
 }
 
 /** "lead_engine" → "Lead engine". Names people typed ("Weekly digest") pass through. */

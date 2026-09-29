@@ -24,7 +24,11 @@ import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
 import { momentumMetrics, priorityInbound } from "@/lib/queries";
-import { operatorCalendarStatus } from "@/lib/integrations/google-calendar";
+import { getServiceSupabase } from "@/lib/supabase-server";
+import { operatorCalendarStatus, systemCalendarConfig } from "@/lib/integrations/google-calendar";
+import { getUserIntegrationBundleForStatus } from "@/lib/user-integration-store";
+import { loadEmpireRoutines, loadTenantRoutines } from "@/components/os/department/routines";
+import { mergeRoutineReads, routineHealth, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { overview } from "@/lib/founders-finances/reports-io";
 import { formatCents } from "@/lib/founders-finances/money";
@@ -37,8 +41,10 @@ import {
   summarizeBoard,
   summarizeDelivery,
   summarizeRecords,
+  type CalendarStatus,
   type CashSnapshot,
   type ConnectionAttention,
+  type ContentWeek,
   type DeliverySnapshot,
   type HotReply,
   type Read,
@@ -135,25 +141,71 @@ export function loadDelivery(input: {
       listTickets(db, access.viewer, { status: "open" }),
       listProjects(db, access.viewer),
     ]);
+    // With nothing open, ask whether the desk has EVER held a ticket: a desk
+    // nobody has used is "No tickets yet", not "Within SLA". Same viewer, same
+    // scope as the open read.
+    const closedTicketsExist =
+      tickets.rows.length === 0 ? (await listTickets(db, access.viewer, { status: "closed" })).rows.length > 0 : false;
     return summarizeDelivery({
       tickets: tickets.rows,
       projects: projects.rows,
       ticketsTruncated: tickets.truncated,
       projectsTruncated: projects.truncated,
+      closedTicketsExist,
       now: new Date(input.day.nowMs),
       todayKey: input.day.todayKey,
     });
   });
 }
 
-/** Hot inbound from the last day. priorityInbound is tenant-scoped. */
+/**
+ * Hot inbound from the last day. priorityInbound is tenant-scoped, and it
+ * THROWS when lead_interactions cannot be read (lib/queries.ts recentInbound),
+ * so a failed read is "Couldn't check inbound replies", never "no hot replies".
+ */
 export function loadHotReplies(tenantId: string, nowMs: number): Promise<Read<HotReply[]>> {
   return read("inbound", async () => pickHotReplies(await priorityInbound(tenantId, 10), nowMs));
 }
 
-/** Distinct content pieces published in 7 days (post_analytics, tenant-scoped). Null = the reader failed. */
-export function loadContentWeek(tenantId: string): Promise<Read<number | null>> {
-  return read("content", async () => (await momentumMetrics(tenantId)).contentPublished7d);
+/**
+ * What the Marketing card reads: distinct pieces published in 7 days
+ * (post_analytics via momentumMetrics, tenant-scoped; null = that read failed)
+ * and when this workspace's post analytics last synced from Zernio, so the
+ * card names its source and its freshness instead of a fixed label.
+ */
+export function loadContentWeek(tenantId: string): Promise<Read<ContentWeek>> {
+  return read("content", async () => {
+    const [momentum, latest] = await Promise.all([
+      momentumMetrics(tenantId),
+      getServiceSupabase()
+        .from("post_analytics")
+        .select("last_synced_at")
+        .eq("tenant_id", tenantId)
+        .order("last_synced_at", { ascending: false })
+        .limit(1),
+    ]);
+    if (latest.error) throw new Error(`post_analytics freshness read failed: ${latest.error.message}`);
+    const row = ((latest.data || []) as Array<{ last_synced_at: string | null }>)[0];
+    return { published: momentum.contentPublished7d, lastSyncedAt: row?.last_synced_at ?? null };
+  });
+}
+
+/**
+ * Routine health for the Operations card and a failed-routine row in Needs
+ * you: the workspace's own routines, plus — for an OASIS owner — the Empire
+ * scheduler's rows that carry the OASIS workspace id (routines.ts). The same
+ * readers and the same routineHealth the Operations tab uses.
+ */
+export function loadRoutineHealth(tenantId: string, includeEmpire: boolean, nowMs: number): Promise<Read<RoutineHealth>> {
+  return read("routines", async () => {
+    const [workspace, empire] = await Promise.all([
+      loadTenantRoutines(tenantId),
+      includeEmpire ? loadEmpireRoutines(tenantId) : Promise.resolve(null),
+    ]);
+    const merged = mergeRoutineReads(workspace, empire);
+    if (!merged.ok) throw new Error("routine read failed (logged by the reader)");
+    return routineHealth(merged.value, nowMs);
+  });
 }
 
 /**
@@ -172,14 +224,21 @@ export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionA
   );
 }
 
-/** The viewer's own Google Calendar connection (Settings › Personal). */
-export function loadCalendarStatus(
-  tenantId: string,
-  userId: string,
-): Promise<Read<{ connected: boolean; address: string | null }>> {
+/**
+ * The calendars behind today's schedule (model.ts CalendarStatus). The
+ * personal login is read through the FAIL-LOUD status reader: the send-path
+ * reader (getUserIntegrationBundle) answers {} on a database error, which
+ * printed "Not connected" for a check that never ran. The workspace calendar
+ * is OASIS's own identity, so it is reported only in an OASIS workspace.
+ */
+export function loadCalendarStatus(tenantId: string, userId: string, oasisWorkspace: boolean): Promise<Read<CalendarStatus>> {
   return read("calendar", async () => {
-    const status = await operatorCalendarStatus(tenantId, userId);
-    return { connected: status.connected, address: status.address ?? null };
+    const status = await operatorCalendarStatus(tenantId, userId, { getBundle: getUserIntegrationBundleForStatus });
+    const system = oasisWorkspace ? systemCalendarConfig() : null;
+    return {
+      personal: { connected: status.connected, address: status.address ?? null },
+      workspace: oasisWorkspace ? { configured: system !== null, address: system?.organizerEmail || null } : null,
+    };
   });
 }
 
@@ -217,6 +276,7 @@ export async function loadCash(): Promise<Read<CashSnapshot> | null> {
       overdueCount: ov.overdueCount,
       overdueLabel: overdue.length > 0 ? overdue.map(([currency, cents]) => formatCents(cents, currency)).join(" + ") : null,
       unreviewed: ov.unreviewed,
+      coverage: ov.coverage,
     };
   });
 }

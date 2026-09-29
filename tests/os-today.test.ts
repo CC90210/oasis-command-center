@@ -43,8 +43,8 @@ import {
   cashView,
   goalPaceView,
   meetingsBetween,
-  overdueFollowUps,
   pickHotReplies,
+  salesBuckets,
   summarizeBoard,
   summarizeDelivery,
   todayBriefPlan,
@@ -209,20 +209,31 @@ async function main() {
   assert.equal(planFor("founder", CLIENT).money, false, "a client owner never reads OASIS money");
 
   // ── 2. Source: the money readers are called behind the gate, and only here ─
+  // The Needs-you reads (pipeline, support, inbound, cash, approvals,
+  // connections, routines) moved to components/os/today/brief-load.ts so the
+  // Chief of Staff tab makes the SAME reads (one Needs-you model). The gate
+  // moved with them: FounderToday narrows showFinancials by the plan and hands
+  // it in, and brief-load reads cash only behind it.
   const founder = code("components/today/FounderToday.tsx");
+  const brief = code("components/os/today/brief-load.ts");
   assert.match(founder, /const showFinancials = financialsAllowed && plan\.money;/, "the dispatcher's flag is narrowed by the plan");
   assert.match(founder, /showFinancials \? await loadOasisMoney\(tenantId, "today"\) : null/, "money read only behind showFinancials");
-  assert.match(founder, /showFinancials && plan\.cash \? loadCash\(\) : Promise\.resolve\(null\)/, "cash read only behind the money gate");
+  assert.match(founder, /loadNeedsYouReads\(\{ viewer, navInput, plan, showFinancials,/, "the shared reads get the narrowed flag, never the raw capability");
+  assert.match(brief, /input\.showFinancials && plan\.cash \? loadCash\(\) : Promise\.resolve\(null\)/, "cash read only behind the money gate");
   assert.equal((founder.match(/loadOasisMoney\(/g) || []).length, 1, "one money read");
-  assert.equal((founder.match(/loadCash\(/g) || []).length, 1, "one cash read");
-  for (const [flag, loader] of [
-    ["plan.pipeline", "loadSales"],
-    ["plan.delivery", "loadDelivery"],
-    ["plan.inbound", "loadHotReplies"],
-    ["plan.content", "loadContentWeek"],
+  assert.equal((founder.match(/loadCash\(/g) || []).length, 0, "FounderToday reads cash only through brief-load");
+  assert.equal((brief.match(/loadCash\(/g) || []).length, 1, "one cash read");
+  assert.equal((brief.match(/loadOasisMoney\(/g) || []).length, 0, "the shared Needs-you reads never touch the revenue goal");
+  for (const [src, file, flag, loader] of [
+    [brief, "brief-load.ts", "plan.pipeline", "loadSales"],
+    [brief, "brief-load.ts", "plan.delivery", "loadDelivery"],
+    [brief, "brief-load.ts", "plan.inbound", "loadHotReplies"],
+    [brief, "brief-load.ts", "plan.connections", "loadConnectionAlerts"],
+    [brief, "brief-load.ts", "plan.routines", "loadRoutineHealth"],
+    [founder, "FounderToday.tsx", "plan.content", "loadContentWeek"],
   ] as const) {
-    assert.match(founder, new RegExp(`${flag.replace(".", "\\.")}\\s*\\?\\s*${loader}\\(`), `${loader} runs only behind ${flag}`);
-    assert.equal((founder.match(new RegExp(`${loader}\\(`, "g")) || []).length, 1, `${loader} is called once`);
+    assert.match(src, new RegExp(`${flag.replace(".", "\\.")}\\s*\\?\\s*${loader}\\(`), `${file}: ${loader} runs only behind ${flag}`);
+    assert.equal((src.match(new RegExp(`${loader}\\(`, "g")) || []).length, 1, `${file}: ${loader} is called once`);
   }
   const dispatcher = code("app/page.tsx");
   assert.match(dispatcher, /showFinancials=\{surface\.capabilities\.canSeeCompanyFinancials\}/);
@@ -233,6 +244,7 @@ async function main() {
     "founders-finances",
     "loadCash",
     "components/os/today/loaders",
+    "components/os/today/brief-load",
     "GoalCountdownCard",
     "TodayBrief",
   ];
@@ -287,7 +299,14 @@ async function main() {
     { id: "m2", data: { company: "Gone Co", stage: "founder_meeting_booked", founder_meeting_at: "2026-09-28T17:00:00Z", founder_meeting_status: "cancelled_by_client" } },
     { id: "m3", data: { company: "Tomorrow", stage: "founder_meeting_booked", founder_meeting_at: "2026-09-29T15:00:00Z" } },
   ];
-  assert.deepEqual(overdueFollowUps(rows, now).map((r) => r.id), ["e", "a"], "open + past due only, oldest first");
+  // Past-due next steps, split at the cycle start (2026-09-24 here): "a" is a
+  // fresh miss, "e" a promise carried over from before the cycle. Closed
+  // stages have nothing to follow up; m1/m2/m3 have no next step recorded.
+  const buckets = salesBuckets(rows, now, Date.parse("2026-09-24T00:00:00Z"));
+  assert.deepEqual(buckets.overdue.map((r) => r.id), ["a"], "open + past due inside the cycle only");
+  assert.deepEqual(buckets.carriedOver.map((r) => r.id), ["e"], "dated before the cycle: carried over, not fresh");
+  assert.deepEqual(buckets.noNextStep.map((r) => r.id), ["m2", "m1", "m3"], "open with no next step, by name");
+  assert.deepEqual(buckets.outcomeMissing, [], "no booked meeting is in the past");
   assert.deepEqual(meetingsBetween(rows, day.startMs, day.endMs).map((r) => r.id), ["m1"], "today only, cancelled excluded");
   const board = summarizeBoard({
     rows,
@@ -318,6 +337,7 @@ async function main() {
     ],
     ticketsTruncated: false,
     projectsTruncated: false,
+    closedTicketsExist: false,
     now: new Date(now),
     todayKey: "2026-09-28",
   });
@@ -356,7 +376,14 @@ async function main() {
   const deliveryRead: Read<DeliverySnapshot> = { ok: true, value: delivery };
   const cashLive: Read<CashSnapshot> = {
     ok: true,
-    value: { cashCadCents: 1_250_000, hasCashActivity: true, overdueCount: 2, overdueLabel: "CA$1,200.00", unreviewed: 4 },
+    value: {
+      cashCadCents: 1_250_000,
+      hasCashActivity: true,
+      overdueCount: 2,
+      overdueLabel: "CA$1,200.00",
+      unreviewed: 4,
+      coverage: { complete: true, gaps: [], bankLines: 12, accounts: [{ name: "Business chequing", covers: "12 entries; opening balance recorded" }] },
+    },
   };
   const full = buildNeedsYou({
     sales,
@@ -401,12 +428,13 @@ async function main() {
   }
 
   // Cash: no bank activity is "Not connected", never CA$0.
+  const complete = { complete: true, gaps: [], bankLines: 3, accounts: [] };
   assert.deepEqual(
-    cashView({ ok: true, value: { cashCadCents: 0, hasCashActivity: false, overdueCount: 0, overdueLabel: null, unreviewed: 0 } }),
+    cashView({ ok: true, value: { cashCadCents: 0, hasCashActivity: false, overdueCount: 0, overdueLabel: null, unreviewed: 0, coverage: complete } }),
     { kind: "not_connected" },
   );
   assert.deepEqual(cashView({ ok: false }), { kind: "error" });
-  assert.equal(cashView({ ok: true, value: { cashCadCents: 0, hasCashActivity: true, overdueCount: 0, overdueLabel: null, unreviewed: 0 } }).kind, "live", "a real zero balance is live");
+  assert.equal(cashView({ ok: true, value: { cashCadCents: 0, hasCashActivity: true, overdueCount: 0, overdueLabel: null, unreviewed: 0, coverage: complete } }).kind, "live", "a real zero balance is live");
 
   // ── 4. Rendered: unknown never prints as zero; a live zero does ───────────
   const { CashGlance } = await import("../components/os/today/CashGlance");
@@ -438,15 +466,17 @@ async function main() {
     needsYou: gaps,
     sales: failed,
     delivery: deliveryRead,
-    content: { ok: true, value: 0 },
+    content: { ok: true, value: { published: 0, lastSyncedAt: "2026-09-28T14:00:00Z" } },
     goal: { kind: "error", label: "October sprint" },
     stripeConnected: false,
+    routines: failed,
+    formatWhen: () => "Sep 28, 10:00 AM",
   });
   assert.deepEqual(cards.map((c) => c.key), OS_DEPARTMENTS.map((d) => d.key), "one card per department, in rail order");
   const byKey = Object.fromEntries(cards.map((c) => [c.key, c]));
   assert.equal(byKey.sales.metric.kind, "error", "a failed pipeline read is an error, not 0 leads");
   assert.equal(byKey.finance.metric.kind, "error", "a failed revenue read is an error, not $0");
-  assert.equal(byKey.operations.metric.kind, "unmeasured", "nothing measures operations yet");
+  assert.equal(byKey.operations.metric.kind, "error", "a failed routine read is an error, not 'no failures'");
   assert.equal(byKey.chief_of_staff.status, "Partly checked", "failed sources are not 'Nothing waiting'");
   for (const card of cards) {
     const text = render(createElement(DepartmentCard, { card }));
@@ -458,7 +488,10 @@ async function main() {
   }
   const marketing = render(createElement(DepartmentCard, { card: byKey.marketing }));
   assert.match(marketing, /(^|\s)0(\s|$)/, "a live zero from a live source is a real zero");
-  assert.match(marketing, /Meta Ads · Not connected .*Connect/, "the ads source the OS cannot see says so");
+  // The line under the number names the source the number comes from, with
+  // its freshness — never a fixed "Not connected" for an app it does not read.
+  assert.match(marketing, /Zernio post analytics · Last synced Sep 28, 10:00 AM/, "the card names its real source");
+  assert.doesNotMatch(marketing, /Meta|Not connected|Connect/, `the Marketing card claims a connection it does not read: ${marketing}`);
   assert.match(render(createElement(DepartmentCard, { card: byKey.finance })), /Stripe .*Not connected .*Connect/);
   const nc = render(
     createElement(DepartmentCard, {
@@ -477,9 +510,10 @@ async function main() {
       needsYou: { items: [], unavailable: [] },
       sales: failed,
       delivery: { ok: true, value: { ...quietDelivery, ticketsTruncated, projectsTruncated } },
-      content: { ok: true, value: 0 },
+      content: { ok: true, value: { published: 0, lastSyncedAt: null } },
       goal: null,
       stripeConnected: null,
+      routines: null,
     })[0];
   assert.equal(slaCard(false).status, "Within SLA");
   assert.equal(slaCard(false).tone, "ok");
@@ -533,11 +567,17 @@ async function main() {
         needsYou: { items: [], unavailable: [] },
         sales: { ok: true, value: { ...board, source: "records", summary: null, openLeads: 0, overdue: [], meetingsToday: [], partial: false } },
         delivery: deliveryRead,
-        content: { ok: true, value: 3 },
+        content: { ok: true, value: { published: 3, lastSyncedAt: "2026-09-28T14:00:00Z" } },
         goal: null,
         stripeConnected: null,
+        routines: { ok: true, value: { total: 0, on: 0, failed24h: [], lastSuccessAt: null } },
       }),
-      schedule: { meetings: null, partial: false, calendar: { ok: true, value: { connected: false, address: null } }, connectHref: "/settings" },
+      schedule: {
+        meetings: null,
+        partial: false,
+        calendar: { ok: true, value: { personal: { connected: false, address: null }, workspace: null } },
+        connectHref: "/settings",
+      },
       goal: null,
       cash: null,
       financialsNote: null,

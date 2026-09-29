@@ -1,26 +1,35 @@
 /**
  * Today's schedule, right column of the owner's brief.
  *
- * Two real sources and no more:
+ * Real sources and no more:
  *   - meetings booked through the pipeline today (a lead's founder_meeting_at,
  *     read by the board query), each linking to its lead;
- *   - whether the viewer's Google Calendar is connected (Settings › Personal).
+ *   - in an OASIS workspace, whether the workspace calendar founder meetings
+ *     are booked on is set up (lib/integrations/google-calendar
+ *     systemCalendarConfig) — the calendar that actually holds the bookings;
+ *   - whether the viewer's own Google Calendar is connected (Settings ›
+ *     Personal).
+ *
+ * "Not connected" used to be the whole story on a check that looked only at
+ * the personal login (0 rows in the database) while every booking went to the
+ * workspace calendar; and a failed credential read printed the same "Not
+ * connected". A read that fails now says "Couldn't check".
  *
  * The OS has no reader for the rest of a Google Calendar yet, so this block
  * never claims the day is free: with no booked meetings it says "No meetings
- * booked", and the calendar line says what is and is not shown.
+ * booked", and the calendar lines say what is and is not shown.
  *
  * Server component, no hooks.
  */
 import Link from "next/link";
-import { operatorTime, type LeadLite, type Read } from "@/components/os/today/model";
+import { operatorTime, type CalendarStatus, type LeadLite, type Read } from "@/components/os/today/model";
 
 export type ScheduleGlanceProps = {
   /** Null when this viewer's pipeline is not read here (no meetings source). */
   meetings: Read<LeadLite[]> | null;
   /** The meetings list came from a window of the board and may be incomplete. */
   partial: boolean;
-  calendar: Read<{ connected: boolean; address: string | null }>;
+  calendar: Read<CalendarStatus>;
   /** Where the calendar is connected. */
   connectHref: string;
 };
@@ -67,25 +76,36 @@ export function ScheduleGlance({ meetings, partial, calendar, connectHref }: Sch
         </div>
       )}
 
-      <div className={`px-4 py-3 text-xs ${meetings ? "border-t border-hairline" : ""}`}>
+      <div className={`space-y-1.5 px-4 py-3 text-xs ${meetings ? "border-t border-hairline" : ""}`}>
         {!calendar.ok ? (
-          <span className="text-status-warm">Couldn&rsquo;t check your Google Calendar connection.</span>
-        ) : calendar.value.connected ? (
-          <span className="text-fg-muted">
-            Google Calendar connected{calendar.value.address ? ` (${calendar.value.address})` : ""}. Its own events are
-            not listed here yet.
-          </span>
+          <p className="text-status-warm">Google Calendar · Couldn&rsquo;t check the connection just now.</p>
         ) : (
-          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-fg-muted">
-            <span>Google Calendar</span>
-            <span aria-hidden className="text-fg-dim">
-              ·
-            </span>
-            <span>Not connected</span>
-            <Link href={connectHref} prefetch={false} className="ml-auto font-medium text-accent hover:underline">
-              Connect
-            </Link>
-          </span>
+          <>
+            {calendar.value.workspace && (
+              <p className="text-fg-muted">
+                {calendar.value.workspace.configured
+                  ? `Workspace calendar${calendar.value.workspace.address ? ` (${calendar.value.workspace.address})` : ""} · Set up: founder meetings are booked on it.`
+                  : "Workspace calendar · Not set up: founder meetings book on each host's own calendar."}
+              </p>
+            )}
+            {calendar.value.personal.connected ? (
+              <p className="text-fg-muted">
+                Your Google Calendar · Connected{calendar.value.personal.address ? ` (${calendar.value.personal.address})` : ""}.
+                Its own events are not listed here yet.
+              </p>
+            ) : (
+              <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-fg-muted">
+                <span>{calendar.value.workspace ? "Your Google Calendar" : "Google Calendar"}</span>
+                <span aria-hidden className="text-fg-dim">
+                  ·
+                </span>
+                <span>Not connected</span>
+                <Link href={connectHref} prefetch={false} className="ml-auto font-medium text-accent hover:underline">
+                  Connect
+                </Link>
+              </p>
+            )}
+          </>
         )}
       </div>
     </section>

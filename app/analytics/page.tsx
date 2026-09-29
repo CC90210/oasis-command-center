@@ -1,13 +1,7 @@
 import { Card, PageHeader, Stat, EmptyState } from "@/components/Card";
-import { MRRProgressChart } from "@/components/charts/MRRProgressChart";
 import { GoalPaceChart } from "@/components/charts/GoalPaceChart";
 import { PipelineFunnel } from "@/components/charts/PipelineFunnel";
-import {
-  mrrSnapshot,
-  mrrHistory,
-  pipelineBreakdown,
-  getActiveProfile,
-} from "@/lib/queries";
+import { pipelineBreakdown, getActiveProfile } from "@/lib/queries";
 import { safe } from "@/lib/api-helpers";
 import { formatMoney } from "@/lib/fmt";
 import { requireSystemSurface, resolveViewerSurface } from "@/lib/role-surfaces-session";
@@ -24,18 +18,15 @@ export default async function AnalyticsPage() {
   const profile = await safe("analytics.profile", getActiveProfile(), null);
   const tenantId = profile?.tenant_id || "";
   // An OASIS workspace reads the same money block as Today (live Stripe MRR +
-  // collected vs the revenue goal). Any other workspace keeps its own profile
-  // numbers — the Finances ledger is OASIS's books and must never render there.
+  // collected vs the revenue goal). Any other workspace has no live MRR source
+  // yet, so it says "Not connected": the Finances ledger is OASIS's books and
+  // must never render there, and the typed profile MRR it used to show (with
+  // an invented $5,000 target and a synthetic decline curve when no history
+  // existed) was a number nothing measured.
   const surface = await resolveViewerSurface();
   const oasisMoney = surface.ok && surface.capabilities.canSeeCompanyFinancials;
-  const [money, mrr, history, pipeline] = await Promise.all([
+  const [money, pipeline] = await Promise.all([
     oasisMoney ? loadOasisMoney(tenantId, "analytics") : Promise.resolve(null),
-    oasisMoney
-      ? Promise.resolve(null)
-      : safe("analytics.mrr_snapshot", mrrSnapshot(), null),
-    oasisMoney
-      ? Promise.resolve([] as Array<{ date: string; mrr: number; synthetic: boolean }>)
-      : safe("analytics.mrr_history", mrrHistory(60), [] as Array<{ date: string; mrr: number; synthetic: boolean }>),
     safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
   ]);
   const dollars = (cents: number) => formatMoney(cents / 100);
@@ -68,7 +59,7 @@ export default async function AnalyticsPage() {
             accent
           />
         ) : (
-          <Stat label="Net MRR" value={mrr ? `$${Math.round(mrr.current).toLocaleString()}` : "—"} accent />
+          <Stat label="Net MRR" value="Not connected" hint="MRR comes from a live Stripe connection" accent />
         )}
         <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
         <Stat label="Won" value={won} />
@@ -88,22 +79,9 @@ export default async function AnalyticsPage() {
             <EmptyState message="No active revenue goal. A founder sets one in Settings → Revenue goal." />
           </Card>
         )
-      ) : mrr ? (
-      <Card
-        title="MRR · 60 days"
-        subtitle={(() => {
-          const realDays = history.filter((h) => !h.synthetic).length;
-          const target = `Target $${mrr.target.toLocaleString()}`;
-          if (realDays === 0) return `${target} · projected (no snapshot history)`;
-          if (realDays < 14) return `${target} · ${realDays} day${realDays === 1 ? "" : "s"} of real data, rest back-filled — cron snapshots build up daily`;
-          return target;
-        })()}
-      >
-        <MRRProgressChart data={history} target={mrr.target} />
-      </Card>
       ) : (
         <Card title="MRR">
-          <EmptyState message="MRR could not be read just now. Reload in a minute." />
+          <EmptyState message="Not connected. MRR here comes from a live Stripe connection, never a typed number, and this workspace has none feeding it yet." />
         </Card>
       )}
 

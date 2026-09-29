@@ -12,7 +12,10 @@
  *
  *   Cash, In/Out/Net   live once the books hold any bank data (a balance or a
  *                      recorded transaction); otherwise "Not connected" with
- *                      a link to import a statement.
+ *                      a link to import a statement. Cash on hand also needs
+ *                      complete books (overview().coverage): a bank account
+ *                      with no opening balance, or Stripe payouts never
+ *                      booked, makes it "Books incomplete", never a balance.
  *   Collected          live once Stripe is pinned or any payment is recorded.
  *   MRR                live once a Stripe subscription sync has run (as_of).
  *   Owed / Overdue     live always: invoices are created in this app, so no
@@ -32,6 +35,8 @@ export type MoneyOverviewInput = {
     overdueAr: Record<string, number>;
     overdueCount: number;
     unreviewed: number;
+    /** lib/founders-finances/cash-coverage.ts, via overview(): may cashTotal be called a balance. */
+    coverage: { complete: boolean; gaps: readonly string[] };
   };
   collected: { cad_cents: number; usd_cents: number; payments: number; fx_missing_days: readonly string[] };
   mrr: { mrr_cents: number; currency: string; active_subscriptions: number; as_of: string | null };
@@ -91,9 +96,24 @@ export function moneyTiles(input: MoneyOverviewInput | null, fmt: Fmt): { headli
     .filter(Boolean)
     .join(" · ");
 
+  // Books with bank data but a missing part of the story (no opening balance,
+  // Stripe payouts never booked) have a ledger total, not cash on hand: the
+  // tile says so, and the total rides along only as a labelled hint.
+  const cashTile: MoneyTile =
+    bank && !ov.coverage.complete
+      ? {
+          id: "cash",
+          label: "Cash on hand",
+          value: null,
+          status: "no_data",
+          emptyText: "Books incomplete",
+          hint: `${ov.coverage.gaps.join("; ")}. Ledger total, incomplete: ${fmt(ov.cashTotal, "CAD")}`,
+        }
+      : bankTile("cash", "Cash on hand", ov.cashTotal, "Bank and Stripe balances");
+
   return {
     headline: [
-      bankTile("cash", "Cash on hand", ov.cashTotal, "Bank and Stripe balances"),
+      cashTile,
       collectedLive
         ? { id: "collected", label: "Collected this month", value: fmt(collected.cad_cents, "CAD"), status: "live", hint: collectedHint }
         : { id: "collected", label: "Collected this month", value: null, status: "not_connected", connectHref: MONEY_LINKS.stripeSettings, hint: "Stripe" },

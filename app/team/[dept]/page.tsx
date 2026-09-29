@@ -93,10 +93,12 @@ export default async function DepartmentPage({
     // This department's approvals waiting on THIS viewer: the session's
     // workspace, and only if the viewer is seated in this department
     // (lib/os/approvals/rules.ts DEPARTMENT_SEATS; owners/admins see all).
+    // Chief of Staff answers for the whole workspace, as Today does, so its
+    // cards are every department's — the same approvals its count includes.
     loadPendingApprovals({
       scope: approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput }),
       tenantSlug: viewer.surface.tenantSlug,
-      department: dept.key,
+      department: dept.key === "chief_of_staff" ? null : dept.key,
       limit: OVERVIEW_APPROVALS_SHOWN,
     }),
   ]);
@@ -110,11 +112,17 @@ export default async function DepartmentPage({
   // Pending approvals are an exact COUNT(*); an attention item from a capped
   // read makes the total a floor, and so does an approvals read that failed:
   // it added 0 for a number nobody knows.
-  const needsYou =
-    numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
+  // Chief of Staff carries its own total: Today's (numbers.ts, needsYouTotal
+  // over the shared Needs-you reads, approvals included), so the tab and
+  // Today's card can never print different answers for the same moment.
+  const needsYou = numbers.needsYou
+    ? numbers.needsYou.total
+    : numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
   // Any floor in the sum makes the total a floor too. A floor of 0 is not
   // "nothing waiting", so the header cannot say Working (statusFor).
-  const needsYouCapped = numbers.attention.some((item) => item.capped === true) || !approvals.ok;
+  const needsYouCapped = numbers.needsYou
+    ? numbers.needsYou.capped
+    : numbers.attention.some((item) => item.capped === true) || !approvals.ok;
   const profile = departmentProfile(dept.key);
 
   return (

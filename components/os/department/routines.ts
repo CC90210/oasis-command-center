@@ -9,11 +9,14 @@
  * all three.
  *
  * Scoped by the SESSION tenant id, the same predicate GET /api/cron-jobs uses
- * for its tenant lane. The operator Empire lane (`cron_jobs`) is never read.
+ * for its tenant lane. The operator Empire lane (`cron_jobs`) is read only by
+ * loadEmpireRoutines below, only for an OASIS owner, and only for the health
+ * counts (routine-rules.ts routineHealth): the panel never lists its rows.
  */
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { normalizeEmpireRow, type EmpireCronRow } from "@/lib/cron-empire-row";
 import { normalizeRoutineRow, type RoutineRow } from "./routine-rules";
 
 /** A read that can fail. `ok: false` means "could not find out", never "none". */
@@ -33,6 +36,49 @@ export async function loadTenantRoutines(tenantId: string): Promise<Read<Routine
     };
   } catch (err) {
     console.error("[os.department.routines]", err);
+    return { ok: false };
+  }
+}
+
+/**
+ * The Empire scheduler's rows that belong to this workspace: `cron_jobs`
+ * carries a tenant_id (migration 084), and GET /api/cron-jobs reads its
+ * operator lane with the same `.eq("tenant_id", …)`. Every live row carries
+ * the OASIS workspace's id, so for OASIS these ARE its routines (post
+ * analytics sync, inbound email sweep, …) even though they run on the
+ * operator's machine rather than the bridge.
+ *
+ * The caller decides who may ask (an OASIS owner). The status comes from
+ * lib/cron-empire-row normalizeEmpireRow, the classifier the Automations tab
+ * and the watchdog share, so `{"errors": 3}` is a failure here too and an
+ * unresolved fail_count keeps a row red until a clean run clears it.
+ */
+export async function loadEmpireRoutines(tenantId: string): Promise<Read<RoutineRow[]>> {
+  try {
+    const res = await getServiceSupabase()
+      .from("cron_jobs")
+      .select("id, name, description, schedule, action_type, action_config, owner_agent_key, is_active, last_run_at, last_result, next_run_at, run_count, fail_count, created_at")
+      .eq("tenant_id", tenantId)
+      .order("created_at", { ascending: false });
+    if (res.error) throw new Error(res.error.message);
+    return {
+      ok: true,
+      value: ((res.data || []) as EmpireCronRow[]).map((row) => {
+        const job = normalizeEmpireRow(row);
+        return normalizeRoutineRow({
+          id: job.id,
+          agent_key: job.agent_key,
+          name: job.name,
+          description: job.description,
+          schedule: job.schedule,
+          enabled: job.enabled,
+          last_run_at: job.last_run_at,
+          last_run_status: job.last_run_status,
+        });
+      }),
+    };
+  } catch (err) {
+    console.error("[os.department.routines.empire]", err);
     return { ok: false };
   }
 }
