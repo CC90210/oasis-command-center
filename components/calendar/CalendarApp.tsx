@@ -80,6 +80,7 @@ export function CalendarApp() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [legacy, setLegacy] = useState<string[] | null>(null);
   const lastUndo = useRef<EventOp[] | null>(null);
+  const lastError = useRef<string>("");
 
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 30_000);
@@ -214,6 +215,7 @@ export function CalendarApp() {
         return true;
       } catch (err) {
         const msg = err instanceof CalendarApiError ? err.message : messageFor("");
+        lastError.current = msg;
         toast(msg, { tone: "error" });
         return false;
       }
@@ -247,7 +249,11 @@ export function CalendarApp() {
     if (clash) return setPanelError(clash);
     const ops: EventOp[] = occ ? [{ op: "update", id: occ.event.id, patch: checked.value }] : [{ op: "create", event: checked.value }];
     setPanel(null);
-    await run(ops, occ ? "Event saved" : "Event created");
+    // A failed save must not cost the user what they typed: reopen it.
+    if (!(await run(ops, occ ? "Event saved" : "Event created"))) {
+      setPanelError(lastError.current);
+      setPanel({ kind: "editor", draft, occ });
+    }
   };
 
   const applyScope = async (scope: EditScope) => {
@@ -276,7 +282,10 @@ export function CalendarApp() {
       return;
     }
     setPanel(null);
-    await run(ops, "Event saved");
+    if (!(await run(ops, "Event saved")) && fromEditor) {
+      setPanelError(lastError.current);
+      setPanel({ kind: "editor", draft: next, occ });
+    }
   };
 
   const moveOcc = (occ: Occurrence, start: Date, end: Date) => {

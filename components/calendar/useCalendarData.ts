@@ -120,6 +120,9 @@ export function useCalendarData() {
   const [saving, setSaving] = useState(0);
   const eventsRef = useRef(events);
   eventsRef.current = events;
+  // Saves run one at a time. With two in flight, rolling one back to its
+  // snapshot would undo the other; serialized, each snapshot is exact.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
 
   const reload = useCallback(async () => {
     try {
@@ -143,7 +146,7 @@ export function useCalendarData() {
    * Optimistically applies ops, persists them, and returns the inverse ops for
    * undo. On failure the local state is restored and the error rethrown.
    */
-  const commit = useCallback(
+  const commitNow = useCallback(
     async (ops: EventOp[]): Promise<EventOp[]> => {
       const before = eventsRef.current;
       const ids = ops.map((op) => (op.op === "create" ? tempId() : op.op === "update" || op.op === "delete" ? op.id : ""));
@@ -168,13 +171,25 @@ export function useCalendarData() {
         return inverseOps(before, withTemp, results);
       } catch (err) {
         setEvents(before);
-        if (err instanceof CalendarApiError && (err.code === "event_not_found" || /changes saved/.test(err.message))) void reload();
+        eventsRef.current = before;
+        // Re-read after any failure: the server is the truth, and a partial
+        // batch or a concurrent change elsewhere must not linger locally.
+        void reload();
         throw err;
       } finally {
         setSaving((n) => n - 1);
       }
     },
     [reload],
+  );
+
+  const commit = useCallback(
+    (ops: EventOp[]): Promise<EventOp[]> => {
+      const next = queue.current.then(() => commitNow(ops));
+      queue.current = next.catch(() => undefined);
+      return next;
+    },
+    [commitNow],
   );
 
   const addCalendar = useCallback(async (name: string, color: CalendarColor) => {

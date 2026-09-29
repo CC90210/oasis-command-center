@@ -118,10 +118,12 @@ export function MonthView({ anchor, occurrences, calendars, prefs, now, selected
       <div ref={bodyRef} className="grid min-h-0 flex-1 grid-rows-6">
         {weeks.map((week, wi) => {
           const segs = layoutSpans(week, occurrences, true);
-          const hidden = week.map(() => 0);
-          for (const s of segs) if (s.row >= capacity - 1) for (let c = s.startCol; c < s.startCol + s.span; c++) hidden[c]++;
-          // If a day has no overflow, it can use the last row too.
-          const rowsFor = (col: number) => (hidden[col] > 0 ? capacity - 1 : capacity);
+          // Rows each day needs; only a day that needs MORE than fit gives up
+          // its last row to the "N more" link. A day that exactly fits shows all.
+          const need = week.map(() => 0);
+          for (const s of segs) for (let c = s.startCol; c < s.startCol + s.span; c++) need[c] = Math.max(need[c], s.row + 1);
+          const rowsFor = (col: number) => (need[col] > capacity ? capacity - 1 : capacity);
+          const hidden = week.map((_, c) => (need[c] > capacity ? segs.filter((s) => s.startCol <= c && c < s.startCol + s.span && s.row >= capacity - 1).length : 0));
           return (
             <div key={wi} className="relative grid grid-cols-7 border-b border-hairline last:border-b-0">
               {week.map((day, di) => {
