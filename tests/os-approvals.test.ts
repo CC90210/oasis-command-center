@@ -255,6 +255,7 @@ async function main() {
   const rules = await import("../lib/os/approvals/rules");
   const store = await import("../lib/os/approvals/store");
   const { executeApproval } = await import("../lib/os/approvals/execute");
+  const { SUNBIZ_RETIRED_TENANT_ID } = await import("../lib/tenant/retired");
   const executors = await import("../lib/os/approvals/executors");
   const { buildApprovalViews } = await import("../lib/os/approvals/view");
   const { approvalScopeFromViewer } = await import("../lib/os/approvals/scope");
@@ -797,6 +798,27 @@ async function main() {
     assert.equal(sent.length, before, "OASIS's mailbox never sends for a client workspace");
   });
 
+  await check("execute: a retired workspace's approved card is refused and nothing is sent", async () => {
+    // Approved before the workspace was retired (lib/tenant/retired.ts): the
+    // executor re-checks at run time, so a card left over from before the
+    // offboarding cannot act for it.
+    await raw.execute({ sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'submissions', 'Retired Co')", args: [SUNBIZ_RETIRED_TENANT_ID] });
+    const r = await create({ tenantId: SUNBIZ_RETIRED_TENANT_ID, title: "RETIRED-MARKER" });
+    await raw.execute({ sql: "UPDATE approvals SET status = 'approved' WHERE tenant_id = ? AND id = ?", args: [SUNBIZ_RETIRED_TENANT_ID, r.id] });
+    const before = sent.length;
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      const x = await executeApproval(raw, { tenantId: SUNBIZ_RETIRED_TENANT_ID, approvalId: r.id }, fakeDeps());
+      assert.ok(x.ok);
+      assert.equal(x.approval.status, "failed");
+      assert.equal((x.approval.execution_result as { reason: string }).reason, "workspace_retired");
+    } finally {
+      console.error = quiet;
+    }
+    assert.equal(sent.length, before, "nothing is sent for a retired workspace");
+  });
+
   // ── 8. Tenant isolation ────────────────────────────────────────────────
   await check("isolation: workspace B cannot list, read, decide, comment on, audit or execute workspace A's approval", async () => {
     const a = await create({ departmentKey: null, title: "OASIS-ONLY-MARKER" });
@@ -1159,7 +1181,7 @@ async function main() {
   });
 
   // ── 12. Surfaces ───────────────────────────────────────────────────────
-  await check("Feed: the owner lands on Needs you with live approval cards; a rep (no Feed on the rail) gets 404", async () => {
+  await check("Feed: the owner lands on Needs you with live approval cards; a rep sees only the departments they sit in", async () => {
     const FeedPage = (await import("../app/feed/page")).default;
     const { ApprovalCard } = await import("../components/os/approvals/ApprovalCard");
     await login("cc");
@@ -1171,8 +1193,20 @@ async function main() {
     assert.ok(!cards.some((c) => c.title === "Client post" || c.title === "Client email"), "no other workspace's cards");
     const tabs = found.elements.find((e) => e.props && "active" in e.props && "counts" in e.props);
     assert.equal(tabs?.props.active, "needs", "opens on Needs you when something waits");
+    // Every persona has the Feed since #469 (lib/role-surfaces.ts), so the
+    // rep's page renders; what it must not do is show a card from a
+    // department the rep is not seated in (rules.ts DEPARTMENT_SEATS).
     await login("rep");
-    await assert.rejects(Promise.resolve().then(() => FeedPage({ searchParams: Promise.resolve({ tab: "needs" }) })), /404/);
+    const repTree = await FeedPage({ searchParams: Promise.resolve({ tab: "needs" }) });
+    const repCards = walk(repTree)
+      .elements.filter((e) => e.type === ApprovalCard)
+      .map((e) => e.props.approval as { title: string; department_key: string | null });
+    assert.ok(repCards.length > 0, "the rep sees Sales' cards");
+    assert.ok(
+      repCards.every((c) => c.department_key === "sales"),
+      `a rep saw another department's card: ${repCards.map((c) => `${c.title}/${c.department_key}`).join(", ")}`,
+    );
+    assert.ok(!repCards.some((c) => c.title === "FINANCE-MARKER" || c.title === "MARKETING-MARKER"));
   });
 
   await check("Overview panel and Today render the cards, a failed read says so, and the placeholders are gone", async () => {

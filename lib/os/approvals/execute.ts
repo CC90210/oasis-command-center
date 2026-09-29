@@ -11,12 +11,12 @@
  *   2. RE-CHECK, after the claim and before any outward effect:
  *        - the stored payload still hashes to payload_hash (what was approved
  *          is what runs);
- *        - the workspace still exists. NOTE: lib/tenant/retired.ts (the
- *          retired-tenant list) and tenants.lifecycle are not on this branch;
- *          the check here is the tenant lookup itself, and each executor's
+ *        - the workspace still exists and is not retired
+ *          (lib/tenant/retired.ts: an offboarded workspace's data is being
+ *          exported and deleted, so nothing may act for it). Each executor's
  *          readiness check refuses the retired SunBiz workspace on its own
- *          (brand "sunbiz" has no in-app sender; it is not a founders
- *          tenant). When retired.ts lands, add isRetiredTenant() below.
+ *          too (brand "sunbiz" has no in-app sender; it is not a founders
+ *          tenant); this check does not depend on that.
  *        - an executor exists for action_kind (else: "no executor for <kind>").
  *   3. DISPATCH to the registry (executors.ts), which uses only sanctioned
  *      send paths and honours dry-run.
@@ -46,6 +46,7 @@ import {
   type ExecutorOutcome,
 } from "@/lib/os/approvals/executors";
 import type { AgentEventPublish } from "@/lib/manifest/events";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export type ExecuteArgs = {
   /** The session's tenant (or a server context that came from it). Never a request body. */
@@ -166,6 +167,9 @@ async function runChecked(
     return fail("payload_changed", "The stored draft is not in the form that was approved, so it was not carried out.");
   }
 
+  if (isRetiredTenant(approval.tenant_id)) {
+    return fail("workspace_retired", "This workspace has been retired, so nothing was carried out.");
+  }
   const tenant = await readTenantForExecution(db, approval.tenant_id);
   if (!tenant) return fail("workspace_missing", "This workspace no longer exists, so nothing was carried out.");
 

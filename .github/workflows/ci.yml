@@ -86,6 +86,13 @@ jobs:
           # top-level /automations because the gate keyed on operator ROLE
           # rather than on which tenant's surface was being rendered.
           npm run test:isolation
+          # OASIS OS shell + Phase-0 security (ADDED 2026-09-29). These are the
+          # gate tests the OS plan names (operator check by auth id, admin
+          # surfaces, env fallback OASIS-only, invite-only signup, tool
+          # default-deny, retired-tenant producers, approvals exactly-once,
+          # unknown-is-not-zero) and none of them had a CI entry: every OS PR
+          # before this one deployed on typecheck + build alone.
+          npm run test:os
           # Repo invariant: the chat's CLI-runtime storage key is declared
           # once. It used to be a literal in two files synchronised by a
           # comment — desyncing them breaks the runtime picker silently.
