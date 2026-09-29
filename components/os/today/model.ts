@@ -223,8 +223,10 @@ export type DeliverySnapshot = {
   activeProjects: number;
   /** Active projects whose due date has passed. */
   overdueProjects: number;
-  /** A list hit its read ceiling: the counts are a floor. */
-  truncated: boolean;
+  /** The ticket read hit its ceiling: ticket counts and SLA are floors. */
+  ticketsTruncated: boolean;
+  /** The project read hit its ceiling: project counts are floors. */
+  projectsTruncated: boolean;
 };
 
 const ACTIVE_PROJECT: ReadonlySet<string> = new Set(["discovery", "building", "review"]);
@@ -241,7 +243,8 @@ export function summarizeDelivery(input: {
     created_at: string;
   }>;
   projects: ReadonlyArray<{ stage: string; due_date: string | null }>;
-  truncated: boolean;
+  ticketsTruncated: boolean;
+  projectsTruncated: boolean;
   now: Date;
   /** YYYY-MM-DD, operator time zone. */
   todayKey: string;
@@ -262,7 +265,8 @@ export function summarizeDelivery(input: {
     atRisk,
     activeProjects: active.length,
     overdueProjects: active.filter((p) => !!p.due_date && p.due_date < input.todayKey).length,
-    truncated: input.truncated,
+    ticketsTruncated: input.ticketsTruncated,
+    projectsTruncated: input.projectsTruncated,
   };
 }
 
@@ -431,6 +435,8 @@ export type NeedsYouItem = {
   detail: string | null;
   /** Shown as a pill. Null for a single-row item (one reply, one meeting). */
   count: number | null;
+  /** The count came from a read that hit its ceiling: the pill prints a floor. */
+  capped?: boolean;
   href: string;
 };
 
@@ -469,9 +475,10 @@ export function buildNeedsYou(input: {
           id: "sla-breached",
           tone: "urgent",
           icon: "sla",
-          title: `${plural(d.breached.length, "ticket is", "tickets are")} past the first-response SLA`,
+          title: `${d.ticketsTruncated ? "At least " : ""}${plural(d.breached.length, "ticket is", "tickets are")} past the first-response SLA`,
           detail: d.breached.slice(0, 2).map((t) => `${t.number} ${t.title}`).join(" · "),
           count: d.breached.length,
+          capped: d.ticketsTruncated,
           href: "/tickets?sla=breached",
         });
       }
@@ -480,9 +487,10 @@ export function buildNeedsYou(input: {
           id: "sla-at-risk",
           tone: "attention",
           icon: "sla",
-          title: `${plural(d.atRisk.length, "ticket is", "tickets are")} close to the first-response SLA`,
+          title: `${d.ticketsTruncated ? "At least " : ""}${plural(d.atRisk.length, "ticket is", "tickets are")} close to the first-response SLA`,
           detail: d.atRisk.slice(0, 2).map((t) => `${t.number} ${t.title}`).join(" · "),
           count: d.atRisk.length,
+          capped: d.ticketsTruncated,
           href: "/tickets?sla=at_risk",
         });
       }
@@ -502,6 +510,7 @@ export function buildNeedsYou(input: {
           title: `${s.partial ? "At least " : ""}${plural(n, "follow-up is", "follow-ups are")} past due`,
           detail: names(s.overdue),
           count: n,
+          capped: s.partial,
           href: "/pipeline",
         });
       }
@@ -683,22 +692,27 @@ function departmentCard(
       // "Within SLA" is a claim about EVERY open ticket; a capped read cannot
       // make it, since tickets past the ceiling may be breached (CodeRabbit
       // #469). Such a read says the check is incomplete instead.
+      // Each read carries its own cap: a capped PROJECT list says nothing
+      // about the tickets, and the reverse (CodeRabbit #469, second pass).
+      const tCap = d.ticketsTruncated;
+      const pCap = d.projectsTruncated;
+      const projects = `${floorCount(d.activeProjects, pCap)} ${d.activeProjects === 1 && !pCap ? "active project" : "active projects"}`;
       return {
         ...base,
-        tone: d.breached.length > 0 ? "needs_you" : d.atRisk.length > 0 || d.truncated ? "attention" : "ok",
+        tone: d.breached.length > 0 ? "needs_you" : d.atRisk.length > 0 || tCap ? "attention" : "ok",
         status: d.breached.length > 0
-          ? `${floorCount(d.breached.length, d.truncated)} past SLA`
+          ? `${floorCount(d.breached.length, tCap)} past SLA`
           : d.atRisk.length > 0
-            ? `${floorCount(d.atRisk.length, d.truncated)} close to SLA`
-            : d.truncated
+            ? `${floorCount(d.atRisk.length, tCap)} close to SLA`
+            : tCap
               ? "SLA not fully checked"
               : "Within SLA",
         metric: {
           kind: "live",
-          value: floorCount(d.openTickets, d.truncated),
-          label: d.openTickets === 1 && !d.truncated ? "open ticket" : "open tickets",
+          value: floorCount(d.openTickets, tCap),
+          label: d.openTickets === 1 && !tCap ? "open ticket" : "open tickets",
         },
-        detail: `${plural(d.activeProjects, "active project", "active projects")}${d.overdueProjects > 0 ? ` · ${d.overdueProjects} past due` : ""}`,
+        detail: `${projects}${d.overdueProjects > 0 ? ` · ${floorCount(d.overdueProjects, pCap)} past due` : ""}`,
       };
     }
     case "finance": {

@@ -130,7 +130,8 @@ export function loadDelivery(input: {
     return summarizeDelivery({
       tickets: tickets.rows,
       projects: projects.rows,
-      truncated: tickets.truncated || projects.truncated,
+      ticketsTruncated: tickets.truncated,
+      projectsTruncated: projects.truncated,
       now: new Date(input.day.nowMs),
       todayKey: input.day.todayKey,
     });
