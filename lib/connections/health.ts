@@ -74,6 +74,30 @@ const STRIPE_API = "https://api.stripe.com";
 export const STRIPE_TIMEOUT_MS = 10_000;
 
 /**
+ * A Worker keeps at most 6 fetches waiting for response headers; any more
+ * queue inside the runtime while their probe's deadline runs. So one probe
+ * sends at most this many GETs at once, and the health pass runs one probe at
+ * a time (HEALTH_PASS_CONCURRENCY): a probe's waiting is then only ever behind
+ * its own requests — 13 GETs in three rounds — never behind another probe's
+ * (CodeRabbit #472).
+ */
+export const STRIPE_MAX_IN_FLIGHT = 6;
+
+/** `fn` over `items`, at most `limit` at once, results in input order. */
+async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return out;
+}
+
+/**
  * The GET that proves each Read permission OASIS asks the owner for. Keys are
  * exactly registry STRIPE_READ_PERMISSIONS (tests/os-connections.test.ts holds
  * the two together), so adding a permission to the setup steps without a probe
@@ -204,10 +228,14 @@ export async function probeStripeRestrictedKey(
   let account: StripeCall;
   let results: StripeCall[];
   try {
-    [account, ...results] = await Promise.all([
-      stripeGet(key, "/v1/account", fetchImpl, controller.signal),
-      ...reads.map((r) => stripeGet(key, r.path, fetchImpl, controller.signal)),
-    ]);
+    // At most STRIPE_MAX_IN_FLIGHT at once: the rest wait here, on this
+    // probe's own clock, instead of in the Worker's connection queue behind
+    // another probe's requests.
+    [account, ...results] = await mapLimited(
+      ["/v1/account", ...reads.map((r) => r.path)],
+      STRIPE_MAX_IN_FLIGHT,
+      (path) => stripeGet(key, path, fetchImpl, controller.signal),
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -533,15 +561,20 @@ export type HealthPassResult = {
  * for listing, pruning and the response.
  */
 export const HEALTH_PASS_BUDGET_MS = 45_000;
-/** Probes in flight at once. Each is ~13 parallel GETs, and a Worker queues fetches past 6 open connections. */
-export const HEALTH_PASS_CONCURRENCY = 5;
+/**
+ * Probes in flight at once: ONE. A probe already fills the Worker's six
+ * connection slots (STRIPE_MAX_IN_FLIGHT); a second one would only queue
+ * behind it on its own deadline and time out with Stripe reachable.
+ */
+export const HEALTH_PASS_CONCURRENCY = 1;
 /** One probe at its worst: the provider deadline, plus the database reads and writes around it. */
 export const PROBE_WORST_CASE_MS = STRIPE_TIMEOUT_MS + 5_000;
 /**
  * As many due connections as fit the budget even when EVERY probe runs to its
- * deadline (a Stripe outage): 5 lanes × 3 rounds = 15. Every 15 minutes, that
- * keeps ~60 connections re-probed each hour; past that, raise the concurrency
- * or the schedule, not this cap.
+ * deadline (a Stripe outage): 1 lane × 3 rounds = 3. Every 15 minutes, that
+ * keeps ~12 connections re-probed each hour — the pilot scale. Past that, run
+ * the pass more often or move it onto the job queue; do not raise this cap or
+ * the concurrency.
  */
 export const HEALTH_PASS_LIMIT = HEALTH_PASS_CONCURRENCY * Math.floor(HEALTH_PASS_BUDGET_MS / PROBE_WORST_CASE_MS);
 

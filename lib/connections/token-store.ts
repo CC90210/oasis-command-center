@@ -59,6 +59,27 @@ export type OAuthTokens = {
 
 /** A refresh call must finish well inside the lease. */
 export const REFRESH_TIMEOUT_MS = 30_000;
+/**
+ * The most a save of refreshed tokens may take. Refresh plus save stay well
+ * inside REFRESH_LEASE_MS (tests/os-connections.test.ts holds the sum under it),
+ * so a lease cannot lapse while its holder is still writing.
+ */
+export const TOKEN_SAVE_TIMEOUT_MS = 30_000;
+
+/** `work`, or `onTimeout()` thrown once `ms` pass first. The timer never outlives the race. */
+async function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(onTimeout()), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export class TokenStoreError extends Error {
   code:
@@ -162,13 +183,15 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
   if (!tokens) throw new TokenStoreError("not_connected", "No tokens are stored for this connection.");
   if (now().getTime() < tokens.expires_at - REFRESH_SKEW_MS) return tokens.access_token;
 
+  const leaseTakenAt = now();
   const version = await takeRefreshLease(db, {
     tenantId: input.tenantId,
     connectionId: input.connectionId,
     expectedVersion: conn.token_version,
-    now: now(),
+    now: leaseTakenAt,
     leaseMs: REFRESH_LEASE_MS,
   });
+  const leaseEndsMs = leaseTakenAt.getTime() + REFRESH_LEASE_MS;
 
   if (version === null) {
     // Someone else holds (or just took) the lease. Wait for their tokens.
@@ -236,8 +259,21 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
   }
   clearTimeout(timer);
 
+  // The lease must cover the save too (CodeRabbit #472): past it, another
+  // caller may already have taken the lease and refreshed with the old refresh
+  // token. So the save is bounded, it only starts while the lease still covers
+  // it, and a lease that turns out to be lost returns no token.
+  let saved = false;
   try {
-    await saveConnectionTokens(input.tenantId, input.connectionId, refreshed);
+    if (now().getTime() + TOKEN_SAVE_TIMEOUT_MS >= leaseEndsMs) {
+      throw new TokenStoreError("refresh_busy", "The refresh ran past its lease, so its tokens were not saved over a newer refresh.");
+    }
+    await withTimeout(
+      saveConnectionTokens(input.tenantId, input.connectionId, refreshed),
+      TOKEN_SAVE_TIMEOUT_MS,
+      () => new TokenStoreError("save_failed", "Saving the refreshed tokens timed out."),
+    );
+    saved = true;
   } finally {
     const released = await releaseRefreshLease(db, {
       tenantId: input.tenantId,
@@ -251,6 +287,9 @@ export async function getAccessToken(db: Client, input: GetAccessTokenInput): Pr
         connectionId: input.connectionId,
         version,
       });
+      // Another refresh took the lease while this one ran: its outcome, not
+      // this token, is the connection's now.
+      if (saved) throw new TokenStoreError("refresh_busy", "Another refresh took over this connection while this one was saving.");
     }
   }
   return refreshed.access_token;

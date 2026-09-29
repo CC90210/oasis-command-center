@@ -20,7 +20,7 @@
  * 15-minute group in .github/workflows/cron-driver.yml
  * (tests/cron-driver-coverage.test.ts holds them together). Each connection is
  * still probed about hourly — a run only takes connections checked more than
- * 50 minutes ago, HEALTH_PASS_LIMIT (15) per run, the most that fit the pass's
+ * 50 minutes ago, HEALTH_PASS_LIMIT (3) per run, the most that fit the pass's
  * 45-second budget even when every probe runs to its deadline. A run that
  * still runs short defers the rest and says how many (`deferred`).
  *

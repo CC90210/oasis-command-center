@@ -1218,6 +1218,74 @@ async function main() {
     assert.equal((await store.getConnection(db, TENANT_A, row.id))!.refresh_lease_until, null, "a failed health write stranded the lease");
   });
 
+  await check("[lease] refresh + save fit inside the lease; a lease lost mid-save returns no token", async () => {
+    assert.ok(tokens.REFRESH_TIMEOUT_MS + tokens.TOKEN_SAVE_TIMEOUT_MS < rules.REFRESH_LEASE_MS, "refresh + save can outlive the lease");
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "rotating-2", expires_at: Date.now() - 1000 });
+    try {
+      await assert.rejects(
+        tokens.getAccessToken(db, {
+          tenantId: TENANT_A,
+          connectionId: row.id,
+          refresh: async () => {
+            // Another caller takes the lease while this refresh runs.
+            await db.execute({
+              sql: "UPDATE tenant_connections SET token_version = token_version + 1 WHERE id = ? AND tenant_id = ?",
+              args: [row.id, TENANT_A],
+            });
+            return { access_token: "orphan-access", refresh_token: "rotating-3", expires_at: Date.now() + 3_600_000 };
+          },
+        }),
+        (e: unknown) => (e as { code?: string }).code === "refresh_busy",
+      );
+    } finally {
+      await db.execute({ sql: "UPDATE tenant_connections SET refresh_lease_until = NULL WHERE id = ? AND tenant_id = ?", args: [row.id, TENANT_A] });
+    }
+  });
+
+  await check("[lease] a refresh that ran past its lease saves nothing and returns no token", async () => {
+    const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
+    await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "keep-me", expires_at: Date.now() - 1000 });
+    let t = Date.now();
+    await assert.rejects(
+      tokens.getAccessToken(db, {
+        tenantId: TENANT_A,
+        connectionId: row.id,
+        now: () => new Date(t),
+        refresh: async () => {
+          t += rules.REFRESH_LEASE_MS; // the provider answered, but only after the lease ran out
+          return { access_token: "late-access", refresh_token: "late-refresh", expires_at: t + 3_600_000 };
+        },
+      }),
+      (e: unknown) => (e as { code?: string }).code === "refresh_busy",
+    );
+    const bundle = await credentials.getTenantIntegrationBundle(TENANT_A, `connection:${row.id}`, { allowEnvFallback: false });
+    assert.equal(bundle.refresh_token, "keep-me", "tokens were saved over a newer refresh");
+    assert.equal((await store.getConnection(db, TENANT_A, row.id))!.refresh_lease_until, null, "the lease was not released");
+  });
+
+  await check("[in-flight] a Stripe probe never has more than six requests open; the pass runs one probe at a time", async () => {
+    let open = 0;
+    let most = 0;
+    let calls = 0;
+    const counting = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      open += 1;
+      calls += 1;
+      most = Math.max(most, open);
+      try {
+        await new Promise((r) => setTimeout(r, 15));
+        return await globalThis.fetch(input, init);
+      } finally {
+        open -= 1;
+      }
+    }) as typeof fetch;
+    const r = await health.probeStripeRestrictedKey(KEY_B, { fetchImpl: counting });
+    assert.equal(r.verdict, "healthy");
+    assert.equal(calls, 1 + registry.STRIPE_READ_PERMISSIONS.length, "every advertised permission plus /v1/account");
+    assert.ok(most <= health.STRIPE_MAX_IN_FLIGHT, `${most} requests were open at once`);
+    assert.ok(health.HEALTH_PASS_CONCURRENCY * health.STRIPE_MAX_IN_FLIGHT <= 6, "the pass can open more than a Worker's six connections");
+  });
+
   await check("a refused refresh fails closed: expired, lease released, health row written", async () => {
     const row = (await store.findActiveConnection(db, TENANT_A, "xero"))!;
     await tokens.saveConnectionTokens(TENANT_A, row.id, { access_token: "stale", refresh_token: "rotating-2", expires_at: Date.now() - 1000 });
