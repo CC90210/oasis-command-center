@@ -38,7 +38,12 @@ assert.match(contentRoute, /req\.headers\.get\("range"\)/);
 assert.match(contentRoute, /content-range/);
 assert.match(contentRoute, /import\("sharp"\)/);
 assert.match(contentRoute, /searchParams\.get\("download"\)/);
-assert.match(access, /canViewLead/);
-assert.match(access, /startsWith\(expectedPrefix\)/);
+// #355 moved both guards to shared modules. The parent-lead check is the same
+// read boundary every lead route uses (manager policy included), and the
+// tenant-prefix check lives in the path normaliser, which
+// tests/lead-document-path.test.ts exercises with hostile paths.
+assert.match(access, /await getReadableLeadTargetForSession\(session,/);
+assert.match(access, /if \(!parentTarget\) return \{ ok: false, status: 404/);
+assert.match(access, /normalizeLeadDocumentStoragePath\(\s*doc\.storage_path,\s*doc\.tenant_id,/);
 
 console.log("ok document MIME recovery, preview fallbacks, authenticated streaming, and access guards");

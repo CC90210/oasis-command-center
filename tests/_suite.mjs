@@ -391,6 +391,66 @@ const TESTS = [
   // webhook and snapshot producer must write nothing for a retired tenant
   // while its data is exported and deleted, and keep writing for OASIS.
   "tests/retired-tenant-producers.test.ts",
+  // 2026-09-29 (F0 release gate): the files below were in no suite, so CI had
+  // never run one of them. Each was run before it was listed here, and
+  // tests/test-suite-coverage.test.ts now fails the build when a tests/ file is
+  // in nothing CI runs. Four needed their assertions brought up to date with
+  // intended changes (document-rendering, guard-audit, shopout-high-risk-confirm,
+  // sunbiz-runtime); the reasons are in each file.
+  //
+  // The bridge, and the RPC shim the bridge and the TextTorrent runtime call.
+  "tests/bridge-agent-validation.test.ts",
+  "tests/bridge-dropdown-state.test.ts",
+  "tests/bridge-effective-online.test.ts",
+  "tests/bridge-health-reasons.test.ts",
+  "tests/bridge-target-resolution.test.ts",
+  "tests/bridge-rpc-registry.test.ts",
+  "tests/turso-rpc-texttorrent.test.mjs",
+  "tests/turso-contains.test.ts",
+  // Drips and SMS sending: which line a text leaves from, whether the
+  // destination can receive it, and what a delivery receipt means.
+  "tests/blast-safety.test.ts",
+  "tests/destination-health.test.ts",
+  "tests/destination-gate-wired.test.ts",
+  "tests/verified-mobile.test.ts",
+  "tests/line-health.test.ts",
+  "tests/line-health-wired.test.ts",
+  "tests/hold-not-skip.test.ts",
+  "tests/resolve-send-number.test.ts",
+  "tests/thread-match-platform.test.ts",
+  "tests/receipt-resolution-checks.test.ts",
+  "tests/receipt-wire-account.test.ts",
+  "tests/drip-stage-buffer.test.ts",
+  "tests/drip-template-inventory.test.ts",
+  "tests/scoreboard-core.test.ts",
+  "tests/phone-lookup-repair.test.ts",
+  "tests/guard-audit.test.ts",
+  // Lenders, shop-out and the TextTorrent reply runtime.
+  "tests/jordan-submission.test.ts",
+  "tests/restricted-states.test.ts",
+  "tests/restricted-state-preview-visible.test.ts",
+  "tests/shop-out-email-templates.test.ts",
+  "tests/shopout-high-risk-confirm.test.ts",
+  "tests/shopout-watermark-fallback.test.ts",
+  "tests/clair-tenant-access.test.ts",
+  "tests/sunbiz-runtime.test.ts",
+  // Lead documents and the public form upload path.
+  "tests/document-rendering.test.ts",
+  "tests/lead-document-path.test.ts",
+  "tests/forms-upload-bootstrap.test.ts",
+  // Renewals.
+  "tests/renewals-core.test.ts",
+  "tests/renewals-picker-interaction.test.ts",
+  "tests/renewal-outreach-contract.test.ts",
+  // Records platform (field permissions, schema, views, workflow steps) and
+  // the background-worker inventory on the Automations tab.
+  "tests/role-gates-field-perms.test.ts",
+  "tests/schema-introspector.test.ts",
+  "tests/views-loader.test.ts",
+  "tests/workflow-steps.test.ts",
+  "tests/background-workers-contract.test.ts",
+  // The /schedule week model: protected time and the editable blocks.
+  "tests/schedule-model.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

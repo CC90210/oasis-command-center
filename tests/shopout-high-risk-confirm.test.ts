@@ -5,8 +5,9 @@ const client = readFileSync("components/shopping-out/ShoppingOutClient.tsx", "ut
 const route = readFileSync("app/api/applications/[id]/shop-out/route.ts", "utf8");
 const runEngine = readFileSync("lib/lenders/shop-out-run.ts", "utf8");
 
-assert.match(client, /\.filter\(\(r\) => r\.recipient_email\)/, "high-risk contactable lenders may be preselected");
-assert.doesNotMatch(client, /recipient_email && r\.blockers\.length === 0/, "high-risk lenders must not be filtered from defaults");
+// Any parameter name: the rule is "contactable", not the spelling of the arrow.
+assert.match(client, /\.filter\(\((\w+)\) => \1\.recipient_email\)/, "high-risk contactable lenders may be preselected");
+assert.doesNotMatch(client, /recipient_email && \w+\.blockers\.length === 0/,"high-risk lenders must not be filtered from defaults");
 assert.match(client, /if \(highRiskSelected\.length > 0\)[\s\S]*setPendingConfirmation\(true\)/, "high-risk send requires a confirmation warning");
 assert.match(client, /Override note \(optional\)/, "confirmation must not require an explanation");
 assert.doesNotMatch(client, /overrideNote\.trim\(\)\.length < 5/, "empty optional note must not disable Proceed Anyway");
