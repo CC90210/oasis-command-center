@@ -217,6 +217,9 @@ async function main() {
   );
   assert.equal(deliveryTables?.length, 5, "the five delivery tables are in migration 183");
   await raw.executeMultiple(deliveryTables!.join("\n"));
+  // The Feed's Needs-you tab reads approvals (migration bravo__186); an empty
+  // table is the real "nothing waiting", not a failed read.
+  await raw.executeMultiple(readFileSync(join(ROOT, "database/turso/bravo__186_os_approvals.sql"), "utf8"));
 
   const { parseManifest } = await import("../lib/manifest/schema");
   const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");

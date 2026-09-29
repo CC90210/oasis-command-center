@@ -1,8 +1,10 @@
 /**
  * FounderToday — the owner's Today: the OASIS OS morning brief (2026-09-28).
  *
- * WHAT IT IS NOW. Greeting and the Ask composer, then Needs you (follow-ups
- * past due, tickets past SLA, hot replies, overdue invoices), one card per
+ * WHAT IT IS NOW. Greeting and the Ask composer, then Needs you (approval
+ * cards first — lib/os/approvals, scoped to this viewer's workspace and
+ * departments — then follow-ups past due, tickets past SLA, hot replies,
+ * overdue invoices), one card per
  * department, and a right column with today's schedule, goal pace and cash.
  * The layout and the pieces live in components/os/today; this file does the
  * reading. It keeps its name and its place in app/page.tsx because
@@ -52,6 +54,8 @@ import {
   loadSales,
   type OperatorDay,
 } from "@/components/os/today/loaders";
+import { loadPendingApprovals } from "@/components/os/approvals/load";
+import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import { operatorDateKey, operatorDayStartIso, operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
@@ -63,6 +67,9 @@ import type { UserProfile } from "@/lib/supabase";
 
 /** Where a viewer connects their own Google Calendar today (Settings › Personal). */
 const CALENDAR_CONNECT_HREF = "/settings";
+/** Approval cards drawn inline on Today (design doc §(c) Today, 2); the rest are in the Feed. */
+const TODAY_APPROVALS_SHOWN = 5;
+const FEED_HREF = "/feed";
 
 export async function FounderToday({
   profile,
@@ -134,19 +141,27 @@ export async function FounderToday({
   const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
   const calendarP = loadCalendarStatus(tenantId, viewer.userId);
   const cashP = showFinancials && plan.cash ? loadCash() : Promise.resolve(null);
+  // Approvals waiting on THIS viewer: the session's workspace, cut to the
+  // departments the rail opens for them (lib/os/approvals/scope.ts).
+  const approvalsP = loadPendingApprovals({
+    scope: approvalScopeFromViewer({ surface: viewer, navInput }),
+    tenantSlug: viewer.tenantSlug,
+    limit: TODAY_APPROVALS_SHOWN,
+  });
 
   // The money block. Entered only when the capability says so — the point of
   // the branch is that these reads never happen otherwise, not that their
   // results get dropped afterwards. lib/goals/oasis-money is the same loader
   // /analytics uses; its figures are the Finances ledger and live Stripe.
   const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
-  const [sales, delivery, inbound, content, calendar, cash] = await Promise.all([
+  const [sales, delivery, inbound, content, calendar, cash, approvals] = await Promise.all([
     salesP,
     deliveryP,
     inboundP,
     contentP,
     calendarP,
     cashP,
+    approvalsP,
   ]);
 
   const paceSeries: GoalPacePoint[] = money?.paceSeries ?? [];
@@ -159,7 +174,7 @@ export async function FounderToday({
         collected: money.collected,
       })
     : null;
-  const needsYou = buildNeedsYou({ sales, delivery, inbound, cash, nowMs: day.nowMs });
+  const needsYou = buildNeedsYou({ sales, delivery, inbound, cash, approvals, nowMs: day.nowMs });
   const cards = buildDepartmentCards({
     departments,
     needsYou,
@@ -187,6 +202,7 @@ export async function FounderToday({
       }
       askHref={mayOpenOsHref(navInput, ASK_HREF) ? ASK_HREF : null}
       needsYou={needsYou}
+      feedHref={mayOpenOsHref(navInput, FEED_HREF) ? `${FEED_HREF}?tab=needs` : null}
       departments={cards}
       schedule={{
         meetings: sales ? (sales.ok ? { ok: true, value: sales.value.meetingsToday } : { ok: false }) : null,

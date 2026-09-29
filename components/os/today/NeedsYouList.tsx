@@ -1,20 +1,25 @@
 /**
  * Needs you — the first block of the owner's brief (design doc §(c) Today, 2).
  *
- * Only rows that already exist somewhere else in the product: a past-due
+ * Approval cards come first: an email, a post or another outward action a
+ * department drafted and is holding until this person approves it or sends it
+ * back (lib/os/approvals). Up to five render inline with Approve · Send back ·
+ * Comment; the rest are one link away in the Feed.
+ *
+ * Then the rows that already exist somewhere else in the product: a past-due
  * follow-up on the board, a ticket past its SLA, a hot reply, an overdue
- * invoice. Each row opens the page where it is resolved. There are no
- * approval cards yet (the `approvals` table is plan W5); when they land they
- * join this list, not a second one.
+ * invoice. Each row opens the page where it is resolved.
  *
  * An empty list says so, and a source that could not be read is named under
  * it — "nothing needs you" is only claimed when every source answered.
  *
- * Server component, no hooks. Links keep prefetch off like every rail link.
+ * Server component, no hooks (the approval cards are their own client
+ * islands). Links keep prefetch off like every rail link.
  */
 import Link from "next/link";
 import { CalendarDays, ChevronRight, Landmark, LifeBuoy, PhoneCall, Receipt, Reply } from "lucide-react";
-import type { NeedsYou, NeedsYouIcon, NeedsYouTone } from "@/components/os/today/model";
+import { ApprovalCard } from "@/components/os/approvals/ApprovalCard";
+import { needsYouCount, type NeedsYou, type NeedsYouIcon, type NeedsYouTone } from "@/components/os/today/model";
 
 const ICONS: Record<NeedsYouIcon, typeof PhoneCall> = {
   follow_up: PhoneCall,
@@ -43,34 +48,64 @@ function formatCount(n: number, capped = false): string {
   return n > 99 ? "99+" : capped ? `${n}+` : String(n);
 }
 
-export function NeedsYouList({ needsYou }: { needsYou: NeedsYou }) {
+export function NeedsYouList({
+  needsYou,
+  feedHref = null,
+}: {
+  needsYou: NeedsYou;
+  /** Where "All N in Feed" goes, when this viewer's rail has the Feed. */
+  feedHref?: string | null;
+}) {
   const { items, unavailable } = needsYou;
-  const urgent = items.filter((i) => i.tone === "urgent").length;
+  const approvals = needsYou.approvals ?? null;
+  const total = needsYouCount(needsYou);
+  const urgent = items.filter((i) => i.tone === "urgent").length + (approvals?.total ?? 0);
+  const moreApprovals = approvals ? approvals.total - approvals.items.length : 0;
   return (
     <section aria-labelledby="needs-you-heading" className="rounded-xl border border-hairline bg-bg-panel">
       <header className="flex items-center gap-2 border-b border-hairline px-4 py-3">
         <h2 id="needs-you-heading" className="text-sm font-semibold text-fg">
           Needs you
         </h2>
-        {items.length > 0 && (
+        {total > 0 && (
           <span
             className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${
               urgent > 0 ? "bg-unread text-white" : "bg-bg-elev text-fg-muted"
             }`}
-            aria-label={`${items.length} item${items.length === 1 ? "" : "s"}`}
+            aria-label={`${total} item${total === 1 ? "" : "s"}`}
           >
-            {formatCount(items.length)}
+            {formatCount(total)}
           </span>
         )}
       </header>
 
-      {items.length === 0 ? (
+      {approvals && approvals.items.length > 0 && (
+        <div className="space-y-3 border-b border-hairline px-4 py-3">
+          <ul className="space-y-3" aria-label="Approvals waiting on you">
+            {approvals.items.map((a) => (
+              <li key={a.id}>
+                <ApprovalCard approval={a} density="compact" />
+              </li>
+            ))}
+          </ul>
+          {moreApprovals > 0 && feedHref && (
+            <Link href={feedHref} prefetch={false} className="inline-block text-[13px] font-medium text-accent hover:underline">
+              All {approvals.total} approvals in Feed
+            </Link>
+          )}
+          {moreApprovals > 0 && !feedHref && (
+            <p className="text-xs text-fg-dim">{moreApprovals} more waiting.</p>
+          )}
+        </div>
+      )}
+
+      {items.length === 0 && (approvals?.items.length ?? 0) === 0 ? (
         <p className="px-4 py-6 text-sm text-fg-muted">
           {unavailable.length === 0
-            ? "Nothing needs you right now. Follow-ups, support SLAs and hot replies land here when they do."
+            ? "Nothing needs you right now. Approvals, follow-ups, support SLAs and hot replies land here when they do."
             : "Nothing found in the sources that answered."}
         </p>
-      ) : (
+      ) : items.length > 0 ? (
         <ul className="divide-y divide-hairline">
           {items.map((item) => {
             const Icon = ICONS[item.icon];
@@ -104,7 +139,7 @@ export function NeedsYouList({ needsYou }: { needsYou: NeedsYou }) {
             );
           })}
         </ul>
-      )}
+      ) : null}
 
       {unavailable.length > 0 && (
         <p className="border-t border-hairline px-4 py-2.5 text-xs text-status-warm">

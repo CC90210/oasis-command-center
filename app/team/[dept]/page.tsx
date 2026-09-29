@@ -35,12 +35,18 @@ import { loadTenantRoutines } from "@/components/os/department/routines";
 import { statusFor } from "@/components/os/department/StatusPill";
 import { resolveOsViewer } from "@/components/os/department/viewer";
 import { ASK_PREFILL_PARAM } from "@/components/os/today/ask";
+import { loadPendingApprovals } from "@/components/os/approvals/load";
 import { departmentBySlug } from "@/lib/os/departments";
+import { mayOpenOsHref } from "@/lib/os/nav";
+import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 
 export const dynamic = "force-dynamic";
 
 /** A draft longer than this is not a question; it is truncated, not refused. */
 const MAX_PREFILL_CHARS = 2000;
+/** Approval cards in the Overview panel's Needs you (design doc §(b): top 3). */
+const OVERVIEW_APPROVALS_SHOWN = 3;
+const FEED_HREF = "/feed";
 
 type Params = { dept: string };
 type Search = { [ASK_PREFILL_PARAM]?: string | string[] };
@@ -80,10 +86,19 @@ export default async function DepartmentPage({
   // Routines feed both the panel and the Operations / Chief of Staff numbers:
   // read once, shared, while the channel check runs beside them.
   const routinesRead = loadTenantRoutines(tenantId);
-  const [channel, routines, numbers] = await Promise.all([
+  const [channel, routines, numbers, approvals] = await Promise.all([
     resolveChannelState(dept, viewer),
     routinesRead,
     routinesRead.then((r) => loadDepartmentNumbers(dept, viewer, r)),
+    // This department's approvals waiting on THIS viewer: the session's
+    // workspace, and only if the viewer is seated in this department
+    // (lib/os/approvals/rules.ts DEPARTMENT_SEATS; owners/admins see all).
+    loadPendingApprovals({
+      scope: approvalScopeFromViewer({ surface: viewer.surface, navInput: viewer.navInput }),
+      tenantSlug: viewer.surface.tenantSlug,
+      department: dept.key,
+      limit: OVERVIEW_APPROVALS_SHOWN,
+    }),
   ]);
 
   const deptRoutines = routines.ok
@@ -92,7 +107,10 @@ export default async function DepartmentPage({
         value: routinesForDepartment(routines.value, dept.key, binding.kind === "agent" ? [binding.agentSlug] : []),
       }
     : routines;
-  const needsYou = numbers.attention.reduce((sum, item) => sum + item.count, 0);
+  // Pending approvals are an exact COUNT(*); only an attention item from a
+  // capped read can make the total a floor.
+  const needsYou =
+    numbers.attention.reduce((sum, item) => sum + item.count, 0) + (approvals.ok ? approvals.value.total : 0);
   // Any floor in the sum makes the total a floor too.
   const needsYouCapped = numbers.attention.some((item) => item.capped === true);
   const profile = departmentProfile(dept.key);
@@ -106,6 +124,8 @@ export default async function DepartmentPage({
       prefill={prefill}
       overview={{
         attention: numbers.attention,
+        approvals,
+        feedHref: mayOpenOsHref(viewer.navInput, FEED_HREF) ? `${FEED_HREF}?tab=needs&dept=${dept.slug}` : null,
         tiles: numbers.tiles,
         routines: deptRoutines,
         connections: profile.connections,
