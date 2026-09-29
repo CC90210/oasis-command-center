@@ -82,7 +82,12 @@ import {
 } from "@/lib/forms/lead-source";
 import { LEAD_PIPELINE_STAGES } from "@/lib/sunbiz-stage-meta";
 import { isFormStageDowngrade } from "@/lib/forms/stage-transition";
-import { handleSupportFormSubmission, isSupportFormSubmission } from "@/lib/delivery/support-intake";
+import {
+  handleSupportFormSubmission,
+  handleWorkspaceSupportSubmission,
+  isSupportFormSubmission,
+  matchWorkspaceSupportDesk,
+} from "@/lib/delivery/support-intake";
 import { createHash } from "node:crypto";
 
 export const runtime = "nodejs";
@@ -229,6 +234,15 @@ async function handleSubmit(req: NextRequest, body: SubmitBody) {
   // path is untouched. See lib/delivery/support-intake.ts.
   if (isSupportFormSubmission(body)) {
     return handleSupportFormSubmission(req, body);
+  }
+  // EVERY OTHER WORKSPACE'S SUPPORT FORM (/f/<slug>/support). Same rule: a
+  // ticket on that workspace's desk, never a lead, returned before any lead
+  // code below. Only an anonymous `support` body outside OASIS costs the one
+  // registry read; a workspace's ordinary form that happens to be called
+  // `support` is not registered and carries on down the lead path as before.
+  const supportDesk = await matchWorkspaceSupportDesk(body);
+  if (supportDesk) {
+    return handleWorkspaceSupportSubmission(req, body, supportDesk);
   }
 
   // Two auth shapes:

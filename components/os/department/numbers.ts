@@ -197,11 +197,12 @@ function pipelineTiles(p: Read<PipelineFigures> | null, compact: boolean): KpiTi
 // ── Client Success (tickets + projects) ───────────────────────────────────
 
 /**
- * lib/delivery is one queue today, pinned to OASIS's workspace
- * (DELIVERY_TENANT_ID) until W7 generalises it. Inside OASIS a founder works
- * that queue; a member of any other workspace sees only the requests THEIR
- * workspace filed and the projects run FOR them, so their tiles say so rather
- * than presenting a vendor's queue as their own customers'.
+ * Every workspace runs its own desk (lib/delivery/access.ts, relation "desk").
+ * Its team (owners and admins) sees THEIR customers' tickets and their own
+ * projects. A member below that in another workspace still sees only the
+ * requests their workspace filed with OASIS and the projects OASIS runs for
+ * them (relation "vendor"), so their tiles say so rather than presenting a
+ * vendor's queue as their own customers'.
  */
 type DeliveryFigures = {
   kind: "founder" | "client";
@@ -215,16 +216,18 @@ type DeliveryFigures = {
   projectsTruncated: boolean;
 };
 
-/** lib/delivery/access.ts, asked with the session this page already resolved. */
+/** lib/delivery/access.ts, asked with the session this page already resolved: own desk first, then vendor. */
 function deliveryViewerFor(viewer: OsViewer) {
   const s = viewer.surface;
-  return resolveDeliveryViewer({
-    ok: true,
+  const input = {
+    ok: true as const,
     persona: s.persona,
     tenantId: s.tenantId,
     userId: s.userId,
     canAct: s.capabilities.canAct,
-  });
+  };
+  const desk = resolveDeliveryViewer(input, { relation: "desk" });
+  return desk.ok ? desk : resolveDeliveryViewer(input);
 }
 
 async function loadDelivery(viewer: OsViewer, withProjects: boolean): Promise<Read<DeliveryFigures> | null> {

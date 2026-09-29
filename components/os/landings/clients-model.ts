@@ -1,7 +1,10 @@
 /**
  * clients-model — one list of "the business's customers" out of the three
- * places OASIS already records them, until the `customers` table (plan D5)
- * exists. PURE: tests/os-landings.test.ts runs the merge in bare node.
+ * places OASIS recorded them before the `customers` table (plan D5, migration
+ * bravo__188) existed. /clients now lists client records first and shows these
+ * below as "Not yet client records" until each won deal is converted (a
+ * converted deal is left out there). PURE: tests/os-landings.test.ts runs the
+ * merge in bare node.
  *
  * Sources, all OASIS-workspace data the viewer was already allowed to read:
  *   won deals   tenant_records leads whose stage proves a sale: won, then the

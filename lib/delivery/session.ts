@@ -9,11 +9,17 @@
 import "server-only";
 import { NextResponse } from "next/server";
 import type { Client } from "@libsql/client";
-import { resolveViewerSurface } from "@/lib/role-surfaces-session";
+import { resolveViewerSurface, type ViewerSurface } from "@/lib/role-surfaces-session";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { getOasisPipelineAssignmentRoster, getTenantMembers, type MemberRow } from "@/lib/team";
-import { resolveDeliveryViewer, type DeliveryAccess } from "@/lib/delivery/access";
+import {
+  resolveDeliveryViewer,
+  type DeliveryAccess,
+  type DeliveryRelation,
+  type DeliveryViewer,
+} from "@/lib/delivery/access";
 import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
+import { getProject, getTicket, type Project, type Ticket } from "@/lib/delivery/store";
 
 /** The delivery tables live only in Turso. Null = not configured on this deploy. */
 export function getDeliveryDb(): Client | null {
@@ -21,18 +27,22 @@ export function getDeliveryDb(): Client | null {
 }
 
 /**
- * Who work may be assigned to: founders + ACTIVE reps (lib/team.ts). The same
- * list feeds every assignee menu and every server-side assignee check, so a
- * menu can never offer a person the API refuses. Throws when the founders are
- * missing from the roster — a loud 500 beats silently assigning to nobody.
+ * Who work on a desk may be assigned to. OASIS's desk: founders + ACTIVE reps
+ * (lib/team.ts getOasisPipelineAssignmentRoster, which throws when the founders
+ * are missing — a loud 500 beats silently assigning to nobody). Any other
+ * desk: that workspace's ACTIVE members. The same list feeds every assignee
+ * menu and every server-side assignee check, so a menu can never offer a
+ * person the API refuses.
  */
-export function loadAssignmentRoster(): Promise<MemberRow[]> {
-  return getOasisPipelineAssignmentRoster(DELIVERY_TENANT_ID);
+export function loadAssignmentRoster(tenantId: string): Promise<MemberRow[]> {
+  return tenantId === DELIVERY_TENANT_ID
+    ? getOasisPipelineAssignmentRoster(DELIVERY_TENANT_ID)
+    : getTenantMembers(tenantId);
 }
 
-/** Every teammate, including deactivated ones — for NAMING people on old rows only. */
-export function loadMemberDirectory(): Promise<MemberRow[]> {
-  return getTenantMembers(DELIVERY_TENANT_ID, { includeInactive: true });
+/** Every teammate of the desk, including deactivated ones — for NAMING people on old rows only. */
+export function loadMemberDirectory(tenantId: string): Promise<MemberRow[]> {
+  return getTenantMembers(tenantId, { includeInactive: true });
 }
 
 /**
@@ -53,16 +63,94 @@ export function serverError(label: string, err: unknown) {
   );
 }
 
-export async function getDeliveryAccess(): Promise<DeliveryAccess> {
-  const surface = await resolveViewerSurface();
+/**
+ * The session's delivery viewer for one relationship (lib/delivery/access.ts).
+ * No relation = "vendor", the pre-desk contract every existing caller relies on.
+ */
+export async function getDeliveryAccess(relation?: DeliveryRelation): Promise<DeliveryAccess> {
+  return deliveryAccessFor(await resolveViewerSurface(), relation);
+}
+
+/** Same answer from a surface the caller already resolved (one session read per page). */
+export function deliveryAccessFor(surface: ViewerSurface, relation?: DeliveryRelation): DeliveryAccess {
   if (!surface.ok) return resolveDeliveryViewer({ ok: false });
-  return resolveDeliveryViewer({
-    ok: true,
-    persona: surface.persona,
-    tenantId: surface.tenantId,
-    userId: surface.userId,
-    canAct: surface.capabilities.canAct,
-  });
+  return resolveDeliveryViewer(
+    {
+      ok: true,
+      persona: surface.persona,
+      tenantId: surface.tenantId,
+      userId: surface.userId,
+      canAct: surface.capabilities.canAct,
+    },
+    { relation },
+  );
+}
+
+/**
+ * A route's relationship, from `?scope=desk|vendor`. Anything else (including
+ * absent) is "vendor", so a caller written before desks behaves as it did.
+ * The scope only chooses WHICH of the viewer's own relationships applies; the
+ * tenant always comes from the session.
+ */
+export function relationFromScope(scope: string | null | undefined): DeliveryRelation {
+  return scope === "desk" ? "desk" : "vendor";
+}
+
+/**
+ * For a request addressed to ONE row by id: the viewer's own desk first, then
+ * (outside OASIS) OASIS as vendor. Ids are UUIDs, so a row matches at most one
+ * of them; whichever scoped read finds it decides what the viewer may do.
+ */
+export async function getDeliveryAccessChain(): Promise<{ desk: DeliveryAccess; vendor: DeliveryAccess | null }> {
+  const surface = await resolveViewerSurface();
+  const desk = deliveryAccessFor(surface, "desk");
+  const vendor = surface.ok && surface.tenantId !== DELIVERY_TENANT_ID ? deliveryAccessFor(surface, "vendor") : null;
+  return { desk, vendor };
+}
+
+export type TicketAccess =
+  | { ok: true; viewer: DeliveryViewer; ticket: Ticket }
+  | { ok: false; status: 401 | 403 | 404; error: "not_signed_in" | "forbidden" | "not_found" };
+
+/**
+ * Find ticket `id` through the viewer's relationships, desk first
+ * (getDeliveryAccessChain). A ticket found through the vendor relationship
+ * carries the client viewer, so the route applies the client rules to it. Not
+ * readable through either: the access error when the viewer has no
+ * relationship at all (401 / 403), otherwise 404 — never a hint that the
+ * ticket exists on someone else's desk.
+ */
+export async function resolveTicketAccess(db: Client, id: string): Promise<TicketAccess> {
+  const { desk, vendor } = await getDeliveryAccessChain();
+  if (desk.ok) {
+    const ticket = await getTicket(db, desk.viewer, id);
+    if (ticket) return { ok: true, viewer: desk.viewer, ticket };
+  }
+  if (vendor?.ok) {
+    const ticket = await getTicket(db, vendor.viewer, id);
+    if (ticket) return { ok: true, viewer: vendor.viewer, ticket };
+  }
+  if (!desk.ok && !vendor?.ok) return { ok: false, status: desk.status, error: desk.error };
+  return { ok: false, status: 404, error: "not_found" };
+}
+
+export type ProjectAccess =
+  | { ok: true; viewer: DeliveryViewer; project: Project }
+  | { ok: false; status: 401 | 403 | 404; error: "not_signed_in" | "forbidden" | "not_found" };
+
+/** resolveTicketAccess for a project: own desk first, then OASIS as vendor. */
+export async function resolveProjectAccess(db: Client, id: string): Promise<ProjectAccess> {
+  const { desk, vendor } = await getDeliveryAccessChain();
+  if (desk.ok) {
+    const project = await getProject(db, desk.viewer, id);
+    if (project) return { ok: true, viewer: desk.viewer, project };
+  }
+  if (vendor?.ok) {
+    const project = await getProject(db, vendor.viewer, id);
+    if (project) return { ok: true, viewer: vendor.viewer, project };
+  }
+  if (!desk.ok && !vendor?.ok) return { ok: false, status: desk.status, error: desk.error };
+  return { ok: false, status: 404, error: "not_found" };
 }
 
 /** JSON error with a stable code and a sentence. Never an empty body. */
@@ -82,7 +170,11 @@ const MESSAGES: Record<string, string> = {
   no_inferred_client_link: "This ticket has no unverified client link to confirm.",
   project_not_found: "That project does not exist in this workspace.",
   client_tenant_not_found: "That client workspace does not exist.",
-  lead_not_found: "That lead does not exist in the OASIS pipeline.",
+  client_workspace_links_are_oasis_only: "Linking to a client workspace is only for OASIS's own desk. Link a client record instead.",
+  customer_not_found: "That client record does not exist in this workspace.",
+  project_belongs_to_another_customer:
+    "This ticket's project belongs to a different client. Move the ticket to another project first, or change the project's client.",
+  lead_not_found: "That lead does not exist in this workspace's pipeline.",
   ticket_closed: "This ticket is closed. Open a new ticket for anything new.",
   no_changes: "Nothing to change.",
   body_invalid: "The request body must be a JSON object.",

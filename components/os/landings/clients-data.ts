@@ -1,7 +1,9 @@
 /**
- * clients-data — the reads behind /clients, each gated by the SAME rule its own
- * page uses, so this list can never show more than Pipeline, Projects and the
- * Support desk would show this viewer.
+ * clients-data — the reads behind /clients' "Not yet client records" section
+ * (OASIS's pipeline-derived clients; the client records themselves are read by
+ * clients-records-data.ts), each gated by the SAME rule its own page uses, so
+ * this list can never show more than Pipeline, Projects and the Support desk
+ * would show this viewer.
  *
  *   won deals          canSeeAllPipeline inside an OASIS workspace. A rep,
  *                      manager or marketer sees clients through their own

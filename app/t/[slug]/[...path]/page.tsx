@@ -76,6 +76,7 @@ import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
 import { oasisLeadCreateRedirect } from "@/lib/oasis-lead-create";
 import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
 import { getOasisPipelineAssignmentRoster } from "@/lib/team";
+import { ClientRecordCard } from "@/components/os/landings/clients-record-card";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -376,6 +377,15 @@ export default async function TenantCatchAllPage({
               applicationId={recordDetailId}
               tenantSlug={normalised}
               businessName={title}
+            />
+          )}
+          {/* A won deal: "Convert to client" / the client record it became.
+              Draws nothing for any other stage or entity. */}
+          {entity.name === "lead" && dataTenantId && (
+            <ClientRecordCard
+              tenantId={dataTenantId}
+              leadId={recordDetailId}
+              stage={typeof record.data.stage === "string" ? record.data.stage : null}
             />
           )}
           <ManifestRecordForm

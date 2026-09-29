@@ -195,7 +195,8 @@ async function main() {
     CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
       team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
       onboarding_completed_at TEXT, full_name TEXT, display_name TEXT, agents_enabled TEXT,
-      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT);
+      primary_agent TEXT, updated_at TEXT, deactivated_at TEXT, invited_by TEXT, joined_at TEXT,
+      manager_user_id TEXT, deactivated_by TEXT, deactivation_reason TEXT);
     CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT, custom_fields TEXT);
     CREATE TABLE tenant_manifests (id TEXT PRIMARY KEY, tenant_id TEXT, slug TEXT UNIQUE, manifest TEXT,
       version INTEGER, schema_version INTEGER, created_at TEXT, updated_at TEXT);
@@ -292,25 +293,36 @@ async function main() {
   const { getTursoClient } = await import("../lib/turso");
   const client = getTursoClient() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
   let sqlLog: string[] = [];
+  // The bound arguments of each statement, in step with sqlLog: which tenant a
+  // statement was pinned to is in its args, not its text.
+  let argsLog: unknown[][] = [];
   const sqlOf = (stmt: unknown): string => (typeof stmt === "string" ? stmt : String((stmt as { sql?: unknown })?.sql ?? ""));
+  const argsOfStmt = (stmt: unknown): unknown[] => {
+    const a = typeof stmt === "string" ? [] : (stmt as { args?: unknown })?.args;
+    return Array.isArray(a) ? a : a && typeof a === "object" ? Object.values(a as Record<string, unknown>) : [];
+  };
   for (const name of ["execute", "batch"] as const) {
     const original = (Object.getPrototypeOf(client) as Record<string, (...a: unknown[]) => Promise<unknown>>)[name];
     assert.equal(typeof original, "function", `libSQL client has a prototype ${name}`);
     client[name] = async function (this: unknown, ...a: unknown[]) {
-      if (name === "batch" && Array.isArray(a[0])) for (const s of a[0]) sqlLog.push(sqlOf(s));
-      else sqlLog.push(sqlOf(a[0]));
+      const stmts = name === "batch" && Array.isArray(a[0]) ? (a[0] as unknown[]) : [a[0]];
+      for (const s of stmts) {
+        sqlLog.push(sqlOf(s));
+        argsLog.push(argsOfStmt(s));
+      }
       return original.apply(this, a);
     };
   }
-  async function recording<T>(fn: () => Promise<T>): Promise<{ result: T | Error; sql: string[] }> {
+  async function recording<T>(fn: () => Promise<T>): Promise<{ result: T | Error; sql: string[]; args: unknown[][] }> {
     sqlLog = [];
+    argsLog = [];
     let result: T | Error;
     try {
       result = await fn();
     } catch (e) {
       result = e as Error;
     }
-    return { result, sql: sqlLog };
+    return { result, sql: sqlLog, args: argsLog };
   }
   const touchesFin = (sql: string[]) => sql.filter((s) => /\bfin_[a-z_]+/i.test(s));
   const touchesEvents = (sql: string[]) => sql.filter((s) => /\bagent_events\b/i.test(s));
@@ -551,7 +563,18 @@ async function main() {
     const run = await recording(() => ClientsPage());
     assert.ok(!(run.result instanceof Error), String(run.result));
     assert.ok(!text(run.result).includes("Harbour"));
-    assert.deepEqual(run.sql.filter((s) => /tenant_records|delivery_projects|support_tickets/i.test(s)), []);
+    // Since every workspace runs its own desk (bravo__188), a client workspace's
+    // /clients reads ITS OWN client records and desk counts. What must never
+    // happen is a read of OASIS's rows: every statement that touches a
+    // records/delivery table is bound to the client's tenant, never OASIS's.
+    const touching = run.sql
+      .map((s, i) => ({ s, args: run.args[i] }))
+      .filter(({ s }) => /tenant_records|delivery_projects|support_tickets|\bcustomers\b/i.test(s));
+    for (const { s, args } of touching) {
+      assert.ok(args.includes(CLIENT), `bound to the client's own tenant: ${s.slice(0, 80)}`);
+      assert.ok(!args.includes(OASIS), `never bound to OASIS's tenant: ${s.slice(0, 80)}`);
+    }
+    assert.equal(run.sql.some((s) => /\btenant_records\b/i.test(s)), false, "no pipeline-derived clients outside OASIS");
   });
   await check("/clients: a ticket list past its read cap shows floors (N+), never a total", async () => {
     const { CLIENTS_DELIVERY_LIMIT } = await import("../components/os/landings/clients-data");
@@ -575,11 +598,23 @@ async function main() {
       assert.deepEqual(table?.rows.map((r) => [r.name, r.openTickets]), [["Harbour Dental", CLIENTS_DELIVERY_LIMIT]]);
       assert.equal(table?.floors.openTickets, true, "the per-client ticket count is marked as a floor");
       assert.equal(table?.floors.activeProjects, false, "the project list was not capped");
+      // Client records lead the page now (migration bravo__188), so the
+      // subtitle carries no counts: it cannot print an unfloored total. The
+      // derived list's floors are asserted on the table and the words below.
       const subtitle = els.find((e) => e.props && e.props.title === "Clients" && "subtitle" in e.props)?.props.subtitle;
-      assert.equal(subtitle, `1 client · ${CLIENTS_DELIVERY_LIMIT}+ open tickets · 1 active project`);
+      assert.equal(subtitle, "The customers your business serves.");
       const all = walk(tree).strings.join("");
       assert.ok(all.includes(`Only the first ${CLIENTS_DELIVERY_LIMIT} open tickets were read`), "the cap is said in words");
-      assert.ok(all.includes(`${CLIENTS_DELIVERY_LIMIT}+`), "the table cell prints the floor");
+      // walk() records elements without rendering function components, so the
+      // cell has to be rendered here: ClientsTable, then each Count in it.
+      // (Before client records, this check passed on the SUBTITLE's "500+",
+      // never on a cell.)
+      const tableEl = els.find((e) => e.props && "rows" in e.props && "deliveryHidden" in e.props)!;
+      const tableTree = (tableEl.type as (p: unknown) => unknown)(tableEl.props);
+      const cells = walk(tableTree)
+        .elements.filter((e) => e.props && "value" in e.props && "hidden" in e.props)
+        .map((e) => String(((e.type as (p: unknown) => { props: { children: unknown } })(e.props)).props.children));
+      assert.ok(cells.includes(`${CLIENTS_DELIVERY_LIMIT}+`), `the table cell prints the floor: ${JSON.stringify(cells)}`);
     } finally {
       await raw.execute("DELETE FROM support_tickets WHERE id LIKE 'cap-%'");
     }

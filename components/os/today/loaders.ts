@@ -117,13 +117,17 @@ export function loadDelivery(input: {
   day: OperatorDay;
 }): Promise<Read<DeliverySnapshot>> {
   return read("delivery", async () => {
-    const access = resolveDeliveryViewer({
-      ok: true,
+    // The workspace's own desk for its team; OASIS as vendor for anyone else
+    // (lib/delivery/access.ts), the same order /tickets reads in.
+    const who = {
+      ok: true as const,
       persona: input.persona,
       tenantId: input.tenantId,
       userId: input.userId,
       canAct: input.canAct,
-    });
+    };
+    const desk = resolveDeliveryViewer(who, { relation: "desk" });
+    const access = desk.ok ? desk : resolveDeliveryViewer(who);
     if (!access.ok) throw new Error(`delivery access refused: ${access.error}`);
     const db = getDeliveryDb();
     if (!db) throw new Error("delivery database not configured");

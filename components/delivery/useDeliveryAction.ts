@@ -16,7 +16,7 @@ export function useDeliveryAction() {
   const [error, setError] = useState<string | null>(null);
 
   const run = useCallback(
-    async (url: string, method: "POST" | "PATCH", body: unknown): Promise<ActionResult | null> => {
+    async (url: string, method: "POST" | "PATCH" | "DELETE", body: unknown): Promise<ActionResult | null> => {
       setBusy(true);
       setError(null);
       try {

@@ -8,7 +8,9 @@
  *          create if they truly need a different slug.
  * DELETE → soft-delete by setting enabled=false. Hard-delete via the
  *          DELETE method drops the row + cascades to form_submissions
- *          (rare; only used during cleanup).
+ *          (rare; only used during cleanup). A workspace's support desk
+ *          intake form is refused with 409 support_desk_form; the list's
+ *          on/off toggle pauses it instead (lib/delivery/desks.ts).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -154,6 +156,25 @@ export async function DELETE(
   const { id } = await ctx.params;
 
   const db = getServiceSupabase();
+  // A workspace's support desk intake (lib/delivery/desks.ts) is not deleted
+  // here: the desk would keep its registration with no form behind it, and
+  // its public URL would stop filing tickets (Codex, PR #473). Switching the
+  // form off pauses the desk instead. A database without support_desks
+  // (migration bravo__188 not applied) has no desk forms to protect.
+  const desk = await db.from("support_desks").select("form_id").eq("tenant_id", tenantId).eq("form_id", id).maybeSingle();
+  if (desk.error && !/no such table: support_desks/i.test(desk.error.message)) {
+    return NextResponse.json({ ok: false, error: desk.error.message }, { status: 500 });
+  }
+  if (desk.data) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "support_desk_form",
+        message: "This form is your support desk's intake, so it can't be deleted. To stop taking requests, switch the form off instead.",
+      },
+      { status: 409 },
+    );
+  }
   // count: "exact" so a no-op delete (id already gone, or tenant
   // mismatch) surfaces as 404 instead of a silent ok:true that the UI
   // would interpret as success. See the parallel /api/sequences/[id]

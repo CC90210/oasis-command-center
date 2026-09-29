@@ -174,6 +174,74 @@ export const SUPPORT_FORM_STEPS: FormStep[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// Every other workspace's support form (2026-09-28)
+// ---------------------------------------------------------------------------
+
+/**
+ * Each workspace gets its own public support form at /f/<its slug>/support
+ * (the /f/<tenant>/<form> URL format is frozen), which files a ticket on THAT
+ * workspace's desk (lib/delivery/desks.ts registers it; lib/delivery/support-
+ * intake.ts takes its submissions). Same fields and field names as OASIS's
+ * form — the intake parses both with one rule — with copy that names neither
+ * OASIS nor a mailbox the workspace has not connected:
+ *   - no OASIS colour, name or wording (DEFAULT_PRIMARY_COLOR is neutral, the
+ *     workspace's own logo is used when it has one);
+ *   - no promise of a confirmation email: until the workspace connects a
+ *     mailbox none is sent (lib/delivery/notify.ts), so the thank-you says the
+ *     team will reply, not that an email is on its way.
+ */
+export const WORKSPACE_SUPPORT_FORM_NAME = "Support request";
+export const WORKSPACE_SUPPORT_FORM_DESCRIPTION =
+  "Customers report an issue or ask for a change. Every submission becomes a ticket on your support desk " +
+  "(never a lead) with a ticket number and a first-response target.";
+
+const WORKSPACE_FIELD_COPY: Record<string, Partial<FormStep["fields"][number]>> = {
+  email: { help: "The team replies to this address, and it is how your request is matched to your account." },
+  company: { placeholder: "Your business name, if any" },
+  project: { placeholder: "The project or service this is about", help: "Optional." },
+};
+
+export const WORKSPACE_SUPPORT_FORM_STEPS: FormStep[] = SUPPORT_FORM_STEPS.map((step) => ({
+  ...step,
+  // Not "will reply by email": a workspace desk has no mailbox lane yet, so
+  // its public replies are recorded as not sent (lib/delivery/notify.ts).
+  // The copy promises only what the desk does today.
+  description: "Tell us what is going on. The team will get back to you.",
+  fields: step.fields.map((f) => ({ ...f, ...(WORKSPACE_FIELD_COPY[f.name] ?? {}) })),
+}));
+
+export function workspaceSupportFormBranding(tenant: { name: string; logo_url?: string | null }): FormBranding {
+  const name = tenant.name.trim() || "Support";
+  return {
+    ...(tenant.logo_url ? { logo_url: tenant.logo_url } : {}),
+    headline: `${name} Support`,
+    subheadline: "Report a problem or ask for a change. Every request gets a ticket number.",
+    thanks_message: "Thanks, your request is in. The team will get back to you.",
+  };
+}
+
+/** The `forms` row a workspace's support desk writes (minus the DB-generated id/timestamps). */
+export function buildWorkspaceSupportFormRow(tenant: { id: string; name: string; logo_url?: string | null }) {
+  return {
+    tenant_id: tenant.id,
+    slug: SUPPORT_FORM_SLUG,
+    name: WORKSPACE_SUPPORT_FORM_NAME,
+    description: WORKSPACE_SUPPORT_FORM_DESCRIPTION,
+    branding: workspaceSupportFormBranding(tenant),
+    steps: WORKSPACE_SUPPORT_FORM_STEPS,
+    on_complete_stage: null as string | null,
+    step_outcomes: {} as Record<string, string>,
+    enabled: true,
+    redirect_url: null as string | null,
+  };
+}
+
+/** Relative public path of a workspace's support form. */
+export function supportFormPathFor(tenantSlug: string): string {
+  return `/f/${encodeURIComponent(tenantSlug)}/${SUPPORT_FORM_SLUG}`;
+}
+
 /** The `forms` row this seed writes (minus the DB-generated id/timestamps). */
 export function buildSupportFormRow() {
   return {
