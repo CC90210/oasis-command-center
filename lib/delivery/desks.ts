@@ -135,7 +135,7 @@ export async function getDeskForm(db: Client, tenantId: string, tenantSlug: stri
   try {
     desk = rows(
       await db.execute({
-        sql: `SELECT d.form_id, f.enabled FROM support_desks d
+        sql: `SELECT d.form_id, f.id AS live_form_id, f.enabled FROM support_desks d
               LEFT JOIN forms f ON f.id = d.form_id AND f.tenant_id = d.tenant_id
               WHERE d.tenant_id = ? LIMIT 1`,
         args: [tenantId],
@@ -145,7 +145,11 @@ export async function getDeskForm(db: Client, tenantId: string, tenantSlug: stri
     if (!isMissingRegistry(err)) throw err;
     return { state: "unavailable" };
   }
-  if (desk) {
+  // A registration whose form is gone (deleted through the Forms page before
+  // that was refused) is NOT a desk that is on: intake cannot find it, so it
+  // reads as off here and enableSupportDesk re-creates the form and replaces
+  // the stale registration (Codex, PR #473).
+  if (desk && desk.live_form_id != null) {
     return {
       state: "on",
       path: supportFormPathFor(tenantSlug ?? ""),
@@ -219,9 +223,16 @@ export async function enableSupportDesk(
         },
         {
           // Registers only the form this batch just wrote: a racing request that
-          // wrote its own form first leaves this INSERT matching nothing.
+          // wrote its own form first leaves this INSERT matching nothing. An
+          // existing registration is replaced ONLY when its form is gone (a
+          // stale desk); a live desk's registration is never taken over.
           sql: `INSERT INTO support_desks (tenant_id, form_id, enabled_by, enabled_at)
-                SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM forms WHERE id = ? AND tenant_id = ?)`,
+                SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM forms WHERE id = ? AND tenant_id = ?)
+                ON CONFLICT (tenant_id) DO UPDATE SET
+                  form_id = excluded.form_id, enabled_by = excluded.enabled_by, enabled_at = excluded.enabled_at
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM forms WHERE id = support_desks.form_id AND tenant_id = support_desks.tenant_id
+                )`,
           args: [tenantId, formId, actor, at, formId, tenantId],
         },
       ],

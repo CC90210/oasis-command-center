@@ -151,6 +151,7 @@ async function main() {
   const ticket = await import("../app/api/tickets/[id]/route");
   const comments = await import("../app/api/tickets/[id]/comments/route");
   const submitRoute = await import("../app/api/forms/submit/route");
+  const formByIdRoute = await import("../app/api/forms/[id]/route");
 
   const req = (method: string, url: string, body?: unknown, headers: Record<string, string> = {}) =>
     new NextRequest(`http://localhost${url}`, {
@@ -524,6 +525,33 @@ async function main() {
     assert.equal(await intake.matchWorkspaceSupportDesk({ token: "t", anonymous_init: { tenant_slug: "client-a", form_slug: "support" } }, { db }), null);
     const desk = await intake.matchWorkspaceSupportDesk({ anonymous_init: { tenant_slug: " Client-A ", form_slug: "SUPPORT" } }, { db });
     assert.equal(desk?.tenantId, CLIENT_A);
+  });
+  // Codex, PR #473: deleting the desk's form through the Forms page left a
+  // registration with no form behind it — the desk still read "on", enabling
+  // was a no-op, and the public URL stopped filing tickets for good.
+  const deskFormOf = async (tenantId: string) =>
+    String((await db.execute({ sql: "SELECT form_id FROM support_desks WHERE tenant_id = ?", args: [tenantId] })).rows[0]?.form_id ?? "");
+  await login(USERS.clientA);
+  await check("support desk: its intake form cannot be deleted through the Forms page (409), and stays", async () => {
+    const formId = await deskFormOf(CLIENT_A);
+    assert.ok(formId, "precondition: A's desk is registered");
+    const r = await call(formByIdRoute.DELETE(req("DELETE", `/api/forms/${formId}`), { params: Promise.resolve({ id: formId }) }));
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.equal(r.body.error, "support_desk_form");
+    assert.equal(await count("SELECT count(*) AS n FROM forms WHERE id = ?", [formId]), 1, "the desk's form survived");
+  });
+  await login(USERS.clientB);
+  await check("support desk: a desk whose form vanished reads as off; turning it on re-creates and re-registers it", async () => {
+    const stale = await deskFormOf(CLIENT_B);
+    await db.execute({ sql: "DELETE FROM forms WHERE id = ?", args: [stale] }); // as the Forms page could before the 409
+    assert.equal((await desks.getDeskForm(db, CLIENT_B, "client-b")).state, "off", "a registration with no form is not a desk that is on");
+    const on = await call(deskRoute.POST());
+    assert.equal(on.status, 201, JSON.stringify(on.body));
+    const fresh = await deskFormOf(CLIENT_B);
+    assert.ok(fresh && fresh !== stale, "the stale registration was replaced by the new form");
+    assert.equal(await count("SELECT count(*) AS n FROM support_desks WHERE tenant_id = ?", [CLIENT_B]), 1);
+    const desk = await intake.matchWorkspaceSupportDesk({ anonymous_init: { tenant_slug: "client-b", form_slug: "support" } }, { db });
+    assert.equal(desk?.tenantId, CLIENT_B, "the public URL files tickets again");
   });
 
   const leadsBefore = await count("SELECT count(*) AS n FROM tenant_records");
