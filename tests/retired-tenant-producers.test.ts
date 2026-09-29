@@ -540,6 +540,8 @@ async function main() {
       "sms-reply-agent", "enroll-drips", "dispatch-drips", "reconcile-drip-telemetry",
       "reconcile-website-sales-payments", "dispatch-founder-meeting-reminders", "operator-email-agent",
       "health-check", "sla-check", "reconcile-sms",
+      // OASIS OS Connections (2026-09-29): multi-tenant, per-connection probes.
+      "connection-health",
     ].map((r) => `/api/cron/${r}`);
     assert.deepEqual([...new Set(CRON_TABLE.map((c) => base(c.path)))].sort(), [...KEPT].sort());
   });

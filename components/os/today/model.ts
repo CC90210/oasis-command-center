@@ -31,6 +31,7 @@ import { WON_STAGES } from "@/lib/oasis-board-summary-rules";
 import { OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
 import { formatOperatorDate } from "@/lib/dates";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
+import { needsAttention } from "@/lib/connections/rules";
 
 /** A read that can fail. `ok:false` means "could not find out", which is not zero. */
 export type Read<T> = { ok: true; value: T } | { ok: false };
@@ -52,6 +53,8 @@ export type TodayBriefPlan = {
   inbound: boolean;
   /** Content published in the last 7 days (the Marketing card). */
   content: boolean;
+  /** The workspace's connections that need the owner (Settings › Connections is owner/admin only). */
+  connections: boolean;
 };
 
 export function todayBriefPlan(input: {
@@ -77,6 +80,9 @@ export function todayBriefPlan(input: {
     delivery: caps.canSeeDeliveryQueues && input.departments.has("client_success"),
     inbound: caps.canSeeInboundTape,
     content: input.departments.has("marketing"),
+    // The same people lib/connections/access.ts lets manage connections: an
+    // owner/admin (the founder persona) who may see system surfaces and act.
+    connections: input.persona === "founder" && caps.canSeeSystemSurfaces && caps.canAct,
   };
 }
 
@@ -426,7 +432,10 @@ export function cashView(read: Read<CashSnapshot>): CashView {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type NeedsYouTone = "urgent" | "attention" | "info";
-export type NeedsYouIcon = "follow_up" | "sla" | "reply" | "meeting" | "invoice" | "bank";
+export type NeedsYouIcon = "follow_up" | "sla" | "reply" | "meeting" | "invoice" | "bank" | "connection";
+
+/** One live connection as Needs you sees it (lib/connections/store listActiveConnections, reduced). */
+export type ConnectionAttention = { provider: string; label: string; status: string; detail: string | null };
 
 export type NeedsYouItem = {
   id: string;
@@ -468,6 +477,8 @@ export function buildNeedsYou(input: {
   cash: Read<CashSnapshot> | null;
   /** Approvals waiting on this viewer. Null/absent = not read for this viewer. */
   approvals?: Read<ApprovalsBlock> | null;
+  /** The workspace's live connections. Null/absent = not read for this viewer. */
+  connections?: Read<ConnectionAttention[]> | null;
   nowMs: number;
   formatTime?: (ms: number) => string;
 }): NeedsYou {
@@ -480,6 +491,26 @@ export function buildNeedsYou(input: {
   if (input.approvals) {
     if (!input.approvals.ok) unavailable.push("approvals");
     else approvals = input.approvals.value;
+  }
+
+  // A connection in an attention status (lib/connections/rules needsAttention)
+  // stays here until it recovers; the list is read fresh, so recovery clears it.
+  if (input.connections) {
+    if (!input.connections.ok) unavailable.push("connection health");
+    else {
+      for (const c of input.connections.value) {
+        if (!needsAttention(c.status)) continue;
+        items.push({
+          id: `connection-${c.provider}`,
+          tone: c.status === "degraded" ? "attention" : "urgent",
+          icon: "connection",
+          title: `${c.label} connection needs attention`,
+          detail: c.detail ?? "Open Settings › Connections to see what the last check found.",
+          count: null,
+          href: CONNECTIONS_HREF,
+        });
+      }
+    }
   }
 
   if (input.delivery) {

@@ -39,6 +39,7 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/health-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
+  { path: "/api/cron/connection-health", schedule: "*/15 * * * *" },
 ];
 
 // Self-contained runtime types: this dir sits inside the Next app's tsconfig

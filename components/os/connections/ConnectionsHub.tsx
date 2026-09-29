@@ -12,9 +12,11 @@
  *
  * Clicking a live card opens the flow that already exists for it: the shared
  * key editor and your own Google connection further down this page, the
- * Telegram setup on Chat apps, or Constant Contact's OAuth popup. Clicking a
- * coming-soon card opens the detail drawer. Every card also has a Details
- * button, so the drawer is one click away for live apps too.
+ * Telegram setup on Chat apps, Constant Contact's OAuth popup, or — for a
+ * Connections-framework app such as Stripe — the drawer, where the key form,
+ * Test again and Disconnect live. Clicking a coming-soon card opens the detail
+ * drawer. Every card also has a Details button, so the drawer is one click
+ * away for live apps too.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -144,7 +146,9 @@ export function ConnectionsHub({
   const connect = useCallback(
     (def: ConnectorDef) => {
       const action = def.live?.connect;
-      if (!action) return openDrawer(def.slug);
+      // A pasted-key connection lives in the drawer itself (its form, Test
+      // again and Disconnect), so the card opens the drawer.
+      if (!action || action.kind === "key_form") return openDrawer(def.slug);
       setDrawerOpen(false);
       if (action.kind === "popup") return runPopup(def, action.href, action.messageSource);
       if (!openOnThisPage(action.href)) router.push(action.href);
@@ -260,6 +264,7 @@ export function ConnectionsHub({
         status={drawerDef ? statuses[drawerDef.slug] ?? null : null}
         onClose={closeDrawer}
         onConnect={connect}
+        onChanged={() => router.refresh()}
         supportHref={supportHref}
       />
     </div>

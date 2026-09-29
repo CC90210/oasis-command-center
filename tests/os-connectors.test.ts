@@ -30,6 +30,7 @@ import {
   glyphColor,
   contrastOnTile,
   resolveConnectorStatus,
+  type ConnectionFact,
   type ConnectorDef,
   type ConnectorFacts,
   type HeartbeatFact,
@@ -37,6 +38,7 @@ import {
 } from "../lib/os/connectors";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
 import { findIntegrationSchema } from "../lib/tenant-integration-schemas";
+import { providerById } from "../lib/connections/registry";
 import {
   SETTINGS_SECTIONS,
   legacyAnchorTargets,
@@ -146,6 +148,16 @@ for (const def of CONNECTOR_CATALOG) {
     continue;
   }
   const src = def.live.source;
+  if (src.kind === "tenant_connection") {
+    // A Connections-framework card reads tenant_connections, which the facts
+    // loader must actually load; the provider must be LIVE in the registry
+    // (tests/os-connections.test.ts pins the registry side).
+    const provider = providerById(src.provider);
+    assert.ok(provider && provider.availability === "live", `${def.slug}: "${src.provider}" is not a live provider`);
+    assert.equal(src.provider, def.slug, `${def.slug}: a framework card's provider id is its slug`);
+    assert.match(factsSource, /listActiveConnections\(/, `${def.slug}: connections are never loaded`);
+    continue;
+  }
   // Every field a status reads is a real field of a real integration schema —
   // the same store Credentials writes and listTenantIntegrationStatus reads.
   const schema = findIntegrationSchema(src.service);
@@ -163,10 +175,10 @@ for (const def of CONNECTOR_CATALOG) {
 const everyService = new Set<string>();
 for (const def of CONNECTOR_CATALOG) {
   everyService.add(def.slug).add(def.slug.replace(/-/g, "_"));
-  if (def.live) everyService.add(def.live.source.service);
+  if (def.live) everyService.add(def.live.source.kind === "tenant_connection" ? def.live.source.provider : def.live.source.service);
 }
 const allFields = ["secret_key", "app_password", "from_address", "bot_token", "chat_id", "account_sid", "auth_token",
-  "from_number", "messaging_service_sid", "access_token", "refresh_token", "api_key", "token"];
+  "from_number", "messaging_service_sid", "access_token", "refresh_token", "api_key", "token", "restricted_key"];
 const GREEN: ConnectorFacts = {
   keyRows: [...everyService].flatMap((service) =>
     allFields.map((field_key): KeyRowFact => ({
@@ -175,6 +187,12 @@ const GREEN: ConnectorFacts = {
   ),
   heartbeats: [...everyService].map((service): HeartbeatFact => ({ service, status: "healthy", last_ping_at: iso(MIN) })),
   personalGoogleLinked: true,
+  // A connected, freshly verified framework connection for EVERY slug — a
+  // coming-soon card handed one must still say coming soon.
+  connections: [...everyService].map((provider): ConnectionFact => ({
+    provider, status: "connected", account_id: "acct_hostile", account_label: "Hostile", environment: "live",
+    last_health_at: iso(MIN), last_health_verdict: "healthy", last_health_code: null, last_health_detail: null,
+  })),
 };
 
 for (const def of CONNECTOR_CATALOG) {
@@ -189,7 +207,7 @@ assert.equal(resolveConnectorStatus(connectorBySlug("google-workspace")!, GREEN,
 
 // Every lookup failed: "status unavailable" for every live card — never
 // "not connected", never "connected".
-const FAILED: ConnectorFacts = { keyRows: null, heartbeats: null, personalGoogleLinked: null };
+const FAILED: ConnectorFacts = { keyRows: null, heartbeats: null, personalGoogleLinked: null, connections: null };
 for (const def of CONNECTOR_CATALOG) {
   const s = resolveConnectorStatus(def, FAILED, NOW);
   assert.equal(s.kind, def.live ? "unknown" : "coming_soon", `${def.slug}: a failed lookup resolved to "${s.kind}"`);
@@ -200,8 +218,11 @@ assert.equal(
   "unknown",
 );
 
+// Only the connections read failing is still unknown for a framework card.
+assert.equal(resolveConnectorStatus(connectorBySlug("stripe")!, { ...GREEN, connections: null }, NOW).kind, "unknown");
+
 // Nothing saved at all: honestly not connected.
-const EMPTY: ConnectorFacts = { keyRows: [], heartbeats: [], personalGoogleLinked: false };
+const EMPTY: ConnectorFacts = { keyRows: [], heartbeats: [], personalGoogleLinked: false, connections: [] };
 for (const slug of LIVE) {
   assert.equal(resolveConnectorStatus(connectorBySlug(slug)!, EMPTY, NOW).kind, "not_connected", slug);
 }
@@ -211,22 +232,33 @@ const keyRow = (service: string, field_key: string, over: Partial<KeyRowFact> = 
 });
 const stripe = connectorBySlug("stripe")!;
 const twilio = connectorBySlug("twilio")!;
+const twilioKeys = (over: Partial<KeyRowFact> = {}) => [
+  keyRow("twilio", "account_sid", over),
+  keyRow("twilio", "auth_token", over),
+  keyRow("twilio", "from_number", over),
+];
 
 // A saved key nobody tested is set up, not connected.
-assert.equal(
-  resolveConnectorStatus(stripe, { ...EMPTY, keyRows: [keyRow("stripe", "secret_key")] }, NOW).kind,
-  "configured",
-);
+assert.equal(resolveConnectorStatus(twilio, { ...EMPTY, keyRows: twilioKeys() }, NOW).kind, "configured");
 // A failed test is attention, even beside an older passing one.
 assert.equal(
-  resolveConnectorStatus(stripe, {
+  resolveConnectorStatus(twilio, {
     ...EMPTY,
     keyRows: [
-      keyRow("stripe", "secret_key", { last_test_ok: false, last_tested_at: iso(MIN) }),
-      keyRow("stripe", "publishable_key", { last_test_ok: true, last_tested_at: iso(HOUR) }),
+      ...twilioKeys({ last_test_ok: true, last_tested_at: iso(HOUR) }),
+      keyRow("twilio", "messaging_service_sid", { last_test_ok: false, last_tested_at: iso(MIN) }),
     ],
   }, NOW).kind,
   "attention",
+);
+// Stripe is a framework card now: a legacy secret key in the Credentials store
+// (OASIS's checkout-link key) never makes it connected — or even "set up".
+assert.equal(
+  resolveConnectorStatus(stripe, {
+    ...EMPTY,
+    keyRows: [keyRow("stripe", "secret_key", { last_test_ok: true, last_tested_at: iso(MIN) })],
+  }, NOW).kind,
+  "not_connected",
 );
 // Twilio needs a number OR a messaging service: sid + token alone are incomplete.
 assert.equal(
@@ -298,7 +330,7 @@ assert.equal(
 );
 // Your own Google link is real, but it never makes the WORKSPACE connected.
 assert.notEqual(
-  resolveConnectorStatus(gws, { keyRows: [], heartbeats: [], personalGoogleLinked: true }, NOW).kind,
+  resolveConnectorStatus(gws, { keyRows: [], heartbeats: [], personalGoogleLinked: true, connections: [] }, NOW).kind,
   "connected",
 );
 // A heartbeat for one service never lights up another.
@@ -307,6 +339,7 @@ assert.notEqual(
     keyRows: [keyRow("telegram", "bot_token"), keyRow("telegram", "chat_id")],
     heartbeats: [{ service: "gws", status: "healthy", last_ping_at: iso(MIN) }],
     personalGoogleLinked: true,
+    connections: [],
   }, NOW).kind,
   "connected",
 );

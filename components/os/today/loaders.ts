@@ -28,6 +28,9 @@ import { operatorCalendarStatus } from "@/lib/integrations/google-calendar";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { overview } from "@/lib/founders-finances/reports-io";
 import { formatCents } from "@/lib/founders-finances/money";
+import { getTursoClient } from "@/lib/turso";
+import { listActiveConnections } from "@/lib/connections/store";
+import { providerById } from "@/lib/connections/registry";
 import type { Persona } from "@/lib/role-surfaces";
 import {
   pickHotReplies,
@@ -35,6 +38,7 @@ import {
   summarizeDelivery,
   summarizeRecords,
   type CashSnapshot,
+  type ConnectionAttention,
   type DeliverySnapshot,
   type HotReply,
   type Read,
@@ -146,6 +150,22 @@ export function loadHotReplies(tenantId: string, nowMs: number): Promise<Read<Ho
 /** Distinct content pieces published in 7 days (post_analytics, tenant-scoped). Null = the reader failed. */
 export function loadContentWeek(tenantId: string): Promise<Read<number | null>> {
   return read("content", async () => (await momentumMetrics(tenantId)).contentPublished7d);
+}
+
+/**
+ * The workspace's live Connections-framework connections, for Needs you — the
+ * same tenant-scoped reader the Connections hub uses. Read fresh on every
+ * render, so a connection that recovers drops off without anything clearing it.
+ */
+export function loadConnectionAlerts(tenantId: string): Promise<Read<ConnectionAttention[]>> {
+  return read("connections", async () =>
+    (await listActiveConnections(getTursoClient(), tenantId)).map((c) => ({
+      provider: c.provider,
+      label: providerById(c.provider)?.label ?? c.provider,
+      status: c.status,
+      detail: c.last_health_detail,
+    })),
+  );
 }
 
 /** The viewer's own Google Calendar connection (Settings › Personal). */

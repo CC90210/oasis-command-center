@@ -42,8 +42,15 @@ function k(service: string, fieldKey: string): string {
 
 export function IntegrationKeysPanel({
   canManage,
+  hiddenServices = [],
 }: {
   canManage: boolean;
+  /**
+   * Services this workspace does not set up here. A client workspace connects
+   * Stripe read-only from its card in Settings › Connections, and
+   * /api/integrations/keys refuses a Stripe secret key for it.
+   */
+  hiddenServices?: readonly string[];
 }) {
   const [status, setStatus] = useState<StatusRow[]>([]);
   const [drafts, setDrafts] = useState<Drafts>({});
@@ -104,7 +111,7 @@ export function IntegrationKeysPanel({
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) {
-        setErrors((e) => ({ ...e, [key]: j.error || `save_failed_${r.status}` }));
+        setErrors((e) => ({ ...e, [key]: j.message || j.error || `save_failed_${r.status}` }));
       } else {
         setDrafts((d) => ({ ...d, [key]: "" }));
         await reload();
@@ -224,7 +231,11 @@ export function IntegrationKeysPanel({
       ) : (
         <div className="space-y-5">
           {TENANT_MANUALLY_EDITABLE_INTEGRATION_SCHEMAS.filter(
-            (s) => !s.advanced || showAdvanced,
+            (s) =>
+              (!s.advanced || showAdvanced) &&
+              // A service this workspace connects elsewhere is hidden — unless a
+              // value was stored here before, so it can still be cleared.
+              (!hiddenServices.includes(s.service) || status.some((r) => r.service === s.service && r.has_value)),
           ).map((schema) => {
             const fieldStatuses = schema.fields.map((f) => ({
               field: f,

@@ -70,6 +70,7 @@ import { getManifest } from "@/lib/manifest/loader";
 import { resolveEnabledAgentSlugs } from "@/lib/manifest/agent-roster";
 import { visibleIntegrationsForTenant } from "@/lib/integrations-registry";
 import { isSharedInboxTenant } from "@/lib/shared-inbox-tenants";
+import { tenantMayUseEnvFallback } from "@/lib/tenant-integration-store";
 import { resolveAgentKey } from "@/lib/agents";
 import type { IntegrationHealth } from "@/lib/supabase";
 import { isOasisSurfaceTenant, type Persona } from "@/lib/role-surfaces";
@@ -386,7 +387,12 @@ export async function SettingsContent({
                   defaultOpen
                 >
                   <SafeBoundary label="Integration keys">
-                    <IntegrationKeysPanel canManage={canManageTenant} />
+                    <IntegrationKeysPanel
+                      canManage={canManageTenant}
+                      // Same rule as the keys API: only OASIS's own workspaces
+                      // keep a Stripe secret key here (checkout links).
+                      hiddenServices={tenantMayUseEnvFallback(profile?.tenant_id) ? [] : ["stripe"]}
+                    />
                   </SafeBoundary>
                 </SettingsSection>
 

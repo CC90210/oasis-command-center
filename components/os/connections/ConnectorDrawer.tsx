@@ -6,7 +6,9 @@
  * Says, in plain English, what OASIS reads and does with the app, which
  * departments depend on it, and its status in the same words as the card. A
  * coming-soon app opens here instead of a connect flow; a live one also offers
- * its connect action at the bottom.
+ * its connect action at the bottom — except a pasted-key app (Stripe), whose
+ * key form, Test again and Disconnect sit in KeyConnectionPanel right under
+ * the status.
  *
  * An overlay, so it is the one place in the hub that carries a shadow (a
  * y-offset, neutral tint). Motion is opacity + transform at 140ms and switches
@@ -18,9 +20,11 @@
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/ConnectorIcon";
+import { KeyConnectionPanel } from "@/components/os/connections/KeyConnectionPanel";
 import { StatusLine } from "@/components/os/connections/StatusLine";
 import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
 import { glyphColor, type ConnectorDef, type ConnectorStatus } from "@/lib/os/connectors";
+import { providerById } from "@/lib/connections/registry";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 
 function departmentLabel(key: string): string {
@@ -33,6 +37,7 @@ export function ConnectorDrawer({
   status,
   onClose,
   onConnect,
+  onChanged,
   supportHref,
 }: {
   open: boolean;
@@ -41,6 +46,8 @@ export function ConnectorDrawer({
   status: ConnectorStatus | null;
   onClose: () => void;
   onConnect: (def: ConnectorDef) => void;
+  /** A connect, test or disconnect finished: re-read every status from the server. */
+  onChanged: () => void;
   /** OASIS's support form, for "tell OASIS you use this". */
   supportHref: string | null;
 }) {
@@ -82,6 +89,9 @@ export function ConnectorDrawer({
 
   const live = def?.live ?? null;
   const verb = live ? { reads: "What OASIS reads", does: "What OASIS does" } : { reads: "What OASIS will read", does: "What OASIS will do" };
+  // A pasted-key app is connected, tested and disconnected right here.
+  const keyForm = live?.connect.kind === "key_form" ? live.connect : null;
+  const keyConfig = keyForm ? providerById(keyForm.provider)?.restrictedKey ?? null : null;
 
   return (
     <div
@@ -143,6 +153,18 @@ export function ConnectorDrawer({
                     </p>
                   )}
                 </section>
+              )}
+
+              {keyForm && keyConfig && (
+                // Keyed by app so switching apps never carries a typed key across.
+                <KeyConnectionPanel
+                  key={def.slug}
+                  providerId={keyForm.provider}
+                  providerName={def.name}
+                  config={keyConfig}
+                  status={status}
+                  onChanged={onChanged}
+                />
               )}
 
               {def.includes && def.includes.length > 0 && (
@@ -207,28 +229,31 @@ export function ConnectorDrawer({
               </p>
             </div>
 
-            <footer className="border-t border-hairline px-5 py-4">
-              {live ? (
-                <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">
-                  {status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention"
-                    ? `Manage ${def.name}`
-                    : live.connect.label}
-                </button>
-              ) : supportHref ? (
-                <p className="text-[13px] leading-5 text-fg-muted">
-                  Use {def.name} today?{" "}
-                  <a
-                    href={supportHref}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-accent underline-offset-2 hover:underline"
-                  >
-                    Tell OASIS
-                  </a>
-                  .
-                </p>
-              ) : null}
-            </footer>
+            {/* A pasted-key app's actions live in its panel above, not here. */}
+            {!keyForm && (
+              <footer className="border-t border-hairline px-5 py-4">
+                {live ? (
+                  <button type="button" onClick={() => onConnect(def)} className="btn-primary w-full">
+                    {status?.kind === "connected" || status?.kind === "configured" || status?.kind === "attention"
+                      ? `Manage ${def.name}`
+                      : live.connect.label}
+                  </button>
+                ) : supportHref ? (
+                  <p className="text-[13px] leading-5 text-fg-muted">
+                    Use {def.name} today?{" "}
+                    <a
+                      href={supportHref}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-accent underline-offset-2 hover:underline"
+                    >
+                      Tell OASIS
+                    </a>
+                    .
+                  </p>
+                ) : null}
+              </footer>
+            )}
           </>
         )}
       </aside>
