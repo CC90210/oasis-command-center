@@ -100,10 +100,8 @@ export type ClientFloors = {
 
 export type ClientsBuild = { rows: ClientRow[]; unlinkedTickets: number | null; floors: ClientFloors };
 
-/** A count as the page prints it: "12+" when it is a floor, never a bare number that reads as the total. */
-export function shownCount(value: number, floor: boolean): string {
-  return floor ? `${value}+` : String(value);
-}
+/** A count as the page prints it: "12+" when it is a floor. One rule for the whole shell (lib/os/count.ts). */
+export { floorCount as shownCount } from "@/lib/os/count";
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
 const norm = (v: string | null | undefined) => (v || "").trim().toLowerCase();

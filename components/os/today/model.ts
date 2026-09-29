@@ -24,6 +24,7 @@
 
 import type { Persona, SurfaceCapabilities } from "@/lib/role-surfaces";
 import type { DepartmentKey } from "@/lib/os/types";
+import { floorCount } from "@/lib/os/count";
 import type { GoalProgress } from "@/lib/goals/goal-math";
 import type { BoardSummary } from "@/lib/oasis-board-summary-rules";
 import { WON_STAGES } from "@/lib/oasis-board-summary-rules";
@@ -654,7 +655,7 @@ function departmentCard(
         ...base,
         tone: overdue > 0 ? "needs_you" : "ok",
         status,
-        metric: { kind: "live", value: `${s.partial ? "≥" : ""}${s.openLeads}`, label: "open leads" },
+        metric: { kind: "live", value: floorCount(s.openLeads, s.partial), label: "open leads" },
       };
     }
     case "marketing": {
@@ -677,16 +678,21 @@ function departmentCard(
       if (!r) return { ...base, tone: "quiet", status: "Not in your view", metric: { kind: "unmeasured", label: "Support is not in your view" } };
       if (!r.ok) return { ...base, tone: "attention", status: "Couldn't load", metric: { kind: "error", label: "Support read failed" } };
       const d = r.value;
-      const floor = d.truncated ? "≥" : "";
+      // Breached / at-risk come from the same capped ticket read as the open
+      // count, so all three are floors whenever it was capped (lib/os/count.ts).
       return {
         ...base,
         tone: d.breached.length > 0 ? "needs_you" : d.atRisk.length > 0 ? "attention" : "ok",
         status: d.breached.length > 0
-          ? `${d.breached.length} past SLA`
+          ? `${floorCount(d.breached.length, d.truncated)} past SLA`
           : d.atRisk.length > 0
-            ? `${d.atRisk.length} close to SLA`
+            ? `${floorCount(d.atRisk.length, d.truncated)} close to SLA`
             : "Within SLA",
-        metric: { kind: "live", value: `${floor}${d.openTickets}`, label: d.openTickets === 1 ? "open ticket" : "open tickets" },
+        metric: {
+          kind: "live",
+          value: floorCount(d.openTickets, d.truncated),
+          label: d.openTickets === 1 && !d.truncated ? "open ticket" : "open tickets",
+        },
         detail: `${plural(d.activeProjects, "active project", "active projects")}${d.overdueProjects > 0 ? ` · ${d.overdueProjects} past due` : ""}`,
       };
     }

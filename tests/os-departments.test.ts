@@ -330,6 +330,15 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   assert.match(numbers, /tileCount\(d\.breached, d\.truncated\)/);
   assert.match(numbers, /tileCount\(d\.atRisk, d\.truncated\)/);
   assert.match(numbers, /tileCount\(d\.activeProjects, d\.projectsTruncated\)/);
+  // ONE floor rule for the whole shell: Today and Clients use lib/os/count.ts
+  // too, so the same queue can never print "≥500" on one screen and "500+" on
+  // another (three hand-rolled copies had drifted exactly that way).
+  const today = read("components/os/today/model.ts");
+  const clients = read("components/os/landings/clients-model.ts");
+  assert.match(today, /from "@\/lib\/os\/count"/);
+  assert.match(clients, /from "@\/lib\/os\/count"/);
+  assert.doesNotMatch(today, /["`]≥/, "Today hand-rolls a floor marker instead of floorCount");
+  assert.doesNotMatch(clients, /\$\{value\}\+`/, "Clients hand-rolls a floor marker instead of floorCount");
   assert.equal(
     (numbers.match(/tileCount\(d\.open, d\.truncated\)/g) || []).length,
     2,
