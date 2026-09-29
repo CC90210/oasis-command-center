@@ -19,14 +19,6 @@
   "observability": {
     "enabled": true
   },
-  // Smart Placement: run the Worker near its database, not near the viewer.
-  // A page makes 3-4 SEQUENTIAL Turso reads (session, profile, workspace,
-  // data), and each round trip from the edge measured ~145 ms (2026-09-29,
-  // from Montreal; ~140 ms in app/layout.tsx's own note), so the distance to
-  // the database, paid 3-4 times, was most of a tab switch. Placed near Turso,
-  // those reads cost a few ms each and the viewer pays one longer trip once.
-  // Static assets are served before the Worker and are unaffected. Reversible:
-  // delete this block.
   "placement": {
     "mode": "smart"
   }
