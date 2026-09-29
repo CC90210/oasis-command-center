@@ -171,7 +171,13 @@ The layout nav filter is cosmetic only.
 
 **Billing run.** `app/api/cron/bill-passthrough` on the 1st, or on `invoice.upcoming`:
 - **Bills closed periods only.** A period (YYYY-MM) closes when the first collector run after that month ends has ingested its final vendor usage; the collector records the close (`closed_at` per tenant and period). The billing run, whichever trigger started it, selects only closed periods with `accrued` rows. `invoice.upcoming` fires while the current month is still accumulating usage, so it never bills that month: it bills any closed period not yet invoiced, and the open month waits for its own close.
-- Creates Stripe InvoiceItems on the tenant's OASIS customer, idempotency key `pt-{tenant}-{period}-{category}`, so they land on the next subscription invoice. Because only a closed period is ever billed, the usage behind a key cannot change after its InvoiceItem exists. The durable guard against double billing is the ledger's `accrued → invoiced` compare-and-swap; Stripe keeps idempotency keys for only 24 hours.
+- Creates Stripe InvoiceItems on the tenant's OASIS customer, so they land on the next subscription invoice. Because only a closed period is ever billed, the usage behind an item cannot change after the item exists.
+- **Durable outbox, not a bare compare-and-swap** (Stripe prunes idempotency keys after about 24 hours, and a ledger update can never commit atomically with a Stripe call). Each ledger row moves `accrued → invoicing → invoiced`:
+  1. Claim: compare-and-swap `accrued → invoicing`, stamping `invoicing_started_at` and a deterministic `billing_ref` (`pt-{tenant}-{period}-{category}`).
+  2. Before creating anything, reconcile: list the customer's pending InvoiceItems and look for `metadata.billing_ref`. If one exists (a crash after Stripe accepted it), adopt its id instead of creating a second one.
+  3. Otherwise create the InvoiceItem with `metadata.billing_ref` (and the same value as idempotency key for the short window it lasts).
+  4. Persist the returned `stripe_invoice_item_id`, then compare-and-swap `invoicing → invoiced`.
+  5. A sweep re-runs step 2 for rows stuck in `invoicing`, so a crash before the Stripe call re-creates exactly once and a crash after it adopts the existing item. Usage is never marked invoiced without a confirmed item id, and never billed twice.
 - Converts currency with the existing Bank of Canada FX (`lib/founders-finances/fx-io.ts`).
 
 **Pricing.** Default handling margin is **15%**. Cook charges carrier cost + 10%; Atlas sets ours. One-time A2P and number fees pass through at cost plus a flat handling fee, and **only after an owner approval card** (Cook does the same: "A2P registration only runs after explicit fee approval").
