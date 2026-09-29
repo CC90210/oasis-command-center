@@ -5,7 +5,9 @@
 -- WHAT LIVES WHERE
 --   tenant_connections        one row per connected account: which provider,
 --                             which external account (acct_ / realmId / ...),
---                             status, health, refresh lease. NO SECRETS. The
+--                             status, health, refresh lease. At most ONE live
+--                             row per provider per tenant (per user for user
+--                             scope): ux_tenant_connections_one_live. NO SECRETS. The
 --                             credential itself stays in
 --                             tenant_integration_credentials (service
 --                             'connection:<tenant_connections.id>'), encrypted
