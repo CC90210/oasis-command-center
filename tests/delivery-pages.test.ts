@@ -11,7 +11,8 @@
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createElement, isValidElement, type ReactNode } from "react";
 import { CLIENT_A, CLIENT_B, OASIS, USERS, check, finish, login, setupDatabase } from "./_delivery-harness";
@@ -162,6 +163,34 @@ async function main() {
     assert.equal(await is404(project({ params: Promise.resolve({ id: pB }) })), true);
     assert.equal(await is404(ticket({ params: Promise.resolve({ id: tB.id }) })), true);
   });
+  // Codex, PR #473: a client workspace's owner landed on OASIS's vendor view
+  // and could neither list nor create their own projects. /projects now
+  // resolves the viewer's own desk first, like /tickets.
+  const ownA = await store.createProject(db, CLIENT_A, {
+    title: "CLIENT-A-OWN-PROJECT", description: null, client_tenant_id: null, client_name: "A's customer", client_email: null,
+    lead_id: null, stage: "building", priority: "medium", assigned_to: null, due_date: null,
+  }, { userId: USERS.clientA.id, name: "Alice Client" }, now);
+  await check("client A's owner: their OWN board on /projects, and OASIS's projects for them in their own section", async () => {
+    const board = await text(projects({ searchParams: sp }));
+    assert.match(board, /CLIENT-A-OWN-PROJECT/, "the owner's own workspace board");
+    assert.match(board, /Projects OASIS runs for you/);
+    assert.match(board, /ALPHA-PROJECT/, "OASIS's project about A, as vendor");
+    assert.doesNotMatch(board, /BRAVO-PROJECT/);
+    const src = readFileSync(join(__dirname, "..", "components/delivery/ProjectForms.tsx"), "utf8");
+    assert.match(src, /run\("\/api\/projects\?scope=desk", "POST"/, "New project writes to the viewer's own desk");
+  });
+  await login(USERS.clientB);
+  await check("client B never sees client A's own project", async () => {
+    const board = await text(projects({ searchParams: sp }));
+    assert.doesNotMatch(board, /CLIENT-A-OWN-PROJECT|ALPHA-PROJECT/);
+    assert.equal(await is404(project({ params: Promise.resolve({ id: ownA }) })), true);
+  });
+  await login(USERS.cc);
+  await check("OASIS's board does not carry a client workspace's own projects", async () => {
+    assert.doesNotMatch(await text(projects({ searchParams: sp })), /CLIENT-A-OWN-PROJECT/);
+  });
+  await login(USERS.clientA);
+
   await check("client portal: 'Your projects' and 'Your tickets' for client A only, with the report link", async () => {
     const page = await text(portal());
     assert.match(page, /Your projects/);

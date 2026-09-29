@@ -79,7 +79,9 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
   }
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const data = await run("/api/projects", "POST", {
+    // scope=desk: the viewer's own workspace's board (OASIS's for OASIS), the
+    // same desk /projects lists — never OASIS's board as a vendor.
+    const data = await run("/api/projects?scope=desk", "POST", {
       ...f,
       client_tenant_id: f.client_tenant_id || null,
       assigned_to: f.assigned_to || null,
@@ -107,15 +109,18 @@ export function ProjectCreateForm({ roster, clientTenants }: { roster: Option[];
           <span className="label">Title</span>
           <input className="input" required maxLength={200} value={f.title} onChange={set("title")} placeholder="Acme Plumbing website" />
         </label>
-        <label>
-          <span className="label">Client portal workspace</span>
-          <select className="select" value={f.client_tenant_id} onChange={set("client_tenant_id")}>
-            <option value="">No portal (email only)</option>
-            {clientTenants.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
-        </label>
+        {/* Only OASIS's desk links a project to a client workspace. */}
+        {clientTenants.length > 0 && (
+          <label>
+            <span className="label">Client portal workspace</span>
+            <select className="select" value={f.client_tenant_id} onChange={set("client_tenant_id")}>
+              <option value="">No portal (email only)</option>
+              {clientTenants.map((t) => (
+                <option key={t.value} value={t.value}>{t.label}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           <span className="label">Client email</span>
           <input className="input" type="email" value={f.client_email} onChange={set("client_email")} placeholder="owner@client.com" />
