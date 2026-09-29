@@ -30,3 +30,9 @@ Key reminders (see CLAUDE.md for detail):
 7. **Definition of done:** the verification gate passed and its output is in the report. Anything else is "in progress," and you say so.
 <!-- /LOCKSTEP:tool_discipline -->
 
+
+## UI work
+
+Before changing any visual surface in this repo, read the UI section in `CLAUDE.md`.
+It routes through the Oasis UI library (60 installed skills, the design constitution,
+and licence rules) and names the CI gate that fails on new AI-tell patterns.
