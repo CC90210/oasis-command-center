@@ -8,7 +8,9 @@
  *          create if they truly need a different slug.
  * DELETE → soft-delete by setting enabled=false. Hard-delete via the
  *          DELETE method drops the row + cascades to form_submissions
- *          (rare; only used during cleanup).
+ *          (rare; only used during cleanup). A workspace's support desk
+ *          intake form is refused with 409 support_desk_form; the list's
+ *          on/off toggle pauses it instead (lib/delivery/desks.ts).
  */
 
 import { NextRequest, NextResponse } from "next/server";
