@@ -30,7 +30,8 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const root = path.resolve(__dirname, "..");
@@ -74,15 +75,53 @@ type Coverage = {
 const TEST_FILE = /\.test\.(?:ts|mts|mjs)$/;
 const PATH_TOKEN = /(?<![\w/.-])tests\/[\w./@[\]-]+\.(?:ts|mts|mjs)\b/g;
 
-/** Groups the CI workflow runs: `npm run test:*` on lines that are not comments. */
+/**
+ * Groups the CI workflow runs: `npm run test:*` inside a step's `run:` value
+ * only. A step `name:` or a comment that mentions a group runs nothing, so it
+ * must not count. `run:` is either inline or a block scalar (`|` / `>`) whose
+ * body is every following line indented deeper than the key.
+ */
 function ciTestGroups(ciYaml: string): string[] {
   const groups: string[] = [];
+  const collect = (command: string) => {
+    const code = command.trim();
+    if (!code || code.startsWith("#")) return;
+    for (const m of code.matchAll(/(?:^|[\s;&|(])npm run (test:[\w:-]+)/g)) groups.push(m[1]);
+  };
+  let blockIndent: number | null = null;
   for (const line of ciYaml.split(/\r?\n/)) {
-    const code = line.trim();
-    if (!code || code.startsWith("#")) continue;
-    for (const m of code.matchAll(/(?:^|[\s:])npm run (test:[\w:-]+)/g)) groups.push(m[1]);
+    const indent = line.length - line.trimStart().length;
+    if (blockIndent !== null) {
+      if (!line.trim() || indent > blockIndent) {
+        collect(line);
+        continue;
+      }
+      blockIndent = null;
+    }
+    const run = /^(\s*(?:-\s+)?)run:\s*(.*)$/.exec(line);
+    if (!run) continue;
+    const value = run[2].trim();
+    if (/^[|>][+-]?$/.test(value)) blockIndent = run[1].length;
+    else collect(value);
   }
   return groups;
+}
+
+/** Every test file under <repoRoot>/tests, at any depth, as "tests/..." paths. */
+function listTestFiles(repoRoot: string): string[] {
+  const found: string[] = [];
+  const walk = (rel: string) => {
+    for (const entry of readdirSync(path.join(repoRoot, rel), { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (entry.name !== "node_modules" && !entry.name.startsWith(".")) walk(child);
+      } else if (TEST_FILE.test(entry.name)) {
+        found.push(child);
+      }
+    }
+  };
+  walk("tests");
+  return found.sort();
 }
 
 /** The string entries of a runner's `const TESTS = [ ... ];`, comments skipped. */
@@ -159,10 +198,18 @@ function coverage(src: Sources): Coverage {
   const base: Sources = {
     ciYaml: [
       "      - run: npm run typecheck",
+      "      - name: npm run test:unrun",
+      "        run: echo a step name runs nothing",
+      "      - name: Tests",
+      "        env:",
+      "          NODE_OPTIONS: --conditions=react-server",
       "        run: |",
       "          npm run test:a",
       "          # npm run test:commented",
+      "",
       "          npm run test:runner",
+      "      - name: after the block, npm run test:unrun is prose again",
+      "        run: echo done",
     ].join("\n"),
     scripts: {
       "test:a": "node --import tsx tests/direct.test.ts && node --import tsx tests/wrongly-excluded.test.ts",
@@ -179,7 +226,11 @@ function coverage(src: Sources): Coverage {
     },
   };
   const c = coverage(base);
-  assert.deepEqual(c.ciGroups, ["test:a", "test:runner"], "a commented `# npm run` line is not a CI group");
+  assert.deepEqual(
+    c.ciGroups,
+    ["test:a", "test:runner"],
+    "only `run:` values count: not a step name, not a shell comment, not text after the block ends",
+  );
   assert.ok(c.covered.has("tests/direct.test.ts"), "named by a group CI runs");
   assert.ok(c.covered.has("tests/in-runner.test.ts"), "named by a runner a CI group invokes");
   assert.deepEqual(
@@ -200,10 +251,27 @@ function coverage(src: Sources): Coverage {
   assert.deepEqual(lazy.unexplainedExclusions, ["tests/nowhere.test.ts"], "an exclusion needs a reason, not a word");
   const gone = coverage({ ...base, excluded: { "tests/deleted.test.ts": "a reason long enough to mean something" } });
   assert.deepEqual(gone.staleExclusions, ["tests/deleted.test.ts"], "an exclusion for a deleted file must be removed");
-  const typo = coverage({ ...base, ciYaml: "          npm run test:nope" });
+  const typo = coverage({ ...base, ciYaml: "      - run: npm run test:nope" });
   assert.deepEqual(typo.unknownGroups, ["test:nope"], "CI running a group package.json lacks is caught");
   const noRunner = coverage({ ...base, readRunner: () => null });
   assert.deepEqual(noRunner.unreadableRunners, ["tests/_runner.mjs"], "a runner with no readable TESTS list is caught, not read as empty");
+
+  // Discovery walks subdirectories: a nested test nobody registered is still
+  // found, and paths come back repository-relative with forward slashes.
+  const scratch = mkdtempSync(path.join(tmpdir(), "suite-coverage-"));
+  try {
+    mkdirSync(path.join(scratch, "tests", "security", "deep"), { recursive: true });
+    writeFileSync(path.join(scratch, "tests", "top.test.ts"), "");
+    writeFileSync(path.join(scratch, "tests", "security", "deep", "nested.test.mts"), "");
+    writeFileSync(path.join(scratch, "tests", "security", "helper.ts"), "");
+    assert.deepEqual(
+      listTestFiles(scratch),
+      ["tests/security/deep/nested.test.mts", "tests/top.test.ts"],
+      "nested test files are discovered; helpers are not",
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 // ── This repository ───────────────────────────────────────────────────────
@@ -213,9 +281,7 @@ function coverage(src: Sources): Coverage {
     ciYaml: readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"),
     scripts: pkg.scripts,
     readRunner: (f) => (existsSync(path.join(root, f)) ? readFileSync(path.join(root, f), "utf8") : null),
-    testFiles: readdirSync(path.join(root, "tests"))
-      .filter((f) => TEST_FILE.test(f))
-      .map((f) => `tests/${f}`),
+    testFiles: listTestFiles(root),
     exists: (f) => existsSync(path.join(root, f)),
     excluded: EXCLUDED,
   });
