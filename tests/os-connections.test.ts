@@ -375,12 +375,12 @@ async function main() {
   const needsYouFor = async (tenantId: string) =>
     todayModel.buildNeedsYou({ sales: null, delivery: null, inbound: null, cash: null, connections: await loadConnectionAlerts(tenantId), nowMs: Date.now() });
   /** The real client, with `hook` run just before each batch (to land a write between a read and a batch). */
-  const withBatchHook = (hook: () => Promise<void>) =>
+  const withBatchHook = (hook: (statements: ReadonlyArray<string | { sql: string }>) => Promise<void>) =>
     new Proxy(db, {
       get(target, prop) {
         if (prop === "batch") {
           return async (...args: Parameters<typeof db.batch>) => {
-            await hook();
+            await hook(args[0] as ReadonlyArray<string | { sql: string }>);
             return target.batch(...args);
           };
         }
@@ -1299,20 +1299,10 @@ async function main() {
     try {
     // The health write fails with a message that must stay in the server log.
     // Only the probe's write: pruning (also a batch) runs first and must pass.
-    const leaky = new Proxy(db, {
-      get(target, prop) {
-        if (prop === "batch") {
-          return async (...args: Parameters<typeof db.batch>) => {
-            const stmts = args[0] as Array<string | { sql: string }>;
-            if (stmts.some((st) => (typeof st === "string" ? st : st.sql).includes("INSERT INTO connection_health_checks"))) {
-              throw new Error("SQLITE_IOERR: disk detail SECRET-DETAIL-XYZ at /var/db");
-            }
-            return target.batch(...args);
-          };
-        }
-        const v = Reflect.get(target, prop, target);
-        return typeof v === "function" ? v.bind(target) : v;
-      },
+    const leaky = withBatchHook(async (statements) => {
+      if (statements.some((st) => (typeof st === "string" ? st : st.sql).includes("INSERT INTO connection_health_checks"))) {
+        throw new Error("SQLITE_IOERR: disk detail SECRET-DETAIL-XYZ at /var/db");
+      }
     });
     const quiet = console.error;
     console.error = () => {};

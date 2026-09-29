@@ -127,7 +127,13 @@ async function loadTokens(tenantId: string, connectionId: string): Promise<OAuth
 export type GetAccessTokenInput = {
   tenantId: string;
   connectionId: string;
-  /** The provider's refresh call. Receives the current refresh token and an abort signal. */
+  /**
+   * The provider's refresh call. Receives the current refresh token and an
+   * abort signal. When the provider ANSWERS and refuses (invalid_grant,
+   * invalid_client, unauthorized_client, or a 400/401), throw
+   * RefreshRefusedError: only that expires the connection. Anything else it
+   * throws is treated as "could not reach the provider" and never expires it.
+   */
   refresh: (refreshToken: string, signal: AbortSignal) => Promise<OAuthTokens>;
   now?: () => Date;
   /** How long a loser waits for the winner, and how often it looks. */
