@@ -33,7 +33,10 @@ export const LIMITS = {
   exdates: 1000,
   calendarName: 80,
   calendars: 50,
-  opsPerBatch: 60,
+  // Runs of deletes/creates are grouped into single queries (store.applyOps),
+  // so this bounds work, not database calls. Covers a series plus the 1000
+  // exceptions it may carry.
+  opsPerBatch: 1100,
   maxSpanDays: 366,
 } as const;
 

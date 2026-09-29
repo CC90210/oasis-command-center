@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { seriesStarts } from "../lib/calendar/recurrence";
+import { instantOf } from "../lib/calendar/zone";
 import { DEFAULT_PREFS, type EventInput, type EventRecord } from "../lib/calendar/types";
 import { shabbatConflict } from "../lib/calendar/validate";
 
@@ -47,6 +48,20 @@ assert.ok(
   // `until` is a date in the event's zone: Mon 9 Nov 9am Toronto is still the 9th there.
   const until = { ...series, recurrence: { freq: "WEEKLY" as const, interval: 1, until: "2026-11-09" } };
   assert.equal([...seriesStarts(until)].length, 3);
+}
+
+// [P2, Codex round 4] Wall-clock to instant around DST changes.
+{
+  const w = (y: number, m: number, d: number, h: number, mi: number) => ({ y, m, d, h, mi, s: 0 });
+  // Paris 01:30 on the spring-forward day exists (CET) and must stay 01:30.
+  assert.equal(instantOf(w(2026, 2, 29, 1, 30), "Europe/Paris").toISOString(), "2026-03-29T00:30:00.000Z");
+  // Toronto 02:30 on Mar 8 does not exist: pushed past the gap to 03:30 EDT.
+  assert.equal(instantOf(w(2026, 2, 8, 2, 30), "America/Toronto").toISOString(), "2026-03-08T07:30:00.000Z");
+  // Toronto 01:30 on Nov 1 happens twice: the earlier (EDT) wins.
+  assert.equal(instantOf(w(2026, 10, 1, 1, 30), "America/Toronto").toISOString(), "2026-11-01T05:30:00.000Z");
+  // Ordinary times on either side.
+  assert.equal(instantOf(w(2026, 6, 1, 9, 0), "America/Toronto").toISOString(), "2026-07-01T13:00:00.000Z");
+  assert.equal(instantOf(w(2026, 0, 15, 9, 0), "Asia/Kolkata").toISOString(), "2026-01-15T03:30:00.000Z");
 }
 
 console.log("calendar-server-tz: all checks passed");

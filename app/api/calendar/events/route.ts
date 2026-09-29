@@ -18,7 +18,8 @@ export async function POST(req: Request) {
   if (!sameOrigin(req)) return forbidden();
   const who = await requireOwner();
   if (!who.ok) return who.response;
-  const body = (await readJson(req)) as { ops?: unknown } | undefined;
+  // 1 MB: room for a series plus its exceptions (LIMITS.opsPerBatch).
+  const body = (await readJson(req, 1_000_000)) as { ops?: unknown } | undefined;
   if (!body) return badRequest("body_invalid");
   const ops = validateOps(body.ops);
   if (!ops.ok) return badRequest(ops.error);

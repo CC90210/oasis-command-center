@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { AlignLeft, Bell, CalendarDays, Clock3, MapPin, Palette, Plus, Repeat2, Users, X } from "lucide-react";
-import { addDays, addMinutes, fromDateKey, isDateKey, toDateKey } from "@/lib/calendar/dates";
+import { addDays, addMinutes, diffDays, fromDateKey, isDateKey, toDateKey } from "@/lib/calendar/dates";
 import { CALENDAR_COLORS, CALENDAR_COLOR_LABELS, type CalendarPrefs, type CalendarRecord, type EventInput } from "@/lib/calendar/types";
 import { RecurrenceField } from "./RecurrenceField";
 import { REMINDER_CHOICES, inputEnd, inputStart, reminderLabel, useDialogFocus } from "./ui";
@@ -53,8 +53,9 @@ export function EventEditor({ draft, isNew, calendars, prefs, error, saving, onC
   const onStartDate = (key: string) => {
     const s = draft.allDay ? (isDateKey(key) ? fromDateKey(key) : null) : combine(key, timeValue(start));
     if (!s) return;
-    // Moving the start keeps the duration, as Google does.
-    setTimes(s, new Date(s.getTime() + (end.getTime() - start.getTime())));
+    // Moving the start keeps the duration, as Google does: in calendar days
+    // for all-day events (a DST change makes a day 23 or 25 hours long).
+    setTimes(s, draft.allDay ? addDays(s, diffDays(start, end)) : new Date(s.getTime() + (end.getTime() - start.getTime())));
   };
   const onStartTime = (t: string) => {
     const s = combine(toDateKey(start), t);

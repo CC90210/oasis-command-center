@@ -274,6 +274,12 @@ export type OpResult = { op: EventOp["op"]; id: string; tempId?: string; event?:
  * Applies a planned batch in order. The planner orders creates before the
  * truncation of an old series, so a failure part-way never loses an event;
  * the error names how many ops landed so the client can reload.
+ *
+ * Runs of consecutive deletes become ONE query and runs of consecutive
+ * creates ONE insert. On Cloudflare Workers every database call is a
+ * subrequest against a per-request cap, and deleting a series with many
+ * edited occurrences (or undoing that) would otherwise spend one per row.
+ * Every create is checked (calendar + Shabbat) before the first write.
  */
 export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPrefs): Promise<OpResult[]> {
   const db = getServiceSupabase();
@@ -286,22 +292,53 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
     const hit = shabbatConflict(input, prefs);
     if (hit) throw new CalendarStoreError("shabbat_protected", 409, `overlaps ${hit.start.toISOString()} - ${hit.end.toISOString()}`);
   };
+  for (const op of ops) if (op.op === "create") check(op.event);
 
-  for (const [index, op] of ops.entries()) {
+  let i = 0;
+  while (i < ops.length) {
+    const landed = results.length;
     try {
-      if (op.op === "create") {
-        const input = { ...op.event };
-        if (input.recurringEventId && tempIds.has(input.recurringEventId))
-          input.recurringEventId = tempIds.get(input.recurringEventId)!;
-        check(input);
-        const now = new Date().toISOString();
-        const id = randomUUID();
-        const row = { id, tenant_id: owner.tenantId, user_id: owner.userId, ...eventColumns(input), created_at: now, updated_at: now };
-        const { error } = await db.from("calendar_events").insert(row);
+      const op = ops[i];
+      if (op.op === "delete") {
+        let j = i;
+        while (j < ops.length && ops[j].op === "delete") j++;
+        const ids = ops.slice(i, j).map((o) => (o as { id: string }).id);
+        const { error } = await db
+          .from("calendar_events")
+          .delete()
+          .eq("tenant_id", owner.tenantId)
+          .eq("user_id", owner.userId)
+          .in("id", ids);
         if (error) storageError(error, "event_write_failed");
-        if (op.tempId) tempIds.set(op.tempId, id);
-        results.push({ op: "create", id, tempId: op.tempId, event: toEvent(row) });
-      } else if (op.op === "update") {
+        for (const id of ids) results.push({ op: "delete", id });
+        i = j;
+      } else if (op.op === "create") {
+        // Take consecutive creates, stopping before one that points at a
+        // series created earlier in this same run (it needs the real id).
+        const run: Extract<EventOp, { op: "create" }>[] = [];
+        const pending = new Set<string>();
+        let j = i;
+        while (j < ops.length && ops[j].op === "create") {
+          const c = ops[j] as Extract<EventOp, { op: "create" }>;
+          if (c.event.recurringEventId && pending.has(c.event.recurringEventId)) break;
+          if (c.tempId) pending.add(c.tempId);
+          run.push(c);
+          j++;
+        }
+        const now = new Date().toISOString();
+        const rows = run.map((c) => {
+          const input = { ...c.event };
+          if (input.recurringEventId && tempIds.has(input.recurringEventId)) input.recurringEventId = tempIds.get(input.recurringEventId)!;
+          return { id: randomUUID(), tenant_id: owner.tenantId, user_id: owner.userId, ...eventColumns(input), created_at: now, updated_at: now };
+        });
+        const { error } = await db.from("calendar_events").insert(rows);
+        if (error) storageError(error, "event_write_failed");
+        run.forEach((c, k) => {
+          if (c.tempId) tempIds.set(c.tempId, rows[k].id);
+          results.push({ op: "create", id: rows[k].id, tempId: c.tempId, event: toEvent(rows[k]) });
+        });
+        i = j;
+      } else {
         const current = await getEvent(owner, op.id);
         if (!current) throw new CalendarStoreError("event_not_found", 404);
         const { id: _i, createdAt: _c, updatedAt: _u, ...base } = current;
@@ -317,19 +354,11 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
           .eq("id", op.id);
         if (error) storageError(error, "event_write_failed");
         results.push({ op: "update", id: op.id, event: { ...merged.value, id: op.id, createdAt: current.createdAt, updatedAt: now } });
-      } else {
-        const { error } = await db
-          .from("calendar_events")
-          .delete()
-          .eq("tenant_id", owner.tenantId)
-          .eq("user_id", owner.userId)
-          .eq("id", op.id);
-        if (error) storageError(error, "event_write_failed");
-        results.push({ op: "delete", id: op.id });
+        i++;
       }
     } catch (err) {
-      if (err instanceof CalendarStoreError && index > 0)
-        throw new CalendarStoreError(err.code, err.status, `${index} of ${ops.length} changes saved before this failed`);
+      if (err instanceof CalendarStoreError && landed > 0)
+        throw new CalendarStoreError(err.code, err.status, `${landed} of ${ops.length} changes saved before this failed`);
       throw err;
     }
   }

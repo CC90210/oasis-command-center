@@ -63,16 +63,16 @@ export function instantOf(p: WallParts, tz: string): Date {
   if (!formatter(tz)) return new Date(p.y, p.m, p.d, p.h, p.mi, p.s);
   const guess = Date.UTC(p.y, p.m, p.d, p.h, p.mi, p.s);
   const o1 = offsetMinutes(guess, tz);
-  let t = guess - o1 * 60_000;
-  const o2 = offsetMinutes(t, tz);
-  if (o2 !== o1) {
-    const t2 = guess - o2 * 60_000;
-    // Accept whichever candidate actually shows the requested wall time; if
-    // neither does, the time fell in a gap: take the later offset's reading.
-    const w = wallParts(new Date(t2), tz);
-    t = w.h === p.h && w.mi === p.mi ? Math.min(t, t2) : Math.max(t, t2);
-  }
-  return new Date(t);
+  const o2 = offsetMinutes(guess - o1 * 60_000, tz);
+  const candidates = [...new Set([guess - o1 * 60_000, guess - o2 * 60_000])];
+  const shows = (t: number) => {
+    const w = wallParts(new Date(t), tz);
+    return w.y === p.y && w.m === p.m && w.d === p.d && w.h === p.h && w.mi === p.mi;
+  };
+  const exact = candidates.filter(shows);
+  // Fall-back overlap: both match, the earlier wins. Spring-forward gap:
+  // neither matches; the later candidate is the time pushed past the gap.
+  return new Date(exact.length ? Math.min(...exact) : Math.max(...candidates));
 }
 
 /** Day number (days since 1970-01-01) of a wall date, for zone-free day arithmetic. */
