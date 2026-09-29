@@ -28,6 +28,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { PanelLeftClose, X } from "lucide-react";
 import { longestPrefixMatch } from "@/lib/os/match";
 import type { OsNavRow, OsNavSection, OsSectionKey } from "@/lib/os/types";
+import { activeRailMode, lastNormalMode, modeToRemember } from "@/components/os/rail-mode";
 import { ModeTabs } from "@/components/os/ModeTabs";
 import { RailGroup } from "@/components/os/RailGroup";
 import { RailRow, useWarmOnIntent } from "@/components/os/RailRow";
@@ -89,13 +90,11 @@ export function OsRail({
     () => sections.flatMap((s) => s.groups.flatMap((g) => g.rows.map((r) => ({ ...r, section: s.key })))),
     [sections],
   );
-  const hasSection = (key: OsSectionKey | null): key is OsSectionKey =>
-    !!key && sections.some((s) => s.key === key);
+  const available = useMemo(() => sections.map((s) => s.key), [sections]);
 
   const matched = longestPrefixMatch(pathname, rows);
   const pathMode = matched?.section ?? null;
   const modes = sections.filter((s) => s.key !== "admin");
-  const firstMode = modes[0]?.key ?? sections[0]?.key ?? null;
 
   // A tab click or the shield overrides the path until the path changes.
   const [manual, setManual] = useState<OsSectionKey | null>(null);
@@ -103,9 +102,11 @@ export function OsRail({
     setManual(null);
   }, [pathname]);
 
-  // Last mode used in this browser tab, for pages no row owns (/settings, …).
-  // Read after mount so the server render and hydration agree.
+  // Last mode used in this browser tab, for pages no row owns (/settings, …)
+  // and for leaving Admin. Read after mount so the server render and hydration
+  // agree; kept current below (rail-mode.ts modeToRemember).
   const [remembered, setRemembered] = useState<OsSectionKey | null>(null);
+  const [storageRead, setStorageRead] = useState(false);
   useEffect(() => {
     try {
       const raw = window.sessionStorage.getItem(MODE_STORAGE_KEY) as OsSectionKey | null;
@@ -113,31 +114,27 @@ export function OsRail({
     } catch {
       // Blocked storage: fall back to the first mode.
     }
+    setStorageRead(true);
   }, []);
 
-  const activeMode: OsSectionKey | null = hasSection(manual)
-    ? manual
-    : hasSection(pathMode)
-      ? pathMode
-      : hasSection(remembered) && remembered !== "admin"
-        ? remembered
-        : firstMode;
+  const activeMode = activeRailMode({ manual, pathMode, remembered, available });
 
   useEffect(() => {
-    if (!activeMode || activeMode === "admin") return;
+    const mode = modeToRemember(activeMode, storageRead);
+    if (!mode) return;
+    setRemembered(mode);
     try {
-      window.sessionStorage.setItem(MODE_STORAGE_KEY, activeMode);
+      window.sessionStorage.setItem(MODE_STORAGE_KEY, mode);
     } catch {
       // Convenience only.
     }
-  }, [activeMode]);
+  }, [activeMode, storageRead]);
 
   const adminView = activeMode === "admin";
   const shown = sections.find((s) => s.key === activeMode) ?? null;
-  const lastNormalMode = hasSection(remembered) && remembered !== "admin" ? remembered : firstMode;
 
   const toggleAdmin = () => {
-    setManual(adminView ? lastNormalMode : "admin");
+    setManual(adminView ? lastNormalMode({ remembered, available }) : "admin");
   };
 
   const warmHome = useWarmOnIntent("/");

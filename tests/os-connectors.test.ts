@@ -46,6 +46,8 @@ import {
   type SettingsSectionKey,
 } from "../components/settings/settings-sections";
 import { OASIS_ADDONS } from "../components/settings/addons";
+import { watchPopup } from "../components/os/connections/popup-watch";
+import { FOCUSABLE_SELECTOR, trapTab } from "../components/os/connections/focus-trap";
 
 const root = join(__dirname, "..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -411,6 +413,104 @@ assert.match(content, /isVerifiedOperator\(\)/);
 assert.doesNotMatch(content, /isOperatorEmail\(/, "operator status must not come from the session email alone");
 // The workspace-level hub is owners/admins only; everyone else sees their own Google.
 assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.canManage\)/);
+
+// ─── 6. The hub's popup watch and the drawer's focus trap (CodeRabbit #468) ─
+
+{
+  // A fake window: the listeners and timers the watch registers stay visible.
+  const fakeWindow = () => {
+    const listeners = new Set<(e: MessageEvent) => void>();
+    const timers = new Map<number, () => void>();
+    let next = 1;
+    return {
+      listeners,
+      timers,
+      env: {
+        origin: "https://app.test",
+        addMessageListener: (fn: (e: MessageEvent) => void) => void listeners.add(fn),
+        removeMessageListener: (fn: (e: MessageEvent) => void) => void listeners.delete(fn),
+        setInterval: (fn: () => void) => {
+          const id = next++;
+          timers.set(id, fn);
+          return id;
+        },
+        clearInterval: (id: unknown) => void timers.delete(id as number),
+      },
+      post: (origin: string, data: unknown) => {
+        for (const fn of [...listeners]) fn({ origin, data } as MessageEvent);
+      },
+      tick: () => {
+        for (const fn of [...timers.values()]) fn();
+      },
+    };
+  };
+
+  // Reports back: onDone once, and nothing is left registered.
+  {
+    const w = fakeWindow();
+    const done: unknown[] = [];
+    watchPopup({ popup: { closed: false }, source: "constant_contact", env: w.env, onDone: (r) => done.push(r) });
+    assert.equal(w.listeners.size, 1);
+    assert.equal(w.timers.size, 1);
+    w.post("https://evil.test", { source: "constant_contact", status: "connected" });
+    w.post("https://app.test", { source: "other", status: "connected" });
+    w.post("https://app.test", null);
+    assert.deepEqual(done, [], "another origin or source is not this popup's answer");
+    w.post("https://app.test", { source: "constant_contact", status: "error", reason: "admin_only" });
+    w.post("https://app.test", { source: "constant_contact", status: "connected" });
+    assert.deepEqual(done, [{ status: "error", reason: "admin_only" }], "one answer, once");
+    assert.equal(w.listeners.size + w.timers.size, 0, "the listener and the poll are gone after the answer");
+  }
+  // Closed by hand: the poll finishes it with no status.
+  {
+    const w = fakeWindow();
+    const popup = { closed: false };
+    const done: unknown[] = [];
+    watchPopup({ popup, source: "constant_contact", env: w.env, onDone: (r) => done.push(r) });
+    w.tick();
+    assert.deepEqual(done, []);
+    popup.closed = true;
+    w.tick();
+    assert.deepEqual(done, [{}]);
+    assert.equal(w.listeners.size + w.timers.size, 0);
+  }
+  // Stopped (the hub unmounted, or another popup started): nothing outlives it,
+  // and a late answer never reaches router.refresh or setState.
+  {
+    const w = fakeWindow();
+    const popup = { closed: false };
+    const done: unknown[] = [];
+    const stop = watchPopup({ popup, source: "constant_contact", env: w.env, onDone: (r) => done.push(r) });
+    stop();
+    stop();
+    assert.equal(w.listeners.size + w.timers.size, 0, "stop removes the listener and clears the poll");
+    popup.closed = true;
+    w.tick();
+    w.post("https://app.test", { source: "constant_contact", status: "connected" });
+    assert.deepEqual(done, [], "no callback after stop");
+  }
+  const hub = read("components/os/connections/ConnectionsHub.tsx");
+  assert.doesNotMatch(hub, /window\.addEventListener\("message", (?!fn\))/, "the hub registers message listeners only through watchPopup");
+  assert.match(hub, /useEffect\(\s*\(\) => \(\) => \{\s*stopWatch\.current\?\.\(\);/, "the watch is stopped on unmount");
+  assert.match(hub, /\(def: ConnectorDef, href: string, source: string\) => \{\s*stopWatch\.current\?\.\(\);/, "a new popup stops the previous watch first");
+
+  // Focus trap: Tab wraps inside the sheet; focus outside is pulled back in.
+  const stops = ["close", "tell-oasis", "connect"];
+  assert.deepEqual(trapTab(stops, "connect", false, true), { prevent: true, focus: "close" }, "Tab from the last control wraps to the first");
+  assert.deepEqual(trapTab(stops, "close", true, true), { prevent: true, focus: "connect" }, "Shift+Tab from the first wraps to the last");
+  assert.deepEqual(trapTab(stops, "close", false, true), { prevent: false, focus: null }, "Tab between inside controls is the browser's");
+  assert.deepEqual(trapTab(stops, "tell-oasis", true, true), { prevent: false, focus: null });
+  assert.deepEqual(trapTab(stops, "page-link", false, false), { prevent: true, focus: "close" }, "focus behind the backdrop comes back in");
+  assert.deepEqual(trapTab(stops, null, true, false), { prevent: true, focus: "connect" });
+  assert.deepEqual(trapTab(["close"], "close", false, true), { prevent: true, focus: "close" }, "one control: focus stays on it");
+  assert.deepEqual(trapTab([], null, false, false), { prevent: true, focus: null }, "nothing to focus: Tab still cannot leave");
+  assert.match(FOCUSABLE_SELECTOR, /a\[href\]/, "the drawer's Tell OASIS link is a Tab stop");
+  const drawer = read("components/os/connections/ConnectorDrawer.tsx");
+  assert.match(drawer, /trapTab\(/, "the drawer's keydown handler traps Tab");
+  assert.match(drawer, /e\.key === "Escape"/, "Escape still closes it");
+  assert.match(drawer, /returnFocus\.current\?\.focus\?\.\(\)/, "focus still goes back to the opener on close");
+  assert.match(drawer, /ref=\{panelRef\}\s+role="dialog"\s+aria-modal="true"/, "the trap is scoped to the aria-modal sheet");
+}
 
 console.log(
   `os-connectors: OK — ${CONNECTOR_CATALOG.length} connectors (${LIVE.length} live, ` +

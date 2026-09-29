@@ -603,6 +603,11 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // off a rep's rail — the same line the capability rows above draw.
   "/team/chief-of-staff",
   "/team/sales",
+  // OASIS OS Feed, a Team row for everyone (lib/os/nav.ts). A rep gets its
+  // Needs-you tab only: the event tape is canSeeSystemSurfaces, which this
+  // persona does not have, so app/feed never reads agent_events for them
+  // (components/os/landings/feed-model.ts).
+  "/feed",
 ];
 
 /**
@@ -634,6 +639,8 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   // The rep's departments: a manager coaches inside Sales, not Finance.
   "/team/chief-of-staff",
   "/team/sales",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 /**
@@ -663,6 +670,8 @@ export const MARKETING_NAV_ALLOWLIST: readonly string[] = [
   "/team/chief-of-staff",
   "/team/marketing",
   "/growth/ads",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 /**
@@ -689,6 +698,8 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   "/team/sales",
   "/team/marketing",
   "/growth/ads",
+  // Feed: Needs you only, as for a rep (no system surfaces, so no tape read).
+  "/feed",
 ];
 
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {

@@ -43,6 +43,7 @@ import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { ACTIVE_PROJECT_STAGES, slaStatus } from "@/lib/delivery/rules";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
+import { tileCount } from "./count-rules";
 import { failedWithin, type RoutineRow } from "./routine-rules";
 import type { Read } from "./routines";
 import type { OsViewer } from "./viewer";
@@ -206,7 +207,10 @@ type DeliveryFigures = {
   breached: number;
   atRisk: number;
   activeProjects: number;
+  /** The open-ticket read hit its ceiling: every ticket-derived count is a floor. */
   truncated: boolean;
+  /** The project read hit its ceiling: the active-project count is a floor. */
+  projectsTruncated: boolean;
 };
 
 /** lib/delivery/access.ts, asked with the session this page already resolved. */
@@ -243,6 +247,7 @@ async function loadDelivery(viewer: OsViewer, withProjects: boolean): Promise<Re
         ? projects.rows.filter((p) => (ACTIVE_PROJECT_STAGES as readonly string[]).includes(p.stage)).length
         : 0,
       truncated: tickets.truncated,
+      projectsTruncated: projects ? projects.truncated : false,
     };
   });
 }
@@ -255,7 +260,7 @@ function breachAttention(d: DeliveryFigures): AttentionItem[] {
     {
       id: "sla-breached",
       count: d.breached,
-      label: `${n(d.breached)} ticket${d.breached === 1 ? "" : "s"} past the first-response target`,
+      label: `${tileCount(d.breached, d.truncated)} ticket${d.breached === 1 && !d.truncated ? "" : "s"} past the first-response target`,
       href: "/tickets?sla=breached",
     },
   ];
@@ -427,22 +432,24 @@ async function clientSuccessNumbers(viewer: OsViewer): Promise<DepartmentNumbers
     };
   }
   const d = delivery.value;
-  const open = d.truncated ? `${n(d.open)}+` : n(d.open);
+  const open = tileCount(d.open, d.truncated);
   if (d.kind === "client") {
     return {
       tiles: [
         { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" },
-        { label: "Active projects", value: n(d.activeProjects), status: "live", hint: "In discovery, building or review" },
+        { label: "Active projects", value: tileCount(d.activeProjects, d.projectsTruncated), status: "live", hint: "In discovery, building or review" },
       ],
       attention: [],
     };
   }
+  // Breached and at-risk are counted from the same capped ticket read as
+  // "Open", so they are floors whenever it is (never an exact-looking total).
   return {
     tiles: [
       { label: "Open tickets", value: open, status: "live", hint: "Open, in progress or waiting" },
-      { label: "SLA breached", value: n(d.breached), status: "live", hint: "Unanswered past target" },
-      { label: "At risk", value: n(d.atRisk), status: "live", hint: "Last quarter of the window" },
-      { label: "Active projects", value: n(d.activeProjects), status: "live", hint: "Discovery, building or review" },
+      { label: "SLA breached", value: tileCount(d.breached, d.truncated), status: "live", hint: "Unanswered past target" },
+      { label: "At risk", value: tileCount(d.atRisk, d.truncated), status: "live", hint: "Last quarter of the window" },
+      { label: "Active projects", value: tileCount(d.activeProjects, d.projectsTruncated), status: "live", hint: "Discovery, building or review" },
     ],
     attention: breachAttention(d),
   };
@@ -477,10 +484,11 @@ async function chiefOfStaffNumbers(viewer: OsViewer, routines: Read<RoutineRow[]
   if (delivery !== null) {
     if (delivery.ok) {
       const d = delivery.value;
+      const open = tileCount(d.open, d.truncated);
       tiles.push(
         d.kind === "founder"
-          ? { label: "Open tickets", value: n(d.open), status: "live", hint: "Across every client" }
-          : { label: "Open requests", value: n(d.open), status: "live", hint: "Support requests your team filed" },
+          ? { label: "Open tickets", value: open, status: "live", hint: "Across every client" }
+          : { label: "Open requests", value: open, status: "live", hint: "Support requests your team filed" },
       );
       attention.push(...breachAttention(d));
     } else {

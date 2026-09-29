@@ -19,7 +19,7 @@ import "server-only";
 
 import { listRecords } from "@/lib/manifest/data";
 import { getDeliveryAccess, getDeliveryDb } from "@/lib/delivery/session";
-import { listProjects, listTickets } from "@/lib/delivery/store";
+import { LIST_LIMIT, listProjects, listTickets } from "@/lib/delivery/store";
 import type { OsPageViewer } from "@/components/os/landings/page-gate";
 import {
   CLIENT_STAGES,
@@ -36,6 +36,9 @@ export type SourceState<T> =
 
 /** Upper bound on won deals read for the list; the page says when it is hit. */
 export const CLIENTS_LEAD_LIMIT = 1000;
+
+/** The delivery reads' own ceiling (lib/delivery/store LIST_LIMIT); the page says when it is hit. */
+export const CLIENTS_DELIVERY_LIMIT = LIST_LIMIT;
 
 async function loadWonDeals(viewer: OsPageViewer): Promise<SourceState<ClientLead>> {
   if (!viewer.oasis) return { state: "not_applicable" };

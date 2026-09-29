@@ -11,13 +11,15 @@
  * An overlay, so it is the one place in the hub that carries a shadow (a
  * y-offset, neutral tint). Motion is opacity + transform at 140ms and switches
  * off under prefers-reduced-motion. Esc and the backdrop close it; focus moves
- * to the close button on open and back to whatever opened it on close.
+ * to the close button on open, Tab and Shift+Tab stay inside it while it is
+ * open, and focus goes back to whatever opened it on close.
  */
 
 import { useEffect, useRef } from "react";
 import { X } from "lucide-react";
 import { ConnectorIcon, SubProductIcon } from "@/components/os/connections/ConnectorIcon";
 import { StatusLine } from "@/components/os/connections/StatusLine";
+import { FOCUSABLE_SELECTOR, trapTab } from "@/components/os/connections/focus-trap";
 import { glyphColor, type ConnectorDef, type ConnectorStatus } from "@/lib/os/connectors";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 
@@ -43,6 +45,7 @@ export function ConnectorDrawer({
   supportHref: string | null;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -50,7 +53,22 @@ export function ConnectorDrawer({
     returnFocus.current = document.activeElement as HTMLElement | null;
     closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      // aria-modal: Tab stays inside the sheet (focus-trap.ts).
+      const panel = panelRef.current;
+      if (e.key !== "Tab" || !panel) return;
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const move = trapTab(
+        Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)),
+        active,
+        e.shiftKey,
+        !!active && panel.contains(active),
+      );
+      if (move.prevent) e.preventDefault();
+      move.focus?.focus();
     };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
@@ -79,6 +97,7 @@ export function ConnectorDrawer({
         }`}
       />
       <aside
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="connector-drawer-title"

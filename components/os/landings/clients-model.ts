@@ -16,6 +16,10 @@
  *
  * A count the viewer may not read (projects / tickets are founder-only inside
  * OASIS) is null, and renders as an em dash — never 0.
+ *
+ * A count built from a list that stopped at its read cap is a FLOOR, not a
+ * total: it renders as "N+" (shownCount), never as the number alone. Which
+ * counts a capped list turns into floors is decided here, in `floors`.
  */
 
 /** Stages that mean "this deal is now a client" (paid, then delivery). */
@@ -82,7 +86,24 @@ export type ClientRow = {
   href: string | null;
 };
 
-export type ClientsBuild = { rows: ClientRow[]; unlinkedTickets: number | null };
+/** Which counts are floors ("at least N") because a source list hit its read cap. */
+export type ClientFloors = {
+  /** The number of clients: a won deal or a project past the cap is a client not listed. */
+  clients: boolean;
+  /** Per-client and summed open tickets. */
+  openTickets: boolean;
+  /** Per-client and summed active projects. */
+  activeProjects: boolean;
+  /** The unlinked-ticket count (only when it is a number). */
+  unlinkedTickets: boolean;
+};
+
+export type ClientsBuild = { rows: ClientRow[]; unlinkedTickets: number | null; floors: ClientFloors };
+
+/** A count as the page prints it: "12+" when it is a floor, never a bare number that reads as the total. */
+export function shownCount(value: number, floor: boolean): string {
+  return floor ? `${value}+` : String(value);
+}
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
 const norm = (v: string | null | undefined) => (v || "").trim().toLowerCase();
@@ -103,11 +124,22 @@ type Acc = ClientRow & { emails: Set<string>; projectIds: Set<string>; tenantIds
 /**
  * Merge. `projects` / `tickets` null means "not readable by this viewer" and
  * turns that column into an em dash for every row; [] means "readable, none".
+ *
+ * `capped` says which lists stopped at their read cap (clients-data's
+ * `truncated`). What each one makes a floor:
+ *   leads     the client count (a won deal past the cap is not listed);
+ *   projects  the client count, active projects, AND open tickets — a ticket
+ *             attaches through its project, and one past the cap cannot;
+ *   tickets   open tickets and the unlinked count.
+ * Capped leads or projects make the unlinked count unknown (null), not a
+ * floor: a ticket whose client or project was not read lands in "unlinked", so
+ * that number can be too high as well as too low.
  */
 export function buildClientRows(input: {
   leads: readonly ClientLead[];
   projects: readonly ClientProject[] | null;
   tickets: readonly ClientTicket[] | null;
+  capped?: { leads?: boolean; projects?: boolean; tickets?: boolean };
 }): ClientsBuild {
   const rows = new Map<string, Acc>();
   const byLead = new Map<string, Acc>();
@@ -203,5 +235,19 @@ export function buildClientRows(input: {
     if (ta !== tb) return tb - ta;
     return a.name.localeCompare(b.name);
   });
-  return { rows: out, unlinkedTickets: ticketsKnown ? unlinked : null };
+  const capped = input.capped ?? {};
+  const leadsCapped = capped.leads === true;
+  const projectsCapped = projectsKnown && capped.projects === true;
+  const ticketsCapped = ticketsKnown && capped.tickets === true;
+  const unlinkedKnown = ticketsKnown && !leadsCapped && !projectsCapped;
+  return {
+    rows: out,
+    unlinkedTickets: unlinkedKnown ? unlinked : null,
+    floors: {
+      clients: leadsCapped || projectsCapped,
+      openTickets: ticketsKnown && (ticketsCapped || projectsCapped),
+      activeProjects: projectsCapped,
+      unlinkedTickets: unlinkedKnown && ticketsCapped,
+    },
+  };
 }

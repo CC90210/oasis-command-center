@@ -29,6 +29,7 @@ import {
   departmentProfile,
   suggestedAsksFor,
 } from "../components/os/department/config";
+import { tileCount } from "../components/os/department/count-rules";
 import {
   describeSchedule,
   failedWithin,
@@ -308,6 +309,32 @@ const opens = (slug: string, input: BuildOsNavInput) => departmentGate(slug, inp
   // SQLite hands booleans back as 0/1: a disabled routine must not read "On".
   assert.equal(normalizeRoutineRow({ id: 1, enabled: 0, agent_key: "BRAVO" }).enabled, false);
   assert.equal(normalizeRoutineRow({ id: 1, enabled: 1, agent_key: "BRAVO" }).agentKey, "bravo");
+}
+
+// ── 11. A capped ticket count is a floor on every tab ─────────────────────
+// CodeRabbit #468: Client Success printed "500+" for a ticket list at its read
+// ceiling while Chief of Staff printed the same count as an exact "500".
+{
+  assert.equal(tileCount(500, true), "500+");
+  assert.equal(tileCount(1234, false), "1,234");
+  assert.equal(tileCount(0, false), "0");
+  const numbers = read("components/os/department/numbers.ts");
+  assert.doesNotMatch(numbers, /\bn\(d\.open\)/, "an open-ticket tile printed the raw count, dropping the floor marker");
+  // Breached / at-risk come from the same capped ticket read, active projects
+  // from a capped project read: all floors when the read hit its ceiling.
+  assert.doesNotMatch(
+    numbers,
+    /\bn\(d\.(breached|atRisk|activeProjects)\)/,
+    "a delivery tile printed a raw count from a capped read, dropping the floor marker",
+  );
+  assert.match(numbers, /tileCount\(d\.breached, d\.truncated\)/);
+  assert.match(numbers, /tileCount\(d\.atRisk, d\.truncated\)/);
+  assert.match(numbers, /tileCount\(d\.activeProjects, d\.projectsTruncated\)/);
+  assert.equal(
+    (numbers.match(/tileCount\(d\.open, d\.truncated\)/g) || []).length,
+    2,
+    "Chief of Staff and Client Success both print open tickets through tileCount",
+  );
 }
 
 console.log(
