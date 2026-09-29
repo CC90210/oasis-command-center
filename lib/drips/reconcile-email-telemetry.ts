@@ -1,6 +1,7 @@
 import "server-only";
 import { dbError } from "@/lib/db-error";
 import { buildDripHtml } from "@/lib/email/tracked-html";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 type Db = ReturnType<typeof import("@/lib/supabase-server").getServiceSupabase>;
 
@@ -32,6 +33,10 @@ export async function reconcileDripEmailTelemetry(db: Db, limit = 1000) {
   if (interactionsResult.error) throw interactionsResult.error;
 
   const candidates = ((interactionsResult.data || []) as Interaction[]).filter((row) => {
+    // No telemetry backfill for a retired tenant: its drip_email_events are
+    // being exported and deleted. Filtered here, not in the query, because
+    // lead_interactions carries NULL-tenant rows that NOT IN would also drop.
+    if (isRetiredTenant(row.tenant_id)) return false;
     const meta = row.metadata || {};
     return (
       meta.provider === "submissions_gmail" &&

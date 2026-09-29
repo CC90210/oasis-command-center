@@ -44,7 +44,11 @@ function stubModule(path: string, exports: Record<string, unknown>) {
 }
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452"; // brand "oasis"
-const SUNBIZ = "aa04fa1f-ad6a-44b0-ac4b-2ff5d1067110"; // brand "sunbiz"
+// The second, SMS-sending tenant. It was the real SunBiz id until SunBiz was
+// retired on 2026-09-28: the dispatcher now never claims a retired tenant's
+// rows (lib/tenant/retired.ts; tests/retired-tenant-producers.test.ts), so a
+// neutral stand-in carries the same TextTorrent-line fixture (runbook C-6c).
+const SUNBIZ = "5b5b5b5b-0000-4000-8000-00000000005b";
 const AVA = "3d3d3d3d-0000-4000-8000-000000000001"; // active on OASIS
 const BEN = "3d3d3d3d-0000-4000-8000-000000000002"; // active on OASIS
 const RILEY = "3d3d3d3d-0000-4000-8000-000000000003"; // deactivated on OASIS, active on SunBiz

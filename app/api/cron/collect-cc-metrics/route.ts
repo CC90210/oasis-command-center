@@ -9,6 +9,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getConstantContactClient } from "@/lib/integrations/constant-contact/store";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,12 +47,15 @@ export async function GET(req: NextRequest) {
   const db = getServiceSupabase();
 
   const since = new Date(Date.now() - 60 * 864e5).toISOString();
+  // Retired tenants are excluded in the query, before the LIMIT, so their
+  // campaigns can neither write snapshots/suppressions nor take the 50 slots.
   const runs = await db
     .from("campaign_runs")
     .select("tenant_id, tt_campaign_id, provider_activity_id")
     .eq("channel", "constant_contact")
     .gte("launched_at", since)
     .not("provider_activity_id", "is", null)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .limit(50);
   if (runs.error) return NextResponse.json({ ok: false, error: runs.error.message }, { status: 500 });
 

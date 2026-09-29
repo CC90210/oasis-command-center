@@ -35,6 +35,7 @@ import { publishAgentEvent } from "@/lib/manifest/events";
 import { dispatchLeadStageEvent } from "@/lib/lead-stage-dispatcher";
 import { b64urlDecode, verifyClickTarget } from "@/lib/drips/html-email";
 import { clickAllowedHosts } from "@/lib/email/sending-identity";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -166,7 +167,11 @@ export async function GET(
         if (landing) target = `${APP_BASE}${landing}`;
       }
 
-      if (tenantId) {
+      // A retired tenant's old links still work (the recipient is redirected
+      // as before), but nothing is logged: no email_click_events, no
+      // agent_events, no stage advance. Its rows are being exported and
+      // deleted (SunBiz, 2026-09-28).
+      if (tenantId && !isRetiredTenant(tenantId)) {
         const ua = req.headers.get("user-agent") || null;
         const resolvedIp = getClientIp(req);
         const ipHash = hashIp(resolvedIp === "unknown" ? null : resolvedIp);

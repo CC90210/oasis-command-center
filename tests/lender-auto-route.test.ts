@@ -21,6 +21,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { CRON_TABLE } from "../workers/oasis-cc-cron/src/index";
 import {
   planApplicationRoute,
   minConfidenceFromEnv,
@@ -285,23 +286,30 @@ assert.equal(
 // cron-driver-coverage.test.ts enforces the pairing generally, this names the
 // route so its removal fails by name.
 // ---------------------------------------------------------------------------
+//
+// 2026-09-28: SunBiz, the only tenant with lenders, was RETIRED (runbook C-6a).
+// The scanner is deliberately no longer scheduled anywhere, so a rollback
+// cannot restart writes for a tenant whose data is being exported and deleted.
+// The registration assertions are inverted rather than dropped: re-adding the
+// schedule must fail here by name. The route's own shape is still pinned below
+// until C-6b deletes the funding code.
+// ---------------------------------------------------------------------------
 {
   const read = (p: string) => readFileSync(p, "utf8");
+  const SCANNER = "/api/cron/scan-lender-replies";
+  const registry = JSON.parse(read("config/cron-registry.json")) as { crons?: Array<{ path: string }> };
   assert.ok(
-    read("config/cron-registry.json").includes("/api/cron/scan-lender-replies"),
-    "the scanner must be registered in config/cron-registry.json",
+    !(registry.crons ?? []).some((c) => c.path.split("?")[0] === SCANNER),
+    "config/cron-registry.json must not schedule the retired lender scanner",
   );
-  const driver = read(".github/workflows/cron-driver.yml");
-  assert.ok(driver.includes("/api/cron/scan-lender-replies"), "and driven by the workflow");
-  // BOTH registrations need write=1, not just the driver's. Dry-run is the
-  // default, so a scheduled call without it reads the whole inbox, classifies
-  // every reply, and stores none of it.
-  for (const [name, text] of [["driver", driver], ["cron-registry", read("config/cron-registry.json")]] as const) {
-    assert.ok(
-      /scan-lender-replies\?write=1/.test(text),
-      `${name} must drive the scanner with write=1, or it reads and stores nothing`,
-    );
-  }
+  assert.ok(
+    !CRON_TABLE.some((c) => c.path.split("?")[0] === SCANNER),
+    "the cron Worker must not schedule the retired lender scanner",
+  );
+  assert.ok(
+    !read(".github/workflows/cron-driver.yml").includes(SCANNER),
+    "the GitHub cron driver must not drive the retired lender scanner",
+  );
 
   // THE AUTH SHAPE THAT MADE THE FIRST ATTEMPT A NO-OP (Codex review P1).
   //

@@ -17,6 +17,7 @@ import { canaryStatus } from "./canary";
 import { sendTelegram } from "@/lib/notify/telegram";
 import { shouldAlert } from "@/lib/notify/alert-decay";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export type PoolVerdict = {
   /** Lines that may be sent from, in the order given. */
@@ -107,6 +108,9 @@ export async function announceBenchedLines(
   verdict: PoolVerdict,
   opts: { wire?: string; nowMs?: number } = {},
 ): Promise<{ alerted: string[] }> {
+  // A retired tenant sends nothing, so its lines have nothing to announce, and
+  // its health_alert_state rows are being exported and deleted.
+  if (isRetiredTenant(tenantId)) return { alerted: [] };
   const nowMs = opts.nowMs ?? Date.now();
   const db = getServiceSupabase();
   const alerted: string[] = [];

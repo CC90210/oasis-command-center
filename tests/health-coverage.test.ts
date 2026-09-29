@@ -18,7 +18,9 @@ import { cronPathsFrom, cronCheckId, computeCoverage } from "../lib/health/cover
 const vercel = JSON.parse(readFileSync("config/cron-registry.json", "utf8"));
 const paths = cronPathsFrom(vercel);
 
-assert.ok(paths.length >= 15, `expected the real cron list, got ${paths.length}`);
+// 12, not the old 15: SunBiz's 16 tenant-only registrations were removed when
+// it was retired on 2026-09-28 (runbook C-6a), leaving 14 distinct routes.
+assert.ok(paths.length >= 12, `expected the real cron list, got ${paths.length}`);
 assert.ok(paths.includes("/api/cron/dispatch-drips"), "the drip dispatcher must be discovered");
 assert.ok(paths.includes("/api/cron/enroll-drips"), "the enroller must be discovered");
 assert.ok(paths.includes("/api/cron/health-check"), "the health check itself is registered as a cron");

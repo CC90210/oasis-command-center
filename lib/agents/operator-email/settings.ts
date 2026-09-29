@@ -12,6 +12,7 @@
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getUserIntegrationBundle } from "@/lib/user-integration-store";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 export type AgentEmailMode = "off" | "monitor" | "draft" | "semi" | "full";
 const MODES: AgentEmailMode[] = ["off", "monitor", "draft", "semi", "full"];
@@ -65,13 +66,22 @@ export async function getAgentEmailSettings(tenantId: string, userId: string): P
   }
 }
 
-/** All agents that are not `off`, ordered by cursor (poll the stalest first). */
+/**
+ * All agents that are not `off`, ordered by cursor (poll the stalest first).
+ *
+ * Retired tenants are excluded IN THE QUERY (2026-09-28, SunBiz). Each polled
+ * agent writes an agent_email_snapshots row and ingests mail, which kept
+ * producing rows for a tenant being exported and deleted. Filtering after the
+ * LIMIT would be worse than not filtering: a skipped agent's cursor never
+ * advances, so it stays "stalest" forever and holds a slot every tick.
+ */
 export async function listActiveAgents(limit = 10): Promise<AgentEmailSettings[]> {
   try {
     const r = await getServiceSupabase()
       .from("agent_email_settings")
       .select("*")
       .neq("mode", "off")
+      .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
       .order("last_processed_at", { ascending: true, nullsFirst: true })
       .limit(limit);
     if (r.error || !Array.isArray(r.data)) return [];

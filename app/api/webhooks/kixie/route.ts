@@ -53,6 +53,7 @@ import {
   handleVoicemailFollowup,
   type AutomationResult,
 } from "@/lib/integrations/kixie-automations";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -430,6 +431,16 @@ export async function POST(req: NextRequest) {
       `[webhooks.kixie] no tenant mapping for businessid=${evt.businessid} event=${eventname}`,
     );
     return NextResponse.json({ ok: true, ignored: "no_tenant_mapping" });
+  }
+
+  // A retired tenant (SunBiz, 2026-09-28) is acknowledged with 200 so Kixie
+  // stops retrying, and NOTHING is written: no agent_events, no
+  // lead_interactions, no automations. Its data is being exported and deleted;
+  // a stored event would refill it. One log line so the traffic stays visible
+  // until the webhook is deregistered at Kixie (runbook C-4).
+  if (isRetiredTenant(tenantId)) {
+    console.log(`[webhooks.kixie] tenant retired; event acknowledged, nothing stored tenant=${tenantId} event=${eventname}`);
+    return NextResponse.json({ ok: true, ignored: "tenant_retired" });
   }
 
   // ── Attribution (2026-07-21) ──────────────────────────────────────────

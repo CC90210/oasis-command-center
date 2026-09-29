@@ -79,6 +79,7 @@ import {
   type EmailBudget,
 } from "@/lib/drips/governor";
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 
 export const BATCH_LIMIT = 12;
 // Read a numeric env var, treating unset OR blank/whitespace as "use default"
@@ -2070,6 +2071,7 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
       .update({ status: "scheduled" })
       .eq("status", "sending")
       .lt("claimed_at", staleBeforeIso)
+      .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
       .select("id");
     reclaimed = reclaim.data?.length || 0;
   } catch (err) {
@@ -2111,12 +2113,16 @@ export async function runDispatchDrips(): Promise<DispatchDripsResult> {
     if (claimBudget <= 0) return empty(); // at the hourly ceiling — wait for the next tick
   }
 
-  // 3) Find due 'scheduled' work (bounded by the hourly cap).
+  // 3) Find due 'scheduled' work (bounded by the hourly cap). A retired
+  // tenant's runs are excluded here and in the stale reclaim above, in the
+  // query itself: they must never be claimed or sent, and filtering after the
+  // LIMIT would let them hold every slot.
   const dueRes = await db
     .from("drip_runs")
     .select("id")
     .eq("status", "scheduled")
     .lte("scheduled_for", nowIso)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("scheduled_for", { ascending: true })
     .limit(claimBudget);
   if (dueRes.error) return empty();

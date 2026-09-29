@@ -162,10 +162,11 @@ async function main() {
   assert.doesNotMatch(repair, /sendDripSms|sendMessage|lead_interactions/,
     "repair must not contact a lead");
 
-  // The every-10-minute production schedule remains the ordinary Live-Sub
-  // enrollment URL. Repair requires an explicit authenticated invocation.
+  // Repair requires an explicit authenticated invocation. Since 2026-09-28 the
+  // Live-Sub enrollment itself is unscheduled too: it served SunBiz only, and
+  // SunBiz was retired (runbook C-6a), so no tps-enroll URL may be scheduled.
   const worker = readFileSync("workers/oasis-cc-cron/src/index.ts", "utf8");
-  assert.ok(worker.includes('{ path: "/api/cron/tps-enroll?write=1", schedule: "*/10 * * * *" }'));
+  assert.ok(!worker.includes('path: "/api/cron/tps-enroll'), "the retired SunBiz Live-Sub enrollment is scheduled again");
   assert.ok(!worker.includes("repair-orphan-holds"), "repair was accidentally auto-scheduled");
 
   console.log("phone-lookup-repair.test.ts — all assertions passed");

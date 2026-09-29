@@ -27,6 +27,7 @@ import { DEPLOY_CHECKS } from "./deploy-checks";
 import { CALENDAR_CHECKS } from "./calendar-checks";
 import { WORKER_REPORTER_CHECKS } from "./worker-reporter-checks";
 import { healthAlertStateKey } from "./alert-state-key";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 import { computeCoverage } from "./coverage";
 
@@ -54,6 +55,23 @@ export const OASIS_GLOBAL_CHECKS: DripCheck[] = [...CALENDAR_CHECKS, ...WORKER_R
 export function tenantOutcomeChecks(): DripCheck[] {
   return [...DRIP_CHECKS, ...emailDripChecks(), ...FORM_CHECKS, ...DEPLOY_CHECKS];
 }
+
+/**
+ * Checks that grade the whole estate and ignore the tenant they run under:
+ * whether production serves main, whether pages reach their lanes (it reads
+ * every `alerting.telegram_delivery` row), and the estate-wide form
+ * dead-letter table.
+ *
+ * They rode SunBiz's tenant run until SunBiz was retired on 2026-09-28, and
+ * now persist under the OASIS tenant. Retiring a client must never silence a
+ * platform check, and a platform check must never keep writing rows for a
+ * client that is gone.
+ */
+const ESTATE_WIDE_FORM_CHECK_IDS: ReadonlySet<string> = new Set(["forms.submit_failures_open"]);
+export const ESTATE_WIDE_CHECKS: DripCheck[] = [
+  ...DEPLOY_CHECKS,
+  ...FORM_CHECKS.filter((c) => ESTATE_WIDE_FORM_CHECK_IDS.has(c.id)),
+];
 
 
 type Db = ReturnType<typeof getServiceSupabase>;
@@ -145,6 +163,12 @@ export async function runHealthChecks(
     sendTelegramImpl?: typeof sendTelegram;
   } = {},
 ): Promise<RunSummary> {
+  // A retired tenant has no outcomes left to grade, and every row this writes
+  // (health_check_runs, health_alert_state) lands in tables that are being
+  // exported and deleted. Nothing is checked, persisted or paged.
+  if (isRetiredTenant(tenantId)) {
+    return { ran: 0, results: [], alerted: [], recovered: [], worst: worstVerdict([]) };
+  }
   const db = opts.db ?? getServiceSupabase();
   const send = opts.sendTelegramImpl ?? sendTelegram;
   const nowMs = opts.nowMs ?? Date.now();

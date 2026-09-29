@@ -42,6 +42,7 @@ import {
 import { nudgeConversations } from "@/lib/realtime/conversations-nudge";
 import { loadSunbizInboundContext } from "@/lib/sunbiz-inbound-context";
 import { persistCanonicalLeadTouch } from "@/lib/leads/canonical-touch";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -294,6 +295,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "no_tenant_mapping" }, { status: 503 });
   }
   const { tenantId, userId: routedToUserId } = resolved;
+  // A retired tenant (SunBiz, 2026-09-28) is acknowledged with 200 so
+  // TextTorrent stops retrying, and NOTHING is written: no lead_interactions,
+  // no suppression row, no inbound work, no agent_events. It sends nothing any
+  // more, so a STOP has nothing left to stop, and its data is being exported
+  // and deleted. One log line keeps the traffic visible until the webhook is
+  // deregistered at TextTorrent (runbook C-4).
+  if (isRetiredTenant(tenantId)) {
+    console.log(`[webhooks.tt.sms-inbound] tenant retired; message acknowledged, nothing stored tenant=${tenantId}`);
+    return NextResponse.json({ ok: true, ignored: "tenant_retired" });
+  }
   if (from && isStopCommand(messageText)) {
     try {
       await suppressPhoneNumber(db, {

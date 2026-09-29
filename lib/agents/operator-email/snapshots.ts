@@ -9,8 +9,12 @@
 
 import "server-only";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 export async function writeSnapshot(tenantId: string, userId: string): Promise<void> {
+  // No new snapshots for a retired tenant: its rows are being exported and
+  // deleted, and nobody reads its dashboard cards any more.
+  if (isRetiredTenant(tenantId)) return;
   try {
     const db = getServiceSupabase();
     const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();

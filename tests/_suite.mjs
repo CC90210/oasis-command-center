@@ -387,6 +387,10 @@ const TESTS = [
   // 2026-09-11: three OASIS changes (#401, #405, #421) had also changed what
   // SunBiz users get. Pins SunBiz's restored behaviour and OASIS's kept one.
   "tests/sunbiz-restore-behaviour.test.ts",
+  // 2026-09-28: SunBiz retired (runbook C-6a). Every cron, health lane,
+  // webhook and snapshot producer must write nothing for a retired tenant
+  // while its data is exported and deleted, and keep writing for OASIS.
+  "tests/retired-tenant-producers.test.ts",
 ];
 
 const NODE_ARGS = ["--conditions=react-server", "--import", "tsx"];

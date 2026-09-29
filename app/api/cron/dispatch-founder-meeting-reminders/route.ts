@@ -11,6 +11,7 @@ import { checkTcpaWindow, dispatchByTcpaWindow } from "@/lib/tcpa-window";
 import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { writeAgentAlert } from "@/lib/notify/agent-alert";
 import { memberStanding, type MemberStanding } from "@/lib/team";
+import { RETIRED_TENANT_ID_LIST } from "@/lib/tenant/retired";
 import {
   backfillFounderMeetingNotifications,
   reconcileFounderMeetingSagas,
@@ -664,10 +665,13 @@ async function handle(req: NextRequest) {
     }
   }
 
+  // Founder meetings are OASIS-only today; the retired-tenant exclusion keeps
+  // it that way if a retired tenant ever carries a queued reminder.
   const due = await db.from("website_sales_meeting_notifications")
     .select("id,tenant_id")
     .eq("status", "pending")
     .lte("due_at", now)
+    .not("tenant_id", "in", RETIRED_TENANT_ID_LIST)
     .order("due_at", { ascending: true })
     .limit(BATCH_LIMIT);
   if (due.error) {

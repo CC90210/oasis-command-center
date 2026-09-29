@@ -295,12 +295,16 @@ run().catch((error) => {
     /OASIS_GLOBAL_CHECKS: DripCheck\[\] = \[\.\.\.CALENDAR_CHECKS, \.\.\.WORKER_REPORTER_CHECKS\]/,
     "the OASIS-global run is the calendar proof (first) plus the worker-status reporter check",
   );
-  assert.match(route, /checks:\s*tenantOutcomeChecks\(\)/, "SunBiz's run must exclude the OASIS-global calendar check");
+  // 2026-09-28: SunBiz was retired (runbook C-6a), so its tenant run is gone.
+  // The estate-wide checks that rode on it are the route's second run now, and
+  // it must still exclude the calendar check and still start after it.
+  assert.match(route, /checks:\s*ESTATE_WIDE_CHECKS/, "the estate-wide run must exclude the OASIS-global calendar check");
+  assert.ok(!/SUNBIZ_TENANT_ID|tenantOutcomeChecks/.test(route), "the retired SunBiz lane is back in the health-check route");
   assert.match(route, /Promise\.all\(\[/, "the Calendar proof must start alongside independent route checks");
   assert.ok(
-    route.indexOf("runHealthChecks(WEBDEV_TENANT_ID")
-      < route.indexOf("runHealthChecks(SUNBIZ_TENANT_ID"),
-    "Calendar must be launched first inside the concurrent batch so cleanup cannot queue behind tenant work",
+    route.indexOf("checks: OASIS_GLOBAL_CHECKS") > -1
+      && route.indexOf("checks: OASIS_GLOBAL_CHECKS") < route.indexOf("checks: ESTATE_WIDE_CHECKS"),
+    "Calendar must be launched first inside the concurrent batch so cleanup cannot queue behind other work",
   );
   const routeSeconds = Number(route.match(/export const maxDuration = (\d+);/)?.[1]);
   assert.equal(routeSeconds, 60, "the budget test must track the deployed route ceiling");

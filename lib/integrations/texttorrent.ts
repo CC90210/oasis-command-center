@@ -24,6 +24,7 @@ import "server-only";
 
 import { getTenantIntegrationBundle } from "@/lib/tenant-integration-store";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 
 const BASE_URL = "https://api.texttorrent.com/api/v1";
 
@@ -130,6 +131,12 @@ async function ttFetch<T>(
   path: string,
   opts: RequestOpts = {},
 ): Promise<T> {
+  // A retired tenant makes no TextTorrent calls at all: no sends, no inbox
+  // reads, and no rate-bucket write. Refused before the gate so the reason is
+  // "retired", not a misleading rate limit.
+  if (isRetiredTenant(creds.tenantId)) {
+    throw new TextTorrentError("tenant_retired", "TextTorrent is disabled for a retired tenant.", 410);
+  }
   const controller = new AbortController();
   const gateTimeout = setTimeout(() => controller.abort(), 3000);
   let gate: { data: unknown; error: { message?: string } | null };
