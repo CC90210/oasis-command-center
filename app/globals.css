@@ -9,6 +9,44 @@
      "collapsed" before paint, and these rules set the matching width.
      15rem = 240px = w-60 in Tailwind. */
   --sidebar-w: 15rem;
+
+  /* ── OASIS OS palette ─────────────────────────────────────────────────
+     Space-separated RGB channels, consumed by tailwind.config.ts as
+     rgb(var(--c-x) / <alpha-value>). Re-value here; never rename a token
+     class (see the note at the top of tailwind.config.ts). Neutral greys
+     with no blue cast; the accent is for primary actions, focus and links.
+     docs/os-revamp/01-product-surface-ia-ux.md §(d). */
+  --c-bg-rail: 3 3 4;            /* #030304  window ground + rail */
+  --c-bg: 10 10 11;              /* #0a0a0b  floating content canvas */
+  --c-bg-deep: 7 7 8;            /* #070708  inputs, menus */
+  --c-bg-panel: 14 14 16;        /* #0e0e10  cards on the canvas */
+  --c-bg-raised: 19 19 21;       /* #131315  raised cards */
+  --c-bg-elev: 24 24 27;         /* #18181b  popovers, hover elevation */
+  --c-bg-border: 32 32 36;       /* #202024  solid borders (legacy) */
+  --c-bg-border-strong: 46 46 51; /* #2e2e33 hover / focus separation */
+  --c-bg-hover: 22 22 25;        /* #161619  row hover */
+  --c-fg: 237 237 239;           /* #ededef  primary text */
+  --c-fg-muted: 160 160 167;     /* #a0a0a7  secondary text, inactive rows */
+  /* #82828a, not the spec's #75757d: that measured 4.3:1 on the canvas and
+     4.2:1 on a panel, under the 4.5:1 AA floor for body-size text. This
+     clears 4.5:1 on the rail, canvas, panel, raised and elev surfaces
+     (asserted in tests/theme-tokens.test.ts). */
+  --c-fg-dim: 130 130 138;       /* #82828a  meta, icons */
+  --c-fg-faint: 69 69 75;        /* #45454b  decorative only */
+  --c-accent: 59 130 246;        /* #3b82f6  OASIS blue */
+  --c-accent-muted: 37 99 235;   /* #2563eb  filled buttons: white text clears AA */
+  --c-status-hot: 239 68 68;
+  --c-status-warm: 245 158 11;
+  --c-status-engaged: 16 185 129;
+  --c-status-info: 96 165 250;
+  --c-status-cold: 107 114 128;
+  --c-status-dormant: 75 85 99;
+  --c-status-lost: 31 41 55;
+  --c-unread: 220 38 38;         /* #dc2626  needs-you pills, white text */
+  /* Alpha baked in: these three are always translucent white. */
+  --c-hairline: 255 255 255 / 0.07;
+  --c-active: 255 255 255 / 0.06;
+  --c-active-hover: 255 255 255 / 0.035;
 }
 html[data-sidebar="collapsed"] {
   --sidebar-w: 0rem;
@@ -19,8 +57,43 @@ html[data-sidebar="expanded"] {
 
 html,
 body {
-  background-color: #020409;
-  color: #f5f7fa;
+  background-color: rgb(var(--c-bg-rail));
+  color: rgb(var(--c-fg));
+}
+
+/* ── OS canvas ──────────────────────────────────────────────────────────
+   The rail sits directly on the window ground with no border of its own;
+   content floats on a slightly lighter canvas inset by 0.5rem with a
+   hairline edge, and that edge is the separation. Plain CSS rather than
+   utilities because the left inset depends on html[data-sidebar], which
+   the boot script sets before paint: flush against the open rail, inset
+   from the window edge when the rail is collapsed. Mobile keeps the old
+   edge-to-edge page under the top bar. Used by components/MainShell.tsx. */
+@media (min-width: 768px) {
+  .os-canvas-main {
+    padding: 0.5rem 0.5rem 0.5rem 0;
+  }
+  html[data-sidebar="collapsed"] .os-canvas-main {
+    padding-left: 0.5rem;
+  }
+  .os-canvas-frame {
+    border: 1px solid rgb(var(--c-hairline));
+    border-radius: 0.75rem;
+  }
+  /* The operator chat overlay is fixed-position, so it mirrors the canvas
+     inset itself rather than inheriting it. */
+  .os-canvas-overlay {
+    top: 0.5rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    left: var(--sidebar-w, 15rem);
+    border: 1px solid rgb(var(--c-hairline));
+    border-radius: 0.75rem;
+    overflow: hidden;
+  }
+  html[data-sidebar="collapsed"] .os-canvas-overlay {
+    left: 0.5rem;
+  }
 }
 
 /* Native <select> popups paint their OWN background, and `color-scheme: dark`
@@ -41,8 +114,8 @@ body {
  */
 select option,
 select optgroup {
-  background-color: #0e1014; /* bg-panel */
-  color: #faf9f5; /* fg */
+  background-color: rgb(var(--c-bg-panel));
+  color: rgb(var(--c-fg));
 }
 
 /* Chat fullscreen — uses the browser Fullscreen API on the chat
@@ -55,7 +128,7 @@ select optgroup {
   height: 100vh !important;
   width: 100vw !important;
   max-width: none !important;
-  background: rgb(7, 10, 16) !important;
+  background: rgb(var(--c-bg)) !important;
 }
 .chat-container:fullscreen::before {
   display: none;
@@ -82,18 +155,18 @@ code {
  * it carried no state, no hierarchy and no data. The `.grain` class on <body>
  * in app/layout.tsx is now inert and is removed there too. */
 
-/* Custom scrollbar */
+/* Custom scrollbar. Neutral on hover too: the accent is for actions. */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #1e2532;
+  background: rgb(var(--c-bg-border));
   border-radius: 4px;
 }
-::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--c-bg-border-strong)); }
 
 ::selection {
-  background: rgba(59, 130, 246, 0.4);
-  color: #f5f7fa;
+  background: rgb(var(--c-accent) / 0.4);
+  color: rgb(var(--c-fg));
 }
 
 /* Numeric tabular for stats — every digit same width = no jitter */
@@ -101,9 +174,13 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
-/* Page transitions — keep them snappy, not floaty */
+/* Page transitions — keep them snappy, not floaty. One-shot, inside the
+   120-160ms motion budget; opacity and transform only. */
 main > div {
-  animation: pageIn 0.18s ease-out;
+  animation: pageIn 0.14s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  main > div { animation: none; }
 }
 @keyframes pageIn {
   from { opacity: 0; transform: translateY(4px); }
@@ -115,109 +192,121 @@ main > div {
   font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   line-height: 1.8;
   font-size: 16px;
-  color: #f5f7fa;
+  color: rgb(var(--c-fg));
 }
 .prose-manifesto p { margin: 0 0 1rem; }
-.prose-manifesto p.short { font-style: italic; color: #9ba3b1; }
-.prose-manifesto .closing { color: #3b82f6; font-style: italic; margin-top: 1.5rem; }
+.prose-manifesto p.short { font-style: italic; color: rgb(var(--c-fg-muted)); }
+.prose-manifesto .closing { color: rgb(var(--c-fg)); font-style: italic; margin-top: 1.5rem; }
 
-/* MDX */
+/* MDX (playbook documents). Hierarchy from size and weight, not colour: the
+   accent is for links and actions, so headings, rules and table heads are
+   neutral. */
 .mdx-content h1 {
-  font-size: 1.5rem; font-weight: 700; margin: 2rem 0 1rem; color: #3b82f6;
+  font-size: 1.25rem; line-height: 1.75rem; font-weight: 600; letter-spacing: -0.01em;
+  margin: 2rem 0 1rem; color: rgb(var(--c-fg));
 }
 .mdx-content h2 {
-  font-size: 1.125rem; font-weight: 700; margin: 1.5rem 0 0.75rem; color: #f5f7fa;
-  border-left: 3px solid #3b82f6; padding-left: 0.75rem;
+  font-size: 1rem; font-weight: 600; margin: 1.75rem 0 0.75rem; color: rgb(var(--c-fg));
+  padding-top: 1rem; border-top: 1px solid rgb(var(--c-hairline));
 }
 .mdx-content h3 {
-  font-size: 1rem; font-weight: 600; margin: 1rem 0 0.5rem; color: #f5f7fa;
+  font-size: 0.875rem; font-weight: 600; margin: 1rem 0 0.5rem; color: rgb(var(--c-fg));
 }
-.mdx-content p { margin: 0 0 0.875rem; color: #f5f7fa; line-height: 1.65; }
+.mdx-content p { margin: 0 0 0.875rem; color: rgb(var(--c-fg)); line-height: 1.6; }
+.mdx-content a { color: rgb(var(--c-accent)); text-decoration: underline; text-underline-offset: 2px; }
 .mdx-content blockquote {
-  margin: 0.75rem 0; padding: 0.875rem 1.125rem;
-  background: rgba(59, 130, 246, 0.08);
-  border-left: 3px solid #3b82f6;
-  border-radius: 0.375rem; color: #f5f7fa;
+  margin: 0.75rem 0; padding: 0.75rem 1rem;
+  background: rgb(var(--c-bg-panel));
+  border: 1px solid rgb(var(--c-hairline));
+  border-left: 2px solid rgb(var(--c-bg-border-strong));
+  border-radius: 0.5rem; color: rgb(var(--c-fg));
 }
 .mdx-content blockquote.alt {
-  background: rgba(96, 165, 250, 0.05);
-  border-left-color: #60a5fa;
+  border-left-color: rgb(var(--c-status-info));
 }
 .mdx-content ul, .mdx-content ol { padding-left: 1.5rem; margin: 0.5rem 0 1rem; }
-.mdx-content li { margin: 0.25rem 0; color: #f5f7fa; }
+.mdx-content li { margin: 0.25rem 0; color: rgb(var(--c-fg)); }
 .mdx-content code {
-  background: #161b25; border: 1px solid #1e2532;
+  background: rgb(var(--c-bg-raised)); border: 1px solid rgb(var(--c-hairline));
   padding: 0.125rem 0.375rem; border-radius: 0.25rem;
-  font-size: 0.875em; color: #00d4ff;
+  font-size: 0.875em; color: rgb(var(--c-fg));
 }
 .mdx-content table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.875rem; }
 .mdx-content th, .mdx-content td {
   text-align: left; padding: 0.625rem 0.875rem;
-  border-bottom: 1px solid #1e2532; vertical-align: top;
+  border-bottom: 1px solid rgb(var(--c-hairline)); vertical-align: top;
 }
 .mdx-content th {
-  color: #3b82f6; font-size: 0.75rem; text-transform: uppercase;
-  letter-spacing: 0.08em; font-weight: 600;
+  color: rgb(var(--c-fg-muted)); font-size: 0.75rem; font-weight: 600;
 }
 
-/* Form primitives */
+/* Form primitives. Recessed field on bg-deep with a hairline edge; focus is
+   the accent border alone (no halo ring, which reads as a glow). */
 .input, .textarea, .select {
   width: 100%;
-  background: #10141d;
-  border: 1px solid #1e2532;
-  border-radius: 0.4rem;
-  padding: 0.55rem 0.8rem;
-  color: #f5f7fa;
+  background: rgb(var(--c-bg-deep));
+  border: 1px solid rgb(var(--c-hairline));
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  color: rgb(var(--c-fg));
   font-size: 0.875rem;
-  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  transition: border-color 0.14s, background-color 0.14s;
 }
+.input::placeholder, .textarea::placeholder { color: rgb(var(--c-fg-dim)); }
+.input:hover, .textarea:hover, .select:hover { border-color: rgb(var(--c-bg-border-strong)); }
 .input:focus, .textarea:focus, .select:focus {
   outline: none;
-  border-color: #3b82f6;
-  background: #141925;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  border-color: rgb(var(--c-accent) / 0.6);
+}
+.input:focus-visible, .textarea:focus-visible, .select:focus-visible {
+  outline: 2px solid rgb(var(--c-accent) / 0.6);
+  outline-offset: 1px;
 }
 .textarea { resize: vertical; min-height: 80px; font-family: inherit; }
+/* Sentence case, 12px. The 10px letter-spaced uppercase label was a chip
+   style applied to every field; chips keep it, labels do not. */
 .label {
-  display: block; font-size: 0.625rem; font-weight: 700;
-  letter-spacing: 0.14em; text-transform: uppercase;
-  color: #9ba3b1; margin-bottom: 0.4rem;
+  display: block; font-size: 0.75rem; line-height: 1rem; font-weight: 500;
+  color: rgb(var(--c-fg-muted)); margin-bottom: 0.375rem;
 }
 
+/* Flat accent, no gradient and no halo. Filled with accent-muted because
+   white on #3b82f6 is 3.7:1 — under AA for 14px text — and 5.2:1 here. */
 .btn-primary {
-  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-  color: #f5f7fa;
-  font-weight: 700;
-  padding: 0.55rem 1rem;
-  border-radius: 0.4rem;
+  background: rgb(var(--c-accent-muted));
+  color: #ffffff;
+  font-weight: 600;
+  padding: 0.5rem 0.95rem;
+  border-radius: 0.5rem;
   font-size: 0.875rem;
-  transition: filter 0.15s, transform 0.05s, box-shadow 0.2s;
-  box-shadow: 0 0 0 1px rgba(59,130,246,0.18), 0 8px 20px -8px rgba(59,130,246,0.4);
+  transition: background-color 0.14s, transform 0.12s;
 }
-.btn-primary:hover { filter: brightness(1.1); }
+.btn-primary:hover { background: rgb(29 78 216); }
 .btn-primary:active { transform: translateY(1px); }
+.btn-primary:focus-visible { outline: 2px solid rgb(var(--c-accent) / 0.7); outline-offset: 2px; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-secondary {
-  background: #161b25; color: #f5f7fa;
-  border: 1px solid #1e2532;
+  background: rgb(var(--c-bg-raised)); color: rgb(var(--c-fg));
+  border: 1px solid rgb(var(--c-hairline));
   font-weight: 500;
   padding: 0.5rem 0.95rem;
-  border-radius: 0.4rem;
+  border-radius: 0.5rem;
   font-size: 0.875rem;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background-color 0.14s, border-color 0.14s;
 }
-.btn-secondary:hover { background: #141925; border-color: #3b82f6; }
+.btn-secondary:hover { background: rgb(var(--c-bg-elev)); border-color: rgb(var(--c-bg-border-strong)); }
+.btn-secondary:focus-visible { outline: 2px solid rgb(var(--c-accent) / 0.7); outline-offset: 2px; }
 .btn-danger {
-  background: rgba(255, 77, 109, 0.12);
-  color: #ff4d6d;
-  border: 1px solid rgba(255, 77, 109, 0.3);
+  background: rgb(var(--c-status-hot) / 0.12);
+  color: rgb(var(--c-status-hot));
+  border: 1px solid rgb(var(--c-status-hot) / 0.3);
   font-weight: 500;
   padding: 0.375rem 0.75rem;
-  border-radius: 0.4rem;
+  border-radius: 0.5rem;
   font-size: 0.75rem;
-  transition: background 0.15s;
+  transition: background-color 0.14s;
 }
-.btn-danger:hover { background: rgba(255, 77, 109, 0.2); }
+.btn-danger:hover { background: rgb(var(--c-status-hot) / 0.2); }
 
 /* Sidebar header rule.
  *
@@ -228,7 +317,7 @@ main > div {
  * constitution rule 14 asks separation to be. The class name is kept because
  * Sidebar.tsx consumes it. */
 .top-glow {
-  background: var(--color-bg-border, rgba(148, 163, 184, 0.18));
+  background: rgb(var(--c-hairline));
   height: 1px;
 }
 
@@ -251,7 +340,7 @@ main > div {
   content: "";
   position: absolute;
   left: 0; right: 0; bottom: 0; height: 1px;
-  background: var(--color-bg-border, rgba(148, 163, 184, 0.18));
+  background: rgb(var(--c-hairline));
 }
 
 /* Chat bubble — assistant (LHS) */
@@ -584,7 +673,7 @@ body:has(.form-light) {
 .legal-prose h3 {
   font-size: 0.95rem;
   font-weight: 600;
-  color: #f5f7fa;
+  color: rgb(var(--c-fg));
   margin: 1.1rem 0 0.4rem;
 }
 .legal-prose a {
@@ -592,4 +681,4 @@ body:has(.form-light) {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.legal-prose strong { color: #f5f7fa; font-weight: 600; }
+.legal-prose strong { color: rgb(var(--c-fg)); font-weight: 600; }

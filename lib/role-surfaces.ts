@@ -597,6 +597,12 @@ export const SALES_NAV_ALLOWLIST: readonly string[] = [
   // header says it: HIDING IS NOT ENFORCING.
   "/training",
   "/objections",
+  // OASIS OS departments (lib/os/departments.ts). A rep works in Sales and asks
+  // Chief of Staff; the department page scopes what each one shows to the
+  // viewer's own book. Marketing, Client Success, Finance and Operations stay
+  // off a rep's rail — the same line the capability rows above draw.
+  "/team/chief-of-staff",
+  "/team/sales",
 ];
 
 /**
@@ -625,6 +631,9 @@ export const MANAGER_NAV_ALLOWLIST: readonly string[] = [
   // answer needs deal-closing rights, which a manager has.
   "/training",
   "/objections",
+  // The rep's departments: a manager coaches inside Sales, not Finance.
+  "/team/chief-of-staff",
+  "/team/sales",
 ];
 
 /**
@@ -649,6 +658,11 @@ export const MARKETING_NAV_ALLOWLIST: readonly string[] = [
   "/playbook",
   "/settings",
   "/founders/marketing",
+  // OASIS OS: their department, the Ask target, and the ads surface the
+  // Marketing department operates. /forms stays absent, as before.
+  "/team/chief-of-staff",
+  "/team/marketing",
+  "/growth/ads",
 ];
 
 /**
@@ -667,6 +681,14 @@ export const BUILDER_NAV_ALLOWLIST: readonly string[] = [
   // CC, 2026-08-25: the builder/marketing hire also sells, so he sources from
   // the same prospecting pool the reps do and claims into his own book.
   "/web-leads",
+  // OASIS OS: the two departments his two jobs sit in, plus Chief of Staff.
+  // Client Success is absent: inside OASIS, delivery is founder-only
+  // (lib/delivery/access.ts), and a department over data he cannot read is a
+  // dead tab.
+  "/team/chief-of-staff",
+  "/team/sales",
+  "/team/marketing",
+  "/growth/ads",
 ];
 
 const PERSONA_NAV_ALLOWLIST: Partial<Record<Persona, readonly string[]>> = {

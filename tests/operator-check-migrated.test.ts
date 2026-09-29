@@ -198,10 +198,20 @@ const MIGRATED: Array<[string, RegExp]> = [
   ["app/api/applications/[id]/shop-out/health/route.ts", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
   ["app/api/applications/[id]/lender-threads/[threadId]/reply/route.ts", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
   ["app/applications/[id]/shop-out/page.tsx", /tenantSlug !== "submissions" && !\(await isPlatformOperatorForAuthUser\(sess\.userId, sess\.email\)\)/],
-  ["app/agents/page.tsx", /const isAdmin = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
-  ["app/feed/page.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
+  // OASIS OS shell: the agent fleet moved from /agents (now the AI Team) to
+  // /admin/agents, gated by requireOperator() as its first statement. The Feed
+  // no longer has an operator branch at all — every viewer, operators included,
+  // is scoped to their own workspace (tests/os-landings.test.ts pins that), so
+  // there is no operator decision left on that page to pin.
+  ["app/admin/agents/page.tsx", /\n\s*await requireOperator\(\);/],
+  // A department channel reads "ready" through the same verified platform-key
+  // rule as app/api/agents/chat, never the email alone.
+  ["components/os/department/channel.ts", /isPlatformOperatorForAuthUser\(authUserId, email\)/],
   ["app/integrations/page.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
-  ["components/settings/SettingsContent.tsx", /const isOperator = await isPlatformOperatorForAuthUser\(user\?\.id, user\?\.email\);/],
+  // Settings was split into sections by the OASIS OS shell: every section reads
+  // one cached verified verdict (settings-viewer.ts -> isPlatformOperator()).
+  ["components/settings/SettingsContent.tsx", /\n\s*isVerifiedOperator\(\),/],
+  ["components/settings/settings-viewer.ts", /isVerifiedOperator = cache\(async \(\): Promise<boolean> => isPlatformOperator\(\)\)/],
 ];
 
 async function staticChecks() {

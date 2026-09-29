@@ -22,7 +22,8 @@
  */
 
 import Link from "next/link";
-import { Card, EmptyState, PageHeader, Stat, Tag } from "@/components/Card";
+import { Card, EmptyState, Stat, Tag } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { LiveClock } from "@/components/LiveClock";
 import { listRecords, type TenantRecord } from "@/lib/manifest/data";
 import {
@@ -207,190 +208,189 @@ export async function DeliveryToday({
     .reduce((sum, r) => sum + r.total, 0);
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Today"
-        subtitle={
-          <>
-            <LiveClock initialDateKey={operatorDateKey()} /> · {viewerName} · delivery
-          </>
-        }
-        action={
-          readOnly ? (
-            <Tag tone="neutral">view only</Tag>
-          ) : (
-            <Tag tone={blocked.length > 0 ? "warm" : "accent"}>
-              {blocked.length > 0 ? `${blocked.length} need a nudge` : "clear"}
-            </Tag>
-          )
-        }
-      />
+    <PageFrame
+      title="Today"
+      subtitle={
+        <>
+          <LiveClock initialDateKey={operatorDateKey()} /> · {viewerName} · delivery
+        </>
+      }
+      actions={
+        readOnly ? (
+          <Tag tone="neutral">view only</Tag>
+        ) : (
+          <Tag tone={blocked.length > 0 ? "warm" : "neutral"}>
+            {blocked.length > 0 ? `${blocked.length} need a nudge` : "clear"}
+          </Tag>
+        )
+      }
+    >
+      <div className="space-y-6">
+        {anyReadFailed && (
+          <Card title="Partial read">
+            <EmptyState message="At least one delivery queue could not be loaded. The tiles showing an em dash are unknown, not empty — reload before concluding there is no work." />
+          </Card>
+        )}
 
-      {anyReadFailed && (
-        <Card title="Partial read">
-          <EmptyState message="At least one delivery queue could not be loaded. The tiles showing an em dash are unknown, not empty — reload before concluding there is no work." />
-        </Card>
-      )}
+        <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {DELIVERY_STAGE_KEYS.map((stage) => (
+            <Stat
+              key={stage}
+              label={labelFor(stage)}
+              value={countOf(stage)}
+              hint={
+                byStage.get(stage)?.ok === false
+                  ? "could not read this queue"
+                  : stage === "launched"
+                    ? "shipped"
+                    : stage === "client_review"
+                      ? "waiting on the client"
+                      : stage === "in_build"
+                        ? "yours to move"
+                        : "kickoff pending"
+              }
+            />
+          ))}
+        </section>
 
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {DELIVERY_STAGE_KEYS.map((stage) => (
-          <Stat
-            key={stage}
-            label={labelFor(stage)}
-            value={countOf(stage)}
-            accent={stage === "in_build"}
-            hint={
-              byStage.get(stage)?.ok === false
-                ? "could not read this queue"
-                : stage === "launched"
-                  ? "shipped"
-                  : stage === "client_review"
-                    ? "waiting on the client"
-                    : stage === "in_build"
-                      ? "yours to move"
-                      : "kickoff pending"
+        <section className="grid lg:grid-cols-2 gap-6">
+          <Card
+            title="Needs a nudge"
+            subtitle={
+              blocked.length > 0
+                ? `${blocked.length} past due or stalled · oldest first`
+                : "overdue and stalled builds"
             }
-          />
-        ))}
-      </section>
+          >
+            {blocked.length === 0 ? (
+              <EmptyState message="Nothing is overdue and nothing has gone quiet for a week. Work the build queue." />
+            ) : (
+              <ul className="divide-y divide-hairline">
+                {blocked.slice(0, 8).map(({ row, stage, why, at }) => (
+                  <li key={row.id} className="py-3">
+                    <Link
+                      href={`/pipeline/${row.id}`}
+                      className="block -mx-2 px-2 py-1 rounded-md transition-colors duration-150 hover:bg-bg-hover"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Tag tone="warm">{why}</Tag>
+                        <span className="text-xs font-medium text-fg-dim">
+                          {labelFor(stage)}
+                        </span>
+                        <span className="ml-auto text-xs text-fg-dim">
+                          {timeAgo(new Date(at).toISOString())}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 text-sm font-semibold text-fg">
+                        {truncate(who(row), 60)}
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
 
-      <section className="grid lg:grid-cols-2 gap-6">
+          <Card
+            title="Due today"
+            subtitle={dueToday.length > 0 ? `${dueToday.length} scheduled` : "scheduled for today"}
+          >
+            {dueToday.length === 0 ? (
+              <EmptyState message="Nothing is scheduled for today. Set dates on the builds you are working so they land here." />
+            ) : (
+              <ul className="divide-y divide-hairline">
+                {dueToday.slice(0, 8).map(({ row, stage }) => (
+                  <li key={row.id} className="py-3">
+                    <Link
+                      href={`/pipeline/${row.id}`}
+                      className="block -mx-2 px-2 py-1 rounded-md transition-colors duration-150 hover:bg-bg-hover"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: colorFor(stage) }}
+                          aria-hidden
+                        />
+                        <span className="text-xs font-medium text-fg-dim">
+                          {labelFor(stage)}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 text-sm font-semibold text-fg">
+                        {truncate(who(row), 60)}
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        </section>
+
         <Card
-          title="Needs a nudge"
-          subtitle={
-            blocked.length > 0
-              ? `${blocked.length} past due or stalled · oldest first`
-              : "overdue and stalled builds"
+          title="The build queue"
+          subtitle={`${totalActive} active · launched work is not listed`}
+          action={
+            <Link href="/pipeline" className="text-xs font-medium text-accent hover:underline">
+              Open pipeline →
+            </Link>
           }
         >
-          {blocked.length === 0 ? (
-            <EmptyState message="Nothing is overdue and nothing has gone quiet for a week. Work the build queue." />
+          {totalActive === 0 ? (
+            <EmptyState message="No websites are in delivery right now. New builds arrive here once a deal is won and moves to onboarding." />
           ) : (
-            <ul className="divide-y divide-bg-border">
-              {blocked.slice(0, 8).map(({ row, stage, why, at }) => (
-                <li key={row.id} className="py-3">
-                  <Link
-                    href={`/pipeline/${row.id}`}
-                    className="block -mx-2 px-2 py-1 rounded-md hover:bg-bg-elev transition-colors"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Tag tone="warm">{why}</Tag>
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
-                        {labelFor(stage)}
-                      </span>
-                      <span className="ml-auto text-xs text-fg-dim">
-                        {timeAgo(new Date(at).toISOString())}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 text-sm font-semibold text-fg">
-                      {truncate(who(row), 60)}
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-
-        <Card
-          title="Due today"
-          subtitle={dueToday.length > 0 ? `${dueToday.length} scheduled` : "scheduled for today"}
-        >
-          {dueToday.length === 0 ? (
-            <EmptyState message="Nothing is scheduled for today. Set dates on the builds you are working so they land here." />
-          ) : (
-            <ul className="divide-y divide-bg-border">
-              {dueToday.slice(0, 8).map(({ row, stage }) => (
-                <li key={row.id} className="py-3">
-                  <Link
-                    href={`/pipeline/${row.id}`}
-                    className="block -mx-2 px-2 py-1 rounded-md hover:bg-bg-elev transition-colors"
-                  >
+            <div className="grid gap-4 md:grid-cols-3">
+              {DELIVERY_STAGE_KEYS.filter((s) => s !== "launched").map((stage) => {
+                const read = byStage.get(stage);
+                const rows = read && read.ok ? read.rows : [];
+                return (
+                  <div key={stage} className="rounded-lg border border-hairline bg-bg-raised p-4">
                     <div className="flex items-center gap-2">
                       <span
                         className="h-2 w-2 rounded-full"
                         style={{ backgroundColor: colorFor(stage) }}
                         aria-hidden
                       />
-                      <span className="text-[10px] uppercase tracking-wider font-bold text-fg-dim">
+                      <span className="text-[12.5px] font-medium text-fg-muted">
                         {labelFor(stage)}
                       </span>
+                      <span className="ml-auto text-xs font-semibold tabular-nums text-fg">
+                        {read && read.ok ? rows.length : "—"}
+                      </span>
                     </div>
-                    <div className="mt-1.5 text-sm font-semibold text-fg">
-                      {truncate(who(row), 60)}
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+                    {read && !read.ok ? (
+                      <p className="mt-3 text-xs text-fg-dim">Could not read this queue.</p>
+                    ) : rows.length === 0 ? (
+                      <p className="mt-3 text-xs text-fg-dim">Empty.</p>
+                    ) : (
+                      <ul className="mt-3 space-y-1.5">
+                        {rows.slice(0, 6).map((row) => (
+                          <li key={row.id}>
+                            <Link
+                              href={`/pipeline/${row.id}`}
+                              className="block truncate text-xs text-fg-muted transition-colors duration-150 hover:text-fg"
+                            >
+                              {truncate(who(row), 34)}
+                            </Link>
+                          </li>
+                        ))}
+                        {rows.length > 6 && (
+                          <li className="text-xs text-fg-dim">+{rows.length - 6} more</li>
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </Card>
-      </section>
 
-      <Card
-        title="The build queue"
-        subtitle={`${totalActive} active · launched work is not listed`}
-        action={
-          <Link href="/pipeline" className="text-xs text-fg-muted hover:text-accent transition-colors">
-            Open pipeline →
-          </Link>
-        }
-      >
-        {totalActive === 0 ? (
-          <EmptyState message="No websites are in delivery right now. New builds arrive here once a deal is won and moves to onboarding." />
-        ) : (
-          <div className="grid gap-4 md:grid-cols-3">
-            {DELIVERY_STAGE_KEYS.filter((s) => s !== "launched").map((stage) => {
-              const read = byStage.get(stage);
-              const rows = read && read.ok ? read.rows : [];
-              return (
-                <div key={stage} className="rounded-lg border border-bg-border bg-bg-elev/40 p-4">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className="h-2 w-2 rounded-full"
-                      style={{ backgroundColor: colorFor(stage) }}
-                      aria-hidden
-                    />
-                    <span className="text-[10px] uppercase tracking-[0.14em] font-bold text-fg-muted">
-                      {labelFor(stage)}
-                    </span>
-                    <span className="ml-auto text-xs font-bold tabular-nums text-fg">
-                      {read && read.ok ? rows.length : "—"}
-                    </span>
-                  </div>
-                  {read && !read.ok ? (
-                    <p className="mt-3 text-xs text-fg-dim">Could not read this queue.</p>
-                  ) : rows.length === 0 ? (
-                    <p className="mt-3 text-xs text-fg-dim">Empty.</p>
-                  ) : (
-                    <ul className="mt-3 space-y-1.5">
-                      {rows.slice(0, 6).map((row) => (
-                        <li key={row.id}>
-                          <Link
-                            href={`/pipeline/${row.id}`}
-                            className="block truncate text-xs text-fg-muted transition-colors hover:text-accent"
-                          >
-                            {truncate(who(row), 34)}
-                          </Link>
-                        </li>
-                      ))}
-                      {rows.length > 6 && (
-                        <li className="text-[10px] text-fg-dim">+{rows.length - 6} more</li>
-                      )}
-                    </ul>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-
-      <p className="text-xs text-fg-faint">
-        You are seeing the delivery view because your team role is{" "}
-        <span className="font-mono text-fg-dim">{teamRole}</span>. If that is wrong, ask CC to
-        correct it — revenue and pipeline surfaces are scoped to the role on your profile.
-      </p>
-    </div>
+        <p className="text-xs text-fg-dim">
+          You are seeing the delivery view because your team role is{" "}
+          <span className="font-mono text-fg-dim">{teamRole}</span>. If that is wrong, ask CC to
+          correct it — revenue and pipeline surfaces are scoped to the role on your profile.
+        </p>
+      </div>
+    </PageFrame>
   );
 }

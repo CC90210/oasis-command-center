@@ -1,50 +1,47 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCw } from "lucide-react";
 
 /**
- * Tiny client island that triggers a server re-render every 5 seconds so the
- * feed stays current without a websocket. The actual fetch happens in the
- * parent server component — we just call router.refresh().
+ * Keeps the Feed current without a websocket: the server component re-renders
+ * on router.refresh(), so this island holds no data of its own.
  *
- * Uses useTransition so the spinner shows during the in-flight refresh and
- * the previous data stays visible (no layout flash).
+ * Every 30 s, and only while the tab is visible. The old tape refreshed every
+ * 5 s whether anyone was looking or not, and each refresh re-runs the whole
+ * shell's session reads — a background tab cost a server render every five
+ * seconds for nobody. A hidden tab now catches up the moment it is shown.
+ *
+ * No spinner: a looping animation for a sub-second refresh is motion without
+ * information. The button's label says what is happening.
  */
+const INTERVAL_MS = 30_000;
+
 export function FeedRefresher() {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [lastTick, setLastTick] = useState<number>(Date.now());
 
   useEffect(() => {
-    const id = setInterval(() => {
-      startTransition(() => {
-        router.refresh();
-        setLastTick(Date.now());
-      });
-    }, 5000);
-    return () => clearInterval(id);
+    const refresh = () => {
+      if (document.visibilityState === "visible") startTransition(() => router.refresh());
+    };
+    const id = window.setInterval(refresh, INTERVAL_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, [router]);
-
-  const ago = Math.max(0, Math.round((Date.now() - lastTick) / 1000));
 
   return (
     <button
-      onClick={() => {
-        startTransition(() => {
-          router.refresh();
-          setLastTick(Date.now());
-        });
-      }}
-      title="Refresh now"
-      className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-bg-border text-[10px] font-bold uppercase tracking-wider text-fg-muted hover:text-fg hover:border-accent transition-all"
+      type="button"
+      onClick={() => startTransition(() => router.refresh())}
+      disabled={pending}
+      className="btn-secondary"
+      aria-live="polite"
     >
-      <RefreshCw
-        size={12}
-        className={pending ? "animate-spin" : ""}
-      />
-      <span>{pending ? "refreshing" : `${ago}s`}</span>
+      {pending ? "Refreshing…" : "Refresh"}
     </button>
   );
 }

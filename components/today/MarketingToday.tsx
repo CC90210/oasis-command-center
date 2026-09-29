@@ -20,59 +20,60 @@
  */
 
 import Link from "next/link";
-import { Card, PageHeader } from "@/components/Card";
+import { Card } from "@/components/Card";
+import { PageFrame } from "@/components/os/PageFrame";
 import { LiveClock } from "@/components/LiveClock";
 import { operatorDateKey } from "@/lib/dates";
 
 export function MarketingToday({ viewerName }: { viewerName: string }) {
   const dateKey = operatorDateKey();
   return (
-    <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Today"
-        subtitle={
-          <span>
-            {viewerName} · <LiveClock initialDateKey={dateKey} /> · marketing
-          </span>
-        }
-      />
+    <PageFrame
+      title="Today"
+      subtitle={
+        <span>
+          {viewerName} · <LiveClock initialDateKey={dateKey} /> · marketing
+        </span>
+      }
+    >
+      <div className="space-y-6">
+        <Card
+          title="Marketing studio"
+          subtitle="Where the work happens — library, training, and published performance."
+        >
+          <div className="flex flex-wrap gap-2">
+            <Link href="/founders/marketing" className="btn-primary inline-flex items-center gap-2">
+              Open Marketing
+            </Link>
+            <Link href="/founders/marketing/library" className="btn-secondary inline-flex items-center gap-2">
+              Library
+            </Link>
+            <Link href="/founders/marketing/performance" className="btn-secondary inline-flex items-center gap-2">
+              Performance
+            </Link>
+          </div>
+        </Card>
 
-      <Card
-        title="Marketing studio"
-        subtitle="Where the work happens — library, training, and published performance."
-      >
-        <div className="flex flex-wrap gap-2">
-          <Link href="/founders/marketing" className="btn-primary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
-            Open Marketing
-          </Link>
-          <Link href="/founders/marketing/library" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
-            Library
-          </Link>
-          <Link href="/founders/marketing/performance" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
-            Performance
-          </Link>
-        </div>
-      </Card>
+        <Card title="Playbook" subtitle="Brand voice, the offer, and the language that converts.">
+          <p className="text-sm leading-relaxed text-fg-muted">
+            The playbook is the source for how OASIS talks about itself — the offer, the objections,
+            and the words that have actually closed deals. Write from it rather than around it.
+          </p>
+          <div className="mt-3">
+            <Link href="/playbook" className="btn-secondary inline-flex items-center gap-2">
+              Open playbook
+            </Link>
+          </div>
+        </Card>
 
-      <Card title="Playbook" subtitle="Brand voice, the offer, and the language that converts.">
-        <p className="text-sm leading-relaxed text-fg-muted">
-          The playbook is the source for how OASIS talks about itself — the offer, the objections,
-          and the words that have actually closed deals. Write from it rather than around it.
-        </p>
-        <div className="mt-3">
-          <Link href="/playbook" className="btn-secondary inline-flex items-center gap-2 !px-3 !py-1.5 text-xs">
-            Open playbook
-          </Link>
-        </div>
-      </Card>
-
-      <Card title="What you will not see here" subtitle="Said out loud so it reads as a boundary, not a bug.">
-        <p className="text-sm leading-relaxed text-fg-muted">
-          Company revenue, the sales pipeline and the commission ledger are not part of this
-          role. If you need a number for a campaign or a case study, ask CC — that is a
-          deliberate boundary, not a missing page.
-        </p>
-      </Card>
-    </div>
+        <Card title="What you will not see here" subtitle="Said out loud so it reads as a boundary, not a bug.">
+          <p className="text-sm leading-relaxed text-fg-muted">
+            Company revenue, the sales pipeline and the commission ledger are not part of this
+            role. If you need a number for a campaign or a case study, ask CC — that is a
+            deliberate boundary, not a missing page.
+          </p>
+        </Card>
+      </div>
+    </PageFrame>
   );
 }

@@ -1,0 +1,175 @@
+/**
+ * FeedView — the Feed's tabs, department chips and rows. Server component:
+ * every row it receives has already been scoped to the workspace
+ * (feed-data.ts) and cut to the viewer (feed-model.ts visibleFeedRows).
+ *
+ * Tabs and chips are plain links (?tab=, ?dept=), so the filtered view is a
+ * URL someone can share and the page needs no client state. Prefetch is off:
+ * a click re-renders the same route with a new query, and prefetching every
+ * chip on every load would re-run the feed read for filters nobody picked.
+ */
+
+import Link from "next/link";
+import { Card, Tag } from "@/components/Card";
+import { formatPublisher } from "@/lib/event-bus-display";
+import { projectEvent } from "@/lib/event-projection";
+import { timeAgo } from "@/lib/fmt";
+import type { DepartmentKey } from "@/lib/os/types";
+import {
+  FEED_TABS,
+  departmentForEvent,
+  type FeedEventRow,
+  type FeedTab,
+} from "@/components/os/landings/feed-model";
+
+export type FeedDepartmentOption = { key: DepartmentKey; slug: string; label: string };
+
+function feedHref(tab: FeedTab, dept: string | null): string {
+  const q = new URLSearchParams();
+  q.set("tab", tab);
+  if (dept) q.set("dept", dept);
+  return `/feed?${q.toString()}`;
+}
+
+export function FeedTabs({
+  active,
+  tabs,
+  deptSlug,
+  counts,
+}: {
+  active: FeedTab;
+  tabs: readonly FeedTab[];
+  deptSlug: string | null;
+  /** Shown only for tabs with a known count; Needs you has none yet. */
+  counts: Partial<Record<FeedTab, number>>;
+}) {
+  return (
+    <nav aria-label="Feed" className="flex gap-1 border-b border-hairline">
+      {FEED_TABS.filter((t) => tabs.includes(t.key)).map((t) => {
+        const isActive = t.key === active;
+        const count = counts[t.key];
+        return (
+          <Link
+            key={t.key}
+            href={feedHref(t.key, deptSlug)}
+            prefetch={false}
+            aria-current={isActive ? "page" : undefined}
+            className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors duration-150 ${
+              isActive ? "border-fg text-fg" : "border-transparent text-fg-muted hover:text-fg"
+            }`}
+          >
+            {t.label}
+            {typeof count === "number" && <span className="text-xs tabular-nums text-fg-dim">{count}</span>}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
+export function FeedDepartmentChips({
+  tab,
+  active,
+  options,
+}: {
+  tab: FeedTab;
+  active: DepartmentKey | null;
+  options: readonly FeedDepartmentOption[];
+}) {
+  if (options.length === 0) return null;
+  const chip = (isActive: boolean) =>
+    `inline-flex h-7 items-center rounded-full border px-3 text-xs font-medium transition-colors duration-150 ${
+      isActive ? "border-hairline bg-active text-fg" : "border-hairline text-fg-muted hover:bg-active-hover hover:text-fg"
+    }`;
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter by department">
+      <Link href={feedHref(tab, null)} prefetch={false} className={chip(active === null)} aria-current={active === null ? "true" : undefined}>
+        All departments
+      </Link>
+      {options.map((d) => (
+        <Link
+          key={d.key}
+          href={feedHref(tab, d.slug)}
+          prefetch={false}
+          className={chip(active === d.key)}
+          aria-current={active === d.key ? "true" : undefined}
+        >
+          {d.label}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+/** Honest empty Needs-you: approvals do not exist yet, so nothing is held. */
+export function NeedsYouEmpty() {
+  return (
+    <Card>
+      <div className="py-6">
+        <p className="text-sm font-medium text-fg">Nothing is waiting on you.</p>
+        <p className="mt-1 max-w-prose text-[13px] leading-5 text-fg-muted">
+          When a department drafts something that leaves the business (an email, a text, a post, an ad change), it
+          waits here until you approve it or send it back. Approvals arrive with department channels. Until then,
+          nothing is being held for you.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
+export function FeedRows({
+  rows,
+  departmentLabels,
+  emptyMessage,
+}: {
+  rows: readonly FeedEventRow[];
+  departmentLabels: Readonly<Partial<Record<DepartmentKey, string>>>;
+  emptyMessage: string;
+}) {
+  if (rows.length === 0) {
+    return (
+      <Card>
+        <p className="py-6 text-sm text-fg-muted">{emptyMessage}</p>
+      </Card>
+    );
+  }
+  return (
+    <Card noPadding>
+      <ul className="divide-y divide-hairline">
+        {rows.map((row) => {
+          const ev = projectEvent(row);
+          const dept = departmentForEvent(row);
+          const who = dept ? departmentLabels[dept] ?? null : null;
+          const when = ev.published_at || row.created_at;
+          const sev = (row.severity || "").toLowerCase();
+          return (
+            <li key={row.id} className="flex items-start gap-3 px-4 py-2.5">
+              <time
+                className="w-14 shrink-0 pt-0.5 text-xs tabular-nums text-fg-dim"
+                dateTime={when || undefined}
+                title={when || undefined}
+              >
+                {timeAgo(when)}
+              </time>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                  <span className="text-sm font-medium text-fg" title={row.event_type}>
+                    {ev.label}
+                  </span>
+                  <span className="text-xs text-fg-dim">
+                    {who ?? (row.publisher_agent ? formatPublisher(row.publisher_agent) : "Unattributed")}
+                  </span>
+                  {(sev === "error" || sev === "critical") && <Tag tone="hot">Failed</Tag>}
+                  {(sev === "warn" || sev === "warning") && <Tag tone="warm">Warning</Tag>}
+                </div>
+                {ev.summary && ev.summary !== "—" && (
+                  <p className="mt-0.5 truncate text-[13px] leading-5 text-fg-muted">{ev.summary}</p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
