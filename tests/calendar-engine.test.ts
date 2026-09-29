@@ -10,6 +10,7 @@ import { shabbatForWeekOf, sunTimes } from "../lib/calendar/sun";
 import { DEFAULT_PREFS, type EventRecord } from "../lib/calendar/types";
 import { pickLegacyWeek, planLegacyImport } from "../lib/calendar/legacy";
 import { createPlaceholderSchedule } from "../lib/schedule/model";
+import { inputForOccurrence } from "../components/calendar/ui";
 import { shabbatConflict, validateEventInput, validateOps, validatePrefs } from "../lib/calendar/validate";
 
 // A DST zone, so wall-clock preservation is exercised on any machine. Node
@@ -133,6 +134,47 @@ const take = <T>(g: Generator<T>, n: number) => {
   assert.ok(delThis[0].op === "update" && delThis[0].patch.exdates?.includes(occ.originalStart!));
   const delAll = planDelete(occ, "all", [m, override]);
   assert.deepEqual(delAll.map((o) => o.op), ["delete", "delete"]);
+}
+
+// ── Codex review 2026-09-29: one regression per finding ───────────────────
+
+{
+  const weekly = ev({ id: "w", start: local("2026-10-05T09:00").toISOString(), end: local("2026-10-05T10:00").toISOString(), recurrence: { freq: "WEEKLY", interval: 1, count: 3 } });
+  const occs = expandOccurrences([weekly], local("2026-10-01T00:00"), local("2026-11-01T00:00"));
+  assert.equal(occs.length, 3);
+  const second = occs[1];
+  const { id: _i, createdAt: _c, updatedAt: _u, ...wbase } = weekly;
+
+  // [P2] "this and following" on a count-limited series keeps the remaining count.
+  const renamed = { ...wbase, title: "renamed", start: second.start.toISOString(), end: second.end.toISOString() };
+  const split = planEdit(second, renamed, "following", [weekly]);
+  assert.ok(split[0].op === "create" && split[0].event.recurrence?.count === 2, "2 of 3 remain, not an endless tail");
+
+  // [P2] "Does not repeat" is honoured for all and for following.
+  const once = { ...renamed, recurrence: null };
+  const allOnce = planEdit(second, once, "all", [weekly]);
+  assert.ok(allOnce[0].op === "update" && allOnce[0].patch.recurrence === null);
+  const folOnce = planEdit(second, once, "following", [weekly]);
+  assert.ok(folOnce[0].op === "create" && folOnce[0].event.recurrence === null);
+
+  // [P2] A timed series turned all-day for "all" produces real date keys that validate.
+  const allDayNext = { ...wbase, allDay: true, start: toDateKey(second.start), end: toDateKey(addDays(second.start, 1)) };
+  const toAllDay = planEdit(second, allDayNext, "all", [weekly]);
+  assert.ok(toAllDay[0].op === "update");
+  assert.equal(toAllDay[0].patch.start, "2026-10-05", "the series' first day, not NaN-NaN-NaN");
+  assert.ok(validateEventInput({ ...wbase, ...toAllDay[0].patch }).ok);
+
+  // [P2] An individually edited occurrence can be reopened and saved again.
+  const override = ev({ id: "ov", recurringEventId: "w", originalStart: second.originalStart, start: second.start.toISOString(), end: second.end.toISOString(), title: "moved" });
+  const reopened = expandOccurrences([weekly, override], local("2026-10-01T00:00"), local("2026-11-01T00:00")).find((o) => o.event.id === "ov")!;
+  const draft = inputForOccurrence(reopened);
+  assert.deepEqual(draft.recurrence, weekly.recurrence, "the editor still shows the series' rule");
+  assert.ok(validateEventInput(draft).ok, "and the draft validates");
+  const again = planEdit(reopened, { ...draft, title: "moved again" }, "this", [weekly, override]);
+  assert.ok(again[0].op === "update" && again[0].id === "ov" && again[0].patch.recurringEventId === "w" && again[0].patch.recurrence === null);
+
+  // [P1] An unknown zone is refused rather than silently expanded in the server's zone.
+  assert.equal((validateEventInput({ ...wbase, timeZone: "Mars/Olympus" }) as { error: string }).error, "time_zone_invalid");
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────

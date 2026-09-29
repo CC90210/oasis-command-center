@@ -148,7 +148,9 @@ export function CalendarApp() {
     return set;
   }, [events, miniRange, visible]);
 
-  const upcoming = useMemo(() => visible(expandOccurrences(events, now, new Date(now.getTime() + 12 * 3_600_000))), [events, now, visible]);
+  // Reminders can be up to four weeks ahead (the validator's ceiling), so the
+  // lookup spans that; the hook itself only arms those due in the next 12h.
+  const upcoming = useMemo(() => visible(expandOccurrences(events, now, new Date(now.getTime() + 29 * 86_400_000))), [events, now, visible]);
   const reminders = useReminders(upcoming, (text) => toast(text));
 
   const results = useMemo(() => {

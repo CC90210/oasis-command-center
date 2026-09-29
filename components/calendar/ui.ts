@@ -50,9 +50,15 @@ export function draftFor(
 /** The editable input for one occurrence: the event's fields at this instance's times. */
 export function inputForOccurrence(occ: Occurrence): EventInput {
   const { id: _i, createdAt: _c, updatedAt: _u, ...rest } = occ.event;
-  const base = occ.master && occ.event.id === occ.master.id ? rest : { ...rest, recurrence: occ.master?.recurrence ?? rest.recurrence };
+  // The draft shows the series' rule, but never carries the series link: the
+  // Occurrence already knows its master, and the planner writes the link back
+  // for a "this event" edit. A draft holding both a rule and a link is a
+  // contradiction the validator rightly refuses.
+  const base = occ.master && occ.event.id !== occ.master.id ? { ...rest, recurrence: occ.master.recurrence } : rest;
   return {
     ...base,
+    recurringEventId: null,
+    originalStart: null,
     start: occ.allDay ? toDateKey(occ.start) : occ.start.toISOString(),
     end: occ.allDay ? toDateKey(occ.end) : occ.end.toISOString(),
   };

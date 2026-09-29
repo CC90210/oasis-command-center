@@ -5,7 +5,8 @@
  * node --conditions=react-server --import tsx tests/calendar-server-tz.test.ts
  */
 import assert from "node:assert/strict";
-import { DEFAULT_PREFS, type EventInput } from "../lib/calendar/types";
+import { seriesStarts } from "../lib/calendar/recurrence";
+import { DEFAULT_PREFS, type EventInput, type EventRecord } from "../lib/calendar/types";
 import { shabbatConflict } from "../lib/calendar/validate";
 
 process.env.TZ = "UTC";
@@ -28,5 +29,24 @@ assert.ok(
   shabbatConflict({ ...at("2026-10-01T19:00", "2026-10-01T20:00"), recurrence: { freq: "WEEKLY", interval: 1, byWeekday: [4, 5] } }, DEFAULT_PREFS),
   "a series reaching Friday evening is refused",
 );
+
+// [P1, Codex 2026-09-29] A Toronto 9am weekly series expands to Toronto 9am
+// on a UTC server too, across the Nov 1 DST change: 13:00Z in October (EDT),
+// 14:00Z in November (EST). It used to expand in the server's own zone.
+{
+  const series: EventRecord = {
+    ...base, id: "s", createdAt: "", updatedAt: "",
+    start: "2026-10-26T13:00:00.000Z", end: "2026-10-26T14:00:00.000Z",
+    recurrence: { freq: "WEEKLY", interval: 1, count: 3 },
+  };
+  assert.deepEqual([...seriesStarts(series)].map((d) => d.toISOString()), [
+    "2026-10-26T13:00:00.000Z",
+    "2026-11-02T14:00:00.000Z",
+    "2026-11-09T14:00:00.000Z",
+  ]);
+  // `until` is a date in the event's zone: Mon 9 Nov 9am Toronto is still the 9th there.
+  const until = { ...series, recurrence: { freq: "WEEKLY" as const, interval: 1, until: "2026-11-09" } };
+  assert.equal([...seriesStarts(until)].length, 3);
+}
 
 console.log("calendar-server-tz: all checks passed");

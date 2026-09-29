@@ -6,6 +6,7 @@
 import { addDays, fromDateKey, isDateKey } from "./dates";
 import { expandOccurrences } from "./recurrence";
 import { overlapsShabbat, type ShabbatWindow } from "./sun";
+import { isTimeZone } from "./zone";
 import {
   CALENDAR_COLORS,
   DEFAULT_PREFS,
@@ -110,7 +111,9 @@ export function validateEventInput(v: unknown): Result<EventInput> {
   if (!(spanMs > 0)) return fail("end_before_start");
   if (spanMs > LIMITS.maxSpanDays * 86_400_000 + 3_600_000) return fail("event_too_long");
 
-  const tz = typeof e.timeZone === "string" && e.timeZone.length <= 64 ? e.timeZone : null;
+  // A real IANA zone: series expand in it, so an unknown one must not fall
+  // back silently to whatever zone the server happens to run in.
+  const tz = isTimeZone(e.timeZone) ? e.timeZone : null;
   if (!tz) return fail("time_zone_invalid");
 
   const rec = validateRecurrence(e.recurrence);
