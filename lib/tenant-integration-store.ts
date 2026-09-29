@@ -428,6 +428,120 @@ export async function setTenantIntegrationValue(input: {
   return { ok: true, id: (r.data as { id: string }).id };
 }
 
+/**
+ * Write every field of a bundle in ONE statement (one multi-row upsert), so an
+ * OAuth token set is all saved or none of it is — never a new access token
+ * beside the old, already-rotated refresh token. Encryption finishes for every
+ * field before anything is written; a field that will not encrypt writes
+ * nothing. Cloned from setUserIntegrationBundle (lib/user-integration-store.ts),
+ * which fixed the same gap for personal tokens; doc 03 F7 is the tenant-side
+ * instance (Constant Contact saved its tokens in three separate writes).
+ */
+export async function setTenantIntegrationBundle(input: {
+  tenantId: string;
+  service: string;
+  bundle: Record<string, string>;
+  createdBy?: string | null;
+}): Promise<{ ok: true; written: string[] } | { ok: false; error: string }> {
+  const entries = Object.entries(input.bundle);
+  if (!input.tenantId || !input.service || entries.length === 0) {
+    return { ok: false, error: "missing_required_field" };
+  }
+  const rows: Array<Record<string, unknown>> = [];
+  for (const [fieldKey, raw] of entries) {
+    const value = (raw || "").trim();
+    if (!fieldKey || !value) return { ok: false, error: `empty_value:${fieldKey}` };
+    let encrypted: string;
+    try {
+      encrypted = encryptField(value);
+    } catch (err) {
+      return { ok: false, error: `encrypt_failed: ${(err as Error).message}` };
+    }
+    rows.push({
+      tenant_id: input.tenantId,
+      service: input.service,
+      field_key: fieldKey,
+      encrypted_value: encrypted,
+      created_by: input.createdBy ?? null,
+      last_tested_at: null,
+      last_test_ok: null,
+      last_test_error: null,
+    });
+  }
+  const db = getServiceSupabase();
+  const r = await db
+    .from("tenant_integration_credentials")
+    .upsert(rows, { onConflict: "tenant_id,service,field_key" });
+  if (r.error) return { ok: false, error: r.error.message || "upsert_failed" };
+  return { ok: true, written: entries.map(([k]) => k) };
+}
+
+/**
+ * A stored credential, read with no env fallback of any kind and with its
+ * failure modes kept apart: "missing" (no row), "unreadable" (a row that will
+ * not decrypt) and "lookup_failed" (the query itself failed). The Connections
+ * framework reports each differently — an unreadable key is not a missing one,
+ * and a database outage is neither.
+ */
+export type StrictCredentialRead =
+  | { ok: true; value: string }
+  | { ok: false; reason: "missing" | "unreadable" | "lookup_failed" };
+
+export async function readTenantCredentialStrict(
+  tenantId: string,
+  service: string,
+  fieldKey: string,
+): Promise<StrictCredentialRead> {
+  if (!tenantId || !service || !fieldKey) throw new Error("tenant_credential_scope_missing");
+  const db = getServiceSupabase();
+  const r = await db
+    .from("tenant_integration_credentials")
+    .select("encrypted_value")
+    .eq("tenant_id", tenantId)
+    .eq("service", service)
+    .eq("field_key", fieldKey)
+    .maybeSingle();
+  if (r.error) {
+    console.error("[tenant-integration-store] strict credential lookup failed", {
+      tenantId,
+      service,
+      fieldKey,
+      error: r.error.message,
+    });
+    return { ok: false, reason: "lookup_failed" };
+  }
+  const encrypted = (r.data as { encrypted_value?: string } | null)?.encrypted_value;
+  if (!encrypted) return { ok: false, reason: "missing" };
+  try {
+    const value = decryptField(encrypted);
+    return value.trim() ? { ok: true, value } : { ok: false, reason: "missing" };
+  } catch (err) {
+    console.error("[tenant-integration-store] strict credential decrypt failed", { tenantId, service, fieldKey, err });
+    return { ok: false, reason: "unreadable" };
+  }
+}
+
+/**
+ * Delete EVERY field stored under one service for one tenant — how a
+ * connection's credential is destroyed on disconnect. Returns how many rows
+ * went; a query error is returned, never swallowed.
+ */
+export async function deleteTenantIntegrationService(input: {
+  tenantId: string;
+  service: string;
+}): Promise<{ ok: true; deleted: number } | { ok: false; error: string }> {
+  if (!input.tenantId || !input.service) return { ok: false, error: "missing_required_field" };
+  const db = getServiceSupabase();
+  const r = await db
+    .from("tenant_integration_credentials")
+    .delete()
+    .eq("tenant_id", input.tenantId)
+    .eq("service", input.service)
+    .select("id");
+  if (r.error) return { ok: false, error: r.error.message };
+  return { ok: true, deleted: ((r.data as unknown[] | null) || []).length };
+}
+
 export async function deleteTenantIntegrationValue(input: {
   tenantId: string;
   service: string;

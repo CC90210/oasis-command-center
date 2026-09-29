@@ -33,6 +33,7 @@ import {
   classifyWorkspaceConnection,
   isWorkspaceHeartbeatFresh,
 } from "@/lib/integrations/workspace-connection-status";
+import { isVerifiedHealthy } from "@/lib/connections/rules";
 
 // ── Catalog shape ──────────────────────────────────────────────────────────
 
@@ -73,8 +74,13 @@ export type ConnectorIcon =
  *   oauth_tokens         OAuth tokens in the shared store. Authorised, but not
  *                        re-checked on page load (that would be a provider call
  *                        per render).
+ *   tenant_connection    a Connections-framework connection (tenant_connections,
+ *                        lib/connections/*): green only while its last LIVE
+ *                        probe passed and is under a day old
+ *                        (lib/connections/rules.ts isVerifiedHealthy).
  */
 export type ConnectorStatusSource =
+  | { kind: "tenant_connection"; provider: string }
   | { kind: "workspace_heartbeat"; service: "gws" | "telegram"; requireAll: readonly string[] }
   | {
       kind: "tenant_keys";
@@ -90,7 +96,12 @@ export type ConnectorStatusSource =
 export type ConnectorConnect =
   | { kind: "link"; href: string; label: string }
   /** An OAuth start route opened in a popup that postMessages `{ source }` back. */
-  | { kind: "popup"; href: string; label: string; messageSource: string };
+  | { kind: "popup"; href: string; label: string; messageSource: string }
+  /**
+   * A key pasted into the connector's drawer and posted to
+   * /api/connections/[provider]/connect, which probes it live before saving.
+   */
+  | { kind: "key_form"; label: string; provider: string };
 
 export type ConnectorDef = {
   slug: string;
@@ -135,15 +146,19 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["finance", "sales"],
     brandColor: "#635BFF",
     icon: { kind: "svg", file: "stripe.svg" },
-    reads: ["Payments, customers and subscriptions"],
-    does: [
-      "Shows revenue and recurring income in Finance",
-      "Creates checkout links for the proposals you send and confirms they were paid",
+    reads: [
+      "Your balance, payments, refunds and payouts",
+      "Customers, invoices and subscriptions",
     ],
-    keywords: ["payments", "billing", "mrr", "invoices"],
+    does: [
+      "Re-checks the key with Stripe every hour, so this card shows within the hour if Stripe stops accepting it",
+      "Will feed revenue and recurring income into Finance once the Finance sync ships (next release)",
+      "Never charges a card, issues a refund or moves money: the key it accepts is read-only",
+    ],
+    keywords: ["payments", "billing", "mrr", "invoices", "restricted key"],
     live: {
-      source: { kind: "tenant_keys", service: "stripe", requireAll: ["secret_key"], verifiable: true },
-      connect: keysLink("Add your Stripe key"),
+      source: { kind: "tenant_connection", provider: "stripe" },
+      connect: { kind: "key_form", label: "Connect Stripe", provider: "stripe" },
     },
   },
   {
@@ -483,6 +498,24 @@ export type ConnectorStatus = {
   label: string;
   /** A second line for the drawer and tooltips. */
   detail?: string;
+  /** The connected account, as the provider named it (framework connections only). */
+  account?: string;
+};
+
+/**
+ * One live (not revoked) tenant_connections row, as the hub sees it: state and
+ * health only, never a credential.
+ */
+export type ConnectionFact = {
+  provider: string;
+  status: string;
+  account_id: string | null;
+  account_label: string | null;
+  environment: string | null;
+  last_health_at: string | null;
+  last_health_verdict: string | null;
+  last_health_code: string | null;
+  last_health_detail: string | null;
 };
 
 /** One row of listTenantIntegrationStatus — presence and test state, never a value. */
@@ -510,6 +543,8 @@ export type ConnectorFacts = {
   heartbeats: readonly HeartbeatFact[] | null;
   /** The viewer's own Google (gmail_oauth) link, or null when it could not be read. */
   personalGoogleLinked: boolean | null;
+  /** The tenant's live Connections-framework connections. */
+  connections: readonly ConnectionFact[] | null;
 };
 
 /** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
@@ -605,6 +640,99 @@ function keyedStatus(
       };
 }
 
+function accountLine(row: ConnectionFact): string | undefined {
+  const name = row.account_label ?? row.account_id;
+  if (!name) return undefined;
+  return row.environment === "test" ? `${name} · test mode` : name;
+}
+
+/**
+ * A Connections-framework card. Green comes ONLY from isVerifiedHealthy — a
+ * connected row whose last live probe passed under a day ago. Everything else
+ * says what is true in plain words, with the probe's own explanation.
+ */
+function frameworkStatus(
+  def: ConnectorDef,
+  provider: string,
+  connections: readonly ConnectionFact[],
+  keyRows: readonly KeyRowFact[] | null,
+  nowMs: number,
+): ConnectorStatus {
+  const row = connections.find((c) => c.provider === provider && c.status !== "revoked");
+  if (!row) {
+    // Stripe only: the Credentials store may also hold a separate secret key
+    // (checkout links for proposals). It is not this connection and never makes
+    // it green, but an owner deserves to know both exist.
+    const legacyKey =
+      provider === "stripe" &&
+      !!keyRows?.some((r) => r.service === "stripe" && r.field_key === "secret_key" && r.has_value);
+    return {
+      kind: "not_connected",
+      label: "Not connected",
+      detail: legacyKey
+        ? "A Stripe secret key is also saved under Keys and accounts for checkout links. That key is separate and is not used as this read-only connection."
+        : undefined,
+    };
+  }
+  const account = accountLine(row);
+  if (isVerifiedHealthy(row, nowMs)) {
+    return {
+      kind: "connected",
+      label: `Connected · verified ${formatVerifiedAgo(row.last_health_at, nowMs)}`,
+      detail: `The last live check with ${def.name} passed.`,
+      account,
+    };
+  }
+  switch (row.status) {
+    case "connected":
+      if (row.last_health_code === "provider_unreachable" || row.last_health_code === "unexpected_response") {
+        return {
+          kind: "configured",
+          label: `Connected · ${def.name} did not answer the last check`,
+          detail: row.last_health_detail ?? `OASIS could not reach ${def.name}. It will check again within the hour.`,
+          account,
+        };
+      }
+      return {
+        kind: "configured",
+        label: "Connected · waiting for a health check",
+        detail: "No live check has passed in the last 24 hours. OASIS re-checks every hour; Test again runs one now.",
+        account,
+      };
+    case "pending":
+      return {
+        kind: "configured",
+        label: "Setting up · not verified yet",
+        detail: "The connection has not passed a live check yet.",
+        account,
+      };
+    case "pending_review":
+      return {
+        kind: "configured",
+        label: "Pending platform approval",
+        detail: row.last_health_detail ?? undefined,
+        account,
+      };
+    case "expired":
+      return {
+        kind: "attention",
+        label: "Key no longer accepted",
+        detail: row.last_health_detail ?? `${def.name} stopped accepting this connection. Reconnect it.`,
+        account,
+      };
+    case "degraded":
+    case "error":
+      return {
+        kind: "attention",
+        label: "Needs attention",
+        detail: row.last_health_detail ?? "The last live check found a problem.",
+        account,
+      };
+    default:
+      return { ...UNKNOWN, account };
+  }
+}
+
 /**
  * The status a card shows. Pure: the same facts and `nowMs` always give the
  * same words, which is what lets the test feed it hostile inputs.
@@ -624,6 +752,10 @@ export function resolveConnectorStatus(
   }
 
   const source = def.live.source;
+  if (source.kind === "tenant_connection") {
+    if (!facts.connections) return UNKNOWN;
+    return frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs);
+  }
   if (source.kind === "tenant_keys" || source.kind === "oauth_tokens") {
     if (!facts.keyRows) return UNKNOWN;
     return keyedStatus(source, facts.keyRows, nowMs);
