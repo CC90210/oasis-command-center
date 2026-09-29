@@ -1,22 +1,7 @@
 {
   "_comment": "Known AI-tell visual patterns. Each entry is a reason a business owner reads our software as generated. Shrink, never grow.",
-  "root": "C:\\Users\\echel\\AppData\\Local\\Temp\\claude\\c--Users-echel-JARVIS\\eacee293-4a60-4b8a-af1b-ae56d1a89a60\\scratchpad\\occ-gate",
+  "root": "C:\\Users\\echel\\AppData\\Local\\Temp\\claude\\c--Users-echel-JARVIS\\eacee293-4a60-4b8a-af1b-ae56d1a89a60\\scratchpad\\occ-tells",
   "known": [
-    {
-      "file": "app/globals.css",
-      "line": 319,
-      "rule": "named-decor"
-    },
-    {
-      "file": "app/globals.css",
-      "line": 335,
-      "rule": "named-decor"
-    },
-    {
-      "file": "app/globals.css",
-      "line": 339,
-      "rule": "named-decor"
-    },
     {
       "file": "app/(marketing)/marketing.css",
       "line": 305,
@@ -38,34 +23,14 @@
       "rule": "radial-wash"
     },
     {
-      "file": "app/configure/page.tsx",
-      "line": 33,
-      "rule": "drifting-orb"
-    },
-    {
-      "file": "app/configure/page.tsx",
-      "line": 36,
-      "rule": "radial-wash"
-    },
-    {
       "file": "app/download/page.tsx",
       "line": 69,
       "rule": "radial-wash"
     },
     {
-      "file": "app/download/page.tsx",
-      "line": 102,
-      "rule": "gradient-text"
-    },
-    {
       "file": "app/playbook/drills/page.tsx",
       "line": 263,
       "rule": "ai-accent"
-    },
-    {
-      "file": "components/ChatWidget.tsx",
-      "line": 2699,
-      "rule": "named-decor"
     },
     {
       "file": "components/calls/CallsClient.tsx",
@@ -328,11 +293,6 @@
       "rule": "ai-accent"
     },
     {
-      "file": "components/founders/marketing-shared.tsx",
-      "line": 194,
-      "rule": "halo-shadow"
-    },
-    {
       "file": "components/landing/ConfigureFlow.tsx",
       "line": 65,
       "rule": "ai-accent"
@@ -346,11 +306,6 @@
       "file": "components/leads/ScheduleCallControl.tsx",
       "line": 192,
       "rule": "ai-accent"
-    },
-    {
-      "file": "components/metrics/MetricsDashboard.tsx",
-      "line": 115,
-      "rule": "halo-shadow"
     },
     {
       "file": "components/offers/OffersByDealClient.tsx",
@@ -369,12 +324,7 @@
     },
     {
       "file": "components/schedule/ScheduleClient.tsx",
-      "line": 336,
-      "rule": "drifting-orb"
-    },
-    {
-      "file": "components/schedule/ScheduleClient.tsx",
-      "line": 406,
+      "line": 408,
       "rule": "ai-accent"
     },
     {
@@ -428,11 +378,6 @@
       "rule": "radial-wash"
     },
     {
-      "file": "components/web-leads/BattleCard.tsx",
-      "line": 1687,
-      "rule": "drifting-orb"
-    },
-    {
       "file": "components/web-leads/CompetitorArena3D.tsx",
       "line": 355,
       "rule": "radial-wash"
@@ -446,146 +391,6 @@
       "file": "lib/agents.ts",
       "line": 296,
       "rule": "ai-accent"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 21,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 21,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 28,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 28,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 35,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 42,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 49,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ad-creatives.generated.ts",
-      "line": 49,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
-      "line": 22,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
-      "line": 27,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/borrow_pay_rows_post.html",
-      "line": 28,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
-      "line": 13,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
-      "line": 19,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
-      "line": 19,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/fast_business_capital_story.html",
-      "line": 27,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/framed_card_post.html",
-      "line": 13,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/framed_card_post.html",
-      "line": 48,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/framed_card_post.html",
-      "line": 48,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/hero_amount_post.html",
-      "line": 13,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/hero_amount_post.html",
-      "line": 21,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/hero_amount_post.html",
-      "line": 56,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/hero_amount_post.html",
-      "line": 57,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 14,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 22,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 24,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 27,
-      "rule": "radial-wash"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 27,
-      "rule": "halo-shadow"
-    },
-    {
-      "file": "lib/cold-outreach/ads/spotlight_tiers_story.html",
-      "line": 40,
-      "rule": "halo-shadow"
     }
   ]
 }

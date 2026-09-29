@@ -333,7 +333,9 @@ export function ScheduleClient() {
   return (
     <div className="min-h-[calc(100vh-7rem)] space-y-5 pb-10">
       <header className="relative overflow-hidden rounded-2xl border border-white/10 bg-[#090d15]/90 px-5 py-5 shadow-2xl shadow-black/20 sm:px-7">
-        <div className="pointer-events-none absolute -right-16 -top-20 h-52 w-52 rounded-full bg-blue-500/15 blur-3xl" />
+        {/* A blurred blue orb sat in this header corner. Decorative only, and a
+            blurred gradient orb is a named AI-generated tell. The border and
+            panel colour already separate this header from the page. */}
         <div className="relative flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-blue-300">

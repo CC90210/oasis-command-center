@@ -72,7 +72,15 @@ SKIP_PARTS = set([
     "node_modules", ".next", ".git", "dist", "build", "out", "coverage",
     "vendor", "_ARCHIVE", ".ingested", "venv", "__pycache__",
     ".turbo", ".vercel", "site-packages", "examples", ".hallmark",
+    # Generated advertising creative is a different medium with different rules.
+    # An ad is a poster: a glow there is a deliberate art direction choice, not a
+    # product-UI tell, and `*.generated.*` files are rewritten by their generator
+    # so editing them achieves nothing. Scanning them put 28 unfixable hits in
+    # front of the real ones, which is how a gate gets ignored.
+    "cold-outreach",
 ])
+# Same reasoning, by filename: never lint machine-written output.
+SKIP_NAME_PARTS = (".generated.",)
 # This linter and its test necessarily CONTAIN the banned strings. Skipping them
 # by name stops the guard reporting itself, which would be the dumbest possible
 # false positive.
@@ -166,6 +174,8 @@ def iter_files(root, dirs):
             if p.name in SKIP_FILES:
                 continue
             if SKIP_PARTS & set(p.parts):
+                continue
+            if any(frag in p.name for frag in SKIP_NAME_PARTS):
                 continue
             yield p
     for name in ("tailwind.config.js", "tailwind.config.ts", "tailwind.config.mjs"):

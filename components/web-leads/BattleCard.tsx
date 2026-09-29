@@ -1682,9 +1682,12 @@ function Hero({
                     carries the real number so a screen reader never announces
                     an intermediate frame. */}
                 <div className="relative mt-2 inline-flex h-36 w-36 items-center justify-center">
-                  {/* The arc-reactor halo: a constant pulse behind the ring,
-                      motion-safe gated, identical at every score. */}
-                  <div aria-hidden className="absolute inset-3 rounded-full bg-accent/10 blur-xl motion-safe:animate-pulse-slow" />
+                  {/* The "arc-reactor halo" is gone: a blurred orb pulsing
+                      forever behind the ring, and by its own comment identical
+                      at every score, so it encoded nothing. Perpetual motion
+                      next to a number competes with the number, and it held a
+                      compositor layer for the whole session. The ring itself
+                      carries the score. */}
                   <svg viewBox="0 0 120 120" className="absolute inset-0 h-full w-full -rotate-90" aria-hidden>
                     <defs>
                       <linearGradient id={ringId} x1="0%" y1="0%" x2="100%" y2="100%">
