@@ -390,14 +390,6 @@ async function main() {
     });
   const deps = () => ({ db, now: () => new Date() });
   const actorC = { tenantId: TENANT_C, userId: "0c000000-0000-4000-8000-0000000000c3", profileId: null, email: "owner@charlie.test" };
-  const cronCall = async () =>
-    toRes(
-      await cronRoute.GET(
-        new NextRequest("https://oasisai.work/api/cron/connection-health", {
-          headers: { authorization: `Bearer ${process.env.CRON_SECRET}`, "x-oasis-cron-attest": process.env.CRON_ATTEST_SECRET! },
-        }),
-      ),
-    );
   const stripeDef = registry.providerById("stripe")!;
 
   console.log("os-connections:");
@@ -843,6 +835,15 @@ async function main() {
     // [6] A flip to a worse status alerts (warn for degraded) and puts it under Needs you.
     const alerts = await attentionEvents(TENANT_B);
     assert.deepEqual(alerts.map((a) => [a.severity, a.payload.to]), [["warn", "degraded"]]);
+    // ...and the owner sees it on the Feed, under Operations, saying what it is.
+    const feed = await loadTenantFeed({ tenantId: TENANT_B });
+    assert.ok(feed.ok, "the Feed could not be read");
+    const onFeed = feed.rows.filter((r) => r.event_type === "CONNECTION_NEEDS_ATTENTION");
+    assert.equal(onFeed.length, 1, "the alert is not on the workspace's Feed");
+    assert.equal(departmentForEvent(onFeed[0]), "operations");
+    assert.match(projectEvent(onFeed[0]).summary, /Stripe connection/);
+    const feedA = await loadTenantFeed({ tenantId: TENANT_A });
+    assert.ok(feedA.ok && !feedA.rows.some((r) => r.event_type === "CONNECTION_NEEDS_ATTENTION"), "another workspace saw B's alert");
     const item = (await needsYouFor(TENANT_B)).items.find((i) => i.id === "connection-stripe");
     assert.deepEqual([item?.tone, item?.href], ["attention", "/settings/connections"]);
     assert.match(String(item?.detail), /^Missing: Subscriptions read\./);
