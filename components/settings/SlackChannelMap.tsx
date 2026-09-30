@@ -49,7 +49,14 @@ function draftOf(c: Channel): Draft {
   return { department: c.route?.department ?? GENERAL, customer: c.route?.customer_id ?? "" };
 }
 
-export function SlackChannelMap({ departments }: { departments: readonly Department[] }) {
+export function SlackChannelMap({
+  departments,
+  savedRoutes = [],
+}: {
+  departments: readonly Department[];
+  /** The workspace's saved mappings (server-read), shown even when Slack cannot be reached. */
+  savedRoutes?: readonly Orphan[];
+}) {
   const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -128,11 +135,28 @@ export function SlackChannelMap({ departments }: { departments: readonly Departm
   if (loaded.state === "loading") return <p className="text-[13px] leading-5 text-fg-muted">Loading your Slack channels…</p>;
   if (loaded.state === "error") {
     return (
-      <div className="flex flex-wrap items-center gap-3 text-[13px] leading-5">
-        <span className="text-status-warm">{loaded.message}</span>
-        <button type="button" onClick={() => void load()} className="btn-secondary">
-          Try again
-        </button>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3 text-[13px] leading-5">
+          <span className="text-status-warm">{loaded.message}</span>
+          <button type="button" onClick={() => void load()} className="btn-secondary">
+            Try again
+          </button>
+        </div>
+        {/* What is mapped is OASIS's own record, so it stays visible while Slack is not answering. */}
+        {savedRoutes.length > 0 && (
+          <div>
+            <p className="text-[12px] font-medium text-fg-dim">Mapped now</p>
+            <ul className="mt-1 space-y-0.5 text-[13px] leading-5 text-fg-muted">
+              {savedRoutes.map((m) => (
+                <li key={m.channel_id}>
+                  <span className="font-medium text-fg">#{m.channel_name ?? m.channel_id}</span>{" "}
+                  {m.department ? departments.find((d) => d.key === m.department)?.label ?? m.department : "General"}
+                  {m.customer_id ? ", linked to a client" : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     );
   }

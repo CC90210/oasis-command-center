@@ -153,7 +153,15 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                     nothing is mirrored or answered.
                   </p>
                 ) : viewer.access.canManage ? (
-                  <SlackChannelMap departments={departments} />
+                  <SlackChannelMap
+                    departments={departments}
+                    savedRoutes={(slackSettings.routes ?? []).map((r) => ({
+                      channel_id: r.channel_id,
+                      channel_name: r.channel_name,
+                      department: r.department,
+                      customer_id: r.customer_id,
+                    }))}
+                  />
                 ) : (
                   <ul className="space-y-1 text-[13px] leading-5">
                     {(slackSettings.routes ?? []).length === 0 ? (
