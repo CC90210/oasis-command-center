@@ -267,6 +267,18 @@ export type WebLead = {
   ownerVerification: string | null;
   /** Plain-English sentence a rep can read aloud. Never a template guess. */
   ownerEvidence: string | null;
+  /**
+   * When this rep promised to come back to this one.
+   *
+   * `dispositionPatch` in lib/website-sales-workflow.ts REQUIRES a future date
+   * for the attempted and voicemail dispositions and refuses the write without
+   * one, so this has been filling up since that shipped. Nothing ever read it
+   * back: a rep said "call me in two weeks", the date was stored, and no screen
+   * in this product mentioned it again. On a cold week deferrals are most of
+   * what the week produces, so the largest category of work the board knew
+   * about was the one category it could not show. The `due` filter reads it.
+   */
+  nextActionAt: string | null;
   websiteCondition: string;
   auditFindings: string;
   territoryId: string | null;
@@ -439,6 +451,7 @@ export function toWebLead(row: { id: string; data: Record<string, unknown> }): W
     ownerEvidenceUrl: str(d.owner_evidence_url),
     ownerVerification: str(d.owner_verification_state),
     ownerEvidence: str(d.owner_verification_evidence),
+    nextActionAt: str(d.next_action_at),
     // VERBATIM. Nothing in this pipeline has fetched these websites — OpenStreetMap
     // lacking a website tag means nobody mapped one, not that no site exists. A rep
     // reading a fabricated finding aloud on a live call is the worst outcome this
@@ -551,6 +564,13 @@ export const FILTER_KEYS = [
   // no error raised anywhere. Three short text fields; the transfer cost this
   // projection exists to control lives in the big blob fields it still omits.
   "owner_name", "owner_phone", "owner_verification_state",
+  // THE CALLBACK PROMISE. Read by the `due` filter, which runs HERE on the
+  // projected row, so omitting it would not weaken that filter -- it would make
+  // it answer "nothing is due" for every lead in the tenant, forever, with no
+  // error. That is precisely the failure the three fields above caused for two
+  // weeks, and the one tests/web-leads-projection-covers-filters.test.ts exists
+  // to catch. One short text field.
+  "next_action_at",
 ] as const;
 
 const FILTER_SELECT = `id,${FILTER_KEYS.map((k) => `data->${k}`).join(",")}`;
@@ -850,6 +870,22 @@ export async function fetchLeads(
     .filter((l) => (scope === "pool" ? Boolean(l.phone) : true))
     .filter((l) => (f.noSiteOnly ? !l.websiteUrl : true))
     .filter((l) => (f.ownerOnly ? Boolean(l.ownerName) : true))
+    // WHAT THIS REP ALREADY OWES, evaluated against the same injected `now` as
+    // the claim-expiry rules so one page never sees two clocks.
+    //
+    // Due means the promised moment has ARRIVED OR PASSED. An overdue callback
+    // is more urgent than a fresh one, so both belong in the same list and the
+    // sort puts the oldest promise at the top.
+    //
+    // A missing date is NOT due. A lead nobody promised to call back is ordinary
+    // queue work and belongs in the main list, not in the one screen that says
+    // "you said you would do this".
+    //
+    // Intended with the `mine` view, which is what scopes it to the caller's own
+    // book. Deliberately NOT forcing that scope here: a filter that silently
+    // rewrites the view is how surprising behaviour gets built, and the pool
+    // shows only unheld leads anyway.
+    .filter((l) => (f.due ? isDue(l.nextActionAt, now) : true))
     // How much we know before the dial. A chosen tier means that tier AND
     // better, so asking for named owners never hides the verified ones.
     .filter((l) => passesEnrichment(l, f.enrichment))
@@ -884,7 +920,12 @@ export async function fetchLeads(
   // pass everything else.
   const all = matching
     .filter((l) => countryOf(l.province) === f.country)
-    .sort(comparatorFor(f.sort));
+    // A WORK QUEUE HAS ONE CORRECT ORDER, so `due` overrides the chosen sort
+    // rather than composing with it. The oldest broken promise goes first: a
+    // callback owed since last Tuesday outranks one owed this morning, and any
+    // other ordering makes the screen a list rather than a queue. Ties break on
+    // name like every other comparator here, so paging stays stable.
+    .sort(f.due ? byDueThenName : comparatorFor(f.sort));
 
   // A BOOK SAYS WHERE ITS OTHER LEADS ARE (2026-09-10). My leads and Team leads
   // show one board at a time, like the pool, and a lead on the other board was
@@ -931,6 +972,7 @@ export async function fetchLeads(
       stage: l.stage,
       released: l.released,
       lastCallAt: l.lastCallAt,
+      nextActionAt: l.nextActionAt,
     };
   });
 
@@ -962,6 +1004,48 @@ function matchesBand(l: WebLeadRow, band: ScoreBand): boolean {
  * Unscored leads sort AFTER every scored lead in both score orders (not as a
  * zero, not as a 100). A missing score is not a low score -- see scores.ts.
  */
+/**
+ * Does this rep already owe this call?
+ *
+ * Exported so it can be tested directly. Re-stating the predicate inside a test
+ * would prove only that the test and the source agree with each other, which is
+ * the mistake tests/web-leads-projection-covers-filters.test.ts was written to
+ * stop being repeated.
+ *
+ * NO DATE IS NOT DUE. A lead nobody promised to call back is ordinary queue
+ * work, not a broken promise, and putting it on the one screen that says "you
+ * said you would do this" would make that screen mean nothing. An unparseable
+ * date is treated the same way, for the same reason scores.ts refuses to read a
+ * missing score as a low one.
+ *
+ * @param nextActionAt ISO timestamp the rep committed to, or null
+ * @param now          the request's single injected clock, in ms
+ */
+export function isDue(nextActionAt: string | null | undefined, now: number): boolean {
+  if (!nextActionAt) return false;
+  const at = Date.parse(nextActionAt);
+  return Number.isFinite(at) && at <= now;
+}
+
+/**
+ * The due queue's order: oldest promise first, ties on name.
+ *
+ * Only reachable when the `due` filter is on, and that filter has already
+ * dropped every row without a parseable date, so the fallbacks here are for
+ * type-safety rather than for a case this can actually reach. A row that
+ * somehow arrives without one sorts LAST rather than first, because an unknown
+ * date is not an overdue one -- the same rule scores.ts applies to a missing
+ * score.
+ */
+export function byDueThenName(a: WebLeadRow, b: WebLeadRow): number {
+  const at = a.nextActionAt ? Date.parse(a.nextActionAt) : Number.POSITIVE_INFINITY;
+  const bt = b.nextActionAt ? Date.parse(b.nextActionAt) : Number.POSITIVE_INFINITY;
+  const av = Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
+  const bv = Number.isFinite(bt) ? bt : Number.POSITIVE_INFINITY;
+  if (av !== bv) return av - bv;
+  return a.name.localeCompare(b.name);
+}
+
 function comparatorFor(sort: LeadSort): (a: WebLeadRow, b: WebLeadRow) => number {
   const byName = (a: WebLeadRow, b: WebLeadRow) => a.name.localeCompare(b.name);
   if (sort === "name") return byName;
