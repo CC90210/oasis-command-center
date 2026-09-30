@@ -134,7 +134,11 @@ export function* seriesStarts(master: Pick<EventRecord, "allDay" | "start" | "re
   }
 
   if (rule.freq === "MONTHLY") {
-    const { n, last } = nthOf(w.y, w.m, w.d);
+    // An explicit ordinal (set when a series is split) wins over the one the
+    // first date implies: a "last Monday" series may start on a 4th Monday.
+    const implied = nthOf(w.y, w.m, w.d);
+    const n = rule.nth === -1 ? 5 : rule.nth ?? implied.n;
+    const last = rule.nth === -1 || (rule.nth === undefined && implied.last);
     for (let k = 0; guard++ < MAX_ITERATIONS; k += interval) {
       const y = w.y + Math.floor((w.m + k) / 12);
       const m = (w.m + k) % 12;
@@ -234,7 +238,9 @@ export function describeRecurrence(rule: Recurrence | null, start: Date): string
     }
     case "MONTHLY": {
       if (rule.monthlyMode === "nth") {
-        const { n, last } = nthWeekdayOf(start);
+        const implied = nthWeekdayOf(start);
+        const n = rule.nth === -1 ? 5 : rule.nth ?? implied.n;
+        const last = rule.nth === -1 || (rule.nth === undefined && implied.last);
         text = `${every("month")} on the ${last && n === 5 ? "last" : ordinal(n)} ${weekdayLong(start.getDay())}`;
       } else text = `${every("month")} on day ${start.getDate()}`;
       break;
@@ -299,11 +305,24 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
   }
 
   const newStartDate = eventStart(next);
-  const durationMs = eventEnd(next).getTime() - newStartDate.getTime();
   // Instances are re-keyed when they move or change between timed and all-day.
   const reshaped = newStartDate.getTime() !== occ.start.getTime() || next.allDay !== master.allDay;
-  // Whole calendar days the user moved this instance, in each side's own calendar.
+  // What the user changed on THIS occurrence, as deltas: whole days (in each
+  // side's own calendar), wall-clock minutes, and duration. Series-wide edits
+  // apply these deltas to the series' own values, so a rename of an instance
+  // that was moved or lengthened on its own never moves or lengthens the rest.
   const dayShift = keyDay(dayKeyIn(next, newStartDate)) - keyDay(dayKeyIn(master, occ.start));
+  const timed = !next.allDay && !master.allDay;
+  const minuteShift = timed ? wallMinutes(newStartDate, next.timeZone) - wallMinutes(occ.start, master.timeZone) : 0;
+  const durationShift = eventEnd(next).getTime() - newStartDate.getTime() - (occ.end.getTime() - occ.start.getTime());
+  const seriesDuration = Math.max(60_000, eventEnd(master).getTime() - eventStart(master).getTime() + durationShift);
+  /** Start/end for the instance whose unedited start is `base`, with the user's deltas applied. */
+  const placeFrom = (base: Date) => {
+    const total = (timed ? wallMinutes(base, master.timeZone) : 0) + minuteShift;
+    const day = keyDay(dayKeyIn(master, base)) + dayShift + Math.floor(total / 1440);
+    const minuteOfDay = ((total % 1440) + 1440) % 1440;
+    return placeAt(next, day, newStartDate, seriesDuration, timed ? minuteOfDay : undefined);
+  };
   // Moving an occurrence of an unchanged weekly rule moves its weekdays too.
   const follow = (r: Recurrence, from: Date, to: Date) => followMove(r, weekdayIn(master, from), weekdayIn(next, to));
   const overridesFrom = (fromMs: number) =>
@@ -319,19 +338,7 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
         ...overridesFrom(-Infinity),
       ];
     }
-    // The first instance moves by the same number of calendar days and takes
-    // the edited wall-clock time, in the chosen representation. Wall-clock,
-    // not elapsed milliseconds: a move across a DST change keeps 9am at 9am.
-    // The series keeps its own time of day, shifted by exactly what the user
-    // changed on this occurrence: a title-only edit of an instance that was
-    // moved to 11:00 must not drag the 9:00 series to 11:00.
-    const minuteShift = next.allDay || master.allDay ? 0 : wallMinutes(newStartDate, next.timeZone) - wallMinutes(occ.start, master.timeZone);
-    const masterFirst = eventStart(master);
-    const total = (master.allDay ? 0 : wallMinutes(masterFirst, master.timeZone)) + minuteShift;
-    const extraDays = Math.floor(total / 1440);
-    const minuteOfDay = ((total % 1440) + 1440) % 1440;
-    const timed = !next.allDay && !master.allDay;
-    const { start, end } = placeAt(next, keyDay(dayKeyIn(master, masterFirst)) + dayShift + extraDays, newStartDate, durationMs, timed ? minuteOfDay : undefined);
+    const { start, end } = placeFrom(eventStart(master));
     const rule = sameRule(next.recurrence, master.recurrence) ? follow(next.recurrence, occ.start, newStartDate) : next.recurrence;
     // A changed rule (shorter, other days) can leave edits whose slot is gone:
     // delete those rows rather than keep data the calendar will never show.
@@ -360,18 +367,17 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
   const origTime = keyTime(origKey, master.allDay);
   const origDate = new Date(origTime);
   if (eventStart(master).getTime() === origTime) return planEdit(occ, next, "all", allRows);
-  const moved = origTime !== occ.start.getTime();
-  // The new series starts at the original slot, shifted by whatever days the
-  // user just moved the instance, at the time they chose.
-  const anchored = moved ? { ...next, ...placeAt(next, keyDay(dayKeyIn(master, origDate)) + dayShift, newStartDate, durationMs) } : next;
+  const anchored = { ...next, ...placeFrom(origDate) };
   const oldRule = master.recurrence!;
   let newRule: Recurrence | null;
   if (!next.recurrence) newRule = null;
   else if (sameRule(next.recurrence, oldRule)) {
     // Same rule: the new series carries on where the old one stops, so a
-    // count-limited series keeps only the instances it had left.
+    // count-limited series keeps only the instances it had left, and a
+    // "last Monday" series stays last-Monday although it now starts on a 4th.
     const remaining = oldRule.count ? Math.max(1, oldRule.count - startsBefore(master, origTime)) : undefined;
-    newRule = follow({ ...oldRule, count: remaining }, origDate, eventStart(anchored));
+    const nth = oldRule.freq === "MONTHLY" && oldRule.monthlyMode === "nth" ? { nth: seriesNth(master) } : {};
+    newRule = follow({ ...oldRule, ...nth, count: remaining }, origDate, eventStart(anchored));
   } else newRule = { ...next.recurrence };
   return [
     { op: "create", event: { ...anchored, recurrence: newRule, exdates: [], recurringEventId: null, originalStart: null } },
@@ -379,6 +385,15 @@ export function planEdit(occ: Occurrence, next: EventInput, scope: EditScope, al
     // Overrides at or after the split belonged to the old tail; Google drops them.
     ...overridesFrom(origTime),
   ];
+}
+
+/** The ordinal a monthly-by-weekday series repeats on: 1..4, or -1 for "last". */
+function seriesNth(master: Pick<EventRecord, "allDay" | "start" | "timeZone" | "recurrence">): number {
+  if (master.recurrence?.nth) return master.recurrence.nth;
+  const first = eventStart(master);
+  const w = master.allDay ? { y: first.getFullYear(), m: first.getMonth(), d: first.getDate() } : wallParts(first, master.timeZone);
+  const { n, last } = nthOf(w.y, w.m, w.d);
+  return last && n === 5 ? -1 : n;
 }
 
 /** Minutes past midnight of an instant's wall-clock time in `tz`. */
@@ -413,7 +428,7 @@ function keyTime(key: string, allDay: boolean): number {
 export function sameRule(a: Recurrence | null, b: Recurrence | null): boolean {
   if (!a || !b) return a === b;
   const norm = (r: Recurrence) =>
-    JSON.stringify([r.freq, r.interval, [...(r.byWeekday ?? [])].sort(), r.monthlyMode ?? "day", r.until ?? null, r.count ?? null]);
+    JSON.stringify([r.freq, r.interval, [...(r.byWeekday ?? [])].sort(), r.monthlyMode ?? "day", r.nth ?? null, r.until ?? null, r.count ?? null]);
   return norm(a) === norm(b);
 }
 

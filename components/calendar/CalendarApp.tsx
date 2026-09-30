@@ -245,7 +245,9 @@ export function CalendarApp() {
       setPanel({ kind: "scope", action: "edit", occ, next: checked.value, fromEditor });
       return;
     }
-    const clash = conflictText(checked.value);
+    // Same rule as the server: editing an existing event without adding time
+    // (its title, notes, guests) is never refused, even inside Shabbat.
+    const clash = (!occ || addsTime(inputOf(occ.event), checked.value)) && conflictText(checked.value);
     if (clash) return setPanelError(clash);
     const ops: EventOp[] = occ ? [{ op: "update", id: occ.event.id, patch: checked.value }] : [{ op: "create", event: checked.value }];
     setPanel(null);
