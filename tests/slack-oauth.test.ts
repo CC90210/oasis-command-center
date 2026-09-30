@@ -99,6 +99,9 @@ const CHANNELS: Record<string, { name: string; is_member: boolean; is_archived: 
   C0PARTNERS: { name: "partners", is_member: true, is_archived: false, is_ext_shared: true },
 };
 const exchanges: Array<Record<string, string>> = [];
+// conversations.list: "complete" ends after one page; "endless" always hands back a cursor,
+// so listPublicChannels gives up at its page cap and reports the list as truncated.
+let listMode: "complete" | "endless" = "complete";
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -131,6 +134,15 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const id = new URLSearchParams(String(init?.body ?? "")).get("channel") ?? "";
     const c = CHANNELS[id];
     return json(c ? { ok: true, channel: { id, ...c } } : { ok: false, error: "channel_not_found" });
+  }
+  if (url.pathname === "/api/conversations.list") {
+    const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
+    if (!Object.values(CODES).some((x) => x.token === token)) return json({ ok: false, error: "invalid_auth" });
+    return json({
+      ok: true,
+      channels: Object.entries(CHANNELS).map(([id, c]) => ({ id, ...c })),
+      response_metadata: { next_cursor: listMode === "endless" ? "more" : "" },
+    });
   }
   return json({ ok: false, error: "unknown_method" });
 }) as typeof fetch;
@@ -490,6 +502,39 @@ async function main() {
     assert.equal(ok.status, 200);
     assert.equal(((await ok.json()) as { removed: boolean }).removed, true);
     assert.equal(await routesOf(BRAVO_CO), 0);
+  });
+
+  await check("a mapped channel missing from a COMPLETE list is orphaned; missing from a TRUNCATED list it is only 'beyond the page' (CodeRabbit #501)", async () => {
+    await login(USERS.ownerB);
+    const at = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO slack_channel_routes (id, tenant_id, team_id, channel_id, channel_name, department, customer_id, created_by, created_at, updated_at)
+            VALUES ('r-gone', ?, 'T0ALPHA', 'C0GONE', 'gone', 'sales', NULL, NULL, ?, ?)`,
+      args: [BRAVO_CO, at, at],
+    });
+    try {
+      type Listing = { ok: boolean; truncated: boolean; orphaned: Array<{ channel_id: string }>; beyond_page: Array<{ channel_id: string }> };
+      listMode = "complete";
+      const complete = (await (await channelsRoute.GET()).json()) as Listing;
+      assert.equal(complete.ok, true, JSON.stringify(complete));
+      assert.equal(complete.truncated, false);
+      assert.deepEqual(complete.orphaned.map((o) => o.channel_id), ["C0GONE"], "a complete list proves the channel is gone");
+      assert.deepEqual(complete.beyond_page, []);
+
+      listMode = "endless";
+      const truncated = (await (await channelsRoute.GET()).json()) as Listing;
+      assert.equal(truncated.ok, true, JSON.stringify(truncated));
+      assert.equal(truncated.truncated, true);
+      assert.deepEqual(truncated.orphaned, [], "a truncated list proves nothing, so nothing is called orphaned");
+      assert.deepEqual(truncated.beyond_page.map((o) => o.channel_id), ["C0GONE"], "but the mapping is still shown, so it can be unmapped");
+      // The page renders that bucket with honest copy, never as "no longer lists".
+      const ui = read("components/settings/SlackChannelMap.tsx");
+      assert.match(ui, /beyond_page/);
+      assert.match(ui, /not among the first 500 channels listed \(they may still be live\)/);
+    } finally {
+      listMode = "complete";
+      await db.execute({ sql: "DELETE FROM slack_channel_routes WHERE id = 'r-gone'", args: [] });
+    }
   });
 
   const liveSlackOf = async (tenantId: string) => count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ? AND provider = 'slack' AND revoked_at IS NULL", [tenantId]);

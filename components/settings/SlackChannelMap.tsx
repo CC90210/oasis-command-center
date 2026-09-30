@@ -39,6 +39,8 @@ type Loaded =
       team: { id: string; name: string | null };
       channels: Channel[];
       orphaned: Orphan[];
+      /** Mapped channels not on a truncated page: unproven either way, so never called orphaned. */
+      beyondPage: Orphan[];
       truncated: boolean;
       customers: Array<{ id: string; name: string }> | null;
     };
@@ -81,6 +83,7 @@ export function SlackChannelMap({
         team: body.team as { id: string; name: string | null },
         channels,
         orphaned: Array.isArray(body.orphaned) ? (body.orphaned as Orphan[]) : [],
+        beyondPage: Array.isArray(body.beyond_page) ? (body.beyond_page as Orphan[]) : [],
         truncated: body.truncated === true,
         customers: (body.customers as Array<{ id: string; name: string }> | null) ?? null,
       });
@@ -280,6 +283,21 @@ export function SlackChannelMap({
         </table>
       </div>
       {loaded.truncated && <p className="text-[12px] leading-4 text-fg-dim">Only the first 500 channels are listed.</p>}
+      {loaded.beyondPage.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[12px] font-medium text-fg-dim">Mapped, but not among the first 500 channels listed (they may still be live)</p>
+          <ul className="space-y-1">
+            {loaded.beyondPage.map((o) => (
+              <li key={o.channel_id} className="flex items-center justify-between gap-2 text-[13px]">
+                <span className="text-fg-muted">#{o.channel_name ?? o.channel_id}</span>
+                <button type="button" onClick={() => void remove(o.channel_id)} disabled={busy !== null} className="btn-secondary">
+                  Unmap
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {loaded.orphaned.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[12px] font-medium text-fg-dim">Mapped, but Slack no longer lists them (archived or made private)</p>

@@ -98,6 +98,11 @@ export async function GET() {
     }
 
     const byChannel = new Map(routes.map((r) => [r.channel_id, r]));
+    const byListed = new Set(listed.data.channels.map((c) => c.id));
+    // Mapped channels missing from the page. Only a COMPLETE page proves a channel is gone
+    // (archived, made private). A truncated page cannot, so those mappings are reported as
+    // "beyond the page" instead of orphaned; the owner can still unmap them.
+    const unlisted = routes.filter((r) => !byListed.has(r.channel_id));
     return json(200, {
       ok: true,
       team: { id: conn.external_account_id, name: conn.external_account_label },
@@ -111,8 +116,8 @@ export async function GET() {
           route: r ? { department: r.department, customer_id: r.customer_id } : null,
         };
       }),
-      // Mapped channels Slack no longer lists (archived, renamed private): still shown, so they can be removed.
-      orphaned: routes.filter((r) => !listed.data.channels.some((c) => c.id === r.channel_id)),
+      orphaned: listed.data.truncated ? [] : unlisted,
+      beyond_page: listed.data.truncated ? unlisted : [],
       truncated: listed.data.truncated,
       customers: customersAvailable ? customers : null,
     });
