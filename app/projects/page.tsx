@@ -156,6 +156,10 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
   let roster: Awaited<ReturnType<typeof loadAssignmentRoster>> = [];
   let directory: Awaited<ReturnType<typeof loadMemberDirectory>> = [];
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
+  // The assignee menu's roster fails on its own (OASIS's needs both founders
+  // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
+  // The board still renders; only the menu degrades, with a notice.
+  let rosterNotice: string | null = null;
   try {
     [result, roster, directory, tenants] = await Promise.all([
       listProjects(db, viewer, {
@@ -164,7 +168,14 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         q: sp.q || null,
         includeArchived: sp.archived === "1",
       }),
-      loadAssignmentRoster(viewer.tenantId),
+      loadAssignmentRoster(viewer.tenantId).catch((err: unknown) => {
+        console.error("[projects.page.roster]", err);
+        const msg = err instanceof Error ? err.message : String(err);
+        rosterNotice = msg.includes("oasis_pipeline_assignment_roster_incomplete")
+          ? "Projects can't be assigned from here right now: the assignment roster needs both founders as active members of this workspace, and one is missing. Everything else on the board works."
+          : "The assignee list couldn't be loaded, so projects can't be assigned from here right now. The error has been logged; everything else on the board works.";
+        return [] as Awaited<ReturnType<typeof loadAssignmentRoster>>;
+      }),
       loadMemberDirectory(viewer.tenantId),
       oasisDesk ? listClientTenants(db) : Promise.resolve([]),
     ]);
@@ -199,6 +210,11 @@ export default async function ProjectsPage({ searchParams }: { searchParams?: Pr
         <LoadError what="projects" detail={failure} />
       ) : (
         <>
+          {(rosterNotice as string | null) && (
+            <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
+              {rosterNotice}
+            </p>
+          )}
           <section className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Active" value={active} accent />
             <Stat label="In client review" value={projects.filter((p) => p.stage === "review").length} />

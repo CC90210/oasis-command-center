@@ -1,6 +1,8 @@
 import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
+import { askIfOpen, departmentForAgent, departmentLabel, teamSlugOf } from "@/lib/os/chat-href";
+import { openAskDepartments } from "@/lib/playbook/ask-access";
 import {
   ArrowLeft, ScanFace, Repeat, Mic, BarChart3, Calendar, Clock,
   Sparkles, Target, MessageSquare, TrendingUp, Sword, Brain, Zap,
@@ -31,7 +33,7 @@ const DRILL_ICONS = {
  *
  * Re-frame: this isn't generic cold-call drilling. It's OASIS AI sales
  * + content + voice + pipeline diagnosis, anchored against the live
- * $5K MRR target. Every drill ties to a chat prompt OR a dashboard page,
+ * revenue goal on Today. Every drill ties to a department ask OR a dashboard page,
  * not just paper. Phased progression: foundation (days 1-30) → fluency
  * (31-60) → mastery (61-90).
  */
@@ -117,7 +119,7 @@ const DRILLS: Drill[] = [
       prompt:
         "Draft today's content. Pick the pillar that hasn't fired in the longest stretch. Give me a hook + body in CC's voice (introspective, raw, '2am to a friend' tone). Reference anything noteworthy from this week's wins. Sign off with 'Only good things from now on.' if it lands.",
     },
-    link: { href: "/agents?agent=maven", label: "Send to Maven" },
+    link: { href: "/team/marketing", label: "Marketing channel" },
     icon: "sparkles",
   },
   {
@@ -128,11 +130,11 @@ const DRILLS: Drill[] = [
     intensity: "core",
     body:
       "Open the Today page. Hit the MRR delta. If we moved positive, where did the dollar come from — and how do we replicate? If we moved negative or flat, what's the ONE move that flips it tomorrow? End every day knowing where the revenue lever is.",
-    output: "Day 30 → pattern-matching wins. Day 90 → trajectory locked at $5K MRR.",
+    output: "Day 30 → pattern-matching wins. Day 90 → you know which lever moves the revenue goal.",
     chat: {
       agent: "atlas",
       prompt:
-        "Today's MRR delta + how we got it. Source breakdown: Stripe one-offs, recurring retainers, rev shares, community growth. If positive, name what to scale tomorrow. If flat or negative, name the one revenue lever I should pull. Be specific to my $5K target by May 15.",
+        "Today's MRR delta + how we got it. Source breakdown: Stripe one-offs, recurring retainers, rev shares, community growth. If positive, name what to scale tomorrow. If flat or negative, name the one revenue lever I should pull. Measure it against the current revenue goal on Today.",
     },
     link: { href: "/", label: "Today" },
     icon: "trendingUp",
@@ -242,7 +244,7 @@ const PHASES = [
     label: "Mastery",
     body:
       "Reps move from 'drill' to 'how I work.' Voice is yours, not borrowed. Pipeline triage is reflex, not chore. The system runs you, you don't run it.",
-    target: "1 booking per 4 conversations. Content drives 50%+ of inbound. MRR at $5K.",
+    target: "1 booking per 4 conversations. Content drives 50%+ of inbound. Revenue goal on pace.",
   },
 ];
 
@@ -269,6 +271,9 @@ const CATEGORY_TONE: Record<Drill["category"], string> = {
 export default async function DrillsPage() {
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
+  // The departments this viewer may open (the rail's gate): a rep is never
+  // handed an "Ask Finance" or a "Marketing channel" link that 404s.
+  const open = await openAskDepartments();
   const core = DRILLS.filter((d) => d.intensity === "core");
   const advanced = DRILLS.filter((d) => d.intensity === "advanced");
 
@@ -323,7 +328,7 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {core.map((d) => (
-            <DrillCard key={d.num} drill={d} />
+            <DrillCard key={d.num} drill={d} open={open} />
           ))}
         </div>
       </Card>
@@ -335,25 +340,30 @@ export default async function DrillsPage() {
       >
         <div className="grid lg:grid-cols-2 gap-4">
           {advanced.map((d) => (
-            <DrillCard key={d.num} drill={d} />
+            <DrillCard key={d.num} drill={d} open={open} />
           ))}
         </div>
       </Card>
 
       <Card title="Why this works when nothing else has" subtitle="The 90-day rule, restated">
         <p className="text-fg leading-relaxed">
-          Ten drills. Five every day, five on cadence. Most people quit at week 3 because the early data is bad. The data turns at week 5 and is incredible by week 9. The only thing standing between you and $5K MRR is daily, boring, dashboard-anchored discipline. <span className="text-accent font-medium">Every drill links to a chat prompt or a live dashboard page</span> — they&apos;re not paper exercises. The system runs them with you.
+          Ten drills. Five every day, five on cadence. Most people quit at week 3 because the early data is bad. The data turns at week 5 and is incredible by week 9. The only thing standing between you and the revenue goal is daily, boring, dashboard-anchored discipline. <span className="text-accent font-medium">Every drill links to a department ask or a live dashboard page</span> — they&apos;re not paper exercises. The system runs them with you.
         </p>
       </Card>
     </div>
   );
 }
 
-function DrillCard({ drill: d }: { drill: Drill }) {
+function DrillCard({ drill: d, open }: { drill: Drill; open: readonly string[] }) {
   const Icon = DRILL_ICONS[d.icon];
-  const chatHref = d.chat
-    ? `/agents?agent=${encodeURIComponent(d.chat.agent)}&prompt=${encodeURIComponent(d.chat.prompt)}`
-    : null;
+  // The drill's prompt goes to the department that answers for its agent
+  // (lib/os/chat-href.ts); the channel prefills it and never sends it. Only
+  // when the viewer may open that department; a department channel link
+  // follows the same rule.
+  const chatDept = d.chat ? departmentForAgent(d.chat.agent) : null;
+  const chatHref = d.chat && chatDept ? askIfOpen(chatDept, d.chat.prompt, open) : null;
+  const linkSlug = d.link ? teamSlugOf(d.link.href) : null;
+  const link = d.link && (linkSlug === null || open.includes(linkSlug)) ? d.link : null;
   return (
     <Card>
       <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">
@@ -384,19 +394,19 @@ function DrillCard({ drill: d }: { drill: Drill }) {
         <span className="text-accent font-bold uppercase tracking-wider">Output → </span>
         <span className="text-fg-muted italic">{d.output}</span>
       </div>
-      {(chatHref || d.link) && (
+      {(chatHref || link) && (
         <div className="mt-3 flex items-center gap-3 flex-wrap text-xs">
           {chatHref && (
             <Link
               href={chatHref}
               className="text-accent hover:text-accent-bright inline-flex items-center gap-1"
             >
-              <Sparkles size={12} /> run as chat
+              <Sparkles size={12} /> Ask {chatDept ? departmentLabel(chatDept) : ""}
             </Link>
           )}
-          {d.link && (
-            <Link href={d.link.href} className="text-fg-muted hover:text-accent inline-flex items-center gap-1">
-              <BarChart3 size={12} /> {d.link.label}
+          {link && (
+            <Link href={link.href} className="text-fg-muted hover:text-accent inline-flex items-center gap-1">
+              <BarChart3 size={12} /> {link.label}
             </Link>
           )}
           {d.intensity === "advanced" && (

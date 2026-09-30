@@ -61,7 +61,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       if (!owner.ok) return customersError(400, owner.error, { field: "owner_user_id" });
       changes.owner_user_id = owner.value;
     }
-    const result = await updateCustomer(db, viewer.tenantId, id, changes, new Date());
+    // The editor is the ledger's actor: a Status move into or out of Past
+    // records customer.churned / customer.reactivated under this person.
+    const result = await updateCustomer(db, viewer.tenantId, id, changes, new Date(), viewer.userId);
     if (!result.ok) {
       if (result.error === "not_found") return customersError(404, "not_found");
       return customersError(409, result.error, { existing_id: result.existingId });

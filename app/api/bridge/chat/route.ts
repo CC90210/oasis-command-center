@@ -27,6 +27,7 @@ import { bridgeDisallowedToolsForRole } from "@/lib/role-gates";
 import { authorizeBridgeRequest } from "@/lib/bridge-proxy";
 import { validateBridgeAgent } from "@/lib/agent-roots";
 import { teeBridgeChatPersistence } from "@/lib/bridge-chat-persistence";
+import { teeBridgeDashboardActions } from "@/lib/admin/bridge-dashboard-actions";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -210,7 +211,18 @@ export async function POST(req: NextRequest) {
     userMessage: String(lastUserMsg.content || ""),
     startedAt,
   });
-  return new Response(persistedBody, { status: upstream.status, headers: sseHeaders });
+  // <dashboard-action> markers in the reply become signed proposals here
+  // (2026-09-30), never writes: markers inside code are ignored, and each
+  // other one is written only when the operator clicks Apply, then Confirm
+  // (POST /api/bridge/actions, which logs it for /runs). Tenant, user and role
+  // are this route's own authorization, never the body.
+  const withActions = teeBridgeDashboardActions(persistedBody, {
+    tenantId: auth.tenantId,
+    userId: auth.userId,
+    agent,
+    teamRole: auth.teamRole,
+  });
+  return new Response(withActions, { status: upstream.status, headers: sseHeaders });
 }
 
 function jsonError(status: number, message: string) {

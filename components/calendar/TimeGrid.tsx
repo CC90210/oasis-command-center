@@ -71,7 +71,11 @@ export function TimeGrid({ days, occurrences, calendars, prefs, now, selectedKey
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [first.getTime(), rangeEnd.getTime(), prefs],
   );
-  const sky = useMemo(() => days.map((d) => sunTimes(d, prefs.location.lat, prefs.location.lon)), [days, prefs.location]);
+  // No location set: no sunrise or sunset to draw, rather than someone else's.
+  const sky = useMemo(
+    () => days.map((d) => (prefs.location ? sunTimes(d, prefs.location.lat, prefs.location.lon) : { sunrise: null, sunset: null })),
+    [days, prefs.location],
+  );
 
   // Open on the working morning, or an hour before now when today is shown.
   useLayoutEffect(() => {

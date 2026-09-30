@@ -195,26 +195,34 @@ export function validateOps(v: unknown): Result<EventOp[]> {
   return ok(out);
 }
 
-export function validatePrefs(v: unknown): Result<CalendarPrefs> {
+/**
+ * Validates preferences. Keys the value leaves out come from `base`: the
+ * viewer's own workspace defaults (types.ts defaultPrefsFor), so a partial or
+ * older stored row never gains another workspace's city or Shabbat lock.
+ */
+export function validatePrefs(v: unknown, base: CalendarPrefs = DEFAULT_PREFS): Result<CalendarPrefs> {
   if (!v || typeof v !== "object") return fail("prefs_invalid");
-  const p = { ...DEFAULT_PREFS, ...(v as Partial<CalendarPrefs>) };
+  const p = { ...base, ...(v as Partial<CalendarPrefs>) };
   if (![0, 1, 6].includes(p.weekStartsOn)) return fail("week_start_invalid");
   if (typeof p.showWeekends !== "boolean" || typeof p.shabbatProtection !== "boolean") return fail("prefs_flag_invalid");
   if (!Number.isInteger(p.defaultDurationMin) || p.defaultDurationMin < 15 || p.defaultDurationMin > 480) return fail("duration_invalid");
   const loc = p.location;
   if (
-    !loc || typeof loc.label !== "string" || loc.label.length > 80 ||
-    !Number.isFinite(loc.lat) || Math.abs(loc.lat) > 90 ||
-    !Number.isFinite(loc.lon) || Math.abs(loc.lon) > 180
+    loc !== null &&
+    (!loc || typeof loc !== "object" || typeof loc.label !== "string" || loc.label.length > 80 ||
+      !Number.isFinite(loc.lat) || Math.abs(loc.lat) > 90 ||
+      !Number.isFinite(loc.lon) || Math.abs(loc.lon) > 180)
   )
     return fail("location_invalid");
+  // The lock is computed from a sunset, and a sunset needs a place.
+  if (p.shabbatProtection && !loc) return fail("shabbat_needs_location");
   for (const k of ["candleMinutesBeforeSunset", "havdalahMinutesAfterSunset"] as const)
     if (!Number.isInteger(p[k]) || p[k] < 0 || p[k] > 120) return fail(`${k}_invalid`);
   return ok({
     weekStartsOn: p.weekStartsOn,
     showWeekends: p.showWeekends,
     defaultDurationMin: p.defaultDurationMin,
-    location: { label: loc.label.trim() || "Custom", lat: loc.lat, lon: loc.lon },
+    location: loc ? { label: loc.label.trim() || "Custom", lat: loc.lat, lon: loc.lon } : null,
     candleMinutesBeforeSunset: p.candleMinutesBeforeSunset,
     havdalahMinutesAfterSunset: p.havdalahMinutesAfterSunset,
     shabbatProtection: p.shabbatProtection,

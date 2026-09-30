@@ -14,16 +14,26 @@ import {
 
 const route = readFileSync("app/api/automations/background-workers/route.ts", "utf8");
 const panel = readFileSync("components/automations/BackgroundWorkersPanel.tsx", "utf8");
-const oasisInventory = route.slice(
-  route.indexOf("const OASIS_WORKERS"),
-  route.indexOf("\n];", route.indexOf("const OASIS_WORKERS")) + 3,
+// The OASIS inventory lives in lib/automations/oasis-workers.ts (2026-09-30),
+// shared by this route, the control route's allowlist and System health. The
+// route appends the cloud reminder worker itself.
+const inventoryFile = readFileSync("lib/automations/oasis-workers.ts", "utf8");
+assert.ok(
+  route.includes('import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";'),
+  "the route must list the shared OASIS inventory",
+);
+assert.ok(!route.includes("const OASIS_WORKERS"), "no second copy of the inventory in the route");
+const oasisInventory = inventoryFile.slice(
+  inventoryFile.indexOf("export const OASIS_WORKERS"),
+  inventoryFile.indexOf("\n];", inventoryFile.indexOf("export const OASIS_WORKERS")) + 3,
 );
 
 function workerWindow(service: string, width = 900): string {
   const marker = `service: "${service}"`;
-  const at = route.indexOf(marker);
+  const source = inventoryFile.includes(marker) ? inventoryFile : route;
+  const at = source.indexOf(marker);
   assert.ok(at >= 0, `${service} must be present in the worker inventory`);
-  return route.slice(at, at + width);
+  return source.slice(at, at + width);
 }
 
 // OASIS owns one local queue consumer and one local queue monitor.

@@ -49,6 +49,32 @@ async function main() {
   assert.equal(gws?.status, "unconfigured", "tenant-b's gws heartbeat is not tenant-a's");
   assert.ok(rows.every((r) => r.tenant_id === "tenant-a"));
 
+  // The newest row per service wins (2026-09-30). OASIS carries stale
+  // profile_id NULL duplicates beside the bridge's live rows; the old read
+  // kept whichever row came last, so a month-old duplicate inserted after the
+  // live row hid a heartbeat from a minute ago.
+  await db.execute(
+    `INSERT INTO integrations_health (id, profile_id, tenant_id, service, status, last_ping_at, metadata)
+     VALUES ('s-new', 'p-1', 'tenant-a', 'stripe', 'healthy', '2026-09-29T12:00:00Z', '{}'),
+            ('s-old', NULL, 'tenant-a', 'stripe', 'down', '2026-08-15T00:00:00Z', '{}')`,
+  );
+  const stripe = (await integrationsHealth("tenant-a")).filter((r) => r.service === "stripe");
+  assert.equal(stripe.length, 1, "one card per service");
+  assert.equal(stripe[0].id, "s-new", "the newest heartbeat wins over a stale duplicate");
+
+  // Retired providers draw no card, even with a row and a fresh ping.
+  await db.execute(
+    `INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at, metadata)
+     VALUES ('r-1', 'tenant-a', 'vercel', 'healthy', '2026-09-29T12:00:00Z', '{}'),
+            ('r-2', 'tenant-a', 'supabase', 'healthy', '2026-09-29T12:00:00Z', '{}'),
+            ('r-3', 'tenant-a', 'n8n_inbound', 'healthy', '2026-09-29T12:00:00Z', '{}')`,
+  );
+  const services = new Set((await integrationsHealth("tenant-a")).map((r) => r.service));
+  for (const retired of ["vercel", "supabase", "n8n_inbound"]) assert.ok(!services.has(retired), `${retired} still drawn`);
+  assert.ok(![...services].some((s) => ["vercel", "supabase", "n8n_inbound"].includes(s)));
+  const placeholders = new Set((await integrationsHealth(null)).map((r) => r.service));
+  assert.ok(!placeholders.has("supabase") && !placeholders.has("vercel"), "no placeholder card for a retired provider either");
+
   console.log("integrations-health-read: all passed");
 }
 

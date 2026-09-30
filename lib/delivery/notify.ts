@@ -37,6 +37,7 @@ import { sendOasisSharedGmail } from "@/lib/integrations/oasis-shared-gmail-send
 import { OASIS_PIPELINE_ASSIGNMENT_EMAILS } from "@/lib/team";
 import { publicAppBaseUrl } from "@/lib/api-helpers";
 import { DELIVERY_TENANT_ID } from "@/lib/delivery/rules";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
 import {
   claimNotification,
   deskReader,
@@ -100,6 +101,20 @@ export function scheduleAfterResponse(task: () => Promise<void>): void {
 
 export function ticketUrl(deps: NotifyDeps, ticketId: string): string {
   return `${deps.appOrigin.replace(/\/+$/, "")}/tickets/${ticketId}`;
+}
+
+/** OASIS's public support form, as a full link for an email to a client. */
+export function supportFormUrl(deps: NotifyDeps): string {
+  return `${deps.appOrigin.replace(/\/+$/, "")}${SUPPORT_FORM_PATH}`;
+}
+
+/**
+ * Every email OASIS sends a CLIENT ends with where to ask for help next: the
+ * public support form (/f/oasis-ai-cc/support). Only OASIS's desk emails
+ * clients (deskUsesOasisLanes), so the link is always OASIS's own form.
+ */
+export function withSupportLink(body: string, deps: NotifyDeps): string {
+  return `${body}\n\nNeed help with something else? Open a new request: ${supportFormUrl(deps)}`;
 }
 
 /** Does this desk send through OASIS's lanes? Only OASIS's own. */
@@ -173,7 +188,7 @@ export async function acknowledgeClient(
   }
   const mail = clientAckEmail(ticket);
   const r = await settle(
-    deps.email({ to: ticket.client_email, subject: mail.subject, body: mail.body, idempotencyKey: `support-ack:${ticketId}` }),
+    deps.email({ to: ticket.client_email, subject: mail.subject, body: withSupportLink(mail.body, deps), idempotencyKey: `support-ack:${ticketId}` }),
   );
   const status = outcome("email", r);
   if (!r.ok) console.error("[delivery.notify.client_ack]", { ticket: ticket.ticket_number, status });
@@ -217,7 +232,12 @@ export async function emailClientReply(
   }
   const mail = clientReplyEmail(ticket, { body: comment.body, authorName: comment.authorName });
   const r = await settle(
-    deps.email({ to: ticket.client_email, subject: mail.subject, body: mail.body, idempotencyKey: `support-reply:${comment.id}` }),
+    deps.email({
+      to: ticket.client_email,
+      subject: mail.subject,
+      body: withSupportLink(mail.body, deps),
+      idempotencyKey: `support-reply:${comment.id}`,
+    }),
   );
   const status = outcome("email", r);
   if (!r.ok) console.error("[delivery.notify.client_reply]", { ticket: ticket.ticket_number, status });

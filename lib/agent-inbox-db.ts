@@ -51,10 +51,13 @@ export async function listUnreadDb(tenantId: string, toAgent?: string): Promise<
     .eq("tenant_id", tenantId)
     .is("read_at", null);
   if (toAgent) q = q.eq("to_agent", toAgent);
-  const { data } = await q
+  const { data, error } = await q
     .order("priority", { ascending: true })
     .order("created_at", { ascending: false })
     .limit(200);
+  // Fail loud (2026-09-30): a failed read is not an empty inbox. /inbox shows
+  // "Couldn't check"; the chat's inbox injection already catches and goes on.
+  if (error) throw new Error(`agent_messages unread read failed: ${error.message}`);
   const rows = (data || []) as DbInboxMessage[];
   // Postgres orders alphabetically; we want urgent → low. Re-sort client-side
   // by the rank map so 'urgent' lands above 'high' etc.
@@ -74,9 +77,10 @@ export async function listReadDb(tenantId: string, toAgent?: string, limit = 50)
     .eq("tenant_id", tenantId)
     .not("read_at", "is", null);
   if (toAgent) q = q.eq("to_agent", toAgent);
-  const { data } = await q
+  const { data, error } = await q
     .order("created_at", { ascending: false })
     .limit(limit);
+  if (error) throw new Error(`agent_messages read-archive read failed: ${error.message}`);
   return (data || []) as DbInboxMessage[];
 }
 

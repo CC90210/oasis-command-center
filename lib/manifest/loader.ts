@@ -77,6 +77,51 @@ export const getManifest = cache(async (
 });
 
 /**
+ * The manifest a workspace owns, found by its tenant id.
+ *
+ * WHY THIS EXISTS (2026-09-30). getManifest looks rows up by SLUG, and the
+ * onboarding wizard saves a manifest under the slug the owner typed
+ * ("nodeops-control-center"), not the workspace's own tenants.slug
+ * ("malikfaysalawan"). Invite finalization asked getManifest for the workspace
+ * slug, missed the row, got UNPROVISIONED_SEED (no agents) and threw, so every
+ * teammate invite into a client workspace died with profile_finalize_failed.
+ * tenant_manifests.tenant_id is UNIQUE (tenant_manifests_tenant_id_key), so a
+ * workspace has at most one row and this answers "which manifest is theirs".
+ *
+ * Unlike getManifest this does NOT hide failures behind a seed:
+ *   - no row                         -> null (the caller decides the fallback)
+ *   - a stored body that fails to parse -> null, logged (same as getManifest)
+ *   - a failed read                  -> throws, because "could not tell" is not
+ *                                       "has no manifest"; invite redemption
+ *                                       refuses rather than claim the invite.
+ */
+export async function getManifestByTenantId(
+  tenantId: string,
+  db: Pick<ReturnType<typeof getServiceSupabase>, "from"> = getServiceSupabase(),
+): Promise<TenantManifest | null> {
+  const id = (tenantId || "").trim();
+  if (!id) return null;
+  const result = await db
+    .from("tenant_manifests")
+    .select("slug, manifest")
+    .eq("tenant_id", id)
+    .maybeSingle();
+  if (result.error) {
+    throw new Error(`manifest_by_tenant_lookup_failed: ${result.error.message}`);
+  }
+  const row = (result.data || null) as { slug: string; manifest: unknown } | null;
+  if (!row?.manifest) return null;
+  const parsed = safeParseManifest(row.manifest);
+  if (!parsed.ok) {
+    console.warn(
+      `[manifest.loader] stored manifest for tenant="${id}" (slug="${row.slug}") failed validation: ${parsed.error.message}`
+    );
+    return null;
+  }
+  return parsed.manifest;
+}
+
+/**
  * Adapter — convert a manifest nav array (snake_case, source-of-truth) into
  * the existing Sidebar's NavItem shape (lowerCamelCase).
  *

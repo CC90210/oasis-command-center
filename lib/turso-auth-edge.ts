@@ -8,6 +8,8 @@ export interface EdgeSession {
   sub: string;
   email: string;
   exp: number;
+  /** Onboarding-gate claim (lib/turso-auth.ts TursoSession.onb). Untyped here: the gate validates it. */
+  onb?: unknown;
 }
 
 const enc = new TextEncoder();

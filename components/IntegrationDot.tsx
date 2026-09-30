@@ -57,10 +57,15 @@ export function IntegrationDot({
 
   // Compute display state — what should the badge actually say?
   // Built-in and bundled skills are always "ready" (they ship with the repo).
-  // Everything else looks at: is there a recent ping AND/OR credentials on file?
-  const recentPing =
-    health.last_ping_at &&
-    Date.now() - new Date(health.last_ping_at).getTime() < 24 * 60 * 60 * 1000;
+  // Everything else reads the heartbeat first, then the key (2026-09-30):
+  //   - a ping older than a day is "Stale", whatever status it last carried —
+  //     a month-old "healthy" is not a service that works today;
+  //   - "Connected" needs a healthy ping inside the day;
+  //   - a key on file with no ping is "Key on file": a stored key has never
+  //     been shown to work, so it is never "Connected".
+  const pingedAt = health.last_ping_at ? new Date(health.last_ping_at).getTime() : NaN;
+  const hasPing = Number.isFinite(pingedAt);
+  const recentPing = hasPing && Date.now() - pingedAt < 24 * 60 * 60 * 1000;
   const hasCreds = !!connection?.hasCredentials;
   const credsUnknown = connection?.hasCredentials === null;
 
@@ -73,7 +78,11 @@ export function IntegrationDot({
     stateTone = "text-status-engaged";
     dotColor = "bg-status-engaged shadow-[0_0_10px_rgba(16,185,129,0.6)]";
     stateIcon = <Check className="w-3 h-3" />;
-  } else if (health.status === "healthy" || (recentPing && hasCreds)) {
+  } else if (hasPing && !recentPing && health.status !== "unconfigured") {
+    stateLabel = "Stale";
+    stateTone = "text-status-warm";
+    dotColor = "bg-status-warm";
+  } else if (recentPing && health.status === "healthy") {
     stateLabel = "Connected";
     stateTone = "text-status-engaged";
     dotColor = "bg-status-engaged shadow-[0_0_10px_rgba(16,185,129,0.65)]";
@@ -87,9 +96,9 @@ export function IntegrationDot({
     stateTone = "text-status-hot";
     dotColor = "bg-status-hot shadow-[0_0_10px_rgba(239,68,68,0.5)]";
   } else if (hasCreds) {
-    stateLabel = "Configured · awaiting first ping";
+    stateLabel = "Key on file";
     stateTone = "text-accent";
-    dotColor = "bg-accent shadow-[0_0_10px_rgba(0,212,255,0.5)]";
+    dotColor = "bg-accent";
   } else if (credsUnknown) {
     stateLabel = "Couldn't check";
     stateTone = "text-fg-muted";
@@ -185,7 +194,7 @@ export function IntegrationDot({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3 min-w-0 flex-1">
-          <div className={`w-2.5 h-2.5 rounded-full shrink-0 mt-1.5 ${dotColor} ${health.status === "healthy" || stateLabel === "Built-in · ready" ? "animate-pulse-slow" : ""}`} />
+          <div className={`w-2.5 h-2.5 rounded-full shrink-0 mt-1.5 ${dotColor} ${stateLabel === "Connected" || stateLabel === "Built-in · ready" ? "animate-pulse-slow" : ""}`} />
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
               <div className="text-sm font-semibold text-fg truncate">{label}</div>
