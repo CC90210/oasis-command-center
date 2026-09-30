@@ -14,7 +14,7 @@
  */
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MessageList } from "@/components/conversations/MessageList";
 import type { ConversationMessage } from "@/lib/conversation-threading";
 import type { ClientDraft } from "@/lib/os/customers/conversations";
@@ -43,6 +43,12 @@ export function ClientConversations({
 }) {
   const pending = drafts.filter((d) => d.status === "pending");
   const decided = drafts.filter((d) => d.status !== "pending");
+  // The inbox's MessageList labels days and times in the BROWSER's zone and
+  // locale (components/conversations/format.ts), which the server cannot know:
+  // rendered on the server it would not match the browser's first render
+  // (React #418). So the thread renders once the page is in the browser.
+  const [inBrowser, setInBrowser] = useState(false);
+  useEffect(() => setInBrowser(true), []);
   return (
     <div className="grid gap-6 lg:grid-cols-3">
       <section className="flex flex-col rounded-xl border border-hairline bg-bg-panel lg:col-span-2" aria-label={`Conversation with ${clientName}`}>
@@ -57,8 +63,12 @@ export function ClientConversations({
               No messages with this client yet. Email to or from their addresses, texts to their numbers, messages on the deal
               they came from and Slack in a channel mapped to them appear here.
             </p>
-          ) : (
+          ) : inBrowser ? (
             <MessageList messages={messages} />
+          ) : (
+            <p className="px-4 py-8 text-center text-[13px] text-fg-dim">
+              Loading {messages.length} message{messages.length === 1 ? "" : "s"}...
+            </p>
           )}
         </div>
         {canSend ? (

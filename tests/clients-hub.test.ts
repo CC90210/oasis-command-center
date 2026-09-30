@@ -496,6 +496,31 @@ async function main() {
     assert.ok(labels.includes("Support ticket resolved"), labels.join(", "));
     assert.ok(labels.includes("Became a client record"));
   });
+  await check("Activity: the books' Stripe payment and refund events appear for the founders, found through the client's fin_payments", async () => {
+    // What lib/founders-finances/stripe-ingest.ts writes: subject = the fin_payments row, no customer_id.
+    const row = (id: string, key: string, subjectType: string, subjectId: string, cents: number, at: string) => ({
+      sql: `INSERT INTO outcome_events (id, tenant_id, event_key, event_version, occurred_at, recorded_at, subject_type, subject_id,
+              department_key, actor_type, source, idempotency_key, payload_hash, value_cents, currency, confidence, payload_json, producer)
+            VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'finance', 'external', 'stripe', ?, 'h', ?, 'CAD', 'verified', '{}', 'lib/founders-finances/stripe-ingest.ts')`,
+      args: [id, OASIS, key, at, at, subjectType, subjectId, `stripe:${id}`, cents, at],
+    });
+    await db.batch(
+      [
+        row("01LEDGERPAYX0000000000001", "payment.received", "payment", "p2", 2550, ago(30)),
+        row("01LEDGERREFX0000000000001", "refund.issued", "refund", "r1", 1000, ago(29)),
+        row("01LEDGERPAYY0000000000001", "payment.received", "payment", "p-y", 7777, ago(5)),
+      ],
+      "write",
+    );
+    const xNow = (await store.getCustomer(db, OASIS, X.id))!;
+    const withBooks = await activity.loadClientActivity(db, OASIS, xNow, { books: true });
+    const money = withBooks.entries.filter((e) => /Payment received|Refund issued/.test(e.label)).map((e) => `${e.label}: ${e.detail}`);
+    assert.deepEqual(money.sort(), ["Payment received: CAD 25.50", "Refund issued: CAD 10.00"], `Y's payment is not X's: ${JSON.stringify(money)}`);
+    const withoutBooks = await activity.loadClientActivity(db, OASIS, xNow);
+    assert.equal(withoutBooks.entries.some((e) => /Payment received/.test(e.label)), false, "no books, no payments");
+    await login(USERS.cc);
+    assert.match(await page(record(X.id, "activity")), /Payment received/);
+  });
   await check("Activity: the source deal's interactions are labelled inferred; another client's are not there", async () => {
     const a = await activity.loadClientActivity(db, OASIS, X);
     const inferred = a.entries.filter((e) => e.basis === "inferred");

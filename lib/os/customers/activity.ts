@@ -20,6 +20,7 @@
  * emits may name only the keys it owns; this one names every key it reads).
  */
 import type { Client, ResultSet } from "@libsql/client";
+import { BUSINESS_ENTITY_ID } from "@/lib/founders-finances/chart";
 
 type Row = Record<string, unknown>;
 
@@ -175,6 +176,16 @@ export async function loadClientActivity(
   db: Client,
   tenantId: string,
   customer: ActivityCustomer,
+  opts: {
+    /**
+     * OASIS's own workspace, whose books are in the app: the Stripe payment,
+     * refund and subscription events the books' ingest records are found
+     * through the client's fin_payments / fin_subscriptions rows (their ledger
+     * subject), by Stripe customer or primary email. Never for another
+     * workspace, whose money is not in these tables.
+     */
+    books?: boolean;
+  } = {},
 ): Promise<{ entries: ActivityEntry[]; truncated: boolean }> {
   requireTenant(tenantId);
   // Ticket events for tickets linked to the client AFTER they were opened
@@ -192,6 +203,23 @@ export async function loadClientActivity(
   if (customer.stripe_customer_id) {
     where.push("contact_id = ?");
     args.push(customer.stripe_customer_id);
+  }
+  const email = (customer.primary_email || "").trim().toLowerCase();
+  if (opts.books && (customer.stripe_customer_id || email)) {
+    const who = "((? <> '' AND stripe_customer_id = ?) OR (? <> '' AND lower(customer_email) = ?))";
+    const stripe = customer.stripe_customer_id ?? "";
+    const whoArgs = [stripe, stripe, email, email];
+    // A refund reads its customer through the payment it refunds, as the
+    // Money tab and the Finances metrics do.
+    const payer = `SELECT p.id FROM fin_payments p LEFT JOIN fin_payments pp ON pp.id = p.parent_payment_id
+                   WHERE p.entity_id = ? AND ((? <> '' AND COALESCE(p.stripe_customer_id, pp.stripe_customer_id) = ?)
+                     OR (? <> '' AND lower(COALESCE(NULLIF(p.customer_email, ''), pp.customer_email)) = ?))`;
+    where.push(
+      `(subject_type IN ('payment', 'refund') AND subject_id IN (${payer}))`,
+      `(subject_type = 'payment' AND subject_id IN (SELECT stripe_charge_id FROM fin_payments WHERE entity_id = ? AND stripe_charge_id IS NOT NULL AND ${who}))`,
+      `(subject_type = 'subscription' AND subject_id IN (SELECT id FROM fin_subscriptions WHERE entity_id = ? AND ${who}))`,
+    );
+    args.push(BUSINESS_ENTITY_ID, ...whoArgs, BUSINESS_ENTITY_ID, ...whoArgs, BUSINESS_ENTITY_ID, ...whoArgs);
   }
   const ledger = await db.execute({
     sql: `SELECT id, event_key, occurred_at, subject_type, subject_id, value_cents, currency, payload_json,

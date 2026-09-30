@@ -288,7 +288,8 @@ export async function loadClientRecord(
       ? deskOnly("files", async () => (customer.source_lead_id ? listLeadFiles(db, viewer.tenantId, customer.source_lead_id) : null))
       : skip<LeadFile[] | null>(),
     tab === "activity"
-      ? deskOnly("activity", () => loadClientActivity(db, viewer.tenantId, customer))
+      ? // Payments appear only for the founders who may open Money, the same gate as the Money tab.
+        deskOnly("activity", () => loadClientActivity(db, viewer.tenantId, customer, { books: oasisBooks && moneyAccess === "read" }))
       : skip<{ entries: ActivityEntry[]; truncated: boolean }>(),
     deskOnly("last_touch", async () => (await lastTouchFor(db, viewer.tenantId, [customer])).get(customer.id) ?? null),
     deskOnly("desk_signals", async () => (await deskSignalsFor(db, viewer.tenantId, [customer.id], now)).get(customer.id)!),
