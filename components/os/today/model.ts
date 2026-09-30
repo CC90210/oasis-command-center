@@ -35,6 +35,7 @@ import { formatOperatorDate } from "@/lib/dates";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
 import { needsAttention } from "@/lib/connections/rules";
 import type { CashCoverage, CoverageAccount } from "@/lib/founders-finances/cash-coverage";
+import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
 import { AUTOMATIONS_HREF, failedRoutinesHref, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { CONNECTOR_CATALOG } from "@/lib/os/connectors";
 import { FOUNDER_MEETING_DURATION_MINUTES } from "@/lib/website-sales-meeting";
@@ -951,6 +952,24 @@ export const CONNECTIONS_HREF = "/settings/connections";
 export const FINANCE_STRIPE_HREF = "/founders/finances/settings#stripe";
 
 /**
+ * The Finance card's Stripe line. Not pinned = "Not connected" with the way to
+ * connect it. Pinned = WHEN the books last heard from Stripe ("Last synced 3
+ * hours ago", "Never synced"), never a bare "Connected": on 2026-09-29 a
+ * pinned account and a healthy webhook had synced nothing for five days. A
+ * sync older than two days, or a read that failed, is shown as such.
+ */
+export function stripeConnection(
+  connected: boolean | null,
+  sync: { ok: true; lastSyncAt: string | null } | { ok: false } | null,
+  nowMs: number,
+): DeptConnection {
+  if (connected === false) return { label: "Stripe", state: "not_connected", note: "Not connected", href: FINANCE_STRIPE_HREF };
+  if (connected === null || !sync || !sync.ok) return { label: "Stripe", state: "error", note: "Couldn't check", href: null };
+  const line = stripeSyncLine(sync.lastSyncAt, nowMs);
+  return { label: "Stripe", state: line.state === "live" ? "live" : line.state === "never" ? "no_data" : "error", note: line.note, href: null };
+}
+
+/**
  * The calendars behind today's schedule (loaders.ts loadCalendarStatus):
  *
  *   personal   the viewer's own Google Calendar login (Settings › Personal).
@@ -996,6 +1015,12 @@ export function buildDepartmentCards(input: {
   content: Read<ContentWeek> | null;
   goal: GoalPaceView | null;
   stripeConnected: boolean | null;
+  /**
+   * When the books last heard from Stripe (lib/goals/oasis-money stripeSync).
+   * Absent or ok:false while Stripe is pinned = "Couldn't check": a pin says
+   * nothing about whether anything has synced.
+   */
+  stripeSync?: { ok: true; lastSyncAt: string | null } | { ok: false } | null;
   /** The workspace's routine health (the Operations card). Null = not read for this viewer. */
   routines: Read<RoutineHealth> | null;
   /** Now, for freshness: a Marketing sync older than its own 7-day window cannot count that week. */
@@ -1182,8 +1207,7 @@ function departmentCard(
     }
     case "finance": {
       const g = input.goal;
-      const connection: DeptConnection | null =
-        input.stripeConnected === false ? { label: "Stripe", state: "not_connected", note: "Not connected", href: FINANCE_STRIPE_HREF } : null;
+      const connection = stripeConnection(input.stripeConnected, input.stripeSync ?? null, input.nowMs);
       if (!g) return { ...base, tone: "quiet", status: "Not in your view", metric: { kind: "unmeasured", label: "Company money is owner-only" } };
       if (g.kind === "error") return { ...base, tone: "attention", status: "Couldn't load", metric: { kind: "error", label: "Collected revenue read failed" }, connection };
       if (g.kind === "no_goal") return { ...base, tone: "quiet", status: "No active goal", metric: { kind: "unmeasured", label: "Set a revenue goal to track pace" }, connection };

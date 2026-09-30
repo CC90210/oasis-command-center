@@ -34,22 +34,48 @@
  * charges alike; a USD charge whose CAD settlement had to be estimated from
  * the Bank of Canada rate is trued up to Stripe's real CAD figure when the
  * balance transaction is in CAD (the gap is FX).
+ *
+ * PAYOUTS (payout.paid / payout.failed / payout.canceled, and every payout the
+ * reconcile lists) move money out of Stripe clearing into the bank:
+ * stripe-payouts-io.ts.
+ *
+ * THE BUSINESS LEDGER (lib/ledger, plan §F2). This module is the one writer
+ * of payment.received, payment.failed, refund.issued, invoice.paid and
+ * subscription.* (lib/ledger/catalog.ts). Each is emitted in the SAME batch
+ * as the write that records it, so a failed ledger insert rolls that write
+ * back: payment.received and refund.issued right after the fin_payments
+ * insert (and only when it inserted: emitIfChanged), subscription.* with the
+ * fin_subscriptions upsert, invoice.paid and subscription.renewed with the
+ * write that records the invoice's payment (the payment row, the link to a
+ * fin invoice, or the key fill on a payment already recorded:
+ * applyStripeInvoicePaid), and payment.failed, which records no row, with the
+ * fin_stripe_events row that marks the event processed. The workspace is the one OASIS's Stripe account
+ * belongs to (stripeLedgerTenant); when it cannot be said, the fact goes to
+ * ledger_dead_letters instead, in the same batch. Never a default tenant.
  */
 import "server-only";
 
+import { createHash, randomUUID } from "node:crypto";
+import { emit, emitIfChanged, assertNoPayloadConflicts, type EmitInput } from "@/lib/ledger/emit";
+import { catalogEntry, isLedgerCode, isLedgerId } from "@/lib/ledger/catalog";
+import { canonicalJson } from "@/lib/os/approvals/rules";
+import { isRetiredTenant } from "@/lib/tenant/retired";
 import { accountId, BUSINESS_ENTITY_ID, SYS } from "./chart";
 import { divRoundHalfAwayFromZero } from "./money";
 import { addDays, torontoDateOfEpochSeconds, usdToCadCents } from "./fx";
 import {
+  asObj,
   chargeFacts,
   eventEnvelope,
   finMetadata,
   invoiceFromInvoicePayments,
   invoicePaidFacts,
   paymentIntentFacts,
+  payoutFacts,
   refundFacts,
   stripeInvoiceFacts,
   subscriptionFacts,
+  subscriptionPlanChange,
   balanceTxnFacts,
   type BalanceTxnFacts,
   type ChargeFacts,
@@ -64,10 +90,110 @@ import { buildPosting } from "./ledger-io";
 import { LedgerError } from "./ledger";
 import { rateLookupFor, usdCadRate } from "./fx-io";
 import { buildSettlementPosting, loadInvoice, recomputeInvoicePaidStatement } from "./invoice-store";
-import { getStripeClient, listAll, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
+import { financeTenantId, getStripeClient, listAll, pinnedStripeAccount, stripeRequest, StripeApiError, StripeNotReady } from "./stripe-io";
+import { recordStripePayout, retryUnbookedPayouts, unbookedPayouts } from "./stripe-payouts-io";
 
 const ACTOR = "stripe";
 const E = BUSINESS_ENTITY_ID;
+
+// ── Business Ledger ──────────────────────────────────────────────────────
+
+/** outcome_events.producer for every event this module emits: the catalog's owning module. */
+const LEDGER_PRODUCER = "lib/founders-finances/stripe-ingest.ts";
+
+export type LedgerTenant = { ok: true; tenantId: string } | { ok: false; reason: string };
+
+/**
+ * The workspace a fact from OASIS's Stripe account belongs to: the tenant
+ * whose Stripe key Finances reads (stripe-io.ts financeTenantId, the first of
+ * FOUNDERS_TENANT_IDS), and only while a founder has pinned the account that
+ * key belongs to. Anything short of that is a reason, and the fact is
+ * dead-lettered; it is never filed under OASIS by default.
+ */
+export async function stripeLedgerTenant(): Promise<LedgerTenant> {
+  const pinned = await pinnedStripeAccount();
+  if (!pinned) return { ok: false, reason: "stripe_account_unpinned" };
+  const tenantId = financeTenantId();
+  if (!tenantId) return { ok: false, reason: "finance_tenant_unset" };
+  if (!isLedgerId(tenantId)) return { ok: false, reason: "finance_tenant_invalid" };
+  if (isRetiredTenant(tenantId)) return { ok: false, reason: "finance_tenant_retired" };
+  return { ok: true, tenantId };
+}
+
+/** One Stripe fact, minus what every Stripe fact shares (actor, source, confidence, producer). */
+type StripeFact = Pick<EmitInput, "eventKey" | "occurredAt" | "subject" | "sourceRef" | "idempotencyKey" | "valueCents" | "currency" | "payload">;
+
+/**
+ * A refused fact, for ledger_dead_letters: ids, codes and amounts only (every
+ * field below is a Stripe id, a catalog code or an integer), so nothing
+ * personal is parked there. `conditional` writes it only when the statement
+ * just before it changed a row, like emitIfChanged.
+ */
+function deadLetter(fact: StripeFact, error: string, conditional: boolean): InStatement {
+  const occurred = fact.occurredAt instanceof Date ? fact.occurredAt.toISOString() : fact.occurredAt;
+  const raw = {
+    event_key: fact.eventKey,
+    idempotency_key: fact.idempotencyKey,
+    occurred_at: occurred,
+    subject: fact.subject,
+    value_cents: fact.valueCents ?? null,
+    currency: fact.currency ?? null,
+    payload: fact.payload,
+  };
+  const now = new Date().toISOString();
+  const fingerprint = createHash("sha256").update(`${LEDGER_PRODUCER}\n${canonicalJson(raw)}`, "utf8").digest("hex");
+  const values = "?, NULL, ?, ?, ?, ?, ?, ?, 1, ?, ?";
+  return {
+    sql: `INSERT INTO ledger_dead_letters (id, tenant_hint, producer, event_key, idempotency_key, fingerprint, payload_json,
+            error, attempts, first_seen, last_seen)
+          ${conditional ? `SELECT ${values} WHERE changes() = 1` : `VALUES (${values})`}
+          ON CONFLICT (producer, fingerprint) DO UPDATE SET
+            attempts = attempts + 1, last_seen = excluded.last_seen, error = excluded.error, resolved_at = NULL`,
+    args: [randomUUID(), LEDGER_PRODUCER, fact.eventKey, fact.idempotencyKey, fingerprint, canonicalJson(raw), error, now, now],
+  };
+}
+
+/**
+ * The ledger statement for one Stripe fact, for the caller's own batch: the
+ * event, or its dead letter when no workspace owns it. `ifChanged` = only when
+ * the statement right before it inserted a row (a payment or refund row that
+ * a concurrent delivery may already have written).
+ */
+function ledgerStatement(tenant: LedgerTenant, fact: StripeFact, opts: { ifChanged: boolean }): InStatement {
+  if (!tenant.ok) return deadLetter(fact, `tenant_unmapped:${tenant.reason}`, opts.ifChanged);
+  const input: EmitInput = {
+    ...fact,
+    tenantId: tenant.tenantId,
+    eventVersion: catalogEntry(fact.eventKey)?.version ?? 0,
+    actor: { type: "external" },
+    source: "stripe",
+    confidence: "verified",
+    producer: LEDGER_PRODUCER,
+  };
+  return opts.ifChanged ? emitIfChanged(input) : emit(input);
+}
+
+/**
+ * Run a batch that carries ledger statements, then refuse loudly a key that
+ * already held another fact. A conditional statement whose guarded insert
+ * did not happen (a redelivery: the row, and so its fact, was written before)
+ * is not checked: it meant to write nothing, and its subject is the fresh row
+ * id this attempt minted, not the stored one.
+ */
+async function writeWithLedger(statements: InStatement[]): Promise<Awaited<ReturnType<typeof writeBatch>>> {
+  const out = await writeBatch(statements);
+  const written = statements.filter((s, i) => {
+    const stamp = (s as { ledger?: { conditional: boolean } }).ledger;
+    return !stamp || !stamp.conditional || (i > 0 && out[i - 1]?.rowsAffected === 1);
+  });
+  await assertNoPayloadConflicts(finDb(), written);
+  return out;
+}
+
+/** A Stripe code field (failure_code, cancellation reason) as a ledger code, or nothing. */
+function stripeCode(v: unknown): string | undefined {
+  return isLedgerCode(v) ? v : undefined;
+}
 
 /** A charge as the recorder needs it; the id may be unknown when only an invoice or intent was seen. */
 export type ChargeInput = Omit<ChargeFacts, "chargeId"> & { chargeId: string | null };
@@ -236,10 +362,12 @@ async function classifyCharge(charge: ChargeInput): Promise<void> {
  */
 export async function recordStripeCharge(
   charge: ChargeInput,
-  opts: { fetchFees: boolean } = { fetchFees: true },
+  opts: { fetchFees: boolean; ledger?: InStatement[] } = { fetchFees: true },
 ): Promise<{ paymentId: string | null; created: boolean; reason?: string }> {
   if (!charge.succeeded) return { paymentId: null, created: false, reason: "not_succeeded" };
   if (!charge.livemode) return { paymentId: null, created: false, reason: "test_mode" };
+  // The caller's event facts (applyStripeInvoicePaid), committed with the write that records the payment.
+  const facts = opts.ledger ?? [];
 
   const existing = await findPaymentByKeys({
     chargeId: charge.chargeId,
@@ -247,13 +375,12 @@ export async function recordStripeCharge(
     stripeInvoiceId: charge.stripeInvoiceId,
   });
   if (existing) {
-    await fillMissingKeys(existing, {
-      chargeId: charge.chargeId,
-      paymentIntentId: charge.paymentIntentId,
-      stripeInvoiceId: charge.stripeInvoiceId,
-      balanceTxnId: charge.balanceTxnId,
-    });
-    if (charge.metadata.finInvoiceId && !existing.invoice_id) await linkPaymentToInvoice(existing.id, charge.metadata.finInvoiceId);
+    await recordOnExistingPayment(
+      existing,
+      { chargeId: charge.chargeId, paymentIntentId: charge.paymentIntentId, stripeInvoiceId: charge.stripeInvoiceId, balanceTxnId: charge.balanceTxnId },
+      charge.metadata.finInvoiceId,
+      facts,
+    );
     if (existing.fee_status === "pending" || existing.entry_id === null) {
       const bt = charge.balanceTxn ?? (opts.fetchFees ? await fetchBalanceTxnSafe(charge.balanceTxnId) : null);
       await completeSettlement(existing.id, bt);
@@ -284,6 +411,8 @@ export async function recordStripeCharge(
     console.warn("[finances:stripe] subscription or one-off unknown (no verified key or lookup refused); booked as service revenue", charge.chargeId);
   }
   const incomeCode = charge.subscriptionInvoice === true ? SYS.subscriptionRevenue : SYS.serviceRevenue;
+  const tenant = await stripeLedgerTenant();
+  const providerPaymentId = charge.chargeId || charge.paymentIntentId || charge.stripeInvoiceId || paymentId;
   const statements: InStatement[] = [
     {
       sql: `INSERT OR IGNORE INTO fin_payments
@@ -318,10 +447,25 @@ export async function recordStripeCharge(
         ACTOR,
       ],
     },
+    // Straight after the insert: only the delivery that inserted the row records the money.
+    ledgerStatement(
+      tenant,
+      {
+        eventKey: "payment.received",
+        occurredAt: new Date(charge.created * 1000),
+        subject: { type: "payment", id: paymentId },
+        sourceRef: providerPaymentId,
+        idempotencyKey: `stripe:${providerPaymentId}`,
+        valueCents: charge.amountCents,
+        currency: charge.currency,
+        payload: { provider_payment_id: providerPaymentId },
+      },
+      { ifChanged: true },
+    ),
   ];
   if (invoiceId) statements.push(recomputeInvoicePaidStatement(invoiceId, new Date(charge.created * 1000).toISOString()));
   statements.push(auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_recorded", objectType: "payment", objectId: paymentId, detail: { charge: charge.chargeId, invoice: invoiceId, income: invoiceId ? null : incomeCode, subscription: charge.subscriptionInvoice } }));
-  await writeBatch(statements);
+  await writeWithLedger([...statements, ...facts]);
 
   // OR IGNORE may have lost a race to a concurrent delivery: re-read by key.
   const row = await findPaymentByKeys({ chargeId: charge.chargeId, paymentIntentId: charge.paymentIntentId, stripeInvoiceId: charge.stripeInvoiceId });
@@ -347,10 +491,29 @@ async function fetchBalanceTxnSafe(id: string | null): Promise<BalanceTxnFacts |
   }
 }
 
-async function fillMissingKeys(
-  p: PaymentRow,
-  keys: { chargeId?: string | null; paymentIntentId?: string | null; stripeInvoiceId?: string | null; balanceTxnId?: string | null },
-): Promise<void> {
+type PaymentKeys = { chargeId?: string | null; paymentIntentId?: string | null; stripeInvoiceId?: string | null; balanceTxnId?: string | null };
+
+/** An event's facts committed on their own: the event wrote nothing else they could ride with. */
+async function commitFacts(facts: InStatement[]): Promise<void> {
+  if (facts.length > 0) await writeWithLedger(facts);
+}
+
+/**
+ * A payment already in the books, seen again: link it to the fin invoice its
+ * metadata names, and fill the Stripe keys it lacks. `facts` (an event's own
+ * ledger statements) ride in the batch that records what they describe: the
+ * link (the invoice becomes paid) when there is one, else the key fill (the
+ * payment now carries this invoice's id), else on their own.
+ */
+async function recordOnExistingPayment(existing: PaymentRow, keys: PaymentKeys, finInvoiceId: string | null, facts: InStatement[]): Promise<void> {
+  if (finInvoiceId && !existing.invoice_id && (await linkPaymentToInvoice(existing.id, finInvoiceId, facts))) {
+    await fillMissingKeys(existing, keys);
+    return;
+  }
+  await fillMissingKeys(existing, keys, facts);
+}
+
+async function fillMissingKeys(p: PaymentRow, keys: PaymentKeys, facts: InStatement[] = []): Promise<void> {
   const sets: string[] = [];
   const args: Array<string | null> = [];
   if (!p.stripe_charge_id && keys.chargeId) {
@@ -369,13 +532,16 @@ async function fillMissingKeys(
     sets.push("stripe_balance_txn_id = ?");
     args.push(keys.balanceTxnId);
   }
-  if (sets.length === 0) return;
+  if (sets.length === 0) return commitFacts(facts);
+  const fill: InStatement = { sql: `UPDATE fin_payments SET ${sets.join(", ")} WHERE id = ?`, args: [...args, p.id] };
   try {
-    await finDb().execute({ sql: `UPDATE fin_payments SET ${sets.join(", ")} WHERE id = ?`, args: [...args, p.id] });
+    if (facts.length > 0) await writeWithLedger([fill, ...facts]);
+    else await finDb().execute(fill);
   } catch (e) {
-    // Another row already owns that key (should not happen); keep the payment, log it.
+    // Another row already owns that key (should not happen); keep the payment, log it, and still record the facts.
     if (!isUniqueViolation(e)) throw e;
     console.error("[finances:stripe] key already owned by another payment row", p.id, keys);
+    await commitFacts(facts);
   }
 }
 
@@ -570,9 +736,11 @@ async function completeSettlement(paymentId: string, bt: BalanceTxnFacts | null)
 /**
  * Match a recorded payment to a fin invoice (idempotent). If the payment was
  * already booked as revenue, a reclass moves it onto the invoice's AR instead
- * of recognising the revenue a second time.
+ * of recognising the revenue a second time. `facts`: ledger statements
+ * committed in the same batch as the link; true = linked (and they were
+ * written), false = nothing was written (and neither were they).
  */
-export async function linkPaymentToInvoice(paymentId: string, invoiceId: string): Promise<boolean> {
+export async function linkPaymentToInvoice(paymentId: string, invoiceId: string, facts: InStatement[] = []): Promise<boolean> {
   const p = await loadPayment(paymentId);
   if (!p || p.kind !== "payment" || p.invoice_id) return false;
   const linkId = await linkableInvoice(invoiceId, p.currency);
@@ -601,9 +769,10 @@ export async function linkPaymentToInvoice(paymentId: string, invoiceId: string)
     },
     recomputeInvoicePaidStatement(inv.id, p.occurred_at),
     auditStatement({ entityId: E, actor: ACTOR, action: "stripe.payment_linked", objectType: "invoice", objectId: inv.id, detail: { payment: p.id } }),
+    ...facts,
   );
   try {
-    await writeBatch(statements);
+    await (facts.length > 0 ? writeWithLedger(statements) : writeBatch(statements));
   } catch (e) {
     if (isUniqueViolation(e)) return false;
     throw e;
@@ -668,15 +837,16 @@ export async function recordRefundsForCharge(
   }
   const cap = charge.amountRefundedCents;
   let inserted = 0;
+  const tenant = await stripeLedgerTenant();
   if (list) {
     for (const r of list) {
       if (r.status === "failed" || r.status === "canceled") continue;
-      if (await insertRefund(parent, { refundId: r.refundId, amountCents: r.amountCents, created: r.created, bt: r.balanceTxn }, cap)) inserted += 1;
+      if (await insertRefund(parent, { refundId: r.refundId, amountCents: r.amountCents, created: r.created, bt: r.balanceTxn }, cap, tenant)) inserted += 1;
     }
   } else if (opts.deltaAt) {
     const recorded = await refundedSoFar(parent.id);
     const delta = cap - recorded;
-    if (delta > 0 && (await insertRefund(parent, { refundId: null, amountCents: delta, created: opts.deltaAt, bt: null }, cap))) inserted += 1;
+    if (delta > 0 && (await insertRefund(parent, { refundId: null, amountCents: delta, created: opts.deltaAt, bt: null }, cap, tenant))) inserted += 1;
   } else if (cap > (await refundedSoFar(parent.id))) {
     console.warn("[finances:stripe] refund amount known but refunds not itemised; left for the charge.refunded event or a reconcile", charge.chargeId);
   }
@@ -695,6 +865,7 @@ async function insertRefund(
   parent: PaymentRow,
   r: { refundId: string | null; amountCents: number; created: number; bt: BalanceTxnFacts | null },
   cap: number,
+  tenant: LedgerTenant,
 ): Promise<boolean> {
   if (r.amountCents <= 0) return false;
   let cad: number | null = null;
@@ -704,7 +875,10 @@ async function insertRefund(
   } else if (parent.currency === "CAD") cad = r.amountCents;
   const id = newId("ref");
   const occurredOn = torontoDateOfEpochSeconds(r.created);
-  const rs = await finDb().execute({
+  // A refund Stripe itemised is keyed by its re_ id; one known only as an
+  // amount (the charge.refunded delta) by the row that records it.
+  const providerRefundId = r.refundId || id;
+  const insert: InStatement = {
     sql: `INSERT OR IGNORE INTO fin_payments
             (id, entity_id, kind, source, occurred_at, occurred_on, amount_cents, currency, settlement_cad_cents,
              fee_status, parent_payment_id, invoice_id, contact_id, customer_name, customer_email, stripe_customer_id,
@@ -735,7 +909,27 @@ async function insertRefund(
       r.amountCents,
       cap,
     ],
-  });
+  };
+  const [rs] = await writeWithLedger([
+    insert,
+    ledgerStatement(
+      tenant,
+      {
+        eventKey: "refund.issued",
+        occurredAt: new Date(r.created * 1000),
+        subject: { type: "refund", id },
+        sourceRef: providerRefundId,
+        idempotencyKey: `stripe:${providerRefundId}`,
+        valueCents: r.amountCents,
+        currency: parent.currency,
+        payload: {
+          provider_refund_id: providerRefundId,
+          ...(parent.stripe_charge_id || parent.stripe_payment_intent_id ? { provider_payment_id: parent.stripe_charge_id || parent.stripe_payment_intent_id } : {}),
+        },
+      },
+      { ifChanged: true },
+    ),
+  ]);
   if (rs.rowsAffected !== 1) return false;
   await postRefundEntry(id);
   return true;
@@ -768,13 +962,20 @@ async function postRefundEntry(refundRowId: string): Promise<void> {
 
 // ── Stripe invoices & subscriptions ─────────────────────────────────────
 
-export async function applyStripeInvoicePaid(facts: InvoicePaidFacts): Promise<string> {
+/**
+ * `ledger`: the event's own facts (invoice.paid, subscription.renewed),
+ * committed in the SAME batch as the write that records this invoice's
+ * payment: the new payment row, the link to a fin invoice, or the key fill on
+ * a payment already recorded. So a failed ledger insert leaves the invoice as
+ * unpaid in the books as before, and Stripe's retry lands both. Never written
+ * for an invoice this returns "ignored" for.
+ */
+export async function applyStripeInvoicePaid(facts: InvoicePaidFacts, ledger: InStatement[] = []): Promise<string> {
   if (!facts.livemode) return "test_mode";
   if (facts.amountPaidCents <= 0) return "zero_amount";
   const existing = await findPaymentByKeys({ chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId });
   if (existing) {
-    await fillMissingKeys(existing, { chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId });
-    if (facts.metadata.finInvoiceId && !existing.invoice_id) await linkPaymentToInvoice(existing.id, facts.metadata.finInvoiceId);
+    await recordOnExistingPayment(existing, { chargeId: facts.chargeId, paymentIntentId: facts.paymentIntentId, stripeInvoiceId: facts.stripeInvoiceId }, facts.metadata.finInvoiceId, ledger);
     return "linked_existing";
   }
   if (!facts.chargeId && !facts.paymentIntentId) {
@@ -822,13 +1023,20 @@ export async function applyStripeInvoicePaid(facts: InvoicePaidFacts): Promise<s
   // This invoice is what the charge paid, so it decides subscription vs one-off.
   charge.subscriptionInvoice = facts.forSubscription;
   if (!charge.metadata.finInvoiceId && facts.metadata.finInvoiceId) charge.metadata = facts.metadata;
-  const res = await recordStripeCharge(charge, { fetchFees: true });
+  const res = await recordStripeCharge(charge, { fetchFees: true, ledger });
   return res.created ? "recorded" : "linked_existing";
 }
 
-export async function upsertSubscription(facts: SubscriptionFacts, sourceCreated: number): Promise<void> {
+/**
+ * `ledger`: the subscription event's ledger statement, committed with the
+ * upsert (a webhook event; a reconcile has no event and passes none, nor does
+ * an update that changed nothing the subscription bills). It is
+ * not conditional: an older event that no longer moves the row is still a
+ * fact that happened.
+ */
+export async function upsertSubscription(facts: SubscriptionFacts, sourceCreated: number, ledger?: InStatement): Promise<void> {
   const monthly = subscriptionMonthlyCents(facts.items);
-  await finDb().execute({
+  const upsert: InStatement = {
     sql: `INSERT INTO fin_subscriptions
             (id, entity_id, stripe_customer_id, customer_name, customer_email, status, currency, monthly_cents, items_json,
              current_period_end, cancel_at_period_end, canceled_at, livemode, source_event_created, updated_at)
@@ -859,7 +1067,9 @@ export async function upsertSubscription(facts: SubscriptionFacts, sourceCreated
       facts.livemode ? 1 : 0,
       sourceCreated,
     ],
-  });
+  };
+  if (ledger) await writeWithLedger([upsert, ledger]);
+  else await finDb().execute(upsert);
 }
 
 // ── webhook event dispatch ───────────────────────────────────────────────
@@ -891,21 +1101,37 @@ async function claimEvent(env: StripeEventEnvelope): Promise<"claimed" | "duplic
   return "in_flight";
 }
 
-async function finishEvent(id: string, status: "processed" | "ignored" | "failed", error: string | null): Promise<void> {
-  await finDb().execute({
+/**
+ * Mark the event done. `ledger`: the event-level facts that record no row of
+ * their own (payment.failed), committed with the mark, so an event whose
+ * ledger row fails stays unprocessed and Stripe retries it.
+ */
+async function finishEvent(id: string, status: "processed" | "ignored" | "failed", error: string | null, ledger: InStatement[] = []): Promise<void> {
+  const mark: InStatement = {
     sql: `UPDATE fin_stripe_events SET status = ?, error = ?, processed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE event_id = ?`,
     args: [status, error ? error.slice(0, 1000) : null, id],
-  });
+  };
+  if (ledger.length > 0) await writeWithLedger([mark, ...ledger]);
+  else await finDb().execute(mark);
 }
 
+/**
+ * Every event type the handler acts on. The Stripe webhook endpoint must be
+ * subscribed to each; one it is not subscribed to never arrives, and only the
+ * daily reconcile catches up (payouts, refunds, payments; never a failure).
+ */
 export const HANDLED_EVENT_TYPES = [
   "payment_intent.succeeded",
   "charge.succeeded",
+  "charge.failed",
   "charge.refunded",
   "invoice.paid",
   "customer.subscription.created",
   "customer.subscription.updated",
   "customer.subscription.deleted",
+  "payout.paid",
+  "payout.failed",
+  "payout.canceled",
 ] as const;
 
 export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
@@ -919,9 +1145,10 @@ export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
     return { status: "ignored", detail: "test mode event — never enters the books" };
   }
   try {
-    const detail = await dispatch(env);
+    const ledger: InStatement[] = [];
+    const detail = await dispatch(env, ledger);
     const ignored = detail.startsWith("ignored");
-    await finishEvent(env.id, ignored ? "ignored" : "processed", ignored ? detail : null);
+    await finishEvent(env.id, ignored ? "ignored" : "processed", ignored ? detail : null, ledger);
     return { status: ignored ? "ignored" : "processed", detail };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -930,8 +1157,68 @@ export async function handleStripeEvent(raw: unknown): Promise<EventOutcome> {
   }
 }
 
-async function dispatch(env: StripeEventEnvelope): Promise<string> {
+/** A subscription's billing interval as the ledger's code, when it has exactly one. */
+function subscriptionInterval(f: SubscriptionFacts): "day" | "week" | "month" | "year" | undefined {
+  const intervals = new Set(f.items.map((i) => i.interval));
+  return intervals.size === 1 ? [...intervals][0] : undefined;
+}
+
+/**
+ * `ledger` collects the event-level facts that write no row (payment.failed);
+ * handleStripeEvent commits them with the processed mark. Facts that belong
+ * to a write (a payment, a refund, a subscription, an invoice's payment) are
+ * emitted with that write instead.
+ */
+async function dispatch(env: StripeEventEnvelope, ledger: InStatement[]): Promise<string> {
   switch (env.type) {
+    case "charge.failed": {
+      const c = chargeFacts(env.object);
+      if (!c) throw new Error("charge.failed without a readable charge");
+      if (!c.livemode) return "ignored: test_mode";
+      // Nothing enters the books: a failed charge moved no money. It is a fact the ledger keeps.
+      const failureCode = stripeCode(env.object.failure_code);
+      ledger.push(
+        ledgerStatement(
+          await stripeLedgerTenant(),
+          {
+            eventKey: "payment.failed",
+            occurredAt: new Date(c.created * 1000),
+            subject: { type: "payment", id: c.chargeId },
+            sourceRef: env.id,
+            idempotencyKey: `stripe:${c.chargeId}:failed`,
+            valueCents: c.amountCents,
+            currency: c.currency,
+            payload: { provider_payment_id: c.chargeId, ...(failureCode ? { failure_code: failureCode } : {}) },
+          },
+          { ifChanged: false },
+        ),
+      );
+      return `payment failure recorded ${c.chargeId}`;
+    }
+    case "payout.paid":
+    case "payout.failed":
+    case "payout.canceled": {
+      let f = payoutFacts(env.object);
+      if (!f) throw new Error(`${env.type} without a readable payout`);
+      // The event carries the balance transaction as a bare id; what the
+      // payout took from the Stripe balance (and its current status) needs
+      // the payout itself. Without a verified key it is recorded, held, and
+      // the next reconcile (which lists payouts expanded) completes it.
+      const key = await readyKey();
+      if (key) {
+        const u = new URLSearchParams();
+        u.append("expand[]", "balance_transaction");
+        try {
+          const fresh = payoutFacts(await stripeRequest(key, "GET", `/v1/payouts/${encodeURIComponent(f.payoutId)}`, u));
+          if (fresh) f = fresh;
+        } catch (e) {
+          if (!(e instanceof StripeApiError && e.status >= 400 && e.status < 500 && e.status !== 429)) throw e;
+          console.error("[finances:stripe] could not read payout", f.payoutId, e.message);
+        }
+      }
+      const out = await recordStripePayout(f, { reportedOn: torontoDateOfEpochSeconds(env.created) });
+      return out ? `payout ${f.payoutId} ${out.booking}` : `ignored: payout ${f.payoutId} is ${f.status}`;
+    }
     case "charge.succeeded": {
       const c = chargeFacts(env.object);
       if (!c) throw new Error("charge.succeeded without a readable charge");
@@ -994,8 +1281,49 @@ async function dispatch(env: StripeEventEnvelope): Promise<string> {
     case "invoice.paid": {
       const f = invoicePaidFacts(env.object);
       if (!f) throw new Error("invoice.paid without a readable invoice");
-      const out = await applyStripeInvoicePaid(f);
-      return out === "no_charge_on_invoice" || out === "zero_amount" ? `ignored: ${out}` : out;
+      const tenant = await stripeLedgerTenant();
+      const paidAt = new Date(f.paidAt * 1000);
+      // Committed by applyStripeInvoicePaid in the batch that records the
+      // payment, never after it (so not with the processed mark).
+      const facts: InStatement[] = [];
+      facts.push(
+        ledgerStatement(
+          tenant,
+          {
+            eventKey: "invoice.paid",
+            occurredAt: paidAt,
+            subject: { type: "invoice", id: f.stripeInvoiceId },
+            sourceRef: env.id,
+            idempotencyKey: `inv:${f.stripeInvoiceId}:paid`,
+            valueCents: f.amountPaidCents,
+            currency: f.currency,
+            payload: { invoice_id: f.stripeInvoiceId, source_system: "stripe" },
+          },
+          { ifChanged: false },
+        ),
+      );
+      // A subscription's own cycle invoice paid is the renewal.
+      if (f.subscriptionId && f.billingReason === "subscription_cycle") {
+        facts.push(
+          ledgerStatement(
+            tenant,
+            {
+              eventKey: "subscription.renewed",
+              occurredAt: paidAt,
+              subject: { type: "subscription", id: f.subscriptionId },
+              sourceRef: env.id,
+              idempotencyKey: `stripe:${env.id}`,
+              valueCents: f.amountPaidCents,
+              currency: f.currency,
+              payload: { provider_subscription_id: f.subscriptionId },
+            },
+            { ifChanged: false },
+          ),
+        );
+      }
+      const out = await applyStripeInvoicePaid(f, facts);
+      if (out === "no_charge_on_invoice" || out === "zero_amount" || out === "test_mode") return `ignored: ${out}`;
+      return out;
     }
     case "customer.subscription.created":
     case "customer.subscription.updated":
@@ -1003,7 +1331,30 @@ async function dispatch(env: StripeEventEnvelope): Promise<string> {
       const f = subscriptionFacts(env.object);
       if (!f) throw new Error(`${env.type} without a readable subscription`);
       if (env.type === "customer.subscription.deleted" && f.status !== "canceled") f.status = "canceled";
-      await upsertSubscription(f, env.created);
+      const monthly = subscriptionMonthlyCents(f.items);
+      const base = { occurredAt: new Date(env.created * 1000), subject: { type: "subscription", id: f.id }, sourceRef: env.id, idempotencyKey: `stripe:${env.id}` };
+      const interval = subscriptionInterval(f);
+      const cancelReason = stripeCode(asObj(env.object.cancellation_details)?.reason);
+      // An update is a subscription.changed only when it changed what the
+      // subscription bills; a renewal, a status or payment-method change is not.
+      const change = env.type === "customer.subscription.updated" ? subscriptionPlanChange(env.object, env.previousAttributes) : null;
+      const fact: StripeFact | null =
+        env.type === "customer.subscription.created"
+          ? { ...base, eventKey: "subscription.started", valueCents: monthly, currency: f.currency, payload: { provider_subscription_id: f.id, ...(interval ? { interval } : {}) } }
+          : env.type === "customer.subscription.updated"
+            ? change && {
+                ...base,
+                eventKey: "subscription.changed",
+                valueCents: monthly,
+                currency: f.currency,
+                payload: {
+                  provider_subscription_id: f.id,
+                  ...(change.fromPlanCode ? { from_plan_code: change.fromPlanCode } : {}),
+                  ...(change.planCode ? { plan_code: change.planCode } : {}),
+                },
+              }
+            : { ...base, eventKey: "subscription.cancelled", payload: { provider_subscription_id: f.id, ...(cancelReason ? { cancel_reason: cancelReason } : {}) } };
+      await upsertSubscription(f, env.created, fact ? ledgerStatement(await stripeLedgerTenant(), fact, { ifChanged: false }) : undefined);
       return `subscription ${f.id} -> ${f.status}`;
     }
     default:
@@ -1021,8 +1372,15 @@ export type ReconcileSummary = {
   refunds_recorded: number;
   subscriptions_upserted: number;
   pending_completed: number;
+  payouts_seen: number;
+  payouts_booked: number;
+  /** Paid payouts still held or unmapped after this run (the cash tile lists them). */
+  payouts_unbooked: number;
   truncated: boolean;
 };
+
+/** How far back every reconcile looks for payouts, whatever its `days` (the most the reconcile itself accepts). */
+const PAYOUT_LOOKBACK_DAYS = 400;
 
 /** Backfill the last N days from the Stripe API. Requires the pinned account. */
 export async function reconcileStripe(args: { days: number }): Promise<ReconcileSummary> {
@@ -1037,6 +1395,9 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
     refunds_recorded: 0,
     subscriptions_upserted: 0,
     pending_completed: 0,
+    payouts_seen: 0,
+    payouts_booked: 0,
+    payouts_unbooked: 0,
     truncated: false,
   };
 
@@ -1082,7 +1443,57 @@ export async function reconcileStripe(args: { days: number }): Promise<Reconcile
   }
 
   summary.pending_completed = await syncPendingStripe(key);
+
+  // Payouts last, once the charges, refunds and fees they pay out are in
+  // clearing. The window is never shorter than PAYOUT_LOOKBACK_DAYS: a payout
+  // missed by the webhook (or paid before payouts were booked at all) is
+  // still found by a routine 7-day run, and one already booked costs one read.
+  const payoutSince = Math.floor(Date.now() / 1000) - Math.max(days, PAYOUT_LOOKBACK_DAYS) * 86_400;
+  const payouts = await listAll(key, "/v1/payouts", { "arrival_date[gte]": payoutSince }, { maxPages: 10, expand: ["data.balance_transaction"] });
+  summary.truncated ||= payouts.truncated;
+  // Oldest first: each booking uses what clearing holds at that point.
+  const facts = payouts.items.map(payoutFacts).filter((p): p is NonNullable<typeof p> => p !== null && p.livemode);
+  facts.sort((a, b) => a.arrivalDate.localeCompare(b.arrivalDate) || a.payoutId.localeCompare(b.payoutId));
+  for (const f of facts) {
+    summary.payouts_seen += 1;
+    const before = await queryOne<{ booking: string }>(`SELECT booking FROM fin_stripe_payouts WHERE id = ?`, [f.payoutId]);
+    const out = await recordStripePayout(f);
+    if (out?.booking === "booked" && before?.booking !== "booked") summary.payouts_booked += 1;
+  }
+  // Payouts held or unmapped earlier (no rate yet, no account chosen) that this run did not list.
+  summary.payouts_booked += await retryUnbookedPayouts();
+  summary.payouts_unbooked = (await unbookedPayouts()).length;
+
+  // "Last synced" on Today and in Settings reads this row.
+  await writeBatch([auditStatement({ entityId: E, actor: ACTOR, action: STRIPE_RECONCILED_ACTION, objectType: "stripe", objectId: null, detail: summary })]);
   return summary;
+}
+
+/** The audit action a completed reconcile writes (lastStripeSync reads it). */
+export const STRIPE_RECONCILED_ACTION = "stripe.reconciled";
+
+/**
+ * When a webhook event last REACHED the books: the newest live event that was
+ * processed. Not received_at: every delivery is claimed (and a failed one
+ * re-claimed, received_at reset) before the test-mode and type checks, so a
+ * test-mode event, an unhandled type or an event failing on every retry would
+ * each read as a sync while nothing reached the books.
+ */
+export const LAST_SYNCED_EVENT_SQL = `SELECT MAX(processed_at) FROM fin_stripe_events WHERE livemode = 1 AND status = 'processed'`;
+
+/**
+ * When the books last heard from Stripe: the newest live webhook event that
+ * was processed, or the newest completed reconcile, whichever is later.
+ * Null = never.
+ */
+export async function lastStripeSync(): Promise<string | null> {
+  const row = await queryOne<{ event_at: string | null; reconcile_at: string | null }>(
+    `SELECT (${LAST_SYNCED_EVENT_SQL}) AS event_at,
+            (SELECT MAX(created_at) FROM fin_audit_log WHERE entity_id = ? AND action = ?) AS reconcile_at`,
+    [E, STRIPE_RECONCILED_ACTION],
+  );
+  const times = [row?.event_at, row?.reconcile_at].filter((t): t is string => typeof t === "string" && t.length > 0);
+  return times.length ? times.sort()[times.length - 1] : null;
 }
 
 /**

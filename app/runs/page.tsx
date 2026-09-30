@@ -31,7 +31,9 @@ export default async function RunsPage() {
       </div>
     );
   }
-  const events = await safe("runs.recent_actions", recentActions(profile.tenant_id, 100), []);
+  // null = the audit log could not be read: "Couldn't check", never the
+  // "No agent mutations recorded yet" of a log that really is empty.
+  const events = await safe("runs.recent_actions", recentActions(profile.tenant_id, 100), null);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -70,12 +72,16 @@ export default async function RunsPage() {
       <Card
         title="Recent agent actions"
         subtitle={
-          events.length === 0
-            ? "Empty so far — ask an agent to update something to see it here."
-            : `Last ${events.length} mutations across all agents.`
+          events === null
+            ? "Couldn't check the audit log just now."
+            : events.length === 0
+              ? "Empty so far — ask an agent to update something to see it here."
+              : `Last ${events.length} mutations across all agents.`
         }
       >
-        {events.length === 0 ? (
+        {events === null ? (
+          <EmptyState message="Couldn't check the agent actions. The read failed and has been logged; this does not mean nothing changed. Reload to try again." />
+        ) : events.length === 0 ? (
           <EmptyState message="No agent mutations recorded yet. Try chatting Bravo: &quot;set my MRR target to $7000&quot; — that change will land here." />
         ) : (
           <ul className="divide-y divide-bg-border">

@@ -88,7 +88,8 @@ export default async function SequencesPage() {
   // would be claiming a protection that is not here.
   const [result, bridgeOnline, activityRes, volumeRes, smsVolumeRes, limits, pool, summaryRes, scoreboardRes] = await Promise.all([
     loadSequences(tenantId),
-    safe("sequences.bridge_online", getBridgeOnline(tenantId), false),
+    // null = the heartbeat could not be read: "Couldn't check", not "not connected".
+    safe("sequences.bridge_online", getBridgeOnline(tenantId), null),
     // Wrapped so a read FAILURE is distinguishable from an empty window. `safe`
     // swallows the rejection and hands back [], which DripActivityView would
     // render as "no drip steps in this window - that is a finding, not a

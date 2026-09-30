@@ -216,6 +216,9 @@ async function main() {
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, updated_at TEXT);
   `);
+  // Every channel turn and every "Test" is a metered model call (lib/ai/usage.ts),
+  // so the AI usage tables are applied as written (bravo__192, what the lead runs).
+  await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   const { encryptField } = await import("../lib/field-encryption");
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (id: string, user: U, tenant: string, role: string, owner: 0 | 1, updated: string) => ({
@@ -291,6 +294,9 @@ async function main() {
   const identity = await import("../lib/os/channel/identity");
   const { probeProvider, PROBE_MODEL } = await import("../lib/agents/provider-probe");
   const { getSeedAgent } = await import("../lib/agents/library");
+  const { modelCallMeter } = await import("../lib/ai/usage");
+  /** The meter a direct probe call takes (the route builds its own from the session). */
+  const probeMeter = () => modelCallMeter({ tenantId: SOLO, surface: "probe", authKind: "api_key", billingMode: "byo_key" });
 
   const post = (body: Record<string, unknown>) =>
     chat.POST(
@@ -816,6 +822,7 @@ async function main() {
     ] as const) {
       const seen: Sent[] = [];
       const r = await probeProvider(p, "k", {
+        meter: probeMeter(),
         fetchImpl: async (url2, init) => {
           seen.push({ url: url2, method: String(init.method), headers: {}, body: JSON.parse(String(init.body)) });
           return new Response("{}", { status: 200 });
@@ -828,9 +835,10 @@ async function main() {
       assert.equal(cap(seen[0].body!), want, p);
     }
     // Anthropic's drained balance (400) and a Google bad key (400) are not the same failure.
-    const credit = await probeProvider("anthropic", "k", { fetchImpl: async () => anthropicCredit() });
+    const credit = await probeProvider("anthropic", "k", { meter: probeMeter(), fetchImpl: async () => anthropicCredit() });
     assert.equal(credit.ok === false && credit.code, "provider_400_credit");
     const badKey = await probeProvider("google", "k", {
+      meter: probeMeter(),
       fetchImpl: async () => new Response('{"error":{"message":"API key not valid. Please pass a valid API key."}}', { status: 400 }),
     });
     assert.equal(badKey.ok === false && badKey.code, "provider_401");
@@ -838,8 +846,9 @@ async function main() {
   await check("the route source no longer lists models to decide a key works", () => {
     const src = readFileSync(join(process.cwd(), "app/api/agent-config/test-connection/route.ts"), "utf8");
     assert.doesNotMatch(src, /\/v1\/models|\/v1beta\/models\?|api\/tags/, "a model-list probe is back");
-    assert.match(src, /probeProvider\(provider, proposedKey, \{ model \}\)/);
-    assert.match(src, /probeProvider\(provider, plain, \{ model: row\?\.model \}\)/);
+    // Each probe is metered for the SESSION's workspace (lib/ai/usage.ts, surface "probe").
+    assert.match(src, /probeProvider\(provider, proposedKey, \{ model, meter: probeMeter\(provider, ctx\.tenantId, ctx\.userId\) \}\)/);
+    assert.match(src, /probeProvider\(provider, plain, \{ model: row\?\.model, meter: probeMeter\(provider, ctx\.tenantId, ctx\.userId\) \}\)/);
   });
   const testKey = async (body: Record<string, unknown>) => {
     const res = await testConnection.POST(
@@ -935,7 +944,7 @@ async function main() {
     assert.equal(body.message, "The model claude-sonnet-4-6 was not found for this key. Pick another model in AI settings.");
     // A key with no model saved yet is asked on the cheap probe model, and a
     // 403 there says it is about THAT model, not the key in general.
-    const forbidden = await probeProvider("openai", "k", { fetchImpl: async () => new Response("{}", { status: 403 }) });
+    const forbidden = await probeProvider("openai", "k", { meter: probeMeter(), fetchImpl: async () => new Response("{}", { status: 403 }) });
     assert.equal(forbidden.ok === false && forbidden.message, "This key is not allowed to use gpt-5.4-mini. Check the key's access, or pick another model in AI settings.");
   });
 
@@ -1067,6 +1076,71 @@ async function main() {
     // The send path runs only the commands this chat offers.
     const src = readFileSync(join(process.cwd(), "components/agents/AgentChat.tsx"), "utf8");
     assert.match(src, /if \(!chatCommands\(department\)\.includes\(parsed\.name\)\) \{\s*appendSystem\(unavailableCommandCopy\(parsed\.name\)\);/);
+  });
+
+  // ── 8. The AI usage ledger (lib/ai/usage.ts, plan §F2.6) ─────────────────
+  const usageRows = async (tenant: string, surface: string) =>
+    (
+      await db.execute({
+        sql: "SELECT department_key, teammate_id, user_id, model, billing_mode, outcome, error_code, cost_micro_usd FROM ai_usage_events WHERE tenant_id = ? AND surface = ? ORDER BY id",
+        args: [tenant, surface],
+      })
+    ).rows.map((r) => ({ ...r }));
+  await check("a channel turn is one usage row for the SESSION's workspace, under the channel's department", async () => {
+    await login(USERS.partner);
+    await db.execute({ sql: "DELETE FROM ai_usage_events WHERE tenant_id = ?", args: [OASIS] });
+    provider = () => anthropicOk("ok");
+    const events = parseSse(await (await post(say({ agent_slug: "bravo", department: "chief_of_staff", tenant_slug: undefined }))).text());
+    assert.ok(events.some((e) => e.event === "usage"), JSON.stringify(events));
+    assert.deepEqual(await usageRows(OASIS, "agents.chat"), [
+      // 12 input x $3 + 3 output x $15 per million, in micro-USD.
+      { department_key: "chief_of_staff", teammate_id: "bravo", user_id: USERS.partner.id, model: "claude-sonnet-4-6", billing_mode: "byo_key", outcome: "ok", error_code: null, cost_micro_usd: 81 },
+    ]);
+  });
+  await check("at the month's cap the channel answers 402 in one plain sentence, asks no provider, and the header says why", async () => {
+    await login(USERS.partner);
+    const period = new Date().toISOString().slice(0, 7);
+    await db.execute({
+      sql: "INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, spent_micro_usd, created_at, updated_at) VALUES (?, ?, 1000, 1000, ?, ?)",
+      args: [OASIS, period, stamp, stamp],
+    });
+    try {
+      sent = [];
+      provider = () => anthropicOk("must not be asked");
+      const res = await post(say({ agent_slug: "bravo", department: "chief_of_staff" }));
+      assert.equal(res.status, 402);
+      const body = (await res.json()) as { error: string; message: string };
+      assert.equal(body.error, "ai_budget_exhausted");
+      assert.equal(body.message, "This month's AI budget is used. The owner can raise it.");
+      rendered.push(body.message);
+      assert.equal(sent.length, 0, "a capped workspace reached the provider");
+      assert.ok((await outcomes(OASIS)).includes("dept:chief_of_staff=failed:ai_budget_exhausted"), "the cap is the channel's last turn");
+      const failed = outcome.channelFailure(
+        (await db.execute({ sql: "SELECT channel_key, outcome, code, at FROM agent_turn_outcomes WHERE tenant_id = ?", args: [OASIS] })).rows.map((r) => ({
+          channelKey: String(r.channel_key),
+          ok: r.outcome === "ok",
+          code: r.code === null ? null : String(r.code),
+          at: String(r.at),
+        })),
+        "dept:marketing",
+      );
+      assert.deepEqual(failed, { code: "ai_budget_exhausted" }, "one budget per workspace: every channel says why");
+      // "Test" at the cap is told so too, as a 402, and tests nothing.
+      await login(USERS.cc);
+      const tested = await testKey({ provider: "anthropic", api_key: "sk-ant-pasted-0008" });
+      assert.equal(tested.status, 402, JSON.stringify(tested.body));
+      assert.equal(tested.body.code, "ai_budget_exhausted");
+      assert.equal(sent.length, 0);
+    } finally {
+      await db.execute({ sql: "DELETE FROM tenant_ai_budgets WHERE tenant_id = ?", args: [OASIS] });
+    }
+    // Raised (here: removed, which is no cap) and a turn answers again.
+    await login(USERS.partner);
+    provider = () => anthropicOk("back");
+    const res = await post(say({ agent_slug: "bravo", department: "chief_of_staff" }));
+    assert.equal(res.status, 200);
+    assert.equal(parseSse(await res.text()).at(-1)?.event, "done");
+    assert.ok((await outcomes(OASIS)).includes("dept:chief_of_staff=ok"));
   });
 
   console.log(`os-channels-honest: ${failures === 0 ? "OK" : `${failures} FAILED`}`);

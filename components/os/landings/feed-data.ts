@@ -14,8 +14,9 @@
  * agent_events has no tenant_id column yet. A row a producer did not stamp
  * matches no workspace and is never shown — fail closed.
  *
- * Not lib/queries.ts recentEvents(): that one drops `r.error`, so a failed
- * read renders as an empty, quiet feed. A Feed that cannot load has to say so.
+ * Not lib/queries.ts recentEvents(): it dropped `r.error` when this was
+ * written (a failed read rendered as an empty, quiet feed) and throws since
+ * 2026-09-29. This one returns the failure as a value, so the Feed says so.
  */
 import "server-only";
 

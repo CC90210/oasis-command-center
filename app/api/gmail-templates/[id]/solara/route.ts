@@ -21,6 +21,7 @@ import { getAgentModelForUser } from "@/lib/agent-resolver";
 import { operatorPlatformFallback } from "@/lib/operator-credentials";
 import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { redactAll } from "@/lib/secret-redaction";
+import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
 import { validateGmailTemplateFields } from "@/lib/gmail-templates-server";
 import {
   extractGmailTokens,
@@ -149,6 +150,7 @@ export async function POST(
   let provider: Provider;
   let model: string;
   let apiKey = "";
+  let keySource: "tenant" | "platform" = "tenant";
   if (cfg && cfg.encrypted_api_key) {
     provider = cfg.provider as Provider;
     model = cfg.model;
@@ -169,6 +171,7 @@ export async function POST(
     provider = fallback.provider;
     model = fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
   }
 
   // Model boundary: redact env-secret values / keyed URL params before any
@@ -198,6 +201,13 @@ export async function POST(
       system: SYSTEM_PROMPT,
       messages,
       maxTokens: 1500,
+      meter: modelCallMeter({
+        tenantId: sess.tenantId,
+        surface: "gmail_templates.solara",
+        ...billingForKey(provider, keySource),
+        teammateId: "solara",
+        userId: sess.userId,
+      }),
     })) {
       if (ev.type === "delta") aiText += ev.text;
       else if (ev.type === "error") streamError = ev.message;
@@ -205,6 +215,7 @@ export async function POST(
   } catch (err) {
     streamError = err instanceof Error ? err.message : "stream_failed";
   }
+  if (isAiBudgetCode(streamError)) return budgetRefusalResponse(streamError);
   if (streamError) {
     return NextResponse.json({ ok: false, error: "llm_call_failed", message: streamError }, { status: 502 });
   }
