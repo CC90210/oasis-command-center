@@ -2354,7 +2354,14 @@ export type StreamYield =
       input: Record<string, unknown>;
       resume_state: ResumeState;
     }
-  | { type: "done"; inputTokens: number; outputTokens: number }
+  /**
+   * The turn ended. inputTokens / outputTokens are the SUM of its provider
+   * requests' own usage reports. unreportedCalls counts the requests that
+   * finished with no usage report: their tokens are unknown, so while it is
+   * above 0 the sums are only the other requests' (a floor) and a caller must
+   * not show or store them as the turn's tokens.
+   */
+  | { type: "done"; inputTokens: number; outputTokens: number; unreportedCalls: number }
   | { type: "error"; message: string };
 
 type ContentBlock =
@@ -2392,6 +2399,10 @@ export type ResumeState = {
    *  of resetting to zero. */
   totalIn: number;
   totalOut: number;
+  /** Calls before the pause that finished with no usage report (see the
+   *  done event's unreportedCalls), carried so the resumed turn's done event
+   *  still says its totals are a floor. Absent = none. */
+  unreportedCalls?: number;
   /** Echo of the original request's maxTokens / enableTools — applied to
    *  the resumed call so the second half of the conversation behaves
    *  identically to what would have happened without the pause. */
@@ -2520,6 +2531,7 @@ export async function* streamAnthropicWithTools(
     startIter: 0,
     startTotalIn: 0,
     startTotalOut: 0,
+    startUnreportedCalls: 0,
     ctx,
     meter: req.meter,
   });
@@ -2578,6 +2590,7 @@ export async function* resumeAnthropicTurn(
     startIter: resume.iteration + 1,
     startTotalIn: resume.totalIn,
     startTotalOut: resume.totalOut,
+    startUnreportedCalls: resume.unreportedCalls ?? 0,
     ctx,
     meter,
   });
@@ -2626,8 +2639,11 @@ export async function* streamOpenAICompatibleWithTools(
   // The turn's tokens: the SUM of every step's own report. Each step is its
   // own provider request (its own ai_usage_events row), and each reports only
   // its own usage, so keeping the last report under-counted every tool turn.
+  // A step with no usage report adds nothing to the sums and is counted here
+  // instead, so the done event never passes a partial sum off as the turn's.
   let totalIn = 0;
   let totalOut = 0;
+  let unreportedCalls = 0;
 
   for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
     const body: Record<string, unknown> = {
@@ -2739,6 +2755,8 @@ export async function* streamOpenAICompatibleWithTools(
     }
     totalIn += stepIn;
     totalOut += stepOut;
+    // The step's usage as the ledger recorded it: none means its tokens are unknown.
+    if (ledger === null) unreportedCalls += 1;
 
     const toolUses = [...toolBuffers.values()]
       .filter((tu) => tu.name.length > 0)
@@ -2749,7 +2767,7 @@ export async function* streamOpenAICompatibleWithTools(
         rawArgs: tu.args || "{}",
       }));
     if (toolUses.length === 0 || finishReason !== "tool_calls") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -2881,6 +2899,8 @@ type IterationLoopArgs = {
   startIter: number;
   startTotalIn: number;
   startTotalOut: number;
+  /** Calls already finished with no usage report (0 for fresh). */
+  startUnreportedCalls: number;
   ctx: ToolContext;
   /** Meters each iteration's model call (ToolLoopRequest.meter). */
   meter: ModelCallMeter;
@@ -2984,6 +3004,9 @@ async function* runIterationLoop(
   });
   let totalIn = args.startTotalIn;
   let totalOut = args.startTotalOut;
+  // Iterations whose call finished with no complete usage report: their
+  // tokens are unknown, so the done event says the sums are a floor.
+  let unreportedCalls = args.startUnreportedCalls;
 
   for (let iter = args.startIter; iter < MAX_TOOL_ITERATIONS; iter++) {
     // Output tokens for THIS iteration only. Anthropic's message_delta
@@ -3149,6 +3172,8 @@ async function* runIterationLoop(
       await call.finish(end ?? { outcome: "cancelled", usage: null });
     }
     totalOut += iterOut;
+    // The same test the ledger's usage above uses: both sides reported.
+    if (ledger.inputTokens === null || ledger.outputTokens === null) unreportedCalls += 1;
 
     // If the model didn't ask to call any tools, we're done. Filter
     // tool_use blocks defensively: a block with no id or name would
@@ -3161,7 +3186,7 @@ async function* runIterationLoop(
         b?.type === "tool_use" && typeof b.id === "string" && b.id.length > 0 && typeof b.name === "string" && b.name.length > 0
     );
     if (toolUses.length === 0 || stopReason !== "tool_use") {
-      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut };
+      yield { type: "done", inputTokens: totalIn, outputTokens: totalOut, unreportedCalls };
       return;
     }
 
@@ -3241,6 +3266,8 @@ async function* runIterationLoop(
           iteration: iter,
           totalIn,
           totalOut,
+          // Only when there are any, so an ordinary state carries no new key.
+          ...(unreportedCalls > 0 ? { unreportedCalls } : {}),
           maxTokens,
           enableTools,
           toolPalette: args.toolPalette,

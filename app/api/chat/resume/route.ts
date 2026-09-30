@@ -46,7 +46,7 @@ import { NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
-import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
+import { chatSessionOwner, resolveChatContext } from "@/lib/chat-auth";
 import {
   resumeAnthropicTurn,
   type ResumeState,
@@ -74,6 +74,10 @@ import { departmentForAgent } from "@/lib/os/approvals/rules";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 300;
+
+// What the chat shows (components/ChatWidget.tsx renders a refusal's `error`).
+const RESUME_SESSION_UNAVAILABLE = "We could not check this conversation just now, so the paused step did not continue. Try again in a moment.";
+const RESUME_SESSION_GONE = "This conversation is no longer available, so the paused step cannot continue. Start a new message.";
 
 type IncomingPayload = {
   agent_key?: string;
@@ -194,6 +198,26 @@ export async function POST(req: NextRequest) {
   }
   if (exhausted) return budgetRefusalResponse(exhausted);
 
+  // The resumed half is filed under the session the signed state names, so it
+  // must still be this person's session in this workspace before any model is
+  // asked. Without that there is nowhere to record the answer, its messages or
+  // its cost against, so the resume is refused rather than run unrecorded.
+  const owner = await chatSessionOwner(signedSessionId, tenantId, user.id);
+  if (owner.state === "unavailable") {
+    console.error("[chat/resume.session] could not check the paused turn's chat session; the resume was refused", {
+      tenantId,
+      error: owner.error,
+    });
+    return jsonError(503, RESUME_SESSION_UNAVAILABLE, "chat_session_unavailable");
+  }
+  if (owner.state === "not_owned") {
+    console.error("[chat/resume.session] the paused turn's chat session is gone or not the caller's; the resume was refused", {
+      tenantId,
+    });
+    return jsonError(410, RESUME_SESSION_GONE, "resume_session_gone");
+  }
+  const sessionId = signedSessionId;
+
   // Admin gate for the credential vault (Codex P1, 2026-05-24). Same
   // lookup the parent /api/chat route does — fails CLOSED so a profile
   // lookup hiccup never grants vault access. The bridge-proxy path
@@ -220,11 +244,6 @@ export async function POST(req: NextRequest) {
     // Fail closed.
   }
 
-  // Stream the resumed iteration back to the browser as SSE. The signed
-  // session is still kept only when it is this person's session in this
-  // workspace (lib/chat-auth.ts ownedChatSessionId).
-  const sessionId = await ownedChatSessionId(signedSessionId, tenantId, user.id);
-
   // Capture resumed-turn state for the chat_messages persist below.
   // Phase G of giggly-reef: paused/resumed turns now leave a real audit
   // trail in chat_messages instead of vanishing after the SSE stream
@@ -234,8 +253,9 @@ export async function POST(req: NextRequest) {
   // without a schema change.
   const startedAt = Date.now();
   let resumedText = "";
-  let resumeUsageIn = 0;
-  let resumeUsageOut = 0;
+  // The chat_messages row's tokens; null when the turn's tokens are unknown.
+  let resumeUsageIn: number | null = 0;
+  let resumeUsageOut: number | null = 0;
   // The loop's token count when this request ended (done, or another pause);
   // null when it ended with neither. It counts from the paused totals.
   let resumeTokens: TurnTokens | null = null;
@@ -270,7 +290,7 @@ export async function POST(req: NextRequest) {
       // the subsequent `done` so the buffer doesn't release across the
       // boundary.
       const { send } = createRedactingSseSend(controller, vaultSecretsForRedaction);
-      if (sessionId) send("session", { session_id: sessionId });
+      send("session", { session_id: sessionId });
 
       try {
         for await (const ev of resumeAnthropicTurn(
@@ -324,13 +344,22 @@ export async function POST(req: NextRequest) {
               });
             }
           } else if (ev.type === "done") {
-            resumeUsageIn = ev.inputTokens;
-            resumeUsageOut = ev.outputTokens;
             resumeTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
-            send("usage", {
-              input_tokens: ev.inputTokens,
-              output_tokens: ev.outputTokens,
-            });
+            if (ev.unreportedCalls > 0) {
+              // A call in this turn (before or after the pause) sent no usage
+              // report: the running sums are a floor, so the message row
+              // records unknown tokens and no usage event claims them. The
+              // session delta below still counts only calls whose cost is known.
+              resumeUsageIn = null;
+              resumeUsageOut = null;
+            } else {
+              resumeUsageIn = ev.inputTokens;
+              resumeUsageOut = ev.outputTokens;
+              send("usage", {
+                input_tokens: ev.inputTokens,
+                output_tokens: ev.outputTokens,
+              });
+            }
           } else if (ev.type === "error") {
             resumeStreamError = redactAll(ev.message);
             send("error", sseErrorFrame(resumeStreamError));
@@ -351,55 +380,53 @@ export async function POST(req: NextRequest) {
       // a short header noting which tool just resolved + how it terminated,
       // so audit consumers can reconstruct the tool chain even without
       // joining against a separate tool_execution_log table.
-      if (sessionId) {
-        const headerLines: string[] = [
-          `[resume after tool: ${toolUseId.slice(0, 16)}${normalizedResult.is_error ? " — bridge_error" : ""}]`,
-        ];
-        if (toolCallsExecuted.length > 0) {
-          headerLines.push(
-            `tools_in_turn: ${toolCallsExecuted.map((t) => `${t.name}${t.ok ? "" : "(error)"}`).join(", ")}`,
-          );
-        }
-        const latencyMs = Date.now() - startedAt;
-        // Shared chat_messages writer (lib/chat-persistence). Reuses the
-        // same vaultSecretsForRedaction we fetched once before the
-        // stream opened — one DB round-trip per turn covers both the
-        // live SSE scrub and the persist-time scrub.
-        await persistAssistantTurn({
+      const headerLines: string[] = [
+        `[resume after tool: ${toolUseId.slice(0, 16)}${normalizedResult.is_error ? " — bridge_error" : ""}]`,
+      ];
+      if (toolCallsExecuted.length > 0) {
+        headerLines.push(
+          `tools_in_turn: ${toolCallsExecuted.map((t) => `${t.name}${t.ok ? "" : "(error)"}`).join(", ")}`,
+        );
+      }
+      const latencyMs = Date.now() - startedAt;
+      // Shared chat_messages writer (lib/chat-persistence). Reuses the
+      // same vaultSecretsForRedaction we fetched once before the
+      // stream opened — one DB round-trip per turn covers both the
+      // live SSE scrub and the persist-time scrub.
+      await persistAssistantTurn({
+        sessionId,
+        tenantId,
+        content: resumedText,
+        prefix: headerLines.join("\n"),
+        inputTokens: resumeUsageIn,
+        outputTokens: resumeUsageOut,
+        latencyMs,
+        error: resumeStreamError,
+        vaultSecrets: vaultSecretsForRedaction,
+      });
+      // chat_sessions running totals — ADDED through the same one-statement
+      // SQL increment /api/chat uses (lib/chat-persistence.ts), so two turns
+      // finishing together both land. As in /api/chat, tokens and cost move
+      // TOGETHER and only when the resumed calls' cost is known, so the row
+      // never pairs tokens with a cost that does not include them. The
+      // resumed loop counts on from the paused totals, which the paused
+      // request already added, so only the tokens after them are new.
+      try {
+        await addToSessionTotals({
           sessionId,
           tenantId,
-          content: resumedText,
-          prefix: headerLines.join("\n"),
-          inputTokens: resumeUsageIn,
-          outputTokens: resumeUsageOut,
-          latencyMs,
-          error: resumeStreamError,
-          vaultSecrets: vaultSecretsForRedaction,
+          delta: sessionTotalsDelta({
+            end: resumeTokens,
+            start: { inputTokens: resumeState.totalIn, outputTokens: resumeState.totalOut },
+            meter,
+          }),
         });
-        // chat_sessions running totals — ADDED through the same one-statement
-        // SQL increment /api/chat uses (lib/chat-persistence.ts), so two turns
-        // finishing together both land. As in /api/chat, tokens and cost move
-        // TOGETHER and only when the resumed calls' cost is known, so the row
-        // never pairs tokens with a cost that does not include them. The
-        // resumed loop counts on from the paused totals, which the paused
-        // request already added, so only the tokens after them are new.
-        try {
-          await addToSessionTotals({
-            sessionId,
-            tenantId,
-            delta: sessionTotalsDelta({
-              end: resumeTokens,
-              start: { inputTokens: resumeState.totalIn, outputTokens: resumeState.totalOut },
-              meter,
-            }),
-          });
-        } catch (sessErr) {
-          console.error("[chat/resume.session_totals] the session's running totals were not updated", {
-            tenantId,
-            sessionId,
-            error: sessErr instanceof Error ? sessErr.message : String(sessErr),
-          });
-        }
+      } catch (sessErr) {
+        console.error("[chat/resume.session_totals] the session's running totals were not updated", {
+          tenantId,
+          sessionId,
+          error: sessErr instanceof Error ? sessErr.message : String(sessErr),
+        });
       }
     },
   });

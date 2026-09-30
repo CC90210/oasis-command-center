@@ -12,7 +12,9 @@
  * What must hold, as for the Anthropic loop: each provider request is ONE
  * ai_usage_events row with that step's own tokens and cost, and the turn's
  * total is the sum of its steps, written to chat_sessions together with the
- * summed cost.
+ * summed cost. A step with no usage report leaves the turn's tokens unknown:
+ * no usage event and a NULL message row, never the other steps' sum as if it
+ * were the turn's.
  *
  * Real libSQL file with bravo__192 applied (so gpt-5.4 has its seeded price),
  * the real session cookie and the real /api/chat handler. next/headers and
@@ -245,7 +247,8 @@ async function main() {
   };
   const assistantTokens = async (sessionId: string) => {
     const r = (await db.execute({ sql: "SELECT input_tokens, output_tokens FROM chat_messages WHERE session_id = ? AND role = 'assistant'", args: [sessionId] })).rows;
-    return r.map((x) => [Number(x.input_tokens), Number(x.output_tokens)]);
+    // null stays null: an unknown count is not 0.
+    return r.map((x) => [x.input_tokens === null ? null : Number(x.input_tokens), x.output_tokens === null ? null : Number(x.output_tokens)]);
   };
 
   console.log("OpenAI: a three-step tool turn");
@@ -290,15 +293,18 @@ async function main() {
     assertTotals(await totals(sessionId), [3600, 350, 0.01335]);
   });
 
-  await check("a step the provider reports no usage for leaves the session totals unchanged: its cost is unknown, not zero", async () => {
+  await check("a step the provider reports no usage for leaves the turn's tokens unknown: no usage event, a NULL message row, session totals unchanged", async () => {
     await login(USERS.openaiOwner);
     steps = [
       toolStep("call_x", { prompt_tokens: 1000, completion_tokens: 100 }),
       textStep("Done.", null),
     ];
-    const { sessionId } = await turn("c-openai", "One more");
+    const { events, sessionId } = await turn("c-openai", "One more");
     const r = await rows(sessionId);
     assert.deepEqual(r.map((x) => [x.outcome, x.cost_micro_usd === null ? null : Number(x.cost_micro_usd)]), [["ok", 4000], ["ok", null]]);
+    // Step 1's 1000 / 100 is not the turn's tokens: step 2's are unknown.
+    assert.ok(!events.some((e) => e.event === "usage"), `a partial sum was sent as the turn's tokens: ${JSON.stringify(events)}`);
+    assert.deepEqual(await assistantTokens(sessionId), [[null, null]]);
     assertTotals(await totals(sessionId), [0, 0, 0]);
   });
 

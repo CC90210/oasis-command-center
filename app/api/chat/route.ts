@@ -614,8 +614,9 @@ export async function POST(req: NextRequest) {
 
   // ---- Stream response back as SSE ----------------------------------------
   let assistantText = "";
-  let usageIn = 0;
-  let usageOut = 0;
+  // The chat_messages row's tokens; null when the turn's tokens are unknown.
+  let usageIn: number | null = 0;
+  let usageOut: number | null = 0;
   // The loop's own token count when the turn ended (a done event, or a pause
   // for a bridge tool); null when it ended with neither. The session's running
   // totals are added from this and nothing else (lib/chat-persistence.ts).
@@ -758,10 +759,19 @@ export async function POST(req: NextRequest) {
                 });
               }
             } else if (ev.type === "done") {
-              usageIn = ev.inputTokens;
-              usageOut = ev.outputTokens;
               turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
-              send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              if (ev.unreportedCalls > 0) {
+                // A step the provider sent no usage report for: the sums are
+                // only the other steps', so the message row records unknown
+                // tokens and no usage event claims them as the turn's. (The
+                // session totals add nothing either: that call's cost is unknown.)
+                usageIn = null;
+                usageOut = null;
+              } else {
+                usageIn = ev.inputTokens;
+                usageOut = ev.outputTokens;
+                send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
+              }
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
               send("error", sseErrorFrame(streamError));

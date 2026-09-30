@@ -79,8 +79,9 @@ export type AssistantTurnPersistArgs = {
    *  last line of defense before chat_messages becomes a long-term
    *  secret-leak risk. */
   content: string;
-  inputTokens: number;
-  outputTokens: number;
+  /** null: the turn's tokens are unknown (a call finished with no usage report). */
+  inputTokens: number | null;
+  outputTokens: number | null;
   latencyMs: number;
   error?: string | null;
   /** Optional header prepended to content. /api/chat/resume uses this

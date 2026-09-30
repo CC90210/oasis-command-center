@@ -21,7 +21,13 @@
  *     nothing; a local model's tokens are recorded at a known $0; and two
  *     increments that finish together both land;
  *   - a session id from the body that is not the caller's own is not written
- *     into, and the turn's usage row is not filed under it.
+ *     into, and the turn's usage row is not filed under it;
+ *   - a resume whose signed session is not the caller's, was deleted during the
+ *     pause, or cannot be read is refused (410, or 503) before any model call,
+ *     never answered with nothing recorded against the session;
+ *   - a tool-loop iteration the provider reports no usage for leaves the turn's
+ *     tokens unknown: no usage event and a NULL message row, never a partial
+ *     sum, and a pause carries that into the resumed half.
  *
  * Everything runs against a local libSQL file with bravo__192 applied as the
  * lead applies it: the real signed session cookie, the real Turso adapter, the
@@ -94,6 +100,9 @@ const USERS = {
 } as const;
 const SENTENCE = "This month's AI budget is used. The owner can raise it.";
 const UNAVAILABLE = "We could not check this workspace's AI budget just now. Try again in a moment.";
+// /api/chat/resume's refusals when the paused turn's session cannot be confirmed.
+const SESSION_GONE = "This conversation is no longer available, so the paused step cannot continue. Start a new message.";
+const SESSION_UNAVAILABLE = "We could not check this conversation just now, so the paused step did not continue. Try again in a moment.";
 
 async function login(user: U) {
   const { signSession } = await import("../lib/turso-auth");
@@ -141,6 +150,26 @@ const anthropicToolUse = (id: string, name: string, input: number, output: numbe
     ["content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "{}" } }],
     ["content_block_stop", { index: 0 }],
     ["message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: output } }],
+    ["message_stop", {}],
+  ]);
+/** A reply that completes but whose frames carry no usage report (no input count, no output count). */
+const anthropicUnreported = (text: string) =>
+  sse([
+    ["message_start", { message: {} }],
+    ["content_block_start", { index: 0, content_block: { type: "text" } }],
+    ["content_block_delta", { index: 0, delta: { type: "text_delta", text } }],
+    ["content_block_stop", { index: 0 }],
+    ["message_delta", { delta: { stop_reason: "end_turn" } }],
+    ["message_stop", {}],
+  ]);
+/** A tool request with no usage report: the loop pauses (a bridge tool) with the call's tokens unknown. */
+const anthropicToolUseUnreported = (id: string, name: string) =>
+  sse([
+    ["message_start", { message: {} }],
+    ["content_block_start", { index: 0, content_block: { type: "tool_use", id, name, input: {} } }],
+    ["content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "{}" } }],
+    ["content_block_stop", { index: 0 }],
+    ["message_delta", { delta: { stop_reason: "tool_use" } }],
     ["message_stop", {}],
   ]);
 /** The provider refuses the request (a non-retried 4xx): nothing generated, nothing billed, no usage reported. */
@@ -399,7 +428,8 @@ async function main() {
     const res = await resumeRoute.POST(
       post("/api/chat/resume", { agent_key: "bravo", session_id: sessionId, resume_state: state, resume_signature: sig, tool_use_id: "tu_r", tool_result: { content: "file text", is_error: false } }),
     );
-    return { res, events: parseSse(await res.text()) };
+    const text = await res.text();
+    return { res, text, events: res.status === 200 ? parseSse(text) : [] };
   };
   /** The resume route's last write is the session row's updated_at. */
   const afterResume = async (sessionId: string, run: () => Promise<unknown>) => {
@@ -439,19 +469,75 @@ async function main() {
     );
   });
 
-  await check("a resumed turn with a session id that is not the caller's writes nothing into it", async () => {
+  // A resumed turn is filed under the session its signed state names. When that
+  // session cannot be confirmed as the caller's, the resume is refused before
+  // any model is asked: an answer streamed anyway would have nowhere to record
+  // its messages or cost (its usage row would carry no session at all).
+  const ledgerRows = () => count("SELECT COUNT(*) AS n FROM ai_usage_events");
+  const sessionlessRows = () => count("SELECT COUNT(*) AS n FROM ai_usage_events WHERE session_id IS NULL");
+  await check("a resumed turn whose signed session is not the caller's: HTTP 410 before any model call, nothing written, nothing metered", async () => {
     await login(USERS.openOwner);
     const foreign = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0";
     const before = await session(foreign);
-    const usageBefore = await count("SELECT COUNT(*) AS n FROM ai_usage_events WHERE session_id = ?", [foreign]);
+    const [usageBefore, sessionlessBefore] = [await ledgerRows(), await sessionlessRows()];
+    sent = [];
     provider = () => anthropicOk("resumed", 40, 4);
-    const { res, events } = await resume(foreign);
-    assert.equal(res.status, 200);
-    assert.ok(!events.some((e) => e.event === "session" && e.data.session_id === foreign), "the stream claimed the foreign session");
+    const { res, text } = await resume(foreign);
+    assert.equal(res.status, 410, text);
+    assert.deepEqual(JSON.parse(text), { ok: false, error: SESSION_GONE, code: "resume_session_gone" });
+    assert.equal(sent.length, 0, "a provider was asked");
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.deepEqual(await session(foreign), before);
     assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [foreign]), 0);
-    assert.equal(await count("SELECT COUNT(*) AS n FROM ai_usage_events WHERE session_id = ?", [foreign]), usageBefore);
+    assert.deepEqual([await ledgerRows(), await sessionlessRows()], [usageBefore, sessionlessBefore], "the refused resume metered a call");
+  });
+
+  await check("a resumed turn whose chat session was deleted during the pause: HTTP 410, no model call, no usage row without a session", async () => {
+    await login(USERS.openOwner);
+    const gone = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0";
+    await db.execute({
+      sql: `INSERT INTO chat_sessions (id, tenant_id, user_id, agent_key, provider, model, title) VALUES (?, ?, ?, 'bravo', 'anthropic', 'claude-sonnet-4-6', 'deleted during the pause')`,
+      args: [gone, OPEN, USERS.openOwner.id],
+    });
+    await db.execute({ sql: "DELETE FROM chat_sessions WHERE id = ?", args: [gone] });
+    const [usageBefore, sessionlessBefore] = [await ledgerRows(), await sessionlessRows()];
+    sent = [];
+    provider = () => anthropicOk("resumed", 40, 4);
+    const { res, text } = await resume(gone);
+    assert.equal(res.status, 410, text);
+    assert.deepEqual(JSON.parse(text), { ok: false, error: SESSION_GONE, code: "resume_session_gone" });
+    assert.equal(sent.length, 0, "a provider was asked");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [gone]), 0);
+    assert.deepEqual([await ledgerRows(), await sessionlessRows()], [usageBefore, sessionlessBefore], "the refused resume metered a call");
+  });
+
+  await check("a chat session that cannot be read at resume time: HTTP 503 with the sentence, no model call, nothing metered", async () => {
+    const resumeRows = () => count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ? AND content LIKE '[resume after tool:%'", [openSession]);
+    const resumeRowsBefore = await resumeRows();
+    // The table exists but the owner check cannot run against it (as the budget check below).
+    await db.executeMultiple(`
+      ALTER TABLE chat_sessions RENAME TO chat_sessions_saved;
+      CREATE TABLE chat_sessions (id TEXT PRIMARY KEY);
+    `);
+    try {
+      await login(USERS.openOwner);
+      const [usageBefore, sessionlessBefore] = [await ledgerRows(), await sessionlessRows()];
+      sent = [];
+      provider = () => anthropicOk("resumed", 40, 4);
+      const { res, text } = await resume(openSession);
+      assert.equal(res.status, 503, text);
+      assert.deepEqual(JSON.parse(text), { ok: false, error: SESSION_UNAVAILABLE, code: "chat_session_unavailable" });
+      assert.equal(sent.length, 0, "a provider was asked");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.deepEqual([await ledgerRows(), await sessionlessRows()], [usageBefore, sessionlessBefore], "the refused resume metered a call");
+    } finally {
+      await db.executeMultiple(`
+        DROP TABLE chat_sessions;
+        ALTER TABLE chat_sessions_saved RENAME TO chat_sessions;
+      `);
+    }
+    assert.equal(await resumeRows(), resumeRowsBefore, "the refused resume wrote a message");
   });
 
   console.log("running totals accumulate across both routes");
@@ -602,6 +688,69 @@ async function main() {
     assert.deepEqual([row.billing_mode, row.cost_micro_usd], ["local", null]);
     // ...but the session records the turn's tokens at $0.
     assertTotals(await totals(id), [7, 3, 0]);
+  });
+
+  console.log("a call with no usage report leaves the turn's tokens unknown");
+  const assistantRows = async (id: string, resumeOnly = false) =>
+    (
+      await db.execute({
+        sql: `SELECT input_tokens, output_tokens FROM chat_messages WHERE session_id = ? AND role = 'assistant'${resumeOnly ? " AND content LIKE '[resume after tool:%'" : ""} ORDER BY created_at`,
+        args: [id],
+      })
+    ).rows.map((r) => [r.input_tokens, r.output_tokens]);
+  await check("an Anthropic tool turn with an iteration the provider reports no usage for: no usage event, and the message's tokens are unknown, not the other iteration's 500 / 50", async () => {
+    await login(USERS.oasisOwner);
+    // Iteration 1 reports 500 in / 50 out; iteration 2 completes with no usage report.
+    let calls = 0;
+    provider = (s) => {
+      if (!s.url.includes("api.anthropic.com")) return new Response("unexpected", { status: 599 });
+      calls += 1;
+      return calls === 1 ? anthropicToolUse("tu_y", "not_a_real_tool", 500, 50) : anthropicUnreported("partial answer");
+    };
+    const { res, events } = await settledTurn("c-oasis", "Count it", { cloud_tools: "tools" });
+    assert.equal(res.status, 200);
+    assert.equal(calls, 2, JSON.stringify(events));
+    assert.ok(events.some((e) => e.event === "delta" && e.data.text === "partial answer"), JSON.stringify(events));
+    assert.ok(!events.some((e) => e.event === "error"), JSON.stringify(events));
+    assert.ok(!events.some((e) => e.event === "usage"), `a partial sum was sent as the turn's tokens: ${JSON.stringify(events)}`);
+    const id = String(events.find((e) => e.event === "session")?.data.session_id || "");
+    assert.deepEqual(await assistantRows(id), [[null, null]]);
+    const ledger = (await db.execute({ sql: "SELECT outcome, cost_micro_usd FROM ai_usage_events WHERE session_id = ? ORDER BY id", args: [id] })).rows;
+    assert.deepEqual(ledger.map((r) => [r.outcome, r.cost_micro_usd === null ? null : Number(r.cost_micro_usd)]), [["ok", 2250], ["ok", null]]);
+    assertTotals(await totals(id), [0, 0, 0]);
+  });
+
+  await check("a turn that paused on a call with no usage report: the resumed half says its totals are a floor too (no usage event, NULL row), and its own known call still reaches the session", async () => {
+    await login(USERS.oasisOwner);
+    provider = () => anthropicToolUseUnreported("tu_u", "send_email");
+    const first = await settledTurn("c-oasis", "Email the supplier", { cloud_tools: "tools" });
+    const id = String(first.events.find((e) => e.event === "session")?.data.session_id || "");
+    const pending = first.events.find((e) => e.event === "tool_use_pending");
+    assert.ok(id && pending, JSON.stringify(first.events));
+    const state = pending.data.resume_state as Record<string, unknown>;
+    assert.deepEqual([state.totalIn, state.totalOut, state.unreportedCalls], [0, 0, 1], "the paused state does not say its call was unreported");
+    assertTotals(await totals(id), [0, 0, 0]);
+    provider = () => anthropicOk("sent it", 40, 4);
+    await afterResume(id, async () => {
+      const res = await resumeRoute.POST(
+        post("/api/chat/resume", {
+          agent_key: "bravo",
+          session_id: id,
+          resume_state: state,
+          resume_signature: String(pending.data.resume_signature),
+          tool_use_id: "tu_u",
+          tool_result: { content: "sent", is_error: false },
+        }),
+      );
+      const text = await res.text();
+      assert.equal(res.status, 200, text);
+      const events = parseSse(text);
+      assert.ok(events.some((e) => e.event === "delta" && e.data.text === "sent it"), text);
+      assert.ok(!events.some((e) => e.event === "usage"), `the resumed half claimed a floor as the turn's tokens: ${text}`);
+    });
+    assert.deepEqual(await assistantRows(id, true), [[null, null]]);
+    // The resumed call reported 40 / 4 at a known cost: 40 x $3 + 4 x $15 = 180 micro-USD.
+    assertTotals(await totals(id), [40, 4, 0.00018]);
   });
 
   await check("two increments that finish together both land (one SQL statement, not a read then a write)", async () => {
