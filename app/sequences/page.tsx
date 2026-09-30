@@ -29,8 +29,9 @@ const EMPTY_SUMMARY = {
   truncated: false,
 };
 import { loadApprovedPool } from "@/lib/drips/template-pool-store";
-import { AlertCircle, Cpu, Cloud, Download } from "lucide-react";
-import Link from "next/link";
+import { AlertCircle } from "lucide-react";
+import { BridgeStatusBanner } from "@/components/settings/BridgeInstallLink";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -77,6 +78,8 @@ export default async function SequencesPage() {
   if (!user) redirect("/login");
 
   const profile = await safe("sequences.profile", getActiveProfile(), null);
+  // Fails closed: a lookup error is logged inside and answers "not an operator".
+  const isOperator = await isPlatformOperator();
   const tenantId = profile?.tenant_id || null;
   // Activity loads alongside the sequences. `safe` catches a REJECTION per read,
   // so one failing query degrades to its fallback instead of 500-ing the page.
@@ -168,39 +171,14 @@ export default async function SequencesPage() {
           sequences never fire. Mirrors the banner on /automations so
           operators get a consistent "is my machine connected" signal
           across both surfaces. Self-review consistency 2026-05-24. */}
-      <div className="rounded-xl border border-bg-border bg-bg-deep/40 p-4 flex items-start gap-3">
-        {bridgeOnline ? (
-          <Cpu className="w-5 h-5 text-status-engaged shrink-0 mt-0.5" />
-        ) : (
-          <Cloud className="w-5 h-5 text-fg-dim shrink-0 mt-0.5" />
-        )}
-        <div className="flex-1 text-xs leading-relaxed">
-          {bridgeOnline ? (
-            <>
-              <span className="text-status-engaged font-bold">Your computer is connected.</span>{" "}
-              Sequences fire automatically when a lead or application hits the trigger
-              stage. Edits take effect within a minute. Toggle one off to pause without
-              losing the spec.
-            </>
-          ) : (
-            <>
-              <span className="text-fg-muted font-bold">Computer not connected yet.</span>{" "}
-              Sequences you create here are saved, but the sequence-runner daemon needs a
-              paired machine to actually send the SMS / email steps. Pair a device and
-              they&apos;ll start firing within a minute.
-            </>
-          )}
-        </div>
-        {!bridgeOnline && (
-          <Link
-            href="/settings/devices/install"
-            className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"
-          >
-            <Download className="w-3 h-3" />
-            Install bridge
-          </Link>
-        )}
-      </div>
+      <BridgeStatusBanner
+        bridgeOnline={bridgeOnline}
+        canInstallBridge={isOperator}
+        online="Sequences fire automatically when a lead or application hits the trigger stage. Edits take effect within a minute. Toggle one off to pause without losing the spec."
+        offline="Sequences you create here are saved, but the sequence-runner daemon needs a paired machine to actually send the SMS / email steps."
+        operatorHint="Pair a device and they'll start firing within a minute."
+        clientHint="While the bridge is in private beta, OASIS pairs it with each workspace directly."
+      />
 
       {!result.ok && result.reason === "no_tenant" && (
         <div className="rounded-xl border border-status-warm/40 bg-status-warm/5 p-4 text-sm text-status-warm flex items-start gap-2">

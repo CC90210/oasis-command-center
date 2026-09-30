@@ -25,7 +25,6 @@ const SITE_LINKS = [
 ];
 
 const PLATFORM_LINKS = [
-  { href: "/start", label: "Start here" },
   { href: "/login", label: "Sign in" },
   { href: "/download", label: "Desktop app" },
 ];

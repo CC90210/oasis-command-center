@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { ArrowLeft, Check } from "lucide-react";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -23,7 +24,9 @@ export const dynamic = "force-dynamic";
 const pct = (rate: number) => `${Math.round(rate * 1000) / 10}%`;
 const usd = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 
-export default function DealArchitecturePage() {
+export default async function DealArchitecturePage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const packages = Object.values(WEBSITE_PACKAGES);
   return <div className="space-y-6 animate-fade-in">
     <Link href="/playbook" className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-accent"><ArrowLeft size={14}/> Playbook</Link>

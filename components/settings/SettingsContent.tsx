@@ -53,6 +53,7 @@ import { TelegramConnectCard } from "@/components/settings/TelegramConnectCard";
 import { SafeBoundary } from "@/components/SafeBoundary";
 import { AgentMarketplaceCard } from "@/components/settings/AgentMarketplaceCard";
 import { DevicesEditor } from "@/components/settings/DevicesEditor";
+import { HARNESS_REPO } from "@/lib/install-scripts";
 import { OperationsTrackerPanel } from "@/components/settings/OperationsTrackerPanel";
 import { ProviderAccountsCard } from "@/components/settings/ProviderAccountsCard";
 import { LocalCliProvidersCard } from "@/components/settings/LocalCliProvidersCard";
@@ -383,6 +384,7 @@ export async function SettingsContent({
                   connectedServices={connectedAiSet}
                   bridgeOnline={bridgeOnline}
                   canManageTeam={canManageTenant}
+                  canInstallBridge={isOperator}
                 />
               </SafeBoundary>
             </SettingsSection>
@@ -411,6 +413,7 @@ export async function SettingsContent({
                   <AgentConfigEditor
                     agentKeys={enabledChatAgentKeys}
                     bridgeOnline={bridgeOnline}
+                    canInstallBridge={isOperator}
                     globallyConnectedServices={Array.from(connectedAiSet)}
                     agentPalettes={Object.fromEntries(
                       (manifest?.agents || []).map((a) => [
@@ -502,7 +505,7 @@ export async function SettingsContent({
               }
             >
               <SafeBoundary label="Devices">
-                <DevicesEditor />
+                <DevicesEditor installRepo={HARNESS_REPO} />
               </SafeBoundary>
             </SettingsSection>
           )}

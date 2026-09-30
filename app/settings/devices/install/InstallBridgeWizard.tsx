@@ -8,6 +8,11 @@
  *
  * The state machine + polling logic lives in hooks/useBridgePairing.ts so
  * this file is a thin render-only wrapper. The Modal consumes the same hook.
+ *
+ * Operator only: page.tsx mounts it for a verified platform operator and
+ * passes `installRepo` (the private harness repo). Everyone else gets
+ * PairBridgeOnly, which shares the pairing hook but pairs an already-installed
+ * bridge only and never imports lib/bridge-install-command.ts.
  */
 
 import { useState } from "react";
@@ -24,15 +29,18 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
+import { operatorBridgeCommand } from "@/lib/bridge-install-command";
 import {
   bridgeInstallCommands,
   bridgeRestartCommand,
   bridgeSupervisorLabel,
 } from "@/lib/bridge-install-guidance";
 
-export function InstallBridgeWizard() {
-  const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing();
+export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
+  const { os, setOs, mode, setMode, code, secondsLeft, phase, error, retryMint } = useBridgePairing();
+  // The operator's command: pair-only, or the full install from the private
+  // repo passed in by the operator-gated server component.
+  const oneLiner = code ? operatorBridgeCommand(os, code, mode, installRepo) : "";
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -111,7 +119,7 @@ export function InstallBridgeWizard() {
             </div>
             <p className="text-[11px] text-fg-dim leading-relaxed">
               {mode === "install"
-                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
+                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI signed in with git credentials for an account that can read it: `gh auth login` choosing HTTPS, or `gh auth setup-git` if gh is already signed in. The installer clones over HTTPS, so a gh session without git credentials still fails."
                 : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
             </p>
           </div>
@@ -180,7 +188,7 @@ export function InstallBridgeWizard() {
           </div>
 
           <div className="text-xs text-fg-dim">
-            Prefer a download over a curl pipe? Grab the desktop installer at{" "}
+            Prefer the desktop app? The operator builds are on{" "}
             <Link
               href="/download"
               className="text-accent hover:text-accent-bright inline-flex items-center gap-1"

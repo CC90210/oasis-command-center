@@ -1,8 +1,8 @@
 /**
  * Demo-mode link anchoring.
  *
- * In a public demo (e.g. /demo/sun) the shell renders client branding but the
- * underlying routes (/agent, /leads, /renewals, ...) are auth-gated and
+ * In a demo shell (the retired /demo/sun was the only one) the shell renders
+ * client branding but the underlying routes (/agent, /leads, /renewals, ...) are auth-gated and
  * tenant-scoped, so navigating to them either bounces unauth visitors to
  * /login or — worse for authed previewers — silently re-renders the OASIS
  * shell with the demo cookie still set. Until Phase 1 ships real /t/<slug>/...
@@ -16,5 +16,8 @@ export function demoHref(
   opts: { demoMode?: boolean; landingPath?: string } = {}
 ): string {
   if (!opts.demoMode) return realHref;
-  return opts.landingPath || "/demo/sun";
+  // "/" rather than a demo page: the only demo landing, /demo/sun, is a 404
+  // since 2026-09-29 (F0 containment), and anchoring every link to a 404 would
+  // leave a stale demo cookie with no way out but the Exit link.
+  return opts.landingPath || "/";
 }

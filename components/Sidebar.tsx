@@ -9,7 +9,7 @@
  *                        on the server by lib/os/nav.ts. Every workspace's own
  *                        shell takes this path.
  *   `sections` absent  → the manifest nav (`items`), flat and grouped. Only the
- *                        /t/<slug> preview and /demo/sun shells take this path:
+ *                        /t/<slug> preview and demo shells take this path:
  *                        they render ANOTHER workspace's manifest, and demo mode
  *                        rewrites every link to the demo landing (demoHref).
  *
@@ -56,7 +56,7 @@ export function Sidebar({
   inboxUnread = 0,
   demoMode = false,
   demoLabel = "Client demo",
-  demoLandingPath = "/demo/sun",
+  demoLandingPath,
   isMobileOpen = false,
   onMobileClose,
   onDesktopCollapse,
@@ -94,7 +94,7 @@ export function Sidebar({
   inboxUnread?: number;
   demoMode?: boolean;
   demoLabel?: string;
-  /** Where in-demo clicks land so navigation doesn't leak into the OASIS shell. */
+  /** Where in-demo clicks land so navigation doesn't leak into the OASIS shell. Unset: demoHref's "/". */
   demoLandingPath?: string;
   /** Mobile drawer open state — controlled by SidebarShell. Ignored at md+. */
   isMobileOpen?: boolean;
@@ -496,7 +496,7 @@ function NavLink({
   isActive,
   badgeCount = 0,
   demoMode = false,
-  demoLandingPath = "/demo/sun",
+  demoLandingPath,
   onIntent,
 }: {
   item: NavItem;

@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -265,7 +266,9 @@ const CATEGORY_TONE: Record<Drill["category"], string> = {
   intel: "text-amber-400 border-amber-400/30 bg-amber-400/10",
 };
 
-export default function DrillsPage() {
+export default async function DrillsPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const core = DRILLS.filter((d) => d.intensity === "core");
   const advanced = DRILLS.filter((d) => d.intensity === "advanced");
 

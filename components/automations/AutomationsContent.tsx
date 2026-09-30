@@ -89,6 +89,10 @@ export async function AutomationsContent({
   );
   const isClientAutomationSurface =
     !externalTenantSurfacesBlocked() && tenantSlug === "sun";
+  // The bridge installer is operator-only (/settings/devices/install gives a
+  // client nothing to install), so only OASIS's own workspace is offered it. A
+  // client workspace is told OASIS pairs its machine, never sent to a dead end.
+  const canInstallBridge = isOasisSurfaceTenant(tenantSlug);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -116,12 +120,18 @@ export async function AutomationsContent({
             <>
               <span className="text-fg-muted font-bold">Computer not connected yet.</span>{" "}
               Local agent jobs are paused until a machine is paired. Cloud sales workers, including
-              founder-meeting invitations and reminders, continue independently. Click{" "}
-              <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
+              founder-meeting invitations and reminders, continue independently.{" "}
+              {canInstallBridge ? (
+                <>
+                  Click <span className="text-fg font-medium">Install bridge</span> to restore local jobs.
+                </>
+              ) : (
+                "OASIS pairs a machine with your workspace directly."
+              )}
             </>
           )}
         </div>
-        {!bridgeOnline && (
+        {!bridgeOnline && canInstallBridge && (
           <Link
             href="/settings/devices/install"
             className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"
