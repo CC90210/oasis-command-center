@@ -64,6 +64,16 @@ import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-acce
 import { probeProvider, type ProbeResult } from "@/lib/agents/provider-probe";
 import { PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
 import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
+import { billingForKey, isAiBudgetCode, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
+
+/**
+ * The probe spends, so it is metered like any model call (surface "probe"):
+ * for the SESSION's workspace, on the workspace's own key (a pasted key is
+ * about to become it; the platform key is never tested here).
+ */
+function probeMeter(provider: Provider, tenantId: string, userId: string): ModelCallMeter {
+  return modelCallMeter({ tenantId, surface: "probe", ...billingForKey(provider, "tenant"), userId });
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -125,13 +135,17 @@ function respond(provider: Provider, key: string, result: ProbeResult): NextResp
     result.code === "provider_401" || (provider === "ollama" && result.code === "network")
       ? inferShapeHint(provider, key)
       : "";
-  return NextResponse.json({
-    ok: false,
-    status: "error",
-    provider,
-    message: hint ? `${result.message} ${hint}` : result.message,
-    code: result.code,
-  });
+  return NextResponse.json(
+    {
+      ok: false,
+      status: "error",
+      provider,
+      message: hint ? `${result.message} ${hint}` : result.message,
+      code: result.code,
+    },
+    // The month's AI budget refused the probe: nothing was sent to the provider.
+    isAiBudgetCode(result.code) ? { status: 402 } : undefined,
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -175,7 +189,11 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-    return respond(provider, proposedKey, await probeProvider(provider, proposedKey, { model }));
+    return respond(
+      provider,
+      proposedKey,
+      await probeProvider(provider, proposedKey, { model, meter: probeMeter(provider, ctx.tenantId, ctx.userId) }),
+    );
   }
 
   // Mode 1: test the saved key the CHANNELS answer on, and only that key: the
@@ -259,5 +277,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return respond(provider, plain, await probeProvider(provider, plain, { model: row?.model }));
+  return respond(
+    provider,
+    plain,
+    await probeProvider(provider, plain, { model: row?.model, meter: probeMeter(provider, ctx.tenantId, ctx.userId) }),
+  );
 }
