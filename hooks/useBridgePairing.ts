@@ -17,6 +17,13 @@
  *   - app/settings/devices/install/InstallBridgeWizard.tsx — dedicated
  *     /settings/devices/install page
  *
+ * Operator only since 2026-09-29 (F0 containment). The full install pulls the
+ * harness repo, which went private that day, so the repo name is a required
+ * argument rather than a constant here: both consumers get it as a prop from a
+ * server component that verified the platform operator, and everyone else is
+ * shown a private-beta notice instead of this flow. The name never reaches a
+ * client bundle or a client's page.
+ *
  * Both used to duplicate this whole state machine character-for-character.
  * Any change (new schema, new install flow, different polling cadence)
  * needed to land in both files. Extracting it kills that drift surface
@@ -60,12 +67,21 @@ function detectOS(): OS {
   return "windows";
 }
 
-function oneLinerFor(os: OS, code: string): string {
-  // PowerShell env-var prefix on the iex'd command — verified working
-  // 2026-05-10 self-review. Bash uses the prefix on `bash` (not `curl`)
-  // so the subshell that runs the script inherits the variable.
-  const winShell = `$env:BRAVO_PAIR_CODE="${code}"; irm https://raw.githubusercontent.com/CC90210/CEO-Agent/main/install.ps1 | iex`;
-  const nixShell = `curl -fsSL https://raw.githubusercontent.com/CC90210/CEO-Agent/main/install.sh | BRAVO_PAIR_CODE=${code} bash`;
+/**
+ * Full-install command for a brand-new machine. `repo` is private, so an
+ * anonymous raw.githubusercontent.com fetch is a 404 for everyone; both forms
+ * read the installer through the GitHub CLI's authenticated API instead, the
+ * same fallback /install.ps1 and /install.sh use. PowerShell decodes the base64
+ * `content` as UTF-8 (a native pipe would decode it with the console code
+ * page); bash takes the raw media type straight into `bash`.
+ *
+ * The env-var placement is the one verified 2026-05-10: PowerShell sets it
+ * before iex runs, and bash puts it on `bash` (not `gh`) so the shell that runs
+ * the script inherits it.
+ */
+export function installOneLiner(os: OS, code: string, repo: string): string {
+  const winShell = `$env:BRAVO_PAIR_CODE="${code}"; iex ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((gh api repos/${repo}/contents/install.ps1 --jq .content) -join '')))`;
+  const nixShell = `gh api -H "Accept: application/vnd.github.raw" repos/${repo}/contents/install.sh | BRAVO_PAIR_CODE=${code} bash`;
   return os === "windows" ? winShell : nixShell;
 }
 
@@ -104,7 +120,8 @@ function oneLinerForPair(os: OS, code: string): string {
 
 type DeviceLite = { id: string; created_at: string; revoked_at: string | null };
 
-export function useBridgePairing(): BridgePairing {
+/** `installRepo`: the private harness repo, from a server-verified operator page. */
+export function useBridgePairing(installRepo: string): BridgePairing {
   const [os, setOs] = useState<OS>("windows");
   // Default "install" preserves the existing fresh-machine behavior; the
   // operator flips to "pair" for an already-provisioned machine.
@@ -212,8 +229,8 @@ export function useBridgePairing(): BridgePairing {
   }, [phase, mintedAt]);
 
   const oneLiner = useMemo(
-    () => (code ? (mode === "pair" ? oneLinerForPair(os, code) : oneLinerFor(os, code)) : ""),
-    [os, code, mode],
+    () => (code ? (mode === "pair" ? oneLinerForPair(os, code) : installOneLiner(os, code, installRepo)) : ""),
+    [os, code, mode, installRepo],
   );
 
   return {

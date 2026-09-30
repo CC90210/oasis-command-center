@@ -35,8 +35,9 @@ export const dynamic = "force-dynamic";
  * private that day, so each link was a GitHub 404 for the public. A verified
  * platform operator still gets the links, with a note that they need GitHub
  * access. Everyone else gets PrivateBeta: what the app is, that it is in
- * private beta, and the support form to ask for access. The branch is taken
- * before anything renders, so no release URL reaches a non-operator's HTML.
+ * private beta, and one way to ask for access (see PrivateBeta for which). The
+ * branch is taken before anything renders, so no release URL reaches a
+ * non-operator's HTML.
  */
 
 const VERSION = "0.1.0-alpha.6";
@@ -236,10 +237,17 @@ export default async function DownloadPage() {
  * What everyone who is not a verified platform operator sees: signed out, a
  * client, or a session whose operator check failed. No release link, no
  * checksum, no GitHub URL, since none of them work without access to the
- * private repo. The one action is the support form, the same "ask OASIS"
- * route Settings › Billing uses for add-ons.
+ * private repo.
+ *
+ * The one action depends on who is asking. A signed-in viewer gets the support
+ * form, the same "ask OASIS" route Settings › Billing uses for add-ons. A
+ * signed-out visitor is a prospect, and the support form never creates a lead
+ * (lib/delivery/support-form.ts: a submission is a support_tickets row and
+ * nothing else, with a first-response clock), so they get /contact, whose form
+ * does.
  */
 function PrivateBeta({ signedOut }: { signedOut: boolean }) {
+  const askHref = signedOut ? "/contact" : SUPPORT_FORM_PATH;
   return (
     <main className="relative min-h-screen overflow-hidden bg-bg-deep text-fg">
       <Backdrop />
@@ -266,7 +274,7 @@ function PrivateBeta({ signedOut }: { signedOut: boolean }) {
           directly, so there is no public download yet.
         </p>
         <a
-          href={SUPPORT_FORM_PATH}
+          href={askHref}
           className="mt-10 inline-flex items-center justify-center gap-2 rounded-xl border border-accent/40 bg-accent/15 px-7 py-3.5 text-sm font-bold text-fg transition-colors hover:bg-accent/25"
         >
           Ask for access

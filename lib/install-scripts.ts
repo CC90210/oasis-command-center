@@ -20,6 +20,15 @@
 import { NextResponse } from "next/server";
 import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 
+/**
+ * The private harness repo both scripts below clone. Server-side only: the
+ * bridge pairing wizard gets it as a prop from a server component that has
+ * verified the platform operator, so the name never ships in a client bundle
+ * and never reaches a client's page. tests/f0-containment.test.ts pins that the
+ * two scripts name this same repo.
+ */
+export const HARNESS_REPO = "CC90210/CEO-Agent";
+
 export const INSTALL_PS1 = String.raw`# OASIS AI install - stable URL, repo-visibility-proof.
 #
 #   irm https://oasisai.work/install.ps1 | iex

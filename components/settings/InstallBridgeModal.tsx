@@ -17,10 +17,12 @@
  *   5. Operator clicks Done; the parent component reloads its device
  *      list to show the new pairing
  *
- * Why a shared component: identical flow ships from Settings → Devices
- * AND from /onboarding step 3. Wrapping the logic in one place means
- * any future improvement (Linux flavour detection, installer download
- * link, etc.) lands in both surfaces with one edit.
+ * Operator only: the one mount is DevicesEditor, inside the Settings ›
+ * Devices section that SettingsContent renders for a verified platform
+ * operator alone, and `installRepo` (the private harness repo the full
+ * install pulls) is required so it cannot mount without that server-side
+ * verdict. The old /onboarding step-3 mount was dead code and was deleted
+ * with it on 2026-09-29 (F0 containment).
  */
 
 import { useState } from "react";
@@ -29,11 +31,11 @@ import { Loader2, Check, Copy, X, Clock, AlertCircle, Apple, Monitor, Terminal }
 import { useBridgePairing, type OS } from "@/hooks/useBridgePairing";
 import { bridgeRestartCommand } from "@/lib/bridge-install-guidance";
 
-export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
+export function InstallBridgeModal({ onClose, installRepo }: { onClose: () => void; installRepo: string }) {
   // All pairing state + side effects (mint, countdown, polling, retry)
   // live in the shared hook. This file is now render-only.
   const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing();
+    useBridgePairing(installRepo);
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -133,7 +135,7 @@ export function InstallBridgeModal({ onClose }: { onClose: () => void }) {
                 </div>
                 <p className="text-[11px] text-fg-dim leading-relaxed">
                   {mode === "install"
-                    ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
+                    ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI (gh) signed in with access to it."
                     : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
                 </p>
               </div>

@@ -8,6 +8,15 @@
  * Server-component shell — auth + headline copy. The actual pairing UX is
  * a client component (InstallBridgeWizard) so the polling, OS detection,
  * and clipboard interactions can run client-side.
+ *
+ * Operator only since 2026-09-29 (F0 containment). The full install pulls the
+ * harness repo, which went private that day, and Settings › Devices is already
+ * operator-only for the same reason: the bridge gives an agent a shell on the
+ * paired machine. A verified platform operator (resolvePlatformOperator) gets
+ * the wizard, with the repo name passed in from here. Any other signed-in
+ * viewer, a client included, gets a private-beta notice with no command, no
+ * pair code and no repository name, and the support form to ask for access,
+ * the same answer /download gives. Pinned by tests/f0-containment.test.ts.
  */
 
 import Link from "next/link";
@@ -15,6 +24,9 @@ import { ArrowLeft, Cloud, Cpu } from "lucide-react";
 import { PageHeader } from "@/components/Card";
 import { getSessionUser } from "@/lib/supabase-server";
 import { redirect } from "next/navigation";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
+import { SUPPORT_FORM_PATH } from "@/lib/delivery/support-form";
+import { HARNESS_REPO } from "@/lib/install-scripts";
 import { InstallBridgeWizard } from "./InstallBridgeWizard";
 
 export const dynamic = "force-dynamic";
@@ -22,21 +34,37 @@ export const dynamic = "force-dynamic";
 export default async function BridgeInstallPage() {
   const user = await getSessionUser();
   if (!user) redirect("/login?next=/settings/devices/install");
+  // Fails closed: a membership lookup error is logged inside and answers "not
+  // an operator", which renders the private-beta notice.
+  const op = await resolvePlatformOperator();
+
+  const header = (
+    <PageHeader
+      title="Install the local bridge"
+      subtitle="Give your agents full Claude Code parity — file system, bash, every MCP — by pairing this machine to your tenant."
+      action={
+        <Link
+          href="/settings#devices"
+          className="text-xs text-fg-muted hover:text-fg inline-flex items-center gap-1"
+        >
+          <ArrowLeft className="w-3 h-3" /> Back to Settings
+        </Link>
+      }
+    />
+  );
+
+  if (!op.operator) {
+    return (
+      <div className="space-y-6 animate-fade-in">
+        {header}
+        <BridgePrivateBeta />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <PageHeader
-        title="Install the local bridge"
-        subtitle="Give your agents full Claude Code parity — file system, bash, every MCP — by pairing this machine to your tenant."
-        action={
-          <Link
-            href="/settings#devices"
-            className="text-xs text-fg-muted hover:text-fg inline-flex items-center gap-1"
-          >
-            <ArrowLeft className="w-3 h-3" /> Back to Settings
-          </Link>
-        }
-      />
+      {header}
 
       {/* Side-by-side capability comparison so the operator sees exactly
           what installing the bridge unlocks vs. cloud-only mode. */}
@@ -79,7 +107,25 @@ export default async function BridgeInstallPage() {
         </div>
       </div>
 
-      <InstallBridgeWizard />
+      <InstallBridgeWizard installRepo={HARNESS_REPO} />
+    </div>
+  );
+}
+
+/** What a signed-in viewer who is not the verified platform operator sees. */
+function BridgePrivateBeta() {
+  return (
+    <div className="rounded-xl border border-bg-border bg-bg-elev/40 p-5 space-y-3">
+      <h2 className="text-base font-bold text-fg">The local bridge is in private beta</h2>
+      <p className="text-sm text-fg-muted leading-relaxed max-w-xl">
+        The bridge lets your agents work with the files and tools on a computer
+        you pair. While it is in beta, OASIS sets it up with each workspace
+        directly, so there is no install command here yet.
+      </p>
+      {/* A plain <a>: the support form renders outside the dashboard shell. */}
+      <a href={SUPPORT_FORM_PATH} className="btn-primary inline-flex items-center gap-2">
+        Ask for access
+      </a>
     </div>
   );
 }

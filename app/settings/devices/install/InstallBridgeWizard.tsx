@@ -8,6 +8,10 @@
  *
  * The state machine + polling logic lives in hooks/useBridgePairing.ts so
  * this file is a thin render-only wrapper. The Modal consumes the same hook.
+ *
+ * Operator only: page.tsx mounts it for a verified platform operator and
+ * passes `installRepo` (the private harness repo); everyone else gets a
+ * private-beta notice and never loads the pairing flow.
  */
 
 import { useState } from "react";
@@ -30,9 +34,9 @@ import {
   bridgeSupervisorLabel,
 } from "@/lib/bridge-install-guidance";
 
-export function InstallBridgeWizard() {
+export function InstallBridgeWizard({ installRepo }: { installRepo: string }) {
   const { os, setOs, mode, setMode, code, oneLiner, secondsLeft, phase, error, retryMint } =
-    useBridgePairing();
+    useBridgePairing(installRepo);
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
@@ -111,7 +115,7 @@ export function InstallBridgeWizard() {
             </div>
             <p className="text-[11px] text-fg-dim leading-relaxed">
               {mode === "install"
-                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine."
+                ? "Clones the agent, installs dependencies, then pairs. Use on a brand-new machine. The agent's repository is private, so the machine needs the GitHub CLI (gh) signed in with access to it."
                 : "Just pairs this machine's bridge — no clone, no install. Use when the agent is already installed (e.g. your VPS). After it runs, start your bridge so it picks up the token."}
             </p>
           </div>
@@ -180,7 +184,7 @@ export function InstallBridgeWizard() {
           </div>
 
           <div className="text-xs text-fg-dim">
-            Prefer a download over a curl pipe? Grab the desktop installer at{" "}
+            Prefer the desktop app? The operator builds are on{" "}
             <Link
               href="/download"
               className="text-accent hover:text-accent-bright inline-flex items-center gap-1"

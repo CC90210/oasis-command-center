@@ -320,16 +320,16 @@ export async function middleware(req: NextRequest) {
   // chrome was wrong, but it routed `/api/sms/send` etc. as SunBiz which
   // is a real integrity hazard).
   //
-  // Rule: an authenticated user on a non-/demo path gets the cookie
-  // cleared on the response. /demo/sun itself is exempted so the
-  // anonymous preview keeps working. The layout has a defense-in-depth
+  // Rule: an authenticated user gets the cookie cleared on the response,
+  // on every path. /demo/sun was exempted while it was the anonymous
+  // preview; it is a 404 since 2026-09-29 (F0 containment), so the
+  // exemption went with it. The layout has a defense-in-depth
   // copy of this rule for the page render, but the middleware clear is
   // the durable one — Server Component cookie writes silently no-op in
   // some Next 15 contexts, so the layout-side clear can't be relied on.
   if (
     !error &&
     data.user &&
-    !pathname.startsWith("/demo/sun") &&
     req.cookies.get("oasis_demo_client_profile")?.value
   ) {
     res.cookies.set("oasis_demo_client_profile", "", {

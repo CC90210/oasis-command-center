@@ -8,12 +8,20 @@
  *      per-secret presence map ("which integrations are down" is a probe list).
  *   2. /download shows everyone else a private-beta page with no release link
  *      (every link was a GitHub 404), and the operator the links plus a note.
- *      /api/download/desktop sends everyone else back to /download.
+ *      Its "Ask for access" goes to /contact (a lead) when signed out and to
+ *      the support form when signed in. /api/download/desktop sends everyone
+ *      else back to /download.
  *   3. /install.ps1 and /install.sh are operator-only routes (404 for anyone
- *      else) serving the same text the public/ files did, and nothing under
- *      public/ serves them any more.
- *   4. /start, /configure and /demo/sun are 404s, off middleware's public list,
- *      and nothing public links to them.
+ *      else) serving the same bytes the public/ files did (sha256-pinned), and
+ *      nothing under public/ serves them any more. The bridge pairing wizard
+ *      (/settings/devices/install) shows its install command to the operator
+ *      only, the harness repo name reaches no client page and no client
+ *      bundle, and the client-deploy runbook says the client install is paused.
+ *   4. /start, /configure and /demo/sun: middleware sends a signed-out visitor
+ *      to /login (they are off the public list, like any unknown path), and a
+ *      signed-in viewer gets the 404. No string literal in app, components, lib,
+ *      hooks or middleware names them any more, so nothing links or anchors a
+ *      demo shell to them.
  *
  * Everything runs for real against a local libSQL file: the real signed session
  * cookie, the real Turso adapter, the real operator gate, the real route
@@ -24,12 +32,14 @@
  * Run: node --conditions=react-server --import tsx tests/f0-containment.test.ts
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import * as ReactNS from "react";
 import { isValidElement } from "react";
 import { createClient } from "@libsql/client";
+import ts from "typescript";
 
 const ROOT = join(__dirname, "..");
 const dbFile = join(mkdtempSync(join(tmpdir(), "f0-containment-")), "test.db");
@@ -145,6 +155,13 @@ async function is404(run: () => unknown): Promise<boolean> {
   }
 }
 
+/**
+ * Client components that use hooks. There is no React dispatcher under
+ * react-server, so the walkers below never call one: they record its string
+ * props (textOf) or the element itself (elementsOf) instead.
+ */
+const OPAQUE = new Set<unknown>();
+
 /** Every string reachable in an element tree, href and other props included. */
 function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
   if (depth > 60 || node === null || node === undefined || typeof node === "boolean") return out;
@@ -158,7 +175,7 @@ function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
   }
   if (isValidElement(node)) {
     const props = (node.props ?? {}) as Record<string, unknown>;
-    if (typeof node.type === "function") {
+    if (typeof node.type === "function" && !OPAQUE.has(node.type)) {
       const rendered = (node.type as (p: unknown) => unknown)(props);
       textOf(rendered, out, depth + 1);
       return out;
@@ -169,6 +186,48 @@ function textOf(node: unknown, out: string[] = [], depth = 0): string[] {
     }
     return out;
   }
+  return out;
+}
+
+/** Every element of `type` in a tree, rendering the other function components on the way. */
+function elementsOf(node: unknown, type: unknown, out: ReactNS.ReactElement[] = [], depth = 0): ReactNS.ReactElement[] {
+  if (depth > 60 || node === null || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) elementsOf(n, type, out, depth + 1);
+    return out;
+  }
+  if (!isValidElement(node)) return out;
+  if (node.type === type) {
+    out.push(node);
+    return out;
+  }
+  const props = (node.props ?? {}) as Record<string, unknown>;
+  if (typeof node.type === "function" && !OPAQUE.has(node.type)) {
+    return elementsOf((node.type as (p: unknown) => unknown)(props), type, out, depth + 1);
+  }
+  return elementsOf(props.children, type, out, depth + 1);
+}
+
+/**
+ * Every string literal in a source file (template-literal chunks included),
+ * read with the TypeScript scanner so comments are never mistaken for code.
+ */
+function stringLiterals(src: string, file: string): string[] {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, false, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  const out: string[] = [];
+  const visit = (n: ts.Node) => {
+    if (
+      ts.isStringLiteral(n) ||
+      ts.isNoSubstitutionTemplateLiteral(n) ||
+      ts.isTemplateHead(n) ||
+      ts.isTemplateMiddle(n) ||
+      ts.isTemplateTail(n)
+    ) {
+      out.push(n.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
   return out;
 }
 
@@ -214,15 +273,21 @@ async function main() {
   );
 
   const gate = await import("../lib/role-surfaces-session");
-  const { isPublic } = await import("../middleware");
+  const { isPublic, middleware } = await import("../middleware");
   const { NextRequest } = await import("next/server");
   const health = await import("../app/api/health/route");
   const downloadPage = (await import("../app/download/page")).default;
   const downloadApi = await import("../app/api/download/desktop/route");
   const installPs1 = await import("../app/install.ps1/route");
   const installSh = await import("../app/install.sh/route");
-  const { INSTALL_PS1, INSTALL_SH } = await import("../lib/install-scripts");
+  const { INSTALL_PS1, INSTALL_SH, HARNESS_REPO } = await import("../lib/install-scripts");
   const { SUPPORT_FORM_PATH } = await import("../lib/delivery/support-form");
+  const bridgeInstallPage = (await import("../app/settings/devices/install/page")).default;
+  const { InstallBridgeWizard } = await import("../app/settings/devices/install/InstallBridgeWizard");
+  const { installOneLiner } = await import("../hooks/useBridgePairing");
+  const clientDeployPage = (await import("../app/playbook/client-deploy/page")).default;
+  const { demoHref } = await import("../lib/demo-href");
+  OPAQUE.add(InstallBridgeWizard);
 
   console.log("f0-containment:");
 
@@ -308,7 +373,16 @@ async function main() {
       await login(viewer);
       const page = await renderDownload();
       assert.match(page, /In private beta\./);
-      assert.ok(page.includes(SUPPORT_FORM_PATH), "the ask-for-access route is the support form");
+      // A prospect asking for the app belongs in the lead pipeline (/contact's
+      // form creates a lead); the support form never creates one and starts a
+      // client first-response clock, so it is for signed-in viewers only.
+      if (viewer === "anonymous") {
+        assert.ok(page.includes("/contact"), "a signed-out visitor asks through /contact");
+        assert.ok(!page.includes(SUPPORT_FORM_PATH), "a signed-out visitor is not sent to the client support desk");
+      } else {
+        assert.ok(page.includes(SUPPORT_FORM_PATH), "a signed-in viewer asks through the support form");
+        assert.ok(!page.includes("/contact"), "a signed-in viewer is not sent to the prospect form");
+      }
       assert.ok(!/github\.com/i.test(page), "no GitHub URL for a non-operator");
       assert.ok(!page.includes("/api/download"), "no download redirect for a non-operator");
       assert.ok(!/CEO-Agent/.test(page), "the private repo is not named to a non-operator");
@@ -385,15 +459,83 @@ async function main() {
       assert.equal(await res.text(), s.text);
     }
   });
-  await check("the embedded scripts are the former public/ files, byte for byte in shape", () => {
-    assert.ok(INSTALL_PS1.startsWith("# OASIS AI install - stable URL, repo-visibility-proof.\n"));
-    assert.ok(INSTALL_PS1.endsWith("Invoke-Expression $script\n"));
-    assert.ok(INSTALL_SH.startsWith("#!/usr/bin/env bash\n# OASIS AI install"));
-    assert.ok(INSTALL_SH.endsWith('bash -c "$SCRIPT"\n'));
-    // String.raw keeps this a backslash-n; a plain template would turn it into
-    // a real newline and break the base64 decode in the served script.
+  await check("the embedded scripts are the former public/ files, byte for byte", () => {
+    // sha256 of origin/main:public/install.ps1 and public/install.sh as they
+    // stood when they were deleted (2026-09-29). Any edit to either script has
+    // to change this line too, so it cannot happen by accident.
+    const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+    assert.equal(sha(INSTALL_PS1), "aff59e7d0ddc7a39b2910ce3eb14d4dc0d0ac6b276dc9ed5d42dced4a0574b83", "install.ps1 drifted");
+    assert.equal(sha(INSTALL_SH), "451d0f14356d77eb34dea999e16933a827d79607e0207750405b43971a4b7aba", "install.sh drifted");
+    // The two usual ways it drifts, named so the failure says which. String.raw
+    // keeps this a backslash-n (a plain template would make it a real newline
+    // and break the base64 decode), and .gitattributes pins the file to LF so a
+    // Windows checkout cannot put a carriage return on every served line.
     assert.ok(INSTALL_SH.includes("tr -d '\\n'"), "install.sh lost its literal \\n");
     assert.ok(!INSTALL_PS1.includes("\r") && !INSTALL_SH.includes("\r"), "LF line endings, as the committed files had");
+  });
+  await check("HARNESS_REPO is the repo both scripts clone", () => {
+    assert.ok(INSTALL_PS1.includes(`$Repo = '${HARNESS_REPO}'`));
+    assert.ok(INSTALL_SH.includes(`REPO="${HARNESS_REPO}"`));
+  });
+
+  // The bridge pairing wizard. Its full-install command pulls the same repo,
+  // so it follows the same rule as the scripts: operator only.
+  const renderBridgeInstall = async () => textOf(await bridgeInstallPage()).join("\n");
+  await check("anonymous: /settings/devices/install sends them to sign in", async () => {
+    await login("anonymous");
+    await assert.rejects(bridgeInstallPage(), /NEXT_REDIRECT;\/login\?next=\/settings\/devices\/install/);
+  });
+  for (const viewer of ["client", "squatter"] as const) {
+    await check(`${viewer}: /settings/devices/install is a private-beta notice, with no command and no repo`, async () => {
+      await login(viewer);
+      const tree = await bridgeInstallPage();
+      assert.deepEqual(elementsOf(tree, InstallBridgeWizard), [], "the pairing wizard must not mount for a non-operator");
+      const page = textOf(tree).join("\n");
+      assert.match(page, /The local bridge is in private beta/);
+      assert.ok(page.includes(SUPPORT_FORM_PATH), "Ask for access goes to the support form");
+      for (const leak of ["CEO-Agent", "CC90210", "raw.githubusercontent", "BRAVO_PAIR_CODE", "gh api", "install.ps1", "install.sh"]) {
+        assert.ok(!page.includes(leak), `${leak} shown to a ${viewer}`);
+      }
+    });
+  }
+  await check("operator: /settings/devices/install mounts the wizard with the repo passed in", async () => {
+    await login("cc");
+    const tree = await bridgeInstallPage();
+    const wizards = elementsOf(tree, InstallBridgeWizard);
+    assert.equal(wizards.length, 1);
+    assert.equal((wizards[0].props as { installRepo?: unknown }).installRepo, HARNESS_REPO);
+    assert.ok(!(await renderBridgeInstall()).includes("in private beta"));
+  });
+  await check("the operator's full-install command reads the private repo through gh, not an anonymous raw URL", () => {
+    for (const os of ["windows", "macos", "linux"] as const) {
+      const cmd = installOneLiner(os, "ABC-DEF-GHJ", HARNESS_REPO);
+      const file = os === "windows" ? "install.ps1" : "install.sh";
+      assert.ok(cmd.includes(`gh api`) && cmd.includes(`repos/${HARNESS_REPO}/contents/${file}`), `${os}: ${cmd}`);
+      assert.ok(cmd.includes("BRAVO_PAIR_CODE") && cmd.includes("ABC-DEF-GHJ"), `${os} lost the pair code`);
+      assert.ok(!cmd.includes("raw.githubusercontent"), `${os}: an anonymous raw URL is a 404 on a private repo`);
+    }
+  });
+  await check("no client-bundled module carries the harness repo name", () => {
+    // A "use client" module ships to every browser that loads it, whatever the
+    // page renders, so the repo name may only live server-side (HARNESS_REPO)
+    // and travel as a prop to a verified operator.
+    const hits: string[] = [];
+    for (const dir of ["app", "components", "lib", "hooks"]) {
+      for (const file of sourceFiles(join(ROOT, dir))) {
+        const src = readFileSync(file, "utf8");
+        if (!/^\s*["']use client["']/.test(src)) continue;
+        for (const lit of stringLiterals(src, file)) {
+          if (/CEO-Agent|raw\.githubusercontent\.com\/CC90210/.test(lit)) hits.push(`${relative(ROOT, file).split(sep).join("/")}: ${lit.slice(0, 80)}`);
+        }
+      }
+    }
+    assert.deepEqual(hits, []);
+  });
+  await check("the client-deploy runbook pauses the client install instead of routing around it", () => {
+    const page = textOf(clientDeployPage()).join("\n");
+    assert.match(page, /Paused: installing on a client's machine/);
+    assert.match(page, /do not grant a client's machine access to the harness repository/);
+    assert.ok(!/send them the file|needs GitHub access/i.test(page), "the runbook still tells the operator to ship the script");
   });
 
   // ── 4. retired routes ────────────────────────────────────────────────
@@ -405,12 +547,38 @@ async function main() {
   await check("middleware no longer lists /start, /configure, /demo/sun or /api/demo/sun as public", () => {
     for (const p of ["/start", "/configure", "/demo/sun", "/api/demo/sun"]) assert.equal(isPublic(p), false, p);
   });
-  for (const viewer of ["anonymous", "client", "cc"] as const) {
-    await check(`${viewer}: /start, /configure and /demo/sun are 404s`, async () => {
+  // Through the real middleware, then the page. Off the public list, a retired
+  // path behaves like any unknown one: a signed-out visitor is sent to sign in
+  // (never shown a page), and a signed-in viewer gets the 404.
+  const throughMiddleware = (path: string) => {
+    const req = new NextRequest(`https://oasisai.work${path}`);
+    if (sessionCookie) req.cookies.set(SESSION_COOKIE_NAME, sessionCookie);
+    return middleware(req);
+  };
+  await check("anonymous: middleware sends /start, /configure and /demo/sun to /login", async () => {
+    await login("anonymous");
+    for (const path of Object.keys(retired)) {
+      const res = await throughMiddleware(path);
+      assert.equal(res.status, 307, path);
+      const location = new URL(res.headers.get("location") || "");
+      assert.equal(location.pathname, "/login", path);
+      assert.equal(location.searchParams.get("next"), path);
+    }
+  });
+  for (const viewer of ["client", "squatter", "cc"] as const) {
+    await check(`${viewer} (signed in): middleware lets /start, /configure and /demo/sun through, and each is a 404`, async () => {
       await login(viewer);
-      for (const [path, page] of Object.entries(retired)) assert.equal(await is404(page), true, path);
+      for (const [path, page] of Object.entries(retired)) {
+        const res = await throughMiddleware(path);
+        assert.equal(res.headers.get("x-middleware-next"), "1", `${path} did not reach the page`);
+        assert.equal(await is404(page), true, path);
+      }
     });
   }
+  await check("a demo shell anchors its links to \"/\", not to the retired /demo/sun", () => {
+    assert.equal(demoHref("/leads", { demoMode: true }), "/");
+    assert.equal(demoHref("/leads", { demoMode: false }), "/leads");
+  });
   await check("/api/demo/sun is deleted", () => {
     assert.equal(existsSync(join(ROOT, "app", "api", "demo", "sun", "route.ts")), false);
   });
@@ -426,15 +594,25 @@ async function main() {
       assert.ok(!["/start", "/configure", "/demo/sun"].includes(r.destination), `${r.source} redirects to a 404`);
     }
   });
-  await check("no page or component links to a retired route", () => {
-    // JSX (href="/x", href={"/x"}) and data (cta: { href: "/x" }) forms both.
-    const LINK = /href(?:=\{?|:\s*)["'`](\/start|\/configure|\/demo\/sun|\/api\/demo\/sun)(?=["'`?#])/;
+  await check("no string literal in app, components, lib, hooks or middleware names a retired route", () => {
+    // Every literal, not just href forms: a default prop (Sidebar's demo
+    // landing), a fallback (demoHref) or a path test (the root layout forcing
+    // the SunBiz demo shell in on /demo/sun) is how a retired route stays
+    // reachable. Comments are not literals, so history can still be told.
+    const RETIRED = /^(\/start|\/configure|\/demo\/sun|\/api\/demo\/sun)(?:[/?#]|$)/;
+    // Literals that are not routes. Each one says why.
+    const NOT_A_ROUTE = new Set([
+      "components/settings/TelegramConnectCard.tsx: /start", // Telegram's bot command, sent in the chat app
+    ]);
+    const files = ["app", "components", "lib", "hooks"].flatMap((dir) => sourceFiles(join(ROOT, dir)));
+    files.push(join(ROOT, "middleware.ts"));
     const hits: string[] = [];
-    for (const dir of ["app", "components", "lib", "hooks"]) {
-      for (const file of sourceFiles(join(ROOT, dir))) {
-        const src = readFileSync(file, "utf8");
-        const m = src.match(LINK);
-        if (m) hits.push(`${relative(ROOT, file).split(sep).join("/")} -> ${m[1]}`);
+    for (const file of files) {
+      for (const lit of stringLiterals(readFileSync(file, "utf8"), file)) {
+        const m = lit.match(RETIRED);
+        if (!m) continue;
+        const hit = `${relative(ROOT, file).split(sep).join("/")}: ${m[1]}`;
+        if (!NOT_A_ROUTE.has(hit)) hits.push(hit);
       }
     }
     assert.deepEqual(hits, []);

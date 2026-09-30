@@ -86,12 +86,12 @@ const PHASES: Phase[] = [
     duration: "8 min — install + pair",
     icon: "terminal",
     body:
-      "Run the one-line installer. The wizard pairs the machine to your dashboard automatically (HMAC-based self-pair, no token paste required).",
+      "Paused until the desktop runner ships: the one-line installer and its wizard, which paired the machine to your dashboard automatically, clone a repository that is private since 2026-09-29.",
     steps: [
       {
-        title: "Send the install script for their OS",
+        title: "Paused: installing on a client's machine",
         detail:
-          "/install.ps1 (Windows) or /install.sh (macOS/Linux). Both are operator-only since 2026-09-29, and /configure, which used to generate the one-liner, is retired: open the script for the client's OS while signed in here, save it, and send them the file to run. A pasted `irm | iex` or `curl | bash` line gets a 404, because a terminal carries no session. The script clones a private repository, so the client's machine needs GitHub access to it until the desktop runner replaces this step.",
+          "Paused until the desktop runner ships. Do not send a client the install script, and do not grant a client's machine access to the harness repository: it went private on 2026-09-29 to contain it, and every install path clones it. /install.ps1 and /install.sh are operator-only, and /configure, which generated the client's one-liner, is retired. The steps below apply once the runner replaces this one.",
       },
       {
         title: "Watch for the auto-pair confirmation",
