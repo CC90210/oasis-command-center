@@ -51,7 +51,6 @@ explicitly only if you want different values for browser vs server.
 | `PUBLIC_APP_URL` | `https://agent-dashboard-cc90210.vercel.app` | Used by CLI pair / provisioning routes |
 | `BRAVO_DASHBOARD_URL` | falls back to `PUBLIC_APP_URL` | Pairing flow alias |
 | `CRON_ALLOW_LOCAL` | _unset_ | Set to `"1"` to bypass cron auth in local dev |
-| `STATE_API_URL` | `http://state-api:8500` | Optional state-api sidecar; `/system-health` falls back to Supabase mirror if unset |
 | `EMPIRE_DATA_BACKEND` | `supabase` | Switch to `turso` to enable libSQL fallback |
 | `TURSO_DB_PATH` / `TURSO_DB_URL` / `TURSO_AUTH_TOKEN` | _unset_ | Required when `EMPIRE_DATA_BACKEND=turso` |
 

@@ -9,11 +9,11 @@
  *
  * The rows come from the rail's catalog (OS_NAV_CATALOG, section "admin"), so
  * the hub and the rail cannot list different doors. Each destination keeps its
- * own server gate.
+ * own server gate. Each description says, in plain words, what the page is for.
  */
 
 import type { ReactNode } from "react";
-import { Activity, Cpu, HeartPulse, History, Inbox, RefreshCcw, ShieldCheck, SquareTerminal } from "lucide-react";
+import { Activity, Cpu, History, Inbox, RefreshCcw, ShieldCheck, SquareTerminal } from "lucide-react";
 import { requireOperator } from "@/lib/role-surfaces-session";
 import { PageFrame } from "@/components/os/PageFrame";
 import { LinkList, type LinkListItem } from "@/components/os/landings/LinkList";
@@ -26,14 +26,13 @@ const ICON = { size: 16, strokeWidth: 1.75 } as const;
 
 /** What each admin door opens onto, keyed by catalog id. */
 const ADMIN_DETAIL: Record<string, { description: string; icon: ReactNode }> = {
-  "admin-operations": { description: "Background workers, paired machines and the live event tape", icon: <Activity {...ICON} /> },
-  "admin-automations": { description: "Cron jobs, background workers and the drafter", icon: <RefreshCcw {...ICON} /> },
-  "admin-health": { description: "Buckets that might need you, green when all is fine", icon: <ShieldCheck {...ICON} /> },
-  "admin-agent": { description: "The operator power chat, with the CLI bridge", icon: <SquareTerminal {...ICON} /> },
-  "admin-fleet": { description: "Every agent, whether it is running, and what it owns", icon: <Cpu {...ICON} /> },
-  "admin-runs": { description: "Dashboard actions and their results", icon: <History {...ICON} /> },
-  "admin-inbox": { description: "Agent-to-agent handoffs", icon: <Inbox {...ICON} /> },
-  "admin-system-health": { description: "Local guard substrate and state-api stats", icon: <HeartPulse {...ICON} /> },
+  "admin-operations": { description: "What is running right now: your computers, background agents and the live event tape", icon: <Activity {...ICON} /> },
+  "admin-automations": { description: "Every schedule and background process, with on/off switches", icon: <RefreshCcw {...ICON} /> },
+  "admin-health": { description: "Whether your computer, its safety guards and your automations are working, in plain words", icon: <ShieldCheck {...ICON} /> },
+  "admin-agent": { description: "Run Claude Code/Codex in a department's repo on your PC through the bridge (operator only)", icon: <SquareTerminal {...ICON} /> },
+  "admin-fleet": { description: "Each agent, whether its processes are running, and what it owns", icon: <Cpu {...ICON} /> },
+  "admin-runs": { description: "Every change an agent made to your dashboard data, and whether it worked", icon: <History {...ICON} /> },
+  "admin-inbox": { description: "Notes the agents leave each other, and a box to leave one yourself", icon: <Inbox {...ICON} /> },
 };
 
 export default async function AdminPage() {

@@ -68,6 +68,20 @@ try {
     "the remote worker-control endpoint must 404 before bridge authorization or database work",
   );
   assert.match(control, /auth\.tenantSlug !== "submissions"[\s\S]*?status: 404/);
+  // 2026-09-30: the OASIS deployment's only path is the operator's own fleet.
+  // It needs the verified operator in an OASIS workspace before any bridge
+  // call, allowlists the worker from the OASIS inventory, and uses the bridge's
+  // fleet_control tool, never bash.
+  assert.match(control, /if \(externalTenantSurfacesBlocked\(\)\) \{[\s\S]*?return controlOasisFleet\(req, await authorizeBridgeRequest\(\)\);/);
+  const oasisPath = control.slice(control.indexOf("async function controlOasisFleet"));
+  assert.ok(
+    oasisPath.indexOf("!bridge.isOperator || !isOasisSurfaceTenant(bridge.tenantSlug)") > 0 &&
+      oasisPath.indexOf("!bridge.isOperator || !isOasisSurfaceTenant(bridge.tenantSlug)") < oasisPath.indexOf("callBridgeExecTool("),
+    "the OASIS fleet path must 404 a non-operator before any bridge call",
+  );
+  assert.match(oasisPath, /controllableOasisWorker\(/);
+  assert.match(oasisPath, /tool_name: "fleet_control"/);
+  assert.doesNotMatch(oasisPath.slice(0, oasisPath.indexOf("function bridgeFailure")), /tool_name: "bash"/);
 
   const workers = readFileSync("app/api/automations/background-workers/route.ts", "utf8");
   assert.doesNotMatch(
