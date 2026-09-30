@@ -228,7 +228,9 @@ export function AgentConfigEditor({
       const res = await fetch("/api/agent-config/test-connection", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider: row.provider, api_key: key }),
+        // The model it is about to be saved with: a key the provider accepts
+        // on its cheapest model can still be refused on this one.
+        body: JSON.stringify({ provider: row.provider, api_key: key, model: row.model }),
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;

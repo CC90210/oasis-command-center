@@ -95,6 +95,11 @@ stub("next/link", {
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const CLIENT = "6b6b6b6b-0000-4000-8000-00000000006b";
+// A workspace whose only saved keys are ones its channels never use (another
+// agent's workspace row, a teammate's personal row), for "Test".
+const SOLO = "5a5a5a5a-0000-4000-8000-00000000005a";
+// A custom teammate OASIS built; its direct chat records under agent:<slug>.
+const CUSTOM_SLUG = "renewals-desk";
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
 const USERS = {
@@ -103,10 +108,13 @@ const USERS = {
   client: u(3, "owner@client.test"), // owner of a client workspace
   multi: u(4, "multi@client.test"), // seated in two workspaces: an old OASIS rep seat, a current client owner seat
   rep: u(5, "rep@client.test"), // a closer in the client workspace: not an owner or admin
+  solo: u(6, "owner@solo.test"), // owner of SOLO
 } as const;
 
 const WORKSPACE_KEY = "sk-ant-workspace-key-0001";
 const PERSONAL_KEY = "sk-ant-personal-key-0002";
+const OTHER_AGENT_KEY = "sk-ant-other-agent-key-0005";
+const SOLO_WORKSPACE_KEY = "sk-ant-solo-workspace-key-0006";
 const USER_TEXT = "PRIVATE-QUESTION-DO-NOT-LOG about the Hendricks renewal";
 
 async function login(user: U | null) {
@@ -245,6 +253,26 @@ async function main() {
               VALUES ('c-client-personal', ?, ?, 'bravo', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)`,
         args: [CLIENT, USERS.client.id, encryptField(PERSONAL_KEY), stamp],
       },
+      // SOLO: another agent's WORKSPACE row, then its owner's PERSONAL row for
+      // the channels' agent key. Neither is the key its channels answer on.
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'solo-co', 'Solo Co')", args: [SOLO] },
+      profile("p-solo", USERS.solo, SOLO, "owner", 1, stamp),
+      {
+        sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
+              VALUES ('c-solo-other-agent', ?, NULL, 'maven', 'anthropic', 'claude-other-agent-model', ?, 1, ?)`,
+        args: [SOLO, encryptField(OTHER_AGENT_KEY), stamp],
+      },
+      {
+        sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
+              VALUES ('c-solo-personal', ?, ?, 'bravo', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)`,
+        args: [SOLO, USERS.solo.id, encryptField(PERSONAL_KEY), stamp],
+      },
+      // A custom teammate OASIS built in the builder.
+      {
+        sql: `INSERT INTO agents (slug, name, category, short_description, base_prompt, is_public, is_oasis_managed, tenant_id, created_at, updated_at)
+              VALUES (?, 'Renewals Desk', 'sales', 'Keeps renewals on track.', 'You keep renewals on track for {{tenant.brand.name}}.', 0, 0, ?, ?, ?)`,
+        args: [CUSTOM_SLUG, OASIS, stamp, stamp],
+      },
     ],
     "write",
   );
@@ -261,7 +289,7 @@ async function main() {
   const { departmentChannelFor, suggestedAsksFor } = await import("../components/os/department/config");
   const outcome = await import("../lib/os/channel/outcome");
   const identity = await import("../lib/os/channel/identity");
-  const { probeProvider } = await import("../lib/agents/provider-probe");
+  const { probeProvider, PROBE_MODEL } = await import("../lib/agents/provider-probe");
   const { getSeedAgent } = await import("../lib/agents/library");
 
   const post = (body: Record<string, unknown>) =>
@@ -538,12 +566,22 @@ async function main() {
       }
     }
   });
-  await check("the AI Team roster says 'Web · not working' where the header says Not working", async () => {
+  // A custom teammate's Web state, by slug.
+  const customWeb = async (user: U) => {
+    const team = await loadAiTeam(await viewerFor(user), []);
+    assert.ok(team.custom.ok, "the custom teammates read");
+    const row = team.custom.ok ? team.custom.value.find((c) => c.slug === CUSTOM_SLUG) : undefined;
+    assert.ok(row, `no ${CUSTOM_SLUG} on the roster`);
+    return { team, web: row!.web };
+  };
+  await check("the AI Team roster says 'Web · not working' where the header says Not working, custom teammates included", async () => {
     const viewer = await viewerFor(USERS.partner);
     const team = await loadAiTeam(viewer, []);
     const agentLeads = team.leads.filter((l) => !l.id.startsWith("dept:"));
     assert.ok(agentLeads.length >= 2, JSON.stringify(team.leads.map((l) => l.id)));
     for (const lead of agentLeads) assert.equal(lead.web, "not_working", lead.name);
+    // A custom teammate's chat runs on the same refused workspace key.
+    assert.equal((await customWeb(USERS.partner)).web, "not_working", "a green Web check on a custom teammate over a refused key");
     const label = textOf(Homes({ web: "not_working" }));
     assert.match(label, /Web · not working/);
     rendered.push(label);
@@ -571,6 +609,24 @@ async function main() {
     const state = await resolveChannelState(dept("chief-of-staff"), viewer);
     assert.ok(state.kind === "ready" && state.lastTurn.kind === "ok", JSON.stringify(state));
     assert.deepEqual(withLastTurn(statusFor(true, 0), state.kind === "ready" ? state.lastTurn : null), { kind: "working" });
+  });
+  await check("a custom teammate's own refused turn is its own: Web · not working until its chat answers", async () => {
+    await login(USERS.partner);
+    // Its direct chat (no department) asks for a model the provider does not
+    // know: a failure of that chat, not of the account.
+    provider = () => new Response('{"type":"error","error":{"type":"not_found_error","message":"model: x"}}', { status: 404 });
+    const failed = parseSse(await (await post(say({ agent_slug: CUSTOM_SLUG }))).text());
+    assert.equal(failed.find((e) => e.event === "error")?.data.code, "provider_404");
+    assert.ok((await outcomes(OASIS)).includes(`agent:${CUSTOM_SLUG}=failed:provider_404`), JSON.stringify(await outcomes(OASIS)));
+    const after = await customWeb(USERS.partner);
+    assert.equal(after.web, "not_working", "a green Web check over the custom chat's own failed turn");
+    // The departments are not dragged down by it: their channels answer.
+    for (const lead of after.team.leads.filter((l) => !l.id.startsWith("dept:"))) assert.equal(lead.web, "ready", lead.name);
+    // Its chat answers again: the check comes back.
+    provider = () => anthropicOk("Renewals are on track.");
+    const ok = parseSse(await (await post(say({ agent_slug: CUSTOM_SLUG }))).text());
+    assert.deepEqual(ok.map((e) => e.event), ["agent", "delta", "usage", "done"]);
+    assert.equal((await customWeb(USERS.partner)).web, "ready");
   });
   await check("an unreadable record is Couldn't check, never Working", async () => {
     assert.deepEqual(withLastTurn(statusFor(true, 0), { kind: "unknown" }), { kind: "unknown" });
@@ -641,6 +697,7 @@ async function main() {
       // So does the AI Team roster, and so does Test on a saved key.
       const team = await loadAiTeam(viewer, []);
       for (const lead of team.leads.filter((l) => !l.id.startsWith("dept:"))) assert.equal(lead.web, "unknown", lead.name);
+      assert.equal((await customWeb(USERS.partner)).web, "unknown", "a custom teammate over an unchecked AI account");
       const test = await testConnection.POST(
         new NextRequest("http://localhost/api/agent-config/test-connection", {
           method: "POST",
@@ -779,8 +836,81 @@ async function main() {
   await check("the route source no longer lists models to decide a key works", () => {
     const src = readFileSync(join(process.cwd(), "app/api/agent-config/test-connection/route.ts"), "utf8");
     assert.doesNotMatch(src, /\/v1\/models|\/v1beta\/models\?|api\/tags/, "a model-list probe is back");
-    assert.match(src, /probeProvider\(provider, proposedKey\)/);
-    assert.match(src, /probeProvider\(provider, plain, \{ model: saved\?\.model \}\)/);
+    assert.match(src, /probeProvider\(provider, proposedKey, \{ model \}\)/);
+    assert.match(src, /probeProvider\(provider, plain, \{ model: row\?\.model \}\)/);
+  });
+  const testKey = async (body: Record<string, unknown>) => {
+    const res = await testConnection.POST(
+      new NextRequest("http://localhost/api/agent-config/test-connection", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    return { status: res.status, body: (await res.json()) as { ok: boolean; code?: string; message?: string } };
+  };
+  await check("Test on a saved key tests the channels' workspace key only, never a teammate's or another agent's", async () => {
+    await login(USERS.solo);
+    // Anything probed would come back green: a green here would be a lie.
+    provider = () => new Response("{}", { status: 200 });
+    sent = [];
+    // SOLO has another agent's workspace key and its owner's personal key for
+    // the channels' agent, and no workspace key its channels answer on.
+    const none = await testKey({ provider: "anthropic" });
+    assert.equal(none.status, 404, JSON.stringify(none.body));
+    assert.equal(none.body.code, "no_key_on_file");
+    assert.equal(
+      none.body.message,
+      "No team-wide AI key is saved, so your channels have no key to test. A key saved for your own chats only is not one they use.",
+    );
+    assert.equal(sent.length, 0, "Test probed a key the channels never use");
+    // The owner saves the team-wide key the channels answer on: that key, on its own model.
+    await db.execute({
+      sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
+            VALUES ('c-solo', ?, NULL, 'bravo', 'anthropic', 'claude-sonnet-4-6', ?, 1, ?)`,
+      args: [SOLO, encryptField(SOLO_WORKSPACE_KEY), stamp],
+    });
+    const tested = await testKey({ provider: "anthropic" });
+    assert.equal(tested.body.ok, true, JSON.stringify(tested.body));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].headers["x-api-key"], SOLO_WORKSPACE_KEY, "Test sent a key the channels do not use");
+    assert.equal(sent[0].body?.model, "claude-sonnet-4-6");
+    // Test on another provider's card: the channels have no key there. Said plainly; nothing probed.
+    sent = [];
+    const other = await testKey({ provider: "openrouter" });
+    assert.equal(other.status, 404, JSON.stringify(other.body));
+    assert.equal(other.body.code, "no_key_on_file");
+    assert.match(String(other.body.message), /^Your channels use the team-wide Anthropic[^.]* key, so there is no OpenRouter key of theirs to test\.$/);
+    assert.equal(sent.length, 0);
+    rendered.push(String(none.body.message), String(other.body.message));
+  });
+  await check("Test on a pasted key probes the model it will be saved with; a blank key is not swapped for the saved one", async () => {
+    await login(USERS.solo);
+    provider = () => new Response("{}", { status: 200 });
+    sent = [];
+    const pasted = await testKey({ provider: "anthropic", api_key: "sk-ant-pasted-0007", model: "claude-opus-4-7" });
+    assert.equal(pasted.body.ok, true, JSON.stringify(pasted.body));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].headers["x-api-key"], "sk-ant-pasted-0007");
+    assert.equal(sent[0].body?.model, "claude-opus-4-7", "a pasted key was tested on a model it will not be saved with");
+    // No model named: the probe's cheapest model, as before.
+    sent = [];
+    await testKey({ provider: "anthropic", api_key: "sk-ant-pasted-0007" });
+    assert.equal(sent[0].body?.model, PROBE_MODEL.anthropic);
+    // A key field sent blank is refused: it is not quietly the saved key's test.
+    sent = [];
+    const blank = await testKey({ provider: "anthropic", api_key: "   " });
+    assert.equal(blank.status, 400);
+    assert.equal(blank.body.code, "empty_key");
+    assert.equal(sent.length, 0, "a blank pasted key tested the saved key instead");
+    // Some providers put the model in the URL path: only a plain model id goes out.
+    const odd = await testKey({ provider: "google", api_key: "AIza-pasted", model: "../../v1beta/files" });
+    assert.equal(odd.status, 400);
+    assert.equal(odd.body.code, "invalid_model");
+    assert.equal(sent.length, 0);
+    // The per-agent editor sends the model it is about to save with.
+    const editor = readFileSync(join(process.cwd(), "components/settings/AgentConfigEditor.tsx"), "utf8");
+    assert.match(editor, /JSON\.stringify\(\{ provider: row\.provider, api_key: key, model: row\.model \}\)/);
   });
   await check("Test on a saved key asks the model saved with it, and a model refusal names that model", async () => {
     // The client's workspace row: anthropic, claude-sonnet-4-6 (not PROBE_MODEL's haiku).

@@ -4,15 +4,19 @@
  * One-shot provider-key validation. Two modes, single endpoint:
  *
  * 1. Test the SAVED key (default — body { provider }):
- *      Reads the encrypted key and its model from agent_model_config
- *      (tenant-wide row first, per-user override second), decrypts, and
- *      probes that model.
+ *      Reads the key the CHANNELS answer on — the workspace row (user_id IS
+ *      NULL) for CHANNEL_CONFIG_AGENT_KEY (lib/os/channel/workspace-key.ts),
+ *      the row app/api/agents/chat reads — decrypts it, and probes the model
+ *      saved with it. Never a teammate's personal key or another agent's row.
+ *      No such key, or one for another provider, is said plainly (404) and
+ *      nothing is probed.
  *
- * 2. Test a PROPOSED key before saving (body { provider, api_key }):
+ * 2. Test a PROPOSED key before saving (body { provider, api_key, model? }):
  *      Skips the DB lookup and probes with the supplied key directly so
  *      the AgentConfigEditor's "Test connection" button can validate
- *      a key the operator just pasted but hasn't saved, on the provider's
- *      cheapest listed model.
+ *      a key the operator just pasted but hasn't saved, on the model it is
+ *      about to be saved with (or the provider's cheapest listed model when
+ *      none is named). A blank api_key is refused, never tested as mode 1.
  *
  * Auth: session — both modes require a logged-in operator. Mode #2 is
  * NOT a public oracle for credential stuffing; the rate limit + session
@@ -39,9 +43,12 @@
  *   "timeout"               → no response in 15s
  *   "network"               → fetch threw before HTTP
  *   "no_local_model"        → a local server with no model installed
- *   "no_key_on_file"        → mode 1, no saved key for provider
+ *   "no_key_on_file"        → mode 1, no workspace key the channels use for
+ *                             this provider (404)
  *   "config_unavailable"    → mode 1, the saved-key read failed (503)
  *   "decrypt_failed"        → mode 1, decryptField threw
+ *   "empty_key"             → mode 2, api_key sent blank (400)
+ *   "invalid_model"         → mode 2, model is not a plain model id (400)
  *   "invalid_provider"      → body.provider invalid
  *
  * Replaces the standalone /api/agent-config/test-key endpoint (deleted
@@ -55,12 +62,32 @@ import { decryptField } from "@/lib/field-encryption";
 import { resolveSessionContext } from "@/lib/api-auth";
 import { canAccessSharedTenantResource } from "@/lib/shared-tenant-resource-access";
 import { probeProvider, type ProbeResult } from "@/lib/agents/provider-probe";
-import type { Provider } from "@/lib/providers";
+import { PROVIDER_REGISTRY, type Provider } from "@/lib/providers";
+import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const VALID_PROVIDERS: Provider[] = ["anthropic", "openai", "google", "openrouter", "ollama"];
+
+/** The provider's name as Settings shows it. */
+function providerLabel(provider: string | null | undefined): string {
+  return PROVIDER_REGISTRY.find((r) => r.value === provider)?.label ?? String(provider || "unknown");
+}
+
+const INVALID_MODEL = Symbol("invalid_model");
+/**
+ * Mode 2's optional `model`: the model a pasted key is about to be saved with.
+ * Absent or blank → null (the probe's cheapest model). Anything that is not a
+ * plain model id is refused: some providers put the model in the URL path.
+ */
+function proposedModel(raw: unknown): string | null | typeof INVALID_MODEL {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") return INVALID_MODEL;
+  const model = raw.trim();
+  if (!model) return null;
+  return /^[A-Za-z0-9._:@+/-]{1,200}$/.test(model) && !model.includes("..") ? model : INVALID_MODEL;
+}
 
 function inferShapeHint(provider: Provider, key: string): string {
   // Quick paste-error detection. Returns a single sentence appended to
@@ -116,9 +143,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "forbidden" }, { status: 403 });
   }
 
-  let body: { provider?: string; api_key?: string };
+  let body: { provider?: string; api_key?: string; model?: unknown };
   try {
-    body = (await req.json()) as { provider?: string; api_key?: string };
+    body = (await req.json()) as { provider?: string; api_key?: string; model?: unknown };
   } catch {
     return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
   }
@@ -129,44 +156,48 @@ export async function POST(req: NextRequest) {
   }
 
   // Mode 2: test the proposed key directly (before save). The api_key
-  // field IS the value to test — skip the DB lookup entirely.
-  const proposedKey = typeof body.api_key === "string" ? body.api_key.trim() : "";
-  if (proposedKey) {
-    return respond(provider, proposedKey, await probeProvider(provider, proposedKey));
+  // field IS the value to test — skip the DB lookup entirely. It is tested on
+  // the model it is about to be saved with, when the caller names one. A key
+  // field that was sent blank is refused, never quietly turned into mode 1:
+  // that would test a different key than the one the owner pasted.
+  if (typeof body.api_key === "string") {
+    const proposedKey = body.api_key.trim();
+    if (!proposedKey) {
+      return NextResponse.json(
+        { ok: false, status: "error", provider, code: "empty_key", message: "Paste a key to test." },
+        { status: 400 },
+      );
+    }
+    const model = proposedModel(body.model);
+    if (model === INVALID_MODEL) {
+      return NextResponse.json(
+        { ok: false, status: "error", provider, code: "invalid_model", message: "That model name is not valid." },
+        { status: 400 },
+      );
+    }
+    return respond(provider, proposedKey, await probeProvider(provider, proposedKey, { model }));
   }
 
-  // Mode 1: test the saved key. Tenant-wide row first, then per-user
-  // override. Either has the same encrypted_api_key column shape; first
-  // non-empty value wins. The key is tested on the model saved WITH it, the
-  // model the channel sends it (lib/agents/provider-probe.ts WHICH MODEL).
-  const db = getServiceSupabase();
-  const tenantRow = await db
+  // Mode 1: test the saved key the CHANNELS answer on, and only that key: the
+  // workspace row (user_id IS NULL) for CHANNEL_CONFIG_AGENT_KEY, the same row
+  // app/api/agents/chat and department readiness read. Not a teammate's
+  // personal key and not another agent's row: a green "Test" on either says
+  // nothing about the key every channel sends. The key is tested on the model
+  // saved with it (lib/agents/provider-probe.ts WHICH MODEL).
+  const saved = await getServiceSupabase()
     .from("agent_model_config")
-    .select("encrypted_api_key, model")
+    .select("provider, model, encrypted_api_key")
     .eq("tenant_id", ctx.tenantId)
-    .eq("provider", provider)
+    .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
     .is("user_id", null)
-    .not("encrypted_api_key", "is", null)
-    .limit(1)
     .maybeSingle();
-  const userRow = tenantRow.data?.encrypted_api_key
-    ? null
-    : await db
-        .from("agent_model_config")
-        .select("encrypted_api_key, model")
-        .eq("tenant_id", ctx.tenantId)
-        .eq("provider", provider)
-        .eq("user_id", ctx.userId)
-        .not("encrypted_api_key", "is", null)
-        .limit(1)
-        .maybeSingle();
   // A failed read is not "no key on file": the owner would be told to add a
   // key that is already saved.
-  if (tenantRow.error || userRow?.error) {
+  if (saved.error) {
     console.error("[agent-config.test-connection] saved key could not be read", {
       tenantId: ctx.tenantId,
       provider,
-      error: (tenantRow.error || userRow?.error)?.message,
+      error: saved.error.message,
     });
     return NextResponse.json(
       {
@@ -179,14 +210,30 @@ export async function POST(req: NextRequest) {
       { status: 503 },
     );
   }
-  const saved = (tenantRow.data?.encrypted_api_key ? tenantRow.data : userRow?.data) as
-    | { encrypted_api_key: string | null; model: string | null }
-    | null
-    | undefined;
-  const encrypted = saved?.encrypted_api_key || null;
+  const row = saved.data as { provider: string | null; model: string | null; encrypted_api_key: string | null } | null;
+  const encrypted = row?.encrypted_api_key || null;
   if (!encrypted) {
     return NextResponse.json(
-      { ok: false, status: "error", provider, code: "no_key_on_file", message: "No API key on file for this provider." },
+      {
+        ok: false,
+        status: "error",
+        provider,
+        code: "no_key_on_file",
+        message:
+          "No team-wide AI key is saved, so your channels have no key to test. A key saved for your own chats only is not one they use.",
+      },
+      { status: 404 },
+    );
+  }
+  if (row?.provider !== provider) {
+    return NextResponse.json(
+      {
+        ok: false,
+        status: "error",
+        provider,
+        code: "no_key_on_file",
+        message: `Your channels use the team-wide ${providerLabel(row?.provider)} key, so there is no ${providerLabel(provider)} key of theirs to test.`,
+      },
       { status: 404 },
     );
   }
@@ -212,5 +259,5 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return respond(provider, plain, await probeProvider(provider, plain, { model: saved?.model }));
+  return respond(provider, plain, await probeProvider(provider, plain, { model: row?.model }));
 }

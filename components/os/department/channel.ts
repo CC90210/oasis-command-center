@@ -31,6 +31,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
 import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
+import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -114,7 +115,7 @@ async function providerReady(
       .from("agent_model_config")
       .select("enabled, encrypted_api_key")
       .eq("tenant_id", tenantId)
-      .eq("agent_key", "bravo")
+      .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
       .is("user_id", null)
       .maybeSingle();
     if (res.error) {
@@ -157,15 +158,22 @@ export async function readWorkspaceTurns(tenantId: string): Promise<TurnOutcomes
 }
 
 /**
- * This department's last turn, judged against the whole workspace's
- * (lib/os/channel/outcome.ts channelFailure, which leaves "no AI account
- * connected" to providerReady). A table not yet migrated reads as "nothing
- * recorded"; any other failed read is `unknown`, never "ok".
+ * A channel's last turn, by the key the route records it under
+ * (departmentChannelKey, or agentChannelKey for a direct agent chat), judged
+ * against the whole workspace's (lib/os/channel/outcome.ts channelFailure,
+ * which leaves "no AI account connected" to providerReady). A table not yet
+ * migrated reads as "nothing recorded"; any other failed read is `unknown`,
+ * never "ok".
  */
-export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey): LastTurn {
+export function lastTurnOn(read: TurnOutcomesRead, channelKey: string): LastTurn {
   if (!read.ok) return read.reason === "table_missing" ? { kind: "ok" } : { kind: "unknown" };
-  const failure = channelFailure(read.value, departmentChannelKey(department));
+  const failure = channelFailure(read.value, channelKey);
   return failure ? { kind: "failed", code: failure.code } : { kind: "ok" };
+}
+
+/** This department's last turn (lastTurnOn, on its department channel key). */
+export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey): LastTurn {
+  return lastTurnOn(read, departmentChannelKey(department));
 }
 
 export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer): Promise<ChannelState> {

@@ -84,6 +84,7 @@ import {
 } from "@/lib/os/channel/outcome";
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { recordTurnOutcome } from "@/lib/os/channel/turns";
+import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -301,7 +302,7 @@ export async function POST(req: NextRequest) {
     .from("agent_model_config")
     .select("provider, model, encrypted_api_key, enabled")
     .eq("tenant_id", tenantId)
-    .eq("agent_key", "bravo")
+    .eq("agent_key", CHANNEL_CONFIG_AGENT_KEY)
     .is("user_id", null)
     .maybeSingle();
   // A failed read is not "no key": answering 412 would send the owner to
