@@ -13,10 +13,10 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { checkWorkerSize } from "../scripts/check-worker-bundle";
+import { checkOneByteSource, checkWorkerSize } from "../scripts/check-worker-bundle";
 
 const root = path.resolve(__dirname, "..");
 
@@ -48,6 +48,16 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
   }
   const twice = checkWorkerSize(`${plain}Total Upload: 65000.00 KiB / gzip: 10500.00 KiB\n`, 64512);
   assert.equal(twice.ok, false, "with more than one size line, the largest is the one checked");
+
+  // One-byte source: Latin-1 (including U+00A0..U+00FF) passes; anything above fails, and says where.
+  const latin1 = 'const a = /[\\u2014]/; const b = "café  ÿ";';
+  assert.deepEqual(checkOneByteSource(latin1), { ok: true, chars: latin1.length }, "an escaped regex and Latin-1 text pass");
+  const wide = checkOneByteSource("x".repeat(80) + "/[—–]/g" + "y".repeat(20));
+  assert.equal(wide.ok, false, "a character above U+00FF fails");
+  assert.match(!wide.ok ? wide.reason : "", /holds 2 character\(s\) above U\+00FF/);
+  // 50 characters before the first wide one and 10 from it: 48 x's, "/[", then "—–]/g" and 5 y's.
+  assert.match(!wide.ok ? wide.reason : "", /U\+2014 near "x{48}\/\[—–\]\/gy{5}"/, "it names the character and shows where");
+  assert.equal(checkOneByteSource("﻿").ok, false, "a BOM counts: U+FEFF is above U+00FF");
 }
 
 // ── The script's exit codes, as CI runs it ────────────────────────────────
@@ -55,25 +65,33 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
   const scratch = mkdtempSync(path.join(tmpdir(), "worker-bundle-"));
   try {
     const log = path.join(scratch, "dry-run.log");
+    const outdir = path.join(scratch, "dry-run-out");
+    mkdirSync(outdir);
+    const workerJs = path.join(outdir, "worker.js");
     writeFileSync(log, coloured);
-    const run = (budget: string | undefined, file = log) => {
+    writeFileSync(workerJs, 'export default { fetch() { return new Response("ok"); } };');
+    const run = (budget: string | undefined, file = log, dir: string | null = outdir) => {
       const env = { ...process.env };
       delete env.WORKER_UPLOAD_BUDGET_KIB;
       if (budget !== undefined) env.WORKER_UPLOAD_BUDGET_KIB = budget;
-      return spawnSync(process.execPath, ["--import", "tsx", "scripts/check-worker-bundle.ts", file], {
-        cwd: root,
-        env,
-        encoding: "utf8",
-      });
+      const args = ["--import", "tsx", "scripts/check-worker-bundle.ts", file, ...(dir === null ? [] : [dir])];
+      return spawnSync(process.execPath, args, { cwd: root, env, encoding: "utf8" });
     };
     const within = run("64512");
     assert.equal(within.status, 0, within.stderr);
-    assert.match(within.stdout, /59014\.13 KiB uncompressed, within the 64512 KiB budget/);
+    assert.match(within.stdout, /59014\.13 KiB uncompressed, within the 64512 KiB budget.*worker\.js is one-byte/);
     const over = run("50000");
     assert.equal(over.status, 1, "over budget exits 1");
     assert.match(over.stderr, /9014\.13 KiB over the 50000 KiB budget/);
     assert.equal(run(undefined).status, 1, "no budget in the environment exits 1, never passes as unlimited");
     assert.equal(run("").status, 1, "an empty budget exits 1");
+    assert.equal(run("64512", log, null).status, 1, "no --outdir argument exits 1: the source would go unchecked");
+    assert.equal(run("64512", log, path.join(scratch, "missing")).status, 1, "an outdir with no worker.js exits 1");
+    writeFileSync(workerJs, 'const r = /[—]/; export default { fetch() { return new Response("ok"); } };');
+    const wideRun = run("64512");
+    assert.equal(wideRun.status, 1, "a wide character in the upload exits 1 even when the size is fine");
+    assert.match(wideRun.stderr, /above U\+00FF/);
+    writeFileSync(workerJs, "export default {};");
     writeFileSync(log, "--dry-run: exiting now.\n");
     assert.equal(run("64512").status, 1, "a log with no size line exits 1");
   } finally {
@@ -100,7 +118,13 @@ const coloured = "Total Upload: \u001b[31m59014.13 KiB / gzip: 10271.20 KiB\u001
   assert.ok(Number(budget![1]) <= 65536, "the budget never exceeds Cloudflare's 64 MiB uncompressed limit");
   const pipefail = code.indexOf("set -o pipefail");
   const tee = code.findIndex((l) => /^npx wrangler deploy --dry-run .*2>&1 \| tee "\$RUNNER_TEMP\/wrangler-dry-run\.log"$/.test(l));
-  const check = code.findIndex((l) => l === 'node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log"');
+  const check = code.findIndex(
+    (l) => l === 'node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log" .wrangler/ci-dry-run',
+  );
+  assert.ok(
+    code.some((l) => l.includes("wrangler deploy --dry-run --outdir .wrangler/ci-dry-run")),
+    "the check reads worker.js from the same --outdir the dry run writes",
+  );
   assert.ok(pipefail >= 0, "pipefail is set, so a failed dry run is not swallowed by tee");
   assert.ok(tee > pipefail, "the dry run's output (stdout and stderr) goes to the log the check reads");
   assert.ok(check > tee, "the size check runs on that log, after the dry run");

@@ -304,7 +304,7 @@ export function parseTextList(
   const out: string[] = [];
   const seen = new Set<string>();
   for (const line of raw.split(/[\r\n]+/)) {
-    const item = line.trim().replace(/^[-*•]\s*/, "").slice(0, maxItemLength).trim();
+    const item = line.trim().replace(/^[-*\u2022]\s*/, "").slice(0, maxItemLength).trim();
     if (!item) continue;
     const key = item.toLowerCase();
     if (seen.has(key)) continue;

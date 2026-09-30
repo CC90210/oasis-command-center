@@ -71,7 +71,8 @@ function isChatShellPath(pathname: string): boolean {
  * apex/conversations-inbox-v2 Phase 1).
  */
 function isFullBleedPath(pathname: string): boolean {
-  return /^\/t\/[^/]+\/conversations(\/.*)?$/.test(pathname);
+  // /schedule is a calendar: it owns the viewport and scrolls its own grid.
+  return /^\/t\/[^/]+\/conversations(\/.*)?$/.test(pathname) || pathname === "/schedule";
 }
 
 /**

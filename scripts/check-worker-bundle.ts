@@ -17,12 +17,21 @@
  * size line is a failure, not a pass: if wrangler changes its wording or stops
  * before bundling, the size is unknown, and unknown is not under budget.
  *
- * Exit 0 = within budget; 1 = over budget, no size line, or no usable budget.
+ * It also reads the uploaded worker.js from the dry run's --outdir and fails
+ * on any character above U+00FF. One such character makes V8 store the whole
+ * ~57M-character source as UTF-16, about 109 MiB of the isolate's 128 MiB
+ * instead of about 54. Isolates then die every few requests while still
+ * reporting `ok`, and pages cold-start at ~2 s (#485).
+ * tests/worker-source-one-byte.test.ts stops our own regex literals; this
+ * catches everything else, such as a dependency that adds one.
  *
- * Run: WORKER_UPLOAD_BUDGET_KIB=64512 node --import tsx scripts/check-worker-bundle.ts <dry-run log>
+ * Exit 0 = both pass; 1 = either fails, or an input is missing or unusable.
+ *
+ * Run: WORKER_UPLOAD_BUDGET_KIB=64512 node --import tsx scripts/check-worker-bundle.ts <dry-run log> <outdir>
  */
 
 import { readFileSync } from "node:fs";
+import path from "node:path";
 
 export type SizeVerdict =
   | { ok: true; uploadKib: number; budgetKib: number }
@@ -59,22 +68,47 @@ export function checkWorkerSize(dryRunOutput: string, budgetKib: number): SizeVe
   return { ok: true, uploadKib, budgetKib };
 }
 
+export type OneByteVerdict = { ok: true; chars: number } | { ok: false; reason: string };
+
+/** The uploaded source must be Latin-1 only, so V8 keeps it at one byte per character. */
+export function checkOneByteSource(source: string): OneByteVerdict {
+  const wide = [...source.matchAll(/[^\u0000-ÿ]/g)];
+  if (wide.length === 0) return { ok: true, chars: source.length };
+  const shown = wide.slice(0, 5).map((m) => {
+    const at = m.index ?? 0;
+    const code = `U+${m[0].charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+    return `${code} near ${JSON.stringify(source.slice(Math.max(0, at - 50), at + 10))}`;
+  });
+  return {
+    ok: false,
+    reason:
+      `worker.js holds ${wide.length} character(s) above U+00FF, so V8 stores all ${source.length} characters as ` +
+      `UTF-16 and isolates run out of memory (#485). Escape each as \\uXXXX where it comes from:\n  ${shown.join("\n  ")}`,
+  };
+}
+
 function main(): number {
-  const logPath = process.argv[2];
-  if (!logPath) {
-    console.error("check-worker-bundle: pass the dry-run log path as the first argument");
+  const [logPath, outdir] = process.argv.slice(2);
+  if (!logPath || !outdir) {
+    console.error("check-worker-bundle: pass the dry-run log path and the dry run's --outdir");
     return 1;
   }
   const raw = process.env.WORKER_UPLOAD_BUDGET_KIB;
   const budget = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
-  const verdict = checkWorkerSize(readFileSync(logPath, "utf8"), budget);
-  if (!verdict.ok) {
-    console.error(`check-worker-bundle: FAIL, ${verdict.reason}`);
-    return 1;
+  const size = checkWorkerSize(readFileSync(logPath, "utf8"), budget);
+  const workerJs = path.join(outdir, "worker.js");
+  let oneByte: OneByteVerdict;
+  try {
+    oneByte = checkOneByteSource(readFileSync(workerJs, "utf8"));
+  } catch (err) {
+    oneByte = { ok: false, reason: `cannot read ${workerJs} (${(err as Error).message}), so its source is unchecked` };
   }
+  if (!size.ok) console.error(`check-worker-bundle: FAIL, ${size.reason}`);
+  if (!oneByte.ok) console.error(`check-worker-bundle: FAIL, ${oneByte.reason}`);
+  if (!size.ok || !oneByte.ok) return 1;
   console.log(
-    `check-worker-bundle: ${verdict.uploadKib.toFixed(2)} KiB uncompressed, within the ${verdict.budgetKib} KiB ` +
-      `budget (${(verdict.budgetKib - verdict.uploadKib).toFixed(2)} KiB left)`,
+    `check-worker-bundle: ${size.uploadKib.toFixed(2)} KiB uncompressed, within the ${size.budgetKib} KiB ` +
+      `budget (${(size.budgetKib - size.uploadKib).toFixed(2)} KiB left); worker.js is one-byte (${oneByte.chars} chars)`,
   );
   return 0;
 }
