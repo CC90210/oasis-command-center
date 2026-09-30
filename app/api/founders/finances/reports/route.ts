@@ -1,14 +1,18 @@
 /**
  * GET /api/founders/finances/reports?entity=&kind=pnl|balance|trial|cashflow|ledger|aging&from=&to=&account=
  * CSV export of a statement. Entity-gated like every Finances read.
+ *
+ * An incomplete book's export opens with a "# Books incomplete: …" comment
+ * line naming every gap (report-csv.ts coverageCsvRows), the same gaps the
+ * Reports page shows: a statement never leaves the app without them.
  */
 import { NextResponse } from "next/server";
 import { methodNotHere } from "@/lib/founders/method-guard";
 import { resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { financeErrorResponse } from "@/lib/founders-finances/http";
-import { REPORT_KINDS, runReport, type ReportKind } from "@/lib/founders-finances/reports-io";
+import { REPORT_KINDS, booksCoverageFor, runReport, type ReportKind } from "@/lib/founders-finances/reports-io";
 import { toCsv } from "@/lib/founders-finances/reports";
-import { agingRows, balanceRows, cashFlowRows, ledgerRows, pnlRows, trialRows } from "@/lib/founders-finances/report-csv";
+import { agingRows, balanceRows, cashFlowRows, coverageCsvRows, ledgerRows, pnlRows, trialRows } from "@/lib/founders-finances/report-csv";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +49,9 @@ export async function GET(req: Request) {
       default:
         rows = agingRows(r.data);
     }
-    const header = [[`${r.entity.name}`], [`${kind} ${r.from} to ${r.to} (exclusive)`], []];
+    // What the book covers: read after the report, for the entity it resolved (the gate ran there).
+    const coverage = await booksCoverageFor(r.entity);
+    const header = [...coverageCsvRows(coverage), [`${r.entity.name}`], [`${kind} ${r.from} to ${r.to} (exclusive)`], []];
     const csv = "﻿" + toCsv([...header, ...rows]);
     return new NextResponse(csv, {
       headers: {

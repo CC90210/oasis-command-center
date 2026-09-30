@@ -44,8 +44,8 @@ export const CRON_TABLE: ReadonlyArray<{ path: string; schedule: string }> = [
   { path: "/api/cron/sla-check", schedule: "*/15 * * * *" },
   { path: "/api/cron/reconcile-sms", schedule: "*/15 * * * *" },
   { path: "/api/cron/connection-health", schedule: "*/15 * * * *" },
-  { path: "/api/cron/finance-books?job=fx-refresh", schedule: "23 21 * * *" },
-  { path: "/api/cron/finance-books?job=stripe-reconcile", schedule: "43 21 * * *" },
+  { path: "/api/cron/finance-books?job=fx-refresh", schedule: "47 21 * * *" },
+  { path: "/api/cron/finance-books?job=stripe-reconcile", schedule: "53 21 * * *" },
   { path: "/api/cron/finance-books?job=wise-reconcile", schedule: "7 22 * * *" },
   { path: "/api/cron/finance-books?job=wise-sync", schedule: "29 22 * * *" },
 ];

@@ -2,9 +2,15 @@
  * /founders/finances/reports — the business's P&L, Balance Sheet, Trial
  * Balance, Cash Flow, General Ledger and AR aging for a date range, with a CSV
  * export of the same data.
+ *
+ * While the book is incomplete (books-coverage.ts: costs missing for some
+ * months, no bank deposits, no opening balance, payouts not booked) every
+ * statement says so above it, the subtitle stops calling them final, and the
+ * CSV export opens with the same gaps as a comment line.
  */
 import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
+import { BooksCoverageBanner } from "@/components/founders/finances/BooksCoverageBanner";
 import { inputClass, labelClass, numClass, primaryButton, quietButton, tableClass, tdClass, thClass } from "@/components/founders/finances/ui";
 import { financePage, loadReportsPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { REPORT_KINDS, type ReportKind } from "@/lib/founders-finances/reports-io";
@@ -48,22 +54,29 @@ function Rows({ title, rows, total }: { title: string; rows: AccountRow[]; total
 
 export default async function ReportsPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity, sp } = await financePage(searchParams);
-  const { kind, account, report: r, accounts } = await loadReportsPage(viewer, entity, sp);
+  const { kind, account, report: r, accounts, coverage } = await loadReportsPage(viewer, entity, sp);
   const base = `from=${r.from}&to=${r.to}`;
   const csvHref = `/api/founders/finances/reports?${base}&kind=${kind}${account ? `&account=${encodeURIComponent(account)}` : ""}`;
   const pointInTime = kind === "balance" || kind === "trial" || kind === "aging";
+  const range = `${LABEL[kind]}: ${pointInTime ? `as of ${r.to} (not included)` : `${r.from} up to ${r.to} (not included)`}.`;
 
   return (
     <div className="space-y-6 animate-fade-in">
       <PageHeader
         title="Reports"
-        subtitle={`The statements an accountant asks for, in CAD. ${LABEL[kind]}: ${pointInTime ? `as of ${r.to} (not included)` : `${r.from} up to ${r.to} (not included)`}.`}
+        subtitle={
+          coverage.complete
+            ? `The statements an accountant asks for, in CAD. ${range}`
+            : `Statements from what the books record so far, in CAD: not final while the books are incomplete. ${range}`
+        }
         action={
           <a href={csvHref} className={primaryButton}>
             Export CSV
           </a>
         }
       />
+
+      <BooksCoverageBanner coverage={coverage} figures="These statements" />
 
       <Card>
         <div className="mb-4 flex flex-wrap gap-1">

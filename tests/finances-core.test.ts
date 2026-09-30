@@ -224,11 +224,13 @@ t("GST 5% and QST 9.975% both on the pre-tax amount, rounded half away from zero
 t("small-supplier tracker warns at 75% / 90% and flags a single quarter over", () => {
   const qs = (a: number, b: number, c: number, d: number) =>
     [a, b, c, d].map((v, i) => ({ label: `Q${i}`, revenueCents: v }));
-  assert.equal(smallSupplierStatus(qs(0, 0, 0, 1_000_000)).level, "ok");
-  assert.equal(smallSupplierStatus(qs(500_000, 500_000, 600_000, 650_000)).level, "watch"); // 75%
-  assert.equal(smallSupplierStatus(qs(700_000, 700_000, 700_000, 600_000)).level, "warning"); // 90%
-  assert.equal(smallSupplierStatus(qs(800_000, 800_000, 800_000, 700_001)).level, "exceeded");
-  const single = smallSupplierStatus(qs(0, 0, 0, 3_000_001));
+  // Books that hold every sale (a bank feed from before the first revenue): the levels as before.
+  const all = { complete: true, note: null };
+  assert.equal(smallSupplierStatus(qs(0, 0, 0, 1_000_000), all).level, "ok");
+  assert.equal(smallSupplierStatus(qs(500_000, 500_000, 600_000, 650_000), all).level, "watch"); // 75%
+  assert.equal(smallSupplierStatus(qs(700_000, 700_000, 700_000, 600_000), all).level, "warning"); // 90%
+  assert.equal(smallSupplierStatus(qs(800_000, 800_000, 800_000, 700_001), all).level, "exceeded");
+  const single = smallSupplierStatus(qs(0, 0, 0, 3_000_001), all);
   assert.equal(single.level, "exceeded");
   assert.equal(single.singleQuarterExceeded, "Q3");
   assert.deepEqual(trailingFourQuarters("2026-09-24").map((q) => q.label), ["2025-Q4", "2026-Q1", "2026-Q2", "2026-Q3"]);

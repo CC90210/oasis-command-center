@@ -46,7 +46,9 @@ assert.match(analytics, /mrrState === "oasis" \? loadOasisMoney\(tenantId, "anal
 // was set and a synthetic decline curve when no history existed; that branch
 // now says "Not connected", and the readers are gone from lib/queries.ts.
 assert.doesNotMatch(analytics, /mrrSnapshot|mrrHistory|mrr_current_usd|mrr_target_usd|MRRProgressChart/, "/analytics must not read or chart the typed profile MRR");
-assert.match(analytics, /<Stat label="Net MRR" value=\{MRR_COPY\[noMoney\]\.value\}/, "a workspace without live Stripe MRR gets words, never a number");
+// 2026-09-30: the stat is "MRR (Stripe)", and its hint says when the books last heard from Stripe.
+assert.match(analytics, /<Stat label="MRR \(Stripe\)" value=\{MRR_COPY\[noMoney\]\.value\}/, "a workspace without live Stripe MRR gets words, never a number");
+assert.doesNotMatch(analytics, /`live Stripe/, "the MRR hint is a sync time, never a bare 'live Stripe'");
 assert.match(mrrState, /not_connected: \{\s*value: "Not connected",/, "a confirmed non-OASIS workspace says Not connected");
 const queries = read("lib/queries.ts");
 assert.doesNotMatch(queries, /export async function mrr(Snapshot|History)\(/, "the fake-MRR readers must stay deleted");

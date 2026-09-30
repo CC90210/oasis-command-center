@@ -254,6 +254,12 @@ async function main() {
     assert.equal(await count(`SELECT COUNT(*) FROM fin_payments WHERE stripe_charge_id = 'ch_sig'`), 0);
   });
 
+  // Production has OASIS's Stripe account pinned (Finances › Settings). Since
+  // 2026-09-30 a webhook event reaches the books only from the pinned account
+  // (stripe-ingest.ts stripeEventOrigin); with no Stripe key here, the
+  // endpoint's signing secret is the proof, as before.
+  await raw.execute({ sql: `UPDATE fin_settings SET stripe_account_id = 'acct_test_oasis' WHERE entity_id = ?`, args: [B] });
+
   await check("webhook: idempotent on event id, one payment across charge + intent events", async () => {
     const bt = { id: "txn_1", object: "balance_transaction", amount: 50000, fee: 1480, net: 48520, currency: "cad" };
     const c1 = charge({ id: "ch_1", amount: 50000, pi: "pi_1", bt, name: "Northwind", email: "ap@northwind.test", customer: "cus_nw" });
@@ -439,7 +445,11 @@ async function main() {
     assert.equal(res.status, 200);
     const body = (await res.json()) as { revenue_collected: { payments: number }; threshold: { level: string }; mrr: { mrr_cents: number } };
     assert.ok(body.revenue_collected.payments >= 3);
+    // A bank statement was imported (rbc.csv, above) with lines dated before
+    // the first revenue, so the books can hold every sale and the tracker may
+    // say "under" (books-coverage.ts; without an import it is "unconfirmed").
     assert.equal(body.threshold.level, "ok");
+    assert.equal((body as unknown as { threshold: { revenueComplete: boolean } }).threshold.revenueComplete, true);
     assert.equal(body.mrr.mrr_cents, 60000);
     const post = (payload: unknown) =>
       draftsRoute.POST(new Request("http://localhost/api/internal/finance/transactions", { method: "POST", headers: { authorization: `Bearer ${saved}` }, body: JSON.stringify(payload) }));

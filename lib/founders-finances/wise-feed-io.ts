@@ -86,7 +86,22 @@ import {
 } from "./wise-feed";
 import { wiseStatement, WiseNotReady } from "./wise-io";
 import { recordedRefs } from "./wise-reconcile";
-import { bookedPayoutEntry, payoutBookedFromAnotherLine } from "./stripe-payouts-io";
+import { bookedPayoutEntry, payoutBookedFromAnotherLine, unadoptedPayoutShape, unadoptedPayoutShapedEntry } from "./stripe-payouts-io";
+
+/**
+ * The plain reason the feed holds a payout's line while an entry of that
+ * payout's exact shape, adopted by no payout, is already on the books (a
+ * deposit entered by hand or from a statement): posting the line too would
+ * put the deposit in the bank twice (stripe-payouts-io.ts unadoptedPayoutShape).
+ */
+export const PAYOUT_SHAPE_HOLD_REASON = "an unadopted entry of this payout's exact shape is already on the books";
+
+function payoutShapeHoldNote(payoutId: string, entryDate: string): string {
+  return (
+    `${DECIDE_NOTE}Stripe payout ${payoutId} held: ${PAYOUT_SHAPE_HOLD_REASON} (${entryDate}: Stripe clearing into a bank account, the same amount). ` +
+    "If that entry is this deposit, exclude this line and the payout books from that entry. If it is a different deposit, check both before categorising this line by hand; nothing is posted automatically."
+  );
+}
 import { PAYOUT_SOURCE } from "./stripe-payouts";
 
 const FEED_CURRENCIES = ["CAD", "USD"] as const;
@@ -537,6 +552,11 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           count(fitid, "needs_review");
           continue;
         }
+        // An unadopted entry of this payout's shape is on the books: the sync would hold the line, not book it.
+        if (await unadoptedPayoutShapedEntry(r.payout)) {
+          count(fitid, "needs_review");
+          continue;
+        }
         const row = rowByFitid.get(fitid) as WiseFeedRow;
         const cur = (r.payout.settlementCurrency || "").toUpperCase();
         const clearing = cur ? (await stripeClearingCents(entity.id, acct.stripeClearing, cur)) - (taken.get(cur) || 0) : undefined;
@@ -654,6 +674,17 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           count(fitid, "needs_review");
           continue;
         }
+        // Not adopted yet, but an entry of this payout's exact shape is on the books (a deposit entered by hand or
+        // from a statement). Posting this line too would put the deposit in the bank twice, and the payout would
+        // later adopt only one of them: HELD for a founder. A real second deposit of the same amount in the window
+        // waits for that decision too; it is never posted automatically.
+        const twin = await unadoptedPayoutShapedEntry(p);
+        if (twin) {
+          setNote(line, payoutShapeHoldNote(p.id, twin.entryDate));
+          count(fitid, "needs_review");
+          continue;
+        }
+        const shape = unadoptedPayoutShape(p);
         const settleCur = (p.settlementCurrency || "").toUpperCase();
         const clearing = settleCur ? await stripeClearingCents(entity.id, acct.stripeClearing, settleCur) : undefined;
         const holdPayout = (reason: string) => {
@@ -684,12 +715,14 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           // The webhook or the reconcile may book it after the checks above: from Stripe (then the next
           // sync links the line to that booking), or by adopting another bank line's entry, whatever that
           // entry's source (then the next sync holds this line as the same deposit again). Either way the
-          // payout's row names a posted entry, and this posts nothing.
+          // payout's row names a posted entry, and this posts nothing. Nor does it when an unadopted entry
+          // of the payout's shape landed meanwhile (a deposit entered by hand): the next sync holds the line.
           gate: {
             sql: `NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')
                   AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts sp JOIN fin_journal_entries se ON se.id = sp.entry_id
-                                   WHERE sp.id = ? AND sp.entity_id = ? AND sp.booking = 'booked' AND se.status = 'posted')`,
-            args: [entity.id, PAYOUT_SOURCE, p.id, p.id, entity.id],
+                                   WHERE sp.id = ? AND sp.entity_id = ? AND sp.booking = 'booked' AND se.status = 'posted')
+                  AND NOT EXISTS (SELECT 1 FROM fin_journal_entries e WHERE ${shape.sql})`,
+            args: [entity.id, PAYOUT_SOURCE, p.id, p.id, entity.id, ...shape.args],
           },
         });
         const r = await writeBatch([...posting.posting, ...posting.link]);

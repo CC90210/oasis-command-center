@@ -2,11 +2,19 @@
  * /founders/finances/transactions — the business's money-in/out register:
  * filters, categorise (posts to the ledger), exclude, "make a rule from this",
  * manual entry, statement import, Atlas drafts to approve, and Stripe activity.
+ *
+ * "All activity" (activity-io.ts) lists every recorded movement, bank lines,
+ * payments, refunds, bills and expenses, under the same date and search
+ * filters: with no bank feed the register below is empty while the books
+ * hold September's bills and the Stripe payments, and the page must not read
+ * as "nothing happened". What the book does not cover is said first.
  */
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import { ActionForm } from "@/components/founders/finances/ActionForm";
 import { ActionButton } from "@/components/founders/finances/ActionButton";
+import { ActivityTable } from "@/components/founders/finances/ActivityTable";
+import { BooksCoverageBanner } from "@/components/founders/finances/BooksCoverageBanner";
 import { CategorizeCell } from "@/components/founders/finances/CategorizeCell";
 import { ImportPanel } from "@/components/founders/finances/ImportPanel";
 import { ReceiptUpload } from "@/components/founders/finances/ReceiptUpload";
@@ -23,7 +31,7 @@ const STATUS_TONE = { unreviewed: "warm", posted: "engaged", excluded: "neutral"
 
 export default async function TransactionsPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity, sp } = await financePage(searchParams);
-  const { filters, rows, accounts, categories, imports, payments } = await loadTransactionsPage(viewer, entity, sp);
+  const { filters, rows, accounts, categories, imports, payments, activity, coverage } = await loadTransactionsPage(viewer, entity, sp);
   const registerAccounts = accounts.filter((a) => REGISTER_SUBTYPES.has(a.subtype));
   const catOptions = categories.map((c) => ({ id: c.id, name: c.name, kind: c.kind }));
   const drafts = rows.filter((r) => r.status === "draft").length;
@@ -99,10 +107,34 @@ export default async function TransactionsPage({ searchParams }: { searchParams:
         </form>
       </Card>
 
-      <Card title={`Register (${rows.length})`} noPadding>
+      <BooksCoverageBanner coverage={coverage} figures="The movements on this page" />
+
+      <Card
+        title={`All activity (${activity.length}${activity.length === 100 ? "+" : ""})`}
+        subtitle="Bank lines, payments, refunds, bills and expenses the books record, newest first. Date and search filters apply."
+        noPadding
+      >
+        {activity.length === 0 ? (
+          <p className="p-5 text-sm text-fg-muted">
+            Nothing recorded{filters.from || filters.to || filters.q ? " for these filters" : " yet"}: no bank line, payment, bill or expense.{" "}
+            <a href="#import" className="text-[#1FE3F0] hover:underline">
+              Import a statement
+            </a>{" "}
+            or{" "}
+            <Link href="/founders/finances/bills#record" className="text-[#1FE3F0] hover:underline">
+              record an expense
+            </Link>
+            .
+          </p>
+        ) : (
+          <ActivityTable rows={activity} />
+        )}
+      </Card>
+
+      <Card title={`Bank register (${rows.length})`} subtitle="Imported and hand-entered bank lines: categorise each to post it to the books." noPadding>
         {rows.length === 0 ? (
           <p className="p-5 text-sm text-fg-muted">
-            No transactions match.{" "}
+            No bank lines match.{" "}
             <a href="#import" className="text-[#1FE3F0] hover:underline">
               Import a statement
             </a>{" "}

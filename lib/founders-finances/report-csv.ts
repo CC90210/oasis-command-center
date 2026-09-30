@@ -10,6 +10,18 @@ import { AGING_BUCKETS } from "./reports";
 type Cell = string | number;
 const d = centsToDecimalString;
 
+/**
+ * The CSV's first line when the book is incomplete: a comment row ("#", the
+ * convention spreadsheet imports and accountants' tools skip or show as a
+ * note) naming every gap, so an exported statement never travels without
+ * what it leaves out (books-coverage.ts). One cell, so no gap is split
+ * across columns. Complete books: nothing.
+ */
+export function coverageCsvRows(coverage: { complete: boolean; gaps: readonly string[] }): Cell[][] {
+  if (coverage.complete || coverage.gaps.length === 0) return [];
+  return [[`# Books incomplete: these figures are what the books record so far, not the whole picture. ${coverage.gaps.map((g) => (/[.!?]$/.test(g.trim()) ? g.trim() : `${g.trim()}.`)).join(" ")}`]];
+}
+
 function section(title: string, rows: AccountRow[], total: number): Cell[][] {
   return [[title], ...rows.map((r) => [r.code, r.name, d(r.amountCents)]), [`Total ${title.toLowerCase()}`, "", d(total)], []];
 }

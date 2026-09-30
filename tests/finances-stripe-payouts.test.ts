@@ -55,6 +55,8 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
     const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     const list = (data: unknown[]) => json({ object: "list", data, has_more: false });
     if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+    // A webhook event is proved to be the pinned account's before it is booked (stripe-ingest.ts stripeEventOrigin).
+    if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
     if (url.pathname === "/v1/balance_transactions") return list(stripe.contents[url.searchParams.get("payout") ?? ""] ?? []);
     if (url.pathname === "/v1/payouts") return list(stripe.payouts);
     if (["/v1/charges", "/v1/refunds", "/v1/subscriptions", "/v1/invoice_payments"].includes(url.pathname)) return list([]);

@@ -13,9 +13,10 @@
  *   - a failed ledger insert rolls the book write back (the payment row, the
  *     subscription row, an invoice's payment: its row, key or link, the
  *     processed mark) and Stripe's retry then lands both;
- *   - no workspace to say (no finance tenant, or the account not pinned):
- *     the book write still happens, the fact goes to ledger_dead_letters,
- *     never to a default tenant;
+ *   - no workspace to say (no finance tenant): the book write still happens,
+ *     the fact goes to ledger_dead_letters, never to a default tenant; no
+ *     Stripe account pinned: the event itself is refused and dead-lettered
+ *     (the contamination guard, 2026-09-30);
  *   - payloads hold ids and codes: no customer name or email reaches the ledger.
  *
  * Run: node --conditions=react-server --import tsx tests/finances-stripe-ledger-events.test.ts
@@ -112,6 +113,14 @@ async function main() {
   for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql"]) {
     await raw.executeMultiple(readFileSync(join(root, "database/turso", f), "utf8"));
   }
+  // bravo__188: the client records a Stripe customer links to (payment.received / refund.issued carry the record
+  // as customer_id). It alters migration 183's delivery tables, so those come first (as os-honest-numbers does).
+  const deliveryTables = readFileSync(join(root, "database/turso/183_delivery_and_support.turso.sql"), "utf8").match(
+    /CREATE TABLE IF NOT EXISTS (?:delivery_projects|delivery_tasks|delivery_updates|support_tickets|ticket_comments) \([\s\S]*?\n\);/g,
+  );
+  assert.equal(deliveryTables?.length, 5, "the five delivery tables are in migration 183");
+  await raw.executeMultiple(deliveryTables!.join("\n"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__188_os_customers.sql"), "utf8"));
   for (let d = 1; d <= 30; d++) {
     await raw.execute({ sql: `INSERT INTO fin_fx_rates (pair, rate_date, rate) VALUES ('USDCAD', ?, '1.3800')`, args: [`2026-09-${String(d).padStart(2, "0")}`] });
   }
@@ -365,14 +374,20 @@ async function main() {
     }
   });
 
-  await check("no workspace to say (Stripe account not pinned): dead-lettered with that reason", async () => {
+  // 2026-09-30 (contamination guard, stripe-ingest.ts stripeEventOrigin): with
+  // no Stripe account pinned, nothing says the event is OASIS's, so it never
+  // reaches the books at all (it used to be kept, with only its ledger fact
+  // dead-lettered). It is dead-lettered whole, ids only.
+  await check("Stripe account not pinned: the event never reaches the books or the ledger; dead-lettered with that reason, ids only", async () => {
     await pin(null);
     try {
-      await ingest.handleStripeEvent(event("customer.subscription.created", subscription("sub_led_unpinned")));
-      assert.equal(await num(`SELECT COUNT(*) FROM fin_subscriptions WHERE id = 'sub_led_unpinned'`), 1, "the subscription is still kept");
+      const out = await ingest.handleStripeEvent(event("customer.subscription.created", subscription("sub_led_unpinned")));
+      assert.equal(out.status, "ignored");
+      assert.equal(await num(`SELECT COUNT(*) FROM fin_subscriptions WHERE id = 'sub_led_unpinned'`), 0, "nothing kept for an account nobody pinned");
       assert.equal((await ledger("subscription.started")).filter((r) => r.subject_id === "sub_led_unpinned").length, 0);
-      const dl = (await raw.execute(`SELECT error FROM ledger_dead_letters WHERE event_key = 'subscription.started'`)).rows;
-      assert.deepEqual(dl.map((r) => r.error), ["tenant_unmapped:stripe_account_unpinned"]);
+      const dl = (await raw.execute(`SELECT error, payload_json FROM ledger_dead_letters WHERE error LIKE 'foreign_stripe_account:%'`)).rows;
+      assert.deepEqual(dl.map((r) => r.error), ["foreign_stripe_account:stripe_account_unpinned"]);
+      assert.doesNotMatch(String(dl[0].payload_json), /Tremblay|jean@example/, "ids only");
     } finally {
       await pin("acct_test_oasis");
     }
