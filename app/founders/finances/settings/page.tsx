@@ -53,8 +53,9 @@ async function StripeStatus({ entitySlug }: { entitySlug: string }) {
 export default async function FinanceSettingsPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, entity } = await financePage(searchParams);
   const { settings: s, rules, categories, lastFx, lastEvent, bankAccounts } = await loadSettingsPage(viewer, entity);
-  // A connected Stripe is shown as when the books last heard from it, never as a bare word.
-  const lastSync = [lastEvent?.at, lastEvent?.reconciled_at].filter((t): t is string => !!t).sort().pop() ?? null;
+  // A connected Stripe is shown as when the books last heard from it, never as a bare word:
+  // a live event that reached the books, or a completed reconcile (a failing or test-mode delivery is not a sync).
+  const lastSync = [lastEvent?.synced_at, lastEvent?.reconciled_at].filter((t): t is string => !!t).sort().pop() ?? null;
   const sync = stripeSyncLine(lastSync, Date.now());
 
   return (
@@ -104,7 +105,7 @@ export default async function FinanceSettingsPage({ searchParams }: { searchPara
           </Suspense>
           <p>
             <span className={sync.state === "live" ? "text-fg" : "text-status-warm"}>{sync.note}</span>
-            <span className="text-fg-muted"> (the newest webhook event or daily reconcile)</span>
+            <span className="text-fg-muted"> (the newest webhook event that reached the books, or daily reconcile)</span>
           </p>
           <p className="text-xs text-fg-dim">
             Webhook endpoint: <span className="font-mono">/api/webhooks/stripe-finance</span> · events received: {lastEvent?.n ?? 0}

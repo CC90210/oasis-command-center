@@ -1,7 +1,8 @@
 /**
  * tests/finances-books-cron.test.ts — the books' daily upkeep is scheduled,
  * authenticated, in dependency order, and safe to run: the Wise feed stays a
- * dry run while its switch is off, and a failure answers non-2xx with a
+ * dry run while its switch is off, the Wise invoice match is always a dry run
+ * (recording a payment is a founder's call), and a failure answers non-2xx with a
  * stable code and nothing else (the rollback driver prints bodies to a
  * public log).
  *
@@ -31,8 +32,13 @@ process.env.CRON_SECRET = "test-cron-secret-0123456789";
 process.env.CRON_ATTEST_SECRET = "test-cron-attest-0123456789";
 
 let valetCalls = 0;
+const WISE_PROFILE = "82000009";
 globalThis.fetch = (async (input: unknown) => {
   const url = new URL(String(input));
+  // Wise, once configured below: a business profile with no balances, so there is nothing to record.
+  if (url.host === "api.transferwise.com" && url.pathname === `/v4/profiles/${WISE_PROFILE}/balances`) {
+    return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (url.host === "www.bankofcanada.ca") {
     valetCalls += 1;
     return new Response(JSON.stringify({ observations: [{ d: "2026-09-28", FXUSDCAD: { v: "1.3912" } }, { d: "2026-09-29", FXUSDCAD: { v: "1.3925" } }] }), {
@@ -136,6 +142,22 @@ async function main() {
     const r = await call("wise-reconcile");
     assert.equal(r.status, 503);
     assert.deepEqual(r.body, { ok: false, job: "wise-reconcile", error: "wise_not_configured" });
+  });
+
+  await check("wise-reconcile on the schedule is a DRY RUN: recording an invoice payment stays a founder's click", async () => {
+    assert.equal(books.WISE_RECONCILE_CRON_DRY_RUN, true);
+    process.env.WISE_API_TOKEN = "wise-test-token";
+    process.env.WISE_PROFILE_ID = WISE_PROFILE;
+    try {
+      const r = await call("wise-reconcile");
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const result = r.body.result as Record<string, unknown>;
+      assert.equal(result.dry_run, true, "the job asks reconcileWise for a dry run, whatever the feed switch says");
+      assert.equal(result.recorded, 0);
+    } finally {
+      delete process.env.WISE_API_TOKEN;
+      delete process.env.WISE_PROFILE_ID;
+    }
   });
 
   if (failures) {

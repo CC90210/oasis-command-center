@@ -9,12 +9,27 @@
  * re-run reconcile posts nothing new. Both entries are gated on the payout
  * still being unbooked, and the row flips to "booked" in the same batch.
  *
- * NEVER TWICE WITH THE BANK FEED. The Wise feed (wise-feed-io.ts) recognises
- * the same payout on its bank line. If the feed booked it first, the payout
- * here is ADOPTED (its row points at the bank line's entry) and nothing is
- * posted; the booking batch is also gated on no such bank line existing. The
- * feed, in turn, links its line to an entry booked here instead of posting
- * its own.
+ * NEVER TWICE WITH A BANK LINE. The same payout reaches the books as a bank
+ * line too, three ways: the Wise feed recognises it and tags the line with
+ * its id; an uploaded statement's line, or an untagged Wise line (the feed
+ * could not read Stripe's payouts), is categorised to Stripe clearing by the
+ * seeded "Stripe payouts are transfers" rule or by hand; or someone posts it
+ * by hand. Whichever came first owns it:
+ *   - a bank line already on the books is ADOPTED (the payout's row points at
+ *     its entry) and nothing is posted: the feed's tagged line by its tag,
+ *     any other by its SHAPE (existingPayoutEntry: a posted entry crediting
+ *     1050 and debiting a bank or cash account exactly what the payout
+ *     brought, within PAYOUT_MATCH_WINDOW_DAYS, that no other payout owns).
+ *     The booking batch is gated on neither existing, so one landing between
+ *     the check and the write stops it, and it is adopted instead;
+ *   - a bank line arriving after the payout was booked here is LINKED to this
+ *     entry: by the feed (bookedPayoutEntry), or by categorisation
+ *     (transactions-io.ts, bookedPayoutForBankLine), which never posts it.
+ *
+ * WHAT CONVERTS. A USD payout from charges booked in CAD converts exactly the
+ * charges it pays out, as Stripe lists them (payoutContents; the reasoning is
+ * stripe-payouts.ts's). Without a Stripe key it is held until the reconcile,
+ * which has one, books it.
  *
  * FAILED / CANCELED. A payout that never landed is recorded "not_booked". One
  * booked here that Stripe later reports failed is reversed (ledger-io.ts
@@ -29,9 +44,22 @@ import { finDb, isUniqueViolation, n, newId, query, queryOne, writeBatch, type I
 import { buildPosting, buildReversal } from "./ledger-io";
 import { LedgerError } from "./ledger";
 import { usdCadRate } from "./fx-io";
-import { torontoToday, usdToCadCents } from "./fx";
+import { addDays, torontoToday, usdToCadCents } from "./fx";
+import { normalizeCurrencyCode } from "./money";
 import type { PayoutFacts } from "./stripe-map";
-import { PAYOUT_FX_SOURCE, PAYOUT_SOURCE, payoutBankLineName, planStripePayout, UNMAPPED_REASON, type PayoutAccounts } from "./stripe-payouts";
+import { getStripeClient, listAll, StripeApiError, StripeNotReady } from "./stripe-io";
+import { centsToDecimal } from "./wise-feed";
+import {
+  PAYOUT_FX_SOURCE,
+  PAYOUT_MATCH_WINDOW_DAYS,
+  PAYOUT_SOURCE,
+  payoutBankLineName,
+  payoutNeedsContents,
+  planStripePayout,
+  UNMAPPED_REASON,
+  type PayoutAccounts,
+  type PayoutContents,
+} from "./stripe-payouts";
 
 const E = BUSINESS_ENTITY_ID;
 const ACTOR = "stripe";
@@ -101,13 +129,119 @@ export async function payoutBankAccount(): Promise<{ id: string; reason: null } 
   return { id: row.account_id, reason: null };
 }
 
-/** What 1050 Stripe clearing holds, per currency. Every line counts: a reversal cancels its original. */
-async function clearingByCurrency(): Promise<Record<string, number>> {
+/**
+ * What 1050 Stripe clearing holds on `asOf`, per currency: every line of an
+ * entry dated that day or before (a reversal cancels its original). A payout
+ * never draws on a charge booked after it arrived.
+ */
+async function clearingByCurrency(asOf: string): Promise<Record<string, number>> {
   const rows = await query<{ currency: string; n: number | null }>(
-    `SELECT currency, COALESCE(SUM(debit_cents - credit_cents), 0) AS n FROM fin_journal_lines WHERE entity_id = ? AND account_id = ? GROUP BY currency`,
-    [E, accountId(E, SYS.stripeClearing)],
+    `SELECT l.currency, COALESCE(SUM(l.debit_cents - l.credit_cents), 0) AS n
+       FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id
+      WHERE l.entity_id = ? AND l.account_id = ? AND e.entry_date <= ?
+      GROUP BY l.currency`,
+    [E, accountId(E, SYS.stripeClearing), asOf],
   );
   return Object.fromEntries(rows.map((r) => [r.currency, n(r.n)]));
+}
+
+type BalanceTxn = { id: string; type: string; source: string | null; amount: number; net: number; currency: string };
+
+function balanceTxnOf(raw: Record<string, unknown>): BalanceTxn | null {
+  const id = typeof raw.id === "string" ? raw.id : null;
+  const type = typeof raw.type === "string" ? raw.type : null;
+  const src = raw.source;
+  const source = typeof src === "string" ? src : typeof (src as { id?: unknown } | null)?.id === "string" ? String((src as { id: string }).id) : null;
+  const currency = normalizeCurrencyCode(raw.currency);
+  if (!id || !type || !currency || !Number.isSafeInteger(raw.amount) || !Number.isSafeInteger(raw.net)) return null;
+  return { id, type, source, amount: raw.amount as number, net: raw.net as number, currency };
+}
+
+/**
+ * What a payout pays out, from Stripe (GET /v1/balance_transactions?payout=,
+ * automatic payouts only; read-only), matched to the rows that booked it:
+ * each charge to its payment and each refund to its refund, by balance
+ * transaction id, else by charge or refund id. Not ok, with the reason, when
+ * Stripe cannot say (no key, a manual payout, an error), when a charge or
+ * refund in it is not booked, when it holds anything else the books do not
+ * record, or when the list does not add up to the payout.
+ */
+export async function payoutContents(p: Pick<PayoutFacts, "payoutId" | "settlementCents" | "settlementCurrency" | "feeCents">): Promise<PayoutContents> {
+  const id = p.payoutId;
+  const no = (reason: string): PayoutContents => ({ ok: false, reason });
+  let key: string;
+  try {
+    key = (await getStripeClient()).key;
+  } catch (e) {
+    if (e instanceof StripeNotReady) return no(`Stripe is not connected (${e.code}), so which charges payout ${id} pays out cannot be read; the next reconcile books it`);
+    throw e;
+  }
+  let listed: { items: Array<Record<string, unknown>>; truncated: boolean };
+  try {
+    listed = await listAll(key, "/v1/balance_transactions", { payout: id }, { maxPages: 20 });
+  } catch (e) {
+    // Held with the reason, never booked on a guess; the next reconcile asks again.
+    console.error("[finances:payouts] could not list what payout", id, "pays out:", e instanceof Error ? e.message : e);
+    if (e instanceof StripeApiError) {
+      return no(`Stripe did not list what payout ${id} pays out (HTTP ${e.status}; a manual payout is not listed), so it is not booked automatically`);
+    }
+    return no(`Stripe could not be reached to list what payout ${id} pays out; the next reconcile asks again`);
+  }
+  if (listed.truncated) return no(`payout ${id} pays out more than one read of Stripe lists, so it is not booked automatically`);
+  const txns: BalanceTxn[] = [];
+  for (const raw of listed.items) {
+    const t = balanceTxnOf(raw);
+    if (!t) return no(`Stripe listed something in payout ${id} the books cannot read`);
+    if (t.type === "payout" && t.source === id) continue; // the payout itself
+    txns.push(t);
+  }
+  const settleCur = p.settlementCurrency;
+  const other = txns.find((t) => t.currency !== settleCur);
+  if (other) return no(`payout ${id} pays out ${other.id} in ${other.currency}, not the ${settleCur} it settled in`);
+
+  // The rows that booked its charges and refunds, in one read per 150 ids.
+  const ids = [...new Set(txns.flatMap((t) => [t.id, t.source]).filter((v): v is string => !!v))];
+  const rows: Array<{ kind: string; stripe_balance_txn_id: string | null; stripe_charge_id: string | null; stripe_refund_id: string | null; settlement_cad_cents: number | null; entry_id: string | null }> = [];
+  for (let i = 0; i < ids.length; i += 150) {
+    const chunk = ids.slice(i, i + 150);
+    const marks = chunk.map(() => "?").join(",");
+    rows.push(
+      ...(await query<(typeof rows)[number]>(
+        `SELECT kind, stripe_balance_txn_id, stripe_charge_id, stripe_refund_id, settlement_cad_cents, entry_id FROM fin_payments
+          WHERE entity_id = ? AND source = 'stripe' AND (stripe_balance_txn_id IN (${marks}) OR stripe_charge_id IN (${marks}) OR stripe_refund_id IN (${marks}))`,
+        [E, ...chunk, ...chunk, ...chunk],
+      )),
+    );
+  }
+  const booked = (t: BalanceTxn, kind: "payment" | "refund") =>
+    rows.find((r) => r.kind === kind && r.stripe_balance_txn_id === t.id) ??
+    rows.find((r) => r.kind === kind && !!t.source && (kind === "payment" ? r.stripe_charge_id : r.stripe_refund_id) === t.source);
+
+  let settledCents = 0;
+  let cadBookedCents = 0;
+  let stripeFeeCents = 0;
+  let net = 0;
+  for (const t of txns) {
+    net += t.net;
+    if (t.type === "charge" || t.type === "payment" || t.type === "refund" || t.type === "payment_refund") {
+      const refund = t.type === "refund" || t.type === "payment_refund";
+      const row = booked(t, refund ? "refund" : "payment");
+      if (!row || row.entry_id === null || row.settlement_cad_cents === null) {
+        return no(`the Stripe ${refund ? "refund" : "charge"} ${t.source ?? t.id} that payout ${id} pays out is not booked yet`);
+      }
+      settledCents += t.amount;
+      cadBookedCents += (refund ? -1 : 1) * n(row.settlement_cad_cents);
+    } else if (t.type === "stripe_fee") {
+      stripeFeeCents -= t.amount;
+    } else {
+      return no(`payout ${id} also pays out a Stripe ${t.type.replace(/_/g, " ")} (${t.id}, ${centsToDecimal(t.net)} ${t.currency}) that the books do not record, so it is not booked automatically`);
+    }
+  }
+  const took = (p.settlementCents ?? 0) + p.feeCents;
+  if (net !== took) {
+    return no(`what Stripe lists in payout ${id} comes to ${centsToDecimal(net)} ${settleCur}, not the ${centsToDecimal(took)} ${settleCur} it took, so it is not booked automatically`);
+  }
+  return { ok: true, settledCents, cadBookedCents, stripeFeeCents };
 }
 
 /**
@@ -129,6 +263,118 @@ async function bankFeedBooking(payoutId: string): Promise<{ entry_id: string; ac
       WHERE ${BANK_LINE_WHERE} AND e.status = 'posted' LIMIT 1`,
     bankLineArgs(payoutId),
   );
+}
+
+/**
+ * A posted entry that already moved this payout into a bank or cash account
+ * without naming it (an uploaded statement's line categorised to Stripe
+ * clearing by the seeded rule or by hand, an untagged Wise line, a hand-made
+ * entry): the SHAPE cash-coverage.ts reads as a payout, one entry crediting
+ * 1050 Stripe clearing and debiting a bank or cash account, here for exactly
+ * the payout's amount in the currency it arrived in, dated within
+ * PAYOUT_MATCH_WINDOW_DAYS of its arrival, and not already another payout's.
+ * A reversal (ledger-io.ts buildReversal, source 'reversal') undoes money,
+ * it never lands any: one that happens to have the shape never counts.
+ * `e` is the entry.
+ */
+const SHAPE_WHERE = `e.entity_id = ? AND e.status = 'posted' AND e.source <> 'reversal' AND e.entry_date BETWEEN ? AND ?
+  AND EXISTS (SELECT 1 FROM fin_journal_lines c WHERE c.entry_id = e.id AND c.account_id = ? AND c.credit_cents > 0)
+  AND EXISTS (SELECT 1 FROM fin_journal_lines b JOIN fin_accounts a ON a.id = b.account_id
+               WHERE b.entry_id = e.id AND a.subtype IN ('bank', 'cash') AND b.currency = ? AND b.debit_cents = ?)
+  AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = e.id)`;
+function shapeArgs(row: Pick<PayoutRow, "arrival_date" | "currency" | "amount_cents">): Array<string | number> {
+  return [
+    E,
+    addDays(row.arrival_date, -PAYOUT_MATCH_WINDOW_DAYS),
+    addDays(row.arrival_date, PAYOUT_MATCH_WINDOW_DAYS),
+    accountId(E, SYS.stripeClearing),
+    row.currency,
+    row.amount_cents,
+  ];
+}
+
+/** The entry already on the books for this payout by its shape, closest to the arrival day first, and the account it debited. */
+async function existingPayoutEntry(row: PayoutRow): Promise<{ entry_id: string; account_id: string; entry_date: string } | null> {
+  if (row.amount_cents <= 0) return null;
+  return queryOne<{ entry_id: string; account_id: string; entry_date: string }>(
+    `SELECT e.id AS entry_id, e.entry_date,
+            (SELECT b.account_id FROM fin_journal_lines b JOIN fin_accounts a ON a.id = b.account_id
+              WHERE b.entry_id = e.id AND a.subtype IN ('bank', 'cash') AND b.currency = ? AND b.debit_cents = ? LIMIT 1) AS account_id
+       FROM fin_journal_entries e
+      WHERE ${SHAPE_WHERE}
+      ORDER BY abs(julianday(e.entry_date) - julianday(?)), e.created_at, e.id
+      LIMIT 1`,
+    [row.currency, row.amount_cents, ...shapeArgs(row), row.arrival_date],
+  );
+}
+
+/**
+ * Adopt a booking already on the books for this payout, if there is one: its
+ * Wise bank line's entry, else an entry of its shape. The row then points at
+ * it and nothing is posted. Null when there is none (or another payout took
+ * that entry first).
+ */
+async function adoptExistingBooking(row: PayoutRow): Promise<PayoutOutcome | null> {
+  const fed = await bankFeedBooking(row.id);
+  const found = fed
+    ? { entryId: fed.entry_id, accountId: fed.account_id, reason: "booked from its Wise bank line" }
+    : await existingPayoutEntry(row).then((s) =>
+        s ? { entryId: s.entry_id, accountId: s.account_id, reason: `booked from the bank line of ${s.entry_date} already on the books (Stripe clearing to the bank, the same amount)` } : null,
+      );
+  if (!found) return null;
+  const upd = await finDb().execute({
+    sql: `UPDATE fin_stripe_payouts SET booking = 'booked', entry_id = ?, bank_account_id = ?, reason = ?, updated_at = ${NOW_SQL}
+           WHERE id = ? AND booking IN ('held', 'unmapped') AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts o WHERE o.entry_id = ? AND o.id <> ?)`,
+    args: [found.entryId, found.accountId, found.reason, row.id, found.entryId, row.id],
+  });
+  if (upd.rowsAffected !== 1) return null;
+  return outcomeOf((await loadPayout(row.id)) ?? row);
+}
+
+/**
+ * The payout booked here that a bank line about to be categorised to Stripe
+ * clearing IS: booked (from Stripe, or adopted from an entry no bank line
+ * points at), for the line's amount and currency, arriving within
+ * PAYOUT_MATCH_WINDOW_DAYS of it, its entry not yet any line's. Closest
+ * first. transactions-io.ts links the line to it instead of posting it again.
+ */
+export async function bookedPayoutForBankLine(line: { entity_id: string; amount_cents: number; currency: string; posted_date: string }): Promise<{
+  payoutId: string;
+  entryId: string;
+  bankAccountId: string | null;
+  amountCents: number;
+  currency: string;
+  arrivalDate: string;
+} | null> {
+  if (line.amount_cents <= 0) return null;
+  const row = await queryOne<{ id: string; entry_id: string; bank_account_id: string | null; amount_cents: number; currency: string; arrival_date: string }>(
+    `SELECT p.id, p.entry_id, p.bank_account_id, p.amount_cents, p.currency, p.arrival_date FROM fin_stripe_payouts p
+      WHERE ${BOOKED_PAYOUT_WHERE}
+      ORDER BY abs(julianday(p.arrival_date) - julianday(?)), p.id LIMIT 1`,
+    [...bookedPayoutArgs(line), line.posted_date],
+  );
+  return row
+    ? { payoutId: row.id, entryId: row.entry_id, bankAccountId: row.bank_account_id, amountCents: n(row.amount_cents), currency: row.currency, arrivalDate: row.arrival_date }
+    : null;
+}
+
+/**
+ * bookedPayoutForBankLine's match as a SQL condition (`p` is the payout), for
+ * the categorisation's posting gate: a payout booked between the check and
+ * the write stops the line's own entry.
+ */
+export const BOOKED_PAYOUT_WHERE = `p.entity_id = ? AND p.booking = 'booked' AND p.currency = ? AND p.amount_cents = ?
+  AND p.arrival_date BETWEEN ? AND ?
+  AND EXISTS (SELECT 1 FROM fin_journal_entries pe WHERE pe.id = p.entry_id AND pe.status = 'posted')
+  AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions pt WHERE pt.entry_id = p.entry_id)`;
+export function bookedPayoutArgs(line: { entity_id: string; amount_cents: number; currency: string; posted_date: string }): Array<string | number> {
+  return [
+    line.entity_id,
+    line.currency,
+    line.amount_cents,
+    addDays(line.posted_date, -PAYOUT_MATCH_WINDOW_DAYS),
+    addDays(line.posted_date, PAYOUT_MATCH_WINDOW_DAYS),
+  ];
 }
 
 /** An audit row that lands only when `entryId` was written by the same batch. */
@@ -195,16 +441,9 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
   if (row.booking !== "held" && row.booking !== "unmapped") return outcomeOf(row);
   const id = row.id;
 
-  // The bank feed booked it from its Wise line first: adopt that entry.
-  const fed = await bankFeedBooking(id);
-  if (fed) {
-    await finDb().execute({
-      sql: `UPDATE fin_stripe_payouts SET booking = 'booked', entry_id = ?, bank_account_id = ?, reason = ?, updated_at = ${NOW_SQL}
-             WHERE id = ? AND booking IN ('held', 'unmapped')`,
-      args: [fed.entry_id, fed.account_id, "booked from its Wise bank line", id],
-    });
-    return outcomeOf((await loadPayout(id)) ?? row);
-  }
+  // A bank line put it on the books first (the Wise feed's, or any categorised to Stripe clearing): adopt that entry.
+  const adopted = await adoptExistingBooking(row);
+  if (adopted) return adopted;
 
   const bank = await payoutBankAccount();
   if (bank.id === null) {
@@ -229,11 +468,13 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
   };
   const needsUsd = facts.currency === "USD" || facts.settlementCurrency === "USD";
   const rate = needsUsd ? await usdCadRate(facts.arrivalDate) : null;
+  const clearing = await clearingByCurrency(facts.arrivalDate);
   const plan = planStripePayout({
     payout: facts,
     bankAccountId: bank.id,
     accounts: accounts(),
-    clearing: await clearingByCurrency(),
+    clearing,
+    contents: payoutNeedsContents(facts, clearing) ? await payoutContents(facts) : null,
     cadOf: (cents, currency, day) =>
       currency === "CAD" ? cents : currency === "USD" && rate && day === facts.arrivalDate ? usdToCadCents(cents, rate.micro) : null,
   });
@@ -243,12 +484,15 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
   }
 
   // Both entries at the rate planStripePayout valued them at, so the
-  // conversion nets to zero in Currency exchange clearing.
+  // conversion nets to zero in Currency exchange clearing. Gated on the
+  // payout still unbooked AND on no bank line having booked it meanwhile (by
+  // its Wise tag or its shape): one that did is adopted below instead.
   const fixedRates = rate ? { USD: rate.rate } : undefined;
   const gate = {
     sql: `(SELECT booking FROM fin_stripe_payouts WHERE id = ?) IN ('held', 'unmapped')
-          AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions t WHERE ${BANK_LINE_WHERE})`,
-    args: [id, ...bankLineArgs(id)],
+          AND NOT EXISTS (SELECT 1 FROM fin_bank_transactions t WHERE ${BANK_LINE_WHERE})
+          AND NOT EXISTS (SELECT 1 FROM fin_journal_entries e WHERE ${SHAPE_WHERE})`,
+    args: [id, ...bankLineArgs(id), ...shapeArgs(row)],
   };
   const statements: InStatement[] = [];
   try {
@@ -289,7 +533,13 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
         entry: posting.entryId,
         bank_account: bank.id,
         conversion: plan.conversion
-          ? { currency: plan.conversion.currency, cents: plan.conversion.cents, cad_cents: plan.conversion.cadCents, cad_taken_cents: plan.conversion.cadTakenCents }
+          ? {
+              currency: plan.conversion.currency,
+              cents: plan.conversion.cents,
+              cad_cents: plan.conversion.cadCents,
+              cad_taken_cents: plan.conversion.cadTakenCents,
+              fx_cents: plan.conversion.fxCents,
+            }
           : null,
         fx_cents: plan.fxCents,
       }),
@@ -303,7 +553,10 @@ async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
     }
     // A unique violation: a concurrent delivery booked it. Either way, report what is stored now.
   }
-  return outcomeOf((await loadPayout(id)) ?? row);
+  const after = (await loadPayout(id)) ?? row;
+  // The gate refused because a bank line booked it between the check and the write: adopt that line's entry.
+  if (after.booking === "held" || after.booking === "unmapped") return (await adoptExistingBooking(after)) ?? outcomeOf(after);
+  return outcomeOf(after);
 }
 
 async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutOutcome> {

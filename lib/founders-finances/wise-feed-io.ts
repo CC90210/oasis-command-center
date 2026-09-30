@@ -87,6 +87,7 @@ import {
 import { wiseStatement, WiseNotReady } from "./wise-io";
 import { recordedRefs } from "./wise-reconcile";
 import { bookedPayoutEntry } from "./stripe-payouts-io";
+import { PAYOUT_SOURCE } from "./stripe-payouts";
 
 const FEED_CURRENCIES = ["CAD", "USD"] as const;
 /** Wise statements span at most 469 days. */
@@ -669,6 +670,12 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           actor,
           fixedRates: rates.get(row.postedDate) ? { USD: (rates.get(row.postedDate) as { rate: string }).rate } : undefined,
           detail: { payout: p.id, fx_cents: built.fxCents, fitid },
+          // The webhook or the reconcile may book it from Stripe after the check above: then this posts
+          // nothing, and the next sync links the line to that booking.
+          gate: {
+            sql: `NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')`,
+            args: [entity.id, PAYOUT_SOURCE, p.id],
+          },
         });
         const r = await writeBatch([...posting.posting, ...posting.link]);
         if (r[posting.posting.length]?.rowsAffected === 1) {

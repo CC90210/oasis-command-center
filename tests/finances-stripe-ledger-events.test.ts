@@ -11,7 +11,8 @@
  *     for the workspace OASIS's pinned Stripe account belongs to;
  *   - a redelivery writes no second row;
  *   - a failed ledger insert rolls the book write back (the payment row, the
- *     subscription row, the processed mark) and Stripe's retry then lands both;
+ *     subscription row, an invoice's payment: its row, key or link, the
+ *     processed mark) and Stripe's retry then lands both;
  *   - no workspace to say (no finance tenant, or the account not pinned):
  *     the book write still happens, the fact goes to ledger_dead_letters,
  *     never to a default tenant;
@@ -40,13 +41,13 @@ const PRODUCER = "lib/founders-finances/stripe-ingest.ts";
 type Json = Record<string, unknown>;
 const epoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 let seq = 0;
-const event = (type: string, object: Json, at = "2026-09-20T12:00:00Z", id = `evt_ledger_${++seq}`): Json => ({
+const event = (type: string, object: Json, at = "2026-09-20T12:00:00Z", id = `evt_ledger_${++seq}`, previous?: Json): Json => ({
   id,
   object: "event",
   type,
   created: epoch(at),
   livemode: true,
-  data: { object },
+  data: previous ? { object, previous_attributes: previous } : { object },
 });
 
 function charge(p: { id: string; amount: number; at: string; status?: string; refunded?: number; refunds?: Json[]; failureCode?: string }): Json {
@@ -73,7 +74,15 @@ function charge(p: { id: string; amount: number; at: string; status?: string; re
   };
 }
 
-function subscription(id: string, status = "active"): Json {
+const STARTER = { id: "price_1StarterCAD", lookup_key: "starter", unit_amount: 10000 };
+const GROWTH = { id: "price_1GrowthCAD", lookup_key: "growth", unit_amount: 25000 };
+
+/** A subscription's items list (from API 2025-03-31 each item carries its own billing period). */
+const items = (price: { id: string; lookup_key: string; unit_amount: number }, periodEnd = "2026-10-01T00:00:00Z"): Json => ({
+  data: [{ quantity: 1, current_period_end: epoch(periodEnd), price: { ...price, currency: "cad", recurring: { interval: "month", interval_count: 1 } } }],
+});
+
+function subscription(id: string, status = "active", price = STARTER, periodEnd?: string): Json {
   return {
     id,
     object: "subscription",
@@ -81,7 +90,7 @@ function subscription(id: string, status = "active"): Json {
     currency: "cad",
     livemode: true,
     customer: { id: "cus_live", name: "Jean Tremblay", email: "jean@example.test" },
-    items: { data: [{ quantity: 1, price: { unit_amount: 10000, currency: "cad", recurring: { interval: "month", interval_count: 1 } } }] },
+    items: items(price, periodEnd),
     cancellation_details: status === "canceled" ? { reason: "cancellation_requested" } : null,
   };
 }
@@ -175,7 +184,7 @@ async function main() {
     assert.equal((await ledger("refund.issued")).length, 1, "a second delivery: no second refund, no second row");
   });
 
-  await check("invoice.paid for a subscription cycle: invoice.paid and subscription.renewed, committed with the processed mark", async () => {
+  await check("invoice.paid for a subscription cycle: invoice.paid and subscription.renewed, committed with the payment", async () => {
     const inv: Json = {
       id: "in_led_1",
       object: "invoice",
@@ -205,15 +214,34 @@ async function main() {
     assert.equal((await ledger("payment.received")).length, 2, "the charge behind it is a payment too");
   });
 
-  await check("customer.subscription.created / updated / deleted: started, changed, cancelled, with the subscription row", async () => {
+  await check("customer.subscription.created / updated / deleted: started, changed (a plan change only), cancelled, with the subscription row", async () => {
     await ingest.handleStripeEvent(event("customer.subscription.created", subscription("sub_led_2"), "2026-09-01T00:00:00Z"));
-    await ingest.handleStripeEvent(event("customer.subscription.updated", subscription("sub_led_2", "past_due"), "2026-09-10T00:00:00Z"));
+    // Stripe sends customer.subscription.updated for much that changes nothing billed.
+    const rolled = await ingest.handleStripeEvent(
+      event("customer.subscription.updated", subscription("sub_led_2", "active", STARTER, "2026-11-01T00:00:00Z"), "2026-09-09T00:00:00Z", undefined, { items: items(STARTER, "2026-10-01T00:00:00Z") }),
+    );
+    assert.equal(rolled.status, "processed", rolled.detail);
+    await ingest.handleStripeEvent(event("customer.subscription.updated", subscription("sub_led_2", "past_due"), "2026-09-10T00:00:00Z", undefined, { status: "active" }));
+    await ingest.handleStripeEvent(event("customer.subscription.updated", subscription("sub_led_2", "active"), "2026-09-11T00:00:00Z", undefined, { cancel_at_period_end: true, default_payment_method: "pm_old" }));
+    await ingest.handleStripeEvent(event("customer.subscription.updated", subscription("sub_led_2", "active"), "2026-09-12T00:00:00Z"));
+    assert.equal((await ledger("subscription.changed")).length, 0, "a billing-cycle roll, a status, payment-method or cancel-at-period-end change, or no previous_attributes: no subscription.changed");
+    assert.equal(await num(`SELECT COUNT(*) FROM fin_subscriptions WHERE id = 'sub_led_2' AND status = 'active'`), 1, "the subscription row still follows every update");
+    // An upgrade: the item's price changed.
+    await ingest.handleStripeEvent(event("customer.subscription.updated", subscription("sub_led_2", "active", GROWTH), "2026-09-15T00:00:00Z", undefined, { items: items(STARTER) }));
+    const changed = await ledger("subscription.changed");
+    assert.equal(changed.length, 1);
+    assert.equal(Number(changed[0].value_cents), 25000, "the new monthly value");
+    assert.deepEqual(JSON.parse(String(changed[0].payload_json)), { from_plan_code: "starter", plan_code: "growth", provider_subscription_id: "sub_led_2" });
+    // A quantity change on the same price is a change too.
+    const seats = subscription("sub_led_2", "active", GROWTH);
+    ((seats.items as Json).data as Json[])[0].quantity = 2;
+    await ingest.handleStripeEvent(event("customer.subscription.updated", seats, "2026-09-16T00:00:00Z", undefined, { items: items(GROWTH) }));
+    assert.equal((await ledger("subscription.changed")).length, 2);
     await ingest.handleStripeEvent(event("customer.subscription.deleted", subscription("sub_led_2", "canceled"), "2026-09-20T00:00:00Z"));
     const started = await ledger("subscription.started");
     assert.equal(started.length, 1);
     assert.equal(Number(started[0].value_cents), 10000, "the monthly value");
     assert.deepEqual(JSON.parse(String(started[0].payload_json)), { interval: "month", provider_subscription_id: "sub_led_2" });
-    assert.equal((await ledger("subscription.changed")).length, 1);
     const cancelled = await ledger("subscription.cancelled");
     assert.equal(cancelled.length, 1);
     assert.deepEqual(JSON.parse(String(cancelled[0].payload_json)), { cancel_reason: "cancellation_requested", provider_subscription_id: "sub_led_2" });
@@ -259,6 +287,59 @@ async function main() {
     } finally {
       await mendLedger();
     }
+  });
+
+  await check("invoice.paid rides in the batch that records the invoice's payment: when only it fails, nothing of the payment is written; the retry lands both", async () => {
+    // Only invoice.paid refuses: payment.received (in the same batch) would go through on its own.
+    await raw.execute(`CREATE TRIGGER invoice_paid_down BEFORE INSERT ON outcome_events WHEN NEW.event_key = 'invoice.paid' BEGIN SELECT RAISE(ABORT, 'invoice.paid down'); END`);
+    const mend = () => raw.execute(`DROP TRIGGER invoice_paid_down`);
+    const invoicePaid = (id: string, chargeId: string, amount: number, metadata: Json = {}): Json => ({
+      id,
+      object: "invoice",
+      currency: "cad",
+      amount_paid: amount,
+      livemode: true,
+      billing_reason: "manual",
+      customer: "cus_live",
+      status_transitions: { paid_at: epoch("2026-09-15T10:00:00Z") },
+      payments: { data: [{ payment: { type: "charge", charge: chargeId, payment_intent: `pi_${chargeId}` } }] },
+      metadata,
+    });
+    const paidFacts = async (invoiceId: string) => (await ledger("invoice.paid")).filter((r) => r.idempotency_key === `inv:${invoiceId}:paid`).length;
+    // B: a payment already recorded, which this invoice.paid names: the key fill is the write.
+    await ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_led_key", amount: 4000, at: "2026-09-15T09:00:00Z" })));
+    // C: a payment already recorded as revenue, whose invoice.paid links it to a fin invoice.
+    await raw.execute({ sql: `INSERT INTO fin_contacts (id, entity_id, kind, name) VALUES ('con_led_link', ?, 'customer', 'Client')`, args: [B] });
+    await raw.execute({
+      sql: `INSERT INTO fin_invoices (id, entity_id, contact_id, number, status, issue_date, due_date, currency, subtotal_cents, total_cents, created_by)
+            VALUES ('inv_led_link', ?, 'con_led_link', 'OASIS-2026-0901', 'sent', '2026-09-01', '2026-09-30', 'CAD', 5000, 5000, 'test')`,
+      args: [B],
+    });
+    await ingest.handleStripeEvent(event("charge.succeeded", charge({ id: "ch_led_link", amount: 5000, at: "2026-09-15T09:30:00Z" })));
+    const newPay = event("invoice.paid", invoicePaid("in_led_new", "ch_led_new", 6000));
+    const keyFill = event("invoice.paid", invoicePaid("in_led_key", "ch_led_key", 4000));
+    const link = event("invoice.paid", invoicePaid("in_led_link", "ch_led_link", 5000, { fin_invoice_id: "inv_led_link" }));
+    const keyOf = async (chargeId: string) => (await raw.execute({ sql: `SELECT stripe_invoice_id, invoice_id FROM fin_payments WHERE stripe_charge_id = ?`, args: [chargeId] })).rows[0];
+    const invoiceStatus = async () => (await raw.execute(`SELECT status FROM fin_invoices WHERE id = 'inv_led_link'`)).rows[0].status;
+    try {
+      for (const e of [newPay, keyFill, link]) {
+        await assert.rejects(ingest.handleStripeEvent(e), /invoice\.paid down/);
+        assert.equal(await eventStatus(String(e.id)), "failed", "Stripe retries it");
+      }
+      assert.equal(await payment("ch_led_new"), undefined, "a new payment: its row is not written without its invoice.paid");
+      assert.equal((await keyOf("ch_led_key")).stripe_invoice_id, null, "a recorded payment: the invoice's id is not filled in without its invoice.paid");
+      assert.equal((await keyOf("ch_led_link")).invoice_id, null, "a recorded payment: not linked to the fin invoice without its invoice.paid");
+      assert.equal(await invoiceStatus(), "sent", "the fin invoice is not paid in the books without its invoice.paid");
+    } finally {
+      await mend();
+    }
+    for (const e of [newPay, keyFill, link]) assert.equal((await ingest.handleStripeEvent(e)).status, "processed");
+    assert.ok(await payment("ch_led_new"));
+    assert.equal((await keyOf("ch_led_key")).stripe_invoice_id, "in_led_key");
+    assert.equal((await keyOf("ch_led_link")).invoice_id, "inv_led_link");
+    assert.equal(await invoiceStatus(), "paid");
+    for (const id of ["in_led_new", "in_led_key", "in_led_link"]) assert.equal(await paidFacts(id), 1, id);
+    assert.equal((await ledger("payment.received")).filter((r) => r.idempotency_key === "stripe:ch_led_new").length, 1);
   });
 
   await check("no workspace to say (finance tenant unset): the payment is booked, the fact is dead-lettered, never filed under a default", async () => {

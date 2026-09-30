@@ -8,6 +8,7 @@
  * as unknown, never as a match.
  */
 
+import { isLedgerCode } from "@/lib/ledger/catalog";
 import { normalizeCurrencyCode } from "./money";
 import type { RecurringInterval, SubscriptionItemFacts } from "./mrr";
 
@@ -422,6 +423,8 @@ export type StripeEventEnvelope = {
   created: number;
   livemode: boolean;
   object: Obj;
+  /** data.previous_attributes: the fields an *.updated event changed, at their old values; null when Stripe sent none. */
+  previousAttributes: Obj | null;
 };
 
 export function eventEnvelope(raw: unknown): StripeEventEnvelope | null {
@@ -429,9 +432,57 @@ export function eventEnvelope(raw: unknown): StripeEventEnvelope | null {
   const id = str(e?.id);
   const type = str(e?.type);
   const created = int(e?.created);
-  const object = asObj(asObj(e?.data)?.object);
+  const data = asObj(e?.data);
+  const object = asObj(data?.object);
   if (!e || !id || !id.startsWith("evt_") || !type || created === null || !object) return null;
-  return { id, type, created, livemode: e.livemode === true, object };
+  return { id, type, created, livemode: e.livemode === true, object, previousAttributes: asObj(data?.previous_attributes) };
+}
+
+/** What a subscription bills, item by item: its price (or legacy plan) id and quantity. Null when the list is unreadable. */
+function billedItems(items: unknown): string[] | null {
+  const list = asObj(items);
+  if (!list || !Array.isArray(list.data)) return null;
+  return (list.data as unknown[])
+    .map((raw) => {
+      const it = asObj(raw);
+      const price = asObj(it?.price) || asObj(it?.plan);
+      return `${str(price?.id) ?? "?"}x${int(it?.quantity) ?? 1}`;
+    })
+    .sort();
+}
+
+/** A subscription's plan as a ledger code: its single item's price lookup_key, when that is a lowercase code. */
+function planCodeOf(items: unknown): string | undefined {
+  const data = asObj(items)?.data;
+  if (!Array.isArray(data) || data.length !== 1) return undefined;
+  const it = asObj(data[0]);
+  const key = str((asObj(it?.price) || asObj(it?.plan))?.lookup_key);
+  return isLedgerCode(key) ? key : undefined;
+}
+
+/**
+ * Whether a customer.subscription.updated changed what the subscription
+ * bills (its plan, price or quantity), and the plan codes before and after.
+ * Stripe sends that event for much else: every billing-cycle roll (the
+ * period dates, which from API 2025-03-31 live on the items, so `items`
+ * appears in previous_attributes at every renewal), a status change
+ * (active -> past_due), a new payment method, cancel_at_period_end. Those
+ * change nothing billed: null. So `items` counts only when an item's price
+ * or quantity differs; a top-level `plan` or `quantity` (the legacy
+ * single-plan shape) always does.
+ */
+export function subscriptionPlanChange(object: Obj, previous: Obj | null): { fromPlanCode?: string; planCode?: string } | null {
+  if (!previous) return null;
+  let changed = "plan" in previous || "quantity" in previous;
+  if (!changed && "items" in previous) {
+    const before = billedItems(previous.items);
+    const after = billedItems(object.items);
+    changed = before !== null && after !== null && before.join(",") !== after.join(",");
+  }
+  if (!changed) return null;
+  const fromPlanCode = planCodeOf(previous.items ?? (previous.plan ? { data: [{ plan: previous.plan }] } : undefined));
+  const planCode = planCodeOf(object.items);
+  return { ...(fromPlanCode ? { fromPlanCode } : {}), ...(planCode ? { planCode } : {}) };
 }
 
 /** Customer label for reports: never an empty string. */

@@ -94,6 +94,14 @@ check("every surface that reports Stripe prints the sync line, never a Connected
   const settings = readFileSync(join(root, "app/founders/finances/settings/page.tsx"), "utf8");
   assert.match(settings, /stripeSyncLine\(lastSync, Date\.now\(\)\)/);
   assert.match(settings, /\{sync\.note\}/);
+  // Settings' Last synced is lastStripeSync's: a live event that reached the books (the
+  // shared LAST_SYNCED_EVENT_SQL, tests/finances-stripe-payouts.test.ts runs it) or a
+  // reconcile. Not the newest delivery: a failing or test-mode one is not a sync.
+  assert.match(settings, /const lastSync = \[lastEvent\?\.synced_at, lastEvent\?\.reconciled_at\]/);
+  const pageContext = readFileSync(join(root, "lib/founders-finances/page-context.ts"), "utf8");
+  assert.match(pageContext, /\(\$\{LAST_SYNCED_EVENT_SQL\}\) AS synced_at/);
+  const ingestSrc = readFileSync(join(root, "lib/founders-finances/stripe-ingest.ts"), "utf8");
+  assert.match(ingestSrc, /SELECT \(\$\{LAST_SYNCED_EVENT_SQL\}\) AS event_at/, "lastStripeSync reads the same condition");
   const numbers = readFileSync(join(root, "components/os/department/numbers.ts"), "utf8");
   assert.match(numbers, /stripeSyncLine\(money\.stripeSync\.lastSyncAt, Date\.now\(\)\)\.note/, "the Finance tab's MRR tile says when Stripe last synced");
   for (const [name, src] of [["settings", settings], ["numbers", numbers]] as const) {

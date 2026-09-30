@@ -13,11 +13,14 @@
  *                                (stripe-ingest.ts reconcileStripe). A safety
  *                                net under the webhook; idempotent on
  *                                Stripe's own ids.
- *   wise-reconcile    22:07 UTC  records a Wise deposit only when it EXACTLY
- *                                settles one open invoice (what "Check for
- *                                Wise payments" does); every other match waits
- *                                for a founder. Idempotent on Wise's
- *                                reference.
+ *   wise-reconcile    22:07 UTC  a DRY RUN: it lists the Wise deposits that
+ *                                EXACTLY settle one open invoice and records
+ *                                none of them. Recording an invoice payment
+ *                                (and deactivating its Stripe payment link)
+ *                                stays a founder's click on "Check for Wise
+ *                                payments" until CC approves automatic
+ *                                recording; then WISE_RECONCILE_CRON_DRY_RUN
+ *                                is the one line to change.
  *   wise-sync         22:29 UTC  the Wise bank feed. While
  *                                FINANCE_WISE_FEED_WRITES is not "on"
  *                                (production today) it is a DRY RUN and
@@ -32,8 +35,9 @@
  * the hourly :15 / :17 jobs.
  *
  * NONE OF THEM MOVES MONEY OR WRITES TO A CLIENT. They read Stripe, Wise and
- * the Bank of Canada and write the books. The only outward write is Stripe
- * deactivating a paid invoice's payment link, as the webhook already does.
+ * the Bank of Canada and write the books. None writes to Stripe: the one
+ * outward write a reconcile could make (deactivating a paid invoice's payment
+ * link) belongs to recording a Wise payment, which the schedule does not do.
  */
 import "server-only";
 
@@ -69,6 +73,14 @@ export function wiseSyncDryRun(writesEnabled: boolean = WISE_FEED_WRITES_ENABLED
 }
 
 /**
+ * The scheduled Wise invoice match never records a payment: recording one is
+ * a founder's decision (Atlas's handover, 2026-09-29) until CC approves doing
+ * it automatically. Not tied to the feed's switch: turning the bank feed on
+ * is not that approval.
+ */
+export const WISE_RECONCILE_CRON_DRY_RUN = true;
+
+/**
  * Run one job. The result holds counts and stable codes only: the manual
  * rollback driver (cron-driver.yml) prints the response to a public log.
  */
@@ -85,7 +97,7 @@ export async function runFinanceBookJob(job: FinanceBookJob): Promise<Record<str
     }
     case "wise-reconcile": {
       await ensureFinanceSeed();
-      const r = await reconcileWise(SYSTEM, { days: WISE_DAYS, dryRun: false });
+      const r = await reconcileWise(SYSTEM, { days: WISE_DAYS, dryRun: WISE_RECONCILE_CRON_DRY_RUN });
       return {
         dry_run: r.dry_run,
         deposits_seen: r.deposits_seen,
