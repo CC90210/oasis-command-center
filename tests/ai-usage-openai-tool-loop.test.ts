@@ -293,6 +293,33 @@ async function main() {
     assertTotals(await totals(sessionId), [3600, 350, 0.01335]);
   });
 
+  await check("a step whose stream repeats its usage report counts that step once: the last report stands, it is not added twice", async () => {
+    await login(USERS.openaiOwner);
+    steps = [
+      // A provider that streams a running usage report and then the final one
+      // for the same request: 1000 / 100 is this step's usage, not 1900 / 130.
+      () =>
+        sse([
+          { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_r", type: "function", function: { name: "not_a_real_tool", arguments: "{}" } }] } }] },
+          { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: { prompt_tokens: 900, completion_tokens: 30 } },
+          { choices: [], usage: { prompt_tokens: 1000, completion_tokens: 100 } },
+          "[DONE]",
+        ]),
+      textStep("Done.", { prompt_tokens: 1200, completion_tokens: 50 }),
+    ];
+    const { events, sessionId } = await turn("c-openai", "Once more, please");
+    assert.deepEqual(
+      (await rows(sessionId)).map((r) => [Number(r.input_tokens), Number(r.output_tokens), Number(r.cost_micro_usd)]),
+      [
+        [1000, 100, 4000],
+        [1200, 50, 3750],
+      ],
+    );
+    assert.deepEqual(events.find((e) => e.event === "usage")?.data, { input_tokens: 2200, output_tokens: 150 }, JSON.stringify(events));
+    assert.deepEqual(await assistantTokens(sessionId), [[2200, 150]]);
+    assertTotals(await totals(sessionId), [2200, 150, 0.00775]);
+  });
+
   await check("a step the provider reports no usage for leaves the turn's tokens unknown: no usage event, a NULL message row, session totals unchanged", async () => {
     await login(USERS.openaiOwner);
     steps = [

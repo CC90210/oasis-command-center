@@ -101,8 +101,10 @@ const USERS = {
 const SENTENCE = "This month's AI budget is used. The owner can raise it.";
 const UNAVAILABLE = "We could not check this workspace's AI budget just now. Try again in a moment.";
 // /api/chat/resume's refusals when the paused turn's session cannot be confirmed.
-const SESSION_GONE = "This conversation is no longer available, so the paused step cannot continue. Start a new message.";
-const SESSION_UNAVAILABLE = "We could not check this conversation just now, so the paused step did not continue. Try again in a moment.";
+// The owner's machine already ran the step (an email may be out), so neither
+// sentence invites a plain retry that would run it again.
+const SESSION_GONE = "This conversation is no longer available, so the agent cannot continue after the step above. Check that step's result before you ask again in a new message.";
+const SESSION_UNAVAILABLE = "We could not check this conversation just now, so the agent did not continue after the step above. Check that step's result before you ask again.";
 
 async function login(user: U) {
   const { signSession } = await import("../lib/turso-auth");

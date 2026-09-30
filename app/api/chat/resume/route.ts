@@ -76,8 +76,11 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 // What the chat shows (components/ChatWidget.tsx renders a refusal's `error`).
-const RESUME_SESSION_UNAVAILABLE = "We could not check this conversation just now, so the paused step did not continue. Try again in a moment.";
-const RESUME_SESSION_GONE = "This conversation is no longer available, so the paused step cannot continue. Start a new message.";
+// The browser posts a resume only after the owner's machine has handled the
+// step (an email sent, a file written, or an error), with its result on screen,
+// so a refusal never says to simply try again: asking again can run it twice.
+const RESUME_SESSION_UNAVAILABLE = "We could not check this conversation just now, so the agent did not continue after the step above. Check that step's result before you ask again.";
+const RESUME_SESSION_GONE = "This conversation is no longer available, so the agent cannot continue after the step above. Check that step's result before you ask again in a new message.";
 
 type IncomingPayload = {
   agent_key?: string;

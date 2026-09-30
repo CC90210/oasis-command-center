@@ -33,6 +33,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createClient } from "@libsql/client";
+import ts from "typescript";
 
 const HMAC_KEY = "chat-resume-signature-test-hmac-key-0000000001";
 const dbFile = join(mkdtempSync(join(tmpdir(), "chat-resume-signature-")), "test.db");
@@ -199,6 +200,9 @@ async function main() {
     assert.deepEqual(verifyResumeState(overTheWire(state), sig, binding), { ok: true, binding });
     // A second trip (the resume route re-emits the state it was given) changes nothing either.
     assert.deepEqual(verifyResumeState(overTheWire(overTheWire(state)), sig, binding), { ok: true, binding });
+    // The verifier hashes the wire form too, so the state as the loop built it
+    // (its undefined keys still present) verifies against the same signature.
+    assert.deepEqual(verifyResumeState(state, sig, binding), { ok: true, binding });
   });
 
   await check("a state with nothing JSON would drop signs exactly as v1 always did (no signature changes meaning)", () => {
@@ -273,6 +277,46 @@ async function main() {
     }
     const src = readFileSync(join(process.cwd(), "lib/resume-hmac.ts"), "utf8");
     assert.doesNotMatch(src, /(provided|expected|sig)\s*[!=]==\s*(provided|expected|sig)\b/, "a signature is compared with ===");
+  });
+
+  // ── the browser's half ─────────────────────────────────────────────────
+  console.log("the Agent console (components/ChatWidget.tsx)");
+  await check("no React state updater reads pendingToolUse, which the resume loop sets back to null before React runs it", () => {
+    // ChatWidget keeps the paused tool in a mutable `let pendingToolUse`; the
+    // resume loop takes it and sets it to null as soon as the stream closes.
+    // React runs a setX((prev) => ...) updater later, at render, so an updater
+    // that read pendingToolUse!.name threw on null and took the whole Agent
+    // console down to the error page after a pause (seen in the local E2E walk).
+    const file = join(process.cwd(), "components/ChatWidget.tsx");
+    const sf = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const readsInUpdaters: string[] = [];
+    let nulledByTheLoop = false;
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        node.left.getText(sf) === "pendingToolUse" &&
+        node.right.kind === ts.SyntaxKind.NullKeyword
+      ) {
+        nulledByTheLoop = true;
+      }
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && /^set[A-Z]/.test(node.expression.text)) {
+        const updater = node.arguments[0];
+        if (updater && (ts.isArrowFunction(updater) || ts.isFunctionExpression(updater))) {
+          const find = (n: ts.Node) => {
+            if (ts.isIdentifier(n) && n.text === "pendingToolUse") {
+              readsInUpdaters.push(`${node.expression.getText(sf)} at line ${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`);
+            }
+            ts.forEachChild(n, find);
+          };
+          find(updater.body);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    assert.ok(nulledByTheLoop, "the premise changed: nothing sets pendingToolUse back to null any more");
+    assert.deepEqual(readsInUpdaters, [], "a state updater reads the mutable pendingToolUse");
   });
 
   // ── the routes ─────────────────────────────────────────────────────────
