@@ -301,7 +301,7 @@ async function main() {
   await check("/api/chat/resume at the cap: HTTP 402 in the same shape, before the resumed call", async () => {
     await login(USERS.cappedOwner);
     sent = [];
-    const state = { model: "claude-sonnet-4-6", system: "sys", history: [], iteration: 0, totalIn: 0, totalOut: 0 };
+    const state = { model: "claude-sonnet-4-6", system: "sys", history: [], iteration: 0, totalIn: 0, totalOut: 0, sessionId: "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4" };
     const sig = signResumeState(state, { tenant_id: CAPPED, user_id: USERS.cappedOwner.id, agent_key: "bravo" });
     assert.ok(sig, "the test signs its resume state");
     const res = await resumeRoute.POST(
@@ -392,8 +392,9 @@ async function main() {
   });
 
   console.log("/api/chat/resume totals");
+  /** A signed state naming `sessionId`, as /api/chat issues one (the body's session_id is ignored). */
   const resume = async (sessionId: string, model = "claude-sonnet-4-6") => {
-    const state = { model, system: "sys", history: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "tool_use", id: "tu_r", name: "read_file", input: {} }] }], iteration: 1, totalIn: 0, totalOut: 0 };
+    const state = { model, system: "sys", history: [{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "tool_use", id: "tu_r", name: "read_file", input: {} }] }], iteration: 1, totalIn: 0, totalOut: 0, sessionId };
     const sig = signResumeState(state, { tenant_id: OPEN, user_id: USERS.openOwner.id, agent_key: "bravo" });
     const res = await resumeRoute.POST(
       post("/api/chat/resume", { agent_key: "bravo", session_id: sessionId, resume_state: state, resume_signature: sig, tool_use_id: "tu_r", tool_result: { content: "file text", is_error: false } }),
@@ -464,6 +465,7 @@ async function main() {
   };
   let oasisSession = "";
   let oasisPaused: unknown = null;
+  let oasisPausedSig = "";
   await check("/api/chat, then its resume, then another /api/chat turn: each ADDS its own tokens and cost to the session", async () => {
     await login(USERS.oasisOwner);
     // 1. The turn pauses for a bridge tool. Its one call finished and reported
@@ -480,14 +482,13 @@ async function main() {
 
     // 2. The browser ran the tool and resumes. The resumed loop starts from the
     //    paused totals, so its done event says 1040 / 204; only 40 / 4 are new.
-    //    The state is the one the route emitted, re-signed after its trip
-    //    through JSON: lib/resume-hmac.ts signs undefined-valued keys (this
-    //    state's maxTokens) that JSON drops, so the emitted signature does not
-    //    verify after a round trip. That is a separate defect, not this test's.
+    //    The state and its signature are the ones the route emitted, after
+    //    their trip through JSON (tests/chat-resume-signature.test.ts).
     const state = pending!.data.resume_state;
     assert.deepEqual([(state as Record<string, unknown>).totalIn, (state as Record<string, unknown>).totalOut], [1000, 200]);
     oasisPaused = state;
-    const resumeSig = signResumeState(state, { tenant_id: OASIS, user_id: USERS.oasisOwner.id, agent_key: "bravo" });
+    const resumeSig = String(pending!.data.resume_signature);
+    oasisPausedSig = resumeSig;
     provider = () => anthropicOk("sent", 40, 4);
     await afterResume(oasisSession, async () => {
       const res = await resumeRoute.POST(
@@ -522,7 +523,7 @@ async function main() {
     // The resumed call (30 in / 3 out) asks for another bridge tool: the loop
     // pauses at 1030 / 203 from its 1000 / 200 start, with no done event.
     provider = () => anthropicToolUse("tu_again", "send_email", 30, 3);
-    const sig = signResumeState(oasisPaused, { tenant_id: OASIS, user_id: USERS.oasisOwner.id, agent_key: "bravo" });
+    const sig = oasisPausedSig;
     await afterResume(oasisSession, async () => {
       const res = await resumeRoute.POST(
         post("/api/chat/resume", {

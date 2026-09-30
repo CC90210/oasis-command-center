@@ -2372,11 +2372,9 @@ type AnthropicMessage =
  * the pre-pause state intact. Contains everything resumeAnthropicTurn()
  * needs to continue the model's session without re-running prior iterations.
  *
- * Security note: this state passes through the browser. v1 trusts the
- * authed dashboard session (replay attacks only let an operator mess with
- * their OWN chat, no cross-tenant blast radius). If /api/chat/resume ever
- * becomes a multi-tenant or public surface, add HMAC signing here so a
- * malicious page can't synthesize states the server didn't issue.
+ * Security note: this state passes through the browser, so the routes sign
+ * it (lib/resume-hmac.ts) bound to the tenant, user and agent it was issued
+ * to, and /api/chat/resume refuses any state the server did not issue.
  */
 export type ResumeState = {
   /** Anthropic model ID — must match the model that was streaming the pause. */
@@ -2419,6 +2417,12 @@ export type ResumeState = {
    *  sees the same bridge tool set the original call resolved.
    *  null = no advertisement on record (older bridges). */
   bridgeAdvertisedTools?: string[] | null;
+  /** The chat session the paused turn belongs to. The loop never sets it:
+   *  the route that signs the state stamps it, so it is signed with the
+   *  rest, and /api/chat/resume files the resumed half under it rather than
+   *  under a session id from the request body (which the browser can send
+   *  stale). */
+  sessionId?: string;
 };
 
 export type ToolLoopRequest = {
@@ -2619,6 +2623,9 @@ export async function* streamOpenAICompatibleWithTools(
     // Keep this path cloud-safe instead of advertising tools it cannot resume.
     forceExcludeDeferred: true,
   });
+  // The turn's tokens: the SUM of every step's own report. Each step is its
+  // own provider request (its own ai_usage_events row), and each reports only
+  // its own usage, so keeping the last report under-counted every tool turn.
   let totalIn = 0;
   let totalOut = 0;
 
@@ -2666,6 +2673,9 @@ export async function* streamOpenAICompatibleWithTools(
     const toolBuffers = new Map<number, { id: string; name: string; args: string }>();
     let ledger: ModelUsage | null = null;
     let end: CallEnd | null = null;
+    // This step's own usage report; if a provider repeats it, the last one stands.
+    let stepIn = 0;
+    let stepOut = 0;
 
     try {
       const res = await fetchWithRetry(openAICompatibleUrl(req.provider), {
@@ -2715,8 +2725,8 @@ export async function* streamOpenAICompatibleWithTools(
         }
         const usage = asSSERecord(data.usage);
         if (usage) {
-          totalIn = numberOr(usage.prompt_tokens, totalIn);
-          totalOut = numberOr(usage.completion_tokens, totalOut);
+          stepIn = numberOr(usage.prompt_tokens, stepIn);
+          stepOut = numberOr(usage.completion_tokens, stepOut);
           ledger = openAICompatibleLedgerUsage(usage);
         }
       }
@@ -2727,6 +2737,8 @@ export async function* streamOpenAICompatibleWithTools(
     } finally {
       await modelCall.finish(end ?? { outcome: "cancelled", usage: null });
     }
+    totalIn += stepIn;
+    totalOut += stepOut;
 
     const toolUses = [...toolBuffers.values()]
       .filter((tu) => tu.name.length > 0)

@@ -53,6 +53,7 @@ import {
   cloudToolsPromptBlockV2,
   streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
+  type ResumeState,
 } from "@/lib/cloud-tool-runner";
 import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
@@ -261,6 +262,8 @@ export async function POST(req: NextRequest) {
     if (createErr || !created) return jsonError(500, "session_create_failed");
     sessionId = created.id as string;
   }
+  // The session a paused turn's resume_state names (and is signed with).
+  const turnSessionId: string = sessionId;
   if (sessionId && turnAttachments.length > 0) {
     await linkChatAttachmentsToSession({
       tenantId,
@@ -734,7 +737,10 @@ export async function POST(req: NextRequest) {
               // The paused loop's calls have finished; resume_state carries
               // their token count, and the resume adds only what comes after.
               turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
-              const sig = signResumeState(ev.resume_state, {
+              // The state names this turn's session, signed with the rest:
+              // /api/chat/resume files the resumed half under it.
+              const issued: ResumeState = { ...ev.resume_state, sessionId: turnSessionId };
+              const sig = signResumeState(issued, {
                 tenant_id: tenantId,
                 user_id: user.id,
                 agent_key: agentKey,
@@ -747,7 +753,7 @@ export async function POST(req: NextRequest) {
                   tool_use_id: ev.tool_use_id,
                   name: ev.name,
                   input: ev.input,
-                  resume_state: ev.resume_state,
+                  resume_state: issued,
                   resume_signature: sig,
                 });
               }

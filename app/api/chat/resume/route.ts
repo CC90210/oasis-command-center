@@ -19,9 +19,12 @@
  * Body:
  *   {
  *     agent_key: string,
- *     session_id?: string,
+ *     session_id?: string,              // ignored: the session is the one the
+ *                                        // signed resume_state names
  *     resume_state: ResumeState,        // opaque to the client, originally
  *                                        // issued by cloud-tool-runner
+ *     resume_signature: string,         // lib/resume-hmac.ts, from the same
+ *                                        // tool_use_pending event
  *     tool_use_id: string,              // matches the paused tool_use block
  *     tool_result: {
  *       content: string,
@@ -32,10 +35,11 @@
  * Response: text/event-stream with the same shape /api/chat uses
  *   (session/delta/cloud_tool_call/cloud_tool_result/tool_use_pending/usage/done/error).
  *
- * Auth: same as /api/chat. Resume state passes through the browser; this
- * route trusts the user's session cookie. v1 does NOT HMAC-sign the
- * resume state — replay attacks only let an operator mess with their
- * own chat. Document this when /api/chat/resume goes multi-tenant.
+ * Auth: same as /api/chat, plus the resume state's HMAC signature
+ * (lib/resume-hmac.ts), verified against the caller's tenant, user and
+ * agent. The resumed half is filed under the chat session the signed state
+ * names: ChatWidget posts session_id from a closure taken before the turn's
+ * session event, so on a new conversation the body's session_id is null.
  */
 
 import { NextRequest } from "next/server";
@@ -73,6 +77,7 @@ export const maxDuration = 300;
 
 type IncomingPayload = {
   agent_key?: string;
+  /** Ignored: the resumed half goes to the session the signed state names. */
   session_id?: string | null;
   resume_state?: ResumeState;
   /** HMAC signature attached by /api/chat when it emitted tool_use_pending.
@@ -147,6 +152,11 @@ export async function POST(req: NextRequest) {
       `resume_signature_${sigCheck.reason}`,
     );
   }
+  // The chat session the paused turn belongs to, as /api/chat signed it. Every
+  // state the chat routes issue names one; a state without it is not theirs.
+  const signedSessionId =
+    typeof resumeState.sessionId === "string" && resumeState.sessionId.trim() ? resumeState.sessionId : null;
+  if (!signedSessionId) return jsonError(400, "resume_state_missing_session");
 
   // Per-tenant token bucket — sized smaller than /api/chat (resumes are
   // continuations of a paused turn; burst caps don't add value here).
@@ -210,10 +220,10 @@ export async function POST(req: NextRequest) {
     // Fail closed.
   }
 
-  // Stream the resumed iteration back to the browser as SSE. The body's
-  // session id is kept only when it is this person's session in this
+  // Stream the resumed iteration back to the browser as SSE. The signed
+  // session is still kept only when it is this person's session in this
   // workspace (lib/chat-auth.ts ownedChatSessionId).
-  const sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
+  const sessionId = await ownedChatSessionId(signedSessionId, tenantId, user.id);
 
   // Capture resumed-turn state for the chat_messages persist below.
   // Phase G of giggly-reef: paused/resumed turns now leave a real audit
@@ -294,7 +304,9 @@ export async function POST(req: NextRequest) {
             // with the SAME identity binding so the next
             // /api/chat/resume verification passes (Codex finding #3).
             resumeTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
-            const sig = signResumeState(ev.resume_state, {
+            // Still the same turn: the new state names the same session.
+            const issued: ResumeState = { ...ev.resume_state, sessionId: signedSessionId };
+            const sig = signResumeState(issued, {
               tenant_id: tenantId,
               user_id: user.id,
               agent_key: agentKey,
@@ -307,7 +319,7 @@ export async function POST(req: NextRequest) {
                 tool_use_id: ev.tool_use_id,
                 name: ev.name,
                 input: ev.input,
-                resume_state: ev.resume_state,
+                resume_state: issued,
                 resume_signature: sig,
               });
             }
