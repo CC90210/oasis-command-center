@@ -719,6 +719,54 @@ async function main() {
     assert.equal((await resolve()).status, 200);
     assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'ticket.resolved' AND subject_id = ? AND customer_id = ?", [id, X.id]), 2);
   });
+  /**
+   * The same database, except that right after the FIRST read matching `read`
+   * returns, `between` runs: another request's write landing between this
+   * request's read and its write.
+   */
+  const racing = (read: RegExp, between: () => Promise<unknown>): typeof db => {
+    let fired = false;
+    return new Proxy(db, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (prop !== "execute") return typeof v === "function" ? v.bind(target) : v;
+        return async (...a: unknown[]) => {
+          const rs = await (v as (...x: unknown[]) => Promise<unknown>).apply(target, a);
+          const sql = typeof a[0] === "string" ? a[0] : String((a[0] as { sql: string }).sql);
+          if (!fired && read.test(sql)) {
+            fired = true;
+            await between();
+          }
+          return rs;
+        };
+      },
+    });
+  };
+  const newTicket = (title: string) =>
+    deliveryStore.createTicket(db, OASIS, {
+      title, description: null, category: "bug", severity: "low", source: "form", project_id: null, client_tenant_id: null,
+      client_name: "Walk-in", client_email: null, client_company: null, client_match: null, project_hint: null,
+      reporter_user_id: null, assigned_to: null,
+    }, T0);
+  const CC_AUTHOR = { userId: USERS.cc.id, name: "CC" };
+  const ADON_AUTHOR = { userId: USERS.adon.id, name: "Adon" };
+  await check("two founders resolving one ticket at once resolve it once: one ledger row, one thread line, and the late one is told (409)", async () => {
+    const id = (await newTicket("Resolved twice at once")).ticket.id;
+    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "resolved" }, ADON_AUTHOR, T0));
+    const late = await deliveryStore.updateTicket(raced, OASIS, id, { status: "resolved" }, CC_AUTHOR, T0);
+    assert.deepEqual(late, { ok: false, status: 409, error: "invalid_transition" });
+    assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'ticket.resolved' AND subject_id = ?", [id]), 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM ticket_comments WHERE ticket_id = ? AND author_type = 'system' AND body LIKE 'Status:%'", [id]), 1);
+  });
+  await check("a status move read from a stale status never lands: 'waiting on client' on a ticket closed meanwhile is refused, and it stays closed", async () => {
+    const id = (await newTicket("Closed under a stale edit")).ticket.id;
+    const raced = racing(/FROM support_tickets WHERE tenant_id = \? AND id = \?/, () => deliveryStore.updateTicket(db, OASIS, id, { status: "closed" }, ADON_AUTHOR, T0));
+    const late = await deliveryStore.updateTicket(raced, OASIS, id, { status: "waiting_on_client", assigned_to: USERS.cc.id }, CC_AUTHOR, T0);
+    assert.deepEqual(late, { ok: false, status: 409, error: "invalid_transition" });
+    const row = (await db.execute({ sql: "SELECT status, assigned_to FROM support_tickets WHERE id = ?", args: [id] })).rows[0];
+    assert.deepEqual([row.status, row.assigned_to], ["closed", null], "nothing of the stale edit landed");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM ticket_comments WHERE ticket_id = ? AND body LIKE '%Waiting%'", [id]), 0);
+  });
 
   // ── Last touch, health ─────────────────────────────────────────────────────
   await check("last touch is the latest activity, not updated_at: an edit is not a touch, an email is", async () => {
@@ -1096,6 +1144,23 @@ async function main() {
     assert.ok(r.conflicts.some((c) => c.stripe_customer_id === "cus_DUPB"), JSON.stringify(r));
     assert.equal((await store.getCustomer(db, OASIS, dup.customer.id))!.stripe_customer_id, "cus_DUPA", "the first link stands");
   });
+  await check("Stripe import: a record linked by someone else after the plan was read keeps its link; the import's link is a conflict", async () => {
+    const rec = await store.createCustomer(db, OASIS, { ...base, display_name: "Raced Link Co", primary_email: "raced@link.test" }, USERS.cc.id, new Date(ago(3)));
+    assert.ok(rec.ok);
+    await db.execute({
+      sql: `INSERT INTO fin_subscriptions (id, entity_id, stripe_customer_id, customer_name, customer_email, status, currency, monthly_cents)
+            VALUES ('s-raced', 'fin_ent_oasis', 'cus_IMPORTED', 'Raced', 'raced@link.test', 'active', 'CAD', 10000)`,
+      args: [],
+    });
+    // A founder links the record by hand between the import's plan and its write.
+    const raced = racing(/SELECT id, primary_email, stripe_customer_id FROM customers/, () =>
+      store.updateCustomer(db, OASIS, rec.customer.id, { stripe_customer_id: "cus_BY_HAND" }, T0, USERS.adon.id),
+    );
+    const r = await sync.runStripeImport(raced, OASIS, USERS.cc.id, T0, new Map([["cus_IMPORTED", "link"]]));
+    assert.ok(!r.linked.includes(rec.customer.id), JSON.stringify(r));
+    assert.ok(r.conflicts.some((c) => c.stripe_customer_id === "cus_IMPORTED" && c.customerId === rec.customer.id), JSON.stringify(r));
+    assert.equal((await store.getCustomer(db, OASIS, rec.customer.id))!.stripe_customer_id, "cus_BY_HAND", "the hand link is never overwritten");
+  });
 
   // ── Support desk ───────────────────────────────────────────────────────────
   const TicketsPage = (await import("../app/tickets/page")).default;
@@ -1153,6 +1218,19 @@ async function main() {
       assert.doesNotMatch(broken, /Messages Handled\n0\b/);
     } finally {
       await db.execute("ALTER TABLE client_roi_snapshots_gone RENAME TO client_roi_snapshots");
+    }
+  });
+  await check("the client portal: a workspace that could not be resolved is the load error, never the empty 'nightly snapshot' state", async () => {
+    await login(USERS.clientA);
+    await db.execute("ALTER TABLE user_profiles RENAME TO user_profiles_gone");
+    try {
+      const t = await page(Portal());
+      assert.match(t, /Couldn't load your AI's numbers/);
+      assert.doesNotMatch(t, /nightly snapshot/, "an unread profile is not 'no data yet'");
+      // The value's element carries a class name, which the walk prints before its text.
+      assert.match(t, /Days Tracked\n(?:[^\n]*\n)?—/, "and not zero days");
+    } finally {
+      await db.execute("ALTER TABLE user_profiles_gone RENAME TO user_profiles");
     }
   });
 

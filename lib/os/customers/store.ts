@@ -648,6 +648,37 @@ export async function updateCustomer(
   return { ok: true, customer, changed };
 }
 
+export type StripeLinkResult = { ok: true } | { ok: false; error: "already_linked" | Conflict };
+
+/**
+ * Link a Stripe customer to a client of THIS workspace that has none. A
+ * compare-and-swap: it lands only while the record's stripe_customer_id is
+ * still empty, so a link anyone set between the caller's read and this write
+ * is never overwritten (already_linked, also for a record that is not there).
+ * The unique index refuses a Stripe customer another record already holds.
+ */
+export async function linkStripeCustomer(
+  db: Client,
+  tenantId: string,
+  id: string,
+  stripeCustomerId: string,
+  now: Date,
+): Promise<StripeLinkResult> {
+  requireTenant(tenantId);
+  try {
+    const rs = await db.execute({
+      sql: `UPDATE customers SET stripe_customer_id = ?, updated_at = ?
+            WHERE tenant_id = ? AND id = ? AND (stripe_customer_id IS NULL OR stripe_customer_id = '')`,
+      args: [stripeCustomerId, now.toISOString(), tenantId, id],
+    });
+    return rs.rowsAffected === 1 ? { ok: true } : { ok: false, error: "already_linked" };
+  } catch (err) {
+    const conflict = conflictOf(err);
+    if (!conflict) throw err;
+    return { ok: false, error: conflict };
+  }
+}
+
 export async function addContact(
   db: Client,
   tenantId: string,

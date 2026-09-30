@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { Card, PageHeader, Stat, EmptyState } from "@/components/Card";
 import { LoadError, StageTag, TicketStatusTag } from "@/components/delivery/badges";
-import { getActiveProfile } from "@/lib/queries";
-import { safe } from "@/lib/api-helpers";
+import { resolveTenantId } from "@/lib/api-auth";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { timeAgo } from "@/lib/fmt";
 import { getDeliveryAccess } from "@/lib/delivery/session";
@@ -89,14 +88,24 @@ async function getRecentRoi(tenantId: string, days = 30): Promise<RoiState> {
   }
 }
 
-export default async function ClientPortalPage() {
-  const profile = await safe("client-portal.profile", getActiveProfile(), null);
-  const tenantId = profile?.tenant_id || "";
+/**
+ * The viewer's ROI. A workspace that could not be resolved (the profile read
+ * failed) is an unknown, so "error"; only a viewer who truly has no workspace
+ * reads as an empty roll-up.
+ */
+async function getViewerRoi(): Promise<RoiState> {
+  let tenantId: string | null;
+  try {
+    tenantId = await resolveTenantId();
+  } catch (err) {
+    console.error("[client-portal.profile]", err);
+    return { state: "error" };
+  }
+  return tenantId ? getRecentRoi(tenantId, 30) : { state: "ok", rows: [] };
+}
 
-  const [roi, delivery] = await Promise.all([
-    tenantId ? getRecentRoi(tenantId, 30) : Promise.resolve<RoiState>({ state: "ok", rows: [] }),
-    getDeliveryPanel(),
-  ]);
+export default async function ClientPortalPage() {
+  const [roi, delivery] = await Promise.all([getViewerRoi(), getDeliveryPanel()]);
   const snapshots = roi.state === "ok" ? roi.rows : [];
   // No snapshot (or a failed read) is "not known yet", shown as a dash, never as 0.
   const known = roi.state === "ok" && snapshots.length > 0;

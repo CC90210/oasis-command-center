@@ -31,7 +31,7 @@ import type { Client, ResultSet } from "@libsql/client";
 import { BUSINESS_ENTITY_ID } from "@/lib/founders-finances/chart";
 import { MRR_STATUSES } from "@/lib/founders-finances/mrr";
 import { LIMITS, normalizeEmail, type CustomerLifecycle } from "@/lib/os/customers/rules";
-import { createCustomer, updateCustomer } from "@/lib/os/customers/store";
+import { createCustomer, linkStripeCustomer } from "@/lib/os/customers/store";
 
 type Row = Record<string, unknown>;
 
@@ -191,7 +191,9 @@ export async function runStripeImport(
       continue;
     }
     if (item.action === "link") {
-      const r = await updateCustomer(db, tenantId, item.customerId, { stripe_customer_id: g.stripe_customer_id }, now, actor);
+      // Only onto a record that still has no Stripe customer: one linked since
+      // the plan was read keeps its link, and this one is a conflict.
+      const r = await linkStripeCustomer(db, tenantId, item.customerId, g.stripe_customer_id, now);
       if (r.ok) out.linked.push(item.customerId);
       else out.conflicts.push({ stripe_customer_id: g.stripe_customer_id, customerId: item.customerId });
       continue;

@@ -1195,10 +1195,12 @@ export type TicketUpdateResult =
     };
 
 /**
- * Apply a founder's edit. Status moves are checked against TICKET_TRANSITIONS;
- * a severity change on an unanswered ticket re-targets its SLA; linking a
- * project refuses a project that belongs to a different client, and a ticket
- * with no client inherits the project's (the founder just said whose it is).
+ * Apply a founder's edit. Status moves are checked against TICKET_TRANSITIONS
+ * and land only on a ticket still in the status they were checked from (else
+ * 409 invalid_transition, nothing written); a severity change on an
+ * unanswered ticket re-targets its SLA; linking a project refuses a project
+ * that belongs to a different client, and a ticket with no client inherits
+ * the project's (the founder just said whose it is).
  * A ticket moved onto a project takes that project's client record; naming a
  * different one while it sits there is refused. A client record can only be
  * one of THIS desk's (tenant_id, id) pairs.
@@ -1350,9 +1352,25 @@ export async function updateTicket(
 
   if (sets.length === 0) return { ok: true, changed: [] };
   set("updated_at", at);
+  // A status move was checked from the status read above, so it lands only if
+  // the ticket still has it (compare-and-swap). Two founders resolving at once
+  // resolve it once: the late one changes no row, so its thread line and its
+  // ledger row below (each conditional on the statement before it) are not
+  // written, and it is told the status moved.
+  const movesStatus = sets.includes("status = ?");
   const stmts: InStatement[] = [
-    { sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`, args: [...args, tenantId, id] },
+    {
+      sql: `UPDATE support_tickets SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?${movesStatus ? " AND status = ?" : ""}`,
+      args: [...args, tenantId, id, ...(movesStatus ? [fromStatus] : [])],
+    },
   ];
+  if (notes.length) {
+    stmts.push({
+      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
+            SELECT ?, ?, ?, 'system', ?, ?, ?, 1, ? WHERE changes() = 1`,
+      args: [randomUUID(), id, tenantId, author.userId, author.name, notes.join(" "), at],
+    });
+  }
   if (changes.status === "resolved" && fromStatus !== "resolved") {
     // The n-th resolution of this ticket (a reopened ticket resolves again).
     const prior = await db.execute({
@@ -1377,14 +1395,8 @@ export async function updateTicket(
       ),
     );
   }
-  if (notes.length) {
-    stmts.push({
-      sql: `INSERT INTO ticket_comments (id, ticket_id, tenant_id, author_type, author_user_id, author_name, body, is_internal, created_at)
-            VALUES (?, ?, ?, 'system', ?, ?, ?, 1, ?)`,
-      args: [randomUUID(), id, tenantId, author.userId, author.name, notes.join(" "), at],
-    });
-  }
-  await db.batch(stmts, "write");
+  const results = await db.batch(stmts, "write");
+  if (movesStatus && results[0].rowsAffected !== 1) return { ok: false, status: 409, error: "invalid_transition" };
   return { ok: true, changed: sets.map((x) => x.split(" = ")[0]).filter((c) => c !== "updated_at") };
 }
 
