@@ -1,8 +1,7 @@
 /**
  * POST /api/clients/[id]/reply — write to a client from their record.
  *
- * Body: { to?, subject, body, confirmed, channel?: "email",
- *         drafted_by?: "person" | "agent", drafted_by_agent? }
+ * Body: { to?, subject, body, confirmed, channel?: "email" }
  *
  *   A person's message   sent only with confirmed: true (the composer asks
  *                        "Send this email to <address>?" first), through the
@@ -10,12 +9,14 @@
  *                        the OASIS mailbox; any other workspace only from the
  *                        teammate's own mailbox connected in it, never from
  *                        OASIS's (lib/os/customers/conversations.ts
- *                        resolveClientMailbox). No mailbox: a 409 that says so,
+ *                        resolveClientMailbox). A workspace with no registered
+ *                        sender identity, or no mailbox: a 409 that says which,
  *                        and nothing is sent. Sent: it is written to the
  *                        message ledger and the client's thread, so it shows
  *                        in the record's Conversations.
- *   An agent's draft     never sent here: it becomes ONE send_email approval
- *                        (the existing kind), decided in Feed.
+ *   An agent's draft     NOT taken here (403): a session is a person. The agent
+ *                        runtime proposes it itself (proposeClientEmail), as
+ *                        ONE send_email approval decided in Feed.
  *
  * Who: the workspace's desk team (owners and admins who may act), the same
  * people who read the client's messages. The client and the workspace come
@@ -38,7 +39,6 @@ import { resolveOasisMailboxFrom, sendOasisSharedGmail } from "@/lib/integration
 import { getTenant } from "@/lib/queries";
 import {
   clientAddresses,
-  proposeClientEmail,
   sendClientEmail,
   validateClientReply,
   type MailboxDeps,
@@ -114,17 +114,10 @@ export async function POST(req: NextRequest, { params }: Params) {
     if (!v.ok) return customersError(400, v.error, { field: v.field });
     const now = new Date();
 
-    if (v.value.draftedBy === "agent") {
-      const proposed = await proposeClientEmail(db, { tenantId: viewer.tenantId, customer, reply: v.value, now });
-      if (!proposed.ok) return customersError(409, proposed.error, { field: proposed.field });
-      return NextResponse.json({
-        ok: true,
-        status: "proposed",
-        approval_id: proposed.approval.id,
-        created: proposed.created,
-        message: "The draft is waiting for approval in Feed. Nothing was sent.",
-      });
-    }
+    // A person's session never files a draft AS an agent: an agent's draft is
+    // proposed by the agent runtime itself (proposeClientEmail, with the
+    // agent's own key). Nothing is created here.
+    if (v.value.draftedBy === "agent") return customersError(403, "agent_drafts_not_from_a_session");
 
     const session = await resolveSessionContext();
     const userEmail = session.ok ? session.email || null : null;

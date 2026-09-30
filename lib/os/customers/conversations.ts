@@ -36,7 +36,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { messageSource, normalizePhoneE164, type ConversationMessage } from "@/lib/conversation-threading";
 import type { BrandKey } from "@/lib/email/brands";
-import { createApproval } from "@/lib/os/approvals/store";
+import { defaultExecutorDeps, executorReadiness } from "@/lib/os/approvals/executors";
+import { createApproval, type CreateApprovalResult } from "@/lib/os/approvals/store";
 import { normalizeEmail } from "@/lib/os/customers/rules";
 
 type Row = Record<string, unknown>;
@@ -394,13 +395,19 @@ export type MailboxDeps = {
 export type MailboxChoice =
   | { ok: true; kind: "oasis_shared"; from: string; brand: "oasis" }
   | { ok: true; kind: "operator"; mailbox: "app_password" | "oauth"; brand: BrandKey }
-  | { ok: false; error: "oasis_mailbox_not_configured" | "no_mailbox" };
+  | { ok: false; error: "oasis_mailbox_not_configured" | "no_sender_identity" | "no_mailbox" };
 
 /**
  * The ONE mailbox rule. OASIS's workspace: the OASIS mailbox. Any other
  * workspace: the teammate's own mailbox connected IN that workspace, and only
  * when the workspace has a legal identity to sign with. Never the OASIS
  * mailbox for another workspace.
+ *
+ * The identity is checked FIRST and refused under its own code: a workspace
+ * with no registered sender identity (brandForTenant fails closed for every
+ * workspace not in its map) cannot send whatever mailbox is connected, so
+ * telling that teammate to "connect a mailbox" would send them to a fix that
+ * does not work.
  */
 export async function resolveClientMailbox(tenantId: string, userId: string, deps: MailboxDeps): Promise<MailboxChoice> {
   if (tenantId === deps.oasisTenantId) {
@@ -408,7 +415,7 @@ export async function resolveClientMailbox(tenantId: string, userId: string, dep
     return from ? { ok: true, kind: "oasis_shared", from, brand: "oasis" } : { ok: false, error: "oasis_mailbox_not_configured" };
   }
   const brand = await deps.brandFor(tenantId);
-  if (!brand) return { ok: false, error: "no_mailbox" };
+  if (!brand) return { ok: false, error: "no_sender_identity" };
   const mailbox = await deps.operatorMailbox(tenantId, userId);
   if (!mailbox) return { ok: false, error: "no_mailbox" };
   return { ok: true, kind: "operator", mailbox, brand };
@@ -606,13 +613,26 @@ export async function sendClientEmail(
  * An agent's draft to the client becomes ONE send_email approval (the existing
  * kind; lib/os/approvals is not changed). The same draft proposed twice is the
  * same approval: the key is the client, the address and the words.
+ *
+ * SERVER-SIDE CALLERS ONLY: the agent runtime, with the agent's own key. No
+ * HTTP route takes an "agent" draft from a person's session (that would let
+ * anyone on the desk file an approval as an agent that never drafted it).
+ *
+ * A workspace whose send_email executor cannot run (lib/os/approvals/executors
+ * readiness: no sender identity, or one with no sender inside the app) gets no
+ * approval at all: a card that can never be carried out is not proposed.
  */
 export async function proposeClientEmail(
   db: Client,
-  input: { tenantId: string; customer: ConversationCustomer; reply: ClientReply; now: Date },
-) {
+  input: { tenantId: string; tenantSlug: string | null; customer: ConversationCustomer; reply: ClientReply; now: Date },
+): Promise<CreateApprovalResult | { ok: false; error: "workspace_cannot_send_email"; message: string }> {
   const { tenantId, customer, reply, now } = input;
   requireTenant(tenantId);
+  if (reply.draftedBy !== "agent" || !reply.draftedByAgent) throw new Error("customers.conversations: only an agent's draft is proposed");
+  const ready = executorReadiness("send_email", { id: tenantId, slug: input.tenantSlug }, defaultExecutorDeps());
+  if (!ready.executable) {
+    return { ok: false, error: "workspace_cannot_send_email", message: ready.note ?? "This workspace cannot send an approved email." };
+  }
   const digest = createHash("sha256").update(`${reply.to}\n${reply.subject}\n${reply.body}`, "utf8").digest("hex").slice(0, 32);
   return createApproval(
     db,

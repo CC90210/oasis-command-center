@@ -2,7 +2,9 @@
  * POST /api/clients/[id]/link-workspace — link an OASIS client record to the
  * client's own OASIS workspace, or unlink it.
  *
- * Body: { client_tenant_id: "<tenants.id>" | null }
+ * Body: { client_tenant_id: "<tenants.id>" | null, confirmed: true }
+ * (confirmed: the operator answered "Link <workspace> to this client?" or
+ * "Unlink?" in the control; without it nothing changes.)
  *
  * OPERATOR ONLY, and only in OASIS's own workspace. The link is what lets the
  * record's Usage tab read the client's workspace (its ROI snapshots, agent
@@ -56,6 +58,9 @@ export async function POST(req: NextRequest, { params }: Params) {
     const raw = body.client_tenant_id;
     const clientTenantId = raw === null || raw === "" ? null : typeof raw === "string" && TENANT_ID_RE.test(raw.trim()) ? raw.trim() : undefined;
     if (clientTenantId === undefined) return customersError(400, "client_tenant_id_invalid", { field: "client_tenant_id" });
+    // A cross-workspace read grant, made or removed, is confirmed first (the
+    // control asks "Link <workspace> to this client?"); nothing changes without it.
+    if (body.confirmed !== true) return customersError(400, "link_confirmation_required");
     let result: Awaited<ReturnType<typeof setClientWorkspace>>;
     try {
       result = await setClientWorkspace(db, viewer.tenantId, id, clientTenantId, new Date());

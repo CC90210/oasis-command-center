@@ -8,7 +8,8 @@
  *              deal it came from (deal_id = source_lead_id: deal.won, ...),
  *              and payment rows that name its Stripe customer (contact_id =
  *              the cus_ id, the contract T5's payment.received and
- *              refund.issued follow).
+ *              refund.issued follow). Events the ledger files under finance
+ *              are read only for a viewer who may open Money (opts.books).
  *   INFERRED   lead_interactions on the deal the client came from. Those were
  *              logged against the LEAD, before (or outside) the client record,
  *              so each is labelled "inferred from the deal", never passed off
@@ -20,7 +21,9 @@
  * emits may name only the keys it owns; this one names every key it reads).
  */
 import type { Client, ResultSet } from "@libsql/client";
+import { normalizePhoneE164 } from "@/lib/conversation-threading";
 import { BUSINESS_ENTITY_ID } from "@/lib/founders-finances/chart";
+import { normalizeEmail } from "@/lib/os/customers/rules";
 
 type Row = Record<string, unknown>;
 
@@ -221,11 +224,16 @@ export async function loadClientActivity(
     );
     args.push(BUSINESS_ENTITY_ID, ...whoArgs, BUSINESS_ENTITY_ID, ...whoArgs, BUSINESS_ENTITY_ID, ...whoArgs);
   }
+  // Money is for the founders who may open Money. Without the books, no event
+  // the ledger files under finance (payments, refunds, invoices, subscriptions,
+  // with their amounts) is read, whichever column matched it: a payment that
+  // names the client's Stripe customer or its customer id is still money.
+  const moneyGate = opts.books ? "" : " AND department_key <> 'finance'";
   const ledger = await db.execute({
     sql: `SELECT id, event_key, occurred_at, subject_type, subject_id, value_cents, currency, payload_json,
                  CASE WHEN customer_id IS NULL OR customer_id <> ? THEN 1 ELSE 0 END AS from_deal
           FROM outcome_events
-          WHERE tenant_id = ? AND (${where.join(" OR ")})
+          WHERE tenant_id = ? AND (${where.join(" OR ")})${moneyGate}
           ORDER BY occurred_at DESC, id DESC
           LIMIT ${ACTIVITY_LIMIT + 1}`,
     args: [customer.id, tenantId, ...args],
@@ -266,23 +274,44 @@ function latest(...isos: Array<string | null | undefined>): string | null {
 }
 
 /**
+ * A send the mail server could not confirm (lib/os/customers/conversations.ts
+ * records it with this type). It may never have left, so it is not contact.
+ */
+const UNCONFIRMED_SEND = "email_delivery_unknown";
+
+/** The JSON field `metadata.<key>` of a row, or NULL when the column is not JSON. */
+const metaField = (key: string, column = "metadata") =>
+  `(CASE WHEN json_valid(${column}) THEN json_extract(${column}, '$.${key}') END)`;
+
+export type TouchCustomer = ActivityCustomer & { primary_phone?: string | null; last_ticket_at?: string | null };
+
+/**
  * "Last touch" for each client: the latest ACTIVITY, never the record's
- * updated_at (an edit to a tag is not contact with the client). The latest of:
- * the client's ledger facts, an interaction on its source deal, a message to or
- * from its primary address, and the latest ticket the desk already counted.
- * Null = nothing recorded at all, which the page says as such.
+ * updated_at (an edit to a tag is not contact with the client). It reads every
+ * place the Conversations tab reads, matched the same way
+ * (lib/os/customers/conversations.ts loadClientConversation), so the badge
+ * never says "no contact" over a thread full of messages. The latest of:
+ *   - the client's ledger facts (bookkeeping about the record excluded);
+ *   - its tickets, and the public replies on them;
+ *   - interactions on the deal it came from;
+ *   - email and SMS to or from ANY of its addresses: the primary email and
+ *     phone and every contact's email and phone;
+ *   - messages stamped with its id (metadata.customer_id, what the composer
+ *     writes);
+ *   - Slack messages mirrored for it (conversation_events);
+ *   - agents' drafts to it that were approved and sent.
+ * A send the mail server could not confirm is not counted: it may never have
+ * left. Null = nothing recorded at all, which the page says as such.
  */
 export async function lastTouchFor(
   db: Client,
   tenantId: string,
-  customers: ReadonlyArray<ActivityCustomer & { last_ticket_at?: string | null }>,
+  customers: ReadonlyArray<TouchCustomer>,
 ): Promise<Map<string, string | null>> {
   requireTenant(tenantId);
   const out = new Map<string, string | null>();
   if (customers.length === 0) return out;
   const byCustomer = new Map<string, string>();
-  const byLead = new Map<string, string>();
-  const byEmail = new Map<string, string>();
   const chunk = <T,>(list: readonly T[]) => {
     const parts: T[][] = [];
     for (let i = 0; i < list.length; i += 200) parts.push(list.slice(i, i + 200));
@@ -293,9 +322,40 @@ export async function lastTouchFor(
     const best = latest(byCustomer.get(id), at);
     if (best) byCustomer.set(id, best);
   };
+  // Each address (and deal) mapped to the clients it belongs to. Two clients can share
+  // an address; a message to it is in both threads, so it touches both.
+  const owners = (map: Map<string, Set<string>>, key: string | null, id: string) => {
+    if (!key) return;
+    const set = map.get(key) ?? new Set<string>();
+    set.add(id);
+    map.set(key, set);
+  };
+  const byEmail = new Map<string, Set<string>>();
+  const byPhone = new Map<string, Set<string>>();
+  const byLead = new Map<string, Set<string>>();
+  for (const c of customers) {
+    owners(byEmail, normalizeEmail(c.primary_email), c.id);
+    owners(byPhone, normalizePhoneE164(c.primary_phone ?? null), c.id);
+    owners(byLead, c.source_lead_id, c.id);
+  }
+  for (const part of chunk(ids)) {
+    const rs = await db.execute({
+      sql: `SELECT customer_id, email, phone FROM customer_contacts
+            WHERE tenant_id = ? AND customer_id IN (${part.map(() => "?").join(", ")})`,
+      args: [tenantId, ...part],
+    });
+    for (const r of rows(rs)) {
+      owners(byEmail, normalizeEmail(r.email), String(r.customer_id));
+      owners(byPhone, normalizePhoneE164(s(r.phone)), String(r.customer_id));
+    }
+  }
+  const bumpAll = (map: Map<string, Set<string>>, key: string, at: string | null) => {
+    for (const id of map.get(key) ?? []) bump(id, at);
+  };
+
   for (const part of chunk(ids)) {
     const marks = part.map(() => "?").join(", ");
-    const [ledger, tickets, replies] = await Promise.all([
+    const [ledger, tickets, replies, stamped, slack, approved] = await Promise.all([
       // Bookkeeping about the record itself (it was created, moved to Past)
       // is not contact with the client, so it is not a touch.
       db.execute({
@@ -320,46 +380,77 @@ export async function lastTouchFor(
               GROUP BY t.customer_id`,
         args: [tenantId, ...part],
       }),
+      // What the record's composer sent (stamped with the client's id).
+      db.execute({
+        sql: `SELECT ${metaField("customer_id")} AS customer_id, MAX(COALESCE(sent_at, created_at)) AS at FROM lead_interactions
+              WHERE tenant_id = ? AND channel IN ('email', 'sms') AND COALESCE(type, '') <> ?
+                AND ${metaField("customer_id")} IN (${marks})
+              GROUP BY 1`,
+        args: [tenantId, UNCONFIRMED_SEND, ...part],
+      }),
+      // Slack, mirrored for this client (the rows the Conversations tab shows).
+      db.execute({
+        sql: `SELECT ${metaField("customer_id")} AS customer_id, MAX(created_at) AS at FROM conversation_events
+              WHERE tenant_id = ? AND ${metaField("channel")} = 'slack'
+                AND (CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.text') END) = 'text'
+                AND ${metaField("customer_id")} IN (${marks})
+              GROUP BY 1`,
+        args: [tenantId, ...part],
+      }),
+      // Agents' drafts to the client, approved and sent.
+      db.execute({
+        sql: `SELECT target_ref, MAX(executed_at) AS at FROM approvals
+              WHERE tenant_id = ? AND action_kind = 'send_email' AND status = 'executed' AND executed_at IS NOT NULL
+                AND ${metaField("outcome", "execution_result")} = 'sent'
+                AND target_ref IN (${marks})
+              GROUP BY target_ref`,
+        args: [tenantId, ...part.map((id) => `customer:${id}`)],
+      }),
     ]);
-    for (const rs of [ledger, tickets, replies]) {
+    for (const rs of [ledger, tickets, replies, stamped, slack]) {
       for (const r of rows(rs)) bump(String(r.customer_id), s(r.at));
     }
+    for (const r of rows(approved)) bump(String(r.target_ref).slice("customer:".length), s(r.at));
   }
-  const leads = [...new Set(customers.map((c) => c.source_lead_id).filter((x): x is string => Boolean(x)))];
+  const leads = [...byLead.keys()];
   for (const part of chunk(leads)) {
     const rs = await db.execute({
       sql: `SELECT lead_id, MAX(COALESCE(sent_at, created_at)) AS at FROM lead_interactions
-            WHERE tenant_id = ? AND lead_id IN (${part.map(() => "?").join(", ")})
+            WHERE tenant_id = ? AND lead_id IN (${part.map(() => "?").join(", ")}) AND COALESCE(type, '') <> ?
             GROUP BY lead_id`,
-      args: [tenantId, ...part],
+      args: [tenantId, ...part, UNCONFIRMED_SEND],
     });
-    for (const r of rows(rs)) if (s(r.at)) byLead.set(String(r.lead_id), String(r.at));
+    for (const r of rows(rs)) bumpAll(byLead, String(r.lead_id), s(r.at));
   }
-  const emails = [...new Set(customers.map((c) => (c.primary_email || "").toLowerCase()).filter(Boolean))];
-  for (const part of chunk(emails)) {
+  for (const part of chunk([...byEmail.keys()])) {
     const marks = part.map(() => "?").join(", ");
     const rs = await db.execute({
       sql: `SELECT addr, MAX(at) AS at FROM (
               SELECT lower(to_email) AS addr, COALESCE(sent_at, created_at) AS at FROM lead_interactions
-                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND lower(to_email) IN (${marks})
+                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND COALESCE(type, '') <> ? AND lower(to_email) IN (${marks})
               UNION ALL
               SELECT lower(from_email) AS addr, COALESCE(sent_at, created_at) AS at FROM lead_interactions
-                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND lower(from_email) IN (${marks})
+                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND COALESCE(type, '') <> ? AND lower(from_email) IN (${marks})
             ) GROUP BY addr`,
-      args: [tenantId, ...part, tenantId, ...part],
+      args: [tenantId, UNCONFIRMED_SEND, ...part, tenantId, UNCONFIRMED_SEND, ...part],
     });
-    for (const r of rows(rs)) if (s(r.at)) byEmail.set(String(r.addr), String(r.at));
+    for (const r of rows(rs)) bumpAll(byEmail, String(r.addr), s(r.at));
   }
-  for (const c of customers) {
-    out.set(
-      c.id,
-      latest(
-        byCustomer.get(c.id),
-        c.source_lead_id ? byLead.get(c.source_lead_id) : null,
-        c.primary_email ? byEmail.get(c.primary_email.toLowerCase()) : null,
-        c.last_ticket_at ?? null,
-      ),
-    );
+  // Texts carry a phone, not an email (lead_interactions.to_phone / from_phone, E.164).
+  for (const part of chunk([...byPhone.keys()])) {
+    const marks = part.map(() => "?").join(", ");
+    const rs = await db.execute({
+      sql: `SELECT addr, MAX(at) AS at FROM (
+              SELECT to_phone AS addr, COALESCE(sent_at, created_at) AS at FROM lead_interactions
+                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND COALESCE(type, '') <> ? AND to_phone IN (${marks})
+              UNION ALL
+              SELECT from_phone AS addr, COALESCE(sent_at, created_at) AS at FROM lead_interactions
+                WHERE tenant_id = ? AND channel IN ('email', 'sms') AND COALESCE(type, '') <> ? AND from_phone IN (${marks})
+            ) GROUP BY addr`,
+      args: [tenantId, UNCONFIRMED_SEND, ...part, tenantId, UNCONFIRMED_SEND, ...part],
+    });
+    for (const r of rows(rs)) bumpAll(byPhone, String(r.addr), s(r.at));
   }
+  for (const c of customers) out.set(c.id, latest(byCustomer.get(c.id), c.last_ticket_at ?? null));
   return out;
 }

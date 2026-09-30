@@ -10,16 +10,33 @@
  * (POST /api/clients/[id]/reply). The route's own sentence is shown on any
  * refusal (no mailbox, opted out, dry run) and the draft stays in the box.
  * After a send the page re-reads, so the message appears in the thread from
- * the ledger, not from local state.
+ * the ledger, not from local state. A send the mail server could not confirm
+ * keeps its "Delivery unconfirmed" tag in the thread (ClientThread), read from
+ * the row it was recorded as. A workspace with no registered sender identity
+ * gets no composer, and the reason instead (sendBlocked).
  */
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { MessageList } from "@/components/conversations/MessageList";
+import { MessageList, type MessageStatusMap } from "@/components/conversations/MessageList";
 import type { ConversationMessage } from "@/lib/conversation-threading";
 import type { ClientDraft } from "@/lib/os/customers/conversations";
 
 type Recipient = { email: string; label: string };
+
+/** How the composer records a send the mail server could not confirm (lib/os/customers/conversations.ts). */
+const UNCONFIRMED_SEND = "email_delivery_unknown";
+
+/**
+ * The thread itself. A send the server could not confirm carries the
+ * bubble's "Delivery unconfirmed" tag from the row it was recorded as, so it
+ * never reads as a delivered email once the one-off notice is gone.
+ */
+export function ClientThread({ messages }: { messages: ConversationMessage[] }) {
+  const statusMap: MessageStatusMap = {};
+  for (const m of messages) if (m.type === UNCONFIRMED_SEND) statusMap[m.id] = "unknown";
+  return <MessageList messages={messages} statusMap={statusMap} />;
+}
 
 export function ClientConversations({
   customerId,
@@ -29,6 +46,7 @@ export function ClientConversations({
   truncated,
   recipients,
   mailboxNote,
+  sendBlocked,
   canSend,
 }: {
   customerId: string;
@@ -39,6 +57,8 @@ export function ClientConversations({
   recipients: Recipient[];
   /** Which mailbox sends, in words (OASIS's, or the teammate's own). */
   mailboxNote: string;
+  /** Why this workspace cannot send at all (no registered sender identity); null when it can. */
+  sendBlocked: string | null;
   canSend: boolean;
 }) {
   const pending = drafts.filter((d) => d.status === "pending");
@@ -64,14 +84,18 @@ export function ClientConversations({
               they came from and Slack in a channel mapped to them appear here.
             </p>
           ) : inBrowser ? (
-            <MessageList messages={messages} />
+            <ClientThread messages={messages} />
           ) : (
             <p className="px-4 py-8 text-center text-[13px] text-fg-dim">
               Loading {messages.length} message{messages.length === 1 ? "" : "s"}...
             </p>
           )}
         </div>
-        {canSend ? (
+        {canSend && sendBlocked ? (
+          <p role="status" className="border-t border-hairline px-4 py-3 text-[13px] text-status-warm">
+            {sendBlocked}
+          </p>
+        ) : canSend ? (
           <Composer customerId={customerId} recipients={recipients} mailboxNote={mailboxNote} />
         ) : (
           <p className="border-t border-hairline px-4 py-3 text-[13px] text-fg-muted">

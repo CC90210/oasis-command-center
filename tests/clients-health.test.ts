@@ -196,6 +196,50 @@ async function main() {
     assert.deepEqual(m.get("c-a2"), { overdueInvoices: 0, failedPayments: 0, cancelAtPeriodEnd: true });
     assert.deepEqual(m.get("c-b1"), { overdueInvoices: 0, failedPayments: 0, cancelAtPeriodEnd: false });
   });
+  await check("money signals: a client with neither a Stripe customer nor an email gets NO entry (unknown), never zeros", async () => {
+    const m = await h.moneySignalsFor(db, [{ id: "c-unlinked", stripe_customer_id: null, primary_email: null }], "2026-09-30");
+    assert.equal(m.has("c-unlinked"), false);
+    // Through the at-risk count it is unknown, not fine.
+    await db.execute(cust("c-u1", "u0000000-0000-4000-8000-00000000000u", "Unlinked One"));
+    const touch = async (list: ReadonlyArray<{ id: string }>) => new Map(list.map((c) => [c.id, daysAgo(2)] as [string, string | null]));
+    const r = await h.countAtRiskClients(db, "u0000000-0000-4000-8000-00000000000u", NOW, { money: "read", lastTouch: touch });
+    assert.deepEqual(r, { total: 1, atRisk: 0, watch: 0, unknown: 1 });
+  });
+  await check("'today' is Toronto's day in every reader: at 22:00 Toronto (02:00 UTC next day) a thing due today is not yet late", async () => {
+    // 2026-10-01T02:00Z is 2026-09-30 22:00 in Toronto (EDT).
+    const late = new Date("2026-10-01T02:00:00.000Z");
+    assert.equal(h.torontoDay(late), "2026-09-30");
+    const T = "t0000000-0000-4000-8000-00000000000t";
+    await db.batch(
+      [
+        cust("c-t1", T, "Due Today Co", { email: "due-today@t.test" }),
+        cust("c-t2", T, "Due Yesterday Co", { email: "due-yesterday@t.test" }),
+        {
+          sql: `INSERT INTO delivery_projects (id, tenant_id, title, stage, due_date, customer_id, created_at, updated_at)
+                VALUES ('p-t1', ?, 'Due today', 'building', '2026-09-30', 'c-t1', ?, ?)`,
+          args: [T, daysAgo(30), daysAgo(1)],
+        },
+        {
+          sql: `INSERT INTO delivery_projects (id, tenant_id, title, stage, due_date, customer_id, created_at, updated_at)
+                VALUES ('p-t2', ?, 'Due yesterday', 'building', '2026-09-29', 'c-t2', ?, ?)`,
+          args: [T, daysAgo(30), daysAgo(1)],
+        },
+        { sql: "INSERT INTO fin_contacts (id, entity_id, kind, name, email) VALUES ('fc-t1', 'fin_ent_oasis', 'customer', 'Due Today Co', 'due-today@t.test')", args: [] },
+        {
+          sql: `INSERT INTO fin_invoices (id, entity_id, contact_id, number, status, issue_date, due_date, currency, total_cents, created_by)
+                VALUES ('i-t1', 'fin_ent_oasis', 'fc-t1', 'INV-T1', 'sent', '2026-09-01', '2026-09-30', 'CAD', 1000, 'test')`,
+          args: [],
+        },
+      ],
+      "write",
+    );
+    const desk = await h.deskSignalsFor(db, T, ["c-t1", "c-t2"], late);
+    assert.equal(desk.get("c-t1")!.projectsPastDue, 0, "due today (Toronto) is not past due");
+    assert.equal(desk.get("c-t2")!.projectsPastDue, 1);
+    const touch = async (list: ReadonlyArray<{ id: string }>) => new Map(list.map((c) => [c.id, late.toISOString()] as [string, string | null]));
+    // c-t1: nothing late (project and invoice both due today) = healthy; c-t2: a project past due = watch.
+    assert.deepEqual(await h.countAtRiskClients(db, T, late, { money: "read", lastTouch: touch }), { total: 2, atRisk: 0, watch: 1, unknown: 0 });
+  });
 
   await check("at-risk count for Client Success: this workspace's current clients only, unread signals counted as unknown", async () => {
     const touch = async (list: ReadonlyArray<{ id: string }>) => new Map(list.map((c) => [c.id, daysAgo(2)] as [string, string | null]));

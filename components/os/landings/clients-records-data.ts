@@ -51,7 +51,7 @@ import { lastTouchFor, loadClientActivity, type ActivityEntry } from "@/lib/os/c
 import { clientAddresses, loadClientConversation, type ClientAddresses, type ClientConversation } from "@/lib/os/customers/conversations";
 import { loadClientMoney, type ClientMoney } from "@/lib/os/customers/money";
 import { loadClientUsage, type ClientUsage } from "@/lib/os/customers/usage";
-import { deskSignalsFor, health, moneySignalsFor, type Health, type MoneySignals } from "@/lib/os/customers/health";
+import { deskSignalsFor, health, moneySignalsFor, torontoDay, type Health, type MoneySignals } from "@/lib/os/customers/health";
 import { getCustomersDb, type ClientsViewer } from "@/lib/os/customers/session";
 
 export type Loaded<T> =
@@ -74,11 +74,6 @@ function dbOrThrow(): Client {
   const db = getCustomersDb();
   if (!db) throw new Error("Turso is not configured on this deployment");
   return db;
-}
-
-/** YYYY-MM-DD in Toronto, the day "overdue" is counted against (the books' own calendar). */
-export function torontoDay(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }
 
 /**
@@ -162,7 +157,9 @@ function moneyInput(
 ): MoneySignals | "not_tracked" | null {
   if (access === "not_tracked") return "not_tracked";
   if (access !== "read" || !signals || signals.state !== "ok") return null;
-  return signals.value.get(id) ?? { overdueInvoices: 0, failedPayments: 0, cancelAtPeriodEnd: false };
+  // No entry = a client the books cannot be searched for (no Stripe customer,
+  // no email): unknown, which health() lists, never "nothing overdue".
+  return signals.value.get(id) ?? null;
 }
 
 /**

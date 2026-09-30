@@ -53,6 +53,7 @@ import { ClientUsagePanel } from "@/components/os/landings/client-usage";
 import { clientsViewerFromSurface, type ClientsViewer } from "@/lib/os/customers/session";
 import { CUSTOMER_LIFECYCLE_LABELS } from "@/lib/os/customers/rules";
 import { ACTIVE_PROJECT_STAGES, DELIVERY_TENANT_ID, OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
 import { loadAssignmentRoster } from "@/lib/delivery/session";
@@ -226,6 +227,12 @@ export default async function ClientRecordPage({
 function ConversationsTab({ data, viewer }: { data: ClientRecordData; viewer: ClientsViewer }) {
   const state = data.conversation;
   if (state.state !== "ok") return <NotLoaded state={state.state} what="Conversations" />;
+  const oasis = viewer.tenantId === DELIVERY_TENANT_ID;
+  // The same fail-closed identity the send route checks first
+  // (lib/os/customers/conversations.ts resolveClientMailbox): a workspace
+  // without one cannot send, whatever mailbox it connects, and is told so
+  // BEFORE anyone writes a message.
+  const identity = oasis || brandForTenant({ tenantId: viewer.tenantId, tenantSlug: viewer.tenantSlug }) !== null;
   return (
     <ClientConversations
       customerId={data.customer.id}
@@ -235,9 +242,14 @@ function ConversationsTab({ data, viewer }: { data: ClientRecordData; viewer: Cl
       truncated={state.value.truncated}
       recipients={state.value.addresses.recipients}
       mailboxNote={
-        viewer.tenantId === DELIVERY_TENANT_ID
+        oasis
           ? "Sends from the OASIS mailbox, with you in copy. It is recorded in this conversation."
           : "Sends from your own mailbox connected in this workspace (never from OASIS's). It is recorded in this conversation."
+      }
+      sendBlocked={
+        identity
+          ? null
+          : "Email can't be sent from this workspace yet: it has no registered business identity to send client email as. OASIS has to set that up; connecting a mailbox alone does not. The conversation above still collects every message."
       }
       canSend={Boolean(viewer.desk?.canAct)}
     />

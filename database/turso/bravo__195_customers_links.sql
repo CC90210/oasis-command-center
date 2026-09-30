@@ -20,10 +20,13 @@
 --     into every WHERE (libSQL has no row-level security).
 --   - additive only: one nullable column and two indexes. No DROP, no rewrite.
 --
--- ORDERING. Apply BEFORE the code that ships with it is deployed: the client
--- record reads customers.client_tenant_id, and a database without it answers
--- "no such column" on the Clients pages (said out loud, never read as "not
--- linked").
+-- ORDERING. Apply it with or before the code that ships with it. The code
+-- deployed first does not break the Clients pages: they read customers with
+-- SELECT *, so the missing column reads as null and every record's Usage tab
+-- shows "Not linked to the client's workspace yet". Only the operator's Link
+-- workspace action needs the column, and without it that route answers 503
+-- client_workspace_link_not_set_up, naming this migration; nothing is written.
+-- Until it is applied, no record can be linked, so no client usage is read.
 --
 -- NOT RE-RUNNABLE AS A WHOLE: SQLite has no ADD COLUMN IF NOT EXISTS. The
 -- migration ledger (scripts/apply_turso_migration.py) applies it once.

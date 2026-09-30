@@ -346,7 +346,37 @@ export function LinkWorkspaceControl({
   const { run, busy, error } = useDeliveryAction();
   const [choice, setChoice] = useState(current?.id ?? "");
   const [confirmUnlink, setConfirmUnlink] = useState(false);
+  const [confirmLink, setConfirmLink] = useState(false);
   const url = `/api/clients/${encodeURIComponent(customerId)}/link-workspace`;
+  const chosenLabel = options.find((o) => o.value === choice)?.label ?? "this workspace";
+  if (confirmLink) {
+    // A cross-workspace read grant: asked first, in words, like unlinking.
+    return (
+      <div role="alertdialog" aria-label="Confirm link workspace" className="space-y-2 rounded-xl border border-hairline bg-bg-panel p-3">
+        <p className="text-sm text-fg">
+          Link {chosenLabel} to this client? This record will then read that workspace&rsquo;s usage: its AI numbers, agent runs,
+          approvals and tickets.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={busy}
+            onClick={async () => {
+              const data = await run(url, "POST", { client_tenant_id: choice, confirmed: true });
+              if (data) setConfirmLink(false);
+            }}
+          >
+            {busy ? "Saving..." : "Yes, link it"}
+          </button>
+          <button type="button" className="btn-secondary" disabled={busy} onClick={() => setConfirmLink(false)}>
+            Cancel
+          </button>
+        </div>
+        <ErrorLine error={error} />
+      </div>
+    );
+  }
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-end gap-2">
@@ -363,14 +393,19 @@ export function LinkWorkspaceControl({
           type="button"
           className="btn-primary"
           disabled={busy || !choice || choice === current?.id}
-          onClick={() => void run(url, "POST", { client_tenant_id: choice })}
+          onClick={() => setConfirmLink(true)}
         >
-          {busy ? "Saving..." : current ? "Change workspace" : "Link workspace"}
+          {current ? "Change workspace" : "Link workspace"}
         </button>
         {current &&
           (confirmUnlink ? (
             <>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void run(url, "POST", { client_tenant_id: null })}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={busy}
+                onClick={() => void run(url, "POST", { client_tenant_id: null, confirmed: true })}
+              >
                 Confirm unlink
               </button>
               <button type="button" className="text-xs text-fg-muted hover:text-fg" onClick={() => setConfirmUnlink(false)}>
@@ -397,8 +432,9 @@ type PlanItem = { action: string; stripe_customer_id: string; name: string | nul
 
 /**
  * Shows what an import WOULD do (GET), asks the privacy question, and only
- * then imports (POST { confirm_privacy: true }). Records get a name, an email
- * and the Stripe customer id; nothing else.
+ * then imports exactly the listed people (POST { confirm_privacy: true,
+ * confirmed: [...] }). Records get a name, an email and the Stripe customer
+ * id; nothing else.
  */
 export function ImportStripeButton() {
   const router = useRouter();
@@ -486,17 +522,28 @@ export function ImportStripeButton() {
                 setBusy(true);
                 setError(null);
                 try {
+                  // Exactly the people listed above, with the action each was
+                  // shown with: the privacy answer covers them and no one else.
+                  const confirmed = plan.items
+                    .filter((i) => i.action === "create" || i.action === "link")
+                    .map((i) => ({ stripe_customer_id: i.stripe_customer_id, action: i.action }));
                   const res = await fetch("/api/clients/import-stripe", {
                     method: "POST",
                     headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ confirm_privacy: true }),
+                    body: JSON.stringify({ confirm_privacy: true, confirmed }),
                   });
                   const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
                   if (!res.ok || !data || data.ok !== true) {
                     setError((data && typeof data.message === "string" && data.message) || `The import failed (HTTP ${res.status}).`);
                     return;
                   }
-                  setDone(`Created ${String(data.created)}, linked ${String(data.linked)}, skipped ${String(data.skipped)}.`);
+                  const held = Number(data.unreviewed ?? 0) + Number(data.changed ?? 0);
+                  setDone(
+                    `Created ${String(data.created)}, linked ${String(data.linked)}, skipped ${String(data.skipped)}.` +
+                      (held > 0
+                        ? ` ${held} not imported: they reached the books or changed after this list was opened. Open the import again to review them.`
+                        : ""),
+                  );
                   setPlan(null);
                   router.refresh();
                 } catch {

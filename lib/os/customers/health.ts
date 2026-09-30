@@ -119,6 +119,16 @@ function rows(rs: ResultSet): Row[] {
   });
 }
 
+/**
+ * YYYY-MM-DD in Toronto: the day "overdue" and "past due" are counted against
+ * (the books' own calendar). Every reader here and every page uses this one
+ * day, so the list, the record and the Client Success count agree between
+ * 20:00 and midnight Toronto time, when the UTC date is already tomorrow.
+ */
+export function torontoDay(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Toronto", year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
 function chunks<T>(list: readonly T[], size = 200): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
@@ -136,7 +146,7 @@ export async function deskSignalsFor(
   const out = new Map<string, { slaBreaches30d: number; projectsPastDue: number }>();
   for (const id of customerIds) out.set(id, { slaBreaches30d: 0, projectsPastDue: 0 });
   const since = new Date(now.getTime() - 30 * 86_400_000).toISOString();
-  const today = now.toISOString().slice(0, 10);
+  const today = torontoDay(now);
   for (const part of chunks(customerIds)) {
     const marks = part.map(() => "?").join(", ");
     const [breaches, projects] = await Promise.all([
@@ -165,6 +175,10 @@ export async function deskSignalsFor(
  * Money signals per client from OASIS's books, matched the way the Money tab
  * matches (lib/os/customers/money.ts): Stripe customer id, else the primary
  * email. The books are small; each table is read once for all clients.
+ *
+ * A client with neither a Stripe customer nor an email cannot be found in the
+ * books at all (its Money tab says "not linked to the books"), so it gets NO
+ * entry: its money is unknown, never "nothing overdue".
  */
 export async function moneySignalsFor(
   db: Client,
@@ -190,6 +204,7 @@ export async function moneySignalsFor(
   for (const c of customers) {
     const stripe = c.stripe_customer_id || null;
     const email = (c.primary_email || "").toLowerCase() || null;
+    if (!stripe && !email) continue;
     const mine = (r: Row) => (stripe && r.stripe_customer_id === stripe) || (email && r.email === email);
     let failedPayments = 0;
     let cancelAtPeriodEnd = false;
@@ -224,13 +239,21 @@ export async function countAtRiskClients(
   now: Date,
   opts: {
     money: "read" | "not_tracked" | "unknown";
-    lastTouch: (customers: ReadonlyArray<{ id: string; source_lead_id: string | null; stripe_customer_id: string | null; primary_email: string | null }>) => Promise<Map<string, string | null>>;
+    lastTouch: (
+      customers: ReadonlyArray<{
+        id: string;
+        source_lead_id: string | null;
+        stripe_customer_id: string | null;
+        primary_email: string | null;
+        primary_phone: string | null;
+      }>,
+    ) => Promise<Map<string, string | null>>;
   },
 ): Promise<{ total: number; atRisk: number; watch: number; unknown: number }> {
   if (typeof tenantId !== "string" || !tenantId.trim()) throw new Error("customers.health: a tenant id is required");
   const list = rows(
     await db.execute({
-      sql: `SELECT id, lifecycle, created_at, source_lead_id, stripe_customer_id, primary_email FROM customers
+      sql: `SELECT id, lifecycle, created_at, source_lead_id, stripe_customer_id, primary_email, primary_phone FROM customers
             WHERE tenant_id = ? AND archived_at IS NULL AND lifecycle <> 'churned' LIMIT 1000`,
       args: [tenantId],
     }),
@@ -241,8 +264,9 @@ export async function countAtRiskClients(
     source_lead_id: r.source_lead_id ? String(r.source_lead_id) : null,
     stripe_customer_id: r.stripe_customer_id ? String(r.stripe_customer_id) : null,
     primary_email: r.primary_email ? String(r.primary_email) : null,
+    primary_phone: r.primary_phone ? String(r.primary_phone) : null,
   }));
-  const today = now.toISOString().slice(0, 10);
+  const today = torontoDay(now);
   const [desk, touch, money] = await Promise.all([
     deskSignalsFor(db, tenantId, list.map((c) => c.id), now),
     opts.lastTouch(list),

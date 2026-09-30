@@ -5,7 +5,8 @@
  * Runs ONLY from the founder-clicked "Import Stripe customers" button
  * (POST /api/clients/import-stripe), which also requires the founder to
  * confirm the privacy question first: Stripe subscribers can be private
- * individuals, and Quebec's Law 25 applies to recording them. Nothing calls it
+ * individuals, and Quebec's Law 25 applies to recording them. It imports only
+ * the Stripe customers the founder was shown and confirmed. Nothing calls it
  * on a schedule.
  *
  * WHAT IT READS. fin_subscriptions and fin_payments of OASIS's business book
@@ -135,17 +136,37 @@ export type ImportResult = {
   linked: string[];
   skipped: number;
   conflicts: Array<{ stripe_customer_id: string; customerId: string | null }>;
+  /** Stripe customers the founder was not shown (they reached the books after the list was opened): not imported. */
+  unreviewed: string[];
+  /** Stripe customers whose action changed since the founder reviewed it (a create is now a link, or back): not imported. */
+  changed: string[];
 };
 
+/** What the founder saw and confirmed in the dialog: each Stripe customer and the action it was shown with. */
+export type ConfirmedImport = ReadonlyMap<string, "create" | "link">;
+
 /**
- * Carry the plan out. Each record goes through the customers store, so it is
- * tenant-scoped, unique-index guarded and ledgered (customer.created, origin
- * "import") like any other. A record that raced in between the plan and the
- * write is reported as a conflict, never overwritten.
+ * Carry out what the founder CONFIRMED, and nothing else. The plan is read
+ * again (so nothing is written from a stale picture), and each create or link
+ * runs only when the founder was shown that same Stripe customer with that
+ * same action: the privacy confirmation covered the people listed, not whoever
+ * reached the books between the preview and the click. The rest is reported
+ * (unreviewed, changed) for the founder to review again.
+ *
+ * Each record goes through the customers store, so it is tenant-scoped,
+ * unique-index guarded and ledgered (customer.created, origin "import") like
+ * any other. A record that raced in between the plan and the write is reported
+ * as a conflict, never overwritten.
  */
-export async function runStripeImport(db: Client, tenantId: string, actor: string | null, now: Date): Promise<ImportResult> {
+export async function runStripeImport(
+  db: Client,
+  tenantId: string,
+  actor: string | null,
+  now: Date,
+  confirmed: ConfirmedImport,
+): Promise<ImportResult> {
   const plan = await planStripeImport(db, tenantId);
-  const out: ImportResult = { created: [], linked: [], skipped: 0, conflicts: [] };
+  const out: ImportResult = { created: [], linked: [], skipped: 0, conflicts: [], unreviewed: [], changed: [] };
   for (const item of plan) {
     const g = item.group;
     if (item.action === "skip") {
@@ -154,6 +175,15 @@ export async function runStripeImport(db: Client, tenantId: string, actor: strin
     }
     if (item.action === "conflict") {
       out.conflicts.push({ stripe_customer_id: g.stripe_customer_id, customerId: item.customerId });
+      continue;
+    }
+    const shown = confirmed.get(g.stripe_customer_id);
+    if (!shown) {
+      out.unreviewed.push(g.stripe_customer_id);
+      continue;
+    }
+    if (shown !== item.action) {
+      out.changed.push(g.stripe_customer_id);
       continue;
     }
     if (item.action === "link") {

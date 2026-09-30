@@ -24,6 +24,7 @@
  */
 import "./_delivery-harness";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
@@ -82,6 +83,9 @@ function textOf(node: unknown, out: string[] = [], seen = new Set<unknown>()): s
 
 const MIG = (f: string) => readFileSync(join(__dirname, "..", "database", "turso", f), "utf8");
 const MEMBER_A = { id: "0d000000-0000-4000-8000-0000000000a2", email: "helper@client-a.test" };
+// An OASIS admin who runs the desk but is NOT one of the founders who may open
+// Money (lib/founders-finances/access.ts FINANCE_OWNER_EMAILS).
+const OPS_ADMIN = { id: "0d000000-0000-4000-8000-0000000000f5", email: "ops-admin@oasis-ops.test" };
 const LEAD_X = "1ead0000-0000-4000-8000-00000000000a";
 const T0 = new Date("2026-09-30T12:00:00.000Z");
 const ago = (days: number) => new Date(T0.getTime() - days * 86_400_000).toISOString();
@@ -135,6 +139,12 @@ async function main() {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, joined_at, updated_at)
               VALUES (?, ?, ?, ?, 'member', 0, '2026-09-01T00:00:00Z', 'Helper', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
         args: [`p-${MEMBER_A.id}`, MEMBER_A.id, MEMBER_A.email, CLIENT_A],
+      },
+      { sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [OPS_ADMIN.id, OPS_ADMIN.email] },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, joined_at, updated_at)
+              VALUES (?, ?, ?, ?, 'admin', 0, '2026-09-01T00:00:00Z', 'Ops Admin', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z')`,
+        args: [`p-${OPS_ADMIN.id}`, OPS_ADMIN.id, OPS_ADMIN.email, OASIS],
       },
       // The deal OASIS's client X came from.
       {
@@ -276,17 +286,43 @@ async function main() {
     assert.equal(r.body.error, "to_not_this_client");
   });
   await login(USERS.clientA);
-  await check("reply route: a client workspace with no mailbox of its own is refused (never the OASIS mailbox)", async () => {
+  await check("reply route (real brandForTenant): a client workspace with no registered sender identity is refused as THAT, never told to connect a mailbox", async () => {
+    const before = await count("SELECT COUNT(*) AS n FROM lead_interactions");
     const r = await call(replyRoute.POST(req("POST", `/api/clients/${A.id}/reply`, { ...sentMsg, confirmed: true }), params({ id: A.id })));
     assert.equal(r.status, 409, JSON.stringify(r.body));
-    assert.equal(r.body.error, "no_mailbox");
-    assert.match(String(r.body.message), /no mailbox connected for client email yet, so nothing was sent/);
+    assert.equal(r.body.error, "no_sender_identity");
+    assert.match(String(r.body.message), /no registered business identity to send client email as, so nothing was sent/);
+    assert.doesNotMatch(String(r.body.message), /Connect your own mailbox/, "connecting a mailbox cannot fix this, so it is not the advice");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM lead_interactions"), before);
     assert.equal((await call(replyRoute.POST(req("POST", `/api/clients/${X.id}/reply`, { ...sentMsg, confirmed: true }), params({ id: X.id })))).status, 404, "OASIS's client is not A's");
+  });
+  await check("the record says a workspace without a sender identity cannot send yet, before anyone writes", async () => {
+    assert.match(await page(record(A.id, "conversations")), /Email can't be sent from this workspace yet: it has no registered business identity/);
+    await login(USERS.cc);
+    assert.doesNotMatch(await page(record(X.id, "conversations")), /Email can't be sent from this workspace yet/, "OASIS sends from the OASIS mailbox");
+    await login(USERS.clientA);
   });
   await login(MEMBER_A);
   await check("reply route: a member below owner/admin may not write to clients", async () => {
     const r = await call(replyRoute.POST(req("POST", `/api/clients/${A.id}/reply`, { ...sentMsg, confirmed: true }), params({ id: A.id })));
     assert.equal(r.status, 403);
+  });
+  await check("reply route: a desk viewer who may not act (canAct false) is refused before anything is sent or recorded", async () => {
+    // No persona pairs the desk with canAct:false today; the route's gate must
+    // still hold if the capability matrix ever does (a read-only founder view).
+    const surfaces = await import("../lib/role-surfaces");
+    const founder = surfaces.SURFACE_CAPABILITIES.founder;
+    (surfaces.SURFACE_CAPABILITIES as Record<string, unknown>).founder = { ...founder, canAct: false };
+    try {
+      await login(USERS.cc);
+      const before = await count("SELECT COUNT(*) AS n FROM lead_interactions");
+      const r = await call(replyRoute.POST(req("POST", `/api/clients/${X.id}/reply`, { ...sentMsg, confirmed: true }), params({ id: X.id })));
+      assert.equal(r.status, 403, JSON.stringify(r.body));
+      assert.equal(r.body.error, "forbidden");
+      assert.equal(await count("SELECT COUNT(*) AS n FROM lead_interactions"), before);
+    } finally {
+      (surfaces.SURFACE_CAPABILITIES as Record<string, unknown>).founder = founder;
+    }
   });
 
   type Call = { kind: string; args: Json };
@@ -340,18 +376,20 @@ async function main() {
     assert.equal(thread.last_direction, "outbound");
     assert.equal(thread.last_preview, "HELLO-FROM-RECORD");
   });
-  await check("send: another workspace uses ITS OWN connected mailbox, never OASIS's; none connected is refused", async () => {
-    const none = fakeDeps({ brandFor: async () => null });
-    const refused = await conversations.sendClientEmail(db, none.deps, {
+  await check("send: another workspace uses ITS OWN connected mailbox, never OASIS's; no identity or no mailbox is refused, each in its own words", async () => {
+    // No registered sender identity: refused as such, EVEN WITH a mailbox connected.
+    const noIdentity = fakeDeps({ brandFor: async () => null, operatorMailbox: async () => "app_password" });
+    const refused = await conversations.sendClientEmail(db, noIdentity.deps, {
       tenantId: CLIENT_A, userId: USERS.clientA.id, userEmail: USERS.clientA.email, customer: A, reply: reply(A, [], { ...sentMsg, confirmed: true }), now: T0,
     });
-    assert.deepEqual(refused, { ok: false, status: 409, error: "no_mailbox" });
-    assert.equal(none.calls.length, 0);
+    assert.deepEqual(refused, { ok: false, status: 409, error: "no_sender_identity" });
+    assert.equal(noIdentity.calls.length, 0);
+    // A workspace WITH an identity (as SunBiz's own is, lib/email/brand-for-tenant.ts) but no mailbox of the teammate's own.
     const noOwn = fakeDeps({ brandFor: async () => "sunbiz" });
     const refused2 = await conversations.sendClientEmail(db, noOwn.deps, {
       tenantId: CLIENT_A, userId: USERS.clientA.id, userEmail: USERS.clientA.email, customer: A, reply: reply(A, [], { ...sentMsg, confirmed: true }), now: T0,
     });
-    assert.equal(refused2.ok, false, "a brand but no mailbox of the teammate's own is still refused");
+    assert.deepEqual(refused2, { ok: false, status: 409, error: "no_mailbox" });
     assert.equal(noOwn.calls.length, 0);
     const own = fakeDeps({ brandFor: async () => "sunbiz", operatorMailbox: async () => "app_password" });
     const sent = await conversations.sendClientEmail(db, own.deps, {
@@ -387,23 +425,64 @@ async function main() {
     const row = (await db.execute("SELECT type FROM lead_interactions WHERE content = 'UNSURE-SEND'")).rows[0];
     assert.equal(row.type, "email_delivery_unknown");
   });
+  await check("the thread marks an unconfirmed send 'Delivery unconfirmed' from its row, long after the one-off notice (tests/clients-hub.render.ts)", async () => {
+    const thread = await conversations.loadClientConversation(db, OASIS, X, await store.listContacts(db, OASIS, X.id));
+    const unsure = thread.messages.find((m) => m.preview === "UNSURE-SEND");
+    const sent = thread.messages.find((m) => m.preview === "HELLO-FROM-RECORD");
+    assert.ok(unsure && sent, "both sends are in the thread");
+    assert.equal(unsure!.type, "email_delivery_unknown");
+    // The render needs whole React: drop the suite's react-server condition.
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const out = spawnSync(process.execPath, ["--import", "tsx", "tests/clients-hub.render.ts"], {
+      encoding: "utf8",
+      env,
+      input: JSON.stringify([sent, unsure]),
+    });
+    assert.equal(out.status, 0, `the render helper exited ${out.status}:\n${out.stderr}`);
+    const html = (JSON.parse(out.stdout) as { thread: string }).thread;
+    const bubble = (id: string) => {
+      const start = html.indexOf(`data-message-id="${id}"`);
+      assert.ok(start >= 0, `bubble ${id} is drawn`);
+      const next = html.indexOf("data-message-id=", start + 1);
+      return html.slice(start, next < 0 ? undefined : next);
+    };
+    assert.match(bubble(unsure!.id), /Delivery unconfirmed/, "the unconfirmed send says so");
+    assert.doesNotMatch(bubble(sent!.id), /Delivery unconfirmed/, "a confirmed send does not");
+  });
 
   // ── An agent's draft ───────────────────────────────────────────────────────
   await login(USERS.cc);
-  await check("an agent's draft creates exactly ONE send_email approval, and is never sent", async () => {
-    const draft = { subject: "Check-in", body: "AGENT-DRAFT", drafted_by: "agent", drafted_by_agent: "client-success" };
-    const r1 = await call(replyRoute.POST(req("POST", `/api/clients/${X.id}/reply`, draft), params({ id: X.id })));
-    assert.equal(r1.status, 200, JSON.stringify(r1.body));
-    assert.equal(r1.body.status, "proposed");
-    const r2 = await call(replyRoute.POST(req("POST", `/api/clients/${X.id}/reply`, draft), params({ id: X.id })));
-    assert.equal(r2.body.created, false, "the same draft is the same approval");
-    assert.equal(
-      await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ? AND action_kind = 'send_email' AND target_ref = ?", [OASIS, `customer:${X.id}`]),
-      1,
-    );
+  const agentDraft = { subject: "Check-in", body: "AGENT-DRAFT", drafted_by: "agent", drafted_by_agent: "client-success" };
+  await check("reply route: a signed-in person cannot file a draft AS an agent; nothing is created", async () => {
+    const r = await call(replyRoute.POST(req("POST", `/api/clients/${X.id}/reply`, agentDraft), params({ id: X.id })));
+    assert.equal(r.status, 403, JSON.stringify(r.body));
+    assert.equal(r.body.error, "agent_drafts_not_from_a_session");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ?", [OASIS]), 0);
+  });
+  await check("an agent's draft (server-side, the agent runtime) creates exactly ONE send_email approval, and is never sent", async () => {
+    const draft = reply(X, [], agentDraft);
+    const r1 = await conversations.proposeClientEmail(db, { tenantId: OASIS, tenantSlug: "oasis-ai-cc", customer: X, reply: draft, now: T0 });
+    assert.ok(r1.ok && r1.created, JSON.stringify(r1));
+    const r2 = await conversations.proposeClientEmail(db, { tenantId: OASIS, tenantSlug: "oasis-ai-cc", customer: X, reply: draft, now: T0 });
+    assert.ok(r2.ok && !r2.created, "the same draft is the same approval");
+    const row = (await db.execute({ sql: "SELECT requested_by_type, requested_by_id, action_kind FROM approvals WHERE tenant_id = ? AND target_ref = ?", args: [OASIS, `customer:${X.id}`] })).rows;
+    assert.equal(row.length, 1);
+    assert.deepEqual([row[0].requested_by_type, row[0].requested_by_id, row[0].action_kind], ["agent", "client-success", "send_email"]);
     assert.equal(await count("SELECT COUNT(*) AS n FROM lead_interactions WHERE content = 'AGENT-DRAFT'"), 0);
     const c = await conversations.loadClientConversation(db, OASIS, X, []);
     assert.deepEqual(c.drafts.map((d) => [d.status, d.subject]), [["pending", "Check-in"]]);
+  });
+  await check("an agent's draft in a workspace whose approved email could never go out is not proposed at all", async () => {
+    const r = await conversations.proposeClientEmail(db, { tenantId: CLIENT_A, tenantSlug: "client-a", customer: A, reply: reply(A, [], agentDraft), now: T0 });
+    assert.equal(r.ok, false);
+    assert.equal(!r.ok && r.error, "workspace_cannot_send_email");
+    assert.match(String(!r.ok && "message" in r ? r.message : ""), /no email sender set up/);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ?", [CLIENT_A]), 0);
   });
 
   // ── Money ──────────────────────────────────────────────────────────────────
@@ -474,6 +553,19 @@ async function main() {
     assert.ok(bare.ok);
     assert.equal(await money.loadClientMoney(db, bare.customer, "2026-09-30"), null);
     assert.match(await page(record(bare.customer.id, "money")), /not linked to the books yet/);
+    // The same client's HEALTH: money that cannot be looked up is unknown, never "nothing overdue".
+    const { moneySignalsFor } = await import("../lib/os/customers/health");
+    assert.equal((await moneySignalsFor(db, [bare.customer], "2026-09-30")).has(bare.customer.id), false, "no signals are invented for it");
+    const health = await page(record(bare.customer.id, "health"));
+    assert.match(health, /Not known: payments and invoices/);
+    assert.doesNotMatch(health, /\bHealthy\b/);
+  });
+  await check("Money is for the founders who may open Money: an OASIS admin on the desk gets 'not allowed', never the figures", async () => {
+    await login(OPS_ADMIN);
+    const t = await page(record(X.id, "money"));
+    assert.match(t, /A client.{1,8}s money is for the founders who can open Money/);
+    assert.doesNotMatch(t, /CAD 127\.84|INV-0001/);
+    await login(USERS.cc);
   });
 
   // ── Activity ───────────────────────────────────────────────────────────────
@@ -521,6 +613,31 @@ async function main() {
     await login(USERS.cc);
     assert.match(await page(record(X.id, "activity")), /Payment received/);
   });
+  await check("Activity: without the books, NO finance event is read, whichever column names the client (T5's contact_id = cus_, or customer_id)", async () => {
+    // T5's contract: payment.received / refund.issued carry contact_id = the Stripe customer.
+    const ev = (id: string, key: string, cols: { contact_id?: string; customer_id?: string }, cents: number, at: string) => ({
+      sql: `INSERT INTO outcome_events (id, tenant_id, event_key, event_version, occurred_at, recorded_at, subject_type, subject_id,
+              contact_id, customer_id, department_key, actor_type, source, idempotency_key, payload_hash, value_cents, currency, confidence, payload_json, producer)
+            VALUES (?, ?, ?, 1, ?, ?, 'payment', ?, ?, ?, 'finance', 'external', 'stripe', ?, 'h', ?, 'CAD', 'verified', '{}', 'lib/founders-finances/stripe-ingest.ts')`,
+      args: [id, OASIS, key, at, at, `pay-${id}`, cols.contact_id ?? null, cols.customer_id ?? null, `t5:${id}`, cents, at],
+    });
+    await db.batch(
+      [
+        ev("01LEDGERT5CONTACT00000001", "payment.received", { contact_id: "cus_X" }, 4242, ago(4)),
+        ev("01LEDGERT5CUSTOMER0000001", "refund.issued", { customer_id: X.id }, 1313, ago(3)),
+      ],
+      "write",
+    );
+    const xNow = (await store.getCustomer(db, OASIS, X.id))!;
+    const money = (entries: Array<{ detail: string | null }>) => entries.map((e) => e.detail ?? "").filter((d) => /CAD (42\.42|13\.13)/.test(d));
+    assert.deepEqual(money((await activity.loadClientActivity(db, OASIS, xNow)).entries), [], "no amounts without the books");
+    assert.equal(money((await activity.loadClientActivity(db, OASIS, xNow, { books: true })).entries).length, 2, "the founders who may open Money see both");
+    await login(OPS_ADMIN);
+    const t = await page(record(X.id, "activity"));
+    assert.match(t, /Support ticket opened/, "the desk admin still sees the client's activity");
+    assert.doesNotMatch(t, /Payment received|Refund issued|CAD 42\.42|CAD 13\.13/);
+    await login(USERS.cc);
+  });
   await check("Activity: the source deal's interactions are labelled inferred; another client's are not there", async () => {
     const a = await activity.loadClientActivity(db, OASIS, X);
     const inferred = a.entries.filter((e) => e.basis === "inferred");
@@ -542,6 +659,68 @@ async function main() {
     await db.batch([li("li-z", OASIS, { preview: "hello quiet", to_email: "quiet@co.test", at: ago(1) })], "write");
     assert.equal((await activity.lastTouchFor(db, OASIS, [z])).get(z.id), ago(1));
     assert.match(await page(ClientsPage({ searchParams: Promise.resolve({ q: "Quiet" }) })), /Quiet Co/);
+  });
+  await check("last touch reads every source the Conversations tab reads, per client, and equals the thread's latest message", async () => {
+    // Hand-added clients (no deal), created 60 days ago, each reached through ONE source only.
+    const made: Record<string, typeof X> = {};
+    const mk = async (key: string, email: string, phone: string | null) => {
+      const r = await store.createCustomer(db, OASIS, { ...base, display_name: `Touch ${key}`, primary_email: email, primary_phone: phone }, USERS.cc.id, new Date(ago(60)));
+      assert.ok(r.ok, JSON.stringify(r));
+      made[key] = r.customer;
+    };
+    await mk("contact", "owner@contact.test", null);
+    await mk("sms", "owner@sms.test", "+1 (514) 555-0101");
+    await mk("inbound", "owner@inbound.test", null);
+    await mk("stamped", "owner@stamped.test", null);
+    await mk("slack", "owner@slack.test", null);
+    await mk("approved", "owner@approved.test", null);
+    await mk("unsure", "owner@unsure.test", null);
+    await store.addContact(db, OASIS, made.contact.id, { name: "Ops", email: "ops@contact.test", phone: null, role: null }, new Date(ago(59)));
+    await store.addContact(db, OASIS, made.inbound.id, { name: "Cell", email: null, phone: "514-555-0199", role: null }, new Date(ago(59)));
+    await db.batch(
+      [
+        // An email to a CONTACT's address, not stamped with the client (sent from the inbox, say).
+        li("li-t-contact", OASIS, { preview: "TO-CONTACT", to_email: "Ops@Contact.test", at: ago(2) }),
+        // A text to the primary phone: to_phone, no email at all.
+        li("li-t-sms", OASIS, { channel: "sms", type: "sms_sent", preview: "TO-PHONE", to_phone: "+15145550101", at: ago(3) }),
+        // A text FROM a contact's phone.
+        {
+          sql: "INSERT INTO lead_interactions (id, tenant_id, type, channel, direction, content_preview, from_phone, created_at) VALUES (?, ?, 'sms_received', 'sms', 'inbound', 'FROM-CONTACT-PHONE', '+15145550199', ?)",
+          args: ["li-t-inbound", OASIS, ago(4)],
+        },
+        // Stamped with the client's id, to an address no longer on file.
+        li("li-t-stamped", OASIS, { preview: "STAMPED", to_email: "gone@elsewhere.test", at: ago(5), metadata: JSON.stringify({ customer_id: made.stamped.id }) }),
+        slack("ce-t-slack", OASIS, made.slack.id, "SLACK-ONLY", ago(6)),
+        {
+          sql: `INSERT INTO approvals (id, tenant_id, department_key, requested_by_type, requested_by_id, action_kind, title, target_ref, payload_json,
+                  payload_hash, status, executed_at, execution_result, idempotency_key, created_at, updated_at)
+                VALUES ('ap-t-approved', ?, 'client_success', 'agent', 'client-success', 'send_email', 'Email', ?, ?, 'h', 'executed', ?, ?, 'ap-t-approved', ?, ?)`,
+          args: [OASIS, `customer:${made.approved.id}`, JSON.stringify({ to: "owner@approved.test", subject: "Hi", body: "APPROVED-SEND" }), ago(7),
+            JSON.stringify({ outcome: "sent", provider: "oasis_shared_gmail" }), ago(8), ago(7)],
+        },
+        // A send the mail server could not confirm is the ONLY thing for this one.
+        li("li-t-unsure", OASIS, { type: "email_delivery_unknown", preview: "MAYBE-SENT", to_email: "owner@unsure.test", at: ago(1), metadata: JSON.stringify({ customer_id: made.unsure.id }) }),
+      ],
+      "write",
+    );
+    const all = Object.values(made);
+    const touch = await activity.lastTouchFor(db, OASIS, all);
+    const expected: Record<string, string | null> = {
+      contact: ago(2), sms: ago(3), inbound: ago(4), stamped: ago(5), slack: ago(6), approved: ago(7), unsure: null,
+    };
+    for (const [key, c] of Object.entries(made)) {
+      assert.equal(touch.get(c.id), expected[key], `${key}: last touch`);
+      if (key === "unsure") continue;
+      const thread = await conversations.loadClientConversation(db, OASIS, c, await store.listContacts(db, OASIS, c.id));
+      assert.equal(thread.messages.at(-1)?.at, touch.get(c.id), `${key}: the badge and the thread agree`);
+    }
+    // The finding's case: health reads the contact, not "no contact since the record was created".
+    await login(USERS.cc);
+    const h = await page(record(made.contact.id, "health"));
+    assert.doesNotMatch(h, /No contact recorded since the record was created/);
+    assert.doesNotMatch(h, /\bAt risk\b/);
+    // (The page counts days against the real clock; the fixtures are 60 days before T0.)
+    assert.match(await page(record(made.unsure.id, "health")), /No contact recorded since the record was created in \d+ days/, "an unconfirmed send is not contact");
   });
   await check("the list and the record carry a health badge", async () => {
     await login(USERS.cc);
@@ -596,21 +775,29 @@ async function main() {
 
   // ── The client's own workspace ─────────────────────────────────────────────
   await check("Link workspace: operator only, OASIS only, one record per workspace", async () => {
+    const link = (id: string, body: unknown) => call(linkRoute.POST(req("POST", `/api/clients/${id}/link-workspace`, body), params({ id })));
     await login(USERS.adon);
-    const notOperator = await call(linkRoute.POST(req("POST", `/api/clients/${X.id}/link-workspace`, { client_tenant_id: CLIENT_A }), params({ id: X.id })));
+    const notOperator = await link(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(notOperator.status, 403);
     assert.equal(notOperator.body.error, "operator_only");
     await login(USERS.clientA);
-    const notOasis = await call(linkRoute.POST(req("POST", `/api/clients/${A.id}/link-workspace`, { client_tenant_id: CLIENT_B }), params({ id: A.id })));
+    const notOasis = await link(A.id, { client_tenant_id: CLIENT_B, confirmed: true });
     assert.equal(notOasis.status, 403);
     await login(USERS.cc);
-    const ok = await call(linkRoute.POST(req("POST", `/api/clients/${X.id}/link-workspace`, { client_tenant_id: CLIENT_A }), params({ id: X.id })));
+    const unconfirmed = await link(X.id, { client_tenant_id: CLIENT_A });
+    assert.equal(unconfirmed.status, 400, "a cross-workspace read grant is confirmed first");
+    assert.equal(unconfirmed.body.error, "link_confirmation_required");
+    assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, null, "nothing changed");
+    const ok = await link(X.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, CLIENT_A);
-    const taken = await call(linkRoute.POST(req("POST", `/api/clients/${Y.id}/link-workspace`, { client_tenant_id: CLIENT_A }), params({ id: Y.id })));
+    const unlinkUnconfirmed = await link(X.id, { client_tenant_id: null });
+    assert.equal(unlinkUnconfirmed.body.error, "link_confirmation_required");
+    assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, CLIENT_A, "unlinking is confirmed too");
+    const taken = await link(Y.id, { client_tenant_id: CLIENT_A, confirmed: true });
     assert.equal(taken.status, 409);
     assert.equal(taken.body.error, "client_tenant_taken");
-    const self = await call(linkRoute.POST(req("POST", `/api/clients/${Y.id}/link-workspace`, { client_tenant_id: OASIS }), params({ id: Y.id })));
+    const self = await link(Y.id, { client_tenant_id: OASIS, confirmed: true });
     assert.equal(self.body.error, "client_tenant_is_this_workspace");
   });
   await check("Usage reads the linked workspace only: its snapshots, agent channels, approvals and desk over 30 days", async () => {
@@ -651,14 +838,87 @@ async function main() {
     ],
     "write",
   );
-  await check("Stripe import: plan first; creates with a name and an email only, links by email, skips what it cannot know", async () => {
+  const importRoute = await import("../app/api/clients/import-stripe/route");
+  const importPost = (body: unknown) => call(importRoute.POST(req("POST", "/api/clients/import-stripe", body)));
+  // What the dialog shows (GET) and would confirm: every create and link, with its action.
+  let reviewed: Array<{ stripe_customer_id: string; action: string }> = [];
+  const customersNow = () => count("SELECT COUNT(*) AS n FROM customers");
+  await check("Stripe import: the founder's preview lists what an import would do, and test-mode customers are not read", async () => {
+    await login(USERS.cc);
     const plan = await sync.planStripeImport(db, OASIS);
     const by = Object.fromEntries(plan.map((p) => [p.group.stripe_customer_id, p.action]));
     assert.deepEqual(by, { cus_ANON: "skip", cus_NEW: "create", cus_OLD: "create", cus_X: "skip", cus_Y: "link" }, "test-mode customers are not read");
+    const g = await call(importRoute.GET());
+    assert.equal(g.status, 200, JSON.stringify(g.body));
+    reviewed = (g.body.items as Array<{ stripe_customer_id: string; action: string }>)
+      .filter((i) => i.action === "create" || i.action === "link")
+      .map((i) => ({ stripe_customer_id: i.stripe_customer_id, action: i.action }));
+    assert.deepEqual(reviewed.map((i) => i.stripe_customer_id).sort(), ["cus_NEW", "cus_OLD", "cus_Y"]);
+  });
+  await check("Stripe import route: refused, and nothing written, without the privacy answer or the reviewed list", async () => {
+    await login(USERS.cc);
+    const before = await customersNow();
+    const noPrivacy = await importPost({ confirmed: reviewed });
+    assert.equal(noPrivacy.status, 400);
+    assert.equal(noPrivacy.body.error, "privacy_confirmation_required");
+    const noList = await importPost({ confirm_privacy: true });
+    assert.equal(noList.status, 400);
+    assert.equal(noList.body.error, "import_confirmation_invalid");
+    assert.equal(await customersNow(), before);
+  });
+  await check("Stripe import route: an OASIS admin who may not open Money is refused (finance_owners_only), GET and POST", async () => {
+    await login(OPS_ADMIN);
+    const before = await customersNow();
+    const g = await call(importRoute.GET());
+    assert.equal(g.status, 403);
+    assert.equal(g.body.error, "finance_owners_only");
+    const p = await importPost({ confirm_privacy: true, confirmed: reviewed });
+    assert.equal(p.status, 403);
+    assert.equal(p.body.error, "finance_owners_only");
+    assert.equal(await customersNow(), before);
+    await login(USERS.cc);
+  });
+  // CC standing in another workspace (a second, newer membership): still the
+  // operator and a finance owner by identity, but not in OASIS's workspace.
+  const CC_IN_B = `p-cc-in-b`;
+  const standInB = () =>
+    db.execute({
+      sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, full_name, joined_at, updated_at)
+            VALUES (?, ?, ?, ?, 'owner', 1, '2026-09-01T00:00:00Z', 'Conaugh McKenna', '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z')`,
+      args: [CC_IN_B, USERS.cc.id, USERS.cc.email, CLIENT_B],
+    });
+  const leaveB = () => db.execute({ sql: "DELETE FROM user_profiles WHERE id = ?", args: [CC_IN_B] });
+  await check("the OASIS-only actions refuse the operator standing in a client's workspace: oasis_only, nothing written", async () => {
+    const bClient = await store.createCustomer(db, CLIENT_B, { ...base, display_name: "B's Own Client", primary_email: "bee@client-b.test" }, USERS.clientB.id, new Date(ago(5)));
+    assert.ok(bClient.ok);
+    await standInB();
+    try {
+      await login(USERS.cc);
+      const before = await customersNow();
+      const imp = await importPost({ confirm_privacy: true, confirmed: reviewed });
+      assert.equal(imp.status, 403, JSON.stringify(imp.body));
+      assert.equal(imp.body.error, "oasis_only");
+      assert.equal(await customersNow(), before);
+      const link = await call(
+        linkRoute.POST(req("POST", `/api/clients/${bClient.customer.id}/link-workspace`, { client_tenant_id: CLIENT_A, confirmed: true }), params({ id: bClient.customer.id })),
+      );
+      assert.equal(link.status, 403, JSON.stringify(link.body));
+      assert.equal(link.body.error, "oasis_only");
+      assert.equal((await store.getCustomer(db, CLIENT_B, bClient.customer.id))!.client_tenant_id, null);
+    } finally {
+      await leaveB();
+    }
+  });
+  await check("Stripe import: imports ONLY what the founder reviewed; a customer that reached the books after the preview is held back", async () => {
+    await login(USERS.cc);
+    // Arrives between the preview and the click. Its id has underscores (as the
+    // books can hold, e.g. cus_TEST_SUB): the POST takes ids as the GET showed them.
+    await db.execute("INSERT INTO fin_subscriptions (id, entity_id, stripe_customer_id, customer_name, customer_email, status, currency, monthly_cents) VALUES ('s-late', 'fin_ent_oasis', 'cus_LATE_ARRIVAL', 'Late Arrival', 'late@sub.test', 'active', 'CAD', 10000)");
     const customersBefore = await count("SELECT COUNT(*) AS n FROM customers WHERE tenant_id = ?", [OASIS]);
-    const r = await sync.runStripeImport(db, OASIS, USERS.cc.id, T0);
-    assert.equal(r.created.length, 2);
-    assert.deepEqual(r.linked, [Y.id]);
+    const res = await importPost({ confirm_privacy: true, confirmed: reviewed });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual([res.body.created, res.body.linked, res.body.unreviewed, res.body.changed], [2, 1, 1, 0]);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id = 'cus_LATE_ARRIVAL'"), 0, "never shown, never imported");
     assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE tenant_id = ?", [OASIS]), customersBefore + 2);
     const sam = (await db.execute("SELECT * FROM customers WHERE tenant_id = ? AND stripe_customer_id = 'cus_NEW'", [OASIS])).rows[0];
     assert.equal(sam.display_name, "Sam Subscriber");
@@ -672,11 +932,22 @@ async function main() {
     assert.equal((await store.getCustomer(db, OASIS, Y.id))!.stripe_customer_id, "cus_Y");
     assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'customer.created' AND source = 'import' AND tenant_id = ?", [OASIS]), 2);
   });
-  await check("Stripe import is idempotent: a second run creates and links nothing", async () => {
+  await check("Stripe import is idempotent: a second run of the same review creates and links nothing", async () => {
+    await login(USERS.cc);
     const before = await count("SELECT COUNT(*) AS n FROM customers");
-    const r = await sync.runStripeImport(db, OASIS, USERS.cc.id, T0);
-    assert.deepEqual([r.created.length, r.linked.length, r.conflicts.length], [0, 0, 0]);
+    const r = await importPost({ confirm_privacy: true, confirmed: reviewed });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.created, r.body.linked, (r.body.conflicts as unknown[]).length], [0, 0, 0]);
     assert.equal(await count("SELECT COUNT(*) AS n FROM customers"), before);
+    const direct = await sync.runStripeImport(db, OASIS, USERS.cc.id, T0, new Map(reviewed.map((i) => [i.stripe_customer_id, i.action as "create" | "link"])));
+    assert.deepEqual([direct.created.length, direct.linked.length, direct.conflicts.length], [0, 0, 0]);
+  });
+  await check("Stripe import: a customer shown with a different action than it now has is held back, not imported", async () => {
+    await login(USERS.cc);
+    const r = await importPost({ confirm_privacy: true, confirmed: [{ stripe_customer_id: "cus_LATE_ARRIVAL", action: "link" }] });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.created, r.body.linked, r.body.changed], [0, 0, 1]);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id = 'cus_LATE_ARRIVAL'"), 0);
   });
 
   // ── Support desk ───────────────────────────────────────────────────────────
@@ -730,6 +1001,26 @@ async function main() {
       assert.doesNotMatch(broken, /Messages Handled\n0\b/);
     } finally {
       await db.execute("ALTER TABLE client_roi_snapshots_gone RENAME TO client_roi_snapshots");
+    }
+  });
+
+  await check("before bravo__195 is applied: records read as 'Not linked', Link workspace answers 503 naming it, as its header says", async () => {
+    const header = MIG("bravo__195_customers_links.sql");
+    const ordering = header.slice(header.indexOf("-- ORDERING."), header.indexOf("-- NOT RE-RUNNABLE"));
+    assert.match(ordering, /Not linked to the client's workspace yet/);
+    assert.match(ordering, /503/);
+    assert.doesNotMatch(ordering, /answers\s+(--\s+)?"no such column" on the Clients pages/);
+    await db.execute("ALTER TABLE customers RENAME COLUMN client_tenant_id TO client_tenant_id_unapplied");
+    try {
+      await login(USERS.cc);
+      assert.equal((await store.getCustomer(db, OASIS, X.id))!.client_tenant_id, null);
+      assert.match(await page(record(X.id, "usage")), /Not linked to the client/);
+      const r = await call(linkRoute.POST(req("POST", `/api/clients/${Y.id}/link-workspace`, { client_tenant_id: CLIENT_B, confirmed: true }), params({ id: Y.id })));
+      assert.equal(r.status, 503, JSON.stringify(r.body));
+      assert.equal(r.body.error, "client_workspace_link_not_set_up");
+      assert.match(String(r.body.message), /bravo__195/);
+    } finally {
+      await db.execute("ALTER TABLE customers RENAME COLUMN client_tenant_id_unapplied TO client_tenant_id");
     }
   });
 
