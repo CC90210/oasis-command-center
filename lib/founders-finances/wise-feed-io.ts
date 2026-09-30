@@ -86,6 +86,8 @@ import {
 } from "./wise-feed";
 import { wiseStatement, WiseNotReady } from "./wise-io";
 import { recordedRefs } from "./wise-reconcile";
+import { bookedPayoutEntry, payoutBookedFromAnotherLine } from "./stripe-payouts-io";
+import { PAYOUT_SOURCE } from "./stripe-payouts";
 
 const FEED_CURRENCIES = ["CAD", "USD"] as const;
 /** Wise statements span at most 469 days. */
@@ -525,6 +527,16 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
     const taken = new Map<string, number>();
     for (const [fitid, r] of plan) {
       if (r.kind === "stripe_payout") {
+        // Already booked from Stripe into this account: the sync links the line to it and takes nothing from clearing.
+        const fromStripe = await bookedPayoutEntry(r.payout.id, entity.id);
+        if (fromStripe) {
+          count(fitid, fromStripe.bankAccountId === chequing ? "stripe_payout" : "needs_review");
+          continue;
+        }
+        if (await payoutBookedFromAnotherLine(r.payout.id, entity.id)) {
+          count(fitid, "needs_review");
+          continue;
+        }
         const row = rowByFitid.get(fitid) as WiseFeedRow;
         const cur = (r.payout.settlementCurrency || "").toUpperCase();
         const clearing = cur ? (await stripeClearingCents(entity.id, acct.stripeClearing, cur)) - (taken.get(cur) || 0) : undefined;
@@ -608,6 +620,40 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
         }
       } else if (res.kind === "stripe_payout") {
         const p = res.payout;
+        // The payout webhook or the Stripe reconcile booked it already
+        // (stripe-payouts-io.ts): link this line to that entry, never post it again.
+        const fromStripe = await bookedPayoutEntry(p.id, entity.id);
+        if (fromStripe) {
+          if (fromStripe.bankAccountId !== chequing) {
+            setNote(line, `${DECIDE_NOTE}Stripe payout ${p.id} is already booked from Stripe into another account than Business chequing, but it arrived here. Check which bank account Finances › Settings › Stripe names for payouts; do not categorise this line by hand.`);
+            count(fitid, "needs_review");
+            continue;
+          }
+          const r = await writeBatch(
+            linkLineToEntryStatements({
+              entityId: entity.id,
+              txnId: line.id,
+              entryId: fromStripe.entryId,
+              categoryId: cat(SYS.stripeClearing),
+              memo: `Stripe payout ${p.id}, already booked from Stripe; nothing new was posted.`,
+              actor,
+              detail: { payout: p.id, fitid },
+            }),
+          );
+          if (r[0]?.rowsAffected === 1) {
+            count(fitid, "stripe_payout");
+            handled.add(line.id);
+            changed = true;
+          }
+          continue;
+        }
+        // Booked from another bank line already (an uploaded statement's, adopted by its shape): this line is that deposit again.
+        const elsewhere = await payoutBookedFromAnotherLine(p.id, entity.id);
+        if (elsewhere) {
+          setNote(line, `${DECIDE_NOTE}Stripe payout ${p.id} is already on the books from another bank line (${elsewhere.entryDate}), so this is the same deposit a second time. Exclude this line; do not categorise it.`);
+          count(fitid, "needs_review");
+          continue;
+        }
         const settleCur = (p.settlementCurrency || "").toUpperCase();
         const clearing = settleCur ? await stripeClearingCents(entity.id, acct.stripeClearing, settleCur) : undefined;
         const holdPayout = (reason: string) => {
@@ -635,6 +681,16 @@ export async function syncWiseFeed(viewer: FinanceViewer, raw: Record<string, un
           actor,
           fixedRates: rates.get(row.postedDate) ? { USD: (rates.get(row.postedDate) as { rate: string }).rate } : undefined,
           detail: { payout: p.id, fx_cents: built.fxCents, fitid },
+          // The webhook or the reconcile may book it after the checks above: from Stripe (then the next
+          // sync links the line to that booking), or by adopting another bank line's entry, whatever that
+          // entry's source (then the next sync holds this line as the same deposit again). Either way the
+          // payout's row names a posted entry, and this posts nothing.
+          gate: {
+            sql: `NOT EXISTS (SELECT 1 FROM fin_journal_entries WHERE entity_id = ? AND source = ? AND source_ref = ? AND status = 'posted')
+                  AND NOT EXISTS (SELECT 1 FROM fin_stripe_payouts sp JOIN fin_journal_entries se ON se.id = sp.entry_id
+                                   WHERE sp.id = ? AND sp.entity_id = ? AND sp.booking = 'booked' AND se.status = 'posted')`,
+            args: [entity.id, PAYOUT_SOURCE, p.id, p.id, entity.id],
+          },
         });
         const r = await writeBatch([...posting.posting, ...posting.link]);
         if (r[posting.posting.length]?.rowsAffected === 1) {

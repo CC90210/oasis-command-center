@@ -26,6 +26,7 @@ import { loadSettings } from "./settings-io";
 import { sweepOverdue } from "./invoices-io";
 import { cashCoverage } from "./cash-coverage";
 import { WISE_FEED_WRITES_ENABLED } from "./wise-feed";
+import { unbookedPayouts } from "./stripe-payouts-io";
 
 export const REPORT_KINDS = ["pnl", "balance", "trial", "cashflow", "ledger", "aging"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -226,7 +227,7 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       [entity.id],
     );
   };
-  const [{ accounts, lines }, invoices, bankLines, threshold] = await Promise.all([
+  const [{ accounts, lines }, invoices, bankLines, threshold, payoutsNotBooked] = await Promise.all([
     loadLedger(entity.id, tomorrow),
     openInvoices(),
     // One read for both bank figures: the lines still to review, and every
@@ -238,6 +239,8 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       [entity.id],
     ),
     business ? thresholdStatus(today) : Promise.resolve(null),
+    // Stripe payouts are the business book's alone.
+    business ? unbookedPayouts(entity.id) : Promise.resolve([]),
   ]);
   const unreviewed = bankLines.reduce((s, r) => s + Number(r.unreviewed || 0), 0);
   const balances = new Map<string, number>();
@@ -285,6 +288,7 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
       book: business ? "business" : "personal",
       wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,
+      unbookedPayouts: payoutsNotBooked,
     }),
     threshold,
   };

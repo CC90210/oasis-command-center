@@ -111,6 +111,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(root, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
   await raw.executeMultiple(readFileSync(join(root, "database/turso/184_finance_wise_payments.turso.sql"), "utf8"));
 
   const { addDays, torontoToday, usdToCadCents, parseRateMicro } = await import("../lib/founders-finances/fx");
@@ -686,6 +689,164 @@ async function main() {
     assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_lines l JOIN fin_journal_entries e ON e.id = l.entry_id WHERE e.source = 'bank_txn' AND e.status = 'posted' AND l.account_id = ? AND l.currency = 'USD' AND l.debit_cents IN (800, 1200)`, [acct("5100")]), 0, "Linear and Notion are each on the books once, as their expenses");
     assert.equal(await native(acct(SYS.stripeClearing), "USD"), 0);
     assert.deepEqual([await activeOpenings("CAD"), await activeOpenings("USD")], [1, 1]);
+  });
+
+  // ── phase 7: a payout the Stripe webhook already booked (stripe-payouts-io.ts) ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24"), value: 50, cur: "USD", ref: "TRANSFER-P4", running: 0, sender: "OASIS AI", payref: "5552100", desc: "Received money from OASIS AI with reference 5552100" });
+  rerun(usdTx, 1000);
+  publish();
+  const poBooked: Json = { id: "po_booked_by_stripe", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 5000, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_4", amount: -5000, currency: "usd", fee: 0, net: -5000 } };
+  fixtures.payouts.push(poBooked);
+  // A US client's charge settled in USD: Stripe clearing holds the USD this payout pays out, so it books
+  // without a conversion (a conversion needs Stripe's list of the charges it pays out, which this file does not serve).
+  const usdCharge = (ref: string, day: string, cents: number) =>
+    postJournalEntry({ entityId: B, entryDate: d(day), memo: "Stripe charge", source: "stripe_charge", sourceRef: ref, createdBy: "stripe", lines: [
+      { accountId: acct(SYS.stripeClearing), currency: "USD", debitCents: cents },
+      { accountId: acct(SYS.serviceRevenue), currency: "USD", creditCents: cents },
+    ] });
+  await usdCharge("ch_usd_p4", "2026-09-21", 5000);
+
+  await check("a payout the Stripe webhook already booked: the feed links its bank line to that entry and posts nothing (never counted twice)", async () => {
+    const { setStripePayoutAccount } = await import("../lib/founders-finances/settings-io");
+    const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
+    const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
+    await setStripePayoutAccount(cc, "oasis", chequing);
+    const booked = await payoutsIo.recordStripePayout(payoutFacts(poBooked)!);
+    assert.equal(booked?.booking, "booked", booked?.reason ?? "");
+    const chequingBefore = await native(chequing, "USD");
+    const preview = await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: true });
+    assert.equal(preview.currencies.find((c) => c.currency === "USD")!.stripe_payouts, 1, "previewed as the payout it is");
+    const r = await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    assert.equal(r.currencies.find((c) => c.currency === "USD")!.stripe_payouts, 1);
+    const p4 = await line("WISE-USD-CREDIT-TRANSFER-P4");
+    assert.deepEqual([p4.status, p4.entry_id], ["posted", booked?.entryId], "linked to the Stripe booking");
+    assert.equal(await native(chequing, "USD"), chequingBefore, "nothing new posted to chequing");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn' AND source_ref = ?`, [String(p4.id)]), 0, "the line has no entry of its own");
+    assert.equal((await native(chequing, "USD")) + (await pending("USD")), wiseNow("USD"), "chequing USD + the held lines = Wise USD");
+  });
+
+  // ── phase 8: the payout is booked from Stripe WHILE the feed is booking its bank line ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24", "15:30"), value: 30, cur: "USD", ref: "TRANSFER-P5", running: 0, sender: "OASIS AI", payref: "5552101", desc: "Received money from OASIS AI with reference 5552101" });
+  rerun(usdTx, 1000);
+  publish();
+  const poRace: Json = { id: "po_race", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 3000, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_5", amount: -3000, currency: "usd", fee: 0, net: -3000 } };
+  fixtures.payouts.push(poRace);
+  await usdCharge("ch_usd_p5", "2026-09-23", 3000);
+
+  await check("a payout booked from Stripe between the feed's check and its write: the feed's posting is refused (its gate), the next sync links the line; on the books once", async () => {
+    const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
+    const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
+    const { getTursoClient } = await import("../lib/turso");
+    const chequingBefore = await native(chequing, "USD");
+    // Test-only: the cached client's batch is shadowed so the Stripe booking lands just before the feed's write.
+    const client = getTursoClient() as unknown as Record<string, unknown>;
+    const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+    let raced = false;
+    client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+      const b = JSON.stringify(stmts);
+      if (!raced && b.includes("txn.posted_by_feed") && b.includes("po_race")) {
+        raced = true;
+        const booked = await payoutsIo.recordStripePayout(payoutFacts(poRace)!);
+        assert.equal(booked?.booking, "booked", booked?.reason ?? "");
+      }
+      return original.call(this, stmts, ...rest);
+    };
+    try {
+      await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    } finally {
+      delete client.batch;
+    }
+    assert.ok(raced, "the Stripe booking landed between the feed's check and its write");
+    const booking = await payoutsIo.bookedPayoutEntry("po_race");
+    assert.ok(booking, "booked from Stripe");
+    assert.equal(await native(chequing, "USD"), chequingBefore + 3000, "the US$30 reached chequing once, not twice");
+    const p5 = await line("WISE-USD-CREDIT-TRANSFER-P5");
+    assert.equal(p5.entry_id, null, "the feed posted nothing");
+    await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const linked = await line("WISE-USD-CREDIT-TRANSFER-P5");
+    assert.deepEqual([linked.status, linked.entry_id], ["posted", booking!.entryId], "the next sync links the line to the Stripe booking");
+    assert.equal(await native(chequing, "USD"), chequingBefore + 3000);
+  });
+
+  // ── phase 9: the payout is already on the books from another bank line (an uploaded statement's) ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24", "16:00"), value: 20, cur: "USD", ref: "TRANSFER-P6", running: 0, sender: "OASIS AI", payref: "5552102", desc: "Received money from OASIS AI with reference 5552102" });
+  rerun(usdTx, 1000);
+  publish();
+  const poTwice: Json = { id: "po_twice", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 2000, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_6", amount: -2000, currency: "usd", fee: 0, net: -2000 } };
+  fixtures.payouts.push(poTwice);
+  // Stripe clearing still holds the USD after the line below takes its US$20, so nothing but the
+  // booking already on the books stops the feed from booking the payout again.
+  await usdCharge("ch_usd_p6", "2026-09-23", 4000);
+
+  await check("a payout already on the books from another bank line (adopted by its shape): the feed holds its own line for it, never posts it again", async () => {
+    const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
+    const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
+    // An uploaded statement's line, categorised to Stripe clearing, before the payout event.
+    await txns.createManualTransaction(cc, "oasis", { date: d("2026-09-24"), description: "STRIPE TRANSFER", amount: "20.00", currency: "USD", account_id: chequing, category_id: categoryId(B, SYS.stripeClearing) });
+    const booked = await payoutsIo.recordStripePayout(payoutFacts(poTwice)!);
+    assert.equal(booked?.booking, "booked", booked?.reason ?? "");
+    const chequingBefore = await native(chequing, "USD");
+    const preview = (await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: true })).currencies.find((c) => c.currency === "USD")!;
+    const r = await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const usd = r.currencies.find((c) => c.currency === "USD")!;
+    assert.ok(usd.needs_review >= 1);
+    assert.deepEqual([preview.stripe_payouts, preview.needs_review], [usd.stripe_payouts, usd.needs_review], "the preview says what the sync then does: held, not booked");
+    const p6 = await line("WISE-USD-CREDIT-TRANSFER-P6");
+    assert.deepEqual([p6.status, p6.entry_id], ["unreviewed", null], "held, not posted");
+    assert.match(String(p6.memo), /Stripe payout po_twice is already on the books from another bank line .*the same deposit a second time/);
+    assert.equal(await native(chequing, "USD"), chequingBefore, "the US$20 is on the books once");
+  });
+
+  // ── phase 10: the payout ADOPTS another bank line's entry between the feed's check and its write (CodeRabbit, PR #491) ──
+  usdTx.push({ dir: "CREDIT", kind: "DEPOSIT", at: at("2026-09-24", "16:30"), value: 17.5, cur: "USD", ref: "TRANSFER-P7", running: 0, sender: "OASIS AI", payref: "5552103", desc: "Received money from OASIS AI with reference 5552103" });
+  rerun(usdTx, 1000);
+  publish();
+  const poAdoptRace: Json = { id: "po_adopt_race", object: "payout", status: "paid", livemode: true, created: arrival("2026-09-22"), amount: 1750, currency: "usd", arrival_date: arrival("2026-09-24"), balance_transaction: { id: "txn_7", amount: -1750, currency: "usd", fee: 0, net: -1750 } };
+  fixtures.payouts.push(poAdoptRace);
+  // Stripe clearing covers the payout even after the line below takes its US$17.50, so only the gate can stop the feed.
+  await usdCharge("ch_usd_p7", "2026-09-23", 4000);
+
+  await check("a payout that adopts another bank line's entry between the feed's check and its write: the feed's posting is refused (its gate), the deposit is on the books once", async () => {
+    const payoutsIo = await import("../lib/founders-finances/stripe-payouts-io");
+    const { payoutFacts } = await import("../lib/founders-finances/stripe-map");
+    const { getTursoClient } = await import("../lib/turso");
+    // An uploaded statement's line for the same deposit, categorised to Stripe clearing; the payout has no row yet,
+    // so the feed's check (payoutBookedFromAnotherLine) finds nothing.
+    await txns.createManualTransaction(cc, "oasis", { date: d("2026-09-24"), description: "STRIPE TRANSFER ADOPT RACE", amount: "17.50", currency: "USD", account_id: chequing, category_id: categoryId(B, SYS.stripeClearing) });
+    const manual = (await raw.execute({ sql: `SELECT * FROM fin_bank_transactions WHERE description = 'STRIPE TRANSFER ADOPT RACE'`, args: [] })).rows[0];
+    assert.ok(manual?.entry_id, "the manual line has its own entry");
+    assert.equal(await payoutsIo.payoutBookedFromAnotherLine("po_adopt_race"), null, "nothing adopted it before the sync");
+    const chequingBefore = await native(chequing, "USD");
+    // Test-only: the cached client's batch is shadowed so the payout adopts that entry just before the feed's write.
+    const client = getTursoClient() as unknown as Record<string, unknown>;
+    const original = (Object.getPrototypeOf(client) as { batch: (...a: unknown[]) => Promise<unknown> }).batch;
+    let raced = false;
+    client.batch = async function (this: unknown, stmts: unknown, ...rest: unknown[]) {
+      const b = JSON.stringify(stmts);
+      if (!raced && b.includes("txn.posted_by_feed") && b.includes("po_adopt_race")) {
+        raced = true;
+        const adopted = await payoutsIo.recordStripePayout(payoutFacts(poAdoptRace)!);
+        assert.equal(adopted?.booking, "booked", adopted?.reason ?? "");
+        assert.equal(adopted?.entryId, manual.entry_id, "adopted the manual line's entry, not posted from Stripe");
+      }
+      return original.call(this, stmts, ...rest);
+    };
+    try {
+      await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    } finally {
+      delete client.batch;
+    }
+    assert.ok(raced, "the adoption landed between the feed's check and its write");
+    const p7 = await line("WISE-USD-CREDIT-TRANSFER-P7");
+    assert.deepEqual([p7.status, p7.entry_id], ["unreviewed", null], "the feed posted nothing for its line");
+    assert.equal(await count(`SELECT COUNT(*) FROM fin_journal_entries WHERE source = 'bank_txn' AND source_ref = ?`, [String(p7.id)]), 0, "no entry of the line's own");
+    assert.equal(await native(chequing, "USD"), chequingBefore, "the US$17.50 is on the books once (the manual line), not twice");
+    // The next sync sees the adoption and holds the line as the same deposit a second time.
+    await feedIo.syncWiseFeed(cc, { since: d("2026-09-24") }, { dryRun: false });
+    const held = await line("WISE-USD-CREDIT-TRANSFER-P7");
+    assert.deepEqual([held.status, held.entry_id], ["unreviewed", null]);
+    assert.match(String(held.memo), /Stripe payout po_adopt_race is already on the books from another bank line .*the same deposit a second time/);
+    assert.equal(await native(chequing, "USD"), chequingBefore);
   });
 
   await check("D, on screen: the Wise card says when an opening balance is in force and what posting again does", async () => {
