@@ -160,6 +160,7 @@ function splitSql(sql: string): string[] {
 }
 
 const MIGRATION = join(ROOT, "database", "turso", "bravo__186_os_approvals.sql");
+const LEDGER_MIGRATION = join(ROOT, "database", "turso", "bravo__190_ledger_core.sql");
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const req = (url: string, body?: unknown, raw?: string) =>
   new Request(url, {
@@ -229,6 +230,9 @@ async function main() {
       created_at TEXT DEFAULT (datetime('now')), started_at TEXT, finished_at TEXT);
   `);
   for (const stmt of splitSql(readFileSync(MIGRATION, "utf8"))) await raw.execute(stmt);
+  // Every lifecycle write mirrors into the Business Ledger in the same batch
+  // (bravo__190). executeMultiple, because its triggers carry their own `;`.
+  await raw.executeMultiple(readFileSync(LEDGER_MIGRATION, "utf8"));
 
   const { parseManifest } = await import("../lib/manifest/schema");
   const { finalizeManifestFromWizard } = await import("../lib/manifest/wizard-finalize");
@@ -437,11 +441,18 @@ async function main() {
     assert.deepEqual(statusFor(true, 0, false), { kind: "working" });
     assert.deepEqual(statusFor(true, 3, true), { kind: "needs_you", count: 3, capped: true }, "attention items still count, as a floor");
     const code = readFileSync(join(ROOT, "app/team/[dept]/page.tsx"), "utf8").replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/.*$/gm, "$1");
+    // Every department but Chief of Staff sums its own lines and approvals.
     assert.match(
       code,
-      /const needsYouCapped = numbers\.attention\.some\(\(item\) => item\.capped === true\) \|\| !approvals\.ok;/,
+      /const needsYouCapped = numbers\.needsYou\s*\?\s*numbers\.needsYou\.capped\s*:\s*numbers\.attention\.some\(\(item\) => item\.capped === true\) \|\| !approvals\.ok;/,
       "a failed approvals read makes the header's total a floor",
     );
+    // Chief of Staff carries Today's total (model.ts needsYouTotal): a failed
+    // approvals read is named in `unavailable`, and any unavailable source
+    // makes that total a floor too.
+    const today = readFileSync(join(ROOT, "components/os/today/model.ts"), "utf8");
+    assert.match(today, /if \(!input\.approvals\.ok\) unavailable\.push\("approvals"\);/);
+    assert.match(today, /capped: n\.unavailable\.length > 0 \|\|/, "an unread source makes the shared total a floor");
     assert.match(code, /statusFor\(channel\.kind === "ready", needsYou, needsYouCapped\)/);
   });
 
@@ -1583,7 +1594,10 @@ async function main() {
     assert.match(dept, /approvalScopeFromViewer\(\{ surface: viewer\.surface, navInput: viewer\.navInput \}\)/);
     const feed = code("app/feed/page.tsx");
     assert.ok(feed.indexOf('requireOsRoute("/feed")') < feed.indexOf("loadPendingApprovals("), "the Feed gates first");
-    assert.match(code("components/today/FounderToday.tsx"), /loadPendingApprovals\(\{\s*scope: approvalScopeFromViewer\(\{ surface: viewer, navInput \}\)/);
+    // Today's (and Chief of Staff's) approvals are read by the shared Needs-you
+    // loader, with the scope built from the rail's inputs the page hands it.
+    assert.match(code("components/os/today/brief-load.ts"), /loadPendingApprovals\(\{\s*scope: approvalScopeFromViewer\(\{ surface: viewer, navInput: input\.navInput \}\)/);
+    assert.match(code("components/today/FounderToday.tsx"), /loadNeedsYouReads\(\{\s*viewer,\s*navInput,\s*plan,/);
   });
 
   await check("static: the approval surfaces carry no gradient, glow or perpetual animation", () => {

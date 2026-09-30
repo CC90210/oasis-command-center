@@ -30,17 +30,27 @@ assert.match(founderToday, /showFinancials \? await loadOasisMoney\(tenantId, "t
 assert.doesNotMatch(founderToday, /mrr_current_usd|mrrSnapshot|mrrHistory/);
 
 const analytics = read("app/analytics/page.tsx");
+// The gate is app/analytics/mrr-state.ts: "oasis" (the only state that reads
+// money) is the same capability Today gates on, after a failed workspace
+// lookup has been ruled out.
+const mrrState = read("app/analytics/mrr-state.ts");
 assert.match(
-  analytics,
-  /const oasisMoney = surface\.ok && surface\.capabilities\.canSeeCompanyFinancials;/,
+  mrrState,
+  /if \(!surface\.ok \|\| surface\.degraded\) return "unconfirmed";\s*if \(surface\.capabilities\.canSeeCompanyFinancials\) return "oasis";/,
   "/analytics must gate OASIS money on the same capability as Today",
 );
-assert.match(analytics, /oasisMoney \? loadOasisMoney\(tenantId, "analytics"\) : Promise\.resolve\(null\)/);
-assert.match(
-  analytics,
-  /oasisMoney\s*\?\s*Promise\.resolve\(null\)\s*:\s*safe\("analytics\.mrr_snapshot"/,
-  "an OASIS workspace must not also read the profile MRR snapshot",
-);
+assert.match(analytics, /const mrrState = analyticsMrrState\(surface\);/);
+assert.match(analytics, /mrrState === "oasis" \? loadOasisMoney\(tenantId, "analytics"\) : Promise\.resolve\(null\)/);
+// 2026-09-29: no workspace reads the typed profile MRR on /analytics any more.
+// It used to be the non-OASIS branch, with a $5,000 target invented when none
+// was set and a synthetic decline curve when no history existed; that branch
+// now says "Not connected", and the readers are gone from lib/queries.ts.
+assert.doesNotMatch(analytics, /mrrSnapshot|mrrHistory|mrr_current_usd|mrr_target_usd|MRRProgressChart/, "/analytics must not read or chart the typed profile MRR");
+assert.match(analytics, /<Stat label="Net MRR" value=\{MRR_COPY\[noMoney\]\.value\}/, "a workspace without live Stripe MRR gets words, never a number");
+assert.match(mrrState, /not_connected: \{\s*value: "Not connected",/, "a confirmed non-OASIS workspace says Not connected");
+const queries = read("lib/queries.ts");
+assert.doesNotMatch(queries, /export async function mrr(Snapshot|History)\(/, "the fake-MRR readers must stay deleted");
+assert.doesNotMatch(queries, /\|\| 5000|current \* 0\.005/, "no invented MRR target or synthetic curve in lib/queries.ts");
 
 const tools = read("lib/agent-tools.ts");
 const mrrTool = tools.slice(tools.indexOf("async mrr_today("), tools.indexOf("async today_plan("));

@@ -26,6 +26,7 @@ import {
   CONNECTOR_CATALOG,
   CONNECTOR_CATEGORIES,
   connectorBySlug,
+  connectorHref,
   connectorMatches,
   glyphColor,
   contrastOnTile,
@@ -37,7 +38,7 @@ import {
   type KeyRowFact,
 } from "../lib/os/connectors";
 import { OS_DEPARTMENTS } from "../lib/os/departments";
-import { findIntegrationSchema } from "../lib/tenant-integration-schemas";
+import { findIntegrationSchema, findTenantManuallyEditableIntegrationSchema } from "../lib/tenant-integration-schemas";
 import { providerById } from "../lib/connections/registry";
 import {
   SETTINGS_SECTIONS,
@@ -445,7 +446,7 @@ assert.match(content, /show\("ai"\) && isOperator &&[\s\S]{0,80}LocalCliProvider
 assert.match(content, /isVerifiedOperator\(\)/);
 assert.doesNotMatch(content, /isOperatorEmail\(/, "operator status must not come from the session email alone");
 // The workspace-level hub is owners/admins only; everyone else sees their own Google.
-assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.canManage\)/);
+assert.match(read("app/settings/connections/page.tsx"), /if \(!viewer\.access\.canManage\) \{[\s\S]{0,400}<SettingsContent section="connections"/);
 
 // ─── 6. The hub's popup watch and the drawer's focus trap (CodeRabbit #468) ─
 
@@ -550,6 +551,64 @@ assert.match(read("app/settings/connections/page.tsx"), /if \(viewer\.access\.ca
   assert.match(drawer, /e\.key === "Escape"/, "Escape still closes it");
   assert.match(drawer, /returnFocus\.current\?\.focus\?\.\(\)/, "focus still goes back to the opener on close");
   assert.match(drawer, /ref=\{panelRef\}\s+role="dialog"\s+aria-modal="true"/, "the trap is scoped to the aria-modal sheet");
+}
+
+// ─── 7. One card per app (CC, 2026-09-29) ───────────────────────────────────
+// The page used to list every app a second time under "Keys and accounts".
+// Now each app's card is the one place it is set up, custom keys are one card,
+// and apps that are not built are a single compact row, not cards that do nothing.
+
+{
+  // An owner's page renders the hub and nothing that lists the apps again.
+  const page = read("app/settings/connections/page.tsx");
+  const ownerPath = page.slice(page.indexOf("const facts = await loadConnectorFacts"));
+  assert.match(ownerPath, /<ConnectionsHub/);
+  assert.doesNotMatch(ownerPath, /SettingsContent|IntegrationKeysPanel|Keys and accounts/, "an owner's page lists the apps once");
+  assert.equal(existsSync(join(root, "components/settings/IntegrationKeysPanel.tsx")), false, "the page-wide key list is gone");
+  const content = read("components/settings/SettingsContent.tsx");
+  assert.doesNotMatch(content, /title="Credentials"|title="Integration health"|<IntegrationKeysPanel|<CustomCredentialsVault/);
+
+  // Every app whose keys are saved in the store has exactly one card, and that
+  // card's service is one an owner may actually edit.
+  const keyCards = CONNECTOR_CATALOG.flatMap((d) => (d.live?.connect.kind === "keys" ? [[d.slug, d.live.connect.service] as const] : []));
+  assert.ok(keyCards.length >= 3, "Google, Twilio and the Telegram team bot are set up in their drawers");
+  const services = keyCards.map(([, s]) => s);
+  assert.equal(new Set(services).size, services.length, "one card per saved-key service");
+  for (const [slug, service] of keyCards) {
+    assert.ok(findTenantManuallyEditableIntegrationSchema(service), `${slug}: "${service}" is not an owner-editable key set`);
+  }
+  // The legacy anchor that sent people to the removed list is gone everywhere.
+  assert.doesNotMatch(read("lib/os/connectors.ts"), /CREDENTIALS_ANCHOR|keysLink/);
+  assert.doesNotMatch(read("app/settings/chat-apps/page.tsx"), /CREDENTIALS_ANCHOR/);
+  assert.match(read("app/settings/chat-apps/page.tsx"), /connectorHref\("telegram"\)/);
+  assert.equal(connectorHref("telegram"), "/settings/connections?app=telegram");
+
+  // The drawer sets the app up in place; the hub opens it for keys and ?app=.
+  const drawer = read("components/os/connections/ConnectorDrawer.tsx");
+  assert.match(drawer, /<ServiceKeysForm/);
+  assert.match(drawer, /def\.yourAccount === "google" && personalGoogle[\s\S]{0,400}<PersonalIntegrationsPanel/);
+  assert.match(hub, /action\.kind === "key_form" \|\| action\.kind === "keys"\) return openDrawer\(def\.slug\)/);
+  assert.match(hub, /initialApp === "custom-keys"[\s\S]{0,120}connectorBySlug\(initialApp\)\) openDrawer\(initialApp\)/);
+  // Google's sign-in comes back to its drawer, not to a removed anchor.
+  assert.match(read("app/api/auth/google-oauth/callback/route.ts"), /SETTINGS_RETURN_PATH = "\/settings\/connections\?app=google-workspace"/);
+  assert.match(page, /one\(sp\.gmail_oauth\) \? "google-workspace"/);
+
+  // A closed sheet stays closed on refresh: both close paths clear ?app= and
+  // Google's sign-in result params (CodeRabbit #477).
+  assert.match(hub, /const closeDrawer = useCallback\(\(\) => \{\s*setDrawerOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /const closeCustom = useCallback\(\(\) => \{\s*setCustomOpen\(false\);\s*clearDeepLink\(\);/);
+  assert.match(hub, /DEEP_LINK_PARAMS = \["app", "gmail_oauth", "reason", "gmail", "mailbox"\]/);
+  // Remove always re-reads, even when a later DELETE fails part-way.
+  assert.match(read("components/os/connections/ServiceKeysForm.tsx"), /\} finally \{[\s\S]{0,300}await reload\(\);\s*onChanged\(\);/);
+
+  // Custom keys are one card, opened in the same accessible sheet.
+  assert.match(hub, /<CustomCredentialsVault \/>/);
+  assert.match(hub, /<DrawerSheet[\s\S]{0,200}CUSTOM_KEYS\.title/);
+
+  // Apps that are not built are one compact row, never full cards that do nothing.
+  assert.match(hub, /const later = visible\.filter\(\(def\) => !def\.live\)/);
+  assert.match(hub, /const available = visible\.filter\(\(def\) => def\.live && !isYourTool/);
+  assert.doesNotMatch(hub, /rest\.filter\(\(d\) => d\.category === cat\.key\)/, "coming-soon apps no longer fill the category grids");
 }
 
 console.log(

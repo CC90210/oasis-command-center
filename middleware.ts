@@ -113,6 +113,7 @@ export const PUBLIC_PATH_PREFIXES = [
   "/api/webhook",          // public webhooks for clients (HMAC/Bearer gated inside)
   "/api/ingest/",          // machine ingest for n8n client automations — the Turso repoint target for automation_logs. Self-authenticates with a timing-safe X-Ingest-Secret compare INSIDE the route (no session exists for an n8n HTTP node), so the prefix must be public or every client-automation log write 401s before reaching its own check.
   "/api/webhooks/",        // inbound provider webhooks — Kixie / TextTorrent / Twilio (and future). Each route self-authenticates via a timing-safe HMAC signature check INSIDE the route, so the prefix is public. Trailing slash → matchesPathPrefix covers every /api/webhooks/* sub-path. MUST be public or registered Kixie/TT/Twilio callbacks 401 before their signature verification runs — the singular "/api/webhook" entry can't cover the plural "/api/webhooks/" (matchesPathPrefix needs prefix+"/").
+  "/api/ledger/ingest",    // Business Ledger ingest for the Python harnesses (BEA, Maven, Atlas). Self-authenticates INSIDE the route with a per-producer HMAC over "<timestamp>.<raw body>" and a 5-minute window (lib/ledger/ingest.ts); no harness holds a session cookie, so without this entry every producer 401s here before its signature is checked. Exact path only: any future /api/ledger/* read route stays session-gated.
   "/_next",
   "/favicon",
 ];

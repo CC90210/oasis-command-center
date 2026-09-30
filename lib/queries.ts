@@ -505,6 +505,12 @@ export async function recentDecisions(
   return (r.data as AgentDecision[]) || [];
 }
 
+/**
+ * Throws when lead_interactions cannot be read. It used to answer `[]`, which
+ * the Today brief could not tell from "no inbound": a failed read printed as
+ * "no hot replies" (2026-09-29 audit). Its one caller, priorityInbound → the
+ * Today loader, turns the throw into "Couldn't check inbound replies".
+ */
 export async function recentInbound(tenantId: string, limit = 20): Promise<LeadInteraction[]> {
   const db = getServiceSupabase();
   const r = await db
@@ -514,6 +520,7 @@ export async function recentInbound(tenantId: string, limit = 20): Promise<LeadI
     .in("type", ["email_received", "email_reply", "dm_received"])
     .order("created_at", { ascending: false })
     .limit(limit);
+  if (r.error) throw new Error(`recentInbound: lead_interactions read failed: ${r.error.message}`);
   return (r.data as LeadInteraction[]) || [];
 }
 
@@ -889,6 +896,9 @@ export async function integrationsHealth(
     .select("*")
     .eq("tenant_id", tenantId)
     .order("service", { ascending: true });
+  // A failed read is unknown, not "every service unconfigured": the
+  // placeholders below are for services a SUCCESSFUL read did not list.
+  if (r.error) throw new Error(`integrations_health read failed: ${r.error.message}`);
 
   const expected = KNOWN_INTEGRATIONS.map((integration) => integration.service);
   const existing = new Map(
@@ -1005,24 +1015,15 @@ export async function topOpenLead(tenantId: string): Promise<Lead | null> {
 
 // ============================================================================
 // MRR
+// ----------------------------------------------------------------------------
+// mrrSnapshot / mrrHistory are gone (2026-09-29). They fed /analytics for any
+// workspace outside OASIS from user_profiles.mrr_current_usd — a typed number
+// nobody may edit since 2026-09-24 — with a $5,000 target invented when none
+// was set and, when fewer than two snapshots existed, a synthetic decline
+// curve drawn back from that typed number. OASIS reads live Stripe through
+// lib/goals/oasis-money; every other workspace's /analytics says "Not
+// connected" until its own Stripe feeds MRR.
 // ============================================================================
-
-export async function mrrSnapshot(): Promise<{ current: number; target: number; pct: number }> {
-  const profile = await getActiveProfile();
-  if (!profile) return { current: 0, target: 5000, pct: 0 };
-  const target = Number(profile.mrr_target_usd) || 5000;
-  const current = Number(profile.mrr_current_usd) || 0;
-  return {
-    current,
-    target,
-    pct: target > 0 ? Math.round((current / target) * 1000) / 10 : 0,
-  };
-}
-
-/**
- * MRR history is **NOT REAL DATA** yet — there is no `mrr_history` table.
- * Returns synthetic trajectory tagged synthetic: true.
- */
 
 /**
  * Which AI provider services have credentials on file for this tenant?
@@ -1057,76 +1058,6 @@ export async function aiServicesWithKey(tenantId: string | null): Promise<Set<st
     if (!row.encrypted_api_key || !row.enabled) continue;
     const svc = PROVIDER_TO_SERVICE[row.provider];
     if (svc) out.add(svc);
-  }
-  return out;
-}
-
-export async function mrrHistory(days = 30): Promise<
-  Array<{ date: string; mrr: number; synthetic: boolean }>
-> {
-  const profile = await getActiveProfile();
-  const current = Number(profile?.mrr_current_usd) || 0;
-  const tenantId = profile?.tenant_id || null;
-
-  // Try real snapshots first (migration 021). If we have at least 2 days
-  // of data, use it as-is — synthetic flag false. Anything missing in the
-  // window gets back-filled with the most-recent known value (so the chart
-  // doesn't drop to zero on days the cron hadn't run yet).
-  let real: Array<{ snapshot_date: string; mrr_usd: number }> = [];
-  if (tenantId) {
-    try {
-      const db = getServiceSupabase();
-      const since = new Date();
-      since.setDate(since.getDate() - days + 1);
-      const { data } = await db
-        .from("mrr_snapshots")
-        .select("snapshot_date, mrr_usd")
-        .eq("tenant_id", tenantId)
-        .gte("snapshot_date", since.toISOString().slice(0, 10))
-        .order("snapshot_date", { ascending: true });
-      real = ((data as Array<{ snapshot_date: string; mrr_usd: string | number }>) || [])
-        .map((r) => ({ snapshot_date: r.snapshot_date, mrr_usd: Number(r.mrr_usd) }));
-    } catch {
-      real = [];
-    }
-  }
-
-  if (real.length >= 2) {
-    const byDate = new Map(real.map((r) => [r.snapshot_date, r.mrr_usd] as const));
-    const out: Array<{ date: string; mrr: number; synthetic: boolean }> = [];
-    let lastKnown = real[0].mrr_usd;
-    const today = new Date();
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(today);
-      d.setDate(d.getDate() - i);
-      const iso = d.toISOString().slice(0, 10);
-      const v = byDate.get(iso);
-      const hasReal = v != null;
-      if (hasReal) lastKnown = v;
-      // Tag back-filled days as synthetic so the chart can style them
-      // distinctly. Without this every point reads as "real data" and
-      // the operator thinks the cron has been running for 60 days when
-      // only 3 days of snapshots actually exist.
-      out.push({
-        date: iso.slice(5, 10),
-        mrr: Math.round(lastKnown),
-        synthetic: !hasReal,
-      });
-    }
-    return out;
-  }
-
-  // Fallback: synthetic decline curve, tagged so the UI can label it.
-  const out: Array<{ date: string; mrr: number; synthetic: boolean }> = [];
-  const today = new Date();
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(d.getDate() - i);
-    out.push({
-      date: d.toISOString().slice(5, 10),
-      mrr: Math.round(current - i * (current * 0.005)),
-      synthetic: true,
-    });
   }
   return out;
 }

@@ -4,15 +4,19 @@
  *   <KpiTile label="Cash on hand" value="$41,200" status="live" hint="Stripe + bank, 5 min ago" />
  *   <KpiTile label="Ad spend 7d" value={null} status="not_connected" connectHref="/settings/connections" />
  *   <KpiTile label="Win rate 30d" value={null} status="error" hint="Pipeline read failed" />
+ *   <KpiTile label="SLA breached" value={null} status="no_data" emptyText="No tickets yet" />
  *
  * THE RULE THIS COMPONENT EXISTS TO HOLD. A tile only prints `value` when
  * `status` is "live". A disconnected source says "Not connected" with a way to
  * connect it; a failed read says it failed; a live source with no answer yet
- * prints an em dash. None of them can print 0 — so a page that falls back to
- * `?? 0` on a missing source still cannot render "$0" to the owner, which reads
- * as "the business made nothing" and is the exact failure lib/goals and the
- * Today money cards were rebuilt to prevent. A real zero from a live source is
- * a real zero and renders as one.
+ * prints an em dash; and a source that answered but has never held anything (a
+ * support desk with no ticket ever, a bank never imported) says so in words,
+ * "no_data", because a 0 there reads as a verdict ("within SLA", "nothing to
+ * review") that no data stands behind. None of them can print 0 — so a page
+ * that falls back to `?? 0` on a missing source still cannot render "$0" to
+ * the owner, which reads as "the business made nothing" and is the exact
+ * failure lib/goals and the Today money cards were rebuilt to prevent. A real
+ * zero from a live source is a real zero and renders as one.
  *
  * Server component (no hooks). Format `value` before passing it: this tile
  * knows nothing about currencies or units.
@@ -20,7 +24,7 @@
 
 import Link from "next/link";
 
-export type KpiStatus = "live" | "not_connected" | "error";
+export type KpiStatus = "live" | "not_connected" | "error" | "no_data";
 
 export type KpiTileProps = {
   label: string;
@@ -31,9 +35,11 @@ export type KpiTileProps = {
   hint?: string;
   /** Where "Connect" goes when status is "not_connected". */
   connectHref?: string;
+  /** What a "no_data" tile says in place of a number. Defaults to "No data yet". */
+  emptyText?: string;
 };
 
-export function KpiTile({ label, value, status, hint, connectHref }: KpiTileProps) {
+export function KpiTile({ label, value, status, hint, connectHref, emptyText }: KpiTileProps) {
   const live = status === "live";
   const shown = live && value !== null && value !== "" ? value : null;
   return (
@@ -42,6 +48,10 @@ export function KpiTile({ label, value, status, hint, connectHref }: KpiTileProp
       {live ? (
         <div className="mt-2 text-2xl font-semibold leading-8 tracking-tight text-fg tabular-nums">
           {shown ?? <span className="text-fg-dim" aria-label="No data yet">—</span>}
+        </div>
+      ) : status === "no_data" ? (
+        <div className="mt-2 flex min-h-8 items-baseline">
+          <span className="text-sm font-medium text-fg-muted">{emptyText || "No data yet"}</span>
         </div>
       ) : status === "not_connected" ? (
         <div className="mt-2 flex min-h-8 flex-wrap items-baseline gap-x-2 gap-y-1">

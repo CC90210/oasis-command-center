@@ -17,7 +17,7 @@
  *   - For Gmail: button hits /api/auth/google-oauth/start which
  *     returns a Google consent URL; we redirect the browser there.
  *     Google bounces back to /api/auth/google-oauth/callback which
- *     stores the tokens and redirects to /settings#integrations with
+ *     stores the tokens and redirects to /settings/connections?app=google-workspace with
  *     a status query param this component reads.
  */
 
@@ -333,7 +333,7 @@ export function PersonalIntegrationsPanel({
       }
       // Browser navigation to Google's consent screen. Google bounces
       // back to /api/auth/google-oauth/callback which redirects to
-      // /settings#integrations?gmail_oauth=connected (or =error).
+      // /settings/connections?app=google-workspace&gmail_oauth=connected (or =error).
       window.location.href = body.url;
     } catch (e) {
       setError(e instanceof Error ? e.message : "connect_failed");

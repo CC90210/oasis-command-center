@@ -6,8 +6,16 @@
  * shapes rows, so tests/os-departments.test.ts can run it without a database.
  *
  * Routines are the workspace's own `tenant_cron_jobs` rows. The Empire lane
- * (`cron_jobs`, OASIS's operator schedules) is never read here: it belongs to
- * Admin, and a client owner has no business seeing CC's machine.
+ * (`cron_jobs`, OASIS's operator schedules) is never LISTED here: it belongs
+ * to Admin, and a client owner has no business seeing CC's machine. Its rows
+ * that carry the OASIS workspace's own tenant_id are counted in OASIS's
+ * routine HEALTH (routineHealth, below; read in ./routines.ts), because they
+ * are that workspace's routines and a health card that skips them says
+ * "nothing measured" about a fleet that runs every few minutes. They are
+ * counted only for the platform operator, the one viewer the Automations page
+ * lists them for, and each row keeps its `lane`, so a failure in that lane
+ * points at Automations (failedRoutinesHref), never at a panel that cannot
+ * show it.
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
@@ -22,6 +30,8 @@ export type RoutineRow = {
   lastRunAt: string | null;
   /** tenant_cron_jobs.last_run_status: "success" | "error" | "unknown" | null. */
   lastRunStatus: string | null;
+  /** "workspace": tenant_cron_jobs, listed on the panel. "empire": cron_jobs, listed only in Automations. */
+  lane: "workspace" | "empire";
 };
 
 /** SQLite hands booleans back as 0/1 (and sometimes "1"); Postgres as true. */
@@ -43,6 +53,7 @@ export function normalizeRoutineRow(raw: Record<string, unknown>): RoutineRow {
     enabled: asBool(raw.enabled),
     lastRunAt: raw.last_run_at ? asText(raw.last_run_at) : null,
     lastRunStatus: raw.last_run_status ? asText(raw.last_run_status) : null,
+    lane: raw.lane === "empire" ? "empire" : "workspace",
   };
 }
 
@@ -70,6 +81,83 @@ export function failedWithin(rows: readonly RoutineRow[], hours: number, now: nu
     const at = Date.parse(r.lastRunAt);
     return Number.isFinite(at) && at >= since;
   });
+}
+
+/**
+ * The health of a workspace's routines in three numbers: how many are on, how
+ * many of those failed in the last 24 hours, and when any of them last ran
+ * cleanly. Today's Operations card and the Operations tab both print this, so
+ * the two cannot disagree about the same rows.
+ *
+ * `total` 0 is "no routines set up", which a caller shows as no data, never as
+ * "0 failed" (a fleet of nothing has no failures to speak of).
+ */
+export type RoutineHealth = {
+  total: number;
+  on: number;
+  failed24h: RoutineRow[];
+  /** Newest successful run across the routines that are on. Null = none recorded. */
+  lastSuccessAt: string | null;
+};
+
+type RoutineRead = { ok: true; value: RoutineRow[] } | { ok: false };
+
+/**
+ * Whether a viewer's routine health includes the Empire lane: true (the
+ * platform operator in OASIS), false (anyone else: correctly no Empire lane),
+ * or "unknown" when the verified operator check could not be made (a failed
+ * profile or session read). "unknown" is not "no": the operator's own Empire
+ * failures would vanish behind a clean-looking workspace lane, so it reads as
+ * a failed Empire read (mergeRoutineReads), "Couldn't check".
+ */
+export type EmpireLane = boolean | "unknown";
+
+/** The Empire read for a lane answer: null = not asked, a failed read for "unknown". */
+export async function empireReadFor(lane: EmpireLane, load: () => Promise<RoutineRead>): Promise<RoutineRead | null> {
+  if (lane === "unknown") return { ok: false };
+  return lane ? load() : null;
+}
+
+/**
+ * The workspace lane plus, when asked (null = not asked), the Empire lane: one
+ * list for the health counts. Either read failing fails the whole answer — a
+ * health card built from half the routines would call the other half fine.
+ */
+export function mergeRoutineReads(workspace: RoutineRead, empire: RoutineRead | null): RoutineRead {
+  if (!workspace.ok) return { ok: false };
+  if (empire === null) return workspace;
+  if (!empire.ok) return { ok: false };
+  return { ok: true, value: [...workspace.value, ...empire.value] };
+}
+
+export function routineHealth(rows: readonly RoutineRow[], now: number): RoutineHealth {
+  const on = rows.filter((r) => r.enabled);
+  let lastSuccessAt: string | null = null;
+  let lastMs = -Infinity;
+  for (const r of on) {
+    if (r.lastRunStatus !== "success" || !r.lastRunAt) continue;
+    const at = Date.parse(r.lastRunAt);
+    if (Number.isFinite(at) && at > lastMs) {
+      lastMs = at;
+      lastSuccessAt = r.lastRunAt;
+    }
+  }
+  return { total: rows.length, on: on.length, failed24h: failedWithin(on, 24, now), lastSuccessAt };
+}
+
+/** The Operations tab: its panel lists the workspace's own routines. */
+export const OPERATIONS_HREF = "/team/operations";
+/** Automations: the only page that lists the Empire lane (operator-only). */
+export const AUTOMATIONS_HREF = "/automations";
+
+/**
+ * Where someone goes to see WHICH routines failed. The Operations panel lists
+ * the workspace lane only, so a failure in the Empire lane is seen in
+ * Automations: a "see which" link to a page that cannot show the row is not
+ * a link.
+ */
+export function failedRoutinesHref(failed: readonly Pick<RoutineRow, "lane">[]): string {
+  return failed.some((r) => r.lane === "empire") ? AUTOMATIONS_HREF : OPERATIONS_HREF;
 }
 
 /** "lead_engine" → "Lead engine". Names people typed ("Weekly digest") pass through. */
