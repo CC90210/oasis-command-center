@@ -942,9 +942,6 @@ for (const reader of ["loadOasisMoney", "GoalPaceChart", "GoalCountdownCard"]) {
 
 const GATED_PAGES = [
   "app/analytics/page.tsx",
-  "app/operations/page.tsx",
-  "app/automations/page.tsx",
-  "app/health/page.tsx",
   "app/agents/page.tsx",
 ];
 for (const page of GATED_PAGES) {
@@ -957,6 +954,16 @@ for (const page of GATED_PAGES) {
     /await requireSystemSurface\(\);/.test(src),
     `${page} must AWAIT the gate; a floating promise gates nothing`,
   );
+}
+// The OASIS platform's own internals take the stricter operator gate
+// (2026-09-30): requireSystemSurface admits any workspace's founder, so a
+// client owner could open these by URL and read OASIS's cron names. The
+// behaviour is proven in tests/admin-surfaces-operator-only.test.ts.
+for (const page of ["app/operations/page.tsx", "app/automations/page.tsx", "app/health/page.tsx"]) {
+  const src = read(page);
+  assert.ok(/await requireOperator\(\);/.test(src), `${page} must await requireOperator()`);
+  // A call or an import, not the comment that says why it left.
+  assert.ok(!/requireSystemSurface\(|import[^;]*\brequireSystemSurface\b/.test(src), `${page} must not fall back to the founder gate`);
 }
 
 const settingsPage = read("app/settings/page.tsx");

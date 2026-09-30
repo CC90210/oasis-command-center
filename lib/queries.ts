@@ -683,6 +683,17 @@ export async function recentActions(
 // Integrations health (tenant-scoped)
 // ============================================================================
 
+/**
+ * Providers OASIS no longer runs on: Supabase (Turso replaced it 2026-08-09),
+ * Vercel (Cloudflare Workers) and n8n (deprecated; two client webhooks remain,
+ * which no heartbeat here describes). Their registry entries stay for the
+ * settings history, but no heartbeat card is drawn for them: a stale green or
+ * red dot for a host we left is a claim about nothing.
+ */
+export const RETIRED_INTEGRATION_SERVICES: ReadonlySet<string> = new Set(["supabase", "vercel", "n8n_inbound"]);
+
+const LIVE_INTEGRATIONS = KNOWN_INTEGRATIONS.filter((i) => !RETIRED_INTEGRATION_SERVICES.has(i.service));
+
 export async function integrationsHealth(
   tenantId: string | null
 ): Promise<IntegrationHealth[]> {
@@ -696,7 +707,7 @@ export async function integrationsHealth(
     // Synthesize placeholders for every known integration so the UI
     // still has something to render. Caller's behavior is preserved
     // (every service shows "unconfigured") without scanning all tenants.
-    return KNOWN_INTEGRATIONS.map((integration) => ({
+    return LIVE_INTEGRATIONS.map((integration) => ({
       id: `placeholder-${integration.service}`,
       profile_id: null,
       tenant_id: null,
@@ -711,15 +722,23 @@ export async function integrationsHealth(
     .from("integrations_health")
     .select("*")
     .eq("tenant_id", tenantId)
-    .order("service", { ascending: true });
+    .order("service", { ascending: true })
+    .order("last_ping_at", { ascending: false });
   // A failed read is unknown, not "every service unconfigured": the
   // placeholders below are for services a SUCCESSFUL read did not list.
   if (r.error) throw new Error(`integrations_health read failed: ${r.error.message}`);
 
-  const expected = KNOWN_INTEGRATIONS.map((integration) => integration.service);
-  const existing = new Map(
-    (r.data as IntegrationHealth[] | null)?.map((row) => [row.service, row]) || []
-  );
+  // The NEWEST row per service (2026-09-30). A service can hold several rows
+  // (integrations_health is keyed profile_id + service): OASIS carries 94
+  // profile_id NULL rows from 2026-08-11..21 beside the bridge's live ones. A
+  // Map built from every row kept whichever came LAST, so a month-old
+  // duplicate could hide a heartbeat from a minute ago. Rows arrive newest
+  // first within a service; the first one wins.
+  const expected = LIVE_INTEGRATIONS.map((integration) => integration.service);
+  const existing = new Map<string, IntegrationHealth>();
+  for (const row of (r.data as IntegrationHealth[] | null) || []) {
+    if (!existing.has(row.service)) existing.set(row.service, row);
+  }
   return expected.map((service) => {
     const found = existing.get(service);
     if (found) return found;

@@ -114,12 +114,15 @@ export const OS_NAV_CATALOG: readonly OsNavEntry[] = [
   // ── ADMIN (platform operators, from the shield) ─────────────────────────
   { id: "admin-operations", href: "/operations", label: "Operations", icon: "Activity", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-automations", href: "/automations", label: "Automations", icon: "RefreshCcw", section: "admin", audience: "operator", oasisOnly: true },
-  { id: "admin-health", href: "/health", label: "Health", icon: "ShieldCheck", section: "admin", audience: "operator", oasisOnly: true },
-  { id: "admin-agent", href: "/agent", label: "Agent console", icon: "SquareTerminal", section: "admin", audience: "operator", oasisOnly: true },
+  // One System health (2026-09-30): /system-health folded into /health and
+  // redirects there, so it has no row of its own.
+  { id: "admin-health", href: "/health", label: "System health", icon: "ShieldCheck", section: "admin", audience: "operator", oasisOnly: true },
+  // The operator's workbench: Claude Code / Codex in a department's repo on
+  // the operator's computer. Everyday questions go to Chief of Staff.
+  { id: "admin-agent", href: "/agent", label: "Coding harness", icon: "SquareTerminal", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-fleet", href: "/admin/agents", label: "Fleet", icon: "Cpu", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-runs", href: "/runs", label: "Runs", icon: "History", section: "admin", audience: "operator", oasisOnly: true },
   { id: "admin-inbox", href: "/inbox", label: "Inbox", icon: "Inbox", section: "admin", audience: "operator", oasisOnly: true },
-  { id: "admin-system-health", href: "/system-health", label: "System health", icon: "HeartPulse", section: "admin", audience: "operator", oasisOnly: true },
 ];
 
 export type BuildOsNavInput = {

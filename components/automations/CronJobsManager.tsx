@@ -297,8 +297,8 @@ export function CronJobsManager({ agentKeys }: Props) {
           setLoadError(null);
           setJobs([]);
           // The previous read's receipt describes rows that are now gone, and a
-          // stale "Empire schedules are not shown" under a migration banner is
-          // two unrelated explanations for one blank board.
+          // stale "only this workspace" note under a migration banner is two
+          // unrelated explanations for one blank board.
           setInventory(null);
           return;
         }
@@ -359,11 +359,9 @@ export function CronJobsManager({ agentKeys }: Props) {
    * booting next time (it reads that flag and refuses when armed), so the
    * toggle that looks like "turn my setter back on" was the toggle that took
    * it offline. The API refuses that write now; this is the path that
-   * replaces it — the same localhost exec-tool the Background workers panel
-   * has always used for Start/Stop/Restart.
-   *
-   * Local, not remote: empire rows are CC's own machine's daemons by
-   * definition, so the browser talks to the local bridge directly.
+   * replaces it — the same control route the Background workers panel uses
+   * for Start/Stop/Restart (lib/automations/worker-control.ts), which reaches
+   * the operator's machine through the server, never from the browser.
    */
   async function toggleDaemonBacked(job: CronJob) {
     const daemon = job.daemon;
@@ -389,7 +387,7 @@ export function CronJobsManager({ agentKeys }: Props) {
     let lastObserved: CronJob | null = null;
     let lastReadError: string | null = null;
     try {
-      const result = await runWorkerAction(daemon.service, action, false);
+      const result = await runWorkerAction(daemon.service, action);
       if (controller.signal.aborted || !mountedRef.current) return;
       if (!result.ok) {
         setToggleError(
@@ -580,11 +578,9 @@ export function CronJobsManager({ agentKeys }: Props) {
         <div className="rounded-lg border border-dashed border-bg-border bg-bg-deep/40 p-3 text-xs text-fg-muted flex items-start gap-2">
           <HelpCircle className="w-4 h-4 mt-0.5 shrink-0 text-fg-dim" />
           <span className="flex-1 leading-relaxed">
-            <span className="font-bold text-fg">Empire schedules are not shown.</span>{" "}
-            This session isn&apos;t recognized as the platform operator, so the list below
-            covers this workspace only — it is not the full automation inventory. If you
-            expected the Empire lane here, the signed-in address isn&apos;t the one
-            configured as the operator.
+            <span className="font-bold text-fg">This list covers this workspace&apos;s automations only.</span>{" "}
+            Schedules that belong to the OASIS platform itself are listed for OASIS
+            operators, not here.
           </span>
         </div>
       )}
@@ -624,7 +620,7 @@ export function CronJobsManager({ agentKeys }: Props) {
             ];
             if (empireCount > 0) {
               parts.push(
-                `${tenantCount} for this workspace · ${empireCount} empire-wide (operator-only)`,
+                `${tenantCount} for this workspace · ${empireCount} OASIS platform (operators only)`,
               );
             }
             return parts.join(" · ");
@@ -823,8 +819,8 @@ function JobRow({
                     : `Can't read ${daemon.process_name}'s status right now. Clicking will try to start it.`
                 : isEmpire
                   ? job.enabled
-                    ? "Empire automation — click to pause. Schedule + action stay locked to SEED_JOBS; only the on/off flips."
-                    : "Empire automation — click to resume."
+                    ? "OASIS platform schedule — click to pause. Its schedule and action are set on the operator's machine; only the on/off flips here."
+                    : "OASIS platform schedule — click to resume."
                   : job.enabled
                     ? "Click to disable — keeps the spec, stops firing"
                     : "Click to enable"
@@ -851,7 +847,7 @@ function JobRow({
             <div className="font-bold text-base text-fg truncate">{job.name}</div>
             {isEmpire && (
               <span className="text-[10px] uppercase tracking-wider text-accent border border-accent/40 bg-accent/10 rounded-full px-1.5 py-0.5 font-bold">
-                Empire
+                Platform
               </span>
             )}
             {daemon && (
