@@ -33,14 +33,20 @@ export function ClientHealthBadge({ health }: { health: Health }) {
   );
 }
 
-export function ClientHealthBreakdown({ health }: { health: Health }) {
+/**
+ * `moneyTracked` false: this workspace keeps no books in the app, so payments
+ * were never looked at, and the breakdown says so instead of calling them fine.
+ */
+export function ClientHealthBreakdown({ health, moneyTracked = true }: { health: Health; moneyTracked?: boolean }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <ClientHealthBadge health={health} />
         <span className="text-[13px] text-fg-muted">
           {health.level === "healthy"
-            ? "Nothing in payments, support, delivery or contact needs attention."
+            ? moneyTracked
+              ? "Nothing in payments, support, delivery or contact needs attention."
+              : "Nothing in support, delivery or contact needs attention."
             : health.level === "past"
               ? "This engagement ended. The record and its history stay."
               : health.level === "unknown"
@@ -60,9 +66,15 @@ export function ClientHealthBreakdown({ health }: { health: Health }) {
           Not known: {health.unknown.join(", ")}. Those signals could not be read for you, so they are not counted as fine.
         </p>
       )}
+      {!moneyTracked && (
+        <p className="text-[13px] text-fg-muted">
+          This workspace&rsquo;s payments and invoices are not kept in the app, so they are not part of this.
+        </p>
+      )}
       <p className="text-xs text-fg-dim">
-        Computed when you open the page from overdue or failed payments, tickets that missed their response target in 30
-        days, projects past due, and days since the last contact.
+        {moneyTracked
+          ? "Computed when you open the page from overdue or failed payments, tickets that missed their response target in 30 days, projects past due, and days since the last contact."
+          : "Computed when you open the page from tickets that missed their response target in 30 days, projects past due, and days since the last contact."}
       </p>
     </div>
   );

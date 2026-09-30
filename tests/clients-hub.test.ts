@@ -81,6 +81,35 @@ function textOf(node: unknown, out: string[] = [], seen = new Set<unknown>()): s
   return out;
 }
 
+/**
+ * The `title` of every host element (span, td, ...) a page actually RENDERS:
+ * function components are rendered and only their output is walked, never
+ * their props, so a row object handed to a table cannot answer for what the
+ * cell shows.
+ */
+function renderedTitles(node: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
+  if (node === null || typeof node !== "object" || seen.has(node)) return out;
+  seen.add(node);
+  if (Array.isArray(node)) {
+    for (const v of node) renderedTitles(v, out, seen);
+    return out;
+  }
+  const el = node as { $$typeof?: symbol; type?: unknown; props?: Record<string, unknown> };
+  if (!el.$$typeof || !el.props) return out;
+  if (typeof el.type === "function") {
+    try {
+      const rendered = (el.type as (p: unknown) => unknown)(el.props);
+      if (!(rendered instanceof Promise)) renderedTitles(rendered, out, seen);
+    } catch {
+      /* a client component: it renders in the browser */
+    }
+    return out;
+  }
+  if (typeof el.props.title === "string") out.push(el.props.title);
+  renderedTitles(el.props.children, out, seen);
+  return out;
+}
+
 const MIG = (f: string) => readFileSync(join(__dirname, "..", "database", "turso", f), "utf8");
 const MEMBER_A = { id: "0d000000-0000-4000-8000-0000000000a2", email: "helper@client-a.test" };
 // An OASIS admin who runs the desk but is NOT one of the founders who may open
@@ -170,6 +199,7 @@ async function main() {
   const tickets = await import("../app/api/tickets/route");
   const comments = await import("../app/api/tickets/[id]/comments/route");
   const ticketRoute = await import("../app/api/tickets/[id]/route");
+  const customerRoute = await import("../app/api/customers/[id]/route");
 
   const req = (method: string, url: string, body?: unknown) =>
     new NextRequest(`http://localhost${url}`, {
@@ -648,6 +678,47 @@ async function main() {
     assert.match(t, /inferred from the deal/);
     assert.match(t, /Support ticket opened/);
   });
+  await check("Activity: a ticket linked to the client AFTER it opened, and the deal's own ledger events, are on its timeline (and on no one else's)", async () => {
+    // Filed before anyone knew whose it was: its ticket.opened carries no customer_id.
+    const t = await deliveryStore.createTicket(db, OASIS, {
+      title: "Filed before it was linked", description: null, category: "bug", severity: "low", source: "form", project_id: null, client_tenant_id: null,
+      client_name: "Walk-in", client_email: null, client_company: null, client_match: null, project_hint: null,
+      reporter_user_id: null, assigned_to: null,
+    }, new Date(ago(6)));
+    const tid = t.ticket.id;
+    assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'ticket.opened' AND subject_id = ? AND customer_id IS NULL", [tid]), 1);
+    // A founder links it to X on the ticket.
+    await login(USERS.cc);
+    const linked = await call(ticketRoute.PATCH(req("PATCH", `/api/tickets/${tid}?scope=desk`, { customer_id: X.id }), params({ id: tid })));
+    assert.equal(linked.status, 200, JSON.stringify(linked.body));
+    // The deal X came from was won: a sales event about the deal, with no client record on it.
+    await db.execute({
+      sql: `INSERT INTO outcome_events (id, tenant_id, event_key, event_version, occurred_at, recorded_at, subject_type, subject_id, contact_id, deal_id,
+              department_key, actor_type, source, idempotency_key, payload_hash, confidence, payload_json, producer)
+            VALUES ('01LEDGERDEALWONX000000001', ?, 'deal.won', 1, ?, ?, 'deal', ?, 'contact-x', ?, 'sales', 'human', 'native', ?, 'h', 'verified', '{}', 'lib/lead-stage-engine.ts')`,
+      args: [OASIS, ago(45), ago(45), LEAD_X, LEAD_X, `deal:${LEAD_X}:won:1`],
+    });
+    const x = await activity.loadClientActivity(db, OASIS, (await store.getCustomer(db, OASIS, X.id))!);
+    const opened = x.entries.find((e) => e.href === `/tickets/${tid}`);
+    assert.equal(opened?.label, "Support ticket opened", JSON.stringify(x.entries.map((e) => [e.label, e.href])));
+    const won = x.entries.find((e) => e.label === "Deal won");
+    assert.ok(won, JSON.stringify(x.entries.map((e) => e.label)));
+    assert.match(won!.detail ?? "", /on the deal this client came from/);
+    const y = await activity.loadClientActivity(db, OASIS, (await store.getCustomer(db, OASIS, Y.id))!);
+    assert.ok(!y.entries.some((e) => e.href === `/tickets/${tid}` || e.label === "Deal won"), "another client's timeline has neither");
+  });
+  await check("a ticket resolved, reopened by the client and resolved again records BOTH resolutions (the ledger's n-th)", async () => {
+    await login(USERS.cc);
+    const t = await call(tickets.POST(req("POST", "/api/tickets?scope=desk", { title: "Comes back", customer_id: X.id, severity: "low" })));
+    assert.equal(t.status, 201, JSON.stringify(t.body));
+    const id = String(t.body.id);
+    const resolve = () => call(ticketRoute.PATCH(req("PATCH", `/api/tickets/${id}?scope=desk`, { status: "resolved" }), params({ id })));
+    assert.equal((await resolve()).status, 200);
+    const back = await deliveryStore.addTicketComment(db, OASIS, id, { body: "Still broken.", is_internal: false, author_type: "client", author: { userId: null, name: "Pat" } }, new Date());
+    assert.ok(back.ok && back.reopened, JSON.stringify(back));
+    assert.equal((await resolve()).status, 200);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM outcome_events WHERE event_key = 'ticket.resolved' AND subject_id = ? AND customer_id = ?", [id, X.id]), 2);
+  });
 
   // ── Last touch, health ─────────────────────────────────────────────────────
   await check("last touch is the latest activity, not updated_at: an edit is not a touch, an email is", async () => {
@@ -658,7 +729,13 @@ async function main() {
     assert.equal((await activity.lastTouchFor(db, OASIS, [z])).get(z.id), null, "creating and tagging the record touched nobody");
     await db.batch([li("li-z", OASIS, { preview: "hello quiet", to_email: "quiet@co.test", at: ago(1) })], "write");
     assert.equal((await activity.lastTouchFor(db, OASIS, [z])).get(z.id), ago(1));
-    assert.match(await page(ClientsPage({ searchParams: Promise.resolve({ q: "Quiet" }) })), /Quiet Co/);
+    // The LIST prints that time (the Last touch cell's title is its ISO), never the record's updated_at (the tag edit).
+    await login(USERS.cc);
+    const listEl = await ClientsPage({ searchParams: Promise.resolve({ q: "Quiet" }) });
+    assert.match(textOf(listEl).join("\n"), /Quiet Co/);
+    const titles = renderedTitles(listEl);
+    assert.ok(titles.includes(ago(1)), `the list's Last touch is the email: ${JSON.stringify(titles)}`);
+    assert.ok(!titles.includes(z.updated_at), "and not the record's updated_at");
   });
   await check("last touch reads every source the Conversations tab reads, per client, and equals the thread's latest message", async () => {
     // Hand-added clients (no deal), created 60 days ago, each reached through ONE source only.
@@ -747,6 +824,18 @@ async function main() {
     assert.match(await page(record(A.id, "health")), /owners and admins/);
     await login(USERS.cc);
   });
+  await check("a client workspace keeps no books in the app: its Health tab never says payments were checked", async () => {
+    await login(USERS.clientA);
+    const h = await page(record(A.id, "health"));
+    assert.match(h, /payments and invoices are not kept in the app, so they are not part of this/);
+    assert.doesNotMatch(h, /Nothing in payments/);
+    assert.doesNotMatch(h, /from overdue or failed payments/);
+    // OASIS keeps its books: the same tab counts payments.
+    await login(USERS.cc);
+    const o = await page(record(X.id, "health"));
+    assert.match(o, /from overdue or failed payments/);
+    assert.doesNotMatch(o, /not kept in the app/);
+  });
 
   // ── Past engagements ───────────────────────────────────────────────────────
   await check("Mark engagement ended: owners/admins only, moves the client to Past once, and the ledger records it once", async () => {
@@ -764,6 +853,22 @@ async function main() {
     const past = list.indexOf("Past clients");
     assert.ok(past > 0 && list.indexOf("Other Client") > past, "Y is listed under Past clients");
     assert.equal((await call(endRoute.POST(req("POST", `/api/clients/${A.id}/end-engagement`), params({ id: A.id })))).status, 404, "not OASIS's");
+  });
+  await check("a Status edit into Past records customer.churned, and back out customer.reactivated, each naming the person who made it", async () => {
+    await login(USERS.cc);
+    const sr = await store.createCustomer(db, OASIS, { ...base, display_name: "Status Edit Co", primary_email: "status@edit.test" }, USERS.cc.id, new Date(ago(10)));
+    assert.ok(sr.ok);
+    const id = sr.customer.id;
+    const patch = (lifecycle: string) => call(customerRoute.PATCH(req("PATCH", `/api/customers/${id}`, { lifecycle }), params({ id })));
+    const toPast = await patch("churned");
+    assert.equal(toPast.status, 200, JSON.stringify(toPast.body));
+    const back = await patch("active");
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    const events = (await db.execute({
+      sql: "SELECT event_key, actor_type, actor_id FROM outcome_events WHERE customer_id = ? AND event_key IN ('customer.churned', 'customer.reactivated') ORDER BY event_key",
+      args: [id],
+    })).rows.map((r) => [String(r.event_key), String(r.actor_type), r.actor_id === null ? null : String(r.actor_id)]);
+    assert.deepEqual(events, [["customer.churned", "human", USERS.cc.id], ["customer.reactivated", "human", USERS.cc.id]]);
   });
   await check("a deal that ended AFTER it became a record is listed once, as the record, not again under Past clients in Pipeline", async () => {
     const LEAD_P = "1ead0000-0000-4000-8000-0000000000e5";
@@ -821,6 +926,10 @@ async function main() {
     assert.equal(taken.body.error, "client_tenant_taken");
     const self = await link(Y.id, { client_tenant_id: OASIS, confirmed: true });
     assert.equal(self.body.error, "client_tenant_is_this_workspace");
+    const unknown = await link(Y.id, { client_tenant_id: "0e000000-0000-4000-8000-00000000dead", confirmed: true });
+    assert.equal(unknown.status, 409, JSON.stringify(unknown.body));
+    assert.equal(unknown.body.error, "client_tenant_not_found");
+    assert.equal((await store.getCustomer(db, OASIS, Y.id))!.client_tenant_id, null, "nothing is linked to a workspace that does not exist");
   });
   await check("Usage reads the linked workspace only: its snapshots, agent channels, approvals and desk over 30 days", async () => {
     await db.batch(
@@ -1026,6 +1135,11 @@ async function main() {
     await notify.acknowledgeClient(db, OASIS, t.ticket.id, deps, T0);
     assert.equal(sent.length, 1);
     assert.match(sent[0].body, /https:\/\/oasisai\.work\/f\/oasis-ai-cc\/support/);
+    // The team's reply on the ticket, emailed to the client, ends with it too.
+    await notify.emailClientReply(db, OASIS, t.ticket, { id: "reply-with-link", body: "We fixed it.", authorName: "OASIS Support" }, deps);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1].body, /We fixed it\./);
+    assert.match(sent[1].body, /https:\/\/oasisai\.work\/f\/oasis-ai-cc\/support/);
   });
   await check("the client portal always shows the support link, and an unread ROI is a dash, never a zero", async () => {
     await login(USERS.clientA);

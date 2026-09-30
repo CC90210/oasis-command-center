@@ -214,7 +214,7 @@ export default async function ClientRecordPage({
         {tab === "health" &&
           (cv.desk ? (
             <Card>
-              <ClientHealthBreakdown health={data.health} />
+              <ClientHealthBreakdown health={data.health} moneyTracked={data.moneyAccess !== "not_tracked"} />
             </Card>
           ) : (
             <OwnersOnly what="Health signals" />
