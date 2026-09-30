@@ -25,6 +25,13 @@
  * refused outright where it is certainly a second booking
  * (alreadyOnTheBooks): a line linked to an expense, a Wise deposit already
  * recorded against an invoice, a Wise line an opening balance already holds.
+ *
+ * STRIPE PAYOUTS. A deposit categorised to Stripe clearing that is a payout
+ * the books already booked from Stripe (stripe-payouts-io.ts: same account,
+ * amount and currency, arriving within a few days) is LINKED to that entry,
+ * never posted; the posting is gated on no such payout, so one booked in
+ * between is linked too. The reverse order (the line first, the payout event
+ * after) is stripe-payouts-io.ts's: the payout adopts the line's entry.
  */
 import "server-only";
 
@@ -48,7 +55,8 @@ import {
 } from "./access-io";
 import { buildPosting, buildReversal, findEntryBySource } from "./ledger-io";
 import type { JournalLineInput } from "./ledger";
-import { FEED_HOLD_MARK, OPENING_BALANCE_SOURCE, parseWiseFitid, WISE_PAYMENT_SOURCE } from "./wise-feed";
+import { centsToDecimal, FEED_HOLD_MARK, OPENING_BALANCE_SOURCE, parseWiseFitid, WISE_PAYMENT_SOURCE } from "./wise-feed";
+import { BOOKED_PAYOUT_WHERE, bookedPayoutArgs, bookedPayoutForBankLine } from "./stripe-payouts-io";
 
 /** The source of every entry a register line owns. */
 export const REGISTER_ENTRY_SOURCE = "bank_txn";
@@ -195,8 +203,22 @@ export async function createManualTransaction(viewer: FinanceViewer, entityRef: 
     },
   ];
   if (category) {
-    const posting = await buildPosting(txnPostingInput(row, category, viewerLabel(viewer), id));
-    statements.push(...posting.statements, { sql: `UPDATE fin_bank_transactions SET entry_id = ?, status = 'posted' WHERE id = ?`, args: [posting.entryId, id] });
+    // A deposit from Stripe clearing that is a payout already booked from Stripe is refused, never posted twice.
+    const payoutShaped = isPayoutShaped(row, category);
+    const payout = payoutShaped ? await bookedPayoutForBankLine(row) : null;
+    if (payout) {
+      throw new FinanceInputError(
+        `Stripe payout ${payout.payoutId} (${centsToDecimal(payout.amountCents)} ${payout.currency}, arrived ${payout.arrivalDate}) is already booked from Stripe; recording it here too would count it twice.`,
+      );
+    }
+    const posting = await buildPosting({
+      ...txnPostingInput(row, category, viewerLabel(viewer), id),
+      ...(payoutShaped ? { gate: { sql: `NOT EXISTS (SELECT 1 FROM fin_stripe_payouts p WHERE ${BOOKED_PAYOUT_WHERE})`, args: bookedPayoutArgs(row) } } : {}),
+    });
+    statements.push(...posting.statements, {
+      sql: `UPDATE fin_bank_transactions SET entry_id = ?, status = 'posted' WHERE id = ? AND EXISTS (SELECT 1 FROM fin_journal_entries WHERE id = ?)`,
+      args: [posting.entryId, id, posting.entryId],
+    });
   }
   statements.push(auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "txn.manual_created", objectType: "transaction", objectId: id, detail: { amount: v.value.amountCents } }));
   await writeBatch(statements);
@@ -205,7 +227,12 @@ export async function createManualTransaction(viewer: FinanceViewer, entityRef: 
 
 // ── categorise / exclude ─────────────────────────────────────────────────
 
-async function statementsToPost(txn: TxnRow, category: CategoryRow, actor: string): Promise<{ statements: InStatement[]; entryId: string }> {
+async function statementsToPost(
+  txn: TxnRow,
+  category: CategoryRow,
+  actor: string,
+  extraGate?: { sql: string; args: Array<string | number> },
+): Promise<{ statements: InStatement[]; entryId: string }> {
   const statements: InStatement[] = [];
   const old = txn.entry_id || "";
   if (txn.entry_id) {
@@ -214,7 +241,10 @@ async function statementsToPost(txn: TxnRow, category: CategoryRow, actor: strin
   }
   const posting = await buildPosting({
     ...txnPostingInput(txn, category, actor, txn.entry_id ? `${txn.id}:${newId("r")}` : txn.id),
-    gate: { sql: `(SELECT COALESCE(entry_id, '') FROM fin_bank_transactions WHERE id = ?) = ?`, args: [txn.id, old] },
+    gate: {
+      sql: `(SELECT COALESCE(entry_id, '') FROM fin_bank_transactions WHERE id = ?) = ?${extraGate ? ` AND ${extraGate.sql}` : ""}`,
+      args: [txn.id, old, ...(extraGate?.args ?? [])],
+    },
   });
   statements.push(...posting.statements, {
     sql: `UPDATE fin_bank_transactions SET category_id = ?, entry_id = ?, status = 'posted'
@@ -263,6 +293,48 @@ async function alreadyOnTheBooks(txn: TxnRow): Promise<string | null> {
   return null;
 }
 
+/** Money coming INTO a bank line from Stripe clearing: what a Stripe payout landing looks like. */
+function isPayoutShaped(txn: Pick<TxnRow, "entity_id" | "amount_cents">, category: CategoryRow): boolean {
+  return txn.amount_cents > 0 && category.account_id === accountId(txn.entity_id, SYS.stripeClearing);
+}
+
+/**
+ * Categorising a deposit to Stripe clearing when that payout is already on
+ * the books from Stripe (stripe-payouts-io.ts): the line is LINKED to the
+ * payout's entry and nothing is posted, however the categorisation came
+ * (by hand, the seeded "Stripe payouts are transfers" rule on an uploaded
+ * statement, an untagged Wise line). Refused, never posted, when it cannot be
+ * linked: the line already has an entry of its own, or the payout landed in
+ * another account. Null = no such payout; post as usual.
+ */
+async function linkToBookedPayout(viewer: FinanceViewer, txn: TxnRow, category: CategoryRow): Promise<"linked" | null> {
+  if (!isPayoutShaped(txn, category)) return null;
+  const payout = await bookedPayoutForBankLine(txn);
+  if (!payout) return null;
+  const what = `Stripe payout ${payout.payoutId} (${centsToDecimal(payout.amountCents)} ${payout.currency}, arrived ${payout.arrivalDate})`;
+  if (payout.bankAccountId !== txn.account_id) {
+    throw new FinanceInputError(
+      `${what} is already booked from Stripe into another account; categorising this line to Stripe clearing would count it twice. Check which bank account Finances › Settings › Stripe names for payouts.`,
+    );
+  }
+  if (txn.entry_id) {
+    throw new FinanceInputError(`${what} is already booked from Stripe; categorising this line to Stripe clearing would count it twice. Exclude the line instead.`);
+  }
+  const r = await writeBatch(
+    linkLineToEntryStatements({
+      entityId: txn.entity_id,
+      txnId: txn.id,
+      entryId: payout.entryId,
+      categoryId: category.id,
+      memo: `Stripe payout ${payout.payoutId}, already booked from Stripe; nothing new was posted.`,
+      actor: viewerLabel(viewer),
+      detail: { payout: payout.payoutId },
+    }),
+  );
+  if (r[0]?.rowsAffected !== 1) throw new FinanceInputError("this transaction changed while you were editing it; reload and try again");
+  return "linked";
+}
+
 export async function categorizeTransaction(viewer: FinanceViewer, txnId: string, categoryId: string): Promise<void> {
   const entity = await requireRowEntity(viewer, "fin_bank_transactions", txnId);
   const category = await requireCategoryOf(entity.id, categoryId);
@@ -271,7 +343,14 @@ export async function categorizeTransaction(viewer: FinanceViewer, txnId: string
   if (txn.status === "posted" && txn.category_id === category.id && txn.entry_id) return;
   const twice = await alreadyOnTheBooks(txn);
   if (twice) throw new FinanceInputError(twice);
-  const { statements } = await statementsToPost(txn, category, viewerLabel(viewer));
+  if (await linkToBookedPayout(viewer, txn, category)) return;
+  // A payout booked from Stripe between that check and this write stops the line's own entry.
+  const { statements } = await statementsToPost(
+    txn,
+    category,
+    viewerLabel(viewer),
+    isPayoutShaped(txn, category) ? { sql: `NOT EXISTS (SELECT 1 FROM fin_stripe_payouts p WHERE ${BOOKED_PAYOUT_WHERE})`, args: bookedPayoutArgs(txn) } : undefined,
+  );
   statements.push(auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "txn.categorized", objectType: "transaction", objectId: txnId, detail: { category: category.name } }));
   try {
     await writeBatch(statements);
@@ -279,6 +358,11 @@ export async function categorizeTransaction(viewer: FinanceViewer, txnId: string
     if (isUniqueViolation(e)) throw new FinanceInputError("this transaction changed while you were editing it; reload and try again");
     throw e;
   }
+  const after = await loadTxn(txnId);
+  if (after?.entry_id) return;
+  // Gated out: a payout booked from Stripe meanwhile (link to it), or the line changed under this edit.
+  if (after && (await linkToBookedPayout(viewer, after, category))) return;
+  throw new FinanceInputError("this transaction changed while you were editing it; reload and try again");
 }
 
 export async function excludeTransaction(viewer: FinanceViewer, txnId: string): Promise<void> {
@@ -594,6 +678,8 @@ export async function buildLinePosting(a: {
   fixedRates?: Record<string, string>;
   together?: string[];
   detail?: Record<string, unknown>;
+  /** A further condition the posting needs, checked in the same statement (the feed's: its payout not booked from Stripe meanwhile). */
+  gate?: { sql: string; args: Array<string | number> };
 }): Promise<{ entryId: string; posting: InStatement[]; link: InStatement[] }> {
   const ids = [...new Set([a.txn.id, ...(a.together || [])])];
   const sourceRef = (await findEntryBySource(a.txn.entity_id, REGISTER_ENTRY_SOURCE, a.txn.id)) ? `${a.txn.id}:${newId("r")}` : a.txn.id;
@@ -607,8 +693,8 @@ export async function buildLinePosting(a: {
     fixedRates: a.fixedRates,
     lines: a.lines,
     gate: {
-      sql: `(SELECT COUNT(*) FROM fin_bank_transactions WHERE id IN (${ids.map(() => "?").join(",")}) AND status = 'unreviewed' AND entry_id IS NULL) = ?`,
-      args: [...ids, ids.length],
+      sql: `(SELECT COUNT(*) FROM fin_bank_transactions WHERE id IN (${ids.map(() => "?").join(",")}) AND status = 'unreviewed' AND entry_id IS NULL) = ?${a.gate ? ` AND ${a.gate.sql}` : ""}`,
+      args: [...ids, ids.length, ...(a.gate?.args ?? [])],
     },
   });
   return {
