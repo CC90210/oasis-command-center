@@ -4,14 +4,16 @@
  * The actions on a business document: Copy, Download, Open source (founders),
  * Ask <department>, and for founders on a stored document Draft it, Edit and
  * Mark current. Every write is a founder's own click; Mark current asks for a
- * second click to confirm. After a write the page re-reads from the server
- * (router.refresh), so what shows is what was saved, never an optimistic
- * guess.
+ * second click to confirm. After a write the page reloads from the server, so
+ * what shows is what was saved, never an optimistic guess. (router.refresh()
+ * was not enough: the local walk saved an edit and marked it current 1.4 s
+ * later, the database held version 3 and Current, and the page kept showing
+ * version 2 and Draft, because the second refresh was folded into the first
+ * one still in flight. A reload always reads the saved state.)
  */
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { Check, Copy, Download, ExternalLink, MessageSquare, PenLine, ShieldCheck, Sparkles } from "lucide-react";
 import { copyText } from "@/lib/clipboard";
 
@@ -46,7 +48,6 @@ async function post(url: string, method: "POST" | "PUT", body: Record<string, un
 }
 
 export function DocActions(props: DocActionsProps) {
-  const router = useRouter();
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState<null | "draft" | "save" | "mark">(null);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +74,7 @@ export function DocActions(props: DocActionsProps) {
       }
       setEditing(false);
       setConfirmMark(false);
-      router.refresh();
+      window.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "The request did not reach the server.");
     } finally {

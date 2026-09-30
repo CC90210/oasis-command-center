@@ -351,6 +351,13 @@ async function main() {
     assert.match(src, /askRead\.current = true;/, "read once");
     assert.ok(!/fetch\(|\.submit\(|send\(/.test(src), "the composer context must never send");
   });
+  await check("after a write the document page reloads from the server (a folded router.refresh showed stale Draft over a Current row)", () => {
+    for (const f of ["app/playbook/business/[slug]/DocActions.tsx", "app/playbook/business/[slug]/IncidentRegister.tsx"]) {
+      const src = readFileSync(join(ROOT, f), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      assert.match(src, /window\.location\.reload\(\)/, f);
+      assert.ok(!/router\.refresh\(/.test(src), `${f} must not rely on router.refresh after a write`);
+    }
+  });
   await check("every former /agents builder now asks a department", () => {
     for (const f of [
       "app/playbook/business/[slug]/page.tsx",

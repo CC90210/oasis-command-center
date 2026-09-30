@@ -8,14 +8,12 @@
  */
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import type { Incident } from "@/lib/playbook/store";
 
 const FIELD = "w-full rounded-md border border-hairline bg-bg-elev px-2.5 py-1.5 text-sm text-fg";
 const LABEL = "text-xs font-medium text-fg-muted";
 
 export function IncidentRegister({ incidents, state }: { incidents: Incident[] | null; state: "ok" | "table_missing" | "read_failed" }) {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -40,7 +38,8 @@ export function IncidentRegister({ incidents, state }: { incidents: Incident[] |
       setOpen(false);
       setConfirming(false);
       setForm({ serious_risk: "unknown" });
-      router.refresh();
+      // A reload reads the register as saved (see DocActions on router.refresh).
+      window.location.reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "The request did not reach the server.");
     } finally {
