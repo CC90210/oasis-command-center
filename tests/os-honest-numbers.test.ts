@@ -672,6 +672,19 @@ async function main() {
     const withSavings = cashCoverage({ accounts, lines: [...productionLines, ...savings], bankLinesByAccount: {}, ...BIZ });
     assert.ok(withSavings.gaps.includes("Business savings has no opening balance (recording one for this account is not yet possible from the app)"), withSavings.gaps.join(" | "));
   });
+  await check("cash coverage: a VOIDED payout is no payout; only one in force counts", () => {
+    const opening = entry("2026-08-31", "opening_balance", [["B:1000", 500000, 0], ["B:3900", 0, 500000]]);
+    // Booked as a Stripe payout, then voided: the original is marked reversed
+    // and a reversal entry moves the money back to clearing.
+    const voided = entry("2026-09-08", "bank_import", [["B:1000", 6585, 0], ["B:1050", 0, 6585]], "reversed");
+    const reversal = entry("2026-09-08", "reversal", [["B:1050", 6585, 0], ["B:1000", 0, 6585]]);
+    const gone = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...voided, ...reversal], bankLinesByAccount: {}, ...BIZ });
+    assert.deepEqual([gone.complete, gone.gaps], [false, ["Stripe payouts to the bank are not recorded"]], "a voided payout must not complete the books");
+    assert.match(gone.accounts[1].covers, /no payout to the bank is recorded/);
+    const rebooked = entry("2026-09-09", "bank_import", [["B:1000", 6585, 0], ["B:1050", 0, 6585]]);
+    const whole = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...voided, ...reversal, ...rebooked], bankLinesByAccount: {}, ...BIZ });
+    assert.deepEqual([whole.complete, whole.gaps], [true, []]);
+  });
   // Verify-fix (2026-09-29): the check was the Wise source string, so an
   // opening balance posted any other way never counted.
   await check("cash coverage: ANY posted opening balance counts, whatever wrote it; reversed ones and reversals never do", () => {

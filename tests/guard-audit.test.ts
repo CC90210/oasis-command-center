@@ -99,30 +99,15 @@ for (const broken of [{ considered: null }, { acted: null }, { considered: null,
   assert.match(summarize(clean, auditInstruments(clean)), /all 2 instrument/);
 }
 
-// ── THE AUDIT IS ACTUALLY RUN, on a schedule ─────────────────────────────
-// reportCoverageGap in runner.ts was written, exported, and called from
-// nowhere — a monitor that never runs, which is the very bug class this audit
-// exists to catch. So the wiring is asserted, not assumed.
+// ── THE SCHEDULE WAS SUNBIZ'S, AND WENT WITH IT ──────────────────────────
+// This block used to assert that the health cron ran the audit for SunBiz
+// every 15 minutes. SunBiz was retired on 2026-09-28 (0860f968) and the cron
+// stopped running its lanes, the guard audit included;
+// tests/retired-tenant-producers.test.ts now asserts the route calls
+// neither runGuardAudit nor announceGuardAudit. The two assertions cannot both
+// hold, and the retirement is the intended state. What is left to pin here is
+// the paging behaviour of the module itself.
 {
-  const route = readFileSync(new URL("../app/api/cron/health-check/route.ts", import.meta.url), "utf8");
-  assert.ok(
-    route.includes("await runGuardAudit(SUNBIZ_TENANT_ID)"),
-    "the guard audit must be invoked by the health cron, or it is decorative",
-  );
-  assert.ok(
-    route.includes("announceGuardAudit(SUNBIZ_TENANT_ID, guards)"),
-    "and its findings must be announced, not just returned in a JSON body nobody reads",
-  );
-  // A broken self-check must never take down the health check it rides on.
-  assert.ok(
-    route.includes("runGuardAudit(SUNBIZ_TENANT_ID).catch(() => null)"),
-    "audit failures are swallowed",
-  );
-  assert.ok(
-    route.includes('{ summary: "guard audit could not run", findings: [] }'),
-    "and a failed audit says so in the response rather than reporting an empty, healthy-looking result",
-  );
-
   const impl = readFileSync(new URL("../lib/health/guard-audit.ts", import.meta.url), "utf8");
   // The reading is a 7-day window and the cron runs every 15 minutes. Alerting
   // per tick would repeat the same sentence 96 times a day and get the channel

@@ -5,36 +5,44 @@ on:
   push:
     branches: [main]
 
+# ONE RUN PER REF (2026-09-29, F0 release gate). A newer push to the same ref
+# cancels the run still going for the older one. On main this is what makes a
+# deploy that waits for CI (a workflow_run trigger on this workflow) safe:
+# without it, two pushes close together can finish CI in either order, each
+# success starts a deploy, and the deploy's cancel-in-progress group lets the
+# LAST one to start win, which can be the older commit. A superseded run ends
+# as cancelled, and a deploy gated on success skips it. On a pull request it
+# stops a stale head from holding a runner for the full build.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # SAME TOOLCHAIN AS THE DEPLOY (2026-09-29, F0 release gate).
+      # Production is the OpenNext Worker that deploy-cloudflare.yml builds on
+      # Node 22 from `npm ci`. This job used to build plain `next build` on
+      # Node 20 from `npm install`, so a green check here said nothing about
+      # the artifact that ships: a different Node, a dependency tree the
+      # lockfile does not pin, and no OpenNext or wrangler step at all.
+      # Node version, install command and build command now match the deploy.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '22'
           cache: npm
-      # `npm ci` cannot install this project on Linux.
-      #
-      # package-lock.json is generated on Windows, and npm records optional
-      # platform-specific dependencies only for the host platform. Linux
-      # resolves a different `sharp` variant, which pulls
-      # @emnapi/runtime@1.11.3 — an entry a Windows-generated lockfile does
-      # not contain. `npm ci` treats that as a lockfile/manifest mismatch
-      # and aborts, so EVERY run since 2026-08-01 died at the install step
-      # before reaching typecheck, lint, tests or build.
-      #
-      # That is worse than it sounds: the pipeline was red continuously, so
-      # nothing it was supposed to guard was actually being guarded, and a
-      # test added to it changed nothing. A CI that cannot install is not a
-      # weaker gate, it is no gate.
-      #
-      # `npm install` resolves per-platform on the runner and installs
-      # correctly. It trades strict lockfile determinism for a pipeline that
-      # runs at all, which is the right trade while the lockfile cannot be
-      # regenerated on Linux. Proper fix when someone has a Linux shell:
-      # regenerate package-lock.json there and restore `npm ci`.
-      - run: npm install --no-audit --no-fund
+      # `npm ci` is back. From 2026-08-01 it could not install here: the
+      # Windows-generated lockfile lacked @emnapi/runtime@1.11.3, the entry
+      # Linux's `sharp` variant needs, and the job ran `npm install` instead.
+      # The lockfile has carried that entry since, and deploy-cloudflare.yml
+      # installs with `npm ci` on this same runner image on every push to main
+      # (green on 2026-09-29), so CI can pin the exact tree the deploy builds.
+      # If the lockfile loses a Linux entry again, this step fails before the
+      # deploy does, which is where that should be found.
+      - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run lint
       - name: Tests
@@ -60,8 +68,9 @@ jobs:
           #
           # Setting the condition here fixes the whole step at once instead of
           # rewriting 48 invocations, and it is what test:watermark already
-          # does inline. Verified on node v20.20.2 (the version this job pins)
-          # that --conditions IS honoured via NODE_OPTIONS.
+          # does inline. Verified on node v20.20.2 that --conditions IS honoured
+          # via NODE_OPTIONS; Node 22 (pinned since 2026-09-29) honours it the
+          # same way, and every server-only test below fails at import if not.
           NODE_OPTIONS: --conditions=react-server
         run: |
           npm run test:sunbiz
@@ -147,11 +156,59 @@ jobs:
           # Today's board-summary congruency, and the worker-status reporter
           # (panel rule + Health check) behind the 2026-09-23 false "11/12 down".
           npm run test:fresh-start
-      - name: Build
+          # ADDED 2026-09-29 (F0 release gate). These four groups were defined
+          # in package.json and run by nothing, so six files had never gated a
+          # deploy: AI-audit funnel intake and its notification, lead transfer
+          # and the lead drawer, legal-copy drift, and media framing.
+          # tests/test-suite-coverage.test.ts (in test:os) now fails the build
+          # when any tests/ file is reachable from no group this step runs.
+          npm run test:funnels
+          npm run test:lead-advancements
+          npm run test:legal
+          npm run test:media
+      # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
+      # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
+      # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
+      # next.config.js traces the full @libsql/client tree and drops the
+      # @napi-rs includes only when it is "1", so building without it checks a
+      # different bundle from the one production runs. `opennextjs-cloudflare
+      # build` runs `next build` itself, so the Next build is still covered.
+      #
+      # No secrets. The deploy passes every manifest key because module-scope
+      # SDK init can run during page-data collection; this job has never had
+      # them and the build has never needed more than the three placeholders
+      # below. They are fake on purpose and must stay fake: a pull request's
+      # code runs here.
+      - name: Build (OpenNext -> Cloudflare Worker)
         env:
-          # Minimal env so the build doesn't blow up on missing required vars.
-          # Real values come from Vercel in production deploys.
+          NODE_OPTIONS: "--max-old-space-size=4096 --use-system-ca"
+          CF_MIGRATION_BUILD: "1"
           BRAVO_SUPABASE_URL: https://placeholder.supabase.co
           BRAVO_SUPABASE_SERVICE_ROLE_KEY: placeholder
           BRAVO_SUPABASE_ANON_KEY: placeholder
-        run: npm run build
+        run: npx opennextjs-cloudflare build
+      # Hand the OpenNext output to wrangler the way the deploy's
+      # `wrangler deploy` does, without uploading: it bundles .open-next/worker.js
+      # against wrangler.jsonc and prints the upload size. A Worker that
+      # wrangler cannot bundle fails here instead of in the deploy after merge.
+      # No Cloudflare credentials.
+      #
+      # The dry run does NOT fail on size: it only colours the size line and
+      # exits 0 (wrangler 4.127.1, printBundleSize). scripts/check-worker-bundle.ts
+      # reads that line from the log and fails the step past the budget below,
+      # and fails it too when the line is missing (an unknown size is not a
+      # small one). pipefail keeps a failed dry run failing through `tee`.
+      #
+      # WORKER_UPLOAD_BUDGET_KIB is checked against wrangler's `Total Upload`
+      # KiB, the UNCOMPRESSED size. Cloudflare's limit is 64 MiB (65536 KiB)
+      # uncompressed, and it has no compressed limit (the gzip figure is for
+      # reference only). The budget is that limit less 1 MiB, because the dry
+      # run builds with placeholder env and reads slightly below the deploy
+      # for the same commit. On 2026-09-29 the upload was 59014 KiB.
+      - name: Bundle the Worker (wrangler dry run) and check its size
+        env:
+          WORKER_UPLOAD_BUDGET_KIB: "64512"
+        run: |
+          set -o pipefail
+          npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
+          node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log"
