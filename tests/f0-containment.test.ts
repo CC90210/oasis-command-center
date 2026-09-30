@@ -21,8 +21,9 @@
  *      client-deploy runbook says the client install is paused.
  *   3b. Every "Install bridge" call to action (onboarding's last step,
  *      Settings › AI, /sequences) is the operator's only, through
- *      BridgeInstallLink; a client sees a plain line or nothing. /automations
- *      is a named known gap (see the allowlist in that section).
+ *      BridgeInstallLink; a client sees a plain line or nothing. /automations,
+ *      where viewer checks are not allowed, offers it only in OASIS's own
+ *      workspace.
  *   3c. Every /playbook page 404s for anyone outside an OASIS workspace (by
  *      tenant id and slug), renders for OASIS members, and signed-out visitors
  *      are sent to /login by middleware.
@@ -722,11 +723,11 @@ async function main() {
       ["components/settings/SettingsContent.tsx", "inside the Settings › Devices section, which is show(\"devices\") && isOperator (os-connectors test)"],
       ["components/settings/LocalCliProvidersCard.tsx", "mounted only under show(\"ai\") && isOperator (asserted above)"],
       ["lib/setup-readiness.ts", "readiness data with no caller in app/ or components/"],
-      // KNOWN GAP, not a pass: a client founder reaches /automations
-      // (requireSystemSurface admits any founder) and still sees Install bridge.
-      // tests/client-surface-isolation.test.ts forbids any viewer check in this
-      // component, so gating it needs a decision; raised on PR #479.
-      ["components/automations/AutomationsContent.tsx", "KNOWN GAP: see the comment above"],
+      // A client founder reaches /automations (requireSystemSurface admits any
+      // founder). tests/client-surface-isolation.test.ts keeps viewer checks out
+      // of this component, so the link is gated on the WORKSPACE: OASIS's own
+      // (isOasisSurfaceTenant) only. Asserted in the next check.
+      ["components/automations/AutomationsContent.tsx", "shown only in OASIS's own workspace (next check)"],
     ]);
     const hits: string[] = [];
     for (const dir of ["app", "components", "lib", "hooks"]) {
@@ -737,6 +738,15 @@ async function main() {
       }
     }
     assert.deepEqual(hits, []);
+  });
+  await check("/automations offers Install bridge only in OASIS's own workspace; a client workspace gets a plain line", () => {
+    // The component mounts client panels that cannot load in this process, so
+    // the gate is read from source: the verdict, the button and the hint all use it.
+    const src = readFileSync(join(ROOT, "components", "automations", "AutomationsContent.tsx"), "utf8");
+    assert.match(src, /const canInstallBridge = isOasisSurfaceTenant\(tenantSlug\);/, "the verdict is the workspace, not the viewer");
+    assert.match(src, /\{!bridgeOnline && canInstallBridge && \(\s*<Link\s+href="\/settings\/devices\/install"/, "the button needs the verdict");
+    assert.match(src, /\{canInstallBridge \? \([\s\S]*?Install bridge[\s\S]*?\) : \(\s*"OASIS pairs a machine with your workspace directly\."/, "the hint needs it too");
+    assert.equal((src.match(/Install bridge/g) || []).length, 2, "no other Install bridge text in the component");
   });
 
   // ── 3c. /playbook is OASIS's own material ──────────────────────────────
