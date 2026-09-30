@@ -96,12 +96,18 @@ export type EventRecord = {
 /** The writable subset a client sends. Server stamps id/timestamps. */
 export type EventInput = Omit<EventRecord, "id" | "createdAt" | "updatedAt">;
 
+export type CalendarLocation = { label: string; lat: number; lon: number };
+
 export type CalendarPrefs = {
   weekStartsOn: 0 | 1 | 6;
   showWeekends: boolean;
   defaultDurationMin: number;
-  /** Where sunrise/sunset (and therefore Shabbat) is computed for. */
-  location: { label: string; lat: number; lon: number };
+  /**
+   * Where sunrise/sunset (and therefore Shabbat) is computed for. Null until
+   * the user picks one: a client workspace is never handed OASIS's city.
+   * Shabbat protection needs a location (validatePrefs refuses it without one).
+   */
+  location: CalendarLocation | null;
   /** Candle lighting, minutes before Friday sunset. */
   candleMinutesBeforeSunset: number;
   /** Shabbat ends this many minutes after Saturday sunset. */
@@ -109,6 +115,15 @@ export type CalendarPrefs = {
   shabbatProtection: boolean;
 };
 
+/**
+ * The OASIS home workspace (slug `oasis-ai-cc`). Its members get the
+ * Montréal + Shabbat defaults below. Declared here rather than imported from
+ * lib/platform-operator.ts because this file ships to the browser and that one
+ * reads the database; tests/calendar-routine.test.ts asserts the two agree.
+ */
+export const OASIS_HOME_TENANT_ID = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+
+/** Defaults for the OASIS workspace: Montréal, Shabbat protected. */
 export const DEFAULT_PREFS: CalendarPrefs = {
   weekStartsOn: 0,
   showWeekends: true,
@@ -122,6 +137,22 @@ export const DEFAULT_PREFS: CalendarPrefs = {
   havdalahMinutesAfterSunset: 72,
   shabbatProtection: true,
 };
+
+/**
+ * Defaults for every other workspace: no location and no Shabbat lock until
+ * the user sets them. The offsets are kept so that turning protection on
+ * later starts from the same common customs.
+ */
+export const NEUTRAL_PREFS: CalendarPrefs = {
+  ...DEFAULT_PREFS,
+  location: null,
+  shabbatProtection: false,
+};
+
+/** The preferences a user has before saving any: OASIS's for OASIS, neutral elsewhere. */
+export function defaultPrefsFor(tenantId: string): CalendarPrefs {
+  return tenantId === OASIS_HOME_TENANT_ID ? DEFAULT_PREFS : NEUTRAL_PREFS;
+}
 
 /** One rendered instance of an event on the calendar. */
 export type Occurrence = {

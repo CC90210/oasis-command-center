@@ -15,7 +15,8 @@ type Props = {
   busyDays: Set<number>;
   rangeStart: Date;
   rangeEnd: Date;
-  legacyAvailable: boolean;
+  /** This browser still holds the old page's saved week: "replace" when the calendar has the restored routine. */
+  legacy: "add" | "replace" | null;
   onCreate: () => void;
   onPick: (d: Date) => void;
   onToggle: (c: CalendarRecord) => void;
@@ -23,12 +24,14 @@ type Props = {
   onEditCalendar: (c: CalendarRecord, patch: { name?: string; color?: CalendarColor }) => Promise<void>;
   onDeleteCalendar: (c: CalendarRecord) => void;
   onImportLegacy: () => void;
+  onOpenSettings: () => void;
 };
 
 export function Sidebar(p: Props) {
   const [adding, setAdding] = useState(false);
   const [menuFor, setMenuFor] = useState<string | null>(null);
-  const today = sunTimes(p.now, p.prefs.location.lat, p.prefs.location.lon);
+  const place = p.prefs.location;
+  const today = place ? sunTimes(p.now, place.lat, place.lon) : null;
   // The next Shabbat, or the one in progress.
   const shabbat = shabbatForWeekOf(p.now, p.prefs);
   const shabbatNow = p.now >= shabbat.start && p.now < shabbat.end;
@@ -50,8 +53,17 @@ export function Sidebar(p: Props) {
         onPick={p.onPick}
       />
 
+      {!place || !today ? (
+        <section aria-labelledby="cal-sky-h" className="rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
+          <h3 id="cal-sky-h" className="mb-1 font-semibold text-fg">No location set</h3>
+          <p className="text-fg-muted">Pick a place to see sunrise and sunset here.</p>
+          <button type="button" className="btn mt-2 h-8 text-[12px]" onClick={p.onOpenSettings}>
+            Choose a location
+          </button>
+        </section>
+      ) : (
       <section aria-labelledby="cal-sky-h" className="rounded-lg border border-hairline bg-bg-panel p-3 text-[12px]">
-        <h3 id="cal-sky-h" className="mb-2 font-semibold text-fg">{p.prefs.location.label}</h3>
+        <h3 id="cal-sky-h" className="mb-2 font-semibold text-fg">{place.label}</h3>
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1.5 text-fg-muted">
           <dt><Sunrise className="h-3.5 w-3.5" aria-label="Sunrise" /></dt>
           <dd>{today.sunrise ? formatTime(today.sunrise) : "No sunrise today"}</dd>
@@ -75,6 +87,7 @@ export function Sidebar(p: Props) {
         </dl>
         {!upcoming.computed && <p className="mt-2 text-[11px] text-fg-dim">No sunset here this week; a wide protected window is used.</p>}
       </section>
+      )}
 
       <section aria-labelledby="cal-list-h">
         <div className="mb-1 flex items-center justify-between pl-1">
@@ -135,11 +148,15 @@ export function Sidebar(p: Props) {
         )}
       </section>
 
-      {p.legacyAvailable && (
+      {p.legacy && (
         <section className="rounded-lg border border-dashed border-hairline p-3 text-[12px] text-fg-muted">
-          <p>Your old weekly routine is still saved in this browser.</p>
+          <p>
+            {p.legacy === "replace"
+              ? "This browser still holds the week you saved on the old Schedule page, with any times you changed there."
+              : "Your old weekly routine is still saved in this browser."}
+          </p>
           <button type="button" className="btn mt-2 h-8 text-[12px]" onClick={p.onImportLegacy}>
-            Bring it into the calendar
+            {p.legacy === "replace" ? "Use it instead of the restored routine" : "Bring it into the calendar"}
           </button>
         </section>
       )}

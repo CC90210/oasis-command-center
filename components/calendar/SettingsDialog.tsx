@@ -32,7 +32,9 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
   const [p, setP] = useState(prefs);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const preview = shabbatForWeekOf(now, p);
+  const place = p.location;
+  const preview = place ? shabbatForWeekOf(now, p) : null;
+  const placeValue = !place ? "" : PLACES.find((x) => x.label === place.label) ? place.label : "custom";
   const num = (v: string, lo: number, hi: number) => Math.max(lo, Math.min(hi, Math.round(Number(v) || 0)));
 
   return (
@@ -91,32 +93,38 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
               Location
               <select
                 className="select h-8 w-auto py-0"
-                value={PLACES.find((x) => x.label === p.location.label) ? p.location.label : "custom"}
+                value={placeValue}
                 onChange={(e) => {
-                  const place = PLACES.find((x) => x.label === e.target.value);
-                  if (place) setP({ ...p, location: place });
+                  // "Not set" also turns the lock off: it is computed from this place's sunset.
+                  if (!e.target.value) return setP({ ...p, location: null, shabbatProtection: false });
+                  const picked = PLACES.find((x) => x.label === e.target.value);
+                  if (picked) setP({ ...p, location: picked });
                 }}
               >
+                <option value="">Not set</option>
                 {PLACES.map((x) => (
                   <option key={x.label} value={x.label}>{x.label}</option>
                 ))}
-                {!PLACES.find((x) => x.label === p.location.label) && <option value="custom">{p.location.label}</option>}
+                {place && placeValue === "custom" && <option value="custom">{place.label}</option>}
               </select>
             </label>
-            <div className="grid grid-cols-2 gap-3">
-              <label>
-                <span className="label">Latitude</span>
-                <input className="input h-8" type="number" step="0.0001" min={-90} max={90} value={p.location.lat} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: Number(e.target.value), lon: p.location.lon } })} />
-              </label>
-              <label>
-                <span className="label">Longitude</span>
-                <input className="input h-8" type="number" step="0.0001" min={-180} max={180} value={p.location.lon} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: p.location.lat, lon: Number(e.target.value) } })} />
-              </label>
-            </div>
+            {place && (
+              <div className="grid grid-cols-2 gap-3">
+                <label>
+                  <span className="label">Latitude</span>
+                  <input className="input h-8" type="number" step="0.0001" min={-90} max={90} value={place.lat} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: Number(e.target.value), lon: place.lon } })} />
+                </label>
+                <label>
+                  <span className="label">Longitude</span>
+                  <input className="input h-8" type="number" step="0.0001" min={-180} max={180} value={place.lon} onChange={(e) => setP({ ...p, location: { label: "Custom", lat: place.lat, lon: Number(e.target.value) } })} />
+                </label>
+              </div>
+            )}
             <label className="flex items-center justify-between gap-4">
               Protect Shabbat (no events can be booked)
-              <input type="checkbox" className="h-4 w-4" checked={p.shabbatProtection} onChange={(e) => setP({ ...p, shabbatProtection: e.target.checked })} />
+              <input type="checkbox" className="h-4 w-4" disabled={!place} checked={p.shabbatProtection} onChange={(e) => setP({ ...p, shabbatProtection: e.target.checked })} />
             </label>
+            {!place && <p className="text-fg-dim">Choose a location first: Shabbat times come from its sunset.</p>}
             <label className="flex items-center justify-between gap-4">
               Candle lighting, minutes before sunset
               <input className="input h-8 w-20" type="number" min={0} max={120} value={p.candleMinutesBeforeSunset} onChange={(e) => setP({ ...p, candleMinutesBeforeSunset: num(e.target.value, 0, 120) })} />
@@ -125,9 +133,11 @@ export function SettingsDialog({ prefs, now, notifications, onEnableNotification
               Shabbat ends, minutes after sunset
               <input className="input h-8 w-20" type="number" min={0} max={120} value={p.havdalahMinutesAfterSunset} onChange={(e) => setP({ ...p, havdalahMinutesAfterSunset: num(e.target.value, 0, 120) })} />
             </label>
-            <p className="rounded-md border border-hairline bg-bg-panel px-3 py-2 text-fg-muted">
-              This week: candles Friday {formatTime(preview.start)}, ends Saturday {formatTime(preview.end)}.
-            </p>
+            {preview && (
+              <p className="rounded-md border border-hairline bg-bg-panel px-3 py-2 text-fg-muted">
+                This week: candles Friday {formatTime(preview.start)}, ends Saturday {formatTime(preview.end)}.
+              </p>
+            )}
           </fieldset>
 
           <fieldset className="space-y-2">

@@ -76,8 +76,12 @@ export function shabbatForWeekOf(anyDay: Date, prefs: Pick<CalendarPrefs, "locat
   const d = startOfDay(anyDay);
   const friday = addDays(d, (5 - d.getDay() + 7) % 7 - (d.getDay() === 6 ? 7 : 0));
   const saturday = addDays(friday, 1);
-  const fri = sunTimes(friday, prefs.location.lat, prefs.location.lon).sunset;
-  const sat = sunTimes(saturday, prefs.location.lat, prefs.location.lon).sunset;
+  // No location means no sunset to compute from. validatePrefs never lets the
+  // lock be on without one, so this is a guard, and it fails closed the same
+  // way a polar day does.
+  const loc = prefs.location;
+  const fri = loc ? sunTimes(friday, loc.lat, loc.lon).sunset : null;
+  const sat = loc ? sunTimes(saturday, loc.lat, loc.lon).sunset : null;
   if (!fri || !sat) {
     // Fail closed: protect Friday noon to Sunday 1am rather than guess.
     const start = new Date(friday);

@@ -11,7 +11,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import {
-  DEFAULT_PREFS,
+  defaultPrefsFor,
   type CalendarColor,
   type CalendarPrefs,
   type CalendarRecord,
@@ -21,6 +21,7 @@ import {
   type Recurrence,
 } from "./types";
 import { planCalendarRemoval } from "./recurrence";
+import { ROUTINE_ID_PREFIX, buildRoutineSeries, type RoutineAdjustment, type RoutineBlock } from "./routine";
 import { LIMITS, addsTime, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
 
 export class CalendarStoreError extends Error {
@@ -117,7 +118,12 @@ function eventColumns(e: EventInput) {
 
 // ── Calendars ─────────────────────────────────────────────────────────────
 
-export async function listCalendars(owner: Owner): Promise<CalendarRecord[]> {
+/**
+ * The owner's calendars. On a first visit one default calendar is created,
+ * unless `create: false` (a read-only caller such as Today, which must never
+ * write just because someone looked at it).
+ */
+export async function listCalendars(owner: Owner, opts: { create?: boolean } = {}): Promise<CalendarRecord[]> {
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("calendar_calendars")
@@ -127,7 +133,7 @@ export async function listCalendars(owner: Owner): Promise<CalendarRecord[]> {
     .order("position", { ascending: true });
   if (error) storageError(error, "calendar_read_failed");
   const rows = ((data ?? []) as CalendarRow[]).map(toCalendar);
-  if (rows.length) return rows;
+  if (rows.length || opts.create === false) return rows;
   // First visit: give the user one calendar to put things in. The id is
   // derived from the owner, so two first loads racing each other collide on
   // the primary key instead of creating two defaults; the loser re-reads.
@@ -271,6 +277,18 @@ async function getEvent(owner: Owner, id: string): Promise<EventRecord | null> {
 export type OpResult = { op: EventOp["op"]; id: string; tempId?: string; event?: EventRecord };
 
 /**
+ * The checks every event write passes before anything is written: the event
+ * goes into one of the owner's own calendars, and (unless `shabbat` is false,
+ * for an update that cannot add time) it stays out of Shabbat.
+ */
+function assertWritable(calendars: Set<string>, input: EventInput, prefs: CalendarPrefs, shabbat = true): void {
+  if (!calendars.has(input.calendarId)) throw new CalendarStoreError("calendar_not_found", 404);
+  if (!shabbat) return;
+  const hit = shabbatConflict(input, prefs);
+  if (hit) throw new CalendarStoreError("shabbat_protected", 409, `overlaps ${hit.start.toISOString()} - ${hit.end.toISOString()}`);
+}
+
+/**
  * Applies a planned batch in order. The planner orders creates before the
  * truncation of an old series, so a failure part-way never loses an event;
  * the error names how many ops landed so the client can reload.
@@ -287,12 +305,7 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
   const tempIds = new Map<string, string>();
   const results: OpResult[] = [];
 
-  const check = (input: EventInput, shabbat = true) => {
-    if (!calendars.has(input.calendarId)) throw new CalendarStoreError("calendar_not_found", 404);
-    if (!shabbat) return;
-    const hit = shabbatConflict(input, prefs);
-    if (hit) throw new CalendarStoreError("shabbat_protected", 409, `overlaps ${hit.start.toISOString()} - ${hit.end.toISOString()}`);
-  };
+  const check = (input: EventInput, shabbat = true) => assertWritable(calendars, input, prefs, shabbat);
   for (const op of ops) if (op.op === "create") check(op.event);
 
   let i = 0;
@@ -372,7 +385,14 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
 
 const prefsId = (owner: Owner) => `${owner.tenantId}:${owner.userId}`;
 
+/**
+ * The owner's preferences. With no saved row, the defaults of the owner's OWN
+ * workspace (types.ts defaultPrefsFor): Montréal and the Shabbat lock for
+ * OASIS, and neither anywhere else until the user sets them. A saved row
+ * always wins; keys it lacks come from those same workspace defaults.
+ */
 export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
+  const base = defaultPrefsFor(owner.tenantId);
   const db = getServiceSupabase();
   const { data, error } = await db
     .from("calendar_prefs")
@@ -381,11 +401,14 @@ export async function getPrefs(owner: Owner): Promise<CalendarPrefs> {
     .eq("user_id", owner.userId)
     .maybeSingle();
   if (error) storageError(error, "prefs_read_failed");
-  if (!data) return DEFAULT_PREFS;
-  const parsed = validatePrefs(json<unknown>((data as Record<string, unknown>).prefs, {}));
+  if (!data) return base;
+  const parsed = validatePrefs(json<unknown>((data as Record<string, unknown>).prefs, {}), base);
+  if (parsed.ok) return parsed.value;
   // A stored value that no longer validates must not silently disable the
-  // Shabbat lock: fall back to the protective defaults.
-  return parsed.ok ? parsed.value : DEFAULT_PREFS;
+  // Shabbat lock where the workspace has it on: fall back to the workspace's
+  // defaults, which for OASIS are the protective ones. Logged, not hidden.
+  console.error("[calendar.prefs] stored preferences no longer validate; using workspace defaults", parsed.error);
+  return base;
 }
 
 export async function savePrefs(owner: Owner, prefs: CalendarPrefs): Promise<void> {
@@ -412,4 +435,77 @@ export async function savePrefs(owner: Owner, prefs: CalendarPrefs): Promise<voi
         updated_at: now,
       });
   if (error) storageError(error, "prefs_write_failed");
+}
+
+// ── Weekly routine restore ────────────────────────────────────────────────
+
+/** The id a restored row gets: the routine tag, then a hash of owner and plan key. */
+export function routineEventId(owner: Owner, key: string): string {
+  const digest = createHash("sha256").update(`${owner.tenantId}|${owner.userId}|${key}`).digest("hex").slice(0, 40);
+  return `${ROUTINE_ID_PREFIX}${digest}`;
+}
+
+/** How many of the owner's rows carry the routine tag (routine.ts ROUTINE_ID_PREFIX). */
+export async function countRoutineEvents(owner: Owner): Promise<number> {
+  const db = getServiceSupabase();
+  const { data, error } = await db
+    .from("calendar_events")
+    .select("id")
+    .eq("tenant_id", owner.tenantId)
+    .eq("user_id", owner.userId)
+    .like("id", `${ROUTINE_ID_PREFIX}%`)
+    .limit(MAX_EVENTS);
+  if (error) storageError(error, "event_read_failed");
+  return ((data ?? []) as EventRow[]).filter((r) => String(r.id).startsWith(ROUTINE_ID_PREFIX)).length;
+}
+
+export type RoutineRestore =
+  | { status: "restored"; calendarId: string; created: EventRecord[]; adjusted: RoutineAdjustment[]; dropped: string[] }
+  | { status: "already_restored"; existing: number };
+
+/**
+ * Writes the weekly routine into the owner's default calendar, once.
+ *
+ * Idempotent by id: every row's id is derived from the owner and its plan key
+ * (routineEventId), so a second restore finds the tagged rows and answers
+ * already_restored, and two restores racing collide on the primary key. The
+ * rows go in ONE insert statement, so the loser of a race writes nothing and
+ * re-reads. Every row passes the same checks as any other write
+ * (validateEventInput, the owner's calendar, the Shabbat lock) before the
+ * insert runs.
+ */
+export async function restoreRoutine(owner: Owner, input: { blocks: RoutineBlock[]; now: Date }): Promise<RoutineRestore> {
+  const existing = await countRoutineEvents(owner);
+  if (existing > 0) return { status: "already_restored", existing };
+  const [calendars, prefs] = await Promise.all([listCalendars(owner), getPrefs(owner)]);
+  const calendar = calendars.find((c) => c.isDefault) ?? calendars[0];
+  if (!calendar) throw new CalendarStoreError("calendar_not_found", 404);
+  const plan = buildRoutineSeries(input.blocks, { calendarId: calendar.id, prefs, from: input.now });
+  const planned = [...plan.series, ...plan.singles];
+  if (!planned.length) throw new CalendarStoreError("routine_empty", 409, "no block has a week left to write");
+  const ids = new Set(calendars.map((c) => c.id));
+  const now = new Date().toISOString();
+  const rows = planned.map(({ key, event }) => {
+    const checked = validateEventInput(event);
+    if (!checked.ok) throw new CalendarStoreError(checked.error, 400, key);
+    assertWritable(ids, checked.value, prefs);
+    return {
+      id: routineEventId(owner, key),
+      tenant_id: owner.tenantId,
+      user_id: owner.userId,
+      ...eventColumns(checked.value),
+      created_at: now,
+      updated_at: now,
+    };
+  });
+  const db = getServiceSupabase();
+  const { error } = await db.from("calendar_events").insert(rows);
+  if (error) {
+    if (/unique|primary key|duplicate/i.test(error.message ?? "")) {
+      const after = await countRoutineEvents(owner);
+      if (after > 0) return { status: "already_restored", existing: after };
+    }
+    storageError(error, "event_write_failed");
+  }
+  return { status: "restored", calendarId: calendar.id, created: rows.map(toEvent), adjusted: plan.adjusted, dropped: plan.dropped };
 }
