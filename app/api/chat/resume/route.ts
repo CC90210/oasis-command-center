@@ -51,6 +51,15 @@ import { verifyResumeState, signResumeState } from "@/lib/resume-hmac";
 import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
+import {
+  AI_USAGE_UNAVAILABLE,
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  budgetRefusalResponse,
+  modelCallMeter,
+} from "@/lib/ai/usage";
+import { sseErrorFrame } from "@/lib/ai/usage-codes";
+import { departmentForAgent } from "@/lib/os/approvals/rules";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -107,7 +116,7 @@ export async function POST(req: NextRequest) {
   if (!ctxResult.ok) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, apiKey } = ctxResult;
+  const { tenantId, provider, apiKey, keySource } = ctxResult;
 
   // Manifest-aware agent validation — see /api/chat for full context.
   // Custom tenant slugs are accepted here too, otherwise a multi-turn
@@ -153,6 +162,20 @@ export async function POST(req: NextRequest) {
   if (provider !== "anthropic") {
     return jsonError(400, `resume_not_supported_for_provider:${provider}`);
   }
+
+  // The month's AI budget, as /api/chat checks it: at the cap → 402 before the
+  // stream opens. Each resumed model call still reserves for itself.
+  let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
+  try {
+    exhausted = await budgetExhaustedBeforeStream(tenantId);
+  } catch (err) {
+    console.error("[chat/resume.budget] the AI budget could not be read", {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonError(503, AI_USAGE_UNAVAILABLE, AI_USAGE_UNAVAILABLE);
+  }
+  if (exhausted) return budgetRefusalResponse(exhausted);
 
   // Admin gate for the credential vault (Codex P1, 2026-05-24). Same
   // lookup the parent /api/chat route does — fails CLOSED so a profile
@@ -204,6 +227,17 @@ export async function POST(req: NextRequest) {
     tenantId,
   ).catch(() => []);
 
+  // Meters the resumed half of the turn for the SESSION's tenant.
+  const meter = modelCallMeter({
+    tenantId,
+    surface: "chat.resume",
+    ...billingForKey(provider, keySource),
+    departmentKey: departmentForAgent(agentKey),
+    sessionId,
+    teammateId: agentKey,
+    userId: user.id,
+  });
+
   const stream = new ReadableStream({
     async start(controller) {
       // Shared factory — same contract as /api/chat. A chained deferred
@@ -223,6 +257,7 @@ export async function POST(req: NextRequest) {
           normalizedResult,
           { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
           apiKey,
+          meter,
         )) {
           if (ev.type === "delta") {
             resumedText += ev.text;
@@ -272,7 +307,7 @@ export async function POST(req: NextRequest) {
             });
           } else if (ev.type === "error") {
             resumeStreamError = redactAll(ev.message);
-            send("error", { message: resumeStreamError });
+            send("error", sseErrorFrame(resumeStreamError));
           }
         }
       } catch (err) {

@@ -28,7 +28,6 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import {
   streamChat,
   type ChatMessage,
-  type Provider,
 } from "@/lib/providers";
 import { getPersona, applyAgentManifestOverlay } from "@/lib/agent-personas";
 import { operatorNameOverride } from "@/lib/operator-name";
@@ -71,6 +70,15 @@ import {
   loadChatAttachmentsForTurn,
 } from "@/lib/chat-attachments";
 import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
+import {
+  AI_USAGE_UNAVAILABLE,
+  billingForKey,
+  budgetExhaustedBeforeStream,
+  budgetRefusalResponse,
+  modelCallMeter,
+} from "@/lib/ai/usage";
+import { sseErrorFrame } from "@/lib/ai/usage-codes";
+import { departmentForAgent } from "@/lib/os/approvals/rules";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -155,7 +163,7 @@ export async function POST(req: NextRequest) {
     // can pick a friendly recovery UI (e.g. "Replace key" for key_decrypt_failed).
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope } = ctxResult;
+  const { tenantId, provider, model, apiKey, cfgOverride, displayNameOverride, cfgScope, keySource } = ctxResult;
 
   // Manifest-aware agent validation. A tenant's manifest can declare custom
   // agent slugs (e.g. "renewal_specialist") that are not in the empire-wide
@@ -207,6 +215,23 @@ export async function POST(req: NextRequest) {
       }
     );
   }
+
+  // ---- The month's AI budget (lib/ai/usage.ts) ----------------------------
+  // A workspace already AT its cap gets a 402 and one plain sentence before
+  // anything is written or streamed. Every model call below still reserves for
+  // itself, so a turn that reaches the cap mid-loop stops with the same code.
+  // No budget row for the month = no cap.
+  let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
+  try {
+    exhausted = await budgetExhaustedBeforeStream(tenantId);
+  } catch (err) {
+    console.error("[chat.budget] the AI budget could not be read", {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jsonError(503, AI_USAGE_UNAVAILABLE, AI_USAGE_UNAVAILABLE);
+  }
+  if (exhausted) return budgetRefusalResponse(exhausted);
 
   // ---- Open or create chat_sessions row -----------------------------------
   let sessionId = payload.session_id || null;
@@ -557,6 +582,19 @@ export async function POST(req: NextRequest) {
   const persona = composePlanSystem(personaPreOverlay, effectivePlanMode);
   const startedAt = Date.now();
 
+  // One meter for the turn: every model call it makes (each tool-loop
+  // iteration, or the one plain stream) records its own ai_usage_events row
+  // for the SESSION's tenant, and the turn's cost is their sum.
+  const meter = modelCallMeter({
+    tenantId,
+    surface: cloudToolsMode === "tools" && supportsNativeTools ? "chat.tools" : "chat.stream",
+    ...billingForKey(provider, keySource),
+    departmentKey: departmentForAgent(agentKey),
+    sessionId,
+    teammateId: agentKey,
+    userId: user.id,
+  });
+
   // ---- Stream response back as SSE ----------------------------------------
   let assistantText = "";
   let usageIn = 0;
@@ -628,6 +666,7 @@ export async function POST(req: NextRequest) {
               // mode filters write tools out + appends the plan-mode
               // system overlay. "build" or undefined = no change.
               chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+              meter,
             },
             { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin }
           )
@@ -640,6 +679,7 @@ export async function POST(req: NextRequest) {
                     messages: stripped,
                     toolPalette,
                     chatMode: payload.chat_mode === "plan" ? "plan" : "build",
+                    meter,
                   },
                   { tenantId, userId: user.id, agentKey, authUserId: user.id, isAdmin: callerIsAdmin },
                 );
@@ -696,7 +736,7 @@ export async function POST(req: NextRequest) {
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         } else {
@@ -717,6 +757,7 @@ export async function POST(req: NextRequest) {
             baseUrl: isOllama ? apiKey : undefined,
             system: persona,
             messages: messagesForModel,
+            meter,
           })) {
             if (ev.type === "delta") {
               assistantText += ev.text;
@@ -730,7 +771,7 @@ export async function POST(req: NextRequest) {
               // emitting over SSE or persisting — provider error bodies
               // can echo headers / URLs that contain the API key.
               streamError = redactAll(ev.message);
-              send("error", { message: streamError });
+              send("error", sseErrorFrame(streamError));
             }
           }
         }
@@ -853,13 +894,19 @@ export async function POST(req: NextRequest) {
         error: streamError,
         vaultSecrets: vaultSecretsForRedaction,
       });
-      const cost = estimateCostUsd(provider, model, usageIn, usageOut);
+      // The turn's cost is what the ledger recorded for its model calls
+      // (ai_usage_events by session_id is the record). chat_sessions'
+      // estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say "unknown", so
+      // it is only written when every call's cost is known; it used to be a
+      // guess from a hardcoded price table.
+      const turn = meter.totals();
+      const knownCostUsd = turn.calls > 0 && turn.unknownCostCalls === 0 ? turn.costMicroUsd / 1_000_000 : null;
       await service
         .from("chat_sessions")
         .update({
           total_input_tokens: usageIn,
           total_output_tokens: usageOut,
-          estimated_cost_usd: cost,
+          ...(knownCostUsd === null ? {} : { estimated_cost_usd: knownCostUsd }),
           updated_at: new Date().toISOString(),
         })
         .eq("id", sessionId);
@@ -904,53 +951,6 @@ export async function POST(req: NextRequest) {
       "x-accel-buffering": "no",
     },
   });
-}
-
-/* ============================================================================
- * Cost estimation (rough — published per-1M-token pricing as of 2026-05).
- * Wrong is fine; we just want a directional number on the dashboard.
- * ============================================================================ */
-function estimateCostUsd(
-  provider: Provider,
-  model: string,
-  inTok: number,
-  outTok: number
-): number {
-  const m = model.toLowerCase();
-  let inP = 0;
-  let outP = 0;
-  if (provider === "anthropic") {
-    if (m.includes("opus")) {
-      inP = 15;
-      outP = 75;
-    } else if (m.includes("sonnet")) {
-      inP = 3;
-      outP = 15;
-    } else {
-      inP = 1;
-      outP = 5;
-    }
-  } else if (provider === "openai") {
-    if (m.includes("mini")) {
-      inP = 0.25;
-      outP = 2;
-    } else if (m.includes("codex")) {
-      inP = 3;
-      outP = 12;
-    } else {
-      inP = 2.5;
-      outP = 10;
-    }
-  } else if (provider === "google") {
-    if (m.includes("flash")) {
-      inP = 0.3;
-      outP = 1.2;
-    } else {
-      inP = 1.25;
-      outP = 5;
-    }
-  }
-  return ((inTok * inP) + (outTok * outP)) / 1_000_000;
 }
 
 function jsonError(status: number, message: string, code?: string) {

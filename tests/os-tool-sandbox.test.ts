@@ -28,9 +28,10 @@
  * Run: node --conditions=react-server --import tsx tests/os-tool-sandbox.test.ts
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createClient } from "@libsql/client";
 
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 process.env.TURSO_DB_PATH = join(mkdtempSync(join(tmpdir(), "os-tool-sandbox-")), "test.db");
@@ -101,6 +102,12 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
 
 async function main() {
   console.log("os-tool-sandbox:");
+  // Every loop iteration is a metered model call (lib/ai/usage.ts): the loop
+  // needs the AI usage tables (bravo__192) in the temp database.
+  await createClient({ url: `file:${process.env.TURSO_DB_PATH}` }).executeMultiple(
+    readFileSync(join(process.cwd(), "database", "turso", "bravo__192_ai_usage.sql"), "utf8"),
+  );
+  const { modelCallMeter } = await import("../lib/ai/usage");
   const runner = await import("../lib/cloud-tool-runner");
   const registry = await import("../lib/ai/tools/client-safe-registry");
   const { resolveAgentToolPalette } = await import("../lib/manifest/schema");
@@ -306,7 +313,9 @@ async function main() {
   });
 
   // ── 5. the real Anthropic loop, network stubbed ──────────────────────
-  const loopReq = (toolPalette: string[] | undefined) => ({
+  const meterFor = (tenantId: string) =>
+    modelCallMeter({ tenantId, surface: "chat.tools", authKind: "api_key", billingMode: "byo_key" });
+  const loopReq = (toolPalette: string[] | undefined, tenantId: string = clientCtx.tenantId) => ({
     apiKey: "test-key",
     model: "claude-test",
     system: "sys",
@@ -314,6 +323,7 @@ async function main() {
     excludeDeferredTools: false,
     bridgeAdvertisedTools: null,
     toolPalette,
+    meter: meterFor(tenantId),
   });
 
   await check("a client turn with no palette sends the model no tools at all", async () => {
@@ -355,6 +365,7 @@ async function main() {
         { content: "{}", is_error: false },
         clientCtx,
         "test-key",
+        meterFor(clientCtx.tenantId),
       ),
     );
     assert.equal("tools" in bodies[0], false, "bash/get_credential carried in resume_state reached a client turn");
@@ -362,7 +373,7 @@ async function main() {
 
   await check("OASIS: no palette + bridge online still offers every tool and defers bash to the bridge", async () => {
     const bodies = stubAnthropic([toolUse("bash", { command: "ls" })]);
-    const events = await collect(runner.streamAnthropicWithTools(loopReq(undefined), { ...clientCtx, tenantId: OASIS }));
+    const events = await collect(runner.streamAnthropicWithTools(loopReq(undefined, OASIS), { ...clientCtx, tenantId: OASIS }));
     assert.deepEqual((bodies[0].tools as Array<{ name: string }>).map((t) => t.name), ALL_NAMES);
     assert.ok(events.some((e) => e.type === "tool_use_pending" && e.name === "bash"), "OASIS bridge tools must keep working");
   });

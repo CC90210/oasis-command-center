@@ -30,6 +30,8 @@ import { streamChat, type ChatMessage } from "@/lib/providers";
 import { resolveChatContext } from "@/lib/chat-auth";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
+import { billingForKey, budgetRefusalResponse, isAiBudgetCode, modelCallMeter } from "@/lib/ai/usage";
+import { departmentForAgent } from "@/lib/os/approvals/rules";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -101,7 +103,7 @@ export async function POST(req: NextRequest) {
   if (!ctxResult.ok) {
     return jsonError(ctxResult.status, ctxResult.detail || ctxResult.code, ctxResult.code);
   }
-  const { tenantId, provider, model, apiKey } = ctxResult;
+  const { tenantId, provider, model, apiKey, keySource } = ctxResult;
 
   if (!(await isTenantChatAgent(tenantId, agentKey))) {
     return jsonError(400, `invalid_agent:${agentKey}`);
@@ -126,6 +128,14 @@ export async function POST(req: NextRequest) {
       system: COMPACT_SYSTEM,
       messages: compactionMessages,
       maxTokens: 1024,
+      meter: modelCallMeter({
+        tenantId,
+        surface: "chat.compact",
+        ...billingForKey(provider, keySource),
+        departmentKey: departmentForAgent(agentKey),
+        teammateId: agentKey,
+        userId: user.id,
+      }),
     })) {
       if (ev.type === "delta") summary += ev.text;
       else if (ev.type === "error") {
@@ -138,6 +148,7 @@ export async function POST(req: NextRequest) {
     errorMessage = err instanceof Error ? err.message : "compact_failed";
   }
 
+  if (isAiBudgetCode(errorMessage)) return budgetRefusalResponse(errorMessage);
   if (errorMessage) {
     return jsonError(502, `compact_provider_error: ${errorMessage}`, "provider_error");
   }

@@ -59,6 +59,13 @@ export type ChatAuthContext = {
   isOperator: boolean;
   /** Which config row actually supplied the model/key, if any. */
   cfgScope: "user" | "tenant" | null;
+  /**
+   * Who pays for the key: "tenant" (a key the workspace or the teammate saved)
+   * or "platform" (OASIS's platform key, verified operator only). The AI usage
+   * ledger records it as billing_mode (lib/ai/usage.ts billingForKey).
+   * cfgScope cannot say this: a config row with no key still names its scope.
+   */
+  keySource: "tenant" | "platform";
 };
 
 export type ChatAuthError = {
@@ -145,6 +152,7 @@ export async function resolveChatContext(
   let model: string;
   let apiKey = "";
   let cfgOverride: string | null = null;
+  let keySource: "tenant" | "platform" = "tenant";
 
   if (cfg) {
     if (!cfg.enabled) {
@@ -162,6 +170,7 @@ export async function resolveChatContext(
       provider = fallback.provider;
       model = fallback.model;
       apiKey = fallback.apiKey;
+      keySource = "platform";
     } else {
       try {
         apiKey = decryptField(cfg.encrypted_api_key as string);
@@ -187,6 +196,7 @@ export async function resolveChatContext(
     provider = fallback.provider;
     model = fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
   }
 
   return {
@@ -199,5 +209,6 @@ export async function resolveChatContext(
     displayNameOverride,
     isOperator,
     cfgScope,
+    keySource,
   };
 }

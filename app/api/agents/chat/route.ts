@@ -85,6 +85,7 @@ import {
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { recordTurnOutcome } from "@/lib/os/channel/turns";
 import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
+import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter } from "@/lib/ai/usage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -318,6 +319,7 @@ export async function POST(req: NextRequest) {
   let provider: Provider;
   let model: string;
   let apiKey = "";
+  let keySource: "tenant" | "platform" = "tenant";
   if (cfg && (cfg.enabled === true || cfg.enabled === 1) && cfg.encrypted_api_key) {
     provider = cfg.provider as Provider;
     model = binding?.model_override || cfg.model;
@@ -342,6 +344,22 @@ export async function POST(req: NextRequest) {
     provider = fallback.provider;
     model = binding?.model_override || fallback.model;
     apiKey = fallback.apiKey;
+    keySource = "platform";
+  }
+
+  // The month's AI budget (lib/ai/usage.ts). A workspace already at its cap is
+  // answered 402 before a stream opens, and recorded as the channel's last turn:
+  // like a refused key, it is a verdict on the workspace's AI account that every
+  // channel shares. No budget row for the month = no cap.
+  try {
+    const exhausted = await budgetExhaustedBeforeStream(tenantId);
+    if (exhausted) {
+      await recordTurn(turn, false, exhausted);
+      return refuse(ctx, 402, exhausted, { message: failureCopy(exhausted, { canManageAi: false }).sentence });
+    }
+  } catch (err) {
+    console.error("[agents.chat.budget]", { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return refuse(ctx, 503, "ai_usage_unavailable");
   }
 
   // Effective system prompt — interpolate placeholders, append overlay.
@@ -382,6 +400,17 @@ export async function POST(req: NextRequest) {
   const effectivePlanMode = normalizeMode(body.chat_mode);
   const system = composePlanSystem(baseSystem, effectivePlanMode);
 
+  // Meters the turn's model call for the SESSION's workspace, under the
+  // department the channel speaks for (null in a direct agent chat).
+  const meter = modelCallMeter({
+    tenantId,
+    surface: "agents.chat",
+    ...billingForKey(provider, keySource),
+    departmentKey: dept?.key ?? null,
+    teammateId: agent.slug,
+    userId: user.id,
+  });
+
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -421,6 +450,7 @@ export async function POST(req: NextRequest) {
           system,
           messages: incoming.filter((m) => m.role === "user" || m.role === "assistant"),
           maxTokens: 4096,
+          meter,
         })) {
           if (ev.type === "delta") {
             send("delta", { text: ev.text });
