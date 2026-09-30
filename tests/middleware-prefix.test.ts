@@ -139,6 +139,14 @@ for (const notPublic of ["/api/perf", "/api/perf/anything-else", "/api/perf/vita
   );
 }
 
+// The Business Ledger ingest authenticates each producer by HMAC inside its
+// route (lib/ledger/ingest.ts); the harnesses hold no session. Only that exact
+// path is public: the rest of /api/ledger stays behind the session.
+assert.equal(isPublic("/api/ledger/ingest"), true, "/api/ledger/ingest is HMAC-gated inside its route and must reach it");
+for (const notPublic of ["/api/ledger", "/api/ledger/events", "/api/ledger/ingest-admin"]) {
+  assert.equal(isPublic(notPublic), false, `${notPublic} must stay session-gated — only the ingest path is public`);
+}
+
 // ...and nothing else under /api/internal is public. The prefix must not be a
 // wildcard: a future internal route stays session-gated until someone
 // deliberately adds it above with a reason.
