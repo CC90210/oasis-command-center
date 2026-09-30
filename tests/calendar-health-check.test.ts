@@ -284,6 +284,8 @@ run().catch((error) => {
 {
   const route = readFileSync("app/api/cron/health-check/route.ts", "utf8");
   const page = readFileSync("app/health/page.tsx", "utf8");
+  // /health loads its outcome checks through the one "needs you" loader (PR #498).
+  const attention = readFileSync("lib/admin/attention.ts", "utf8");
   const runner = readFileSync("lib/health/runner.ts", "utf8");
   const panelData = readFileSync("lib/health/outcome-panel-data.ts", "utf8");
   const verifier = readFileSync("scripts/verify-workspace-calendar-live.ts", "utf8");
@@ -318,9 +320,17 @@ run().catch((error) => {
     "the probe budget must retain a real cleanup-only slice",
   );
   assert.match(runner, /checks\?:\s*readonly DripCheck\[\]/, "the runner must accept an explicit bounded check set");
-  assert.match(page, /tenantId === WEBDEV_TENANT_ID/, "the OASIS health page must load its own global outcomes");
-  assert.match(page, /includeCheckIds:\s*calendarCheckIds/, "OASIS must render only its calendar check");
-  assert.match(page, /excludeCheckIds:\s*calendarCheckIds/, "SunBiz must not retain a stale calendar row");
+  assert.match(page, /loadWorkspaceOutcome\(tenantId, profileSlug, now\)/, "the OASIS health page must load its own outcomes through the attention loader");
+  assert.match(
+    attention,
+    /tenantId === WEBDEV_TENANT_ID\s*\?\s*\{ includeCheckIds: calendarCheckIds \}/,
+    "OASIS must render only its calendar check",
+  );
+  assert.match(
+    attention,
+    /profileSlug === "sun"\s*\?\s*\{ excludeCheckIds: calendarCheckIds \}/,
+    "a SunBiz session must never render the OASIS-global calendar check",
+  );
   assert.match(panelData, /allowsCheck\(id, filter\)/, "persisted run rows must respect the tenant-visible check set");
   assert.match(panelData, /allowsCheck\(checkId, filter\)/, "open alerts must respect the same check set");
   assert.match(page, /OASIS founder-booking health/, "the calendar check needs an operator-visible card, not SunBiz copy");
