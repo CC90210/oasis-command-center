@@ -95,6 +95,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(root, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
 
   const { torontoToday, addDays, FX_LOOKBACK_DAYS } = await import("../lib/founders-finances/fx");
   const today = torontoToday();
@@ -182,15 +185,19 @@ async function main() {
   // Bounds are the measured AFTER figures; a change that adds a trip or a
   // sequential step fails here and has to justify itself.
   const sp = {};
+  // 2026-09-29: overview +1 (the Stripe payouts the books did not book, a cash
+  // gap each; read in the same wave as the ledger) and settings +1 (the bank
+  // accounts a founder can choose for Stripe payouts, same wave). Neither adds
+  // a sequential step.
   const PAGES: Array<{ name: string; trips: number; depth: number; run: () => Promise<unknown> }> = [
-    { name: "overview", trips: 16, depth: 2, run: () => pc.loadOverviewPage(cc, entity) },
+    { name: "overview", trips: 17, depth: 2, run: () => pc.loadOverviewPage(cc, entity) },
     { name: "transactions", trips: 5, depth: 1, run: () => pc.loadTransactionsPage(cc, entity, sp) },
     { name: "invoices", trips: 4, depth: 1, run: () => pc.loadInvoicesPage(cc, entity, sp) },
     { name: "bills", trips: 6, depth: 1, run: () => pc.loadBillsPage(cc, entity) },
     { name: "accounts", trips: 3, depth: 1, run: () => pc.loadAccountsPage(cc, entity) },
     { name: "reports", trips: 2, depth: 1, run: () => pc.loadReportsPage(cc, entity, sp) },
     { name: "taxes", trips: 6, depth: 1, run: () => pc.loadTaxesPage(cc, sp) },
-    { name: "settings", trips: 5, depth: 1, run: () => pc.loadSettingsPage(cc, entity) },
+    { name: "settings", trips: 6, depth: 1, run: () => pc.loadSettingsPage(cc, entity) },
     { name: "invoice detail", trips: 8, depth: 3, run: () => pc.loadInvoiceDetailPage(cc, draftInv) },
   ];
   const table: Record<string, { trips: number; sequential: number; network: number; ms: number }> = {};

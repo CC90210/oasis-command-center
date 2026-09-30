@@ -97,10 +97,24 @@ const HANDLERS: Record<string, Handler> = {
     return { message: "Settings saved." };
   },
   "stripe.pin": async (v, b) => ({ account: await settings.pinStripeAccount(v, str(b.entity), str(b.account_id)), message: "Stripe account confirmed." }),
+  "stripe.payout_account": async (v, b) => {
+    const r = await settings.setStripePayoutAccount(v, str(b.entity), b.account_id);
+    return {
+      ...r,
+      message: r.accountId
+        ? `Stripe payouts now book into that account${r.booked ? `; ${r.booked} waiting payout(s) booked` : ""}.`
+        : "Stripe payouts are recorded but not booked until an account is chosen.",
+    };
+  },
   "stripe.reconcile": async (_v, b) => {
     const days = Number(b.days) || 30;
     const summary = await reconcileStripe({ days });
-    return { summary, message: `Reconciled ${summary.days} days: ${summary.payments_recorded} new payment(s), ${summary.refunds_recorded} refund(s), ${summary.subscriptions_upserted} subscription(s).` };
+    return {
+      summary,
+      message:
+        `Reconciled ${summary.days} days: ${summary.payments_recorded} new payment(s), ${summary.refunds_recorded} refund(s), ${summary.subscriptions_upserted} subscription(s), ` +
+        `${summary.payouts_booked} payout(s) booked${summary.payouts_unbooked ? `, ${summary.payouts_unbooked} payout(s) not booked (Overview says why)` : ""}.`,
+    };
   },
   "fx.refresh": async (_v, b) => {
     const to = isIsoDate(b.to) ? (b.to as string) : torontoToday();

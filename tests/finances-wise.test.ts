@@ -136,6 +136,9 @@ async function main() {
   const { createClient } = await import("@libsql/client");
   const raw = createClient({ url: `file:${dbFile}` });
   await raw.executeMultiple(readFileSync(join(root, "database/turso/180_founders_finances.turso.sql"), "utf8"));
+  // Stripe ingest writes the Business Ledger in its own batches (bravo__190); the books read Stripe payouts and the payout account (bravo__193).
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__190_ledger_core.sql"), "utf8"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__193_stripe_payouts.sql"), "utf8"));
 
   const { addDays, torontoToday, usdToCadCents, parseRateMicro } = await import("../lib/founders-finances/fx");
   const today = torontoToday();

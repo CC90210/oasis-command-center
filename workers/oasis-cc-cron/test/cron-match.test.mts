@@ -73,20 +73,38 @@ test("weekly: 40 13 * * 1 fires only Monday", () => {
 });
 
 test("a Vercel-identical minute fires the exact due set", () => {
-  // Monday 13:40 UTC — the */5 senders, the three */10 jobs, and the weekly
-  // kixie scan. (*/30 does NOT fire at :40 — 40 % 30 !== 0.)
+  // Monday 13:40 UTC — the */5 senders and the */10 operator email agent.
+  // (*/15 does NOT fire at :40 — 40 % 15 !== 0.) The SunBiz-only routes that
+  // also fired here (dispatch-bulk-email, the weekly kixie scan,
+  // scan-lender-replies, tps-enroll) were unscheduled when SunBiz was retired
+  // on 2026-09-28 (0860f968); none of them may come back.
   const d = at("2026-08-31T13:40:00Z");
   const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, d)).map((e) => e.path).sort();
   assert.deepEqual(due, [
-    "/api/cron/dispatch-bulk-email",
     "/api/cron/dispatch-drips",
     "/api/cron/dispatch-founder-meeting-reminders",
     "/api/cron/dispatch-scheduled-calls",
     "/api/cron/dispatch-scheduled-sends",
-    "/api/cron/kixie-compliance-scan?mode=weekly",
     "/api/cron/operator-email-agent?write=1",
-    "/api/cron/scan-lender-replies?write=1",
     "/api/cron/sms-reply-agent",
-    "/api/cron/tps-enroll?write=1",
   ].sort());
+});
+
+test("the books' daily jobs each fire once a day, alone in their minute, in order", () => {
+  // lib/founders-finances/books-cron.ts: rates, then Stripe (payouts leave
+  // clearing before the bank feed looks), then Wise invoice matches, then the
+  // feed. Each on its own minute, off the 5-minute grid, so none shares a
+  // tick with another job.
+  const order = ["fx-refresh", "stripe-reconcile", "wise-reconcile", "wise-sync"];
+  const fired: Array<{ job: string; minute: number }> = [];
+  for (let m = 0; m < 24 * 60; m++) {
+    const d = new Date(Date.UTC(2026, 8, 30, 0, m));
+    const due = CRON_TABLE.filter((e) => cronMatches(e.schedule, d)).map((e) => e.path);
+    const books = due.filter((p) => p.startsWith("/api/cron/finance-books?job="));
+    for (const p of books) {
+      fired.push({ job: p.slice("/api/cron/finance-books?job=".length), minute: m });
+      assert.deepEqual(due, [p], `${p} shares minute ${m} with ${due.join(", ")}`);
+    }
+  }
+  assert.deepEqual(fired.map((f) => f.job), order, "each job fires exactly once a day, in dependency order");
 });

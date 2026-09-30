@@ -34,7 +34,7 @@
 
 import "server-only";
 import { createHash } from "node:crypto";
-import { queueInfer } from "@/lib/bridge-infer";
+import { queueInfer, type InferJob } from "@/lib/bridge-infer";
 import { redactAll } from "@/lib/secret-redaction";
 
 export type InferTextResult =
@@ -76,6 +76,8 @@ export async function inferText(args: {
   /** "fast" | "smart" | "max"; the queue maps these onto the CLI. */
   modelTier?: string;
   timeoutMs?: number;
+  /** Passed to queueInfer: the job this call waited on (lib/ai/infer.ts records one usage row per job). */
+  onJob?: (job: InferJob) => void;
 }): Promise<InferTextResult> {
   // Redact BEFORE hashing so the dedupe key matches what is stored and sent.
   const prompt = redactAll(args.prompt);
@@ -108,6 +110,7 @@ export async function inferText(args: {
         maxTokens: args.maxTokens,
         tenantId: args.tenantId,
         dedupeKey,
+        onJob: args.onJob,
       },
       { timeoutMs: args.timeoutMs ?? DEFAULT_TIMEOUT_MS, pollMs: 1_500 },
     );
