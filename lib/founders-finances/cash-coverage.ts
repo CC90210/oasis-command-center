@@ -152,9 +152,15 @@ export function cashCoverage(input: {
   const byAccount = new Map<string, ReportLine[]>();
   const byEntry = new Map<string, ReportLine[]>();
   for (const l of input.lines) {
-    byAccount.set(l.accountId, [...(byAccount.get(l.accountId) || []), l]);
-    byEntry.set(l.entryId, [...(byEntry.get(l.entryId) || []), l]);
+    let onAccount = byAccount.get(l.accountId);
+    if (!onAccount) byAccount.set(l.accountId, (onAccount = []));
+    onAccount.push(l);
+    let legs = byEntry.get(l.entryId);
+    if (!legs) byEntry.set(l.entryId, (legs = []));
+    legs.push(l);
   }
+  // In force: posted, and not itself a reversal. A reversed entry records nothing.
+  const inForce = (l: ReportLine): boolean => l.status === "posted" && l.source !== REVERSAL_SOURCE;
   const openingEquity = new Set(
     input.accounts.filter((a) => a.type === "equity" && a.code === OPENING_EQUITY_CODE[input.book]).map((a) => a.id),
   );
@@ -167,7 +173,7 @@ export function cashCoverage(input: {
    * owner contribution or a payout touches other accounts; neither counts.
    */
   const isOpeningBalance = (l: ReportLine): boolean => {
-    if (l.status !== "posted" || l.source === REVERSAL_SOURCE) return false;
+    if (!inForce(l)) return false;
     if (l.source === OPENING_BALANCE_SOURCE) return true;
     const legs = byEntry.get(l.entryId) || [];
     return (
@@ -194,9 +200,11 @@ export function cashCoverage(input: {
 
     if (a.code === SYS.stripeClearing) {
       const cardMoneyIn = lines.some((l) => l.cadDebitCents > 0);
-      // A payout: an entry that takes money OUT of clearing and puts it INTO a bank or cash account.
+      // A payout IN FORCE: an entry that takes money OUT of clearing and puts it
+      // INTO a bank or cash account. A voided payout records none.
       const payoutRecorded = lines.some(
         (l) =>
+          inForce(l) &&
           l.cadCreditCents > 0 &&
           (byEntry.get(l.entryId) || []).some(
             (o) => o.accountId !== a.id && BALANCE_SUBTYPES.has(kindOf.get(o.accountId) || "") && o.cadDebitCents > 0,
