@@ -133,6 +133,10 @@ async function loadDesk(
   let tenants: Awaited<ReturnType<typeof listClientTenants>> = [];
   let customers: CustomerOptions = { state: "not_set_up" };
   let form: DeskFormState | null = null;
+  // The assignee menu's roster fails on its own (OASIS's needs both founders
+  // active: lib/team.ts getOasisPipelineAssignmentRoster throws otherwise).
+  // The desk still renders; only the menu degrades, with a notice saying why.
+  let rosterNotice: string | null = null;
   try {
     const [r, open, ro, dir, pr, te, cu, fo] = await Promise.all([
       listTickets(db, viewer, {
@@ -144,7 +148,11 @@ async function loadDesk(
         q: sp.q || null,
       }),
       listTickets(db, viewer, { status: "open" }),
-      loadAssignmentRoster(viewer.tenantId),
+      loadAssignmentRoster(viewer.tenantId).catch((err: unknown) => {
+        console.error("[tickets.page.roster]", err);
+        rosterNotice = rosterFailureNotice(err);
+        return [] as Awaited<ReturnType<typeof loadAssignmentRoster>>;
+      }),
       loadMemberDirectory(viewer.tenantId),
       listProjects(db, viewer, { includeArchived: false }),
       oasis ? listClientTenants(db) : Promise.resolve([]),
@@ -189,12 +197,26 @@ async function loadDesk(
     workingCount: workingSet.length,
     counts,
     rosterOptions,
+    rosterNotice: rosterNotice as string | null,
     directory,
     projects,
     tenants,
     customers,
     form,
   };
+}
+
+/**
+ * Why the assignee menu is empty, in words. The incomplete-roster case is
+ * OASIS's own (its roster names both founders) and says what to fix; anything
+ * else says it failed and was logged.
+ */
+function rosterFailureNotice(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("oasis_pipeline_assignment_roster_incomplete")) {
+    return "Tickets can't be assigned from here right now: the assignment roster needs both founders as active members of this workspace, and one is missing. Everything else on the desk works.";
+  }
+  return "The assignee list couldn't be loaded, so tickets can't be assigned from here right now. The error has been logged; everything else on the desk works.";
 }
 
 function DeskView({ data, sp, vendorRequests }: { data: DeskData; sp: Search; vendorRequests: VendorData | null }) {
@@ -330,6 +352,11 @@ function DeskView({ data, sp, vendorRequests }: { data: DeskData; sp: Search; ve
               {filtered && <Link href={view ? hrefFor(view) : "/tickets"} className="pb-2 text-sm text-fg-muted hover:text-fg">Clear</Link>}
             </form>
 
+            {data.rosterNotice && (
+              <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
+                {data.rosterNotice}
+              </p>
+            )}
             {customers.state === "error" && (
               <p role="alert" className="text-[13px] text-status-warm">
                 Couldn&rsquo;t load your client records, so tickets are shown without their client. The error has been logged.

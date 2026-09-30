@@ -19,10 +19,17 @@
  *      in this database yet" (see isMissingCustomersSchema).
  *
  * Writes take already-validated input (lib/os/customers/rules.ts).
+ *
+ * THE LEDGER. This module is the catalog owner of customer.created,
+ * customer.churned and customer.reactivated (lib/ledger/catalog.ts). Each is
+ * emitted in the SAME db.batch as the write it records, so a client record and
+ * its ledger row commit or roll back together (lib/ledger/emit.ts). The
+ * client's Activity tab reads them back by customer_id.
  */
 import { randomUUID } from "node:crypto";
 import type { Client, InStatement, ResultSet } from "@libsql/client";
 import { isUniqueViolationError } from "@/lib/api-helpers";
+import { assertNoPayloadConflicts, emit, emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
 import {
   CUSTOMER_LIFECYCLES,
   contactFromLead,
@@ -95,6 +102,12 @@ export type Customer = {
   owner_user_id: string | null;
   source_lead_id: string | null;
   stripe_customer_id: string | null;
+  /**
+   * The client's own OASIS workspace (tenants.id), set by the operator-only
+   * "Link workspace" action (migration bravo__195). Null = not linked, and
+   * also what a database without that migration reads as.
+   */
+  client_tenant_id: string | null;
   tags: string[];
   custom_fields: Record<string, unknown>;
   archived_at: string | null;
@@ -124,6 +137,7 @@ function mapCustomer(r: Row): Customer {
     owner_user_id: s(r.owner_user_id),
     source_lead_id: s(r.source_lead_id),
     stripe_customer_id: s(r.stripe_customer_id),
+    client_tenant_id: s(r.client_tenant_id),
     tags: Array.isArray(tags) ? tags.filter((t): t is string => typeof t === "string") : [],
     custom_fields: custom && typeof custom === "object" && !Array.isArray(custom) ? (custom as Record<string, unknown>) : {},
     archived_at: s(r.archived_at),
@@ -351,6 +365,84 @@ export async function matchCustomerByEmail(db: Client, tenantId: string, email: 
 }
 
 // ---------------------------------------------------------------------------
+// Ledger events this module owns (lib/ledger/catalog.ts)
+// ---------------------------------------------------------------------------
+
+/** The producer every emit here names: the catalog's owning module for these keys. */
+export const CUSTOMERS_LEDGER_PRODUCER = "lib/os/customers/store.ts";
+
+export type CustomerOrigin = "conversion" | "manual" | "import";
+
+function ledgerActor(actor: string | null): { type: "human" | "system"; id: string | null } {
+  return actor ? { type: "human", id: actor } : { type: "system", id: null };
+}
+
+/** customer.created, for the batch that inserts the record. One per record (cust:{id}). */
+function customerCreatedEvent(
+  tenantId: string,
+  customer: { id: string; source_lead_id: string | null },
+  origin: CustomerOrigin,
+  actor: string | null,
+  now: Date,
+): LedgerStatement {
+  return emit(
+    {
+      tenantId,
+      eventKey: "customer.created",
+      eventVersion: 1,
+      occurredAt: now,
+      subject: { type: "customer", id: customer.id },
+      customerId: customer.id,
+      // A converted deal carries its lead into the ledger, so the deal's
+      // journey (deal.won, then this) reads as one line.
+      dealId: origin === "conversion" ? customer.source_lead_id : null,
+      actor: ledgerActor(actor),
+      source: origin === "import" ? "import" : "native",
+      idempotencyKey: `cust:${customer.id}`,
+      confidence: "verified",
+      payload: { origin, ...(customer.source_lead_id ? { source_lead_id: customer.source_lead_id } : {}) },
+      producer: CUSTOMERS_LEDGER_PRODUCER,
+    },
+    now,
+  );
+}
+
+/**
+ * customer.churned / customer.reactivated for a lifecycle move into or out of
+ * "churned" (shown as Past). Conditional on the UPDATE right before it in the
+ * batch, so a write that changed nothing records nothing. One per client per
+ * day (the catalog's key shape).
+ */
+function lifecycleStatement(
+  tenantId: string,
+  customerId: string,
+  kind: "churned" | "reactivated",
+  actor: string | null | undefined,
+  now: Date,
+): LedgerStatement {
+  const day = now.toISOString().slice(0, 10);
+  return emitIfChanged(
+    {
+      tenantId,
+      eventKey: kind === "churned" ? "customer.churned" : "customer.reactivated",
+      eventVersion: 1,
+      occurredAt: now,
+      subject: { type: "customer", id: customerId },
+      customerId,
+      // Every edit reaches here from a person's click; a caller that did not
+      // pass their id still records a human, with the id unknown.
+      actor: actor === undefined ? { type: "human", id: null } : ledgerActor(actor),
+      source: "native",
+      idempotencyKey: kind === "churned" ? `churn:${customerId}:${day}` : `reactivate:${customerId}:${day}`,
+      confidence: "verified",
+      payload: {},
+      producer: CUSTOMERS_LEDGER_PRODUCER,
+    },
+    now,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------
 
@@ -427,7 +519,8 @@ async function existingIdFor(db: Client, tenantId: string, conflict: Conflict, i
  * customer, one source lead per workspace), so two requests racing to add the
  * same address cannot both win; the loser is told which record already holds
  * it. Existing unlinked work for the new client is linked in the same pass
- * (linkWorkToCustomer).
+ * (linkWorkToCustomer). The record and its customer.created ledger row are
+ * one batch: neither lands without the other.
  */
 export async function createCustomer(
   db: Client,
@@ -435,17 +528,23 @@ export async function createCustomer(
   input: NewCustomer,
   actor: string | null,
   now: Date,
+  origin: CustomerOrigin = "manual",
 ): Promise<CreateResult> {
   requireTenant(tenantId);
   const id = randomUUID();
   const at = now.toISOString();
+  const stmts: InStatement[] = [
+    insertCustomerStatement(tenantId, id, input, actor, at),
+    customerCreatedEvent(tenantId, { id, source_lead_id: input.source_lead_id ?? null }, origin, actor, now),
+  ];
   try {
-    await db.execute(insertCustomerStatement(tenantId, id, input, actor, at));
+    await db.batch(stmts, "write");
   } catch (err) {
     const conflict = conflictOf(err);
     if (!conflict) throw err;
     return { ok: false, error: conflict, existingId: await existingIdFor(db, tenantId, conflict, input) };
   }
+  await assertNoPayloadConflicts(db, stmts);
   const customer = (await getCustomer(db, tenantId, id))!;
   await linkWorkToCustomer(db, tenantId, customer, now);
   return { ok: true, customer };
@@ -479,13 +578,20 @@ const SCALAR_COLUMNS = [
   "stripe_customer_id",
 ] as const;
 
-/** Apply an edit to a client of THIS workspace. A client of another workspace is not_found. */
+/**
+ * Apply an edit to a client of THIS workspace. A client of another workspace is
+ * not_found. A status move into Past (churned) records customer.churned, and
+ * one out of it customer.reactivated, in the same batch as the edit. `actor` is
+ * the person who made the edit (auth user id); undefined means a person whose
+ * id the caller did not pass.
+ */
 export async function updateCustomer(
   db: Client,
   tenantId: string,
   id: string,
   changes: CustomerChanges,
   now: Date,
+  actor?: string | null,
 ): Promise<UpdateResult> {
   requireTenant(tenantId);
   const cur = await getCustomer(db, tenantId, id);
@@ -516,11 +622,16 @@ export async function updateCustomer(
   const changed = sets.map((x) => x.split(" = ")[0]);
   sets.push("updated_at = ?");
   args.push(at);
+  const stmts: InStatement[] = [
+    { sql: `UPDATE customers SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`, args: [...args, tenantId, id] },
+  ];
+  if (changed.includes("lifecycle")) {
+    const next = changes.lifecycle;
+    const move = next === "churned" ? "churned" : cur.lifecycle === "churned" ? "reactivated" : null;
+    if (move) stmts.push(lifecycleStatement(tenantId, id, move, actor, now));
+  }
   try {
-    await db.execute({
-      sql: `UPDATE customers SET ${sets.join(", ")} WHERE tenant_id = ? AND id = ?`,
-      args: [...args, tenantId, id],
-    });
+    await db.batch(stmts, "write");
   } catch (err) {
     const conflict = conflictOf(err);
     if (!conflict) throw err;
@@ -535,6 +646,37 @@ export async function updateCustomer(
   const customer = (await getCustomer(db, tenantId, id))!;
   if (changed.includes("primary_email") && customer.primary_email) await linkWorkToCustomer(db, tenantId, customer, now);
   return { ok: true, customer, changed };
+}
+
+export type StripeLinkResult = { ok: true } | { ok: false; error: "already_linked" | Conflict };
+
+/**
+ * Link a Stripe customer to a client of THIS workspace that has none. A
+ * compare-and-swap: it lands only while the record's stripe_customer_id is
+ * still empty, so a link anyone set between the caller's read and this write
+ * is never overwritten (already_linked, also for a record that is not there).
+ * The unique index refuses a Stripe customer another record already holds.
+ */
+export async function linkStripeCustomer(
+  db: Client,
+  tenantId: string,
+  id: string,
+  stripeCustomerId: string,
+  now: Date,
+): Promise<StripeLinkResult> {
+  requireTenant(tenantId);
+  try {
+    const rs = await db.execute({
+      sql: `UPDATE customers SET stripe_customer_id = ?, updated_at = ?
+            WHERE tenant_id = ? AND id = ? AND (stripe_customer_id IS NULL OR stripe_customer_id = '')`,
+      args: [stripeCustomerId, now.toISOString(), tenantId, id],
+    });
+    return rs.rowsAffected === 1 ? { ok: true } : { ok: false, error: "already_linked" };
+  } catch (err) {
+    const conflict = conflictOf(err);
+    if (!conflict) throw err;
+    return { ok: false, error: conflict };
+  }
 }
 
 export async function addContact(
@@ -694,7 +836,10 @@ export async function convertLeadToCustomer(
     source_lead_id: leadId,
   };
   const contact = contactFromLead(data);
-  const stmts: InStatement[] = [insertCustomerStatement(tenantId, id, input, actor, at)];
+  const stmts: InStatement[] = [
+    insertCustomerStatement(tenantId, id, input, actor, at),
+    customerCreatedEvent(tenantId, { id, source_lead_id: leadId }, "conversion", actor, now),
+  ];
   if (contact) {
     stmts.push({
       sql: `INSERT INTO customer_contacts (id, tenant_id, customer_id, name, email, phone, role, created_at, updated_at)
@@ -714,9 +859,110 @@ export async function convertLeadToCustomer(
     const holder = from.primary_email ? await getCustomerByEmail(db, tenantId, from.primary_email) : null;
     return { ok: false, status: 409, error: "email_belongs_to_another_client", existingId: holder?.id ?? null };
   }
+  await assertNoPayloadConflicts(db, stmts);
   const customer = (await getCustomer(db, tenantId, id))!;
   await linkWorkToCustomer(db, tenantId, customer, now);
   return { ok: true, customer, created: true, linkedBy: null };
+}
+
+// ---------------------------------------------------------------------------
+// Past engagements and the client's own workspace
+// ---------------------------------------------------------------------------
+
+export type EndEngagementResult =
+  | { ok: true; customer: Customer; changed: boolean }
+  | { ok: false; error: "not_found" };
+
+/**
+ * "Mark engagement ended": the founder says this client is Past. Sets lifecycle
+ * to churned with a compare-and-swap (a record already Past is left alone and
+ * records nothing) and emits customer.churned in the same batch. Nothing else
+ * on the record changes; its history stays where it is.
+ */
+export async function endEngagement(
+  db: Client,
+  tenantId: string,
+  id: string,
+  actor: string | null,
+  now: Date,
+): Promise<EndEngagementResult> {
+  requireTenant(tenantId);
+  const cur = await getCustomer(db, tenantId, id);
+  if (!cur) return { ok: false, error: "not_found" };
+  if (cur.lifecycle === "churned") return { ok: true, customer: cur, changed: false };
+  const at = now.toISOString();
+  const results = await db.batch(
+    [
+      {
+        sql: `UPDATE customers SET lifecycle = 'churned', updated_at = ?
+              WHERE tenant_id = ? AND id = ? AND lifecycle <> 'churned'`,
+        args: [at, tenantId, id],
+      },
+      lifecycleStatement(tenantId, id, "churned", actor, now),
+    ],
+    "write",
+  );
+  const customer = (await getCustomer(db, tenantId, id))!;
+  return { ok: true, customer, changed: results[0].rowsAffected === 1 };
+}
+
+export type LinkWorkspaceResult =
+  | { ok: true; customer: Customer; changed: boolean }
+  | { ok: false; error: "not_found" | "client_tenant_not_found" | "client_tenant_is_this_workspace" | "client_tenant_taken"; existingId?: string | null };
+
+/**
+ * Link a client record to the client's own workspace (customers.client_tenant_id,
+ * migration bravo__195), or unlink it with null. The CALLER decides who may:
+ * the route allows the platform operator only. The tenant must exist and may
+ * not be the business's own workspace; one workspace belongs to one client
+ * record per business (a unique index, not a pre-check).
+ */
+export async function setClientWorkspace(
+  db: Client,
+  tenantId: string,
+  id: string,
+  clientTenantId: string | null,
+  now: Date,
+): Promise<LinkWorkspaceResult> {
+  requireTenant(tenantId);
+  const cur = await getCustomer(db, tenantId, id);
+  if (!cur) return { ok: false, error: "not_found" };
+  if (clientTenantId !== null) {
+    if (clientTenantId === tenantId) return { ok: false, error: "client_tenant_is_this_workspace" };
+    const t = await db.execute({ sql: "SELECT id FROM tenants WHERE id = ? LIMIT 1", args: [clientTenantId] });
+    if (t.rows.length === 0) return { ok: false, error: "client_tenant_not_found" };
+  }
+  if ((cur.client_tenant_id ?? null) === clientTenantId) return { ok: true, customer: cur, changed: false };
+  try {
+    await db.execute({
+      sql: "UPDATE customers SET client_tenant_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ?",
+      args: [clientTenantId, now.toISOString(), tenantId, id],
+    });
+  } catch (err) {
+    if (!isUniqueViolationError(err as { message?: string; code?: string })) throw err;
+    const holder = await db.execute({
+      sql: "SELECT id FROM customers WHERE tenant_id = ? AND client_tenant_id = ? LIMIT 1",
+      args: [tenantId, clientTenantId],
+    });
+    return { ok: false, error: "client_tenant_taken", existingId: holder.rows.length ? String(rows(holder)[0].id) : null };
+  }
+  return { ok: true, customer: (await getCustomer(db, tenantId, id))!, changed: true };
+}
+
+/**
+ * The workspaces a record may be linked to: every tenant except the business's
+ * own, by name. Operator-only surface (the caller gates it).
+ */
+export async function listLinkableWorkspaces(
+  db: Client,
+  tenantId: string,
+): Promise<Array<{ id: string; name: string; slug: string | null }>> {
+  requireTenant(tenantId);
+  const rs = await db.execute({
+    sql: "SELECT id, name, slug FROM tenants WHERE id <> ? ORDER BY name COLLATE NOCASE, id LIMIT 1000",
+    args: [tenantId],
+  });
+  return rows(rs).map((r) => ({ id: String(r.id), name: String(r.name ?? ""), slug: s(r.slug) }));
 }
 
 // ---------------------------------------------------------------------------

@@ -1,19 +1,26 @@
 /**
- * /clients/[id] — one client of the business (a `customers` record).
+ * /clients/[id] — one client of the business (a `customers` record): the hub
+ * OASIS runs a client from.
  *
- * Header: name, company, status, owner, contact details; "New ticket" for the
- * desk's team; the deal it came from. Tabs (?tab=):
- *   Overview   key facts, contacts, open items, and the editor (owners/admins).
- *   Tickets    the client's tickets on the workspace's own support desk.
- *   Projects   the client's projects on the workspace's own board.
- *   Files      documents on the source deal (lead_documents, served by
- *              /api/lead-documents/[id]/content under the lead's own access
- *              rule) and attachments on the client's tickets (served by
- *              /api/tickets/[id]/attachments/[index]).
- *   Activity   lead_interactions of the source deal.
+ * Header: name, health badge, company, status, owner; "New ticket" for the
+ * desk's team; "Mark engagement ended" for owners and admins; the deal it
+ * came from. Tabs (?tab=):
+ *   Overview       key facts, last touch, contacts, open items, the editor.
+ *   Conversations  email, SMS and Slack in one thread, the agents' drafts
+ *                  awaiting approval, and a composer that asks before it sends
+ *                  (lib/os/customers/conversations.ts).
+ *   Tickets        the client's tickets on the workspace's own support desk.
+ *   Projects       the client's projects on the workspace's own board.
+ *   Money          OASIS's books for this client (OASIS only, founders who
+ *                  may open Money): collected, MRR, renewal, overdue, invoices.
+ *   Usage          the client's own workspace, once the operator links it.
+ *   Activity       ledger facts, and the source deal's interactions labelled
+ *                  "inferred from the deal".
+ *   Health         the signals behind the badge, and what could not be read.
+ *   Files          documents on the source deal and attachments on tickets.
  * Real data only; a tab with nothing says so, a tab that failed says that.
- * Tickets, Projects, Files and Activity are the desk team's (owners and
- * admins) — they hold every message and document of the client.
+ * Every tab but Overview and Money is the desk team's (owners and admins):
+ * they hold every message, document and datum of the client.
  *
  * GATE, first statement: requireOsRoute("/clients") — the same rule as the
  * list. A client of another workspace is a 404, the same as no client at all.
@@ -38,24 +45,39 @@ import {
   type ClientTab,
   type Loaded,
 } from "@/components/os/landings/clients-records-data";
-import { AddContactForm, ClientEditor, RemoveContactButton } from "@/components/os/landings/clients-actions";
+import { AddContactForm, ClientEditor, EndEngagementButton, RemoveContactButton } from "@/components/os/landings/clients-actions";
+import { ClientConversations } from "@/components/os/landings/client-conversations";
+import { ClientHealthBadge, ClientHealthBreakdown } from "@/components/os/landings/client-health-badge";
+import { ClientMoneyPanel } from "@/components/os/landings/client-money";
+import { ClientUsagePanel } from "@/components/os/landings/client-usage";
 import { clientsViewerFromSurface, type ClientsViewer } from "@/lib/os/customers/session";
 import { CUSTOMER_LIFECYCLE_LABELS } from "@/lib/os/customers/rules";
-import { ACTIVE_PROJECT_STAGES, OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
+import { ACTIVE_PROJECT_STAGES, DELIVERY_TENANT_ID, OPEN_TICKET_STATUSES, slaStatus } from "@/lib/delivery/rules";
+import { brandForTenant } from "@/lib/email/brand-for-tenant";
 import { mayOpenOsHref } from "@/lib/os/nav";
 import { timeAgo } from "@/lib/fmt";
 import { loadAssignmentRoster } from "@/lib/delivery/session";
 import type { Ticket } from "@/lib/delivery/store";
 import type { MemberRow } from "@/lib/team";
 
-/** The desk's assignment roster for "New ticket"; null (form hidden) when it cannot load. */
-async function deskRoster(viewer: ClientsViewer): Promise<MemberRow[] | null> {
+/**
+ * The desk's assignment roster for "New ticket". A failure does not hide the
+ * form: it renders with no assignee choices and a notice says why (OASIS's
+ * roster needs both founders active, lib/team.ts).
+ */
+async function deskRoster(viewer: ClientsViewer): Promise<{ rows: MemberRow[]; notice: string | null } | null> {
   if (!viewer.desk) return null;
   try {
-    return await loadAssignmentRoster(viewer.tenantId);
+    return { rows: await loadAssignmentRoster(viewer.tenantId), notice: null };
   } catch (err) {
     console.error("[os.clients.record.roster]", err);
-    return null;
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      rows: [],
+      notice: msg.includes("oasis_pipeline_assignment_roster_incomplete")
+        ? "New tickets can't be assigned from here right now: the assignment roster needs both founders as active members."
+        : "The assignee list couldn't be loaded, so new tickets start unassigned. The error has been logged.",
+    };
   }
 }
 
@@ -77,7 +99,7 @@ export default async function ClientRecordPage({
   const tab: ClientTab = TAB_KEYS.has(sp.tab as ClientTab) ? (sp.tab as ClientTab) : "overview";
   const cv = clientsViewerFromSurface(viewer.surface)!;
   const [record, directory, roster] = await Promise.all([
-    loadClientRecord(cv, id, tab),
+    loadClientRecord(cv, id, tab, { isOperator: viewer.navInput.isOperator }),
     loadWorkspaceDirectory(cv.tenantId),
     deskRoster(cv),
   ]);
@@ -119,6 +141,7 @@ export default async function ClientRecordPage({
       title={
         <span className="inline-flex flex-wrap items-center gap-2">
           {c.display_name}
+          {cv.desk && <ClientHealthBadge health={data.health} />}
           {c.archived_at && <Tag>Archived</Tag>}
         </span>
       }
@@ -133,9 +156,15 @@ export default async function ClientRecordPage({
               Open the deal
             </Link>
           )}
+          {cv.desk && tab !== "conversations" && (
+            <Link href={`/clients/${c.id}?tab=conversations`} prefetch={false} className="btn-secondary">
+              Write to client
+            </Link>
+          )}
+          {cv.canWrite && c.lifecycle !== "churned" && <EndEngagementButton customerId={c.id} clientName={c.display_name} />}
           {cv.desk && cv.desk.canAct && roster && (
             <TicketCreateForm
-              roster={roster
+              roster={roster.rows
                 .filter((m) => m.auth_user_id)
                 .map((m) => ({ value: String(m.auth_user_id).toLowerCase(), label: m.display_name || m.full_name }))}
               projects={
@@ -152,6 +181,11 @@ export default async function ClientRecordPage({
       }
     >
       <div className="space-y-6">
+        {roster?.notice && (
+          <p role="status" className="rounded-xl border border-status-warm/30 px-4 py-3 text-[13px] text-status-warm">
+            {roster.notice}
+          </p>
+        )}
         <nav aria-label="Client record" className="flex flex-wrap gap-1 border-b border-hairline">
           {CLIENT_TABS.map((t) => {
             const active = t.key === tab;
@@ -170,12 +204,103 @@ export default async function ClientRecordPage({
         </nav>
 
         {tab === "overview" && <OverviewTab data={data} viewer={cv} owners={ownerOptions(directory)} dealHref={dealHref} />}
+        {tab === "conversations" && <ConversationsTab data={data} viewer={cv} />}
         {tab === "tickets" && <TicketsTab state={data.tickets} />}
         {tab === "projects" && <ProjectsTab state={data.projects} />}
+        {tab === "money" && <MoneyTab state={data.money} canOpenMoney={canOpen("/money")} />}
+        {tab === "usage" && <UsageTab state={data.usage} customerId={c.id} linkable={data.linkableWorkspaces} />}
         {tab === "files" && <FilesTab state={data.files} hasDeal={Boolean(c.source_lead_id)} />}
         {tab === "activity" && <ActivityTab state={data.activity} hasDeal={Boolean(c.source_lead_id)} />}
+        {tab === "health" &&
+          (cv.desk ? (
+            <Card>
+              <ClientHealthBreakdown health={data.health} moneyTracked={data.moneyAccess !== "not_tracked"} />
+            </Card>
+          ) : (
+            <OwnersOnly what="Health signals" />
+          ))}
       </div>
     </PageFrame>
+  );
+}
+
+function ConversationsTab({ data, viewer }: { data: ClientRecordData; viewer: ClientsViewer }) {
+  const state = data.conversation;
+  if (state.state !== "ok") return <NotLoaded state={state.state} what="Conversations" />;
+  const oasis = viewer.tenantId === DELIVERY_TENANT_ID;
+  // The same fail-closed identity the send route checks first
+  // (lib/os/customers/conversations.ts resolveClientMailbox): a workspace
+  // without one cannot send, whatever mailbox it connects, and is told so
+  // BEFORE anyone writes a message.
+  const identity = oasis || brandForTenant({ tenantId: viewer.tenantId, tenantSlug: viewer.tenantSlug }) !== null;
+  return (
+    <ClientConversations
+      customerId={data.customer.id}
+      clientName={data.customer.display_name}
+      messages={state.value.messages}
+      drafts={state.value.drafts}
+      truncated={state.value.truncated}
+      recipients={state.value.addresses.recipients}
+      mailboxNote={
+        oasis
+          ? "Sends from the OASIS mailbox, with you in copy. It is recorded in this conversation."
+          : "Sends from your own mailbox connected in this workspace (never from OASIS's). It is recorded in this conversation."
+      }
+      sendBlocked={
+        identity
+          ? null
+          : "Email can't be sent from this workspace yet: it has no registered business identity to send client email as. OASIS has to set that up; connecting a mailbox alone does not. The conversation above still collects every message."
+      }
+      canSend={Boolean(viewer.desk?.canAct)}
+    />
+  );
+}
+
+function MoneyTab({ state, canOpenMoney }: { state: ClientRecordData["money"]; canOpenMoney: boolean }) {
+  if (state.state === "not_tracked") {
+    return (
+      <Card>
+        <EmptyState message="This workspace's payments and invoices are not kept in the app yet, so there is no money to show for its clients." />
+      </Card>
+    );
+  }
+  if (state.state === "not_allowed") {
+    return (
+      <Card>
+        <p className="py-4 text-[13px] text-fg-muted">A client&rsquo;s money is for the founders who can open Money.</p>
+      </Card>
+    );
+  }
+  if (state.state !== "ok") return <NotLoaded state={state.state} what="Money" />;
+  return <ClientMoneyPanel money={state.value} canOpenMoney={canOpenMoney} />;
+}
+
+function UsageTab({
+  state,
+  customerId,
+  linkable,
+}: {
+  state: ClientRecordData["usage"];
+  customerId: string;
+  linkable: ClientRecordData["linkableWorkspaces"];
+}) {
+  if (state.state === "not_applicable") {
+    return (
+      <Card>
+        <EmptyState message="Usage is how OASIS sees its clients' own workspaces, so it is shown on OASIS's client records only." />
+      </Card>
+    );
+  }
+  if (state.state !== "ok") return <NotLoaded state={state.state} what="Usage" />;
+  return (
+    <div className="space-y-4">
+      {linkable && linkable.state !== "ok" && (
+        <p role="alert" className="text-[13px] text-status-warm">
+          Couldn&rsquo;t load the list of workspaces, so the link can&rsquo;t be changed right now. The error has been logged.
+        </p>
+      )}
+      <ClientUsagePanel customerId={customerId} usage={state.value} linkable={linkable && linkable.state === "ok" ? linkable.value : null} />
+    </div>
   );
 }
 
@@ -288,7 +413,18 @@ function OverviewTab({
         <Card title="Details">
           <div className="space-y-3">
             <Field label="Email">
-              {c.primary_email ? <a className="text-accent hover:underline" href={`mailto:${c.primary_email}`}>{c.primary_email}</a> : "None"}
+              {c.primary_email ? (
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <span className="text-fg">{c.primary_email}</span>
+                  {viewer.desk && (
+                    <Link className="text-accent hover:underline" href={`/clients/${c.id}?tab=conversations`} prefetch={false}>
+                      Write from here
+                    </Link>
+                  )}
+                </span>
+              ) : (
+                "None"
+              )}
             </Field>
             <Field label="Phone">{c.primary_phone ?? "None"}</Field>
             {c.company_name && <Field label="Company">{c.company_name}</Field>}
@@ -307,6 +443,15 @@ function OverviewTab({
               )}
             </Field>
             <Field label="Client since">{timeAgo(c.created_at)}</Field>
+            <Field label="Last touch">
+              {data.lastTouch.state === "ok"
+                ? data.lastTouch.value
+                  ? <span title={data.lastTouch.value}>{timeAgo(data.lastTouch.value)}</span>
+                  : "No contact recorded yet"
+                : data.lastTouch.state === "not_allowed"
+                  ? "Owners and admins only"
+                  : "Couldn't load"}
+            </Field>
           </div>
         </Card>
         {viewer.canWrite && (
@@ -459,24 +604,43 @@ function FilesTab({ state, hasDeal }: { state: ClientRecordData["files"]; hasDea
 
 function ActivityTab({ state, hasDeal }: { state: ClientRecordData["activity"]; hasDeal: boolean }) {
   if (state.state !== "ok") return <NotLoaded state={state.state} what="Activity" />;
-  if (!hasDeal || state.value === null) {
-    return <Card><EmptyState message="This client was added by hand, so there is no deal history to show." /></Card>;
+  if (state.value.entries.length === 0) {
+    return (
+      <Card>
+        <EmptyState
+          message={
+            hasDeal
+              ? "Nothing recorded for this client yet. Tickets, payments, status changes and the deal's calls and emails appear here."
+              : "Nothing recorded for this client yet. Tickets, payments and status changes appear here as they happen."
+          }
+        />
+      </Card>
+    );
   }
-  if (state.value.length === 0) return <Card><EmptyState message="No calls, emails or messages recorded on the deal yet." /></Card>;
   return (
-    <Card noPadding>
-      <ol className="divide-y divide-hairline">
-        {state.value.map((a) => (
-          <li key={a.id} className="px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-fg-dim">
-              <span className="font-medium text-fg-muted">{[a.channel ?? a.type, a.direction].filter(Boolean).join(" · ") || "Activity"}</span>
-              <span title={a.created_at}>{timeAgo(a.created_at)}</span>
-            </div>
-            {a.subject && <div className="mt-1 text-sm text-fg">{a.subject}</div>}
-            {a.preview && <p className="mt-0.5 whitespace-pre-wrap text-[13px] text-fg-muted">{a.preview}</p>}
-          </li>
-        ))}
-      </ol>
-    </Card>
+    <div className="space-y-2">
+      <Card noPadding>
+        <ol className="divide-y divide-hairline">
+          {state.value.entries.map((a) => (
+            <li key={a.id} className="px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fg-dim">
+                <span className="font-medium text-fg-muted">{a.label}</span>
+                <span title={a.at}>{timeAgo(a.at)}</span>
+                {a.basis === "inferred" && (
+                  <span className="rounded border border-hairline px-1 py-px text-[10px] text-fg-dim">inferred from the deal</span>
+                )}
+                {a.href && (
+                  <Link href={a.href} prefetch={false} className="text-accent hover:underline">
+                    Open
+                  </Link>
+                )}
+              </div>
+              {a.detail && <p className="mt-0.5 whitespace-pre-wrap text-[13px] text-fg-muted">{a.detail}</p>}
+            </li>
+          ))}
+        </ol>
+      </Card>
+      {state.value.truncated && <p className="text-xs text-fg-dim">Showing the latest 200 of each kind of activity.</p>}
+    </div>
   );
 }
