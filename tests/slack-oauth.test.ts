@@ -444,6 +444,10 @@ async function main() {
     assert.equal(body.disconnected, true);
     assert.equal(await routesOf(ALPHA), 0, "the channel map went with the connection");
     assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE tenant_id = ?", [ALPHA]), 0, "so did the Slack people");
+    // The confirmation the owner reads before clicking says exactly that.
+    const confirmCopy = read("components/settings/SlackDisconnect.tsx").replace(/\s+/g, " ");
+    assert.match(confirmCopy, /OASIS deletes its Slack token, the channel map and the Slack names it looked up/);
+    assert.doesNotMatch(confirmCopy, /Mapped channels and past messages stay/, "the old promise that the map stays is gone");
 
     // Bravo installs the same Slack team, then maps #clients.
     await login(USERS.ownerB);

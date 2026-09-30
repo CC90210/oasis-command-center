@@ -149,7 +149,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                         `Mirrored messages are deleted after ${SLACK_RETENTION_DAYS} days. Replies wait for approval in the Feed or in Slack.`}
                     </div>
                   </div>
-                  {viewer.access.canManage && <SlackDisconnect teamName={conn.account_label} />}
+                  {viewer.access.canManage && <SlackDisconnect teamName={conn.account_label} retentionDays={SLACK_RETENTION_DAYS} />}
                 </div>
                 {slackSettings.routesNotInstalled ? (
                   <p className="text-[13px] leading-5 text-status-warm">
