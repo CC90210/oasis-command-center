@@ -117,7 +117,7 @@ export function parseOwnerReply(raw: string): OwnerReply {
   text = text.replace(/\*[^*]{0,80}\*/g, " ");
   text = text.replace(/\((?:sigh|pause|laughs|sighs)[^)]{0,40}\)/gi, " ");
   // Surrounding quotes, matched pairs only.
-  text = text.replace(/^["'“‘]+\s*/, "").replace(/\s*["'”’]+$/, "");
+  text = text.replace(/^["'\u201C\u2018]+\s*/, "").replace(/\s*["'\u201D\u2019]+$/, "");
   text = text.replace(/\s+/g, " ").trim();
 
   if (text.length === 0) {
