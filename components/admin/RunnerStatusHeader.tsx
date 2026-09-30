@@ -66,10 +66,9 @@ export function describeRunner(snap: RunnerSnapshot): { computer: string; tools:
             : `${machine.label}: offline, last checked in ${when}`;
       computerTone = machine.state === "online" ? "ok" : machine.state === "idle" ? "neutral" : "warn";
     }
+    const busy = body.ok ? body.pool.processes.filter((p) => p.busy).length : 0;
     pool = body.ok
-      ? `${body.pool.processes.filter((p) => p.alive).length} of ${body.pool.max_size} chat processes warm${
-          body.pool.processes.some((p) => p.busy) ? ", one busy" : ""
-        }`
+      ? `${body.pool.processes.filter((p) => p.alive).length} of ${body.pool.max_size} chat processes warm${busy ? `, ${busy} busy` : ""}`
       : describeWarmFailure(body, status);
   }
   let tools = "Checking your AI tools…";

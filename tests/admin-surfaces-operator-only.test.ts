@@ -209,8 +209,8 @@ async function main() {
       summary TEXT, created_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, publisher_agent TEXT,
       source_agent TEXT, correlation_id TEXT, payload TEXT, published_at TEXT, severity TEXT);
-    CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT,
-      last_result TEXT, tenant_id TEXT NOT NULL);
+    CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, action_type TEXT, owner_agent_key TEXT,
+      last_run_at TEXT, last_result TEXT, fail_count INTEGER DEFAULT 0, tenant_id TEXT NOT NULL);
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT, schedule TEXT,
       last_run_at TEXT, last_run_status TEXT, last_run_error TEXT);
   `);

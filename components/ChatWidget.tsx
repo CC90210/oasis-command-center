@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatReadiness, harnessOwnsUrlParams } from "@/lib/admin/chat-readiness";
+import { PendingHarnessActions, pendingFromFrame, type PendingHarnessAction } from "@/components/admin/PendingHarnessActions";
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
 import { mdToHtml } from "@/lib/markdown";
@@ -604,6 +605,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
   // hasn't set an override. Used wherever an agent name surfaces in
   // the chat chrome.
   const { labelFor: agentDisplayName } = useAgentDisplayNames();
+  // On the Coding harness the keys are repos, not department personas: every
+  // label that names the target reads the harness target when there is one.
+  const targetLabel = (k: string) => targetLabels?.[k] ?? agentDisplayName(k);
   const [messages, setMessages] = useState<Msg[]>(() => seedMessagesForAgent(initialAgent, welcomeMessages));
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -666,7 +670,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     if (slashArgCommand === "agent") {
       return agentKeys.map((k) => ({
         value: k,
-        label: agentDisplayName(k),
+        label: targetLabels?.[k] ?? agentDisplayName(k),
         hint: getAgentInfo(k).tagline,
       }));
     }
@@ -687,7 +691,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       return flat;
     }
     return [];
-  }, [slashArgCommand, agentKeys, configs, agentDisplayName]);
+  }, [slashArgCommand, agentKeys, configs, agentDisplayName, targetLabels]);
 
   const slashArgOpen =
     hasSlashArgTrigger &&
@@ -737,6 +741,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
       dismissed?: boolean;
     }>
   >([]);
+  // Changes a Coding harness reply proposed: nothing is written until the
+  // operator confirms each one (components/admin/PendingHarnessActions).
+  const [pendingActions, setPendingActions] = useState<PendingHarnessAction[]>([]);
   const [bridgeOnline, setBridgeOnline] = useState<boolean | null>(null);
   // Machine-readable failure reason from /api/bridge/health when probe fails.
   // Surfaced in the dropdown tooltip so the operator can see WHY the bridge
@@ -1230,6 +1237,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setError(null);
     setErrorCode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -1335,7 +1343,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     ? cfg?.provider === "ollama"
       ? "Install the desktop bridge to use local Ollama models"
       : "Configure this agent's provider + API key in Settings → Agents"
-    : `Message ${agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
+    : `Message ${targetLabels?.[agent] ?? agentDisplayName(agent).toUpperCase()}…  (Shift+Enter for newline)`;
 
   function reset() {
     // New chat: abort any in-flight stream first so a running turn can't bleed
@@ -1381,6 +1389,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setError(null);
     setErrorCode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -1432,6 +1441,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     setErrorCode(null);
     setLastFailedMode(null);
     setActions([]);
+    setPendingActions([]);
     setCloudResults([]);
     setToolReads([]);
     setToolRuns([]);
@@ -2252,6 +2262,11 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             // No early return — let the SSE stream finish naturally.
             // The outer resume loop checks pendingToolUse after the
             // stream closes.
+          } else if (event === "action_pending") {
+            // A change the harness proposed: shown with Apply / Confirm,
+            // written only when the operator confirms (/api/bridge/actions).
+            const proposal = pendingFromFrame(parsed, agent, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+            if (proposal) setPendingActions((prev) => [...prev, proposal]);
           } else if (event === "action") {
             setActions((prev) => [
               ...prev,
@@ -3064,7 +3079,7 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
               <Bubble
                 role={m.role}
                 agent={agent}
-                agentDisplayName={agentDisplayName}
+                agentDisplayName={targetLabel}
                 content={stripActionMarkers(m.content)}
                 attachments={m.attachments}
                 at={m.at}
@@ -3157,6 +3172,14 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
             ))}
           </div>
         )}
+        <PendingHarnessActions
+          items={pendingActions}
+          onResolved={(uid, r) => {
+            setPendingActions((prev) => prev.filter((p) => p.uid !== uid));
+            setActions((prev) => [...prev, { ok: r.ok, type: r.type, summary: r.summary, error: r.error, uid }]);
+          }}
+          onDismiss={(uid) => setPendingActions((prev) => prev.filter((p) => p.uid !== uid))}
+        />
         {actions.length > 0 && (
           <div className="space-y-1.5">
             {actions.filter((a) => !a.dismissed).map((a) => {

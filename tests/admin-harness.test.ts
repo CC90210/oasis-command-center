@@ -23,8 +23,13 @@
  *   - the persistent chat reads ?agent/?prompt only on /agent;
  *   - lib/chat-shell-props.ts: operator-only, no no-tenant fallback, the three
  *     harness targets instead of personas;
- *   - bridge replies' markers are applied and logged once; logAction logs its
+ *   - bridge replies' markers are never written when the reply ends: markers
+ *     outside code become signed proposals, sent before `done` in whole SSE
+ *     frames even when the network splits them; the operator's confirm to
+ *     POST /api/bridge/actions applies one and logs it; logAction logs its
  *     own failures;
+ *   - the runner header counts busy warm processes; the composer and the
+ *     bubbles name the harness target, not a persona;
  *   - the fleet's Running comes from process pings, "Last task" from the tick;
  *   - ManifestDashboard's "Chat" opens the department channel.
  *
@@ -51,6 +56,9 @@ process.env.ADMIN_EMAILS = "adon@oasisai.work";
 // The OASIS workspace's bridge, as production resolves it: a per-tenant
 // https URL plus BRIDGE_BEARER_TOKEN_<SLUG>. A fake value, never a real one.
 process.env.BRIDGE_BEARER_TOKEN_OASIS_AI_CC = "test-bearer-not-real";
+// Signing ON, as in production: a harness proposal is only confirmable with
+// the server's signature. A fake value, never a real one.
+process.env.CHAT_RESUME_HMAC_KEY = "admin-harness-resume-hmac-key-not-real-000001";
 delete process.env.PLATFORM_DEFAULT_OPENROUTER_API_KEY;
 delete process.env.PLATFORM_DEFAULT_OPENAI_API_KEY;
 delete process.env.PLATFORM_DEFAULT_GOOGLE_API_KEY;
@@ -319,6 +327,15 @@ async function main() {
     assert.equal(unread.computer, "Couldn't check your computer just now.");
     const notRead = describeRunner({ warm: { status: 200, body: { ok: false, reason: "bridge_not_configured" } }, cli: null });
     assert.equal(notRead.computer, "Couldn't check your computer.", "pairings the route never read are not 'none paired'");
+    const proc = (key: string, busy: boolean) => ({ key, agent: "bravo", alive: true, busy, age_s: 60, idle_s: 0 });
+    const pool = (processes: ReturnType<typeof proc>[]) =>
+      describeRunner({
+        warm: { status: 200, body: { ok: true, pool: { size: processes.length, max_size: 4, idle_timeout_s: 600, processes }, machine: null } },
+        cli: null,
+      }).pool;
+    assert.equal(pool([proc("a", true), proc("b", true), proc("c", false)]), "3 of 4 chat processes warm, 2 busy", "the busy count is counted, not 'one'");
+    assert.equal(pool([proc("a", true), proc("b", false)]), "2 of 4 chat processes warm, 1 busy");
+    assert.equal(pool([proc("a", false)]), "1 of 4 chat processes warm");
   });
 
   // ── The chat's honesty ──────────────────────────────────────────────────
@@ -377,70 +394,199 @@ async function main() {
     });
   });
 
-  // ── Markers in a bridge reply ───────────────────────────────────────────
-  await check("bridge replies: markers applied once with the server's tenant, logged, sent to the widget before done", async () => {
-    const { teeBridgeDashboardActions, applyBridgeMarkers } = await import("../lib/admin/bridge-dashboard-actions");
-    const ran: Array<{ type: string; tenantId: string }> = [];
-    const logged: Array<{ type: string; ok: boolean; tenant_id: string }> = [];
-    const deps = {
-      run: (async (spec: { type: string }, ctx: { tenantId: string }) => {
-        ran.push({ type: spec.type, tenantId: ctx.tenantId });
-        return { ok: true as const, type: spec.type, summary: "done" };
-      }) as never,
-      log: (async (a: { type: string; ok: boolean; tenant_id: string }) => {
-        logged.push({ type: a.type, ok: a.ok, tenant_id: a.tenant_id });
-        return true;
-      }) as never,
-    };
-    const ctx = { tenantId: OASIS, userId: CC.id, agent: "bravo", teamRole: "owner" };
+  // ── Markers in a bridge reply: proposed, never written on close ────────
+  // Parse the relayed body exactly as the widget does (ChatWidget consumeStream).
+  const sseEvents = (body: string) =>
+    body
+      .split("\n\n")
+      .filter((b) => b.length > 0)
+      .map((block) => {
+        let event = "message";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data = line.slice(5).trim();
+        }
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = JSON.parse(data) as Record<string, unknown>;
+        } catch {
+          parsed = null;
+        }
+        return { event, parsed };
+      });
+  const streamOf = (chunks: string[]) => {
     const enc = new TextEncoder();
-    const frames = [
-      `event: delta\ndata: ${JSON.stringify({ text: 'Updating. <dashboard-action type="update_profile">{"full_name":"CC"}' })}\n\n`,
-      `event: delta\ndata: ${JSON.stringify({ text: "</dashboard-action> Done." })}\n\nevent: done\ndata: {}\n\n`,
-    ];
-    const upstream = new ReadableStream<Uint8Array>({
+    return new ReadableStream<Uint8Array>({
       start(c) {
-        for (const f of frames) c.enqueue(enc.encode(f));
+        for (const ch of chunks) c.enqueue(enc.encode(ch));
         c.close();
       },
     });
-    const text = await new Response(teeBridgeDashboardActions(upstream, ctx, deps)).text();
-    assert.deepEqual(ran, [{ type: "update_profile", tenantId: OASIS }]);
-    assert.deepEqual(logged, [{ type: "update_profile", ok: true, tenant_id: OASIS }]);
-    assert.ok(text.indexOf("event: action") > -1 && text.indexOf("event: action") < text.indexOf("event: done"), "the action frame precedes done");
-    assert.equal(text.split("event: action").length - 1, 1, "applied once, not again at flush");
-    assert.ok(text.includes(frames[0]) && text.includes("</dashboard-action> Done."), "the relayed bytes pass through");
-    const denied = await applyBridgeMarkers('<dashboard-action type="create_record">{"entity":"lead","data":{}}</dashboard-action>', { ...ctx, teamRole: "read_only" }, deps);
-    assert.deepEqual(denied, [{ ok: false, type: "create_record", error: "forbidden_role" }]);
-    assert.equal(logged.at(-1)?.ok, false, "a refusal is logged too");
+  };
+  const delta = (text: string) => `event: delta\ndata: ${JSON.stringify({ text })}\n\n`;
+  const DONE = "event: done\ndata: {}\n\n";
+  type Logged = { type: string; ok: boolean; tenant_id: string; error?: string };
+  const recorder = () => {
+    const ran: Array<{ type: string; tenantId: string; payload: unknown }> = [];
+    const logged: Logged[] = [];
+    const deps = {
+      run: (async (spec: { type: string; payload: unknown }, ctx: { tenantId: string }) => {
+        ran.push({ type: spec.type, tenantId: ctx.tenantId, payload: spec.payload });
+        return { ok: true as const, type: spec.type, summary: "done" };
+      }) as never,
+      log: (async (a: Logged) => {
+        logged.push({ type: a.type, ok: a.ok, tenant_id: a.tenant_id, error: a.error });
+        return true;
+      }) as never,
+    };
+    return { ran, logged, deps };
+  };
+  const ctx = { tenantId: OASIS, userId: CC.id, agent: "bravo", teamRole: "owner" };
+
+  await check("bridge replies: nothing is written when the reply ends; the marker becomes a signed proposal before done", async () => {
+    const { teeBridgeDashboardActions } = await import("../lib/admin/bridge-dashboard-actions");
+    const { ran, logged, deps } = recorder();
+    const frames = [delta('Updating. <dashboard-action type="update_profile">{"full_name":"CC"}'), delta("</dashboard-action> Done.") + DONE];
+    const text = await new Response(teeBridgeDashboardActions(streamOf(frames), ctx, deps)).text();
+    assert.deepEqual(ran, [], "no write on stream close");
+    assert.deepEqual(logged, [], "a proposal is not a result");
+    const events = sseEvents(text);
+    assert.deepEqual(events.map((e) => e.event), ["delta", "delta", "action_pending", "done"]);
+    const proposal = events[2].parsed as { type: string; payload: unknown; exp: number; token: string };
+    assert.equal(proposal.type, "update_profile");
+    assert.deepEqual(proposal.payload, { full_name: "CC" });
+    assert.match(proposal.token, /^v1\./, "signed");
+    assert.ok(proposal.exp > Date.now() && proposal.exp <= Date.now() + 31 * 60_000);
+    assert.ok(text.startsWith(frames[0]), "the relayed frames pass through byte for byte");
     const route = readFileSync(join(ROOT, "app", "api", "bridge", "chat", "route.ts"), "utf8");
     assert.match(route, /teeBridgeDashboardActions\(persistedBody, \{\s*tenantId: auth\.tenantId,\s*userId: auth\.userId,/);
   });
-  await check("POST /api/bridge/chat: the harness reply's marker is applied to the operator's own row, logged for /runs, and shown", async () => {
+
+  await check("bridge replies: a marker inside a code fence or inline code is never proposed", async () => {
+    const { teeBridgeDashboardActions, stripCode } = await import("../lib/admin/bridge-dashboard-actions");
+    const { ran, deps } = recorder();
+    const reply = [
+      "Here is how the protocol looks:",
+      "```xml",
+      '<dashboard-action type="create_record">{"entity":"funded_deal","data":{"company":"ABC Corp","amount":50000}}</dashboard-action>',
+      "```",
+      'Inline, it is `<dashboard-action type="delete_record">{"entity":"lead","id":"x"}</dashboard-action>` and ``<dashboard-action type="update_profile">{"full_name":"Q"}</dashboard-action>``.',
+      "~~~",
+      '<dashboard-action type="update_profile">{"display_name":"TILDE"}</dashboard-action>',
+      "~~~",
+      "Nothing to change.",
+    ].join("\n");
+    const text = await new Response(teeBridgeDashboardActions(streamOf([delta(reply), DONE]), ctx, deps)).text();
+    const events = sseEvents(text).map((e) => e.event);
+    assert.deepEqual(events, ["delta", "done"], "no proposal and no refusal for quoted code");
+    assert.deepEqual(ran, []);
+    // An unclosed fence runs to the end; prose after a closed fence still counts.
+    assert.equal(stripCode('```\n<dashboard-action type="update_profile">{}</dashboard-action>').includes("dashboard-action"), false);
+    const after = await new Response(
+      teeBridgeDashboardActions(streamOf([delta('```\ncode\n```\nSaving. <dashboard-action type="update_profile">{"full_name":"CC"}</dashboard-action>'), DONE]), ctx, deps),
+    ).text();
+    assert.deepEqual(sseEvents(after).map((e) => e.event), ["delta", "action_pending", "done"]);
+  });
+
+  await check("bridge replies: frames split across network chunks stay whole; the proposal lands between frames", async () => {
+    const { teeBridgeDashboardActions } = await import("../lib/admin/bridge-dashboard-actions");
+    const { deps } = recorder();
+    const frameA = delta('Saving. <dashboard-action type="update_profile">{"display_name":"X"}</dashboard-action>');
+    const frameB = delta(" All done, CC.");
+    const all = frameA + frameB + DONE;
+    // Cut inside frame B, then inside the done frame.
+    const cuts = [frameA.length + 20, frameA.length + frameB.length + 7];
+    const chunks = [all.slice(0, cuts[0]), all.slice(cuts[0], cuts[1]), all.slice(cuts[1])];
+    const text = await new Response(teeBridgeDashboardActions(streamOf(chunks), ctx, deps)).text();
+    const events = sseEvents(text);
+    assert.deepEqual(events.map((e) => e.event), ["delta", "delta", "action_pending", "done"]);
+    assert.equal(events[1].parsed?.text, " All done, CC.", "the split delta arrives intact");
+    assert.equal(events[2].parsed?.type, "update_profile");
+    // With no done frame at all, the proposal still comes, and a trailing
+    // unterminated remainder follows it rather than swallowing it.
+    const noDone = await new Response(teeBridgeDashboardActions(streamOf([frameA, "event: delta\ndata: {\"te"]), ctx, deps)).text();
+    const tail = noDone.slice(frameA.length);
+    assert.ok(tail.startsWith("event: action_pending\n"), "the proposal is its own frame");
+    assert.ok(tail.endsWith('event: delta\ndata: {"te'), "the remainder is forwarded last");
+  });
+
+  await check("bridge replies: an unknown type or a role that may not write is refused up front and logged", async () => {
+    const { proposeBridgeMarkers, teeBridgeDashboardActions } = await import("../lib/admin/bridge-dashboard-actions");
+    const readOnly = proposeBridgeMarkers('<dashboard-action type="create_record">{"entity":"lead","data":{}}</dashboard-action>', { ...ctx, teamRole: "read_only" });
+    assert.deepEqual(readOnly, { pending: [], refused: [{ ok: false, type: "create_record", error: "forbidden_role" }] });
+    const unknown = proposeBridgeMarkers('<dashboard-action type="wire_money">{}</dashboard-action>', ctx);
+    assert.deepEqual(unknown.refused, [{ ok: false, type: "wire_money", error: "unknown_action:wire_money" }]);
+    const { logged, deps } = recorder();
+    const text = await new Response(
+      teeBridgeDashboardActions(streamOf([delta('<dashboard-action type="wire_money">{}</dashboard-action>'), DONE]), ctx, deps),
+    ).text();
+    assert.deepEqual(sseEvents(text).map((e) => e.event), ["delta", "action", "done"]);
+    assert.deepEqual(logged, [{ type: "wire_money", ok: false, tenant_id: OASIS, error: "unknown_action:wire_money" }], "a refusal is logged");
+  });
+
+  await check("confirm: only the exact signed proposal, for this session, before it expires, runs and is logged", async () => {
+    const { proposeBridgeMarkers, applyPendingBridgeAction } = await import("../lib/admin/bridge-dashboard-actions");
+    const now = Date.now();
+    const [p] = proposeBridgeMarkers('<dashboard-action type="update_profile">{"full_name":"CC"}</dashboard-action>', ctx, now).pending;
+    const originalError = console.error;
+    console.error = () => undefined; // refusals are logged to the console by design
+    try {
+      const edited = recorder();
+      const tampered = await applyPendingBridgeAction({ ...p, payload: { full_name: "Mallory" } }, ctx, edited.deps, now);
+      assert.equal(tampered.status, 403);
+      assert.deepEqual(edited.ran, [], "an edited payload never runs");
+      const other = recorder();
+      const otherUser = await applyPendingBridgeAction({ ...p }, { ...ctx, userId: CLOSER.id }, other.deps, now);
+      assert.equal(otherUser.status, 403, "another user's session cannot confirm it");
+      const otherTenant = await applyPendingBridgeAction({ ...p }, { ...ctx, tenantId: CLIENT }, other.deps, now);
+      assert.equal(otherTenant.status, 403, "another workspace cannot confirm it");
+      const otherAgent = await applyPendingBridgeAction({ ...p }, { ...ctx, agent: "maven" }, other.deps, now);
+      assert.equal(otherAgent.status, 403, "another harness target cannot confirm it");
+      assert.deepEqual(other.ran, []);
+      const late = recorder();
+      const expired = await applyPendingBridgeAction({ ...p }, ctx, late.deps, p.exp + 1);
+      assert.deepEqual([expired.status, expired.result], [410, { ok: false, type: "update_profile", error: "expired" }]);
+      assert.deepEqual(late.ran, []);
+      const bad = await applyPendingBridgeAction({ type: "update_profile", payload: [], exp: p.exp, token: p.token }, ctx, late.deps, now);
+      assert.equal(bad.status, 400);
+      const demoted = recorder();
+      const [c] = proposeBridgeMarkers('<dashboard-action type="create_record">{"entity":"lead","data":{}}</dashboard-action>', ctx, now).pending;
+      const refused = await applyPendingBridgeAction({ ...c }, { ...ctx, teamRole: "read_only" }, demoted.deps, now);
+      assert.deepEqual([refused.status, refused.result], [403, { ok: false, type: "create_record", error: "forbidden_role" }]);
+      assert.deepEqual(demoted.ran, [], "the role is re-checked at confirm time");
+      assert.equal(demoted.logged.at(-1)?.error, "forbidden_role", "and the refusal is logged");
+    } finally {
+      console.error = originalError;
+    }
+    const good = recorder();
+    const applied = await applyPendingBridgeAction({ ...p }, ctx, good.deps, now);
+    assert.deepEqual([applied.status, applied.result], [200, { ok: true, type: "update_profile", summary: "done" }]);
+    assert.deepEqual(good.ran, [{ type: "update_profile", tenantId: OASIS, payload: { full_name: "CC" } }]);
+    assert.deepEqual(good.logged, [{ type: "update_profile", ok: true, tenant_id: OASIS, error: undefined }]);
+  });
+
+  await check("POST /api/bridge/chat then /api/bridge/actions: nothing is written until the operator confirms; then it lands on their own row, logged for /runs", async () => {
     await login(CC);
     const bridgeChat = await import("../app/api/bridge/chat/route");
+    const actionsRoute = await import("../app/api/bridge/actions/route");
     const { NextRequest: Req } = await import("next/server");
-    const enc = new TextEncoder();
     calls = [];
     answer = (url) => {
       if (!url.endsWith("/chat")) return json(404, {});
-      const sse = [
-        `event: delta\ndata: ${JSON.stringify({ text: 'Saving. <dashboard-action type="update_profile">{"display_name":"CC-FROM-HARNESS"}</dashboard-action>' })}\n\n`,
-        "event: done\ndata: {}\n\n",
-      ];
       return new Response(
-        new ReadableStream<Uint8Array>({
-          start(c) {
-            for (const f of sse) c.enqueue(enc.encode(f));
-            c.close();
-          },
-        }),
+        streamOf([delta('Saving. <dashboard-action type="update_profile">{"display_name":"CC-FROM-HARNESS"}</dashboard-action>'), DONE]),
         { status: 200, headers: { "content-type": "text/event-stream" } },
       );
     };
+    // The history tee has no chat tables here (it logs that, asynchronously),
+    // and a refused confirm logs its reason: expected here, so those two are
+    // muted for this check; anything else still prints.
     const originalError = console.error;
-    console.error = () => undefined; // the history tee has no chat tables here; that is not this check
-    let text = "";
+    console.error = (...a: unknown[]) => {
+      if (/^\[(chat-persistence|bridge\.dashboard_action\] confirm refused)/.test(String(a[0]))) return;
+      originalError(...a);
+    };
     try {
       const res = await bridgeChat.POST(
         new Req("http://localhost/api/bridge/chat", {
@@ -449,20 +595,82 @@ async function main() {
         }),
       );
       assert.equal(res.status, 200);
-      text = await res.text();
+      const text = await res.text();
+      assert.equal(calls[0]?.url, "https://bridge.test/chat");
+      const profileName = async () =>
+        (await db.execute({ sql: "SELECT display_name FROM user_profiles WHERE auth_user_id = ?", args: [CC.id] })).rows[0]?.display_name ?? null;
+      const loggedRows = async () =>
+        (await db.execute("SELECT correlation_id FROM agent_events WHERE event_type = 'dashboard_action' AND payload LIKE '%display_name updated%'")).rows;
+      assert.notEqual(await profileName(), "CC-FROM-HARNESS", "the reply alone wrote nothing");
+      assert.equal((await loggedRows()).length, 0);
+      const proposal = sseEvents(text).find((e) => e.event === "action_pending")?.parsed as Record<string, unknown>;
+      assert.ok(proposal, "the widget gets the proposal");
+      const confirm = (body: unknown) =>
+        actionsRoute.POST(new Request("http://localhost/api/bridge/actions", { method: "POST", body: JSON.stringify(body) }));
+
+      // Someone else's session with CC's proposal: refused, nothing written.
+      await login(CLIENT_OWNER);
+      const foreign = await confirm({ agent: "bravo", ...proposal });
+      assert.equal(foreign.status, 403);
+      await login(null);
+      assert.equal((await confirm({ agent: "bravo", ...proposal })).status, 401);
+      await login(CC);
+      const edited = await confirm({ agent: "bravo", ...proposal, payload: { display_name: "EDITED" } });
+      assert.equal(edited.status, 403, "an edited payload is refused");
+      assert.notEqual(await profileName(), "EDITED");
+
+      const ok = await confirm({ agent: "bravo", ...proposal });
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { ok: true, type: "update_profile", summary: "display_name updated" });
+      assert.equal(await profileName(), "CC-FROM-HARNESS", "applied to the operator's own profile on confirm");
+      const logged = await loggedRows();
+      assert.equal(logged.length, 1, "logged once for /runs");
+      assert.equal(logged[0]?.correlation_id, OASIS, "under the session's tenant, not the body's tenant_id");
     } finally {
       console.error = originalError;
     }
-    assert.equal(calls[0]?.url, "https://bridge.test/chat");
-    assert.match(text, /event: action\ndata: \{"ok":true,"type":"update_profile"/, "the widget gets the result");
-    const profile = await db.execute({ sql: "SELECT display_name FROM user_profiles WHERE auth_user_id = ?", args: [CC.id] });
-    assert.equal(profile.rows[0]?.display_name, "CC-FROM-HARNESS", "applied to the operator's own profile");
-    const logged = await db.execute({
-      sql: "SELECT correlation_id FROM agent_events WHERE event_type = 'dashboard_action' AND payload LIKE '%update_profile%' AND payload LIKE '%display_name updated%'",
-      args: [],
-    });
-    assert.equal(logged.rows.length, 1, "logged once for /runs");
-    assert.equal(logged.rows[0]?.correlation_id, OASIS, "under the session's tenant, not the body's tenant_id");
+  });
+
+  await check("widget: proposals render with Apply then Confirm, post to /api/bridge/actions, and say why a confirm failed", async () => {
+    const pending = await import("../components/admin/PendingHarnessActions");
+    const p = pending.pendingFromFrame({ type: "update_profile", payload: { full_name: "CC" }, exp: 1, token: "v1.x" }, "bravo", "u1");
+    assert.deepEqual(p, { uid: "u1", agent: "bravo", type: "update_profile", payload: { full_name: "CC" }, exp: 1, token: "v1.x" });
+    assert.equal(pending.pendingFromFrame({ type: "update_profile", payload: "x", exp: 1, token: "t" }, "bravo", "u2"), null);
+    const posted: Array<{ url: string; body: unknown }> = [];
+    const fake = (status: number, body: unknown) =>
+      (async (url: string, init?: RequestInit) => {
+        posted.push({ url, body: JSON.parse(String(init?.body)) });
+        return new Response(body === undefined ? "" : JSON.stringify(body), { status });
+      }) as unknown as typeof fetch;
+    const r = await pending.postHarnessAction(p!, fake(200, { ok: true, type: "update_profile", summary: "full_name updated" }));
+    assert.deepEqual(r, { ok: true, type: "update_profile", summary: "full_name updated", error: undefined });
+    assert.deepEqual(posted[0], { url: "/api/bridge/actions", body: { agent: "bravo", type: "update_profile", payload: { full_name: "CC" }, exp: 1, token: "v1.x" } });
+    assert.match((await pending.postHarnessAction(p!, fake(410, { ok: false, type: "update_profile", error: "expired" }))).error ?? "", /expired\. Nothing was written/);
+    const originalError = console.error;
+    console.error = () => undefined;
+    try {
+      assert.match((await pending.postHarnessAction(p!, fake(401, undefined))).error ?? "", /signed out\. Nothing was written/);
+      const down = (async () => {
+        throw new Error("offline");
+      }) as unknown as typeof fetch;
+      assert.match((await pending.postHarnessAction(p!, down)).error ?? "", /Couldn't reach the Command Center\. Nothing was written/);
+    } finally {
+      console.error = originalError;
+    }
+    const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
+    assert.match(widget, /event === "action_pending"[\s\S]{0,300}pendingFromFrame\(parsed, agent,/);
+    assert.match(widget, /<PendingHarnessActions\s+items=\{pendingActions\}/);
+    const panel = readFileSync(join(ROOT, "components", "admin", "PendingHarnessActions.tsx"), "utf8");
+    assert.match(panel, /Write this to your workspace\?/);
+    assert.match(panel, /Nothing is written until you confirm\./);
+  });
+
+  await check("widget: the composer and the bubbles name the harness target, never a persona, when targets are set", () => {
+    const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
+    assert.match(widget, /`Message \$\{targetLabels\?\.\[agent\] \?\? agentDisplayName\(agent\)\.toUpperCase\(\)\}/);
+    assert.doesNotMatch(widget, /`Message \$\{agentDisplayName\(agent\)\.toUpperCase\(\)\}/);
+    assert.match(widget, /<Bubble\s+role=\{m\.role\}\s+agent=\{agent\}\s+agentDisplayName=\{targetLabel\}/);
+    assert.match(widget, /const targetLabel = \(k: string\) => targetLabels\?\.\[k\] \?\? agentDisplayName\(k\);/);
   });
   await check("logAction writes the row, and logs its own failure instead of swallowing it", async () => {
     const { logAction } = await import("../lib/action-log");

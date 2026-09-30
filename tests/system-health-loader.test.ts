@@ -171,8 +171,8 @@ async function main() {
       last_seen_at TEXT, revoked_at TEXT, created_at TEXT);
     CREATE TABLE integrations_health (id TEXT PRIMARY KEY, profile_id TEXT, tenant_id TEXT, service TEXT NOT NULL,
       status TEXT NOT NULL, last_ping_at TEXT, last_error TEXT, metadata TEXT NOT NULL DEFAULT '{}', updated_at TEXT);
-    CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT NOT NULL, schedule TEXT NOT NULL, last_run_at TEXT,
-      last_result TEXT, tenant_id TEXT NOT NULL);
+    CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT NOT NULL, schedule TEXT NOT NULL, action_type TEXT,
+      owner_agent_key TEXT, last_run_at TEXT, last_result TEXT, fail_count INTEGER DEFAULT 0, tenant_id TEXT NOT NULL);
     CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, schedule TEXT NOT NULL,
       last_run_at TEXT, last_run_status TEXT, last_run_error TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, publisher_agent TEXT NOT NULL,
@@ -241,6 +241,16 @@ async function main() {
     { sql: "INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, tenant_id) VALUES ('c4', 'CLIENT-CRON-DO-NOT-COUNT', '0 5 * * *', ?, 'ERROR: exit 1', ?)", args: [ago(1 * H), CLIENT] },
     { sql: "INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, last_run_at, last_run_status, last_run_error) VALUES ('t1', ?, 'Atlas Inbound Email', '*/15 * * * *', ?, 'error', 'unknown_action_type: x')", args: [OASIS, ago(2 * H)] },
     { sql: "INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, last_run_at, last_run_status, last_run_error) VALUES ('t2', ?, 'Client Job', '0 1 * * *', ?, 'error', 'boom')", args: [CLIENT, ago(1 * H)] },
+    // Failure is a shape, not a prefix (lib/cron-empire-row.ts, the classifier
+    // /automations draws with): a JSON summary reporting its own errors, a
+    // "failed: N" counter, and unresolved failures on the counter are all
+    // failures; a "failed: 0" counter is not. A workspace error stored as JSON
+    // text arrives from the shim as an object and must not throw.
+    { sql: "INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, tenant_id) VALUES ('c5', 'Inbound Email Sweep', '*/5 * * * *', ?, ?, ?)", args: [ago(10 * MIN), '{"errors": 3, "sent": 0}', OASIS] },
+    { sql: "INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, tenant_id) VALUES ('c6', 'Library Post Linker', '0 * * * *', ?, 'synced: 10, failed: 4', ?)", args: [ago(20 * MIN), OASIS] },
+    { sql: "INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, tenant_id) VALUES ('c7', 'Healthy Counter', '0 * * * *', ?, 'synced: 157, failed: 0', ?)", args: [ago(30 * MIN), OASIS] },
+    { sql: "INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, fail_count, tenant_id) VALUES ('c8', 'Morning Brief', '0 7 * * *', ?, 'SKIPPED: bridge offline', 2, ?)", args: [ago(3 * H), OASIS] },
+    { sql: "INSERT INTO tenant_cron_jobs (id, tenant_id, name, schedule, last_run_at, last_run_status, last_run_error) VALUES ('t3', ?, 'Webhook Relay', '0 * * * *', ?, 'error', ?)", args: [OASIS, ago(4 * H), '{"error":"HTTP 500"}'] },
     // Events: OASIS error; untenanted legacy 'warning'; OASIS warn; client
     // error (never counted); old OASIS error; OASIS info.
     { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at) VALUES ('e1', 'CRON_FAILED', 'bravo', 'error', ?, ?)", args: [OASIS, ago(1 * H)] },
@@ -383,10 +393,41 @@ async function main() {
     assert.equal(health.attention.workersDown, 1);
   });
   await check("cron: this workspace's failures in 24 h, both registries, each with what to do", () => {
-    assert.equal(health.cron?.count, 2);
-    assert.deepEqual(health.cron?.rows.map((r) => [r.name, r.source]), [["Post Analytics Sync", "platform"], ["Atlas Inbound Email", "workspace"]]);
-    assert.match(health.cron?.rows[0].whatToDo ?? "", /time limit/);
-    assert.equal(health.attention.cronFailures, 2);
+    assert.equal(health.cron?.count, 6);
+    assert.deepEqual(health.cron?.rows.map((r) => [r.name, r.source]), [
+      ["Inbound Email Sweep", "platform"],
+      ["Library Post Linker", "platform"],
+      ["Post Analytics Sync", "platform"],
+      ["Atlas Inbound Email", "workspace"],
+      ["Morning Brief", "platform"],
+      ["Webhook Relay", "workspace"],
+    ]);
+    const byName = new Map(health.cron?.rows.map((r) => [r.name, r]));
+    assert.match(byName.get("Post Analytics Sync")?.whatToDo ?? "", /time limit/);
+    assert.equal(health.attention.cronFailures, 6);
+  });
+  await check("cron: the same verdict /automations draws: JSON errors, 'failed: N' and the unresolved counter count; 'failed: 0' does not", async () => {
+    const { normalizeEmpireRow } = await import("../lib/cron-empire-row");
+    const byName = new Map(health.cron?.rows.map((r) => [r.name, r]));
+    assert.match(byName.get("Inbound Email Sweep")?.lastResult ?? "", /^reported errors=3/);
+    assert.match(byName.get("Inbound Email Sweep")?.whatToDo ?? "", /its own summary reports failures/);
+    assert.match(byName.get("Library Post Linker")?.lastResult ?? "", /^reported failed=4/);
+    assert.match(byName.get("Morning Brief")?.lastResult ?? "", /^2 unresolved failures\./);
+    assert.ok(!byName.has("Healthy Counter"), "a zero counter is not a failure");
+    // Parity with /automations: every OASIS platform row that ran in the
+    // window is listed here exactly when the shared normaliser calls it error.
+    const all = await db.execute({ sql: "SELECT * FROM cron_jobs WHERE tenant_id = ? AND last_run_at >= ?", args: [OASIS, ago(24 * H)] });
+    const shaped = all.rows.map((r) => (typeof r.last_result === "string" && r.last_result.startsWith("{") ? { ...r, last_result: JSON.parse(r.last_result) } : r));
+    const red = shaped.map((r) => normalizeEmpireRow(r as never)).filter((j) => j.last_run_status === "error").map((j) => j.name).sort();
+    const listed = (health.cron?.rows ?? []).filter((r) => r.source === "platform").map((r) => r.name).sort();
+    assert.deepEqual(listed, red);
+  });
+  await check("cron: a workspace error stored as JSON reads as its text, and never throws", () => {
+    const relay = health.cron?.rows.find((r) => r.name === "Webhook Relay");
+    assert.equal(relay?.lastResult, '{"error":"HTTP 500"}');
+    assert.equal(typeof relay?.whatToDo, "string");
+    assert.doesNotThrow(() => at.whatToDoForCronFailure({ error: "HTTP 500" }));
+    assert.match(at.whatToDoForCronFailure({ error: "timed out after 600s" }), /time limit/);
   });
   await check("events: own or untenanted, inside 24 h; warnings normalised; another workspace's never counted", () => {
     assert.equal(health.events?.errors, 1);

@@ -6,7 +6,8 @@
  *
  * What needs you, in the last 24 hours:
  *   - cron failures: the OASIS platform schedules (cron_jobs) and this
- *     workspace's own (tenant_cron_jobs) whose run in the window errored,
+ *     workspace's own (tenant_cron_jobs) whose run in the window errored, by
+ *     the same classifier /automations draws them with (lib/cron-empire-row),
  *     each with a one-line "what to do";
  *   - workers down: an OASIS background process (lib/automations/oasis-workers)
  *     whose heartbeat is older than five minutes, or that reports itself down.
@@ -33,6 +34,8 @@ import "server-only";
 
 import { safe } from "@/lib/api-helpers";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { normalizeEmpireRow, type EmpireCronRow } from "@/lib/cron-empire-row";
+import { coerceInferResultText } from "@/lib/infer-result-text";
 import { OASIS_WORKERS } from "@/lib/automations/oasis-workers";
 import { DAEMON_HEALTH_STALE_MS } from "@/lib/automations/daemon-backed-crons";
 import {
@@ -208,10 +211,15 @@ export type CronFailure = {
 
 /**
  * One line on what to do about a failed run, from the words of its result. It
- * names an action, never a cause the result does not state.
+ * names an action, never a cause the result does not state. The result is
+ * coerced first: the Turso shim hands back JSON text as an object, and a
+ * string method on it threw, which blanked every cron tile for a day.
  */
-export function whatToDoForCronFailure(result: string | null): string {
-  const r = (result || "").toLowerCase();
+export function whatToDoForCronFailure(result: unknown): string {
+  const r = coerceInferResultText(result).toLowerCase();
+  if (/^reported /.test(r)) {
+    return "It ran, but its own summary reports failures. Open its log on your computer to see which items failed; it retries on its next run.";
+  }
   if (/timed out|timeout/.test(r)) {
     return "It ran past its time limit. Open its log on your computer, then speed the script up or raise the job's time limit.";
   }
@@ -227,9 +235,18 @@ export function whatToDoForCronFailure(result: string | null): string {
   return "Open the job in Automations and read its last result, then fix it or pause it.";
 }
 
-const FAILED_RESULT = "last_result.like.ERROR%,last_result.like.FAILED%,last_result.like.unknown_action_type%";
-
-/** Cron runs in the window that failed, newest first, with their total. Throws on a failed read. */
+/**
+ * Cron runs in the window that failed, newest first, with their total. Throws on a failed read.
+ *
+ * A platform job failed when normalizeEmpireRow (lib/cron-empire-row.ts), the
+ * normaliser /automations draws the same job with, says so: the ERROR/FAILED
+ * prefix, a JSON summary reporting its own errors, ok:false or status:error, a
+ * "failed: N" counter, or unresolved failures on the counter. A LIKE 'ERROR%'
+ * filter saw only the first, so Inbound Email Sweep's {"errors": 3} was red on
+ * /automations and "Nothing needs you" here. The shapes can't be filtered in
+ * SQL, so this reads the tenant's jobs that ran in the window (a few dozen at
+ * most) and counts in code.
+ */
 export async function loadCronFailures(
   db: AdminDb,
   tenantId: string,
@@ -239,12 +256,10 @@ export async function loadCronFailures(
   const [platform, workspace] = await Promise.all([
     db
       .from("cron_jobs")
-      .select("id, name, schedule, last_run_at, last_result", { count: "exact" })
+      .select("id, name, schedule, action_type, owner_agent_key, last_run_at, last_result, fail_count")
       .eq("tenant_id", tenantId)
-      .or(FAILED_RESULT)
       .gte("last_run_at", since)
-      .order("last_run_at", { ascending: false })
-      .limit(ATTENTION_LIST_LIMIT),
+      .order("last_run_at", { ascending: false }),
     db
       .from("tenant_cron_jobs")
       .select("id, name, schedule, last_run_at, last_run_error", { count: "exact" })
@@ -256,29 +271,38 @@ export async function loadCronFailures(
   ]);
   if (platform.error) throw new Error(`cron_jobs read failed: ${platform.error.message}`);
   if (workspace.error) throw new Error(`tenant_cron_jobs read failed: ${workspace.error.message}`);
-  type PlatformRow = { id: string; name: string; schedule: string; last_run_at: string | null; last_result: string | null };
-  type WorkspaceRow = { id: string; name: string; schedule: string; last_run_at: string | null; last_run_error: string | null };
+  // Declared as strings; the shim decodes JSON text into objects, so every
+  // text value is coerced before a string method touches it.
+  type WorkspaceRow = { id: string; name: unknown; schedule: unknown; last_run_at: string | null; last_run_error: unknown };
+  const platformFailed = ((platform.data || []) as EmpireCronRow[])
+    .map((row) => normalizeEmpireRow(row))
+    .filter((job) => job.last_run_status === "error");
   const rows: CronFailure[] = [
-    ...((platform.data || []) as PlatformRow[]).map((c) => ({
-      id: String(c.id),
-      name: c.name,
-      schedule: c.schedule,
-      lastRunAt: c.last_run_at,
-      lastResult: c.last_result,
+    ...platformFailed.map((job) => ({
+      id: String(job.id),
+      name: job.name,
+      schedule: job.schedule,
+      lastRunAt: job.last_run_at,
+      lastResult: job.last_run_error,
       source: "platform" as const,
-      whatToDo: whatToDoForCronFailure(c.last_result),
+      whatToDo: whatToDoForCronFailure(job.last_run_error),
     })),
-    ...((workspace.data || []) as WorkspaceRow[]).map((c) => ({
-      id: String(c.id),
-      name: c.name,
-      schedule: c.schedule,
-      lastRunAt: c.last_run_at,
-      lastResult: c.last_run_error,
-      source: "workspace" as const,
-      whatToDo: whatToDoForCronFailure(c.last_run_error),
-    })),
-  ].sort((a, b) => (Date.parse(b.lastRunAt || "") || 0) - (Date.parse(a.lastRunAt || "") || 0));
-  return { count: Number(platform.count ?? 0) + Number(workspace.count ?? 0), rows };
+    ...((workspace.data || []) as WorkspaceRow[]).map((c) => {
+      const error = c.last_run_error == null ? null : coerceInferResultText(c.last_run_error);
+      return {
+        id: String(c.id),
+        name: coerceInferResultText(c.name),
+        schedule: coerceInferResultText(c.schedule),
+        lastRunAt: c.last_run_at,
+        lastResult: error,
+        source: "workspace" as const,
+        whatToDo: whatToDoForCronFailure(error),
+      };
+    }),
+  ]
+    .sort((a, b) => (Date.parse(b.lastRunAt || "") || 0) - (Date.parse(a.lastRunAt || "") || 0))
+    .slice(0, ATTENTION_LIST_LIMIT);
+  return { count: platformFailed.length + Number(workspace.count ?? 0), rows };
 }
 
 // ── Error and warning events ──────────────────────────────────────────────
