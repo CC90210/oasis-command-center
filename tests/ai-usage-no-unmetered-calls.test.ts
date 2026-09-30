@@ -35,17 +35,23 @@ const SOURCE_EXT = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 const SKIP_DIRS = new Set(["node_modules", ".next", ".open-next", ".git", "__pycache__"]);
 
 /**
- * The metered call sites. Each one takes its meter from lib/ai/usage.ts (a
- * value or type import of it, or of lib/ai/usage-codes via the recorder).
- * Adding a file here is a claim that every request in it goes through
- * meter.begin() / call.finish(); tests/ai-usage-ledger.test.ts proves the
- * claim for each one.
+ * The metered call sites, each with the number of lines in it that name a
+ * model endpoint or import a model SDK (modelCallLines). Each one takes its
+ * meter from lib/ai/usage.ts (a value or type import of it, or of
+ * lib/ai/usage-codes via the recorder). Adding a file here is a claim that
+ * every request in it goes through meter.begin() / call.finish();
+ * tests/ai-usage-ledger.test.ts proves the claim for each one.
+ *
+ * The count is pinned because the allow-list is per FILE: without it, a second,
+ * unmetered fetch to a provider added to one of these files would pass. A new
+ * endpoint line fails here until someone checks it goes through the meter and
+ * raises the count.
  */
-export const METERED_CALL_SITES = new Set([
-  "lib/providers.ts", //           streamChat: every plain chat stream
-  "lib/cloud-tool-runner.ts", //   the Anthropic and OpenAI-compatible tool loops
-  "lib/agents/provider-probe.ts", // Settings "Test": the one-token completion
-  "lib/ai-document-extractor.ts", // document extraction
+export const METERED_CALL_SITES = new Map<string, number>([
+  ["lib/providers.ts", 5], //           streamChat: Ollama, OpenRouter, Anthropic, OpenAI, Google
+  ["lib/cloud-tool-runner.ts", 3], //   the Anthropic tool loop; the OpenAI-compatible loop's two URLs (OpenRouter, OpenAI)
+  ["lib/agents/provider-probe.ts", 5], // Settings "Test": Anthropic, Google, OpenAI, OpenRouter, Ollama
+  ["lib/ai-document-extractor.ts", 1], // document extraction
 ]);
 /** The subscription router records its own rows (its transport is gated by the other test). */
 const RECORDING_ROUTERS = new Set(["lib/ai/infer.ts"]);
@@ -106,15 +112,37 @@ export function modelCallsIn(src: string): string[] {
   return hits;
 }
 
-/** Violations for one file: a model call outside the allow-list, or an allow-listed file with no meter. */
+/** How many lines of `src` (comments stripped) name a model endpoint or import a model SDK. */
+export function modelCallLines(src: string): number {
+  let n = 0;
+  for (const line of stripComments(src).split("\n")) {
+    if (modelCallsIn(line).length > 0) n += 1;
+  }
+  return n;
+}
+
+/**
+ * Violations for one file: a model call outside the allow-list, an allow-listed
+ * file with no meter, or an allow-listed file whose endpoint lines changed.
+ */
 export function violationsFor(rel: string, src: string): string[] {
   if (rel === RECORDER) return [];
   const calls = modelCallsIn(src);
-  const metered = METERED_CALL_SITES.has(rel) || RECORDING_ROUTERS.has(rel);
+  const pinned = METERED_CALL_SITES.get(rel);
+  const metered = pinned !== undefined || RECORDING_ROUTERS.has(rel);
   const takesMeter = USAGE_IMPORT_RE.test(stripComments(src));
   const out: string[] = [];
   if (calls.length > 0 && !metered) out.push(`${rel}: calls a model outside the metered call sites (${calls.join(", ")})`);
   if (metered && !takesMeter) out.push(`${rel}: is a metered call site but does not take its meter from lib/ai/usage.ts`);
+  if (pinned !== undefined) {
+    const lines = modelCallLines(src);
+    if (lines !== pinned) {
+      out.push(
+        `${rel}: names a model endpoint on ${lines} line(s), pinned at ${pinned}. Put the new request through ` +
+          `meter.begin() / call.finish() (or streamChat), then update the count in METERED_CALL_SITES.`,
+      );
+    }
+  }
   return out;
 }
 
@@ -189,7 +217,26 @@ check("a PLANTED violation is caught: a new file calling a provider, and a meter
     "lib/agents/provider-probe.ts: is a metered call site but does not take its meter from lib/ai/usage.ts",
   ]);
   // A mention of the recorder in a comment is not a meter.
-  assert.equal(violationsFor("lib/providers.ts", `// import from "@/lib/ai/usage"\nfetch("https://api.openai.com/v1/chat/completions")`).length, 1);
+  assert.equal(
+    violationsFor("lib/providers.ts", `// import from "@/lib/ai/usage"\nfetch("https://api.openai.com/v1/chat/completions")`).filter((v) => /does not take its meter/.test(v)).length,
+    1,
+  );
+});
+
+check("a PLANTED second, unmetered request inside an allow-listed file is caught, not waved through by the file's import", () => {
+  const providers = readFileSync(join(ROOT, "lib/providers.ts"), "utf8");
+  assert.deepEqual(violationsFor("lib/providers.ts", providers), [], "the real file passes");
+  const sneaky =
+    providers +
+    `\nexport async function sneak(key: string) {\n  return fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": key } });\n}\n`;
+  const v = violationsFor("lib/providers.ts", sneaky);
+  assert.equal(v.length, 1, v.join("\n"));
+  assert.match(v[0], /^lib\/providers\.ts: names a model endpoint on \d+ line\(s\), pinned at \d+/);
+  // An SDK import planted in the 3,000-line tool runner is caught the same way.
+  const runner = readFileSync(join(ROOT, "lib/cloud-tool-runner.ts"), "utf8");
+  assert.equal(violationsFor("lib/cloud-tool-runner.ts", `import OpenAI from "openai";\n${runner}`).length, 1);
+  // One line naming two endpoint forms is one request.
+  assert.equal(modelCallLines(`await fetch("https://api.anthropic.com/v1/messages", {})`), 1);
 });
 
 check("no file outside the metered call sites calls a model provider, and every metered site takes its meter", () => {
@@ -206,7 +253,7 @@ check("no file outside the metered call sites calls a model provider, and every 
   // Anti-vacuity: a broken walk would pass and prove nothing.
   assert.ok(files.length > 500, `only ${files.length} source files walked — the scan is broken`);
   const seen = new Set(files.map(rel));
-  for (const site of [...METERED_CALL_SITES, ...RECORDING_ROUTERS, RECORDER]) {
+  for (const site of [...METERED_CALL_SITES.keys(), ...RECORDING_ROUTERS, RECORDER]) {
     assert.ok(seen.has(site), `${site} is on the allow-list but was not found: update the list`);
   }
   const violations: string[] = [];
@@ -219,7 +266,7 @@ check("no file outside the metered call sites calls a model provider, and every 
   }
   // The allow-listed sites really do call providers, so the matcher really matches.
   assert.ok(callingFiles >= METERED_CALL_SITES.size, `only ${callingFiles} files call a model: the matcher is broken`);
-  for (const site of METERED_CALL_SITES) {
+  for (const site of METERED_CALL_SITES.keys()) {
     assert.ok(modelCallsIn(readFileSync(join(ROOT, site), "utf8")).length > 0, `${site} no longer calls a model: drop it from the allow-list`);
   }
   assert.equal(

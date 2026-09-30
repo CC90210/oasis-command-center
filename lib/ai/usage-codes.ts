@@ -20,6 +20,14 @@ export const AI_BUDGET_UNPRICED_MODEL = "ai_budget_unpriced_model";
  * that cannot be read cannot be enforced); not a budget verdict, so not a 402.
  */
 export const AI_USAGE_UNAVAILABLE = "ai_usage_unavailable";
+/** What an owner reads for AI_USAGE_UNAVAILABLE (the channel's copy, lib/os/channel/outcome.ts). */
+export const AI_USAGE_UNAVAILABLE_SENTENCE = "We could not check this workspace's AI budget just now. Try again in a moment.";
+/**
+ * The ledger's tables do not exist (bravo__192 is not applied). Logged, never
+ * shown: a table that does not exist holds no cap, so the call runs uncapped
+ * and unrecorded instead of every AI feature going down with it.
+ */
+export const AI_USAGE_LEDGER_NOT_INSTALLED = "ai_usage_ledger_not_installed";
 
 export const AI_BUDGET_CODES = [AI_BUDGET_EXHAUSTED, AI_BUDGET_UNPRICED_MODEL] as const;
 export type AiBudgetCode = (typeof AI_BUDGET_CODES)[number];

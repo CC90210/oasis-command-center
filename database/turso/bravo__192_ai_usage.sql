@@ -17,9 +17,11 @@
 --                      guessed number.
 --   tenant_ai_budgets  one row per tenant per month. A call reserves its worst
 --                      case before it is sent and settles to its real cost after;
---                      a call that would pass the cap is refused (HTTP 402). NO
---                      ROW MEANS NO CAP: a tenant is uncapped until an owner or
---                      OASIS writes a row for the month.
+--                      a call that would pass the cap is refused (HTTP 402). A
+--                      cap STANDS until it is changed: a month with no row of its
+--                      own takes the cap of the tenant's latest earlier row. A
+--                      tenant with no row at all, or whose latest cap is NULL,
+--                      has no cap.
 --
 -- CONVENTIONS (binding, from bravo__186/190):
 --   - tenant_id TEXT NOT NULL on every tenant table, every tenant index LEADS
@@ -35,10 +37,11 @@
 --   - Additive only. Nothing here drops or rewrites an existing object.
 --
 -- Not applied by the author: the lead applies it to production BEFORE the code
--- that ships with it is deployed. Every model call reads tenant_ai_budgets
--- before it is sent and fails closed when it cannot (a cap that cannot be read
--- cannot be enforced), so until this is applied every AI feature refuses with
--- ai_usage_unavailable instead of running unmetered.
+-- that ships with it is deployed. Until it is, every model call logs
+-- ai_usage_ledger_not_installed and runs uncapped and unrecorded (a table that
+-- does not exist holds no cap). Once it is, a budget that cannot be read fails
+-- the call closed (ai_usage_unavailable): a cap that cannot be read cannot be
+-- enforced.
 
 -- ── ai_usage_events ────────────────────────────────────────────────────────
 -- occurred_at     when the call was dispatched (server UTC, ms).
@@ -67,9 +70,21 @@
 --                 provider answered non-2xx) | NULL (unknown)
 -- reserved_micro_usd  the reservation this call held against the month's cap;
 --                 NULL when the tenant had no cap.
--- outcome         ok | error | refused | timeout | cancelled
+-- outcome         ok | error | refused | timeout | cancelled, how the call ended;
+--                 or, for a call that holds a reservation:
+--                 pending  written with the reservation, before the call is
+--                          sent, so no reservation exists without a row;
+--                 expired  its end was never recorded (the Worker was cancelled,
+--                          or the write failed) and expires_at passed: the next
+--                          reservation for the tenant settled it at the
+--                          reservation, so an unknown only over-counts.
+-- expires_at      a pending row's deadline (NULL on every other row).
 -- error_code      a code, never provider prose (provider_401, stream_failed,
---                 ai_budget_exhausted, managed_runtime_not_configured, ...).
+--                 ai_budget_exhausted, managed_runtime_not_configured,
+--                 reservation_expired, ...).
+-- job_id          for the subscription router, the inference_jobs id: ONE row
+--                 per job however many calls wait on it (a timed-out row is
+--                 resolved by the call that later sees the job finish).
 CREATE TABLE IF NOT EXISTS ai_usage_events (
   id                  TEXT PRIMARY KEY,
   tenant_id           TEXT NOT NULL,
@@ -95,7 +110,8 @@ CREATE TABLE IF NOT EXISTS ai_usage_events (
   reserved_micro_usd  INTEGER CHECK (reserved_micro_usd IS NULL OR reserved_micro_usd >= 0),
   latency_ms          INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
   outcome             TEXT NOT NULL,
-  error_code          TEXT
+  error_code          TEXT,
+  expires_at          TEXT
 );
 -- usageFor (lib/ai/usage.ts): one tenant's month.
 CREATE INDEX IF NOT EXISTS ix_ai_usage_events_tenant_time
@@ -105,6 +121,13 @@ CREATE INDEX IF NOT EXISTS ix_ai_usage_events_tenant_dept
   ON ai_usage_events (tenant_id, department_key, occurred_at);
 CREATE INDEX IF NOT EXISTS ix_ai_usage_events_tenant_surface
   ON ai_usage_events (tenant_id, surface, occurred_at);
+-- The expiry sweep every reservation runs first (lib/ai/usage.ts): only the
+-- reservations still in flight, so it stays small however long the ledger grows.
+CREATE INDEX IF NOT EXISTS ix_ai_usage_events_tenant_pending
+  ON ai_usage_events (tenant_id, expires_at) WHERE outcome = 'pending';
+-- One row per subscription-router job (lib/ai/usage.ts recordJobModelCall).
+CREATE INDEX IF NOT EXISTS ix_ai_usage_events_tenant_job
+  ON ai_usage_events (tenant_id, job_id) WHERE job_id IS NOT NULL;
 
 CREATE TRIGGER IF NOT EXISTS ai_usage_events_tenant_immutable
 BEFORE UPDATE OF tenant_id ON ai_usage_events
@@ -145,16 +168,21 @@ CREATE TABLE IF NOT EXISTS model_prices (
 
 -- ── tenant_ai_budgets ──────────────────────────────────────────────────────
 -- period_month   'YYYY-MM', the UTC month of the call's occurred_at.
--- cap_micro_usd  the hard cap for the month.
+-- cap_micro_usd  the hard cap for the month. It carries forward: the first
+--                reservation in a month with no row writes the month's row with
+--                the latest earlier cap, so a cap never lapses at 00:00 UTC on
+--                the 1st. NULL lifts the cap from this month on.
 -- reserved_micro_usd  worst-case cost of calls in flight (reserve before, settle
---                after: lib/ai/usage.ts reserveBudget / settleBudget).
--- spent_micro_usd     settled cost. A call whose real cost is unknown settles at
---                its reservation, so an unknown can only over-count, never let
---                spend slip past the cap.
+--                after: lib/ai/usage.ts reserveBudget and the call's finish).
+--                Every reservation has its pending ai_usage_events row, written
+--                in the same transaction.
+-- spent_micro_usd     settled cost. A call whose real cost is unknown (or whose
+--                end was never recorded) settles at its reservation, so an
+--                unknown can only over-count, never let spend slip past the cap.
 CREATE TABLE IF NOT EXISTS tenant_ai_budgets (
   tenant_id           TEXT NOT NULL,
   period_month        TEXT NOT NULL,
-  cap_micro_usd       INTEGER NOT NULL CHECK (cap_micro_usd >= 0),
+  cap_micro_usd       INTEGER CHECK (cap_micro_usd IS NULL OR cap_micro_usd >= 0),
   reserved_micro_usd  INTEGER NOT NULL DEFAULT 0 CHECK (reserved_micro_usd >= 0),
   spent_micro_usd     INTEGER NOT NULL DEFAULT 0 CHECK (spent_micro_usd >= 0),
   created_at          TEXT NOT NULL,

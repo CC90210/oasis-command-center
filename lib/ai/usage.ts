@@ -17,26 +17,39 @@
  * begin() reserves the call's worst case against the tenant's month (below) and
  * THROWS an AiBudgetError when it does not fit; the caller turns that into an
  * HTTP 402 (or, mid-stream, an error event with the same code). finish() writes
- * the call's ai_usage_events row and settles the reservation in ONE batch.
+ * the call's ai_usage_events row and settles the reservation.
  * tests/ai-usage-no-unmetered-calls.test.ts fails if a file outside its
  * allow-list names a provider endpoint or SDK, and each allow-listed file must
  * take its meter from here.
  *
  * BUDGETS (tenant_ai_budgets, one row per tenant per UTC month).
- *   - NO ROW = NO CAP. That is explicit, not a fallback: a tenant is uncapped
- *     until an owner or OASIS writes a row for the month. Its calls are still
- *     recorded.
+ *   - A CAP STANDS until it is changed. A month with no row of its own takes
+ *     the cap of the tenant's latest earlier row, and the first reservation of
+ *     the month writes that row, so a cap never lapses at 00:00 UTC on the 1st.
+ *     A tenant with no row at all (or whose latest cap is NULL) has no cap. Its
+ *     calls are still recorded.
+ *   - Only per-token billing is capped. A subscription (a flat plan) or a local
+ *     model (the tenant's own machine) costs nothing per call: begin() reads no
+ *     budget and reserves nothing for them, and the pre-stream check passes them.
  *   - Reserve before: the worst case is the request's prompt, counted as its
  *     UTF-8 byte length (byte-level BPE never makes more tokens than bytes, so
  *     for text this is an upper bound; an attached PDF or image is an estimate),
  *     priced at the higher of the input and cache-write rates, plus
- *     maxOutputTokens at the output rate. `UPDATE ... WHERE spent + reserved +
- *     worst <= cap` either takes the reservation or refuses the call, so two
- *     concurrent calls can never both slip under the cap. Every call in a tool
- *     loop reserves for itself; one reservation never covers a loop.
- *   - Settle after: release the reservation and add the real cost. A cost that
- *     is unknown (the stream broke off before the provider reported its usage)
- *     settles at the reservation, so an unknown can only over-count.
+ *     maxOutputTokens at the output rate. The reservation and the call's
+ *     `pending` row are written in ONE transaction, and only when
+ *     `spent + reserved + worst <= cap`, so two concurrent calls can never both
+ *     slip under the cap and no reservation exists without a row that names it.
+ *     Every call in a tool loop reserves for itself; one reservation never
+ *     covers a loop.
+ *   - Settle after: finish() releases the reservation and adds the real cost,
+ *     and turns the pending row into the call's row, in one transaction. A cost
+ *     that is unknown (the stream broke off before the provider reported its
+ *     usage) settles at the reservation, so an unknown can only over-count.
+ *   - A reservation whose finish() never lands (the Worker was cancelled, hit a
+ *     limit, or the write failed twice) EXPIRES: after RESERVATION_TTL_MS the
+ *     tenant's next reservation settles it at the reservation (spent, never
+ *     released as free) and marks its row `expired`. A finish that arrives after
+ *     that still records the real usage and corrects the month by the difference.
  *   - A capped tenant calling a model with no verified price is refused
  *     (ai_budget_unpriced_model): its worst case cannot be reserved, and running
  *     it unmetered would walk past a hard cap.
@@ -51,10 +64,13 @@
  * Subscription and local calls have no per-call price: cost NULL, and usageFor
  * counts them apart from the unknowns.
  *
- * FAILURES. begin() fails CLOSED when it cannot read the budget or the prices
- * (ai_usage_unavailable): a cap it cannot read is a cap it cannot enforce.
- * finish() never throws into the caller, whose model call already happened; a
- * row that cannot be written is logged loudly with everything but the content.
+ * FAILURES. begin() fails CLOSED when a budget or price table that exists
+ * cannot be read (ai_usage_unavailable): a cap it cannot read is a cap it cannot
+ * enforce. A table that does NOT exist (bravo__192 not applied) holds no cap:
+ * the call runs uncapped and is logged loudly as ai_usage_ledger_not_installed,
+ * so a forgotten migration never takes every AI feature down with it. finish()
+ * never throws into the caller, whose model call already happened; a row that
+ * cannot be written is logged loudly with everything but the content.
  */
 import "server-only";
 import type { Client, InStatement, InValue } from "@libsql/client";
@@ -64,7 +80,9 @@ import {
   AI_BUDGET_EXHAUSTED,
   AI_BUDGET_SENTENCES,
   AI_BUDGET_UNPRICED_MODEL,
+  AI_USAGE_LEDGER_NOT_INSTALLED,
   AI_USAGE_UNAVAILABLE,
+  AI_USAGE_UNAVAILABLE_SENTENCE,
   type AiBudgetCode,
 } from "@/lib/ai/usage-codes";
 
@@ -72,7 +90,9 @@ export {
   AI_BUDGET_EXHAUSTED,
   AI_BUDGET_SENTENCES,
   AI_BUDGET_UNPRICED_MODEL,
+  AI_USAGE_LEDGER_NOT_INSTALLED,
   AI_USAGE_UNAVAILABLE,
+  AI_USAGE_UNAVAILABLE_SENTENCE,
   isAiBudgetCode,
   meterRefusalCode,
   type AiBudgetCode,
@@ -92,11 +112,26 @@ export type AuthKind = (typeof AUTH_KINDS)[number];
  */
 export const BILLING_MODES = ["byo_key", "platform", "managed", "subscription", "local"] as const;
 export type BillingMode = (typeof BILLING_MODES)[number];
-/** Billed per token: a NULL cost here is an unknown, not a flat rate. */
+/** Billed per token: a NULL cost here is an unknown, not a flat rate. The only modes a cap applies to. */
 export const METERED_BILLING_MODES: readonly BillingMode[] = ["byo_key", "platform", "managed"];
 
+function isMetered(mode: BillingMode): boolean {
+  return METERED_BILLING_MODES.includes(mode);
+}
+
+/** How a call ended (CallEnd.outcome). */
 export const USAGE_OUTCOMES = ["ok", "error", "refused", "timeout", "cancelled"] as const;
 export type UsageOutcome = (typeof USAGE_OUTCOMES)[number];
+/**
+ * The two states of a reserved call's row before (or instead of) its end:
+ * `pending` in flight, `expired` never finished and settled at its reservation.
+ */
+export const RESERVATION_STATES = ["pending", "expired"] as const;
+/** What a row is written with: an end, or `pending` (expired is only ever set by the sweep). */
+export type RowOutcome = UsageOutcome | "pending";
+
+/** How long a reserved call may stay unfinished before the next reservation settles it. */
+export const RESERVATION_TTL_MS = 30 * 60_000;
 
 /** The code paths that call a model. The subscription router adds infer:<source>. */
 export const USAGE_SURFACES = [
@@ -261,6 +296,23 @@ function tokenCount(v: number | null | undefined): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : null;
 }
 
+/**
+ * A ledger table that does not exist: bravo__192 is not applied. Distinct from
+ * a read that failed: no table holds no cap, while a table that cannot be read
+ * may hold one.
+ */
+export function isLedgerNotInstalled(err: unknown): boolean {
+  return /no such table/i.test(err instanceof Error ? err.message : String(err));
+}
+
+function logLedgerNotInstalled(where: string, fields: Record<string, unknown>, err: unknown): void {
+  console.error(`[ai/usage] ${AI_USAGE_LEDGER_NOT_INSTALLED}: bravo__192 is not applied, so ${where} runs uncapped and unrecorded`, {
+    ...fields,
+    code: AI_USAGE_LEDGER_NOT_INSTALLED,
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Prices
 // ---------------------------------------------------------------------------
@@ -356,81 +408,12 @@ export function costOf(prices: PriceRow[], usage: ModelUsage): { micro: number |
 }
 
 // ---------------------------------------------------------------------------
-// Budgets
-// ---------------------------------------------------------------------------
-
-export type BudgetRow = { capMicroUsd: number; reservedMicroUsd: number; spentMicroUsd: number };
-export type BudgetReservation = { tenantId: string; periodMonth: string; amountMicroUsd: number };
-
-export async function readBudget(db: Client, tenantId: string, periodMonth: string): Promise<BudgetRow | null> {
-  const rs = await db.execute({
-    sql: `SELECT cap_micro_usd, reserved_micro_usd, spent_micro_usd FROM tenant_ai_budgets
-          WHERE tenant_id = ? AND period_month = ?`,
-    args: [tenantId, periodMonth],
-  });
-  const r = rs.rows[0];
-  if (!r) return null;
-  return {
-    capMicroUsd: intOr0(r.cap_micro_usd),
-    reservedMicroUsd: intOr0(r.reserved_micro_usd),
-    spentMicroUsd: intOr0(r.spent_micro_usd),
-  };
-}
-
-/**
- * Reserve `amountMicroUsd` of the tenant's month before a call.
- *   - no budget row for the month → null: NO CAP, nothing reserved;
- *   - a row and no price (amount null) → AiBudgetError ai_budget_unpriced_model;
- *   - a row the amount does not fit under → AiBudgetError ai_budget_exhausted.
- * `known` is the row the caller already read (undefined: read it here).
- */
-export async function reserveBudget(args: {
-  tenantId: string;
-  periodMonth: string;
-  amountMicroUsd: number | null;
-  known?: BudgetRow | null;
-  now?: Date;
-  db?: Client;
-}): Promise<BudgetReservation | null> {
-  const db = args.db ?? getTursoClient();
-  const budget = args.known === undefined ? await readBudget(db, args.tenantId, args.periodMonth) : args.known;
-  if (!budget) return null;
-  if (args.amountMicroUsd === null) throw new AiBudgetError(AI_BUDGET_UNPRICED_MODEL);
-  const amount = Math.max(0, Math.ceil(args.amountMicroUsd));
-  const rs = await db.execute({
-    sql: `UPDATE tenant_ai_budgets
-          SET reserved_micro_usd = reserved_micro_usd + ?, updated_at = ?
-          WHERE tenant_id = ? AND period_month = ?
-            AND spent_micro_usd + reserved_micro_usd + ? <= cap_micro_usd`,
-    args: [amount, (args.now ?? new Date()).toISOString(), args.tenantId, args.periodMonth, amount],
-  });
-  if (rs.rowsAffected !== 1) throw new AiBudgetError(AI_BUDGET_EXHAUSTED);
-  return { tenantId: args.tenantId, periodMonth: args.periodMonth, amountMicroUsd: amount };
-}
-
-/**
- * Settle a reservation: release it and add the real cost. An unknown cost
- * (null) settles at the reservation, so an unknown only ever over-counts.
- */
-export function settleBudgetStatement(r: BudgetReservation, actualMicroUsd: number | null, now: Date = new Date()): InStatement {
-  const spent = actualMicroUsd === null ? r.amountMicroUsd : Math.max(0, Math.round(actualMicroUsd));
-  return {
-    sql: `UPDATE tenant_ai_budgets
-          SET reserved_micro_usd = MAX(reserved_micro_usd - ?, 0), spent_micro_usd = spent_micro_usd + ?, updated_at = ?
-          WHERE tenant_id = ? AND period_month = ?`,
-    args: [r.amountMicroUsd, spent, now.toISOString(), r.tenantId, r.periodMonth],
-  };
-}
-
-export async function settleBudget(r: BudgetReservation, actualMicroUsd: number | null, db: Client = getTursoClient()): Promise<void> {
-  await db.execute(settleBudgetStatement(r, actualMicroUsd));
-}
-
-// ---------------------------------------------------------------------------
 // The row
 // ---------------------------------------------------------------------------
 
 export type ModelCallRecord = ModelCallContext & {
+  /** The row's ULID; new when omitted. */
+  id?: string;
   occurredAt: Date;
   provider: string;
   model: string;
@@ -441,35 +424,41 @@ export type ModelCallRecord = ModelCallContext & {
   costSource: CostSource | null;
   reservedMicroUsd?: number | null;
   latencyMs: number | null;
-  outcome: UsageOutcome;
+  outcome: RowOutcome;
   errorCode?: string | null;
+  /** A pending row's deadline (RESERVATION_TTL_MS after it was written). */
+  expiresAt?: Date | null;
 };
 
 const COLUMNS = [
   "id", "tenant_id", "occurred_at", "provider", "model", "surface", "auth_kind", "billing_mode",
   "department_key", "job_id", "session_id", "teammate_id", "user_id", "attempt_no", "fallback_reason",
   "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_micro_usd", "cost_source",
-  "reserved_micro_usd", "latency_ms", "outcome", "error_code",
+  "reserved_micro_usd", "latency_ms", "outcome", "error_code", "expires_at",
 ] as const;
 
 const CODE_RE = /^[a-z][a-z0-9_.:-]{0,79}$/;
+
+function validateOutcome(outcome: string, errorCode: string | null | undefined): void {
+  if (!(USAGE_OUTCOMES as readonly string[]).includes(outcome) && outcome !== "pending") throw new Error(`ai_usage: unknown outcome ${outcome}`);
+  if (errorCode != null && !CODE_RE.test(errorCode)) throw new Error(`ai_usage: error_code must be a code, got ${JSON.stringify(errorCode)}`);
+}
 
 function validateRecord(r: ModelCallRecord): void {
   if (typeof r.tenantId !== "string" || !r.tenantId.trim()) throw new Error("ai_usage: a model call row needs a tenant");
   if (!isUsageSurface(r.surface)) throw new Error(`ai_usage: unknown surface ${JSON.stringify(r.surface)}`);
   if (!(AUTH_KINDS as readonly string[]).includes(r.authKind)) throw new Error(`ai_usage: unknown auth_kind ${r.authKind}`);
   if (!(BILLING_MODES as readonly string[]).includes(r.billingMode)) throw new Error(`ai_usage: unknown billing_mode ${r.billingMode}`);
-  if (!(USAGE_OUTCOMES as readonly string[]).includes(r.outcome)) throw new Error(`ai_usage: unknown outcome ${r.outcome}`);
   if (!r.provider || !r.model) throw new Error("ai_usage: a model call row names its provider and model");
-  if (r.errorCode != null && !CODE_RE.test(r.errorCode)) throw new Error(`ai_usage: error_code must be a code, got ${JSON.stringify(r.errorCode)}`);
+  validateOutcome(r.outcome, r.errorCode);
 }
 
-/** The INSERT for one model call's row. It never runs it: see recordModelCall. */
-export function modelCallInsert(r: ModelCallRecord): InStatement {
+/** The row's columns and their values, in COLUMNS order. */
+function rowValues(r: ModelCallRecord): InValue[] {
   validateRecord(r);
   const u = r.usage ?? null;
   const values: Record<(typeof COLUMNS)[number], InValue> = {
-    id: newLedgerId(r.occurredAt.getTime()),
+    id: r.id ?? newLedgerId(r.occurredAt.getTime()),
     tenant_id: r.tenantId,
     occurred_at: r.occurredAt.toISOString(),
     provider: r.provider,
@@ -494,11 +483,17 @@ export function modelCallInsert(r: ModelCallRecord): InStatement {
     latency_ms: r.latencyMs === null ? null : Math.max(0, Math.round(r.latencyMs)),
     outcome: r.outcome,
     error_code: r.errorCode ?? null,
+    expires_at: r.expiresAt ? r.expiresAt.toISOString() : null,
   };
-  return {
-    sql: `INSERT INTO ai_usage_events (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})`,
-    args: COLUMNS.map((c) => values[c]),
-  };
+  return COLUMNS.map((c) => values[c]);
+}
+
+const INSERT_INTO = `INSERT INTO ai_usage_events (${COLUMNS.join(", ")})`;
+const PLACEHOLDERS = COLUMNS.map(() => "?").join(", ");
+
+/** The INSERT for one model call's row. It never runs it: see recordModelCall. */
+export function modelCallInsert(r: ModelCallRecord): InStatement {
+  return { sql: `${INSERT_INTO} VALUES (${PLACEHOLDERS})`, args: rowValues(r) };
 }
 
 /**
@@ -506,24 +501,243 @@ export function modelCallInsert(r: ModelCallRecord): InStatement {
  * already happened): a row that cannot be written is logged loudly, with every
  * field but the content (there is none in the row). Returns whether it landed.
  */
-export async function recordModelCall(r: ModelCallRecord, extra: InStatement[] = [], db?: Client): Promise<boolean> {
+export async function recordModelCall(r: ModelCallRecord, db?: Client): Promise<boolean> {
   try {
-    const client = db ?? getTursoClient();
-    await client.batch([modelCallInsert(r), ...extra], "write");
+    await (db ?? getTursoClient()).execute(modelCallInsert(r));
     return true;
   } catch (err) {
-    console.error("[ai/usage] could not record a model call", {
-      tenantId: r.tenantId,
-      surface: r.surface,
-      provider: r.provider,
-      model: r.model,
-      outcome: r.outcome,
-      errorCode: r.errorCode ?? null,
-      costMicroUsd: r.costMicroUsd,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logUnrecorded(r, err);
     return false;
   }
+}
+
+function logUnrecorded(r: ModelCallRecord, err: unknown): void {
+  console.error("[ai/usage] could not record a model call", {
+    tenantId: r.tenantId,
+    surface: r.surface,
+    provider: r.provider,
+    model: r.model,
+    outcome: r.outcome,
+    errorCode: r.errorCode ?? null,
+    costMicroUsd: r.costMicroUsd,
+    jobId: r.jobId ?? null,
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+
+/** The subscription router's rows (surface infer:<source>) are the only ones kept one per job. */
+const INFER_JOB_ROW = `surface LIKE 'infer:%' AND job_id = ? AND tenant_id = ?`;
+
+/**
+ * Record a subscription-router request that waited on queued job `r.jobId`:
+ * ONE row per job, however many calls wait on it. The call that queued the job
+ * writes the row; a later call that adopts or collects the same job writes
+ * nothing new, and when the row still says `timeout` (the first call stopped
+ * waiting) the later call's end resolves it to ok or error, with the latency
+ * from the row's occurred_at. A job with no row yet (queued before this ledger
+ * existed) gets its row from whichever call sees it first. Never throws.
+ */
+export async function recordJobModelCall(r: ModelCallRecord & { jobId: string }, db?: Client): Promise<boolean> {
+  try {
+    const now = new Date(r.occurredAt.getTime() + Math.max(0, r.latencyMs ?? 0)).toISOString();
+    const statements: InStatement[] = [
+      {
+        sql: `${INSERT_INTO} SELECT ${PLACEHOLDERS}
+              WHERE NOT EXISTS (SELECT 1 FROM ai_usage_events WHERE ${INFER_JOB_ROW})`,
+        args: [...rowValues(r), r.jobId, r.tenantId],
+      },
+    ];
+    if (r.outcome !== "timeout") {
+      statements.push({
+        sql: `UPDATE ai_usage_events
+              SET outcome = ?, error_code = ?,
+                  latency_ms = MAX(CAST(ROUND((julianday(?) - julianday(occurred_at)) * 86400000) AS INTEGER), 0)
+              WHERE ${INFER_JOB_ROW} AND outcome = 'timeout'`,
+        args: [r.outcome, r.errorCode ?? null, now, r.jobId, r.tenantId],
+      });
+    }
+    await (db ?? getTursoClient()).batch(statements, "write");
+    return true;
+  } catch (err) {
+    logUnrecorded(r, err);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Budgets
+// ---------------------------------------------------------------------------
+
+export type BudgetRow = { capMicroUsd: number; reservedMicroUsd: number; spentMicroUsd: number };
+export type BudgetReservation = { tenantId: string; periodMonth: string; amountMicroUsd: number; eventId: string };
+
+/**
+ * The tenant's budget for `periodMonth`: the month's own row, or, when it has
+ * none, the cap of the latest earlier row with nothing reserved or spent against
+ * it yet (a cap stands until it is changed). null: no cap (no row at all, or a
+ * NULL cap).
+ */
+export async function readBudget(db: Client, tenantId: string, periodMonth: string): Promise<BudgetRow | null> {
+  const rs = await db.execute({
+    sql: `SELECT period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd FROM tenant_ai_budgets
+          WHERE tenant_id = ? AND period_month <= ?
+          ORDER BY period_month DESC LIMIT 1`,
+    args: [tenantId, periodMonth],
+  });
+  const r = rs.rows[0];
+  if (!r || r.cap_micro_usd === null || r.cap_micro_usd === undefined) return null;
+  const own = String(r.period_month) === periodMonth;
+  return {
+    capMicroUsd: intOr0(r.cap_micro_usd),
+    reservedMicroUsd: own ? intOr0(r.reserved_micro_usd) : 0,
+    spentMicroUsd: own ? intOr0(r.spent_micro_usd) : 0,
+  };
+}
+
+/** The month's own row, from the latest earlier cap, when it has none yet. */
+function carryCapForward(tenantId: string, periodMonth: string, now: string): InStatement {
+  return {
+    sql: `INSERT OR IGNORE INTO tenant_ai_budgets
+            (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
+          SELECT tenant_id, ?, cap_micro_usd, 0, 0, ?, ? FROM tenant_ai_budgets
+          WHERE tenant_id = ? AND period_month < ?
+          ORDER BY period_month DESC LIMIT 1`,
+    args: [periodMonth, now, now, tenantId, periodMonth],
+  };
+}
+
+/** The tenant's pending rows past their deadline (their month is their occurred_at's). */
+const EXPIRED_PENDING = `e.tenant_id = :tenant AND e.outcome = 'pending' AND e.expires_at <= :now`;
+
+/**
+ * Settle every expired reservation of the tenant at its reservation (each in
+ * its own month's row), then mark those rows expired. Runs first in every
+ * reservation's transaction.
+ */
+function sweepExpired(tenantId: string, now: string): InStatement[] {
+  const expiredInMonth = `(SELECT COALESCE(SUM(e.reserved_micro_usd), 0) FROM ai_usage_events e
+                           WHERE ${EXPIRED_PENDING} AND substr(e.occurred_at, 1, 7) = tenant_ai_budgets.period_month)`;
+  return [
+    {
+      sql: `UPDATE tenant_ai_budgets
+            SET reserved_micro_usd = MAX(reserved_micro_usd - ${expiredInMonth}, 0),
+                spent_micro_usd = spent_micro_usd + ${expiredInMonth},
+                updated_at = :now
+            WHERE tenant_id = :tenant
+              AND EXISTS (SELECT 1 FROM ai_usage_events e
+                          WHERE ${EXPIRED_PENDING} AND substr(e.occurred_at, 1, 7) = tenant_ai_budgets.period_month)`,
+      args: { tenant: tenantId, now },
+    },
+    {
+      sql: `UPDATE ai_usage_events SET outcome = 'expired', error_code = 'reservation_expired'
+            WHERE tenant_id = :tenant AND outcome = 'pending' AND expires_at <= :now`,
+      args: { tenant: tenantId, now },
+    },
+  ];
+}
+
+/**
+ * Reserve `amountMicroUsd` of the tenant's month for the call `pending`
+ * describes, in ONE transaction: carry the cap into the month when it has no
+ * row yet, settle the tenant's expired reservations, write the call's pending
+ * row only if the amount fits under the cap, and take the reservation only if
+ * that row was written. Throws AiBudgetError ai_budget_exhausted when it does
+ * not fit (nothing is reserved and no row is written).
+ */
+export async function reserveBudget(args: {
+  pending: ModelCallRecord & { id: string };
+  periodMonth: string;
+  amountMicroUsd: number;
+  now: Date;
+  db?: Client;
+}): Promise<BudgetReservation> {
+  const db = args.db ?? getTursoClient();
+  const r = args.pending;
+  const amount = Math.max(0, Math.ceil(args.amountMicroUsd));
+  const now = args.now.toISOString();
+  const row: ModelCallRecord = {
+    ...r,
+    outcome: "pending",
+    reservedMicroUsd: amount,
+    expiresAt: new Date(args.now.getTime() + RESERVATION_TTL_MS),
+  };
+  const results = await db.batch(
+    [
+      carryCapForward(r.tenantId, args.periodMonth, now),
+      ...sweepExpired(r.tenantId, now),
+      {
+        sql: `${INSERT_INTO} SELECT ${PLACEHOLDERS}
+              WHERE EXISTS (SELECT 1 FROM tenant_ai_budgets
+                            WHERE tenant_id = ? AND period_month = ? AND cap_micro_usd IS NOT NULL
+                              AND spent_micro_usd + reserved_micro_usd + ? <= cap_micro_usd)`,
+        args: [...rowValues(row), r.tenantId, args.periodMonth, amount],
+      },
+      {
+        sql: `UPDATE tenant_ai_budgets SET reserved_micro_usd = reserved_micro_usd + ?, updated_at = ?
+              WHERE tenant_id = ? AND period_month = ?
+                AND EXISTS (SELECT 1 FROM ai_usage_events WHERE id = ? AND tenant_id = ? AND outcome = 'pending')`,
+        args: [amount, now, r.tenantId, args.periodMonth, r.id, r.tenantId],
+      },
+    ],
+    "write",
+  );
+  // [carry, sweep budgets, sweep rows, pending row, reservation]
+  if (results[3].rowsAffected !== 1) throw new AiBudgetError(AI_BUDGET_EXHAUSTED);
+  return { tenantId: r.tenantId, periodMonth: args.periodMonth, amountMicroUsd: amount, eventId: r.id };
+}
+
+/**
+ * Settle a reservation and turn its pending row into the call's row, in one
+ * transaction. What the month is charged depends on the row as it stands:
+ *   - pending: release the reservation, add the real cost (the reservation when
+ *     the cost is unknown);
+ *   - expired (the sweep already charged the reservation): add the difference
+ *     the real cost makes, or nothing when it is still unknown;
+ *   - anything else (already finished): nothing. That makes a retry safe.
+ */
+function settleStatements(res: BudgetReservation, end: ModelCallRecord, now: Date): InStatement[] {
+  validateOutcome(end.outcome, end.errorCode);
+  const actual = end.costMicroUsd === null ? null : Math.max(0, Math.round(end.costMicroUsd));
+  const rowOutcome = `(SELECT outcome FROM ai_usage_events WHERE id = :id AND tenant_id = :tenant)`;
+  const u = end.usage ?? null;
+  return [
+    {
+      sql: `UPDATE tenant_ai_budgets
+            SET reserved_micro_usd = MAX(reserved_micro_usd - (CASE ${rowOutcome} WHEN 'pending' THEN :reserved ELSE 0 END), 0),
+                spent_micro_usd = MAX(spent_micro_usd + (CASE ${rowOutcome} WHEN 'pending' THEN :spent WHEN 'expired' THEN :late ELSE 0 END), 0),
+                updated_at = :now
+            WHERE tenant_id = :tenant AND period_month = :period`,
+      args: {
+        id: res.eventId,
+        tenant: res.tenantId,
+        period: res.periodMonth,
+        reserved: res.amountMicroUsd,
+        spent: actual ?? res.amountMicroUsd,
+        late: actual === null ? 0 : actual - res.amountMicroUsd,
+        now: now.toISOString(),
+      },
+    },
+    {
+      sql: `UPDATE ai_usage_events
+            SET input_tokens = :input, output_tokens = :output, cache_read_tokens = :cacheRead, cache_write_tokens = :cacheWrite,
+                cost_micro_usd = :cost, cost_source = :source, latency_ms = :latency, outcome = :outcome,
+                error_code = :errorCode, expires_at = NULL
+            WHERE id = :id AND tenant_id = :tenant AND outcome IN ('pending', 'expired')`,
+      args: {
+        id: res.eventId,
+        tenant: res.tenantId,
+        input: tokenCount(u?.inputTokens),
+        output: tokenCount(u?.outputTokens),
+        cacheRead: tokenCount(u?.cacheReadTokens),
+        cacheWrite: tokenCount(u?.cacheWriteTokens),
+        cost: end.costMicroUsd,
+        source: end.costSource,
+        latency: end.latencyMs === null ? null : Math.max(0, Math.round(end.latencyMs)),
+        outcome: end.outcome,
+        errorCode: end.errorCode ?? null,
+      },
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -556,8 +770,10 @@ export function modelCallMeter(context: ModelCallContext, opts: { db?: Client } 
       const occurredAt = new Date();
       const started = Date.now();
       const period = periodMonthOf(occurredAt);
+      const id = newLedgerId(occurredAt.getTime());
       const base = {
         ...ctx,
+        id,
         occurredAt,
         provider: call.provider,
         model: call.model,
@@ -565,55 +781,68 @@ export function modelCallMeter(context: ModelCallContext, opts: { db?: Client } 
         fallbackReason: call.fallbackReason ?? null,
       };
 
-      let db: Client;
-      let prices: PriceRow[];
+      let db: Client | undefined = opts.db;
+      let prices: PriceRow[] = [];
       let reservation: BudgetReservation | null = null;
-      try {
-        db = client();
-        const [p, budget] = await Promise.all([
-          pricesFor(db, call.provider, call.model, occurredAt),
-          readBudget(db, ctx.tenantId, period),
-        ]);
-        prices = p;
-        if (budget) {
-          const worst = worstCaseMicroUsd(p, call.promptBytes, call.maxOutputTokens);
-          reservation = await reserveBudget({
-            db,
-            tenantId: ctx.tenantId,
-            periodMonth: period,
-            amountMicroUsd: worst,
-            known: budget,
-            now: occurredAt,
-          });
-        }
-      } catch (err) {
-        if (err instanceof AiBudgetError) {
-          console.error("[ai/usage] model call refused at the budget", {
+      // A flat plan or the tenant's own machine: nothing to price, nothing to
+      // cap, so nothing is read before the call (the row is still written).
+      if (isMetered(ctx.billingMode)) {
+        try {
+          const d = client();
+          db = d;
+          let notInstalled: unknown = null;
+          const orNotInstalled = <T>(fallback: T) => (err: unknown): T => {
+            if (!isLedgerNotInstalled(err)) throw err;
+            notInstalled = err;
+            return fallback;
+          };
+          const [p, budget] = await Promise.all([
+            pricesFor(d, call.provider, call.model, occurredAt).catch(orNotInstalled<PriceRow[]>([])),
+            readBudget(d, ctx.tenantId, period).catch(orNotInstalled<BudgetRow | null>(null)),
+          ]);
+          if (notInstalled) {
+            logLedgerNotInstalled("the model call", { tenantId: ctx.tenantId, surface: ctx.surface, provider: call.provider, model: call.model }, notInstalled);
+          }
+          prices = p;
+          if (budget) {
+            const worst = worstCaseMicroUsd(p, call.promptBytes, call.maxOutputTokens);
+            if (worst === null) throw new AiBudgetError(AI_BUDGET_UNPRICED_MODEL);
+            reservation = await reserveBudget({
+              db: d,
+              pending: { ...base, costMicroUsd: null, costSource: null, latencyMs: null, outcome: "pending" },
+              periodMonth: period,
+              amountMicroUsd: worst,
+              now: occurredAt,
+            });
+          }
+        } catch (err) {
+          if (err instanceof AiBudgetError) {
+            console.error("[ai/usage] model call refused at the budget", {
+              tenantId: ctx.tenantId,
+              surface: ctx.surface,
+              provider: call.provider,
+              model: call.model,
+              code: err.code,
+              period,
+            });
+            // A refused call billed nothing: cost 0 is a known zero.
+            await recordModelCall(
+              { ...base, costMicroUsd: 0, costSource: "none", latencyMs: Date.now() - started, outcome: "refused", errorCode: err.code },
+              opts.db,
+            );
+            tally(0);
+            throw err;
+          }
+          const detail = err instanceof Error ? err.message : String(err);
+          console.error("[ai/usage] budget or prices unreadable; the model call was not sent", {
             tenantId: ctx.tenantId,
             surface: ctx.surface,
             provider: call.provider,
             model: call.model,
-            code: err.code,
-            period,
+            error: detail,
           });
-          // A refused call billed nothing: cost 0 is a known zero.
-          await recordModelCall(
-            { ...base, costMicroUsd: 0, costSource: "none", latencyMs: Date.now() - started, outcome: "refused", errorCode: err.code },
-            [],
-            opts.db,
-          );
-          tally(0);
-          throw err;
+          throw new AiUsageUnavailableError(detail);
         }
-        const detail = err instanceof Error ? err.message : String(err);
-        console.error("[ai/usage] budget or prices unreadable; the model call was not sent", {
-          tenantId: ctx.tenantId,
-          surface: ctx.surface,
-          provider: call.provider,
-          model: call.model,
-          error: detail,
-        });
-        throw new AiUsageUnavailableError(detail);
       }
 
       let finished = false;
@@ -626,22 +855,46 @@ export function modelCallMeter(context: ModelCallContext, opts: { db?: Client } 
             : end.usage
               ? costOf(prices, end.usage)
               : { micro: null, source: null };
-          const extra = reservation ? [settleBudgetStatement(reservation, cost.micro)] : [];
-          await recordModelCall(
-            {
-              ...base,
-              usage: end.usage ?? null,
-              costMicroUsd: cost.micro,
-              costSource: cost.source,
-              reservedMicroUsd: reservation?.amountMicroUsd ?? null,
-              latencyMs: Date.now() - started,
-              outcome: end.outcome,
-              errorCode: end.errorCode ?? null,
-            },
-            extra,
-            db,
-          );
+          const row: ModelCallRecord = {
+            ...base,
+            usage: end.usage ?? null,
+            costMicroUsd: cost.micro,
+            costSource: cost.source,
+            reservedMicroUsd: reservation?.amountMicroUsd ?? null,
+            latencyMs: Date.now() - started,
+            outcome: end.outcome,
+            errorCode: end.errorCode ?? null,
+          };
           tally(cost.micro);
+          if (!reservation) {
+            await recordModelCall(row, db);
+            return;
+          }
+          // The pending row already exists; settle it. Retried once: the
+          // statements are safe to repeat (see settleStatements). If both fail
+          // the row stays pending and the next reservation after it expires
+          // settles it at the reservation, so the month only over-counts.
+          const statements = settleStatements(reservation, row, new Date());
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            try {
+              await (db ?? client()).batch(statements, "write");
+              return;
+            } catch (err) {
+              if (attempt === 2) {
+                console.error("[ai/usage] could not settle a reserved model call; it stays pending until its reservation expires", {
+                  tenantId: ctx.tenantId,
+                  surface: ctx.surface,
+                  provider: call.provider,
+                  model: call.model,
+                  eventId: reservation.eventId,
+                  reservedMicroUsd: reservation.amountMicroUsd,
+                  outcome: end.outcome,
+                  costMicroUsd: cost.micro,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+          }
         },
       };
     },
@@ -672,17 +925,19 @@ export type DepartmentUsage = {
 export type UsageSummary = {
   tenantId: string;
   periodMonth: string;
-  /** Every recorded call in the month, refused ones included. */
+  /** Every recorded call in the month, refused and in-flight ones included. */
   calls: number;
   /** Sum of the KNOWN costs. Read it next to unknownCostCalls: never "$0" when costs are unknown. */
   costMicroUsd: number;
-  /** Per-token billed calls (byo_key / platform / managed) whose cost is unknown. */
+  /** Finished per-token billed calls (byo_key / platform / managed) whose cost is unknown. */
   unknownCostCalls: number;
   /** Subscription and local calls: no per-call price, not an unknown. */
   flatRateCalls: number;
   refusedCalls: number;
+  /** Reserved calls still in flight: not finished, so neither known nor unknown yet. */
+  pendingCalls: number;
   byDepartment: DepartmentUsage[];
-  /** The month's cap, or null: no cap. */
+  /** The month's cap (carried forward when the month has no row of its own), or null: no cap. */
   budget: BudgetRow | null;
 };
 
@@ -696,9 +951,10 @@ export async function usageFor(tenantId: string, periodMonth: string, db: Client
       sql: `SELECT department_key,
                    COUNT(*) AS calls,
                    COALESCE(SUM(cost_micro_usd), 0) AS cost,
-                   SUM(CASE WHEN cost_micro_usd IS NULL AND billing_mode IN (${metered}) THEN 1 ELSE 0 END) AS unknown_cost,
+                   SUM(CASE WHEN cost_micro_usd IS NULL AND outcome <> 'pending' AND billing_mode IN (${metered}) THEN 1 ELSE 0 END) AS unknown_cost,
                    SUM(CASE WHEN billing_mode IN ('subscription', 'local') THEN 1 ELSE 0 END) AS flat_rate,
-                   SUM(CASE WHEN outcome = 'refused' THEN 1 ELSE 0 END) AS refused
+                   SUM(CASE WHEN outcome = 'refused' THEN 1 ELSE 0 END) AS refused,
+                   SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END) AS pending
             FROM ai_usage_events
             WHERE tenant_id = ? AND occurred_at >= ? AND occurred_at < ?
             GROUP BY department_key
@@ -713,6 +969,7 @@ export async function usageFor(tenantId: string, periodMonth: string, db: Client
   let unknown = 0;
   let flat = 0;
   let refused = 0;
+  let pending = 0;
   for (const r of rs.rows) {
     const d: DepartmentUsage = {
       departmentKey: r.department_key === null || r.department_key === undefined ? null : String(r.department_key),
@@ -726,6 +983,7 @@ export async function usageFor(tenantId: string, periodMonth: string, db: Client
     unknown += d.unknownCostCalls;
     flat += intOr0(r.flat_rate);
     refused += intOr0(r.refused);
+    pending += intOr0(r.pending);
   }
   return {
     tenantId,
@@ -735,27 +993,55 @@ export async function usageFor(tenantId: string, periodMonth: string, db: Client
     unknownCostCalls: unknown,
     flatRateCalls: flat,
     refusedCalls: refused,
+    pendingCalls: pending,
     byDepartment,
     budget,
   };
 }
 
-/** The 402 a JSON route answers a budget refusal with. */
+/**
+ * The 402 a JSON route answers a budget refusal with. `error` carries the
+ * owner's sentence (what the chat widget shows), `code` the machine code.
+ */
 export function budgetRefusalResponse(code: AiBudgetCode): Response {
-  return new Response(JSON.stringify({ ok: false, error: code, code, message: AI_BUDGET_SENTENCES[code] }), {
+  const sentence = AI_BUDGET_SENTENCES[code];
+  return new Response(JSON.stringify({ ok: false, error: sentence, code, message: sentence }), {
     status: 402,
     headers: { "content-type": "application/json" },
   });
+}
+
+/** The 503 a JSON route answers when the budget could not be read, in the same shape. */
+export function usageUnavailableResponse(): Response {
+  return new Response(
+    JSON.stringify({ ok: false, error: AI_USAGE_UNAVAILABLE_SENTENCE, code: AI_USAGE_UNAVAILABLE, message: AI_USAGE_UNAVAILABLE_SENTENCE }),
+    { status: 503, headers: { "content-type": "application/json" } },
+  );
 }
 
 /**
  * The route-level check before a stream opens, so a tenant already AT its cap
  * gets an HTTP 402 instead of a 200 stream carrying an error. It reserves
  * nothing: every call still reserves for itself in begin(). Returns the code
- * when the month has no headroom left, null otherwise (no row = no cap).
+ * when the month has no headroom left, null otherwise: no cap, a flat-rate
+ * billing mode (a cap never applies to it), or the ledger not installed yet.
+ * Throws when a budget table that exists cannot be read.
  */
-export async function budgetExhaustedBeforeStream(tenantId: string, at: Date = new Date(), db: Client = getTursoClient()): Promise<AiBudgetCode | null> {
-  const b = await readBudget(db, tenantId, periodMonthOf(at));
+export async function budgetExhaustedBeforeStream(
+  tenantId: string,
+  billingMode: BillingMode,
+  at: Date = new Date(),
+  db?: Client,
+): Promise<AiBudgetCode | null> {
+  if (!isMetered(billingMode)) return null;
+  let b: BudgetRow | null;
+  try {
+    b = await readBudget(db ?? getTursoClient(), tenantId, periodMonthOf(at));
+  } catch (err) {
+    if (!isLedgerNotInstalled(err)) throw err;
+    logLedgerNotInstalled("the pre-stream budget check", { tenantId }, err);
+    return null;
+  }
   if (!b) return null;
   return b.spentMicroUsd + b.reservedMicroUsd >= b.capMicroUsd ? AI_BUDGET_EXHAUSTED : null;
 }

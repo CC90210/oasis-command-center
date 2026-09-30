@@ -42,7 +42,7 @@ import { NextRequest } from "next/server";
 import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { isTenantChatAgent } from "@/lib/manifest/tenant-scope";
 import { rateLimit } from "@/lib/rate-limit";
-import { resolveChatContext } from "@/lib/chat-auth";
+import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import {
   resumeAnthropicTurn,
   type ResumeState,
@@ -52,11 +52,11 @@ import { redactAll } from "@/lib/secret-redaction";
 import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
-  AI_USAGE_UNAVAILABLE,
   billingForKey,
   budgetExhaustedBeforeStream,
   budgetRefusalResponse,
   modelCallMeter,
+  usageUnavailableResponse,
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
@@ -165,15 +165,16 @@ export async function POST(req: NextRequest) {
 
   // The month's AI budget, as /api/chat checks it: at the cap → 402 before the
   // stream opens. Each resumed model call still reserves for itself.
+  const billing = billingForKey(provider, keySource);
   let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
   try {
-    exhausted = await budgetExhaustedBeforeStream(tenantId);
+    exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
   } catch (err) {
     console.error("[chat/resume.budget] the AI budget could not be read", {
       tenantId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return jsonError(503, AI_USAGE_UNAVAILABLE, AI_USAGE_UNAVAILABLE);
+    return usageUnavailableResponse();
   }
   if (exhausted) return budgetRefusalResponse(exhausted);
 
@@ -203,8 +204,10 @@ export async function POST(req: NextRequest) {
     // Fail closed.
   }
 
-  // Stream the resumed iteration back to the browser as SSE.
-  const sessionId = payload.session_id || null;
+  // Stream the resumed iteration back to the browser as SSE. The body's
+  // session id is kept only when it is this person's session in this
+  // workspace (lib/chat-auth.ts ownedChatSessionId).
+  const sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
 
   // Capture resumed-turn state for the chat_messages persist below.
   // Phase G of giggly-reef: paused/resumed turns now leave a real audit
@@ -231,7 +234,7 @@ export async function POST(req: NextRequest) {
   const meter = modelCallMeter({
     tenantId,
     surface: "chat.resume",
-    ...billingForKey(provider, keySource),
+    ...billing,
     departmentKey: departmentForAgent(agentKey),
     sessionId,
     teammateId: agentKey,
@@ -353,24 +356,36 @@ export async function POST(req: NextRequest) {
         // chat_sessions running totals — ACCUMULATE here (vs /api/chat
         // which overwrites). The pause/resume boundary means one logical
         // turn writes TWO chat_messages rows; without accumulation the
-        // resumed turn would clobber the paused turn's token counts.
+        // resumed turn would clobber the paused turn's token counts. As in
+        // /api/chat, tokens and cost move TOGETHER and only when the resumed
+        // calls' cost is known (lib/ai/usage.ts meter totals), so the row
+        // never pairs tokens with a cost that does not include them.
         try {
           const service = getServiceSupabase();
-          const cur = await service
-            .from("chat_sessions")
-            .select("total_input_tokens, total_output_tokens")
-            .eq("id", sessionId)
-            .maybeSingle();
-          const totIn = ((cur.data?.total_input_tokens as number) || 0) + resumeUsageIn;
-          const totOut = ((cur.data?.total_output_tokens as number) || 0) + resumeUsageOut;
+          const turn = meter.totals();
+          const knownCostUsd = turn.calls > 0 && turn.unknownCostCalls === 0 ? turn.costMicroUsd / 1_000_000 : null;
+          const cur = knownCostUsd === null
+            ? null
+            : await service
+                .from("chat_sessions")
+                .select("total_input_tokens, total_output_tokens, estimated_cost_usd")
+                .eq("id", sessionId)
+                .eq("tenant_id", tenantId)
+                .maybeSingle();
           await service
             .from("chat_sessions")
             .update({
-              total_input_tokens: totIn,
-              total_output_tokens: totOut,
+              ...(knownCostUsd === null || !cur?.data
+                ? {}
+                : {
+                    total_input_tokens: (Number(cur.data?.total_input_tokens) || 0) + resumeUsageIn,
+                    total_output_tokens: (Number(cur.data?.total_output_tokens) || 0) + resumeUsageOut,
+                    estimated_cost_usd: (Number(cur.data?.estimated_cost_usd) || 0) + knownCostUsd,
+                  }),
               updated_at: new Date().toISOString(),
             })
-            .eq("id", sessionId);
+            .eq("id", sessionId)
+            .eq("tenant_id", tenantId);
         } catch (sessErr) {
           console.error("[chat/resume.session_totals]", sessErr);
         }

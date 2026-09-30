@@ -11,6 +11,10 @@
  *   - an unknown cost written as 0, or a price nobody can trace;
  *   - a cap two concurrent calls both slip under, a cap an unknown cost walks
  *     past, or a cap that quietly swaps in a cheaper model;
+ *   - a reservation nothing ever settles (a cancelled Worker, a failed write),
+ *     a cap that lapses on the 1st, a free local model refused at the cap;
+ *   - a missing ledger table that takes every AI feature down;
+ *   - one queued subscription job counted once per caller that waited on it;
  *   - a row filed under the wrong tenant, or under none.
  * Each is driven here against REAL libSQL (a temp file with bravo__192 applied
  * through the same BEGIN/END-aware split scripts/apply_turso_migration.py uses)
@@ -270,6 +274,9 @@ async function main() {
     assert.deepEqual([...usage.AUTH_KINDS], ["api_key", "oauth", "subscription", "local", "managed"]);
     assert.deepEqual([...usage.BILLING_MODES], ["byo_key", "platform", "managed", "subscription", "local"]);
     assert.deepEqual([...usage.USAGE_OUTCOMES], ["ok", "error", "refused", "timeout", "cancelled"]);
+    assert.deepEqual([...usage.RESERVATION_STATES], ["pending", "expired"]);
+    assert.equal(usage.RESERVATION_TTL_MS, 30 * 60_000);
+    assert.equal(outcome.failureCopy("ai_usage_unavailable", { canManageAi: true }).sentence, codes.AI_USAGE_UNAVAILABLE_SENTENCE);
     assert.ok(usage.isUsageSurface("infer:lead-scoring") && !usage.isUsageSurface("infer:") && !usage.isUsageSurface("chat"));
     for (const code of codes.AI_BUDGET_CODES) {
       assert.ok(outcome.isTurnFailureCode(code), `${code} is not a channel failure code`);
@@ -437,18 +444,28 @@ async function main() {
   console.log("budget");
   const cappedMeter = (over: Partial<import("../lib/ai/usage").ModelCallContext> = {}) => meter({ tenantId: CAPPED, ...over });
 
-  await check("no budget row = no cap: nothing is reserved and the call runs", async () => {
+  await check("no budget row = no cap: nothing is reserved, no pending row, and the call runs", async () => {
     assert.equal(await budget(CLIENT), null);
-    assert.equal(await usage.reserveBudget({ tenantId: CLIENT, periodMonth: period, amountMicroUsd: 10 ** 12, db }), null);
-    assert.equal(await usage.budgetExhaustedBeforeStream(CLIENT, new Date(), db), null);
+    assert.equal(await usage.budgetExhaustedBeforeStream(CLIENT, "byo_key", new Date(), db), null);
+    const mark = await total();
+    let rowsDuringCall = -1;
+    play(async () => {
+      rowsDuringCall = (await newRows(mark)).length;
+      return anthropicStream("hi", { input: 10, output: 2 });
+    });
+    await chat("anthropic", "claude-sonnet-4-6");
+    assert.equal(rowsDuringCall, 0, "an uncapped call writes its one row at the end, not a pending one");
+    assert.equal((await newRows(mark)).length, 1);
   });
 
-  await check("under a cap: reserve the worst case before, settle to the real cost after", async () => {
+  await check("under a cap: the reservation and its pending row land together before the call, and settle to the real cost after", async () => {
     await setBudget(CAPPED, 1_000_000);
     const mark = await total();
     let reservedDuringCall = -1;
+    let rowDuringCall: Row | undefined;
     play(async (s) => {
       reservedDuringCall = (await budget(CAPPED))!.reservedMicroUsd;
+      rowDuringCall = (await newRows(mark))[0];
       // The reservation is the sent request's bytes at the higher input rate plus max output.
       const worst = usage.worstCaseMicroUsd(await prices("anthropic", "claude-sonnet-4-6"), usage.utf8Length(s.body), 4096);
       assert.equal(reservedDuringCall, worst);
@@ -456,11 +473,163 @@ async function main() {
     });
     await chat("anthropic", "claude-sonnet-4-6", cappedMeter());
     assert.ok(reservedDuringCall > 60_000, `the worst case was reserved before the call (${reservedDuringCall})`);
+    // No reservation without a row that names it: the call's own row, pending, with its deadline.
+    assert.equal(rowDuringCall?.outcome, "pending");
+    assert.equal(Number(rowDuringCall?.reserved_micro_usd), reservedDuringCall);
+    const ttl = Date.parse(String(rowDuringCall?.expires_at)) - Date.parse(String(rowDuringCall?.occurred_at));
+    assert.equal(ttl, usage.RESERVATION_TTL_MS);
     const b = await budget(CAPPED);
     assert.deepEqual(b, { capMicroUsd: 1_000_000, reservedMicroUsd: 0, spentMicroUsd: 7500 }, "settled to the real cost");
+    const r = await newRows(mark);
+    assert.equal(r.length, 1, "finish turned the pending row into the call's row; it added none");
+    assert.equal(r[0].id, rowDuringCall?.id);
+    assert.equal(r[0].outcome, "ok");
+    assert.equal(r[0].expires_at, null);
+    assert.equal(Number(r[0].reserved_micro_usd), reservedDuringCall);
+    assert.equal(Number(r[0].cost_micro_usd), 7500);
+    assert.deepEqual([r[0].input_tokens, r[0].output_tokens, r[0].cache_read_tokens].map(Number), [1000, 200, 5000]);
+  });
+
+  await check("a reserved call whose finish never runs leaves a pending row; once it expires the next reservation settles it at the reservation", async () => {
+    await setBudget(CAPPED, 10_000_000);
+    const mark = await total();
+    const m = cappedMeter({ surface: "chat.tools" });
+    // The Worker was cancelled between begin() and finish(): finish never runs.
+    await m.begin({ provider: "anthropic", model: "claude-sonnet-4-6", maxOutputTokens: 4096, promptBytes: 60_000 });
+    const worst = usage.worstCaseMicroUsd(await prices("anthropic", "claude-sonnet-4-6"), 60_000, 4096)!;
+    const [leaked] = await newRows(mark);
+    assert.equal(leaked.outcome, "pending", "the reservation is traceable to its own row");
+    assert.equal(Number(leaked.reserved_micro_usd), worst);
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: worst, spentMicroUsd: 0 });
+    // Not yet expired: the next call leaves it alone.
+    play(anthropicStream("a", { input: 10, output: 2 }));
+    await chat("anthropic", "claude-sonnet-4-6", cappedMeter());
+    assert.equal((await rows(db, "id = ?", [String(leaked.id)]))[0].outcome, "pending");
+    assert.equal((await budget(CAPPED))!.reservedMicroUsd, worst);
+    // Past its deadline: the next reservation settles it as spent (an unknown only over-counts) and marks it.
+    await db.execute({ sql: "UPDATE ai_usage_events SET expires_at = ? WHERE id = ?", args: ["2000-01-01T00:00:00.000Z", String(leaked.id)] });
+    const spentBefore = (await budget(CAPPED))!.spentMicroUsd;
+    play(anthropicStream("b", { input: 10, output: 2 }));
+    await chat("anthropic", "claude-sonnet-4-6", cappedMeter());
+    const [swept] = await rows(db, "id = ?", [String(leaked.id)]);
+    assert.equal(swept.outcome, "expired");
+    assert.equal(swept.error_code, "reservation_expired");
+    assert.equal(swept.cost_micro_usd, null, "the call's cost is still unknown, never $0");
+    // 10 in x $3 + 2 out x $15 = 60 for the second call.
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: 0, spentMicroUsd: spentBefore + worst + 60 });
+  });
+
+  await check("a finish whose write fails is retried, then left pending for the sweep; a late finish corrects the month", async () => {
+    await setBudget(CAPPED, 10_000_000);
+    const mark = await total();
+    // A client whose settle writes fail (a transient Turso error), everything else real.
+    let failSettles = 2;
+    let settleAttempts = 0;
+    const flaky = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop === "batch") {
+          return async (stmts: Parameters<Client["batch"]>[0], mode?: Parameters<Client["batch"]>[1]) => {
+            if (stmts.some((s) => typeof s !== "string" && /SET input_tokens = :input/.test(s.sql))) {
+              settleAttempts += 1;
+              if (failSettles > 0) {
+                failSettles -= 1;
+                throw new Error("SERVER_ERROR: transient");
+              }
+            }
+            return target.batch(stmts, mode);
+          };
+        }
+        const v = Reflect.get(target, prop, receiver);
+        return typeof v === "function" ? v.bind(target) : v;
+      },
+    }) as Client;
+    const m = usage.modelCallMeter({ tenantId: CAPPED, surface: "chat.stream", authKind: "api_key", billingMode: "byo_key" }, { db: flaky });
+    const logged: unknown[][] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a);
+    let reserved = 0;
+    try {
+      play(async (s) => {
+        reserved = usage.worstCaseMicroUsd(await prices("anthropic", "claude-sonnet-4-6"), usage.utf8Length(s.body), 4096)!;
+        return anthropicStream("hi", { input: 1000, output: 200 });
+      });
+      await chat("anthropic", "claude-sonnet-4-6", m);
+    } finally {
+      console.error = orig;
+    }
+    assert.equal(settleAttempts, 2, "the settle is retried once");
+    assert.ok(logged.some((a) => String(a[0]).includes("could not settle a reserved model call")), "the lost settle is logged loudly");
     const [r] = await newRows(mark);
-    assert.equal(Number(r.reserved_micro_usd), reservedDuringCall);
-    assert.equal(Number(r.cost_micro_usd), 7500);
+    assert.equal(r.outcome, "pending", "the reservation keeps its row, so it can be traced and swept");
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: reserved, spentMicroUsd: 0 });
+    // It expires; the next reservation settles it at the reservation.
+    await db.execute({ sql: "UPDATE ai_usage_events SET expires_at = ? WHERE id = ?", args: ["2000-01-01T00:00:00.000Z", String(r.id)] });
+    play(anthropicStream("next", { input: 10, output: 2 }));
+    await chat("anthropic", "claude-sonnet-4-6", cappedMeter());
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: 0, spentMicroUsd: reserved + 60 });
+    // The same settle, arriving late (the retry after the sweep): the row gets the real usage and the month the difference.
+    const late = usage.modelCallMeter({ tenantId: CAPPED, surface: "chat.stream", authKind: "api_key", billingMode: "byo_key" }, { db });
+    const lateCall = await late.begin({ provider: "anthropic", model: "claude-sonnet-4-6", maxOutputTokens: 100, promptBytes: 100 });
+    const lateWorst = usage.worstCaseMicroUsd(await prices("anthropic", "claude-sonnet-4-6"), 100, 100)!;
+    const [lateRow] = await rows(db, "outcome = 'pending' AND tenant_id = ?", [CAPPED]);
+    await db.execute({ sql: "UPDATE ai_usage_events SET expires_at = ? WHERE id = ?", args: ["2000-01-01T00:00:00.000Z", String(lateRow.id)] });
+    play(anthropicStream("sweeps", { input: 10, output: 2 }));
+    await chat("anthropic", "claude-sonnet-4-6", cappedMeter());
+    assert.equal((await rows(db, "id = ?", [String(lateRow.id)]))[0].outcome, "expired");
+    const spentAfterSweep = (await budget(CAPPED))!.spentMicroUsd;
+    await lateCall.finish({ outcome: "ok", usage: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+    const [finished] = await rows(db, "id = ?", [String(lateRow.id)]);
+    assert.equal(finished.outcome, "ok");
+    assert.equal(Number(finished.cost_micro_usd), 60);
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: 0, spentMicroUsd: spentAfterSweep - lateWorst + 60 }, "the month keeps the real cost, not the reservation");
+  });
+
+  await check("a cap stands until changed: a month with no row takes the latest cap, and the first reservation writes the month's row", async () => {
+    const T = "9e9e9e9e-0000-4000-8000-00000000009e";
+    const prev = usage.periodMonthOf(new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1) - 1000));
+    const stamp = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
+            VALUES (?, ?, 20000, 0, 19000, ?, ?)`,
+      args: [T, prev, stamp, stamp],
+    });
+    // Last month nearly spent; this month has no row of its own yet: the cap carries, nothing spent against it.
+    assert.deepEqual(await usage.readBudget(db, T, period), { capMicroUsd: 20000, reservedMicroUsd: 0, spentMicroUsd: 0 });
+    assert.deepEqual((await usage.usageFor(T, period, db)).budget, { capMicroUsd: 20000, reservedMicroUsd: 0, spentMicroUsd: 0 });
+    assert.equal(await usage.budgetExhaustedBeforeStream(T, "byo_key", new Date(), db), null);
+    // The month's first reservation writes the month's row with that cap: the call is capped, not uncapped.
+    const m = usage.modelCallMeter({ tenantId: T, surface: "probe", authKind: "api_key", billingMode: "byo_key" }, { db });
+    await assert.rejects(m.begin({ provider: "anthropic", model: "claude-sonnet-4-6", maxOutputTokens: 4096, promptBytes: 10 }), /ai_budget_exhausted/);
+    const own = await db.execute({ sql: "SELECT cap_micro_usd, spent_micro_usd FROM tenant_ai_budgets WHERE tenant_id = ? AND period_month = ?", args: [T, period] });
+    assert.deepEqual(own.rows.map((r) => [Number(r.cap_micro_usd), Number(r.spent_micro_usd)]), [[20000, 0]]);
+    const call = await m.begin({ provider: "anthropic", model: "claude-haiku-4-5", maxOutputTokens: 10, promptBytes: 10 });
+    await call.finish({ outcome: "ok", usage: { inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+    assert.deepEqual(await usage.readBudget(db, T, period), { capMicroUsd: 20000, reservedMicroUsd: 0, spentMicroUsd: 10 });
+    // Last month's own row is untouched.
+    assert.deepEqual(await usage.readBudget(db, T, prev), { capMicroUsd: 20000, reservedMicroUsd: 0, spentMicroUsd: 19000 });
+    // A NULL cap lifts it from its month on.
+    await db.execute({ sql: "UPDATE tenant_ai_budgets SET cap_micro_usd = NULL WHERE tenant_id = ? AND period_month = ?", args: [T, period] });
+    assert.equal(await usage.readBudget(db, T, period), null);
+    const free = await m.begin({ provider: "anthropic", model: "claude-not-a-real-model", maxOutputTokens: 10, promptBytes: 10 });
+    await free.finish({ outcome: "ok", usage: null });
+  });
+
+  await check("a local model or a subscription is never capped: a capped workspace at its cap still runs Ollama, and records a local row", async () => {
+    await setBudget(CAPPED, 10_000, 10_000);
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "byo_key", new Date(), db), "ai_budget_exhausted");
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "local", new Date(), db), null, "the pre-stream check passes a local model");
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "subscription", new Date(), db), null);
+    const mark = await total();
+    play(openAIStream("local", { prompt_tokens: 7, completion_tokens: 3 }));
+    const events = await chat("ollama", "llama3.3", cappedMeter(usage.billingForKey("ollama", "tenant")));
+    assert.equal(sent.length, 1, "the local model was asked");
+    assert.ok(events.some((e) => e.type === "done"), JSON.stringify(events));
+    const r = await newRows(mark);
+    assert.deepEqual(r.map((x) => [x.billing_mode, x.outcome, x.cost_micro_usd, x.reserved_micro_usd]), [["local", "ok", null, null]]);
+    const sub = cappedMeter({ authKind: "subscription", billingMode: "subscription" });
+    const call = await sub.begin({ provider: "claude_cli", model: "tier:fast", maxOutputTokens: 10, promptBytes: 10 });
+    await call.finish({ outcome: "ok", usage: null });
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000, reservedMicroUsd: 0, spentMicroUsd: 10_000 }, "nothing reserved or spent");
   });
 
   await check("at the cap the call is refused with the budget code, nothing is sent, and the refusal is one row", async () => {
@@ -476,20 +645,33 @@ async function main() {
     assert.equal(r[0].error_code, "ai_budget_exhausted");
     assert.equal(Number(r[0].cost_micro_usd), 0);
     assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000, reservedMicroUsd: 0, spentMicroUsd: 9_999 }, "a refusal reserves nothing");
-    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, new Date(), db), null, "there is still 1 micro-USD of headroom");
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "byo_key", new Date(), db), null, "there is still 1 micro-USD of headroom");
     await setBudget(CAPPED, 10_000, 10_000);
-    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, new Date(), db), "ai_budget_exhausted");
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "byo_key", new Date(), db), "ai_budget_exhausted");
+    assert.equal(await usage.budgetExhaustedBeforeStream(CAPPED, "platform", new Date(), db), "ai_budget_exhausted");
   });
 
-  await check("the route answer for a budget refusal is HTTP 402 with the plain sentence", async () => {
+  await check("the route answer for a budget refusal is HTTP 402 with the plain sentence in `error`, the field the chat widget shows", async () => {
     const res = usage.budgetRefusalResponse("ai_budget_exhausted");
     assert.equal(res.status, 402);
     assert.deepEqual(await res.json(), {
       ok: false,
-      error: "ai_budget_exhausted",
+      error: "This month's AI budget is used. The owner can raise it.",
       code: "ai_budget_exhausted",
       message: "This month's AI budget is used. The owner can raise it.",
     });
+    const unavailable = usage.usageUnavailableResponse();
+    assert.equal(unavailable.status, 503);
+    assert.deepEqual(await unavailable.json(), {
+      ok: false,
+      error: codes.AI_USAGE_UNAVAILABLE_SENTENCE,
+      code: "ai_usage_unavailable",
+      message: codes.AI_USAGE_UNAVAILABLE_SENTENCE,
+    });
+    // components/ChatWidget.tsx shows a non-OK /api/chat or /api/chat/resume answer by its `error` field.
+    const widget = readFileSync(join(ROOT, "components/ChatWidget.tsx"), "utf8");
+    assert.match(widget, /setError\(getString\(errBody\?\.error\) \|\| `http_\$\{res\.status\}`\);/);
+    assert.match(widget, /setError\(getString\(e\?\.error\) \|\| `resume_http_\$\{resumeRes\.status\}`\);/);
     assert.deepEqual(codes.sseErrorFrame("ai_budget_exhausted"), { code: "ai_budget_exhausted", message: "This month's AI budget is used. The owner can raise it." });
     assert.deepEqual(codes.sseErrorFrame("anthropic_401:x"), { message: "anthropic_401:x" });
   });
@@ -506,20 +688,29 @@ async function main() {
     assert.equal(r.error_code, "ai_budget_unpriced_model");
   });
 
-  await check("two concurrent calls that each fit but not together: exactly one is reserved", async () => {
+  await check("two concurrent calls that each fit but not together: exactly one is reserved, and only it has a pending row", async () => {
     const sonnet = await prices("anthropic", "claude-sonnet-4-6");
     const worst = usage.worstCaseMicroUsd(sonnet, 500, 4096)!;
     await setBudget(CAPPED, Math.floor(worst * 1.5));
-    const results = await Promise.allSettled([
-      usage.reserveBudget({ tenantId: CAPPED, periodMonth: period, amountMicroUsd: worst, db }),
-      usage.reserveBudget({ tenantId: CAPPED, periodMonth: period, amountMicroUsd: worst, db }),
-    ]);
+    const mark = await total();
+    const open = () => usage.modelCallMeter({ tenantId: CAPPED, surface: "chat.tools", authKind: "api_key", billingMode: "byo_key" }, { db }).begin({ provider: "anthropic", model: "claude-sonnet-4-6", maxOutputTokens: 4096, promptBytes: 500 });
+    const quiet = console.error;
+    console.error = () => undefined;
+    let results: PromiseSettledResult<unknown>[];
+    try {
+      results = await Promise.allSettled([open(), open()]);
+    } finally {
+      console.error = quiet;
+    }
     const ok = results.filter((r) => r.status === "fulfilled");
     const refused = results.filter((r) => r.status === "rejected");
     assert.equal(ok.length, 1, "both reservations slipped under the cap");
     assert.equal(refused.length, 1);
     assert.equal(((refused[0] as PromiseRejectedResult).reason as { code: string }).code, "ai_budget_exhausted");
     assert.equal((await budget(CAPPED))!.reservedMicroUsd, worst);
+    assert.deepEqual((await newRows(mark)).map((r) => r.outcome).sort(), ["pending", "refused"]);
+    await ((ok[0] as PromiseFulfilledResult<import("../lib/ai/usage").ModelCall>).value).finish({ outcome: "cancelled", usage: null });
+    assert.deepEqual(await budget(CAPPED), { capMicroUsd: Math.floor(worst * 1.5), reservedMicroUsd: 0, spentMicroUsd: worst }, "an unknown settles at the reservation");
   });
 
   await check("an unknown cost settles at the reservation (it can only over-count); a refused call releases it", async () => {
@@ -540,8 +731,13 @@ async function main() {
     assert.deepEqual(await budget(CAPPED), { capMicroUsd: 10_000_000, reservedMicroUsd: 0, spentMicroUsd: 0 }, "a refused request billed nothing");
   });
 
-  await check("a budget that cannot be read refuses the call (ai_usage_unavailable), it never runs uncapped", async () => {
-    const other = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "ai-usage-empty-")), "empty.db")}` });
+  await check("a budget table that exists but cannot be read refuses the call (ai_usage_unavailable), it never runs uncapped", async () => {
+    // The tables are there (a cap may be in them) but the read fails.
+    const other = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "ai-usage-unreadable-")), "unreadable.db")}` });
+    await other.executeMultiple(`
+      CREATE TABLE tenant_ai_budgets (tenant_id TEXT NOT NULL, period_month TEXT NOT NULL);
+      CREATE TABLE model_prices (provider TEXT, model TEXT);
+    `);
     const m = usage.modelCallMeter({ tenantId: CLIENT, surface: "chat.stream", authKind: "api_key", billingMode: "byo_key" }, { db: other });
     play();
     const logged: string[] = [];
@@ -550,11 +746,31 @@ async function main() {
     try {
       const events = await drain(streamChat({ provider: "anthropic", model: "claude-sonnet-4-6", apiKey: "k", messages: [{ role: "user", content: "x" }], meter: m }));
       assert.deepEqual(events, [{ type: "error", message: "ai_usage_unavailable" }]);
+      await assert.rejects(usage.budgetExhaustedBeforeStream(CLIENT, "byo_key", new Date(), other), /no such column/);
     } finally {
       console.error = orig;
     }
     assert.equal(sent.length, 0);
     assert.ok(logged.some((l) => l.includes("budget or prices unreadable")), "the refusal is logged loudly");
+  });
+
+  await check("the ledger not installed yet (bravo__192 not applied): calls run uncapped and it is logged loudly, never a total outage", async () => {
+    const empty = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "ai-usage-empty-")), "empty.db")}` });
+    const m = usage.modelCallMeter({ tenantId: CLIENT, surface: "chat.stream", authKind: "api_key", billingMode: "byo_key" }, { db: empty });
+    const logged: string[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" "));
+    try {
+      play(anthropicStream("still works", { input: 10, output: 2 }));
+      const events = await drain(streamChat({ provider: "anthropic", model: "claude-sonnet-4-6", apiKey: "k", messages: [{ role: "user", content: "x" }], meter: m }));
+      assert.ok(events.some((e) => e.type === "done"), JSON.stringify(events));
+      assert.equal(sent.length, 1, "the model was asked");
+      assert.equal(await usage.budgetExhaustedBeforeStream(CLIENT, "byo_key", new Date(), empty), null, "the pre-stream check does not refuse either");
+    } finally {
+      console.error = orig;
+    }
+    assert.ok(logged.some((l) => l.includes("ai_usage_ledger_not_installed")), "the missing ledger is logged as its own state");
+    assert.ok(logged.some((l) => l.includes("could not record a model call")), "the unrecorded call is logged loudly");
   });
 
   // ── 5. The tool loops ────────────────────────────────────────────────────
@@ -633,6 +849,22 @@ async function main() {
     ]);
   });
 
+  await check("cached input in the tool loops: the cached prefix is billed once, at the cache-read rate", async () => {
+    const mark = await total();
+    // Anthropic reports cache reads apart from input_tokens (which is already uncached).
+    play(anthropicStream("cached", { input: 100, output: 20, cacheRead: 1000 }));
+    await drain(runner.streamAnthropicWithTools(loopReq(meter({ surface: "chat.tools" })), ctx));
+    // OpenAI's prompt_tokens INCLUDES the cached prefix: 1200 prompt, 200 of it cached.
+    play(openAIStream("cached", { prompt_tokens: 1200, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 200 } }));
+    const req = { provider: "openai" as const, apiKey: "k", model: "gpt-5.4-mini", system: "s", messages: [{ role: "user" as const, content: "hi" }], toolPalette: ["list_records"], meter: meter({ surface: "chat.tools" }) };
+    await drain(runner.streamOpenAICompatibleWithTools(req, ctx));
+    const r = await newRows(mark);
+    assert.deepEqual(r.map((x) => [x.provider, Number(x.input_tokens), Number(x.cache_read_tokens), Number(x.output_tokens), Number(x.cost_micro_usd)]), [
+      ["anthropic", 100, 1000, 20, 900], // 100 x $3 + 1000 x $0.30 + 20 x $15
+      ["openai", 1000, 200, 10, 810], // 1000 x $0.75 + 200 x $0.075 + 10 x $4.50
+    ]);
+  });
+
   await check("the meter adds up a turn: known cost, and how many calls were unknown", async () => {
     const m = meter();
     play(anthropicStream("a", { input: 1000, output: 200, cacheRead: 5000 }), anthropicStream("b", { input: 1, output: 1 }));
@@ -657,6 +889,13 @@ async function main() {
       ["probe", "claude-haiku-4-5", "ok", null, 17], // 12 x $1 + 1 x $5
       ["probe", "claude-haiku-4-5", "error", "http_401", 0],
     ]);
+    // An OpenAI probe with a cached prefix: prompt_tokens includes it, so the uncached input is 30.
+    const cachedMark = await total();
+    play(new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 50, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 20 } } }), { status: 200 }));
+    assert.equal((await probe.probeProvider("openai", "k", { meter: meter({ surface: "probe" }) })).ok, true);
+    const [cachedRow] = await newRows(cachedMark);
+    // 30 x $0.75 + 20 x $0.075 + 1 x $4.50 = 22.5 + 1.5 + 4.5.
+    assert.deepEqual([cachedRow.model, Number(cachedRow.input_tokens), Number(cachedRow.cache_read_tokens), Number(cachedRow.output_tokens), Number(cachedRow.cost_micro_usd)], ["gpt-5.4-mini", 30, 20, 1, 29]);
     await setBudget(CAPPED, 0);
     play();
     const capped = await probe.probeProvider("anthropic", "k", { meter: cappedMeter({ surface: "probe" }) });
@@ -715,13 +954,52 @@ async function main() {
     } finally {
       console.error = quiet;
     }
+    const jobs = await db.execute("SELECT id, source FROM inference_jobs ORDER BY source");
+    const jobOf = (prefix: string) => String(jobs.rows.find((j) => String(j.source).startsWith(prefix))?.id);
     const r = await newRows(mark);
-    assert.deepEqual(r.map((x) => [x.tenant_id, x.surface, x.provider, x.model, x.billing_mode, x.outcome, x.error_code, x.cost_micro_usd === null ? null : Number(x.cost_micro_usd)]), [
-      [CLIENT, "infer:lead-scoring", "claude_cli", "tier:fast", "subscription", "refused", "managed_runtime_not_configured", 0],
-      [OASIS, "infer:lead-scoring", "claude_cli", "tier:smart", "subscription", "timeout", "queue_timeout", null],
-      [OASIS, "infer:operator-email", "claude_cli", "tier:fast", "subscription", "timeout", "queue_timeout", null],
-      // The collected result is the SAME job: no second row.
+    assert.deepEqual(r.map((x) => [x.tenant_id, x.surface, x.provider, x.model, x.billing_mode, x.outcome, x.error_code, x.cost_micro_usd === null ? null : Number(x.cost_micro_usd), x.job_id]), [
+      [CLIENT, "infer:lead-scoring", "claude_cli", "tier:fast", "subscription", "refused", "managed_runtime_not_configured", 0, null],
+      [OASIS, "infer:lead-scoring", "claude_cli", "tier:smart", "subscription", "timeout", "queue_timeout", null, jobOf("lead-scoring")],
+      // The collected result is the SAME job: no second row, and its row now says how the job ended.
+      [OASIS, "infer:operator-email", "claude_cli", "tier:fast", "subscription", "ok", null, null, jobOf("operator-email")],
     ]);
+  });
+
+  await check("one row per job: a call that ADOPTS a running job adds no row; it resolves the job's timed-out row when the job finishes", async () => {
+    const quiet = console.error;
+    console.error = () => undefined;
+    const mark = await total();
+    try {
+      // queueInferForTenant: times out, then a second call adopts the same job and sees it finish.
+      const args = { source: "classify-reply", prompt: "p", tenantId: OASIS, dedupeKey: "k-adopt-1" };
+      const first = await router.queueInferForTenant(args, { timeoutMs: 10, pollMs: 5 });
+      assert.equal(first.ok, false);
+      setTimeout(() => void db.execute({ sql: "UPDATE inference_jobs SET status = 'complete', result_text = 'adopted' WHERE source LIKE 'classify-reply%'", args: [] }), 30);
+      const second = await router.queueInferForTenant(args, { timeoutMs: 2_000, pollMs: 5 });
+      assert.deepEqual(second, { ok: true, text: "adopted" }, "the second call adopted the job (not reused: it was still running)");
+      // Timeout, then timeout again on the same job: still one row.
+      const slow = { source: "slow-job", prompt: "p", tenantId: OASIS, dedupeKey: "k-adopt-2" };
+      await router.queueInferForTenant(slow, { timeoutMs: 10, pollMs: 5 });
+      await router.queueInferForTenant(slow, { timeoutMs: 10, pollMs: 5 });
+      // inferForTenant always dedupes (lib/subscription-infer.ts): the same rules hold there.
+      const one = { source: "lead-summary", system: "s", prompt: "p", maxTokens: 10, timeoutMs: 10 };
+      assert.equal((await router.inferForTenant(OASIS, one)).ok, false);
+      await db.execute({ sql: "UPDATE inference_jobs SET status = 'error', error_message = 'cli_auth_required: log in' WHERE source LIKE 'lead-summary%'", args: [] });
+      await db.execute({ sql: "UPDATE inference_jobs SET status = 'running' WHERE source LIKE 'lead-summary%'", args: [] });
+      setTimeout(() => void db.execute({ sql: "UPDATE inference_jobs SET status = 'error' WHERE source LIKE 'lead-summary%'", args: [] }), 30);
+      assert.equal((await router.inferForTenant(OASIS, { ...one, timeoutMs: 2_000 })).ok, false);
+    } finally {
+      console.error = quiet;
+    }
+    const jobs = await db.execute("SELECT source, COUNT(*) AS n FROM inference_jobs WHERE source LIKE 'classify-reply%' OR source LIKE 'slow-job%' OR source LIKE 'lead-summary%' GROUP BY source ORDER BY source");
+    assert.deepEqual(jobs.rows.map((j) => Number(j.n)), [1, 1, 1], "each pair of calls shared one job");
+    const r = await newRows(mark);
+    assert.deepEqual(r.map((x) => [x.surface, x.outcome, x.error_code, x.job_id === null ? null : "job"]), [
+      ["infer:classify-reply", "ok", null, "job"],
+      ["infer:slow-job", "timeout", "queue_timeout", "job"],
+      ["infer:lead-summary", "error", "cli_auth_required", "job"],
+    ]);
+    assert.ok(Number(r[0].latency_ms) >= 0);
   });
 
   // ── 8. Reading it back ───────────────────────────────────────────────────
@@ -733,21 +1011,24 @@ async function main() {
     await usage.recordModelCall({ ...base, surface: "agents.chat", billingMode: "byo_key", departmentKey: "sales", costMicroUsd: null, costSource: null, outcome: "ok" });
     await usage.recordModelCall({ ...base, surface: "agents.chat", billingMode: "byo_key", departmentKey: "finance", costMicroUsd: 0, costSource: "none", outcome: "refused", errorCode: "ai_budget_exhausted" });
     await usage.recordModelCall({ ...base, surface: "infer:x", billingMode: "subscription", authKind: "subscription", costMicroUsd: null, costSource: null, outcome: "ok" });
+    // A reserved call still in flight: counted, but neither a known nor an unknown cost yet.
+    await usage.recordModelCall({ ...base, surface: "agents.chat", billingMode: "byo_key", departmentKey: "sales", costMicroUsd: null, costSource: null, outcome: "pending", reservedMicroUsd: 500, expiresAt: new Date(Date.now() + 60_000) });
     // Another tenant's row and last month's row never count.
     await usage.recordModelCall({ ...base, tenantId: CLIENT, surface: "probe", billingMode: "byo_key", costMicroUsd: 99999, costSource: "price_table", outcome: "ok" });
     const lastMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1) - 1000);
     await usage.recordModelCall({ ...base, occurredAt: lastMonth, surface: "probe", billingMode: "byo_key", costMicroUsd: 99999, costSource: "price_table", outcome: "ok" });
     await setBudget(T, 50_000, 1_000);
     const u = await usage.usageFor(T, period, db);
-    assert.equal(u.calls, 4);
+    assert.equal(u.calls, 5);
     assert.equal(u.costMicroUsd, 1000);
     assert.equal(u.unknownCostCalls, 1, "a per-token call with no known cost is unknown, never $0");
     assert.equal(u.flatRateCalls, 1, "a subscription call is flat-rate, not unknown");
     assert.equal(u.refusedCalls, 1);
+    assert.equal(u.pendingCalls, 1, "a call in flight is pending, not an unknown cost");
     assert.deepEqual(u.byDepartment, [
       { departmentKey: null, calls: 1, costMicroUsd: 0, unknownCostCalls: 0 },
       { departmentKey: "finance", calls: 1, costMicroUsd: 0, unknownCostCalls: 0 },
-      { departmentKey: "sales", calls: 2, costMicroUsd: 1000, unknownCostCalls: 1 },
+      { departmentKey: "sales", calls: 3, costMicroUsd: 1000, unknownCostCalls: 1 },
     ]);
     assert.deepEqual(u.budget, { capMicroUsd: 50_000, reservedMicroUsd: 0, spentMicroUsd: 1_000 });
     assert.equal((await usage.usageFor(T, "2001-01", db)).calls, 0);
@@ -770,7 +1051,7 @@ async function main() {
     const orig = console.error;
     console.error = (...a: unknown[]) => void logged.push(a);
     try {
-      const landed = await usage.recordModelCall({ tenantId: CLIENT, surface: "probe", authKind: "api_key", billingMode: "byo_key", occurredAt: new Date(), provider: "anthropic", model: "m", costMicroUsd: 5, costSource: "price_table", latencyMs: 1, outcome: "ok" }, [], broken);
+      const landed = await usage.recordModelCall({ tenantId: CLIENT, surface: "probe", authKind: "api_key", billingMode: "byo_key", occurredAt: new Date(), provider: "anthropic", model: "m", costMicroUsd: 5, costSource: "price_table", latencyMs: 1, outcome: "ok" }, broken);
       assert.equal(landed, false);
     } finally {
       console.error = orig;
@@ -783,10 +1064,12 @@ async function main() {
   await check("every route that calls a model builds its meter from the session's tenant, and maps a budget refusal to 402", () => {
     const src = (p: string) => readFileSync(join(ROOT, p), "utf8");
     const wiring: Array<[string, RegExp[]]> = [
-      ["app/api/chat/route.ts", [/surface: cloudToolsMode === "tools" && supportsNativeTools \? "chat\.tools" : "chat\.stream"/, /budgetExhaustedBeforeStream\(tenantId\)/, /return budgetRefusalResponse\(exhausted\)/]],
-      ["app/api/chat/resume/route.ts", [/surface: "chat\.resume"/, /budgetExhaustedBeforeStream\(tenantId\)/, /return budgetRefusalResponse\(exhausted\)/]],
+      // /api/chat and /api/chat/resume are driven for real in tests/ai-usage-chat-routes.test.ts.
+      ["app/api/chat/route.ts", [/surface: cloudToolsMode === "tools" && supportsNativeTools \? "chat\.tools" : "chat\.stream"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /return budgetRefusalResponse\(exhausted\)/]],
+      ["app/api/chat/resume/route.ts", [/surface: "chat\.resume"/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/, /return budgetRefusalResponse\(exhausted\)/]],
       ["app/api/chat/compact/route.ts", [/surface: "chat\.compact"/, /if \(isAiBudgetCode\(errorMessage\)\) return budgetRefusalResponse\(errorMessage\);/]],
-      ["app/api/agents/chat/route.ts", [/surface: "agents\.chat"/, /refuse\(ctx, 402, exhausted/]],
+      // The at-cap 402 itself is driven for real in tests/os-channels-honest.test.ts; a local model skips the cap.
+      ["app/api/agents/chat/route.ts", [/surface: "agents\.chat"/, /refuse\(ctx, 402, exhausted/, /budgetExhaustedBeforeStream\(tenantId, billing\.billingMode\)/]],
       ["app/api/agents/generate/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "agents\.generate"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/manifest/chat/route.ts", [/tenantId: profile\.tenant_id,\s+surface: "manifest\.chat"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],
       ["app/api/gmail-templates/[id]/solara/route.ts", [/tenantId: sess\.tenantId,\s+surface: "gmail_templates\.solara"/, /if \(isAiBudgetCode\(streamError\)\) return budgetRefusalResponse\(streamError\);/]],

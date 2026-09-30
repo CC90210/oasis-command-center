@@ -212,3 +212,35 @@ export async function resolveChatContext(
     keySource,
   };
 }
+
+/**
+ * A chat session id from a request body, kept only when that session is the
+ * caller's own: this workspace's (from the session, never the body) and this
+ * person's, the same pair /api/chat/sessions lists by. Anything else (another
+ * workspace's id, a teammate's, a made-up one, or a failed read) comes back
+ * null, so the turn opens a new session instead of writing into someone else's
+ * and filing its AI usage under that id.
+ */
+export async function ownedChatSessionId(
+  sessionId: unknown,
+  tenantId: string,
+  userId: string,
+): Promise<string | null> {
+  if (typeof sessionId !== "string" || !sessionId.trim()) return null;
+  const { data, error } = await getServiceSupabase()
+    .from("chat_sessions")
+    .select("id")
+    .eq("id", sessionId)
+    .eq("tenant_id", tenantId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    console.error("[chat-auth] could not check a chat session's owner; opening a new one", { tenantId, error: error.message });
+    return null;
+  }
+  if (!data) {
+    console.error("[chat-auth] a chat session id that is not the caller's was refused; opening a new one", { tenantId });
+    return null;
+  }
+  return sessionId;
+}

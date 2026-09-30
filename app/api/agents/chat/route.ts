@@ -350,9 +350,11 @@ export async function POST(req: NextRequest) {
   // The month's AI budget (lib/ai/usage.ts). A workspace already at its cap is
   // answered 402 before a stream opens, and recorded as the channel's last turn:
   // like a refused key, it is a verdict on the workspace's AI account that every
-  // channel shares. No budget row for the month = no cap.
+  // channel shares. No cap for the month = nothing to check; a local model is
+  // never capped.
+  const billing = billingForKey(provider, keySource);
   try {
-    const exhausted = await budgetExhaustedBeforeStream(tenantId);
+    const exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
     if (exhausted) {
       await recordTurn(turn, false, exhausted);
       return refuse(ctx, 402, exhausted, { message: failureCopy(exhausted, { canManageAi: false }).sentence });
@@ -405,7 +407,7 @@ export async function POST(req: NextRequest) {
   const meter = modelCallMeter({
     tenantId,
     surface: "agents.chat",
-    ...billingForKey(provider, keySource),
+    ...billing,
     departmentKey: dept?.key ?? null,
     teammateId: agent.slug,
     userId: user.id,

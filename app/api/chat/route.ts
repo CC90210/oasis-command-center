@@ -54,7 +54,7 @@ import {
   streamOpenAICompatibleWithTools,
   streamAnthropicWithTools,
 } from "@/lib/cloud-tool-runner";
-import { resolveChatContext } from "@/lib/chat-auth";
+import { ownedChatSessionId, resolveChatContext } from "@/lib/chat-auth";
 import { getBridgeToolCapabilities } from "@/lib/queries";
 import { signResumeState } from "@/lib/resume-hmac";
 import { getAgentInfo } from "@/lib/agents";
@@ -71,11 +71,11 @@ import {
 } from "@/lib/chat-attachments";
 import { deploymentRuntimeLabel } from "@/lib/deployment-surface";
 import {
-  AI_USAGE_UNAVAILABLE,
   billingForKey,
   budgetExhaustedBeforeStream,
   budgetRefusalResponse,
   modelCallMeter,
+  usageUnavailableResponse,
 } from "@/lib/ai/usage";
 import { sseErrorFrame } from "@/lib/ai/usage-codes";
 import { departmentForAgent } from "@/lib/os/approvals/rules";
@@ -220,21 +220,25 @@ export async function POST(req: NextRequest) {
   // A workspace already AT its cap gets a 402 and one plain sentence before
   // anything is written or streamed. Every model call below still reserves for
   // itself, so a turn that reaches the cap mid-loop stops with the same code.
-  // No budget row for the month = no cap.
+  // No cap for the month = nothing to check; a local model is never capped.
+  const billing = billingForKey(provider, keySource);
   let exhausted: Awaited<ReturnType<typeof budgetExhaustedBeforeStream>>;
   try {
-    exhausted = await budgetExhaustedBeforeStream(tenantId);
+    exhausted = await budgetExhaustedBeforeStream(tenantId, billing.billingMode);
   } catch (err) {
     console.error("[chat.budget] the AI budget could not be read", {
       tenantId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return jsonError(503, AI_USAGE_UNAVAILABLE, AI_USAGE_UNAVAILABLE);
+    return usageUnavailableResponse();
   }
   if (exhausted) return budgetRefusalResponse(exhausted);
 
   // ---- Open or create chat_sessions row -----------------------------------
-  let sessionId = payload.session_id || null;
+  // A body-supplied session id is kept only when it is this person's session
+  // in this workspace; the turn's messages, totals and AI usage rows are filed
+  // under it.
+  let sessionId = await ownedChatSessionId(payload.session_id, tenantId, user.id);
   if (!sessionId) {
     const { data: created, error: createErr } = await service
       .from("chat_sessions")
@@ -588,7 +592,7 @@ export async function POST(req: NextRequest) {
   const meter = modelCallMeter({
     tenantId,
     surface: cloudToolsMode === "tools" && supportsNativeTools ? "chat.tools" : "chat.stream",
-    ...billingForKey(provider, keySource),
+    ...billing,
     departmentKey: departmentForAgent(agentKey),
     sessionId,
     teammateId: agentKey,
@@ -897,19 +901,22 @@ export async function POST(req: NextRequest) {
       // The turn's cost is what the ledger recorded for its model calls
       // (ai_usage_events by session_id is the record). chat_sessions'
       // estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say "unknown", so
-      // it is only written when every call's cost is known; it used to be a
-      // guess from a hardcoded price table.
+      // the turn's tokens and cost are written TOGETHER, and only when every
+      // call's cost is known: an unknown turn leaves the last known pair, never
+      // this turn's tokens beside an older turn's cost (or a $0). It used to be
+      // a guess from a hardcoded price table.
       const turn = meter.totals();
       const knownCostUsd = turn.calls > 0 && turn.unknownCostCalls === 0 ? turn.costMicroUsd / 1_000_000 : null;
       await service
         .from("chat_sessions")
         .update({
-          total_input_tokens: usageIn,
-          total_output_tokens: usageOut,
-          ...(knownCostUsd === null ? {} : { estimated_cost_usd: knownCostUsd }),
+          ...(knownCostUsd === null
+            ? {}
+            : { total_input_tokens: usageIn, total_output_tokens: usageOut, estimated_cost_usd: knownCostUsd }),
           updated_at: new Date().toISOString(),
         })
-        .eq("id", sessionId);
+        .eq("id", sessionId)
+        .eq("tenant_id", tenantId);
       if (cfgScope) {
         let lastUsedUpdate = service
           .from("agent_model_config")

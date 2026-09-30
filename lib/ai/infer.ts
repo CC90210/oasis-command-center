@@ -40,16 +40,20 @@
  *   - refused: a tenant that is not OASIS's own (cost 0, nothing was queued).
  *     A call with NO tenant is refused and logged but not recorded: the ledger
  *     has no tenant to file it under, and it is never filed under OASIS.
- *   - A result COLLECTED from a job an earlier call queued (`reused`) is not a
- *     new model call and records nothing: the earlier call's row is that job's.
+ *   - ONE ROW PER QUEUED JOB (job_id = the inference_jobs id). A dedupe key
+ *     lets a later call adopt a job still running or collect one already done;
+ *     that call is not a new model call and adds no row. When the job's row
+ *     says `timeout` (its first caller stopped waiting), the call that later
+ *     sees it finish resolves that row to ok or error
+ *     (lib/ai/usage.ts recordJobModelCall).
  * No budget reservation: a flat plan has no per-call cost to reserve.
  */
 
 import "server-only";
 import { inferText, firstJsonObject, type InferTextResult } from "@/lib/subscription-infer";
-import { inferTextWithFallback, queueInfer } from "@/lib/bridge-infer";
+import { inferTextWithFallback, queueInfer, type InferJob } from "@/lib/bridge-infer";
 import { isOasisInternalTenant } from "@/lib/ai/tools/client-safe-registry";
-import { recordModelCall, type UsageOutcome } from "@/lib/ai/usage";
+import { recordJobModelCall, recordModelCall, type ModelCallRecord, type UsageOutcome } from "@/lib/ai/usage";
 
 export { firstJsonObject };
 export type { InferTextResult };
@@ -74,7 +78,11 @@ function inferErrorCode(message: string): string {
 
 const QUEUE_TIERS = new Set(["fast", "smart", "max"]);
 
-/** One ai_usage_events row for a request to the subscription runtime (see METERED above). */
+/**
+ * The ai_usage_events row for a request to the subscription runtime (see
+ * METERED above). `job` is the queued job it waited on, when it got that far:
+ * its row is the job's one row.
+ */
 async function recordInfer(
   tenantId: string | null,
   source: string,
@@ -82,10 +90,11 @@ async function recordInfer(
   startedAt: Date,
   outcome: UsageOutcome,
   errorCode: string | null,
+  job: InferJob | null = null,
 ): Promise<void> {
   if (typeof tenantId !== "string" || !tenantId.trim()) return;
   const surfaceSource = String(source || "unnamed").replace(/[^A-Za-z0-9_.:-]/g, "_").slice(0, 100) || "unnamed";
-  await recordModelCall({
+  const record: ModelCallRecord = {
     tenantId,
     surface: `infer:${surfaceSource}`,
     authKind: "subscription",
@@ -101,7 +110,9 @@ async function recordInfer(
     latencyMs: Date.now() - startedAt.getTime(),
     outcome,
     errorCode,
-  });
+  };
+  if (job) await recordJobModelCall({ ...record, jobId: job.id });
+  else await recordModelCall(record);
 }
 
 /**
@@ -118,10 +129,11 @@ export async function inferForTenant(
     await recordInfer(tenantId, args.source, args.modelTier, startedAt, "refused", MANAGED_RUNTIME_NOT_CONFIGURED);
     return result;
   }
-  const result = await inferText({ ...args, tenantId });
-  if (result.ok) await recordInfer(tenantId, args.source, args.modelTier, startedAt, "ok", null);
-  else if (result.pending) await recordInfer(tenantId, args.source, args.modelTier, startedAt, "timeout", "queue_timeout");
-  else await recordInfer(tenantId, args.source, args.modelTier, startedAt, "error", inferErrorCode(result.error));
+  let job: InferJob | null = null;
+  const result = await inferText({ ...args, tenantId, onJob: (j) => void (job = j) });
+  if (result.ok) await recordInfer(tenantId, args.source, args.modelTier, startedAt, "ok", null, job);
+  else if (result.pending) await recordInfer(tenantId, args.source, args.modelTier, startedAt, "timeout", "queue_timeout", job);
+  else await recordInfer(tenantId, args.source, args.modelTier, startedAt, "error", inferErrorCode(result.error), job);
   return result;
 }
 
@@ -142,14 +154,22 @@ export async function queueInferForTenant(
     await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "refused", MANAGED_RUNTIME_NOT_CONFIGURED);
     return refused;
   }
-  const result = await queueInfer(args, opts);
+  let job: InferJob | null = null;
+  const onJob = args.onJob;
+  const result = await queueInfer({
+    ...args,
+    onJob: (j) => {
+      job = j;
+      onJob?.(j);
+    },
+  }, opts);
+  // One row per job (see METERED above): an adopted or collected job resolves its row, never adds one.
   if (result.ok) {
-    // A collected result is not a new model call (see METERED above).
-    if (!result.reused) await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "ok", null);
+    await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "ok", null, job);
   } else if (result.timedOut) {
-    await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "timeout", "queue_timeout");
+    await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "timeout", "queue_timeout", job);
   } else {
-    await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "error", inferErrorCode(result.error));
+    await recordInfer(args.tenantId, args.source, args.modelTier, startedAt, "error", inferErrorCode(result.error), job);
   }
   return result;
 }
