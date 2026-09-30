@@ -16,8 +16,14 @@
  * minimum-scope decision (doc 03 a.5) is made once, in review, not at 2 a.m.
  * when the credentials arrive.
  *
- * PURE DATA. No fetch, no env, no server import — the probes live in
- * lib/connections/health.ts, keyed by provider id.
+ * Slack is the one exception with a switch: it names the Worker secrets that
+ * hold OASIS's Slack app (`liveWhenEnv`), and providerAvailability() makes it
+ * live only on a deployment where all of them are set. Every caller that
+ * decides "can this connect here?" asks providerForEnv(), never the static row.
+ *
+ * PURE DATA. No fetch, no server import, and no env read of its own (the env
+ * is passed in) — the probes live in lib/connections/health.ts, keyed by
+ * provider id.
  */
 
 import type { DepartmentKey } from "@/lib/os/types";
@@ -47,6 +53,11 @@ export type RestrictedKeyConfig = {
   setupSteps: readonly string[];
   /** One sentence on what the key can and cannot do. */
   accessSummary: string;
+  /** The key field's label, when it is not a Stripe "Restricted key". */
+  inputLabel?: string;
+  placeholder?: string;
+  /** The line under the field: how the key is checked before it is saved. */
+  checkNote?: string;
 };
 
 export type ProviderDef = {
@@ -72,6 +83,12 @@ export type ProviderDef = {
   };
   /** Why a coming-soon provider cannot connect yet. */
   blockedOn?: string;
+  /**
+   * Worker secret NAMES that, all present, make a coming_soon provider live on
+   * this deployment (providerAvailability). Slack: OASIS's own Slack app. Absent
+   * any one, the provider stays coming_soon and every surface says why.
+   */
+  liveWhenEnv?: readonly string[];
   oauth?: OAuthAppConfig;
   restrictedKey?: RestrictedKeyConfig;
 };
@@ -206,12 +223,32 @@ export const PROVIDERS: readonly ProviderDef[] = [
     id: "slack",
     label: "Slack",
     wave: 2,
+    // Live only on a deployment that holds OASIS's Slack app (liveWhenEnv):
+    // the install needs the client id and secret, every event and button press
+    // is verified with the signing secret, and the consent state is signed with
+    // its own secret (lib/connections/oauth.ts, no fallback).
     availability: "coming_soon",
     authKind: "app_install",
     scopeKind: "tenant",
     departments: ["chief_of_staff", "sales", "marketing", "client_success"],
-    scopes: { base: ["chat:write", "commands"], byDepartment: {} },
+    // Read the channels it is added to and the mentions of it, name the people
+    // who wrote (users:read, and users:read.email to link a teammate), post
+    // replies. No private channels, no DMs, no admin scopes.
+    scopes: {
+      base: [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "users:read",
+        "users:read.email",
+        "team:read",
+        "commands",
+      ],
+      byDepartment: {},
+    },
     blockedOn: "OASIS's Slack app credentials.",
+    liveWhenEnv: ["SLACK_CLIENT_ID", "SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"],
     oauth: {
       authorizeUrl: "https://slack.com/oauth/v2/authorize",
       tokenUrl: "https://slack.com/api/oauth.v2.access",
@@ -264,10 +301,66 @@ export const PROVIDERS: readonly ProviderDef[] = [
     scopes: { base: [], byDepartment: {} },
     blockedOn: "OASIS's Zoom app and Zoom Marketplace review.",
   }),
+  def({
+    // Jev: TypeSafe's System One model, a fast classifier. Each workspace pastes
+    // its OWN TypeSafe key; OASIS holds no key for anyone. It only ever answers
+    // "which one of these" questions in shadow (lib/jev/mode.ts): it never
+    // decides, sends or changes anything.
+    id: "jev",
+    label: "Jev (TypeSafe)",
+    wave: 3,
+    availability: "live",
+    authKind: "restricted_key",
+    scopeKind: "tenant",
+    departments: [],
+    scopes: { base: [], byDepartment: {} },
+    restrictedKey: {
+      credentialField: "api_key",
+      readPermissions: [],
+      setupSteps: [
+        "Create an API key in your TypeSafe account (docs.typesafe.ai describes where). Name it OASIS so you can revoke it on its own.",
+        "Copy it and paste it here.",
+      ],
+      accessSummary:
+        "OASIS can ask Jev to classify text. OASIS never lets Jev's answer send, decide or change anything on its own.",
+      inputLabel: "TypeSafe API key",
+      placeholder: "Paste your TypeSafe API key",
+      checkNote:
+        "OASIS checks the key by listing the models it may use, which sends none of your data, then stores it encrypted.",
+    },
+  }),
 ];
 
 export function providerById(id: string): ProviderDef | null {
   return PROVIDERS.find((p) => p.id === id) ?? null;
+}
+
+type Env = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Whether a provider can be connected on THIS deployment. A provider marked
+ * live is live. A coming_soon provider with `liveWhenEnv` becomes live only
+ * while every named Worker secret is set (non-blank); otherwise it stays
+ * coming_soon. Pure: the caller passes the env (process.env on the server).
+ */
+export function providerAvailability(provider: ProviderDef, env: Env): ProviderAvailability {
+  if (provider.availability === "live") return "live";
+  const needs = provider.liveWhenEnv ?? [];
+  if (needs.length === 0) return "coming_soon";
+  return needs.every((name) => (env[name] || "").trim().length > 0) ? "live" : "coming_soon";
+}
+
+/** The provider as this deployment sees it: `availability` resolved against the env. */
+export function providerForEnv(id: string, env: Env): ProviderDef | null {
+  const p = providerById(id);
+  if (!p) return null;
+  const availability = providerAvailability(p, env);
+  return availability === p.availability ? p : { ...p, availability };
+}
+
+/** The secret names a coming_soon provider still needs here, for the "not configured yet" copy. Names only. */
+export function missingProviderEnv(provider: ProviderDef, env: Env): string[] {
+  return (provider.liveWhenEnv ?? []).filter((name) => !(env[name] || "").trim());
 }
 
 /**

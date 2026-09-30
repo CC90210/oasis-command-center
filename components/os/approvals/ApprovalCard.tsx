@@ -99,6 +99,20 @@ function PostPreview({ payload }: { payload: Record<string, unknown> }) {
   );
 }
 
+/** A department's reply in a Slack thread: where it goes, and the exact words. */
+function SlackPreview({ payload }: { payload: Record<string, unknown> }) {
+  const channel = str(payload.channel_name) ? `#${str(payload.channel_name)}` : str(payload.channel_id);
+  return (
+    <div className="rounded-lg border border-hairline bg-bg-deep/40 px-3 py-2.5 text-[13px] leading-5">
+      <dl className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5">
+        <dt className="text-fg-dim">Slack</dt>
+        <dd className="text-fg">{channel}, in the thread it was asked in</dd>
+      </dl>
+      <p className="mt-2 whitespace-pre-wrap break-words text-fg-muted">{str(payload.text)}</p>
+    </div>
+  );
+}
+
 /** A kind with no dedicated preview still shows everything it would act on. */
 function GenericPreview({ payload }: { payload: Record<string, unknown> }) {
   const entries = Object.entries(payload);
@@ -217,6 +231,8 @@ export function ApprovalCard({
           <EmailPreview payload={approval.payload} clamp={clampable && !expanded} />
         ) : kind === "publish_post" ? (
           <PostPreview payload={approval.payload} />
+        ) : kind === "send_slack_message" ? (
+          <SlackPreview payload={approval.payload} />
         ) : (
           <GenericPreview payload={approval.payload} />
         )}

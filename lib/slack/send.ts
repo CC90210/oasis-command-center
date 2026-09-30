@@ -1,0 +1,223 @@
+/**
+ * lib/slack/send.ts - everything OASIS posts into Slack, for ONE workspace,
+ * with that workspace's own bot token.
+ *
+ *   postSlackReply      an APPROVED department reply (the send_slack_message
+ *                       executor is the only caller), mirrored onto the
+ *                       conversation as outbound.
+ *   postApprovalCard    the "waiting for approval" card under the @mention,
+ *                       with an Approve button (lib/slack/interactivity.ts) and
+ *                       a link to the approval in OASIS.
+ *   postNotice          a one-line status under the @mention when no draft
+ *                       could be made (department not set up, no AI account,
+ *                       the month's AI budget reached). Operational only: it
+ *                       says what happened, never an answer on anyone's behalf.
+ *
+ * Every post checks that the team it is for is the team this tenant's live
+ * Slack connection is pinned to, so nothing can reach a Slack workspace the
+ * tenant does not hold. Names shown are department names; no internal agent
+ * name is ever posted.
+ */
+import "server-only";
+import type { Client } from "@libsql/client";
+import { findActiveConnection } from "@/lib/connections/store";
+import { readBotToken } from "@/lib/connections/token-store";
+import type { DepartmentKey } from "@/lib/os/types";
+import { postMessage, type SlackFetch } from "@/lib/slack/client";
+import { mirrorStatement } from "@/lib/slack/mirror";
+import { departmentLabelOf, getChannelRoute, isSlackSchemaMissing } from "@/lib/slack/routing";
+
+export type SlackPostArgs = {
+  tenantId: string;
+  teamId: string;
+  channelId: string;
+  threadTs: string;
+  text: string;
+  department: DepartmentKey | null;
+  approvalId: string;
+};
+
+export type SlackPostOutcome = { ok: true; ts: string } | { ok: false; reason: string; message: string };
+
+type Token = { ok: true; token: string; botUserId: string | null } | { ok: false; reason: string; message: string };
+
+/** The tenant's live Slack connection for `teamId`, and its bot token. */
+export async function slackTokenFor(db: Client, tenantId: string, teamId: string): Promise<Token> {
+  const conn = await findActiveConnection(db, tenantId, "slack");
+  if (!conn) return { ok: false, reason: "slack_not_connected", message: "Slack is not connected to this workspace, so nothing was posted." };
+  if (conn.external_account_id !== teamId) {
+    return { ok: false, reason: "slack_team_mismatch", message: "This reply is for a Slack workspace that is not the one connected here, so nothing was posted." };
+  }
+  if (conn.status === "expired" || conn.status === "revoked") {
+    return { ok: false, reason: "slack_token_rejected", message: "Slack no longer accepts OASIS's token for this workspace. Install the app again in Settings > Chat apps." };
+  }
+  const token = await readBotToken(tenantId, conn.id);
+  if (!token.ok) {
+    if (token.reason === "lookup_failed") throw new Error("slack token lookup failed");
+    return { ok: false, reason: "slack_token_missing", message: "OASIS's Slack token for this workspace is missing. Install the app again in Settings > Chat apps." };
+  }
+  return token;
+}
+
+function slackFailureMessage(error: string): string {
+  switch (error) {
+    case "not_in_channel":
+    case "channel_not_found":
+      return "OASIS's Slack app is not in that channel any more, so nothing was posted. Invite the app back to the channel and ask again.";
+    case "is_archived":
+      return "That Slack channel is archived, so nothing was posted.";
+    case "invalid_auth":
+    case "token_revoked":
+    case "account_inactive":
+      return "Slack no longer accepts OASIS's token for this workspace. Install the app again in Settings > Chat apps.";
+    case "rate_limited":
+      return "Slack asked OASIS to slow down, so nothing was posted. Approve again in a minute.";
+    case "timeout":
+    case "network_error":
+      return "Slack did not answer in time. It may have been posted: check the thread before approving again.";
+    default:
+      return `Slack refused the reply (${error}).`;
+  }
+}
+
+export async function postSlackReply(db: Client, args: SlackPostArgs, opts: { fetchImpl?: SlackFetch; now?: () => Date } = {}): Promise<SlackPostOutcome> {
+  const token = await slackTokenFor(db, args.tenantId, args.teamId);
+  if (!token.ok) return token;
+  const posted = await postMessage(token.token, { channel: args.channelId, thread_ts: args.threadTs, text: args.text }, { fetchImpl: opts.fetchImpl });
+  if (!posted.ok) {
+    const unknown = posted.error === "timeout" || posted.error === "network_error";
+    return { ok: false, reason: unknown ? "delivery_unknown" : `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
+  }
+  // The reply is part of the conversation: mirrored as outbound, under the
+  // department. It already went out, so a mirror that cannot be written is
+  // logged loudly and does not turn the post into a failure.
+  try {
+    let route = null;
+    try {
+      route = await getChannelRoute(db, args.tenantId, args.teamId, args.channelId);
+    } catch (err) {
+      if (!isSlackSchemaMissing(err)) throw err;
+    }
+    const now = (opts.now ?? (() => new Date()))();
+    await db.execute(
+      mirrorStatement({
+        tenantId: args.tenantId,
+        teamId: args.teamId,
+        channelId: args.channelId,
+        channelName: route?.channel_name ?? null,
+        ts: posted.data.ts,
+        threadTs: args.threadTs,
+        text: args.text,
+        authorName: args.department ? departmentLabelOf(args.department) : null,
+        direction: "outbound",
+        slackUserId: null,
+        department: args.department,
+        customerId: route?.customer_id ?? null,
+        actorUserId: null,
+        receivedAt: now,
+      }),
+    );
+  } catch (err) {
+    console.error("[slack.send] posted, but the reply could not be mirrored", {
+      tenantId: args.tenantId,
+      approvalId: args.approvalId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return { ok: true, ts: posted.data.ts };
+}
+
+/** The Approve button's value: the approval and the exact draft it binds to. */
+export function approveButtonValue(approvalId: string, payloadHash: string): string {
+  return `${approvalId}|${payloadHash}`;
+}
+
+export function parseApproveButtonValue(v: unknown): { approvalId: string; payloadHash: string } | null {
+  if (typeof v !== "string") return null;
+  const m = /^([A-Za-z0-9_-]{1,80})\|([0-9a-f]{64})$/.exec(v);
+  return m ? { approvalId: m[1], payloadHash: m[2] } : null;
+}
+
+export const APPROVE_ACTION_ID = "oasis_approval_approve";
+
+/** Slack mrkdwn needs &, < and > escaped in text it did not write. */
+export function escapeMrkdwn(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function approvalCardBlocks(input: {
+  departmentLabel: string;
+  draft: string;
+  approvalId: string;
+  payloadHash: string;
+  openUrl: string | null;
+}): unknown[] {
+  const quoted = escapeMrkdwn(input.draft)
+    .split("\n")
+    .map((l) => `>${l}`)
+    .join("\n");
+  const blocks: unknown[] = [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `*${escapeMrkdwn(input.departmentLabel)}* drafted a reply. Nothing is posted until an owner or admin approves it.\n${quoted}`.slice(0, 2900) },
+    },
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          action_id: APPROVE_ACTION_ID,
+          style: "primary",
+          text: { type: "plain_text", text: "Approve and post" },
+          value: approveButtonValue(input.approvalId, input.payloadHash),
+        },
+        ...(input.openUrl ? [{ type: "button", action_id: "oasis_approval_open", text: { type: "plain_text", text: "Open in OASIS" }, url: input.openUrl }] : []),
+      ],
+    },
+  ];
+  return blocks;
+}
+
+export async function postApprovalCard(
+  db: Client,
+  input: {
+    tenantId: string;
+    teamId: string;
+    channelId: string;
+    threadTs: string;
+    department: DepartmentKey;
+    draft: string;
+    approvalId: string;
+    payloadHash: string;
+    openUrl: string | null;
+  },
+  opts: { fetchImpl?: SlackFetch } = {},
+): Promise<SlackPostOutcome> {
+  const token = await slackTokenFor(db, input.tenantId, input.teamId);
+  if (!token.ok) return token;
+  const label = departmentLabelOf(input.department);
+  const posted = await postMessage(
+    token.token,
+    {
+      channel: input.channelId,
+      thread_ts: input.threadTs,
+      text: `${label} drafted a reply. It waits for approval before it is posted.`,
+      blocks: approvalCardBlocks({ departmentLabel: label, draft: input.draft, approvalId: input.approvalId, payloadHash: input.payloadHash, openUrl: input.openUrl }),
+    },
+    { fetchImpl: opts.fetchImpl },
+  );
+  if (!posted.ok) return { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
+  return { ok: true, ts: posted.data.ts };
+}
+
+export async function postNotice(
+  db: Client,
+  input: { tenantId: string; teamId: string; channelId: string; threadTs: string; text: string },
+  opts: { fetchImpl?: SlackFetch } = {},
+): Promise<SlackPostOutcome> {
+  const token = await slackTokenFor(db, input.tenantId, input.teamId);
+  if (!token.ok) return token;
+  const posted = await postMessage(token.token, { channel: input.channelId, thread_ts: input.threadTs, text: input.text }, { fetchImpl: opts.fetchImpl });
+  if (!posted.ok) return { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
+  return { ok: true, ts: posted.data.ts };
+}

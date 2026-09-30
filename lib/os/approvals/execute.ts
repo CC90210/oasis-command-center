@@ -140,6 +140,10 @@ export function tapeEventFor(a: ApprovalRow): AgentEventPublish {
   } else if (a.action_kind === "publish_post") {
     const p = parsePayload(a);
     target = { channel: "social", platforms: p.platforms };
+  } else if (a.action_kind === "send_slack_message") {
+    // Where, never what: the reply's text stays on the approval.
+    const p = parsePayload(a);
+    target = { channel: "slack", slack_channel: p.channel_name ?? p.channel_id };
   }
   return {
     eventType,

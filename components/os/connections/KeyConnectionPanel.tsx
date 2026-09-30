@@ -191,14 +191,18 @@ export function KeyConnectionPanel({
               <li key={step}>{step}</li>
             ))}
           </ol>
-          <p className="mt-3 text-[12px] font-medium text-fg-dim">Set to Read</p>
-          <ul className="mt-1.5 flex flex-wrap gap-1.5">
-            {config.readPermissions.map((p) => (
-              <li key={p} className="rounded-md border border-hairline bg-bg-raised px-2 py-0.5 text-[12px] text-fg-muted">
-                {p}
-              </li>
-            ))}
-          </ul>
+          {config.readPermissions.length > 0 && (
+            <>
+              <p className="mt-3 text-[12px] font-medium text-fg-dim">Set to Read</p>
+              <ul className="mt-1.5 flex flex-wrap gap-1.5">
+                {config.readPermissions.map((p) => (
+                  <li key={p} className="rounded-md border border-hairline bg-bg-raised px-2 py-0.5 text-[12px] text-fg-muted">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
           <form
             className="mt-4 space-y-2"
             onSubmit={(e) => {
@@ -207,7 +211,7 @@ export function KeyConnectionPanel({
             }}
           >
             <label htmlFor={`${providerId}-restricted-key`} className="label">
-              Restricted key
+              {config.inputLabel ?? "Restricted key"}
             </label>
             <input
               id={`${providerId}-restricted-key`}
@@ -217,12 +221,12 @@ export function KeyConnectionPanel({
               spellCheck={false}
               value={key}
               onChange={(e) => setKey(e.target.value)}
-              placeholder="rk_live_…"
+              placeholder={config.placeholder ?? "rk_live_…"}
               className="input w-full font-mono"
             />
             <p className="text-[12px] leading-4 text-fg-dim">
-              OASIS checks the key with {providerName} before saving it, then stores it encrypted. Full secret keys (sk_…)
-              are refused.
+              {config.checkNote ??
+                `OASIS checks the key with ${providerName} before saving it, then stores it encrypted. Full secret keys (sk_…) are refused.`}
             </p>
             <div className="flex gap-2 pt-1">
               <button type="submit" disabled={busy !== null || !key.trim()} className="btn-primary">

@@ -29,6 +29,7 @@ import { getTursoClient } from "@/lib/turso";
 import { listTenantIntegrationStatus } from "@/lib/tenant-integration-store";
 import { listUserIntegrationStatus } from "@/lib/user-integration-store";
 import { listActiveConnections } from "@/lib/connections/store";
+import { PROVIDERS, providerAvailability } from "@/lib/connections/registry";
 import type { ConnectionFact, ConnectorFacts, HeartbeatFact, KeyRowFact } from "@/lib/os/connectors";
 
 const HEARTBEAT_SERVICES = ["gws", "telegram"] as const;
@@ -116,5 +117,15 @@ export async function loadConnectorFacts(input: {
     loadPersonalGoogle(input.tenantId, input.userId),
     loadConnections(input.tenantId),
   ]);
-  return { keyRows, heartbeats, personalGoogleLinked, connections };
+  return { keyRows, heartbeats, personalGoogleLinked, connections, appNotConfigured: appNotConfiguredProviders() };
+}
+
+/**
+ * Providers that need OASIS's own app on this deployment and do not have it
+ * (Slack without its Worker secrets). Names only, from the registry; the card
+ * then says "app not configured yet" instead of offering a connect that
+ * cannot work.
+ */
+export function appNotConfiguredProviders(env: Readonly<Record<string, string | undefined>> = process.env): string[] {
+  return PROVIDERS.filter((p) => (p.liveWhenEnv?.length ?? 0) > 0 && providerAvailability(p, env) !== "live").map((p) => p.id);
 }

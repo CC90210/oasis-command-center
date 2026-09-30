@@ -3,9 +3,12 @@
  * does, which departments it leads, and where it lives.
  *
  * WHERE IT LIVES IS STATED, NOT IMPLIED. Web is the department channel (or the
- * custom teammate's chat) and says whether it can answer. Slack and Telegram
- * are v1 surfaces in the plan (decision 3) that do not exist yet, so they read
- * "Phase 2" rather than a toggle that does nothing.
+ * custom teammate's chat) and says whether it can answer. Slack is the
+ * workspace's real state (lib/slack/status.ts): the channels mapped to the
+ * department, "by @mention" when none is, "not connected", or "app not set up"
+ * where OASIS's Slack app is not on this deployment. Custom teammates do not
+ * answer in Slack, so their rows say nothing about it. Telegram teammates do not
+ * exist yet and read "Phase 2" rather than a toggle that does nothing.
  *
  * Server component. Dense rows on a hairline list, the same density as the
  * rail and the channel; no card grid.
@@ -14,6 +17,7 @@
 import Link from "next/link";
 import { Check } from "lucide-react";
 import type { TeammateHome } from "./roster";
+import type { SlackHome } from "@/lib/slack/status";
 
 /**
  * ready          answering (a key on file, and no failed last turn)
@@ -45,7 +49,22 @@ function Initial({ name }: { name: string }) {
   );
 }
 
-export function Homes({ web }: { web: WebState }) {
+function slackLabel(slack: SlackHome): string {
+  switch (slack.kind) {
+    case "channels":
+      return `Slack · ${slack.names.map((n) => `#${n}`).join(", ")}`;
+    case "mention_only":
+      return "Slack · by @mention";
+    case "not_connected":
+      return "Slack · not connected";
+    case "not_configured":
+      return "Slack · app not set up";
+    default:
+      return "Slack · couldn’t check";
+  }
+}
+
+export function Homes({ web, slack }: { web: WebState; slack?: SlackHome }) {
   return (
     <ul aria-label="Where it lives" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs leading-4">
       <li
@@ -56,7 +75,11 @@ export function Homes({ web }: { web: WebState }) {
         {web === "ready" && <Check className="h-3.5 w-3.5 text-status-engaged" strokeWidth={2} aria-hidden />}
         {WEB_LABEL[web]}
       </li>
-      <li className="text-fg-dim">Slack · Phase 2</li>
+      {slack && (
+        <li className={slack.kind === "channels" || slack.kind === "mention_only" ? "text-fg-muted" : "text-fg-dim"}>
+          {slackLabel(slack)}
+        </li>
+      )}
       <li className="text-fg-dim">Telegram · Phase 2</li>
     </ul>
   );
@@ -68,6 +91,7 @@ export function TeammateRow({
   meta,
   departments,
   web,
+  slack,
   href,
   badge,
 }: {
@@ -77,6 +101,8 @@ export function TeammateRow({
   meta?: string;
   departments?: readonly TeammateHome[];
   web: WebState;
+  /** Where it lives in Slack; absent for teammates that do not answer there. */
+  slack?: SlackHome;
   /** Where the name links: the teammate's channel or chat. */
   href?: string | null;
   /** A short state word on the right, e.g. "On" / "Off". */
@@ -111,7 +137,7 @@ export function TeammateRow({
             ))}
           </div>
         )}
-        <Homes web={web} />
+        <Homes web={web} slack={slack} />
       </div>
       {badge && (
         <span className="shrink-0 rounded-md border border-hairline px-1.5 py-0.5 text-[11px] font-medium leading-4 text-fg-muted">

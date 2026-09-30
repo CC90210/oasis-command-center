@@ -874,7 +874,7 @@ async function main() {
       console.error = quiet;
     }
     assert.equal(sent.length, before);
-    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["publish_post", "send_email"], "only kinds with a sanctioned send path");
+    assert.deepEqual(Object.keys(executors.EXECUTORS).sort(), ["publish_post", "send_email", "send_slack_message"], "only kinds with a sanctioned send path");
   });
 
   await check("readiness: an email from a client workspace has no sender here and fails loudly when approved", async () => {

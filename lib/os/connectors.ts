@@ -43,7 +43,8 @@ export type ConnectorCategoryKey =
   | "meetings"
   | "messaging"
   | "ads_social"
-  | "crm_import";
+  | "crm_import"
+  | "ai_models";
 
 /** Catalog groups, in the order the hub renders them. */
 export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: string }[] = [
@@ -53,6 +54,7 @@ export const CONNECTOR_CATEGORIES: readonly { key: ConnectorCategoryKey; label: 
   { key: "messaging", label: "Messaging" },
   { key: "ads_social", label: "Ads & social" },
   { key: "crm_import", label: "CRM import" },
+  { key: "ai_models", label: "AI models" },
 ];
 
 export type ConnectorIcon =
@@ -328,15 +330,23 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     departments: ["chief_of_staff", "sales", "marketing", "client_success"],
     brandColor: null,
     icon: { kind: "monogram", letters: "Sl", reason: "Removed from Simple Icons at Slack's request" },
-    reads: ["Messages in the channels you add an AI teammate to, and messages sent to it directly"],
+    reads: [
+      "Messages in the public channels you map to a department or a client",
+      "Messages that @mention OASIS, and the name and email of the person who wrote them",
+    ],
     does: [
-      "Your department agents reply in those channels under their own names",
-      "Approval requests arrive as buttons, and nothing goes out until someone approves",
-      "Messages are never used for training",
+      "Your department drafts a reply in the thread when someone @mentions it, under the department's name",
+      "Nothing is posted until an owner or admin approves it, in the Feed or with the button in Slack",
+      "Messages in a channel mapped to a client show on that client's Conversations tab, and are deleted after 90 days",
+      "Guests, people from other companies and channels shared with other companies are never read or answered",
     ],
     keywords: ["chat", "channels", "team"],
-    live: null,
-    plannedFor: "Phase 2",
+    live: {
+      source: { kind: "tenant_connection", provider: "slack" },
+      connect: { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" },
+    },
+    pendingNote: "OASIS's Slack app is not set up on this deployment yet, so Slack cannot be installed here.",
+    seeAlso: { href: "/settings/chat-apps", label: "Install Slack and map channels under Chat apps" },
   },
   {
     slug: "telegram",
@@ -494,6 +504,34 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     live: null,
     plannedFor: "Phase 2",
   },
+
+  // AI models
+  {
+    // Jev, TypeSafe's System One model: a fast classifier the workspace pays
+    // for with its OWN TypeSafe key. Shadow only: it never decides anything
+    // (lib/jev/mode.ts). Mode and agreement live on Settings > AI brain.
+    slug: "jev",
+    name: "Jev (TypeSafe)",
+    summary: "A fast classifier, run beside OASIS in shadow",
+    category: "ai_models",
+    // Client Success: support-ticket triage. Chief of Staff: which department a
+    // general Slack message belongs to. The two places it shadows.
+    departments: ["client_success", "chief_of_staff"],
+    brandColor: null,
+    icon: { kind: "monogram", letters: "Jv", reason: "Not in Simple Icons" },
+    reads: ["Jev's answers to the questions OASIS asks it: a label and how sure it is"],
+    does: [
+      "In shadow mode, classifies new support tickets and general Slack messages beside OASIS's normal path, and records only whether it agreed",
+      "Never decides, sends or changes anything on its own",
+      "The text it classifies goes to TypeSafe in the United States. TypeSafe's policy says it does not train on it",
+    ],
+    keywords: ["typesafe", "classifier", "system one", "shadow", "model"],
+    live: {
+      source: { kind: "tenant_connection", provider: "jev" },
+      connect: { kind: "key_form", label: "Connect Jev", provider: "jev" },
+    },
+    seeAlso: { href: "/settings/ai", label: "Mode, cost and agreement are under AI brain" },
+  },
 ];
 
 // ── Status ─────────────────────────────────────────────────────────────────
@@ -559,6 +597,11 @@ export type ConnectorFacts = {
   personalGoogleLinked: boolean | null;
   /** The tenant's live Connections-framework connections. */
   connections: readonly ConnectionFact[] | null;
+  /**
+   * Providers that need OASIS's own app and do not have it on this deployment
+   * (Slack without its Worker secrets). Their cards say so and offer nothing.
+   */
+  appNotConfigured?: readonly string[] | null;
 };
 
 /** "5m ago" / "3h ago" / "Aug 3" — computed from an explicit now, so a test can pin it. */
@@ -767,6 +810,15 @@ export function resolveConnectorStatus(
 
   const source = def.live.source;
   if (source.kind === "tenant_connection") {
+    // An app OASIS itself has not been given on this deployment cannot be
+    // connected, whatever the facts say: say so rather than offer a dead button.
+    if (facts.appNotConfigured?.includes(source.provider)) {
+      return {
+        kind: "coming_soon",
+        label: `${def.name} app not configured yet`,
+        detail: def.pendingNote ?? `OASIS's ${def.name} app is not set up on this deployment yet.`,
+      };
+    }
     if (!facts.connections) return UNKNOWN;
     return frameworkStatus(def, source.provider, facts.connections, facts.keyRows, nowMs);
   }

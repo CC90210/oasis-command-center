@@ -32,6 +32,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { checkCronAuth } from "@/lib/cron-auth";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { runConnectionHealthPass } from "@/lib/connections/health";
+import { purgeSlackRetention } from "@/lib/slack/retention";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -44,9 +45,21 @@ async function handle(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "database_not_configured" }, { status: 503 });
   }
   try {
-    const result = await runConnectionHealthPass({ db: getTursoClient(), now: () => new Date() });
-    const ok = result.errors.length === 0;
-    return NextResponse.json({ ok, ...result }, { status: ok ? 200 : 500 });
+    const db = getTursoClient();
+    const result = await runConnectionHealthPass({ db, now: () => new Date() });
+    // Slack's 90-day retention rides on this schedule (lib/slack/retention.ts).
+    // Its own failure is reported by code, after the health pass has run.
+    let slackRetention: Record<string, unknown>;
+    let retentionFailed = false;
+    try {
+      slackRetention = { ...(await purgeSlackRetention(db, new Date())) };
+    } catch (err) {
+      console.error("[cron.connection-health.slack-retention]", err instanceof Error ? err.stack : err);
+      slackRetention = { error: "slack_retention_failed" };
+      retentionFailed = true;
+    }
+    const ok = result.errors.length === 0 && !retentionFailed;
+    return NextResponse.json({ ok, ...result, slack_retention: slackRetention }, { status: ok ? 200 : 500 });
   } catch (err) {
     console.error("[cron.connection-health]", err instanceof Error ? err.stack : err);
     return NextResponse.json({ ok: false, error: "connection_health_failed" }, { status: 500 });

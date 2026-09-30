@@ -135,7 +135,7 @@ assert.notEqual(glyphColor(connectorBySlug("cal-com")!), "#292929", "Cal.com's n
 
 // The live set is pinned. Making a connector live means pointing it at a store
 // that exists — this list changes in the same commit, on purpose.
-const LIVE = ["stripe", "google-workspace", "telegram", "twilio", "constant-contact"].sort();
+const LIVE = ["stripe", "google-workspace", "telegram", "twilio", "constant-contact", "slack", "jev"].sort();
 assert.deepEqual(
   CONNECTOR_CATALOG.filter((c) => c.live).map((c) => c.slug).sort(),
   LIVE,
@@ -153,8 +153,13 @@ for (const def of CONNECTOR_CATALOG) {
     // A Connections-framework card reads tenant_connections, which the facts
     // loader must actually load; the provider must be LIVE in the registry
     // (tests/os-connections.test.ts pins the registry side).
+    // Live, or live only where OASIS's own app is configured (Slack's
+    // liveWhenEnv); such a card says "app not configured yet" elsewhere.
     const provider = providerById(src.provider);
-    assert.ok(provider && provider.availability === "live", `${def.slug}: "${src.provider}" is not a live provider`);
+    assert.ok(
+      provider && (provider.availability === "live" || (provider.liveWhenEnv?.length ?? 0) > 0),
+      `${def.slug}: "${src.provider}" is not a live provider`,
+    );
     assert.equal(src.provider, def.slug, `${def.slug}: a framework card's provider id is its slug`);
     assert.match(factsSource, /listActiveConnections\(/, `${def.slug}: connections are never loaded`);
     continue;
@@ -352,6 +357,8 @@ const uiFiles = [
   ...readdirSync(join(root, "components/os/connections")).map((f) => `components/os/connections/${f}`),
   "components/settings/ChatAppCard.tsx",
   "components/settings/AddonCard.tsx",
+  "components/settings/JevCard.tsx",
+  "app/settings/ai/page.tsx",
   "app/settings/connections/page.tsx",
   "app/settings/chat-apps/page.tsx",
   "app/settings/notifications/page.tsx",
@@ -364,9 +371,16 @@ const hub = read("components/os/connections/ConnectionsHub.tsx");
 assert.match(hub, /status \?\? \{ kind: "unknown"/, "the hub must read a missing status as unknown");
 assert.match(read("app/settings/connections/page.tsx"), /resolveConnectorStatus\(/);
 assert.match(read("app/settings/chat-apps/page.tsx"), /resolveConnectorStatus\(telegram/);
-// Slack is Phase 2 on both surfaces.
-assert.equal(connectorBySlug("slack")!.live, null);
-assert.equal(connectorBySlug("slack")!.plannedFor, "Phase 2");
+// Slack is a Connections-framework card set up under Chat apps, and it says
+// "app not configured yet" wherever OASIS's Slack app is not on the deployment.
+const slackDef = connectorBySlug("slack")!;
+assert.deepEqual(slackDef.live?.source, { kind: "tenant_connection", provider: "slack" });
+assert.deepEqual(slackDef.live?.connect, { kind: "link", href: "/settings/chat-apps", label: "Set up in Chat apps" });
+assert.equal(
+  resolveConnectorStatus(slackDef, { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [], appNotConfigured: ["slack"] }, Date.now()).label,
+  "Slack app not configured yet",
+);
+assert.doesNotMatch(JSON.stringify(slackDef.does), /never used for training/i, "a claim nothing enforces is not on the card");
 assert.match(read("app/settings/chat-apps/page.tsx"), /Coming in Phase 2/);
 
 // Search: by name, keyword and category label; nonsense matches nothing.

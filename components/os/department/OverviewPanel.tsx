@@ -20,9 +20,38 @@ import type { AttentionItem } from "./numbers";
 import { describeSchedule, lastRunLabel, routineTitle, type RoutineRow } from "./routine-rules";
 import type { Read } from "./routines";
 import { SuggestedAsks } from "./SuggestedAsks";
+import type { SlackHome } from "@/lib/slack/status";
 
 const CONNECTIONS_HREF = "/settings/connections";
+const CHAT_APPS_HREF = "/settings/chat-apps";
 const ROUTINES_SHOWN = 6;
+
+/** Where this department answers in Slack, from the workspace's real state (lib/slack/status.ts). */
+function SlackLine({ slack, canManage }: { slack: SlackHome; canManage: boolean }) {
+  const text =
+    slack.kind === "channels"
+      ? `Answers @mentions in ${slack.names.map((n) => `#${n}`).join(", ")}.`
+      : slack.kind === "mention_only"
+        ? "No channel is mapped to this department. It answers an @mention that names it."
+        : slack.kind === "not_connected"
+          ? "Slack is not connected to this workspace."
+          : slack.kind === "not_configured"
+            ? "OASIS's Slack app is not set up on this deployment yet."
+            : "Could not check Slack just now.";
+  return (
+    <p className="mb-2.5 text-[13px] leading-5 text-fg-muted">
+      <span className="font-medium text-fg">Slack</span> {text}
+      {canManage && slack.kind !== "not_configured" && (
+        <>
+          {" "}
+          <Link href={CHAT_APPS_HREF} prefetch={false} className="text-accent hover:underline">
+            Chat apps
+          </Link>
+        </>
+      )}
+    </p>
+  );
+}
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -191,6 +220,8 @@ export type OverviewPanelProps = {
   tiles: readonly KpiTileProps[];
   routines: Read<RoutineRow[]>;
   connections: readonly string[];
+  /** Where this department lives in Slack; null when it has no teammate to answer there. */
+  slack?: SlackHome | null;
   canManageConnections: boolean;
   asks: readonly SuggestedAsk[];
 };
@@ -202,6 +233,7 @@ export function OverviewPanel({
   tiles,
   routines,
   connections,
+  slack = null,
   canManageConnections,
   asks,
 }: OverviewPanelProps) {
@@ -223,6 +255,7 @@ export function OverviewPanel({
         <Routines routines={routines} />
       </Section>
       <Section title="Connections">
+        {slack && <SlackLine slack={slack} canManage={canManageConnections} />}
         <Connections apps={connections} canManage={canManageConnections} />
       </Section>
       {asks.length > 0 && (

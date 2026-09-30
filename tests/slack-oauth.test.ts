@@ -1,0 +1,394 @@
+/**
+ * slack-oauth.test.ts - "Add to Slack": the generic authorize/callback routes,
+ * the single-use signed consent state, and the registry switch that keeps
+ * Slack "coming soon" until OASIS's Slack app exists on the deployment.
+ *
+ * WHY. An install hands OASIS a bot token for a company's Slack. The failures
+ * that matter are silent: a consent finished into the wrong workspace (OAuth
+ * CSRF), a state replayed or forged, a Slack team attached to two OASIS
+ * workspaces, a token saved with no connection (or a connection with no
+ * token), and an Install button on a deployment that cannot finish it.
+ *
+ * Real routes, real session, real store and token encryption on a local libSQL
+ * file (migrations bravo__187 and bravo__197). Slack's oauth.v2.access and
+ * auth.test are mocked at the fetch boundary; any other host fails the test.
+ *
+ * Run: node --conditions=react-server --import tsx tests/slack-oauth.test.ts
+ */
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createClient } from "@libsql/client";
+
+const dbFile = join(mkdtempSync(join(tmpdir(), "slack-oauth-")), "test.db");
+process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
+process.env.TURSO_DB_PATH = dbFile;
+delete process.env.TURSO_DATABASE_URL;
+delete process.env.TURSO_DB_URL;
+process.env.EMPIRE_AUTH_BACKEND = "turso";
+process.env.AUTH_SESSION_SECRET = "slack-oauth-test-session-secret-long-enough-0001";
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "slack-oauth-test-field-encryption-passphrase";
+process.env.PUBLIC_APP_URL = "https://oasisai.work";
+const SLACK_ENV = {
+  SLACK_CLIENT_ID: "1234.5678",
+  SLACK_CLIENT_SECRET: "slack-oauth-test-client-secret",
+  SLACK_SIGNING_SECRET: "slack-oauth-test-signing-secret",
+  CONNECTIONS_OAUTH_STATE_SECRET: "slack-oauth-test-state-secret-long-enough-000001",
+} as const;
+function setSlackEnv(on: boolean, except: readonly string[] = []) {
+  for (const [k, v] of Object.entries(SLACK_ENV)) {
+    if (on && !except.includes(k)) process.env[k] = v;
+    else delete process.env[k];
+  }
+}
+setSlackEnv(false);
+
+const SESSION_COOKIE_NAME = "oasis_session";
+let sessionCookie: string | undefined;
+function stub(request: string, exports: Record<string, unknown>) {
+  const p = require.resolve(request);
+  require.cache[p] = { id: p, filename: p, path: dirname(p), loaded: true, children: [], paths: [], exports } as unknown as NodeModule;
+}
+stub("next/headers", {
+  cookies: async () => ({
+    get: (name: string) => (name === SESSION_COOKIE_NAME && sessionCookie ? { name, value: sessionCookie } : undefined),
+    getAll: () => (sessionCookie ? [{ name: SESSION_COOKIE_NAME, value: sessionCookie }] : []),
+    has: (name: string) => name === SESSION_COOKIE_NAME && Boolean(sessionCookie),
+    set: () => undefined,
+  }),
+  headers: async () => new Headers(),
+  draftMode: async () => ({ isEnabled: false }),
+});
+
+const ALPHA = "a1a1a1a1-0000-4000-8000-0000000000a1";
+const BRAVO_CO = "b2b2b2b2-0000-4000-8000-0000000000b2";
+type U = { id: string; email: string };
+const USERS: Record<"ownerA" | "adminA" | "ownerB" | "memberA", U> = {
+  ownerA: { id: "0d000000-0000-4000-8000-000000000001", email: "owner@alpha.test" },
+  adminA: { id: "0d000000-0000-4000-8000-000000000002", email: "admin@alpha.test" },
+  ownerB: { id: "0d000000-0000-4000-8000-000000000003", email: "owner@bravo.test" },
+  memberA: { id: "0d000000-0000-4000-8000-000000000004", email: "member@alpha.test" },
+};
+async function login(user: U | null) {
+  if (!user) {
+    sessionCookie = undefined;
+    return;
+  }
+  const { signSession } = await import("../lib/turso-auth");
+  sessionCookie = signSession({ sub: user.id, email: user.email, exp: Math.floor(Date.now() / 1000) + 3600, ver: 0 });
+}
+
+// Slack's install endpoints, at the fetch boundary. Each code maps to a team.
+const CODES: Record<string, { team: string; name: string; token: string }> = {
+  "code-alpha": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-alpha-install-token" },
+  "code-alpha-2": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-alpha-install-token-2" },
+  "code-bravo-same-team": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-bravo-attempt" },
+  "code-alpha-other-team": { team: "T0SECOND", name: "Second Slack", token: "xoxb-second-token" },
+};
+const exchanges: Array<Record<string, string>> = [];
+const realFetch = globalThis.fetch;
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const href = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const url = new URL(href);
+  if (url.hostname !== "slack.com") throw new Error(`unexpected network call in test: ${href}`);
+  const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  if (url.pathname === "/api/oauth.v2.access") {
+    const form = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")));
+    exchanges.push(form);
+    const c = CODES[form.code];
+    if (!c || form.client_secret !== SLACK_ENV.SLACK_CLIENT_SECRET) return json({ ok: false, error: "invalid_code" });
+    return json({ ok: true, access_token: c.token, token_type: "bot", scope: "app_mentions:read,chat:write", bot_user_id: "UBOT", team: { id: c.team, name: c.name } });
+  }
+  if (url.pathname === "/api/auth.test") {
+    const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
+    const c = Object.values(CODES).find((x) => x.token === token);
+    return json(c ? { ok: true, team_id: c.team, team: c.name } : { ok: false, error: "invalid_auth" });
+  }
+  return json({ ok: false, error: "unknown_method" });
+}) as typeof fetch;
+
+let failures = 0;
+let passed = 0;
+async function check(name: string, fn: () => Promise<void> | void) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ok    ${name}`);
+  } catch (e) {
+    failures += 1;
+    console.log(`  FAIL  ${name}\n        ${(e as Error).stack?.split("\n").slice(0, 8).join("\n        ")}`);
+  }
+}
+
+const root = join(__dirname, "..");
+const read = (rel: string) => readFileSync(join(root, rel), "utf8");
+
+async function main() {
+  const db = createClient({ url: `file:${dbFile}` });
+  await db.executeMultiple(`
+    CREATE TABLE "_supabase_auth_users" (id TEXT PRIMARY KEY, email TEXT NOT NULL,
+      session_version INTEGER NOT NULL DEFAULT 0, banned_until TEXT, deleted_at TEXT);
+    CREATE TABLE user_profiles (id TEXT PRIMARY KEY, auth_user_id TEXT, email TEXT, tenant_id TEXT,
+      team_role TEXT, is_owner INTEGER DEFAULT 0, admin_access INTEGER DEFAULT 0,
+      onboarding_completed_at TEXT, updated_at TEXT, deactivated_at TEXT);
+    CREATE TABLE tenants (id TEXT PRIMARY KEY, slug TEXT, name TEXT);
+    CREATE TABLE "tenant_integration_credentials" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+      "tenant_id" TEXT NOT NULL, "service" TEXT NOT NULL, "field_key" TEXT NOT NULL,
+      "encrypted_value" TEXT NOT NULL, "last_tested_at" TEXT, "last_test_ok" INTEGER, "last_test_error" TEXT,
+      "created_by" TEXT,
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      "updated_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY ("id"));
+    CREATE UNIQUE INDEX "tic_key" ON "tenant_integration_credentials" (tenant_id, service, field_key);
+    CREATE TABLE "tenant_audit_log" (
+      "id" TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+      "tenant_id" TEXT NOT NULL, "actor_user_id" TEXT, "actor_email" TEXT, "action_type" TEXT NOT NULL,
+      "target_table" TEXT, "target_id" TEXT, "before" TEXT, "after" TEXT, "ip_hash" TEXT, "user_agent" TEXT,
+      "metadata" TEXT NOT NULL DEFAULT '{}',
+      "created_at" TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), PRIMARY KEY ("id"));
+    CREATE TABLE agent_events (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), event_type TEXT, publisher_agent TEXT,
+      target_agent TEXT, severity TEXT, payload TEXT, correlation_id TEXT, status TEXT, published_at TEXT,
+      created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+  `);
+  await db.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+  await db.executeMultiple(read("database/turso/bravo__197_slack_jev.sql"));
+  const stamp = "2026-09-01T00:00:00Z";
+  const profile = (user: U, tenant: string, role: string, owner: 0 | 1 = 0) => ({
+    sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [`p-${user.id}`, user.id, user.email, tenant, role, owner, stamp, stamp],
+  });
+  await db.batch(
+    [
+      ...Object.values(USERS).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'alpha-co', 'Alpha Co')", args: [ALPHA] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'bravo-co', 'Bravo Co')", args: [BRAVO_CO] },
+      profile(USERS.ownerA, ALPHA, "owner", 1),
+      profile(USERS.adminA, ALPHA, "admin"),
+      profile(USERS.memberA, ALPHA, "member"),
+      profile(USERS.ownerB, BRAVO_CO, "owner", 1),
+    ],
+    "write",
+  );
+
+  const { NextRequest } = await import("next/server");
+  const registry = await import("../lib/connections/registry");
+  const oauth = await import("../lib/connections/oauth");
+  const { appNotConfiguredProviders } = await import("../components/os/connections/connector-facts");
+  const connectors = await import("../lib/os/connectors");
+  const authorizeRoute = await import("../app/api/connections/[provider]/authorize/route");
+  const callbackRoute = await import("../app/api/connections/[provider]/callback/route");
+  const { decryptField } = await import("../lib/field-encryption");
+  const { slackInstallBanner } = await import("../lib/slack/copy");
+
+  const ctx = (provider: string) => ({ params: Promise.resolve({ provider }) });
+  const authorize = async (provider = "slack") =>
+    authorizeRoute.GET(new NextRequest(`https://oasisai.work/api/connections/${provider}/authorize`), ctx(provider));
+  const callback = async (q: Record<string, string>, provider = "slack") =>
+    callbackRoute.GET(new NextRequest(`https://oasisai.work/api/connections/${provider}/callback?${new URLSearchParams(q)}`), ctx(provider));
+  const stateFrom = (res: Response) => {
+    const loc = new URL(res.headers.get("location") ?? "");
+    return { loc, state: loc.searchParams.get("state") ?? "" };
+  };
+  const landed = (res: Response) => new URL(res.headers.get("location") ?? "https://x.invalid/");
+  const count = async (sql: string, args: unknown[] = []) => Number((await db.execute({ sql, args: args as never })).rows[0].n);
+
+  console.log("slack-oauth:");
+
+  // ── 1. The registry switch ─────────────────────────────────────────────
+
+  await check("the registry keeps Slack coming soon with the secrets absent, and with any one of them missing", () => {
+    const slack = registry.providerById("slack")!;
+    assert.equal(slack.availability, "coming_soon", "the static row never claims live");
+    assert.equal(registry.providerAvailability(slack, {}), "coming_soon");
+    for (const name of Object.keys(SLACK_ENV)) {
+      const env: Record<string, string> = { ...SLACK_ENV };
+      delete env[name];
+      assert.equal(registry.providerAvailability(slack, env), "coming_soon", `missing ${name} must keep Slack coming soon`);
+      env[name] = "   ";
+      assert.equal(registry.providerAvailability(slack, env), "coming_soon", `a blank ${name} is not set`);
+    }
+    assert.equal(registry.providerAvailability(slack, SLACK_ENV), "live");
+    assert.deepEqual(registry.missingProviderEnv(slack, { SLACK_CLIENT_ID: "x" }), ["SLACK_CLIENT_SECRET", "SLACK_SIGNING_SECRET", "CONNECTIONS_OAUTH_STATE_SECRET"]);
+    // Every other coming-soon OAuth provider stays coming soon whatever the env holds.
+    for (const id of ["quickbooks", "xero", "gohighlevel", "meta", "zoom", "plaid"]) {
+      assert.equal(registry.providerAvailability(registry.providerById(id)!, { ...SLACK_ENV, INTUIT_CLIENT_ID: "x", INTUIT_CLIENT_SECRET: "y" }), "coming_soon", id);
+    }
+    assert.deepEqual([...registry.providerById("slack")!.scopes.base].sort(), [
+      "app_mentions:read", "channels:history", "channels:read", "chat:write", "commands", "team:read", "users:read", "users:read.email",
+    ]);
+  });
+
+  await check("with the secrets absent, the Slack card says 'app not configured yet' and offers no connect", () => {
+    assert.deepEqual(appNotConfiguredProviders({}), ["slack"]);
+    const status = connectors.resolveConnectorStatus(
+      connectors.connectorBySlug("slack")!,
+      { keyRows: [], heartbeats: [], personalGoogleLinked: null, connections: [], appNotConfigured: appNotConfiguredProviders({}) },
+      Date.now(),
+    );
+    assert.equal(status.kind, "coming_soon");
+    assert.equal(status.label, "Slack app not configured yet");
+    assert.deepEqual(appNotConfiguredProviders(SLACK_ENV), []);
+  });
+
+  await check("authorize refuses when the app is not configured: nothing is written, the browser is told why", async () => {
+    await login(USERS.ownerA);
+    const res = await authorize();
+    assert.equal(res.status, 303);
+    const to = landed(res);
+    assert.equal(to.pathname, "/settings/chat-apps");
+    assert.equal(to.searchParams.get("slack"), "error");
+    assert.equal(to.searchParams.get("reason"), "not_configured");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM oauth_states"), 0);
+  });
+
+  await check("no fallback secret: without CONNECTIONS_OAUTH_STATE_SECRET nothing starts, though the encryption key is set", async () => {
+    setSlackEnv(true, ["CONNECTIONS_OAUTH_STATE_SECRET"]);
+    try {
+      const res = await authorize();
+      assert.equal(landed(res).searchParams.get("reason"), "not_configured");
+      assert.throws(() => oauth.oauthStateSecret(process.env), /no fallback/);
+      assert.equal(await count("SELECT COUNT(*) AS n FROM oauth_states"), 0);
+    } finally {
+      setSlackEnv(false);
+    }
+  });
+
+  setSlackEnv(true);
+
+  await check("only an owner or admin may start an install", async () => {
+    await login(USERS.memberA);
+    const res = await authorize();
+    assert.equal(res.status, 403);
+    await login(null);
+    assert.equal((await authorize()).status, 401);
+  });
+
+  await check("authorize sends the owner to Slack with the bot scopes and a signed, stored, single-use state", async () => {
+    await login(USERS.ownerA);
+    const res = await authorize();
+    assert.equal(res.status, 303);
+    const { loc, state } = stateFrom(res);
+    assert.equal(loc.origin + loc.pathname, "https://slack.com/oauth/v2/authorize");
+    assert.equal(loc.searchParams.get("client_id"), SLACK_ENV.SLACK_CLIENT_ID);
+    assert.equal(loc.searchParams.get("redirect_uri"), "https://oasisai.work/api/connections/slack/callback");
+    assert.equal(loc.searchParams.get("scope"), registry.providerById("slack")!.scopes.base.join(","));
+    assert.ok(state.includes("."), "body.signature");
+    const rows = (await db.execute("SELECT tenant_id, user_id, provider, consumed_at FROM oauth_states")).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].tenant_id, ALPHA);
+    assert.equal(rows[0].user_id, USERS.ownerA.id);
+    assert.equal(rows[0].provider, "slack");
+    assert.equal(rows[0].consumed_at, null);
+  });
+
+  await check("a provider with no finish step never starts a consent", async () => {
+    const res = await authorize("stripe");
+    assert.equal(landed(res).searchParams.get("reason"), "no_install_flow");
+  });
+
+  // ── 2. The callback ───────────────────────────────────────────────────────
+
+  let firstState = "";
+  await check("the callback connects the team, routes it to this workspace and stores the token encrypted", async () => {
+    await login(USERS.ownerA);
+    firstState = stateFrom(await authorize()).state;
+    const res = await callback({ code: "code-alpha", state: firstState });
+    const to = landed(res);
+    assert.equal(to.pathname, "/settings/chat-apps");
+    assert.equal(to.searchParams.get("slack"), "connected", to.search);
+    const conn = (await db.execute("SELECT id, tenant_id, external_account_id, external_account_label, status, last_health_verdict FROM tenant_connections WHERE provider = 'slack'")).rows;
+    assert.equal(conn.length, 1);
+    assert.equal(conn[0].tenant_id, ALPHA);
+    assert.equal(conn[0].external_account_id, "T0ALPHA");
+    assert.equal(conn[0].status, "connected", "a live auth.test proved it");
+    assert.equal(conn[0].last_health_verdict, "healthy");
+    const route = (await db.execute("SELECT tenant_id, connection_id FROM provider_webhook_routes WHERE provider = 'slack' AND external_key = 'T0ALPHA'")).rows;
+    assert.equal(route.length, 1);
+    assert.equal(route[0].tenant_id, ALPHA);
+    const cred = (await db.execute({ sql: "SELECT field_key, encrypted_value FROM tenant_integration_credentials WHERE service = ?", args: [`connection:${conn[0].id}`] })).rows;
+    const token = cred.find((r) => r.field_key === "bot_token");
+    assert.ok(token, "the bot token is stored");
+    assert.notEqual(String(token!.encrypted_value), "xoxb-alpha-install-token", "never in plain text");
+    assert.equal(decryptField(String(token!.encrypted_value)), "xoxb-alpha-install-token");
+    assert.equal(exchanges[exchanges.length - 1].redirect_uri, "https://oasisai.work/api/connections/slack/callback");
+  });
+
+  await check("the state is single-use: the same state again is refused and nothing changes", async () => {
+    const before = await count("SELECT COUNT(*) AS n FROM tenant_connections");
+    const exchangesBefore = exchanges.length;
+    const res = await callback({ code: "code-alpha-2", state: firstState });
+    const to = landed(res);
+    assert.equal(to.searchParams.get("slack"), "error");
+    assert.equal(to.searchParams.get("reason"), "state_invalid");
+    assert.equal(exchanges.length, exchangesBefore, "the code was never exchanged");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections"), before);
+  });
+
+  await check("a tampered state (payload or signature changed) is refused before Slack is called", async () => {
+    const fresh = stateFrom(await authorize()).state;
+    const [body, sig] = fresh.split(".");
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Record<string, unknown>;
+    const forgedBody = Buffer.from(JSON.stringify({ ...payload, t: BRAVO_CO })).toString("base64url");
+    const exchangesBefore = exchanges.length;
+    for (const tampered of [`${forgedBody}.${sig}`, `${body}.${sig.slice(0, -2)}AA`, "not-a-state"]) {
+      const res = await callback({ code: "code-alpha", state: tampered });
+      assert.equal(landed(res).searchParams.get("reason"), "state_invalid", tampered.slice(0, 20));
+    }
+    assert.equal(exchanges.length, exchangesBefore);
+  });
+
+  await check("a state started by one person cannot be finished by another (no consent lands in the wrong workspace)", async () => {
+    await login(USERS.ownerA);
+    const started = stateFrom(await authorize()).state;
+    await login(USERS.ownerB);
+    const exchangesBefore = exchanges.length;
+    const res = await callback({ code: "code-alpha", state: started });
+    assert.equal(landed(res).searchParams.get("reason"), "wrong_person");
+    assert.equal(exchanges.length, exchangesBefore);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ?", [BRAVO_CO]), 0);
+  });
+
+  await check("a Slack team already connected to another workspace is refused, and nothing is stored for the second one", async () => {
+    await login(USERS.ownerB);
+    const state = stateFrom(await authorize()).state;
+    const res = await callback({ code: "code-bravo-same-team", state });
+    assert.equal(landed(res).searchParams.get("reason"), "team_connected_elsewhere");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_connections WHERE tenant_id = ?", [BRAVO_CO]), 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM tenant_integration_credentials WHERE tenant_id = ?", [BRAVO_CO]), 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE tenant_id = ?", [BRAVO_CO]), 0);
+  });
+
+  await check("a second, different team while one is connected is refused: switching is an explicit disconnect", async () => {
+    await login(USERS.adminA);
+    const state = stateFrom(await authorize()).state;
+    const res = await callback({ code: "code-alpha-other-team", state });
+    assert.equal(landed(res).searchParams.get("reason"), "another_team_connected");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM provider_webhook_routes WHERE external_key = 'T0SECOND'"), 0);
+  });
+
+  await check("a cancelled install connects nothing", async () => {
+    await login(USERS.ownerA);
+    const res = await callback({ error: "access_denied", state: "whatever" });
+    assert.equal(landed(res).searchParams.get("slack"), "denied");
+  });
+
+  await check("the return banner turns only known codes into words and never echoes the query", () => {
+    assert.equal(slackInstallBanner("connected", null)?.ok, true);
+    assert.match(slackInstallBanner("error", "team_connected_elsewhere")!.text, /another OASIS workspace/);
+    const hostile = slackInstallBanner("error", "<script>alert(1)</script>")!;
+    assert.doesNotMatch(hostile.text, /script/);
+    assert.equal(slackInstallBanner("weird", "x"), null);
+  });
+
+  globalThis.fetch = realFetch;
+  console.log(`\n${passed} passed, ${failures} failed`);
+  if (failures > 0) process.exit(1);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

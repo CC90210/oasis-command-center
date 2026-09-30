@@ -15,8 +15,8 @@ import {
   deleteTenantIntegrationService,
   setTenantIntegrationValue,
 } from "@/lib/tenant-integration-store";
-import { providerById, type ProviderDef } from "@/lib/connections/registry";
-import { checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
+import { providerForEnv, type ProviderDef } from "@/lib/connections/registry";
+import { checkJevApiKey, checkStripeRestrictedKey, credentialServiceFor } from "@/lib/connections/rules";
 import {
   claimConnection,
   deleteUnprovenClaim,
@@ -57,8 +57,13 @@ const fail = (status: number, error: string, message: string, extra: Record<stri
  * Resolve a [provider] segment. Unknown → 404; known but not buildable yet →
  * 409 with the honest reason. Never a fake connect.
  */
-export function resolveProvider(id: string): { ok: true; provider: ProviderDef } | { ok: false; result: ServiceResult } {
-  const provider = providerById(id);
+export function resolveProvider(
+  id: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): { ok: true; provider: ProviderDef } | { ok: false; result: ServiceResult } {
+  // As THIS deployment sees it: Slack is live only where OASIS's Slack app
+  // secrets are set (registry.providerAvailability).
+  const provider = providerForEnv(id, env);
   if (!provider) return { ok: false, result: fail(404, "unknown_provider", "OASIS has no connection called that.") };
   if (provider.availability !== "live") {
     return {
@@ -74,6 +79,14 @@ export function resolveProvider(id: string): { ok: true; provider: ProviderDef }
 }
 
 // ── Connect (restricted key) ──────────────────────────────────────────────
+
+type KeyFormatCheck = { ok: true; key: string } | { ok: false; error: string; message: string };
+
+/** The format rule per pasted-key provider. A provider missing here cannot connect. */
+const KEY_FORMAT: Readonly<Record<string, (raw: unknown) => KeyFormatCheck>> = {
+  stripe: checkStripeRestrictedKey,
+  jev: checkJevApiKey,
+};
 
 const PROBE_REFUSAL_STATUS: Record<string, number> = {
   key_rejected: 422,
@@ -108,8 +121,10 @@ export async function connectWithRestrictedKey(
   if (provider.authKind !== "restricted_key" || !provider.restrictedKey) {
     return fail(400, "wrong_connect_method", `${provider.label} does not connect with a pasted key.`);
   }
-  // Stripe is the only restricted-key provider; its format rule is Stripe's.
-  const check = checkStripeRestrictedKey(rawKey);
+  // Each pasted-key provider has its own format rule, checked before anything
+  // is sent anywhere.
+  const check = KEY_FORMAT[provider.id]?.(rawKey) ?? null;
+  if (!check) return fail(500, "key_rule_missing", `OASIS has no key rule for ${provider.label}.`);
   if (!check.ok) return fail(422, check.error, check.message);
 
   const probe = probeFor(provider.id);
@@ -214,7 +229,7 @@ export async function connectWithRestrictedKey(
  * the owner nothing, while an errored one says what happened and can be
  * disconnected from its card.
  */
-async function undoUnsavedClaim(
+export async function undoUnsavedClaim(
   deps: ConnectionsDeps,
   tenantId: string,
   claim: Extract<ClaimResult, { ok: true }>,
