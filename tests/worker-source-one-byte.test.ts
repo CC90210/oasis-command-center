@@ -53,7 +53,7 @@ const WIDE = /[^\u0000-\u00ff]/;
  * above U+00FF, as `line: text` (a tagged template is cut to its first 80
  * characters).
  */
-export function wideRegexLiterals(code: string, fileName: string): string[] {
+export function wideRawLiterals(code: string, fileName: string): string[] {
   const kind = /\.(tsx|jsx)$/.test(fileName) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, kind);
   const found: string[] = [];
@@ -81,7 +81,7 @@ const files = [...SCAN_DIRS.flatMap((d) => walk(join(ROOT, d))), ...SCAN_FILES.m
 const offenders: string[] = [];
 for (const file of files) {
   const rel = relative(ROOT, file).split(sep).join("/");
-  for (const hit of wideRegexLiterals(readFileSync(file, "utf8"), rel)) offenders.push(`${rel}:${hit}`);
+  for (const hit of wideRawLiterals(readFileSync(file, "utf8"), rel)) offenders.push(`${rel}:${hit}`);
 }
 
 assert.deepEqual(
@@ -95,20 +95,20 @@ assert.deepEqual(
 
 // PROVE THE GUARD FIRES, and that it looks only at regex literals: strings,
 // templates and comments are escaped by esbuild and must not trip it.
-assert.equal(wideRegexLiterals("const r = /[—–]/g;", "a.ts").length, 1, "a raw em dash in a regex is caught");
-assert.equal(wideRegexLiterals("const r = /a|b/u.test(`x`) ? /•/ : /c/;", "a.ts").length, 1, "only the wide literal counts");
-assert.equal(wideRegexLiterals("const x = <p>{/‣/.test(s)}</p>;", "a.tsx").length, 1, "TSX is parsed as TSX");
+assert.equal(wideRawLiterals("const r = /[—–]/g;", "a.ts").length, 1, "a raw em dash in a regex is caught");
+assert.equal(wideRawLiterals("const r = /a|b/u.test(`x`) ? /•/ : /c/;", "a.ts").length, 1, "only the wide literal counts");
+assert.equal(wideRawLiterals("const x = <p>{/‣/.test(s)}</p>;", "a.tsx").length, 1, "TSX is parsed as TSX");
 assert.deepEqual(
-  wideRegexLiterals('const s = "—"; const t = `“${a}”`; // • note\nconst r = /[\\u2014\\u2013]/;', "a.ts"),
+  wideRawLiterals('const s = "—"; const t = `“${a}”`; // • note\nconst r = /[\\u2014\\u2013]/;', "a.ts"),
   [],
   "strings, templates, comments and escaped regexes pass",
 );
-assert.equal(wideRegexLiterals("const q = a / b / c; const r = /x/;", "a.ts").length, 0, "division is not a regex");
+assert.equal(wideRawLiterals("const q = a / b / c; const r = /x/;", "a.ts").length, 0, "division is not a regex");
 // Tagged templates: esbuild keeps their raw text, so a wide character there is caught in the
 // head, a middle span or the tail; one inside a substitution is ordinary code and is not.
-assert.equal(wideRegexLiterals("const s = String.raw`a — b`;", "a.ts").length, 1, "a raw em dash in String.raw is caught");
-assert.equal(wideRegexLiterals("const s = String.raw`a ${x} b ${y} → c`;", "a.ts").length, 1, "in a later span too");
-assert.equal(wideRegexLiterals('const s = String.raw`a ${"—"} b`;', "a.ts").length, 0, "a substitution is escaped by esbuild");
-assert.equal(wideRegexLiterals("const s = `a — b`;", "a.ts").length, 0, "an untagged template is escaped by esbuild");
+assert.equal(wideRawLiterals("const s = String.raw`a — b`;", "a.ts").length, 1, "a raw em dash in String.raw is caught");
+assert.equal(wideRawLiterals("const s = String.raw`a ${x} b ${y} → c`;", "a.ts").length, 1, "in a later span too");
+assert.equal(wideRawLiterals('const s = String.raw`a ${"—"} b`;', "a.ts").length, 0, "a substitution is escaped by esbuild");
+assert.equal(wideRawLiterals("const s = `a — b`;", "a.ts").length, 0, "an untagged template is escaped by esbuild");
 
 console.log(`worker-source-one-byte: OK — ${files.length} files, no wide character in any regex literal or tagged template`);
