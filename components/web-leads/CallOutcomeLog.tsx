@@ -60,6 +60,48 @@ const BUTTONS: { outcome: CallOutcome; icon: React.ReactNode }[] = [
  */
 const NEEDS_CONFIRM: CallOutcome = "do_not_call";
 
+/**
+ * Outcomes that leave the lead alive, and therefore owe it a date.
+ *
+ * Mirrors KEEPS_LEAD_OPEN in lib/web-leads/outcome.ts. The server is the
+ * boundary and re-validates; this copy exists so a rep is told before the
+ * round trip rather than after it.
+ */
+const NEEDS_NEXT_ACTION: readonly CallOutcome[] = ["no_answer", "connected", "interested"];
+
+/**
+ * When to come back, in one tap.
+ *
+ * THE CONSTRAINT THIS IS BUILT FOR (Adon, 2026-09-29): there is no dialer
+ * integration and there will not be one for some weeks. Every call is dialled by
+ * hand from a mobile and every outcome is typed immediately after hanging up. A
+ * required field that is tedious does not get filled honestly, it gets filled
+ * with whatever dismisses the form -- and a junk callback date is worse than no
+ * date, because the due queue then lies with confidence.
+ *
+ * So the common answers are chips, the choice persists between calls, and a
+ * rep working a list mostly never touches this: pick the cadence once, then log
+ * outcome after outcome with a single click each.
+ *
+ * Offsets are computed AT CLICK TIME rather than at render, so a tab left open
+ * overnight cannot submit yesterday's "tomorrow".
+ */
+const NEXT_ACTION_PRESETS: { key: string; label: string; days: number }[] = [
+  { key: "tomorrow", label: "Tomorrow", days: 1 },
+  { key: "3d", label: "In 3 days", days: 3 },
+  { key: "1w", label: "Next week", days: 7 },
+  { key: "2w", label: "In 2 weeks", days: 14 },
+];
+
+/** Same hour tomorrow, not midnight: a callback owed "tomorrow" means during
+ *  tomorrow's working day, and a midnight timestamp would read as overdue from
+ *  the moment the day starts. */
+function presetToIso(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+}
+
 // Mirrors the server contract without value-importing its server-only module.
 const MAX_CALL_NOTE_LENGTH = 4000;
 
@@ -89,6 +131,11 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
   const [warning, setWarning] = useState<string | null>(null);
   const [pending, setPending] = useState<CallOutcome | null>(null);
   const [confirmingDnc, setConfirmingDnc] = useState(false);
+  // Persists between calls on purpose: a rep working a list usually wants the
+  // same cadence for all of them, so the cheapest path is pick once, then one
+  // click per lead.
+  const [presetKey, setPresetKey] = useState<string>("3d");
+  const [customDate, setCustomDate] = useState<string>("");
   const [note, setNote] = useState("");
   const [leadCanMutate, setLeadCanMutate] = useState(false);
   const noteRef = useRef<HTMLTextAreaElement>(null);
@@ -135,10 +182,36 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
       noteRef.current?.focus();
       return;
     }
+    // WHEN ARE WE COMING BACK TO THIS ONE. Only for outcomes that leave the
+    // lead alive; a terminal one sends null and the server clears any date the
+    // lead was carrying. Computed here rather than at render so a tab left open
+    // overnight cannot submit yesterday's "tomorrow".
+    let nextActionAt: string | null = null;
+    if (NEEDS_NEXT_ACTION.includes(outcome)) {
+      if (customDate) {
+        const parsed = Date.parse(`${customDate}T12:00:00`);
+        if (!Number.isFinite(parsed) || parsed <= Date.now()) {
+          setError("Pick a callback date in the future.");
+          return;
+        }
+        nextActionAt = new Date(parsed).toISOString();
+      } else {
+        const preset = NEXT_ACTION_PRESETS.find((p) => p.key === presetKey);
+        if (!preset) {
+          setError("Choose when to come back to this one.");
+          return;
+        }
+        nextActionAt = presetToIso(preset.days);
+      }
+    }
+
     setPending(outcome);
     setError(null);
     setWarning(null);
-    const signature = JSON.stringify([leadId, outcome, trimmedNote]);
+    // The date is part of the signature: changing when you are coming back is a
+    // different submission, and reusing the previous requestId would make the
+    // server treat it as a duplicate of the earlier one and keep the old date.
+    const signature = JSON.stringify([leadId, outcome, trimmedNote, nextActionAt]);
     const requestId =
       submissionRef.current?.signature === signature
         ? submissionRef.current.requestId
@@ -148,7 +221,7 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
       const r = await fetch(`/api/web-leads/${encodeURIComponent(leadId)}/outcome`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ outcome, note: trimmedNote || undefined, requestId }),
+        body: JSON.stringify({ outcome, note: trimmedNote || undefined, requestId, nextActionAt }),
       });
       const body = await r.json().catch(() => ({})) as {
         error?: string;
@@ -193,6 +266,46 @@ export function CallOutcomeLog({ leadId, canMutate }: { leadId: string; canMutat
       {leadCanMutate && (
         <>
           <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">Log this call</p>
+
+      {/* WHEN, BEFORE WHAT HAPPENED. The cadence is picked once and sticks, so
+          working a list is one click per lead after the first. Selection is
+          carried by border weight and aria-pressed, never by colour: Rule 2
+          bans colour keyed to meaning on this surface and web-leads-guards
+          enforces it by class name.
+
+          Ignored by Not interested and Do not call, which end the lead. */}
+      <div className="mb-2">
+        <p className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-fg-muted">
+          Come back to this in
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {NEXT_ACTION_PRESETS.map((p) => {
+            const active = !customDate && presetKey === p.key;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                aria-pressed={active}
+                onClick={() => { setPresetKey(p.key); setCustomDate(""); }}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium text-fg transition-colors hover:bg-bg-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70 ${
+                  active ? "border-fg font-semibold" : "border-bg-border bg-bg-panel"
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+          <label className="flex items-center gap-1.5 text-xs text-fg-muted">
+            <span className="sr-only">Or pick a specific callback date</span>
+            <input
+              type="date"
+              value={customDate}
+              onChange={(e) => setCustomDate(e.target.value)}
+              className="rounded-md border border-bg-border bg-bg-panel px-2 py-1 text-xs text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/70"
+            />
+          </label>
+        </div>
+      </div>
 
       <div className="grid grid-cols-2 gap-2">
         {BUTTONS.filter(({ outcome }) => outcome !== NEEDS_CONFIRM).map(({ outcome, icon }) => (
