@@ -229,7 +229,7 @@ export function LoginForm() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 className="mt-1.5 w-full bg-bg-elev border border-bg-border rounded-md px-3 py-2.5 text-fg focus:border-accent focus:outline-none"
-                placeholder="you@oasisai.work"
+                placeholder="you@example.com"
                 autoComplete="email"
               />
             </div>
