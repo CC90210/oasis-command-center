@@ -17,8 +17,18 @@ import type { AgentDecision } from "@/lib/supabase";
  * [] rather than leaking when either is missing. Keep it that way: this
  * component must never query on its own behalf, or the scoping decision moves
  * out of the page that knows which tenant it is rendering for.
+ *
+ * `decisions` is null when the read failed (recentDecisions throws): that is
+ * "Couldn't check", never the "No decisions yet" of a tape that really is empty.
  */
-export function AgentDecisionsCard({ decisions }: { decisions: AgentDecision[] }) {
+export function AgentDecisionsCard({ decisions }: { decisions: AgentDecision[] | null }) {
+  if (decisions === null) {
+    return (
+      <Card title="Agent decisions" subtitle="Couldn't check the decision tape just now.">
+        <EmptyState message="Couldn't check the agents' decisions. The read failed and has been logged; this does not mean no decisions were made. Reload to try again." />
+      </Card>
+    );
+  }
   return (
     <Card
       title="Agent decisions"

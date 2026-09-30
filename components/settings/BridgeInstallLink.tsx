@@ -43,6 +43,10 @@ export function BridgeInstallLink({
  * everyone else reads `offline` plus `clientHint` and no button. The page
  * mounts client components that cannot load in a test process, so the banner
  * lives here, where tests/f0-containment.test.ts renders it.
+ *
+ * `bridgeOnline` is null when the heartbeat could not be read (getBridgeOnline
+ * throws, 2026-09-29): "Couldn't check your computer", with no install button,
+ * never "Computer not connected yet".
  */
 export function BridgeStatusBanner({
   bridgeOnline,
@@ -52,7 +56,7 @@ export function BridgeStatusBanner({
   operatorHint,
   clientHint,
 }: {
-  bridgeOnline: boolean;
+  bridgeOnline: boolean | null;
   canInstallBridge: boolean;
   /** After "Your computer is connected." */
   online: ReactNode;
@@ -73,7 +77,12 @@ export function BridgeStatusBanner({
         <Cloud className="w-5 h-5 text-fg-dim shrink-0 mt-0.5" />
       )}
       <div className="flex-1 text-xs leading-relaxed">
-        {bridgeOnline ? (
+        {bridgeOnline === null ? (
+          <>
+            <span className="text-fg-muted font-bold">Couldn&apos;t check your computer.</span> The connection could
+            not be read just now, so this is not saying it is disconnected. Reload in a minute.
+          </>
+        ) : bridgeOnline ? (
           <>
             <span className="text-status-engaged font-bold">Your computer is connected.</span> {online}
           </>
@@ -84,7 +93,7 @@ export function BridgeStatusBanner({
           </>
         )}
       </div>
-      {!bridgeOnline && (
+      {bridgeOnline === false && (
         <BridgeInstallLink
           canInstallBridge={operator}
           className="btn-primary inline-flex items-center gap-1.5 text-xs shrink-0"

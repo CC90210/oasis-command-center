@@ -27,18 +27,21 @@ export default async function AnalyticsPage() {
   // that could not be confirmed says "Couldn't check" (./mrr-state.ts).
   const surface = await resolveViewerSurface();
   const mrrState = analyticsMrrState(surface);
+  // pipeline is null when tenant_records could not be read (pipelineBreakdown
+  // throws): the four pipeline numbers say "Couldn't check", never 0 won / 0
+  // lost over an empty funnel.
   const [money, pipeline] = await Promise.all([
     mrrState === "oasis" ? loadOasisMoney(tenantId, "analytics") : Promise.resolve(null),
-    safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), { stages: {} as Record<string, number>, total: 0, sources: {} as Record<string, number> }),
+    safe("analytics.pipeline_breakdown", pipelineBreakdown(tenantId), null),
   ]);
   const dollars = (cents: number) => formatMoney(cents / 100);
   // The words for a page with no money block. Read only when `money` is null,
   // which is never the "oasis" state: loadOasisMoney always answers.
   const noMoney = mrrState === "oasis" ? "unconfirmed" : mrrState;
 
-  const totalLeads = pipeline.total;
-  const won = pipeline.stages["won"] || 0;
-  const lost = pipeline.stages["lost"] || 0;
+  const totalLeads = pipeline?.total ?? 0;
+  const won = pipeline?.stages["won"] || 0;
+  const lost = pipeline?.stages["lost"] || 0;
   const conversion = totalLeads ? ((won / totalLeads) * 100).toFixed(1) : "—";
 
   return (
@@ -66,9 +69,19 @@ export default async function AnalyticsPage() {
         ) : (
           <Stat label="Net MRR" value={MRR_COPY[noMoney].value} hint={MRR_COPY[noMoney].hint} accent />
         )}
-        <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
-        <Stat label="Won" value={won} />
-        <Stat label="Lost" value={lost} />
+        {pipeline === null ? (
+          <>
+            <Stat label="Conversion" value="Couldn't check" hint="the pipeline could not be read" />
+            <Stat label="Won" value="Couldn't check" />
+            <Stat label="Lost" value="Couldn't check" />
+          </>
+        ) : (
+          <>
+            <Stat label="Conversion" value={`${conversion}%`} hint={`${won} won / ${totalLeads} total`} />
+            <Stat label="Won" value={won} />
+            <Stat label="Lost" value={lost} />
+          </>
+        )}
       </section>
 
       {money ? (
@@ -91,11 +104,17 @@ export default async function AnalyticsPage() {
       )}
 
       <Card title="Pipeline" subtitle="Funnel by stage">
-        <PipelineFunnel stages={pipeline.stages} />
+        {pipeline === null ? (
+          <EmptyState message="Couldn't check the pipeline. The read failed and has been logged; this does not mean it is empty. Reload to try again." />
+        ) : (
+          <PipelineFunnel stages={pipeline.stages} />
+        )}
       </Card>
 
       <Card title="Lead sources" subtitle="Where leads come from">
-        {Object.keys(pipeline.sources || {}).length === 0 ? (
+        {pipeline === null ? (
+          <EmptyState message="Couldn't check where leads come from. Reload to try again." />
+        ) : Object.keys(pipeline.sources || {}).length === 0 ? (
           <EmptyState message="No source data yet." />
         ) : (
           <ul className="space-y-2">
