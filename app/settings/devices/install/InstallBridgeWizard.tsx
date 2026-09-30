@@ -10,8 +10,9 @@
  * this file is a thin render-only wrapper. The Modal consumes the same hook.
  *
  * Operator only: page.tsx mounts it for a verified platform operator and
- * passes `installRepo` (the private harness repo); everyone else gets a
- * private-beta notice and never loads the pairing flow.
+ * passes `installRepo` (the private harness repo). Everyone else gets
+ * PairBridgeOnly, which shares the pairing hook but pairs an already-installed
+ * bridge only and never imports lib/bridge-install-command.ts.
  */
 
 import { useState } from "react";
