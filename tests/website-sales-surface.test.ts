@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 
 const pipeline = readFileSync("app/pipeline/page.tsx", "utf8");
-const script = readFileSync("app/playbook/script/page.tsx", "utf8");
+// The guide's copy lives in ScriptClient; page.tsx is the /playbook access guard around it.
+const script = readFileSync("app/playbook/script/ScriptClient.tsx", "utf8");
 const lifecycle = readFileSync("app/pipeline/[id]/LeadLifecycleActions.tsx", "utf8");
 const playbook = readFileSync("app/playbook/page.tsx", "utf8");
 const dealPlaybook = readFileSync("app/playbook/deals/page.tsx", "utf8");

@@ -3,6 +3,7 @@ import { OnboardingWizardClient } from "@/components/onboarding/OnboardingWizard
 import { getSessionUser, getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { OasisLogo } from "@/components/brand/OasisLogo";
+import { isPlatformOperator } from "@/lib/role-surfaces-session";
 
 export const dynamic = "force-dynamic";
 
@@ -63,7 +64,10 @@ export default async function OnboardingWizardPage() {
     console.error("[onboarding.wizard.gate]", err);
   }
 
-  return <OnboardingWizardClient userEmail={user.email || ""} />;
+  // Only the verified platform operator is offered the bridge install at the
+  // end (F0 containment); isPlatformOperator fails closed on a lookup error.
+  const canInstallBridge = await isPlatformOperator();
+  return <OnboardingWizardClient userEmail={user.email || ""} canInstallBridge={canInstallBridge} />;
 }
 
 /**

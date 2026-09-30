@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import Link from "next/link";
 import {
@@ -20,7 +21,9 @@ const PILLAR_ICON: Record<DocPillar, React.ComponentType<{ className?: string }>
 
 const PILLAR_ORDER: DocPillar[] = ["ceo", "cfo", "cmo", "ops", "legal"];
 
-export default function BusinessDocsPage() {
+export default async function BusinessDocsPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const drafted = BUSINESS_DOCS.filter((d) => d.status === "drafted").length;
 
   return (

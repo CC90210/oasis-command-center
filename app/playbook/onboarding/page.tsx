@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import fs from "node:fs/promises";
 import path from "node:path";
 import Link from "next/link";
@@ -51,6 +52,8 @@ async function loadPlaybook(): Promise<Array<{ slug: string; title: string; body
 }
 
 export default async function PlaybookOnboardingPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const sections = await loadPlaybook();
 
   return (

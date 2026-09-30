@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -18,7 +19,9 @@ const OPERATOR_CATEGORIES: PromptCategory[] = [
   "system_integration",
 ];
 
-export default function PromptsLibraryPage() {
+export default async function PromptsLibraryPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   // Client-deployment prompts are hidden from the operator page (2026-08-04
   // consolidation audit). They're the "SSH'd into a client's machine"
   // toolkit — 17 entries that pushed CC's own daily prompts below the fold

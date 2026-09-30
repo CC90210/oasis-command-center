@@ -293,11 +293,6 @@
       "rule": "ai-accent"
     },
     {
-      "file": "components/landing/ConfigureFlow.tsx",
-      "line": 65,
-      "rule": "ai-accent"
-    },
-    {
       "file": "components/leads/LeadTimelinePanel.tsx",
       "line": 61,
       "rule": "ai-accent"

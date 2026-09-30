@@ -14,10 +14,10 @@
  */
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { Save, Eye, EyeOff, Check, AlertCircle, ExternalLink, Sparkles, ChevronDown, ChevronUp, Cpu, Cloud, KeyRound } from "lucide-react";
 import { getAgentInfo } from "@/lib/agents";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE } from "@/lib/providers";
+import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 // Settings/Agents picker derives from the same single-source registry as
 // Onboarding. Each entry already carries `models`, `hint`, `recommended`,
@@ -109,6 +109,11 @@ type Props = {
    * confusion CC flagged 2026-05-22.
    */
   globallyConnectedServices?: string[];
+  /**
+   * The server's verified platform-operator verdict. Only the operator is
+   * offered the bridge install (BridgeToolAccess); absent means no.
+   */
+  canInstallBridge?: boolean;
 };
 
 export function AgentConfigEditor({
@@ -118,6 +123,7 @@ export function AgentConfigEditor({
   manifestSlug = null,
   toolCatalog = [],
   globallyConnectedServices = [],
+  canInstallBridge = false,
 }: Props) {
   const globalServiceSet = new Set(globallyConnectedServices);
   const [configs, setConfigs] = useState<Record<string, AgentConfig>>({});
@@ -659,48 +665,7 @@ export function AgentConfigEditor({
                 </div>
               </div>
               {/* Local bridge tools — needs `oasis bridge serve` running through the installed launcher. */}
-              <div
-                className={`rounded-lg border p-3 flex items-start gap-2.5 ${
-                  bridgeOnline
-                    ? "border-status-engaged/30 bg-status-engaged/5"
-                    : "border-bg-border bg-bg-deep/40"
-                }`}
-              >
-                <Cpu
-                  className={`w-4 h-4 shrink-0 mt-0.5 ${
-                    bridgeOnline ? "text-status-engaged" : "text-fg-dim"
-                  }`}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
-                    Local bridge · CLI
-                  </div>
-                  <div className="text-xs text-fg mt-0.5 leading-relaxed">
-                    {bridgeOnline ? (
-                      <>
-                        <span className="text-status-engaged">Online.</span>{" "}
-                        Python scripts, file reads, scheduled jobs, real
-                        sends — all via the desktop bridge.
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-fg-muted">Offline.</span> Install
-                        the bridge for full Claude Code parity (file system,
-                        bash, all MCPs).
-                      </>
-                    )}
-                  </div>
-                  {!bridgeOnline && (
-                    <Link
-                      href="/settings/devices/install"
-                      className="text-[11px] text-accent hover:text-accent-bright inline-flex items-center gap-1 mt-1.5"
-                    >
-                      Install the bridge →{" "}
-                      <ExternalLink className="w-3 h-3" />
-                    </Link>
-                  )}
-                </div>
-              </div>
+              <BridgeToolAccess bridgeOnline={bridgeOnline} canInstallBridge={canInstallBridge} />
             </div>
 
             {/* Phase E — per-agent tool palette editor.
@@ -921,6 +886,72 @@ export function AgentConfigEditor({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * The "Local bridge · CLI" strip in each agent's Tool Access row. The install
+ * link and the "install the bridge" line are the verified platform operator's
+ * only (F0 containment, 2026-09-29): the bridge route installs for them alone,
+ * so anyone else offline reads a plain line saying the agent runs in cloud
+ * mode. No hooks, so tests/f0-containment.test.ts renders both versions.
+ */
+export function BridgeToolAccess({
+  bridgeOnline,
+  canInstallBridge,
+}: {
+  bridgeOnline: boolean;
+  canInstallBridge: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-3 flex items-start gap-2.5 ${
+        bridgeOnline
+          ? "border-status-engaged/30 bg-status-engaged/5"
+          : "border-bg-border bg-bg-deep/40"
+      }`}
+    >
+      <Cpu
+        className={`w-4 h-4 shrink-0 mt-0.5 ${
+          bridgeOnline ? "text-status-engaged" : "text-fg-dim"
+        }`}
+      />
+      <div className="flex-1 min-w-0">
+        <div className="text-xs font-bold uppercase tracking-wider text-fg-muted">
+          Local bridge · CLI
+        </div>
+        <div className="text-xs text-fg mt-0.5 leading-relaxed">
+          {bridgeOnline ? (
+            <>
+              <span className="text-status-engaged">Online.</span>{" "}
+              Python scripts, file reads, scheduled jobs, real
+              sends — all via the desktop bridge.
+            </>
+          ) : canInstallBridge === true ? (
+            <>
+              <span className="text-fg-muted">Offline.</span> Install
+              the bridge for full Claude Code parity (file system,
+              bash, all MCPs).
+            </>
+          ) : (
+            <>
+              <span className="text-fg-muted">Offline.</span> This agent
+              runs in cloud mode: chat and dashboard actions through the
+              saved API key.
+            </>
+          )}
+        </div>
+        {!bridgeOnline && (
+          <BridgeInstallLink
+            canInstallBridge={canInstallBridge}
+            className="text-[11px] text-accent hover:text-accent-bright inline-flex items-center gap-1 mt-1.5"
+          >
+            Install the bridge →{" "}
+            <ExternalLink className="w-3 h-3" />
+          </BridgeInstallLink>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { Card, PageHeader, Tag } from "@/components/Card";
 import {
@@ -213,7 +214,9 @@ const SECTIONS: Section[] = [
   },
 ];
 
-export default function SecurityPage() {
+export default async function SecurityPage() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   return (
     <div className="space-y-6 animate-fade-in">
       <Link

@@ -14,3 +14,10 @@
 *.ttf binary
 *.wasm binary
 *.ico binary
+
+# lib/install-scripts.ts embeds the install scripts as String.raw templates. It is
+# pinned to LF only so its bytes on disk match on every platform; this line does
+# not decide what gets served. JavaScript turns a CRLF inside any template literal,
+# String.raw included, into LF, so even a CRLF checkout serves LF scripts. What
+# guards the served bytes is the sha256 pin in tests/f0-containment.test.ts.
+lib/install-scripts.ts text eol=lf
