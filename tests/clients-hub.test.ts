@@ -550,6 +550,14 @@ async function main() {
     assert.match(list, /1 invoice is overdue\./, "X's badge carries its reason (an overdue invoice)");
     assert.match(await page(record(X.id, "health")), /1 invoice is overdue/);
   });
+  await check("a member who may not read the desk sees no health verdict, not a false 'Not enough data'", async () => {
+    await login(MEMBER_A);
+    const list = await page(ClientsPage({ searchParams: Promise.resolve({}) }));
+    assert.match(list, /Acme Same Address/);
+    assert.doesNotMatch(list, /Not enough data|Healthy|At risk/);
+    assert.match(await page(record(A.id, "health")), /owners and admins/);
+    await login(USERS.cc);
+  });
 
   // ── Past engagements ───────────────────────────────────────────────────────
   await check("Mark engagement ended: owners/admins only, moves the client to Past once, and the ledger records it once", async () => {

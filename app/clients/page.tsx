@@ -450,7 +450,14 @@ function CustomersTable({
                     {r.tags.length > 0 && <div className="mt-0.5 text-xs text-fg-dim">{r.tags.join(" · ")}</div>}
                   </td>
                   <td className={td}>
-                    <ClientHealthBadge health={r.health} />
+                    {/* Health reads the desk's signals, which are the owners' and admins' to read. */}
+                    {deskKnown ? (
+                      <ClientHealthBadge health={r.health} />
+                    ) : (
+                      <span className="text-fg-dim" title="Owners and admins only" aria-label="Owners and admins only">
+                        —
+                      </span>
+                    )}
                   </td>
                   <td className={`${td} text-fg-muted`}>{CUSTOMER_LIFECYCLE_LABELS[r.lifecycle]}</td>
                   <td className={`${td} text-fg-muted`}>{ownerName(r.owner_user_id, directory) ?? (r.owner_user_id ? "—" : "No owner")}</td>

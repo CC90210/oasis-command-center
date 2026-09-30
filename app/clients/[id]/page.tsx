@@ -140,7 +140,7 @@ export default async function ClientRecordPage({
       title={
         <span className="inline-flex flex-wrap items-center gap-2">
           {c.display_name}
-          <ClientHealthBadge health={data.health} />
+          {cv.desk && <ClientHealthBadge health={data.health} />}
           {c.archived_at && <Tag>Archived</Tag>}
         </span>
       }
@@ -210,11 +210,14 @@ export default async function ClientRecordPage({
         {tab === "usage" && <UsageTab state={data.usage} customerId={c.id} linkable={data.linkableWorkspaces} />}
         {tab === "files" && <FilesTab state={data.files} hasDeal={Boolean(c.source_lead_id)} />}
         {tab === "activity" && <ActivityTab state={data.activity} hasDeal={Boolean(c.source_lead_id)} />}
-        {tab === "health" && (
-          <Card>
-            <ClientHealthBreakdown health={data.health} />
-          </Card>
-        )}
+        {tab === "health" &&
+          (cv.desk ? (
+            <Card>
+              <ClientHealthBreakdown health={data.health} />
+            </Card>
+          ) : (
+            <OwnersOnly what="Health signals" />
+          ))}
       </div>
     </PageFrame>
   );
