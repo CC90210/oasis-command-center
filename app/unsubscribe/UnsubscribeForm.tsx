@@ -9,6 +9,7 @@
  */
 
 import { useState } from "react";
+import { ManualOptOut } from "./ManualOptOut";
 
 type Props = {
   email: string;
@@ -85,11 +86,8 @@ export default function UnsubscribeForm({ email, brand, token }: Props) {
 
       {status === "error" && (
         <p className="mt-3 text-sm text-red-400 text-center">
-          Something went wrong: {errorMsg}. You can also email{" "}
-          <a href="mailto:unsubscribe@oasisai.work" className="underline">
-            unsubscribe@oasisai.work
-          </a>{" "}
-          to opt out manually.
+          Something went wrong: {errorMsg}. You can also{" "}
+          <ManualOptOut linkClassName="underline" /> to opt out manually.
         </p>
       )}
     </div>

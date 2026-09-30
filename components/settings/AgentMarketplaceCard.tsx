@@ -6,17 +6,24 @@
  *
  * Core agents (manifest.agents[].core === true) are locked: rendered
  * with a "Core · always on" pill, the toggle is disabled, the operator
- * cannot remove them. For SunBiz that's Solara + Helios — the funding-
- * shop CRM depends on them.
+ * cannot remove them.
  *
  * Non-core slots:
  *   - Already in manifest, enabled=true       → "Enabled" toggle (can remove)
  *   - Already in manifest, enabled=false      → "Disabled" toggle (can enable)
  *   - Not in manifest yet                     → "+ Add to workspace" button
  *
- * Add-on candidates come from AGENT_REGISTRY filtered to chat-facing
- * personas — Bravo, Atlas, Maven, Aura, Hermes — excluding any slug
- * already present in the manifest.
+ * NAMES. Every agent is shown by the department it leads (Chief of Staff,
+ * Sales, Marketing, Client Success, Finance, Operations) or, for a house agent
+ * with no department, by its job: `teammateNames`, computed on the server from
+ * lib/os/teammate-names.ts. The persona names behind them are OASIS's internal
+ * vocabulary and are not printed here, in any workspace. An agent a workspace
+ * built itself keeps the name its owner gave it (manifest display_name).
+ *
+ * ADD-ONS are OASIS house agents (FAMILY_AGENT_KEYS) that are not in the
+ * manifest yet. Only OASIS's own workspace is offered them (`offerAddOns`): a
+ * client's department teammates are set up with OASIS, and a client must not be
+ * handed OASIS's internal agents to switch on.
  *
  * Architectural note: writes go through POST /api/tenant/agents/toggle
  * which mutates tenant_manifests.manifest.agents server-side. RLS +
@@ -26,7 +33,8 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Lock, Loader2, CheckCircle2, X, AlertCircle } from "lucide-react";
-import { AGENT_REGISTRY, getAgentInfo, FAMILY_AGENT_KEYS } from "@/lib/agents";
+import { getAgentInfo, FAMILY_AGENT_KEYS } from "@/lib/agents";
+import type { TeammateName } from "@/lib/os/teammate-names";
 
 type ManifestAgent = {
   slug: string;
@@ -39,9 +47,13 @@ type ManifestAgent = {
 type Props = {
   initialAgents: ManifestAgent[];
   isOwner: boolean;
+  /** Department / job names by slug, from lib/os/teammate-names.ts. */
+  teammateNames: Record<string, TeammateName>;
+  /** OASIS's own workspace only: offer house agents not yet in the manifest. */
+  offerAddOns: boolean;
 };
 
-export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
+export function AgentMarketplaceCard({ initialAgents, isOwner, teammateNames, offerAddOns }: Props) {
   const router = useRouter();
   const [agents, setAgents] = useState<ManifestAgent[]>(initialAgents);
   const [busySlug, setBusySlug] = useState<string | null>(null);
@@ -49,13 +61,21 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
   const [flash, setFlash] = useState<string | null>(null);
 
   const knownSlugs = new Set(agents.map((a) => a.slug.toLowerCase()));
-  // Candidate add-ons: chat-facing family agents NOT already in the manifest.
-  const addOnCandidates = FAMILY_AGENT_KEYS.filter((k) => !knownSlugs.has(k.toLowerCase()));
+  // Candidate add-ons: house agents NOT already in the manifest, OASIS only.
+  const addOnCandidates = offerAddOns
+    ? FAMILY_AGENT_KEYS.filter((k) => !knownSlugs.has(k.toLowerCase()))
+    : [];
+
+  /** A known house agent by its department; anything else by the name its workspace gave it. */
+  const nameOf = (slug: string, displayName?: string) =>
+    teammateNames[slug]?.name ?? teammateNames[slug.toLowerCase()]?.name ?? displayName ?? slug;
+  const summaryOf = (slug: string) =>
+    teammateNames[slug]?.summary ?? teammateNames[slug.toLowerCase()]?.summary ?? "Built for this workspace.";
 
   async function callToggle(body: {
     action: "add" | "enable" | "disable" | "remove";
     slug: string;
-  }) {
+  }, label: string) {
     setBusySlug(body.slug);
     setError(null);
     setFlash(null);
@@ -83,12 +103,12 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
       router.refresh();
       setFlash(
         body.action === "add"
-          ? `Added ${getAgentInfo(body.slug).label} to the workspace`
+          ? `Added ${label} to the workspace`
           : body.action === "remove"
-            ? `Removed ${getAgentInfo(body.slug).label}`
+            ? `Removed ${label}`
             : body.action === "enable"
-              ? `${getAgentInfo(body.slug).label} re-enabled`
-              : `${getAgentInfo(body.slug).label} disabled`,
+              ? `${label} re-enabled`
+              : `${label} disabled`,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "toggle_failed");
@@ -105,7 +125,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
             Workspace agents
           </h3>
           <p className="text-[12px] text-fg-muted leading-relaxed">
-            Only the workspace owner can add or remove agents. Ask your workspace owner to manage the agent lineup.
+            Only the workspace owner can add or remove AI teammates. Ask your workspace owner to change the lineup.
           </p>
         </header>
         <ul className="mt-3 space-y-2">
@@ -116,7 +136,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                 key={a.slug}
                 className="flex items-center gap-2 rounded-md border border-bg-border bg-bg-deep/30 px-3 py-2 text-sm"
               >
-                <span className={`font-semibold ${info.textClass}`}>{a.display_name || info.label}</span>
+                <span className={`font-semibold ${info.textClass}`}>{nameOf(a.slug, a.display_name)}</span>
                 <span className="text-fg-dim text-[11px] ml-auto">
                   {a.core ? "Core" : a.enabled ? "Enabled" : "Disabled"}
                 </span>
@@ -135,7 +155,9 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
           Workspace agents
         </h3>
         <p className="text-[12px] text-fg-muted leading-relaxed">
-          Your tenant&apos;s core agents are locked — the workspace depends on them. Add C-suite agents (Bravo, Atlas, Maven, Aura, Hermes) as needed; each one shows up in the chat picker and Settings → My Agents.
+          {offerAddOns
+            ? "Core teammates are locked because the workspace depends on them. Add the others as the team needs them; each one appears in the chat picker once it is on."
+            : "Core teammates are locked because the workspace depends on them. Each department's teammate is set up with OASIS; turn off any you do not use."}
         </p>
       </header>
 
@@ -160,6 +182,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
         <ul className="space-y-2">
           {agents.map((a) => {
             const info = getAgentInfo(a.slug);
+            const name = nameOf(a.slug, a.display_name);
             const isCore = a.core === true;
             const isBusy = busySlug === a.slug;
             return (
@@ -170,7 +193,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className={`font-bold text-sm ${info.textClass}`}>
-                      {a.display_name || info.label}
+                      {name}
                     </span>
                     {isCore ? (
                       <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold bg-accent/15 text-accent border border-accent/30">
@@ -189,7 +212,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                     )}
                   </div>
                   <p className="text-[11.5px] text-fg-muted mt-1 leading-relaxed">
-                    {info.tagline}
+                    {summaryOf(a.slug)}
                   </p>
                 </div>
                 <div className="shrink-0 flex items-center gap-2">
@@ -198,7 +221,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                       {a.enabled ? (
                         <button
                           type="button"
-                          onClick={() => callToggle({ action: "disable", slug: a.slug })}
+                          onClick={() => callToggle({ action: "disable", slug: a.slug }, name)}
                           disabled={isBusy}
                           className="inline-flex items-center gap-1 rounded-md border border-bg-border bg-bg-elev px-2.5 py-1 text-[11.5px] font-bold text-fg-muted hover:text-fg disabled:opacity-50 transition-colors"
                         >
@@ -208,7 +231,7 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                       ) : (
                         <button
                           type="button"
-                          onClick={() => callToggle({ action: "enable", slug: a.slug })}
+                          onClick={() => callToggle({ action: "enable", slug: a.slug }, name)}
                           disabled={isBusy}
                           className="inline-flex items-center gap-1 rounded-md bg-accent text-bg-deep px-2.5 py-1 text-[11.5px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
                         >
@@ -219,8 +242,8 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                       <button
                         type="button"
                         onClick={() => {
-                          if (!confirm(`Remove ${info.label} from this workspace? You can add it back any time.`)) return;
-                          void callToggle({ action: "remove", slug: a.slug });
+                          if (!confirm(`Remove ${name} from this workspace? You can add it back any time.`)) return;
+                          void callToggle({ action: "remove", slug: a.slug }, name);
                         }}
                         disabled={isBusy}
                         className="inline-flex items-center justify-center rounded-md border border-bg-border bg-bg-elev px-2 py-1 text-fg-dim hover:text-red-300 hover:border-red-500/40 disabled:opacity-50 transition-colors"
@@ -237,19 +260,19 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
         </ul>
       </section>
 
-      {/* Add-on candidates */}
+      {/* Add-on candidates (OASIS's own workspace only) */}
       {addOnCandidates.length > 0 && (
         <section className="space-y-2">
           <h4 className="text-[11px] font-bold uppercase tracking-wider text-fg-muted">
             Available add-ons
           </h4>
           <p className="text-[11.5px] text-fg-muted leading-relaxed">
-            These C-suite agents are part of the empire. Add the ones your team will use — each gets its own chat picker entry and its own area in the dashboard. Solara and Helios stay your CRM core.
+            More teammates this workspace can run. Add the ones your team will use; each gets its own entry in the chat picker.
           </p>
           <ul className="grid sm:grid-cols-2 gap-2">
             {addOnCandidates.map((slug) => {
               const info = getAgentInfo(slug);
-              const reg = AGENT_REGISTRY[slug];
+              const name = nameOf(slug);
               const isBusy = busySlug === slug;
               return (
                 <li
@@ -258,15 +281,15 @@ export function AgentMarketplaceCard({ initialAgents, isOwner }: Props) {
                 >
                   <div className="flex items-start gap-2">
                     <div className="flex-1 min-w-0">
-                      <div className={`font-bold text-sm ${info.textClass}`}>{info.label}</div>
+                      <div className={`font-bold text-sm ${info.textClass}`}>{name}</div>
                       <div className="text-[11.5px] text-fg-muted mt-0.5 leading-relaxed">
-                        {reg?.role || info.tagline}
+                        {summaryOf(slug)}
                       </div>
                     </div>
                   </div>
                   <button
                     type="button"
-                    onClick={() => callToggle({ action: "add", slug })}
+                    onClick={() => callToggle({ action: "add", slug }, name)}
                     disabled={isBusy}
                     className="inline-flex items-center justify-center gap-1.5 rounded-md bg-accent text-bg-deep px-2.5 py-1.5 text-[12px] font-bold hover:bg-accent/90 disabled:opacity-60 transition-colors"
                   >

@@ -117,10 +117,17 @@ type Props = {
    * offered the bridge install (BridgeToolAccess); absent means no.
    */
   canInstallBridge?: boolean;
+  /**
+   * What each row is called: the department the agent leads, never its
+   * persona name (lib/os/teammate-names.ts, computed by SettingsContent). A
+   * slug with no entry keeps its slug and registry role, as before.
+   */
+  agentLabels?: Record<string, { name: string; summary: string }>;
 };
 
 export function AgentConfigEditor({
   agentKeys,
+  agentLabels = {},
   bridgeOnline = false,
   agentPalettes = {},
   manifestSlug = null,
@@ -457,10 +464,10 @@ export function AgentConfigEditor({
               <div className="flex items-center gap-3">
                 <div className={`agent-pill`}>
                   <span className="agent-pill-dot" />
-                  {key}
+                  {agentLabels[key]?.name ?? key}
                 </div>
                 <div className="text-xs text-fg-muted">
-                  {getAgentInfo(key).role}
+                  {agentLabels[key]?.summary ?? getAgentInfo(key).role}
                 </div>
               </div>
               <div className="flex items-center gap-3">

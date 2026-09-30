@@ -1,26 +1,19 @@
-import { ComingSoon } from "@/components/ComingSoon";
-import { HandCoins } from "lucide-react";
+import { notFound } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export default function OffersPage() {
-  return (
-    <ComingSoon
-      title="Offers"
-      subtitle="Lender offers organized by application"
-      icon={HandCoins}
-      phase2Bullets={[
-        "Lender offers will sit under the application they belong to.",
-        "Multiple offers on the same merchant are supported when more than one funding band applies.",
-        "Side-by-side comparisons will help pick the cleanest option for the merchant.",
-        "Accepted offers will move into funded deals automatically after review.",
-        "Every accept or decline decision will keep a clear history.",
-      ]}
-      related={[
-        { href: "/applications", label: "Applications" },
-        { href: "/funded-deals", label: "Funded Deals" },
-        { href: "/lenders", label: "Lenders" },
-      ]}
-    />
-  );
+/**
+ * /offers - retired 2026-09-30 (OASIS OS plan, track T1).
+ *
+ * It was a Coming Soon placeholder for SunBiz lender offers, a funding-broker concept OASIS does not use.
+ *
+ * SunBiz was retired on 2026-09-28 and these legacy pages were still reachable
+ * by URL from every workspace, OASIS's clients included. The page now calls
+ * notFound(), the same mechanism #479 used for /start, /configure and
+ * /demo/sun. A signed-out visitor meets the login page first (the path is not
+ * public), a signed-in one the 404.
+ *
+ * Pinned by tests/client-route-gating.test.ts; tests/os-redirects.test.ts
+ * fails if anything in app/, components/ or lib/ links here again.
+ */
+export default function RetiredOffersPage(): never {
+  notFound();
 }

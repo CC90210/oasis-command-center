@@ -203,8 +203,9 @@ export function DripActivityView({
         />
       )}
 
-      {/* Basic numbers only. Opens, clicks and per-variant performance live in
-          /metrics; a second copy here would just disagree with the first. */}
+      {/* Basic numbers only: what reached a provider, failed or was skipped.
+          Opens, clicks and per-variant performance were on /metrics, a SunBiz
+          page retired on 2026-09-30. */}
       <div className={`grid grid-cols-2 gap-3 md:grid-cols-5 ${summaryError ? "opacity-40" : ""}`}>
         <Tile label="Sent (24h)" value={String(summary.realSends)} hint="reached a provider" tone="good" />
         <Tile label="Failed (24h)" value={String(summary.failed)} tone={summary.failed > 0 ? "bad" : "neutral"} />
@@ -307,7 +308,7 @@ export function DripActivityView({
                   <tr key={r.id} className="border-t border-bg-border/60 align-top">
                     <td className="whitespace-nowrap px-3 py-2 text-fg-muted">{when(r.sentAt || r.scheduledFor)}</td>
                     <td className="px-3 py-2">
-                      <a href={`/leads/${r.leadId}`} className="text-accent hover:underline">
+                      <a href={`/pipeline/${encodeURIComponent(r.leadId)}`} className="text-accent hover:underline">
                         {r.leadName || r.leadId.slice(0, 8)}
                       </a>
                     </td>

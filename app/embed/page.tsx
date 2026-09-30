@@ -1,21 +1,19 @@
-import { ComingSoon } from "@/components/ComingSoon";
-import { Code2 } from "lucide-react";
+import { notFound } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export default function EmbedPage() {
-  return (
-    <ComingSoon
-      title="Embed"
-      subtitle="Embeddable lead-capture widgets for your website"
-      icon={Code2}
-      phase2Bullets={[
-        "Generate a script snippet you can paste on your site.",
-        "New website leads land in the same pipeline as every other lead.",
-        "Customize colors, fields, and qualification questions per form.",
-        "See which pages on your site convert best.",
-      ]}
-      related={[{ href: "/leads", label: "Leads" }, { href: "/import", label: "Import" }]}
-    />
-  );
+/**
+ * /embed - retired 2026-09-30 (OASIS OS plan, track T1).
+ *
+ * It was a Coming Soon placeholder for embeddable lead widgets. Nothing was ever built behind it, and its only links went to /leads (no such route) and /import.
+ *
+ * SunBiz was retired on 2026-09-28 and these legacy pages were still reachable
+ * by URL from every workspace, OASIS's clients included. The page now calls
+ * notFound(), the same mechanism #479 used for /start, /configure and
+ * /demo/sun. A signed-out visitor meets the login page first (the path is not
+ * public), a signed-in one the 404.
+ *
+ * Pinned by tests/client-route-gating.test.ts; tests/os-redirects.test.ts
+ * fails if anything in app/, components/ or lib/ links here again.
+ */
+export default function RetiredEmbedPage(): never {
+  notFound();
 }

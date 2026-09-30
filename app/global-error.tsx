@@ -1,14 +1,17 @@
 "use client";
 
 /**
- * Global error boundary — catches errors thrown in the ROOT layout itself
+ * Global error boundary: catches errors thrown in the ROOT layout itself
  * (where error.tsx can't help because the layout is the boundary).
  *
  * This must include its own <html><body> shell since the parent layout
- * has already failed.
+ * has already failed, and its own styles, since the stylesheet the layout
+ * imports may not have loaded. The help copy is components/ErrorHelp.tsx,
+ * shared with app/error.tsx: try again, then send us the code.
  */
 
 import { useEffect } from "react";
+import { ErrorHelp } from "@/components/ErrorHelp";
 
 export default function GlobalError({
   error,
@@ -47,37 +50,9 @@ export default function GlobalError({
           }}
         >
           <h1 style={{ fontSize: "1.1rem", fontWeight: 700, margin: 0 }}>
-            The dashboard couldn&apos;t load
+            Something went wrong
           </h1>
-          <p
-            style={{
-              fontSize: "0.875rem",
-              color: "#9ba3b1",
-              marginTop: "0.5rem",
-              lineHeight: 1.55,
-            }}
-          >
-            A fatal error stopped the root layout from rendering. Try a refresh.
-            If this keeps happening, capture the digest and check Vercel
-            function logs.
-          </p>
-          {error.digest && (
-            <div
-              style={{
-                fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
-                fontSize: 11,
-                color: "#6c7180",
-                background: "#020409",
-                border: "1px solid #1e2532",
-                borderRadius: 6,
-                padding: "0.5rem 0.75rem",
-                marginTop: "0.875rem",
-                wordBreak: "break-all",
-              }}
-            >
-              digest: {error.digest}
-            </div>
-          )}
+          <ErrorHelp digest={error.digest} inline />
           <button
             onClick={() => reset()}
             style={{

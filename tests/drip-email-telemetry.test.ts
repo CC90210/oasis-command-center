@@ -73,9 +73,12 @@ assert.match(sequenceBuilder, /Your Drip Templates/);
 assert.match(sequenceBuilder, /Optional custom HTML/);
 assert.match(sequenceBuilder, /body_html/);
 
+// /templates (the SunBiz HTML + drip template library) was retired on
+// 2026-09-30: the page is a bare notFound(). tests/client-route-gating.test.ts
+// runs it; this only pins that nothing was left mounted behind it.
 const templatesPage = readFileSync("app/templates/page.tsx", "utf8");
-assert.match(templatesPage, /DripEmailTemplatesSection/);
-assert.match(templatesPage, /Drip Templates/);
+assert.match(templatesPage, /notFound\(\);/);
+assert.doesNotMatch(templatesPage, /DripEmailTemplatesSection/);
 
 const dripLibrary = readFileSync("components/templates/DripEmailTemplatesSection.tsx", "utf8");
 assert.match(dripLibrary, /Jordan direct/);

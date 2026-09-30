@@ -21,6 +21,8 @@
  */
 
 import UnsubscribeForm from "./UnsubscribeForm";
+import { ManualOptOut } from "./ManualOptOut";
+import { CONTACT_EMAIL } from "@/lib/marketing/routes";
 
 export const dynamic = "force-dynamic";
 
@@ -64,13 +66,7 @@ export default async function UnsubscribePage({
             <p className="text-[#a8b0bd] text-sm mb-4">
               No email address was provided in the URL. If you got here from an
               email link, please copy the full link from your email and try
-              again, or write to{" "}
-              <a
-                href="mailto:unsubscribe@oasisai.work"
-                className="text-[#00d4ff] underline"
-              >
-                unsubscribe@oasisai.work
-              </a>{" "}
+              again, or <ManualOptOut linkClassName="text-[#00d4ff] underline" />{" "}
               to opt out manually.
             </p>
           </div>
@@ -84,7 +80,7 @@ export default async function UnsubscribePage({
                 with the message that sent them there — on the one page whose
                 whole job is a legally-required identification. */}
             OASIS AI Solutions · 6993 Decarie Blvd, Montreal, QC H3W 0B5, Canada<br />
-            Questions? <a href="mailto:conaugh@oasisai.work" className="text-[#00d4ff] underline">conaugh@oasisai.work</a>
+            Questions? <a href={`mailto:${CONTACT_EMAIL}`} className="text-[#00d4ff] underline">{CONTACT_EMAIL}</a>
           </p>
         </div>
       </div>

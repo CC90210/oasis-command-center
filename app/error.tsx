@@ -2,18 +2,25 @@
 
 /**
  * Root error boundary. Next.js renders this when ANY server component
- * inside the dashboard shell throws — instead of the framework's default
+ * inside the dashboard shell throws, instead of the framework's default
  * stark white page.
  *
  * Most readers in /today, /pipeline, /analytics, etc are wrapped in
  * `safe(p, fallback)` so individual queries can't get here. This catches
  * the residual class: a bug in render code, a misconfigured env, a
- * Supabase outage that takes the whole call down.
+ * database outage that takes the whole call down.
+ *
+ * Clients see this page too, so it speaks to a person who cannot read a log:
+ * what to try, and where to send the code. It used to tell them to check the
+ * hosting provider's function logs, which only an operator can open. The digest
+ * stays because it is the one thing that lets us find the failure in the
+ * Worker's logs from their message.
  */
 
 import { useEffect } from "react";
 import Link from "next/link";
 import { AlertTriangle, RefreshCw, Home } from "lucide-react";
+import { ErrorHelp } from "@/components/ErrorHelp";
 
 export default function ErrorBoundary({
   error,
@@ -23,8 +30,7 @@ export default function ErrorBoundary({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Log to console — Vercel captures this in the Function Logs view.
-    // No third-party telemetry yet; this is the diagnostic surface.
+    // The Worker's logs capture console output; this is the diagnostic record.
     console.error("[error.tsx]", error);
   }, [error]);
 
@@ -35,18 +41,9 @@ export default function ErrorBoundary({
           <div className="w-9 h-9 rounded-lg bg-status-warm/15 border border-status-warm/30 flex items-center justify-center text-status-warm">
             <AlertTriangle className="w-5 h-5" />
           </div>
-          <h1 className="text-base font-bold text-fg">Something broke on this page</h1>
+          <h1 className="text-base font-bold text-fg">Something went wrong</h1>
         </div>
-        <p className="text-sm text-fg-muted leading-relaxed">
-          The dashboard caught an unexpected error rendering this view. Other
-          pages should still work. If this keeps happening, capture the digest
-          below and check the Vercel function logs.
-        </p>
-        {error.digest && (
-          <div className="text-[11px] font-mono text-fg-dim bg-bg-deep border border-bg-border rounded-md px-3 py-2 break-all">
-            digest: {error.digest}
-          </div>
-        )}
+        <ErrorHelp digest={error.digest} />
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <button
             onClick={() => reset()}

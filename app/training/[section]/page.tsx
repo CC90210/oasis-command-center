@@ -25,7 +25,7 @@ export default async function TrainingSectionPage({
   params: Promise<{ section: string }>;
 }) {
   const [session, { section: slug }] = await Promise.all([resolveSessionContext(), params]);
-  if (!session.ok) redirect(`/auth/login?next=/training/${slug}`);
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent(`/training/${slug}`)}`);
   if (!mayViewTraining(session)) redirect("/");
 
   const section = sectionBySlug(slug);

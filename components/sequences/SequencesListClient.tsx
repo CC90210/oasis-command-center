@@ -308,10 +308,10 @@ export function SequencesListClient({ initialRows }: { initialRows: SequenceRow[
         merchant receives from that sequence, and how many land in their first day,
         first week, and first month. To tune it, open the sequence and add/remove
         steps or change the delay before each. (For actual send VOLUME across all
-        leads, see the Metrics tab.){" "}
+        leads, see the Volume tab.){" "}
         Each sequence has a trigger (e.g. lead.stage → viewed_application) and an
         ordered list of steps (SMS or email, with a delay before each). When the
-        triggering event lands on Bravo&apos;s event bus, the bridge-side{" "}
+        triggering event lands on the event bus, the bridge-side{" "}
         <code className="text-accent bg-bg-deep px-1 rounded">sequence-runner</code> PM2
         daemon enrolls the lead, fires the first step after its delay, and continues
         through the steps until done. Sends route through{" "}

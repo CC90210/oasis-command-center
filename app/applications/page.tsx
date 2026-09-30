@@ -1,24 +1,19 @@
-import { ComingSoon } from "@/components/ComingSoon";
-import { FileText } from "lucide-react";
+import { notFound } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export default function ApplicationsPage() {
-  return (
-    <ComingSoon
-      title="Applications"
-      subtitle="Funding applications from your inbound forms, processors, and your team"
-      icon={FileText}
-      phase2Bullets={[
-        "New applications appear here as they come in through your forms and inbound channels.",
-        "Each application gets a clear status: new, in review, offers out, declined, or funded.",
-        "Every file gets a document checklist so nothing slips through the cracks.",
-        "The sidebar count updates automatically as the pipeline changes.",
-      ]}
-      related={[
-        { href: "/import", label: "Bulk Import" },
-        { href: "/offers", label: "Offers" },
-      ]}
-    />
-  );
+/**
+ * /applications - retired 2026-09-30 (OASIS OS plan, track T1).
+ *
+ * It was a Coming Soon placeholder for SunBiz funding applications. The per-application shop-out pages under /applications/<id> are a separate route and are not changed here.
+ *
+ * SunBiz was retired on 2026-09-28 and these legacy pages were still reachable
+ * by URL from every workspace, OASIS's clients included. The page now calls
+ * notFound(), the same mechanism #479 used for /start, /configure and
+ * /demo/sun. A signed-out visitor meets the login page first (the path is not
+ * public), a signed-in one the 404.
+ *
+ * Pinned by tests/client-route-gating.test.ts; tests/os-redirects.test.ts
+ * fails if anything in app/, components/ or lib/ links here again.
+ */
+export default function RetiredApplicationsPage(): never {
+  notFound();
 }

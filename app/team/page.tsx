@@ -96,58 +96,65 @@ export default async function TeamPage() {
           <EmptyState message="The team is empty." />
         ) : (
           <ul className="divide-y divide-bg-border">
-            {members.map((m) => (
-              <li
-                key={m.id}
-                className="grid grid-cols-[1fr_7rem_11rem] gap-4 py-3 items-center"
-              >
-                <div>
-                  <div className="font-semibold text-fg flex items-center gap-2 flex-wrap">
-                    {m.display_name || m.full_name || m.email}
-                    {m.is_owner && (
-                      <span className="text-[10px] uppercase tracking-wider text-accent font-mono">
-                        owner
-                      </span>
-                    )}
-                    {!m.is_owner && m.admin_access && (
-                      <span
-                        className="text-[10px] uppercase tracking-wider text-status-warm font-mono"
-                        title="Full admin access granted by an admin"
-                      >
-                        admin (granted)
-                      </span>
-                    )}
-                    {m.id === ctx.profileId && (
-                      <span className="text-[10px] uppercase tracking-wider text-fg-dim font-mono">
-                        you
-                      </span>
+            {members.map((m) => {
+              // libSQL hands these INTEGER flags back as 0/1 (and some rows as
+              // strings). `{m.is_owner && ...}` rendered the 0 itself, so every
+              // non-owner read "Riley0". Compare the number, never the truthiness.
+              const isOwner = Number(m.is_owner) === 1;
+              const adminGranted = Number(m.admin_access) === 1;
+              return (
+                <li
+                  key={m.id}
+                  className="grid grid-cols-[1fr_7rem_11rem] gap-4 py-3 items-center"
+                >
+                  <div>
+                    <div className="font-semibold text-fg flex items-center gap-2 flex-wrap">
+                      {m.display_name || m.full_name || m.email}
+                      {isOwner && (
+                        <span className="text-[10px] uppercase tracking-wider text-accent font-mono">
+                          owner
+                        </span>
+                      )}
+                      {!isOwner && adminGranted && (
+                        <span
+                          className="text-[10px] uppercase tracking-wider text-status-warm font-mono"
+                          title="Full admin access granted by an admin"
+                        >
+                          admin (granted)
+                        </span>
+                      )}
+                      {m.id === ctx.profileId && (
+                        <span className="text-[10px] uppercase tracking-wider text-fg-dim font-mono">
+                          you
+                        </span>
+                      )}
+                    </div>
+                    {canManage && m.email && (
+                      <div className="text-xs text-fg-muted font-mono mt-0.5">{m.email}</div>
                     )}
                   </div>
-                  {canManage && m.email && (
-                    <div className="text-xs text-fg-muted font-mono mt-0.5">{m.email}</div>
-                  )}
-                </div>
-                <div className="text-sm text-fg-muted">
-                  {teamRoleLabel(m.team_role)}
-                </div>
-                <div className="flex items-center justify-end gap-2 text-xs text-fg-dim">
-                  {canGrantAdmin && !m.is_owner && (
-                    <AdminAccessToggle profileId={m.id} initialGranted={m.admin_access} />
-                  )}
-                  {canGrantAdmin && !m.is_owner && m.id !== ctx.profileId && (
-                    <MemberActivationToggle
-                      profileId={m.id}
-                      name={m.display_name || m.full_name || m.email}
-                      active
-                    />
-                  )}
-                  {/* Removal is a true-admin action (not conferred by admin_access), matching the server gate. */}
-                  {canGrantAdmin && !m.is_owner && m.id !== ctx.profileId && (
-                    <RemoveMemberClientButton profileId={m.id} />
-                  )}
-                </div>
-              </li>
-            ))}
+                  <div className="text-sm text-fg-muted">
+                    {teamRoleLabel(m.team_role)}
+                  </div>
+                  <div className="flex items-center justify-end gap-2 text-xs text-fg-dim">
+                    {canGrantAdmin && !isOwner && (
+                      <AdminAccessToggle profileId={m.id} initialGranted={adminGranted} />
+                    )}
+                    {canGrantAdmin && !isOwner && m.id !== ctx.profileId && (
+                      <MemberActivationToggle
+                        profileId={m.id}
+                        name={m.display_name || m.full_name || m.email}
+                        active
+                      />
+                    )}
+                    {/* Removal is a true-admin action (not conferred by admin_access), matching the server gate. */}
+                    {canGrantAdmin && !isOwner && m.id !== ctx.profileId && (
+                      <RemoveMemberClientButton profileId={m.id} />
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </Card>

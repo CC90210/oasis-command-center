@@ -1,49 +1,19 @@
-import { PageHeader, Card, EmptyState } from "@/components/Card";
-import { getActiveProfile } from "@/lib/queries";
-import { getSessionUser } from "@/lib/supabase-server";
-import { getEmailMetrics } from "@/lib/metrics";
-import { MetricsDashboard } from "@/components/metrics/MetricsDashboard";
-import { LeadSourceBreakdown } from "@/components/charts/LeadSourceBreakdown";
-import { safe } from "@/lib/api-helpers";
-import { redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-const WINDOW_DAYS = 30;
-
-export default async function MetricsPage() {
-  const user = await getSessionUser();
-  if (!user) redirect("/login");
-
-  const profile = await safe("metrics.profile", getActiveProfile(), null);
-  const tenantId = profile?.tenant_id || "";
-  const payload = await safe("metrics.email", getEmailMetrics(tenantId, WINDOW_DAYS), null);
-
-  return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Metrics"
-        subtitle="Outbound performance across every source (Constant Contact's metric definitions), plus where leads originate."
-      />
-      {payload ? (
-        <MetricsDashboard payload={payload} />
-      ) : (
-        <>
-          {/* getEmailMetrics failing must NOT take Lead Origination down with
-              it. That tab counts LEADS and reads its own endpoint
-              (/api/metrics/lead-sources) — it shares nothing with the email
-              payload. Before this, one bad email-metrics read replaced the
-              entire dashboard with "warming up" and the origination chart
-              became unreachable for a reason that had nothing to do with it.
-              Rendered standalone here, so it owns its own range selector. */}
-          <Card title="Lead Origination" subtitle="Text vs Dial — which channel the lead came in through, by day">
-            <LeadSourceBreakdown />
-          </Card>
-          <Card title="Outbound metrics">
-            <EmptyState message="Email metrics are warming up. Check back once a cycle has run." />
-          </Card>
-        </>
-      )}
-    </div>
-  );
+/**
+ * /metrics - retired 2026-09-30 (OASIS OS plan, track T1).
+ *
+ * It was SunBiz's outbound email metrics (Constant Contact's definitions) and its Text-vs-Dial lead origination chart.
+ *
+ * SunBiz was retired on 2026-09-28 and these legacy pages were still reachable
+ * by URL from every workspace, OASIS's clients included. The page now calls
+ * notFound(), the same mechanism #479 used for /start, /configure and
+ * /demo/sun. A signed-out visitor meets the login page first (the path is not
+ * public), a signed-in one the 404.
+ *
+ * Pinned by tests/client-route-gating.test.ts; tests/os-redirects.test.ts
+ * fails if anything in app/, components/ or lib/ links here again.
+ */
+export default function RetiredMetricsPage(): never {
+  notFound();
 }
