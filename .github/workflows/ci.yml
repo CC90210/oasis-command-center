@@ -194,25 +194,21 @@ jobs:
       # No Cloudflare credentials.
       #
       # The dry run does NOT fail on size: it only colours the size line and
-      # exits 0 (wrangler 4.127.1, printBundleSize). scripts/check-worker-size.ts
+      # exits 0 (wrangler 4.127.1, printBundleSize). scripts/check-worker-bundle.ts
       # reads that line from the log and fails the step past the budget below,
       # and fails it too when the line is missing (an unknown size is not a
       # small one). pipefail keeps a failed dry run failing through `tee`.
       #
-      # WORKER_GZIP_BUDGET_KIB is in wrangler's gzip KiB, the number this step
-      # prints. Cloudflare's paid-plan limit is "10 MB compressed", measured on
-      # its side, and it is not the same measure: production has accepted
-      # 10283.20 KiB by wrangler's count (the deploy of 4189719b, 2026-09-29;
-      # 0b5da811 deployed at 10230.73), above 10 MiB. So the budget is the
-      # largest size production is known to accept plus about 1%. The dry run
-      # here reads about 20 KiB below the deploy for the same commit (it
-      # builds with placeholder env, not the manifest's). Raising the budget is
-      # a decision, not a fix: until a staging Worker exists, the post-merge
-      # deploy is the only place Cloudflare's real limit is checked.
+      # WORKER_UPLOAD_BUDGET_KIB is checked against wrangler's `Total Upload`
+      # KiB, the UNCOMPRESSED size. Cloudflare's limit is 64 MiB (65536 KiB)
+      # uncompressed, and it has no compressed limit (the gzip figure is for
+      # reference only). The budget is that limit less 1 MiB, because the dry
+      # run builds with placeholder env and reads slightly below the deploy
+      # for the same commit. On 2026-09-29 the upload was 59014 KiB.
       - name: Bundle the Worker (wrangler dry run) and check its size
         env:
-          WORKER_GZIP_BUDGET_KIB: "10400"
+          WORKER_UPLOAD_BUDGET_KIB: "64512"
         run: |
           set -o pipefail
           npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
-          node --import tsx scripts/check-worker-size.ts "$RUNNER_TEMP/wrangler-dry-run.log"
+          node --import tsx scripts/check-worker-bundle.ts "$RUNNER_TEMP/wrangler-dry-run.log"
