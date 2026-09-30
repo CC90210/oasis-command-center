@@ -17,7 +17,9 @@
  *      in ONE batch with the approval_events row that records it. The event
  *      insert is conditioned on `changes() = 1`, so a CAS that lost a race
  *      writes no event and a retried call never logs twice. approval_events is
- *      append-only: nothing here UPDATEs or DELETEs it.
+ *      append-only: nothing here UPDATEs or DELETEs it. Each lifecycle event
+ *      is mirrored into the Business Ledger (outcome_events) in the same
+ *      batch, guarded the same way (eventWithLedger below).
  *   3. Nothing is swallowed. A failed statement throws; the route turns it into
  *      a loud 500. An empty list means the query ran and matched nothing.
  *
@@ -26,6 +28,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 import type { DepartmentKey } from "@/lib/os/types";
+import { emitIfChanged, type LedgerStatement } from "@/lib/ledger/emit";
+import { isLedgerCode, isLedgerId, type LedgerActorType } from "@/lib/ledger/catalog";
 import {
   APPROVAL_ACTION_KINDS,
   APPROVAL_STATUSES,
@@ -436,12 +440,87 @@ function eventIfChanged(
   actor: Actor,
   meta: Record<string, unknown> | null,
   nowIso: string,
+  eventId: string = newApprovalId(),
 ): InStatement {
   return {
     sql: `INSERT INTO approval_events (id, tenant_id, approval_id, event, actor_type, actor_id, meta, created_at)
           SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
-    args: [newApprovalId(), tenantId, approvalId, event, actor.type, actor.id, meta ? JSON.stringify(meta) : null, nowIso],
+    args: [eventId, tenantId, approvalId, event, actor.type, actor.id, meta ? JSON.stringify(meta) : null, nowIso],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Business Ledger mirror (lib/ledger, plan §F2)
+// ---------------------------------------------------------------------------
+
+const LEDGER_PRODUCER = "lib/os/approvals/store.ts";
+
+type ApprovalLedgerKey =
+  | "approval.requested"
+  | "approval.edited"
+  | "approval.approved"
+  | "approval.sent_back"
+  | "approval.executed"
+  | "approval.failed"
+  | "approval.expired";
+
+/** A routine is the business's own automation, so the ledger calls it system. */
+const LEDGER_ACTOR: Readonly<Record<ActorType, LedgerActorType>> = {
+  user: "human",
+  agent: "agent",
+  routine: "system",
+  system: "system",
+};
+
+/**
+ * The approval_events row AND its ledger mirror, for the same batch, in that
+ * order. The ledger INSERT is guarded by changes() = 1 on the event insert,
+ * which is itself guarded by the compare-and-swap before it: a CAS that lost
+ * writes neither row, and a ledger insert that fails rolls the decision back.
+ *
+ * Keyed appr:{approval_event_id}, so a later backfill from approval_events
+ * lands on the same keys. That id is minted here for each event, so a key can
+ * never be reused for other content, and these batches skip
+ * assertNoPayloadConflicts; a chokepoint whose key comes from a provider id
+ * must call it.
+ *
+ * The ledger holds ids and codes only: the send-back note, the comment and the
+ * draft itself stay in approvals / approval_events. A requester id that is not
+ * id-shaped (the requester is free text up to 200 characters) is recorded as a
+ * NULL actor_id here and stays whole in approvals.requested_by_id.
+ */
+function eventWithLedger(
+  tenantId: string,
+  approvalId: string,
+  event: ApprovalEvent,
+  actor: Actor,
+  meta: Record<string, unknown> | null,
+  nowIso: string,
+  ledger: { key: ApprovalLedgerKey; department: DepartmentKey | null; payload: Record<string, unknown> },
+): [InStatement, LedgerStatement] {
+  const eventId = newApprovalId();
+  return [
+    eventIfChanged(tenantId, approvalId, event, actor, meta, nowIso, eventId),
+    emitIfChanged(
+      {
+        tenantId,
+        eventKey: ledger.key,
+        eventVersion: 1,
+        occurredAt: nowIso,
+        subject: { type: "approval", id: approvalId },
+        department: ledger.department,
+        actor: { type: LEDGER_ACTOR[actor.type], id: isLedgerId(actor.id) ? actor.id : null },
+        source: "native",
+        idempotencyKey: `appr:${eventId}`,
+        causationId: eventId,
+        approvalId,
+        confidence: "verified",
+        payload: ledger.payload,
+        producer: LEDGER_PRODUCER,
+      },
+      new Date(nowIso),
+    ),
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -560,13 +639,24 @@ export async function createApproval(db: Client, input: unknown, now: Date): Pro
     ],
   });
   stmts.push(
-    eventIfChanged(
+    ...eventWithLedger(
       a.tenantId,
       id,
       "created",
       actor,
       { revision, ...(a.supersedesId ? { supersedes_id: a.supersedesId } : {}), payload_hash: hash },
       nowIso,
+      a.supersedesId
+        ? {
+            key: "approval.edited",
+            department: a.departmentKey,
+            payload: { action_kind: a.actionKind, revision, supersedes_id: a.supersedesId, risk_level: a.riskLevel },
+          }
+        : {
+            key: "approval.requested",
+            department: a.departmentKey,
+            payload: { action_kind: a.actionKind, revision, risk_level: a.riskLevel, requested_by_type: a.requestedBy.type },
+          },
     ),
   );
   await db.batch(stmts, "write");
@@ -665,7 +755,11 @@ export async function decideApproval(
                 AND (expires_at IS NULL OR expires_at > ?)`,
         args: [scope.userId, nowIso, via, nowIso, tenantId, id, decision.payloadHash, nowIso],
       },
-      eventIfChanged(tenantId, id, "approved", user, { payload_hash: decision.payloadHash, via }, nowIso),
+      ...eventWithLedger(tenantId, id, "approved", user, { payload_hash: decision.payloadHash, via }, nowIso, {
+        key: "approval.approved",
+        department: row.department_key,
+        payload: { action_kind: row.action_kind, decided_via: via },
+      }),
     ];
   } else {
     batch = [
@@ -674,7 +768,11 @@ export async function decideApproval(
               WHERE tenant_id = ? AND id = ? AND status = 'pending' AND (expires_at IS NULL OR expires_at > ?)`,
         args: [scope.userId, nowIso, via, note, nowIso, tenantId, id, nowIso],
       },
-      eventIfChanged(tenantId, id, "sent_back", user, { note, via }, nowIso),
+      ...eventWithLedger(tenantId, id, "sent_back", user, { note, via }, nowIso, {
+        key: "approval.sent_back",
+        department: row.department_key,
+        payload: { action_kind: row.action_kind, decided_via: via },
+      }),
     ];
   }
   const results = await db.batch(batch, "write");
@@ -702,6 +800,9 @@ export async function decideApproval(
 export async function expireApproval(db: Client, tenantId: string, id: string, now: Date): Promise<boolean> {
   const t = requireTenant(tenantId);
   const nowIso = now.toISOString();
+  // The mirror needs the kind and department; neither ever changes after create.
+  const row = await getApprovalInTenant(db, t, id);
+  if (!row) return false;
   const results = await db.batch(
     [
       {
@@ -709,7 +810,11 @@ export async function expireApproval(db: Client, tenantId: string, id: string, n
               WHERE tenant_id = ? AND id = ? AND status = 'pending' AND expires_at IS NOT NULL AND expires_at <= ?`,
         args: [nowIso, t, id, nowIso],
       },
-      eventIfChanged(t, id, "expired", { type: "system", id: null }, null, nowIso),
+      ...eventWithLedger(t, id, "expired", { type: "system", id: null }, null, nowIso, {
+        key: "approval.expired",
+        department: row.department_key,
+        payload: { action_kind: row.action_kind },
+      }),
     ],
     "write",
   );
@@ -778,17 +883,70 @@ export async function claimForExecution(db: Client, tenantId: string, id: string
   return results[0].rowsAffected === 1;
 }
 
+type ExecutionOutcome = { status: "executed" | "failed"; result: ExecutionResult };
+/** What the finish's ledger row needs from the approval; neither changes after create. */
+export type ExecutionLedgerFacts = Pick<ApprovalRow, "action_kind" | "department_key">;
+
+/**
+ * The ledger mirror of a finish. Codes only: the executor's full account
+ * (message, from, would_send) stays in execution_result and the
+ * approval_events meta.
+ */
+function executionLedger(approval: ExecutionLedgerFacts, outcome: ExecutionOutcome) {
+  const r = outcome.result as { outcome?: unknown; provider?: unknown; reason?: unknown };
+  return outcome.status === "executed"
+    ? {
+        key: "approval.executed" as const,
+        department: approval.department_key,
+        payload: {
+          action_kind: approval.action_kind,
+          outcome: isLedgerCode(r.outcome) ? r.outcome : "unspecified",
+          ...(isLedgerCode(r.provider) ? { provider: r.provider } : {}),
+        },
+      }
+    : {
+        key: "approval.failed" as const,
+        department: approval.department_key,
+        payload: { action_kind: approval.action_kind, reason: isLedgerCode(r.reason) ? r.reason : "unspecified" },
+      };
+}
+
+/**
+ * BEFORE the claim (execute.ts): prove the finish can record its ledger row.
+ * The finish runs after the send; if its batch failed there (outcome_events
+ * missing, or a row the ledger refuses), it would roll back and leave the
+ * approval `executing` with the provider's result lost, although the email
+ * went out. So both possible finish rows are built (and validated) now, and
+ * outcome_events is read once. Either failing throws here, while the approval
+ * is still `approved` and nothing has left the business.
+ */
+export async function assertExecutionLedgerReady(db: Client, approval: ApprovalRow, now: Date): Promise<void> {
+  const t = requireTenant(approval.tenant_id);
+  const nowIso = now.toISOString();
+  const system: Actor = { type: "system", id: null };
+  const probes: ExecutionOutcome[] = [
+    { status: "executed", result: { outcome: "sent", provider: "readiness" } },
+    { status: "failed", result: { outcome: "failed", reason: "readiness", message: "" } },
+  ];
+  for (const o of probes) eventWithLedger(t, approval.id, o.status, system, null, nowIso, executionLedger(approval, o));
+  await db.execute({ sql: "SELECT 1 FROM outcome_events WHERE tenant_id = ? LIMIT 1", args: [t] });
+}
+
 /**
  * executing → executed | failed, with the executor's own account. Throws if
  * the row is not `executing`: under the claim above that cannot happen, and if
  * it ever does, a second writer exists and that is a loud bug, not a detail.
+ *
+ * `approval` is the row the executor already read after its claim. Nothing is
+ * read here: this runs after the outward action, so it does only the one batch.
  */
 export async function finishExecution(
   db: Client,
   tenantId: string,
   id: string,
-  outcome: { status: "executed" | "failed"; result: ExecutionResult },
+  outcome: ExecutionOutcome,
   now: Date,
+  approval: ExecutionLedgerFacts,
 ): Promise<void> {
   const t = requireTenant(tenantId);
   const nowIso = now.toISOString();
@@ -800,7 +958,15 @@ export async function finishExecution(
               WHERE tenant_id = ? AND id = ? AND status = 'executing'`,
         args: [outcome.status, nowIso, resultJson, nowIso, t, id],
       },
-      eventIfChanged(t, id, outcome.status, { type: "system", id: null }, outcome.result as Record<string, unknown>, nowIso),
+      ...eventWithLedger(
+        t,
+        id,
+        outcome.status,
+        { type: "system", id: null },
+        outcome.result as Record<string, unknown>,
+        nowIso,
+        executionLedger(approval, outcome),
+      ),
     ],
     "write",
   );

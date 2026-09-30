@@ -21,9 +21,12 @@
  *
  * WHAT EACH BLOCK MAY READ is decided once, up front, by todayBriefPlan
  * (components/os/today/model.ts) from the viewer's capabilities and the
- * departments their rail shows (mayOpenOsHref — the rail's own answer). A
- * block the plan refuses is never loaded, and every loader returns "could not
- * find out" rather than a zero when it fails.
+ * departments their rail shows (mayOpenOsHref — the rail's own answer), via
+ * briefPlanFor. A block the plan refuses is never loaded, and every loader
+ * returns "could not find out" rather than a zero when it fails. The Needs-you
+ * reads live in components/os/today/brief-load.ts, shared with the Chief of
+ * Staff tab; cash is read there only behind the `showFinancials` passed from
+ * here.
  *
  * The collected-vs-pace CHART no longer renders here: its area fill is a
  * gradient, which the OS visual rules do not allow. The pace is the bar in the
@@ -37,33 +40,20 @@ import { LiveClock } from "@/components/LiveClock";
 import { TodayBrief } from "@/components/os/today/TodayBrief";
 import {
   buildDepartmentCards,
-  buildNeedsYou,
   cashView,
   firstName,
   goalPaceView,
   greetingFor,
-  todayBriefPlan,
   usd,
 } from "@/components/os/today/model";
-import {
-  loadCalendarStatus,
-  loadCash,
-  loadConnectionAlerts,
-  loadContentWeek,
-  loadDelivery,
-  loadHotReplies,
-  loadSales,
-  type OperatorDay,
-} from "@/components/os/today/loaders";
-import { loadPendingApprovals } from "@/components/os/approvals/load";
-import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
-import { operatorDateKey, operatorDayStartIso, operatorParts } from "@/lib/dates";
+import { loadCalendarStatus, loadContentWeek } from "@/components/os/today/loaders";
+import { briefPlanFor, empireLaneFromCheck, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
+import { operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
-import { isWebsiteSalesTenantSlug } from "@/lib/leads/canonical-lead-fields";
-import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { resolveOsModules } from "@/lib/os/modules";
 import { ASK_HREF, mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
 import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import type { UserProfile } from "@/lib/supabase";
 
 /** Where a viewer connects their own Google Calendar today (Settings › Personal). */
@@ -107,65 +97,37 @@ export async function FounderToday({
     provisioned: true,
     founders: null,
   };
-  const departments = OS_DEPARTMENTS.filter((d) => mayOpenOsHref(navInput, d.href));
-  const plan = todayBriefPlan({
-    persona: viewer.persona,
-    capabilities: viewer.capabilities,
-    websiteSalesBoard: isWebsiteSalesTenantSlug(viewer.tenantSlug),
-    departments: new Set(departments.map((d) => d.key)),
-  });
+  const { departments, plan } = briefPlanFor(viewer, navInput);
   const showFinancials = financialsAllowed && plan.money;
 
   const now = new Date();
-  const day: OperatorDay = {
-    nowMs: now.getTime(),
-    startMs: Date.parse(operatorDayStartIso(now)),
-    endMs: Date.parse(operatorDayStartIso(now, 1)),
-    todayKey: operatorDateKey(now),
-  };
+  const day = operatorDayAt(now);
 
   // Every block starts at once. None of these promises rejects: each loader
   // resolves to a value, a failure marker, or null when its block is refused.
-  const salesP = plan.pipeline
-    ? loadSales({ source: plan.pipeline, tenantId, tenantSlug: viewer.tenantSlug, day })
-    : Promise.resolve(null);
-  const deliveryP = plan.delivery
-    ? loadDelivery({
-        persona: viewer.persona,
-        tenantId,
-        userId: viewer.userId,
-        canAct: viewer.capabilities.canAct,
-        day,
-      })
-    : Promise.resolve(null);
-  const inboundP = plan.inbound ? loadHotReplies(tenantId, day.nowMs) : Promise.resolve(null);
-  const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
-  const calendarP = loadCalendarStatus(tenantId, viewer.userId);
-  const cashP = showFinancials && plan.cash ? loadCash() : Promise.resolve(null);
-  // Approvals waiting on THIS viewer: the session's workspace, cut to the
-  // departments the rail opens for them (lib/os/approvals/scope.ts).
-  const approvalsP = loadPendingApprovals({
-    scope: approvalScopeFromViewer({ surface: viewer, navInput }),
-    tenantSlug: viewer.tenantSlug,
-    limit: TODAY_APPROVALS_SHOWN,
+  // The Needs-you reads (pipeline, support, inbound, cash, approvals,
+  // connections, routines) are the SAME call the Chief of Staff tab makes
+  // (components/os/today/brief-load.ts), so the two cannot count differently.
+  const needsP = loadNeedsYouReads({
+    viewer,
+    navInput,
+    plan,
+    showFinancials,
+    day,
+    approvalsLimit: TODAY_APPROVALS_SHOWN,
+    // A failed lookup is "unknown", not "no" (brief-load.ts empireLaneFromCheck).
+    isPlatformOperator: async () => empireLaneFromCheck(await resolvePlatformOperator()),
   });
-  const connectionsP = plan.connections ? loadConnectionAlerts(tenantId) : Promise.resolve(null);
+  const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
+  const calendarP = loadCalendarStatus(tenantId, viewer.userId, isOasisSurfaceTenant(viewer.tenantSlug));
 
   // The money block. Entered only when the capability says so — the point of
   // the branch is that these reads never happen otherwise, not that their
   // results get dropped afterwards. lib/goals/oasis-money is the same loader
   // /analytics uses; its figures are the Finances ledger and live Stripe.
   const money = showFinancials ? await loadOasisMoney(tenantId, "today") : null;
-  const [sales, delivery, inbound, content, calendar, cash, approvals, connections] = await Promise.all([
-    salesP,
-    deliveryP,
-    inboundP,
-    contentP,
-    calendarP,
-    cashP,
-    approvalsP,
-    connectionsP,
-  ]);
+  const [reads, content, calendar] = await Promise.all([needsP, contentP, calendarP]);
+  const { sales, delivery, cash, routines } = reads;
 
   const paceSeries: GoalPacePoint[] = money?.paceSeries ?? [];
   const goal = money
@@ -177,7 +139,7 @@ export async function FounderToday({
         collected: money.collected,
       })
     : null;
-  const needsYou = buildNeedsYou({ sales, delivery, inbound, cash, approvals, connections, nowMs: day.nowMs });
+  const needsYou = needsYouFrom(reads, day.nowMs);
   const cards = buildDepartmentCards({
     departments,
     needsYou,
@@ -186,6 +148,8 @@ export async function FounderToday({
     content,
     goal,
     stripeConnected: money?.stripeConnected ?? null,
+    routines,
+    nowMs: day.nowMs,
   });
 
   const name = firstName(profile.display_name || profile.full_name);

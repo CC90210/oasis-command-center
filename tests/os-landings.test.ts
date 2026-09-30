@@ -720,7 +720,7 @@ async function main() {
     for (const t of [...failed.headline, ...failed.month]) assert.equal(t.status, "error", t.label);
     const live = mm.moneyTiles(
       {
-        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0 },
+        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0, coverage: { complete: true, gaps: [] } },
         collected: { cad_cents: 0, usd_cents: 0, payments: 0, fx_missing_days: [] },
         mrr: { mrr_cents: 0, currency: "CAD", active_subscriptions: 0, as_of: "2026-09-27T00:00:00Z" },
         recent: [{}],
