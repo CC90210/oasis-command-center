@@ -325,11 +325,13 @@ async function main() {
     const { text } = await render(await AutomationsContent({}));
     assert.match(text, /Couldn't check your computer/);
     assert.doesNotMatch(text, /Computer not connected yet/);
+    assert.doesNotMatch(text, /Install bridge/, "no install offer on a heartbeat nobody could read");
   });
   await check("Drips: an unreadable bridge says Couldn't check your computer, not 'Computer not connected yet'", async () => {
     const { text } = await render(await SequencesPage());
     assert.match(text, /Couldn't check your computer/);
     assert.doesNotMatch(text, /Computer not connected yet/);
+    assert.doesNotMatch(text, /Install bridge/, "no install offer on a heartbeat nobody could read");
   });
   await check("Settings › AI: the cards get null (unknown) keys and bridge, and the tag says couldn't check", async () => {
     const { text, client } = await render(await SettingsContent({ section: "ai" }));
@@ -421,6 +423,11 @@ async function main() {
     assert.match(editor, /Couldn't check which AI accounts are connected/);
     assert.doesNotMatch(editor, /No global AI account connected yet/);
     assert.match(plain(html.editorKnownEmpty), /No global AI account connected yet/);
+
+    const toolAccess = plain(html.toolAccessUnknown);
+    assert.match(toolAccess, /Couldn't check\./);
+    assert.doesNotMatch(toolAccess, /Offline\.|Install the bridge/);
+    assert.match(plain(html.toolAccessOffline), /Offline\./);
 
     const railUnknown = plain(html.railUnknown);
     assert.match(railUnknown, /bridge couldn't check/);

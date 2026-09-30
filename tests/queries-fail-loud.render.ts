@@ -3,8 +3,9 @@
  *
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * under which `react-dom/server` does not resolve and `react` has no
- * `useState`. IntegrationDot, ProviderAccountsCard and AgentConfigEditor are
- * client components, so the only way to see what they draw when a page hands
+ * `useState`. IntegrationDot, ProviderAccountsCard, AgentConfigEditor (and its
+ * BridgeToolAccess strip) and OsRail are client components, so the only way
+ * to see what they draw when a page hands
  * them null ("the read failed") is to render them where React is whole — the
  * same split tests/os-channels-honest.render.ts makes. The test spawns this
  * file with plain `node --import tsx` and asserts against the markup it prints.
@@ -46,7 +47,7 @@ async function main() {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const { IntegrationDot } = await import("../components/IntegrationDot");
   const { ProviderAccountsCard } = await import("../components/settings/ProviderAccountsCard");
-  const { AgentConfigEditor } = await import("../components/settings/AgentConfigEditor");
+  const { AgentConfigEditor, BridgeToolAccess } = await import("../components/settings/AgentConfigEditor");
   const { OsRail } = await import("../components/os/OsRail");
   const railSections = [
     {
@@ -94,10 +95,10 @@ async function main() {
     dotUnknown: renderToStaticMarkup(React.createElement(IntegrationDot, { health, connection: { hasCredentials: null } })),
     dotKnownMissing: renderToStaticMarkup(React.createElement(IntegrationDot, { health, connection: { hasCredentials: false } })),
     accountsUnknown: renderToStaticMarkup(
-      React.createElement(ProviderAccountsCard, { connectedServices: null, bridgeOnline: null, canManageTeam: true }),
+      React.createElement(ProviderAccountsCard, { connectedServices: null, bridgeOnline: null, canManageTeam: true, canInstallBridge: true }),
     ),
     accountsKnownEmpty: renderToStaticMarkup(
-      React.createElement(ProviderAccountsCard, { connectedServices: new Set<string>(), bridgeOnline: false, canManageTeam: true }),
+      React.createElement(ProviderAccountsCard, { connectedServices: new Set<string>(), bridgeOnline: false, canManageTeam: true, canInstallBridge: true }),
     ),
     editorUnknown: renderToStaticMarkup(
       React.createElement(AgentConfigEditor, { agentKeys: [], bridgeOnline: null, globallyConnectedServices: null }),
@@ -105,6 +106,8 @@ async function main() {
     editorKnownEmpty: renderToStaticMarkup(
       React.createElement(AgentConfigEditor, { agentKeys: [], bridgeOnline: false, globallyConnectedServices: [] }),
     ),
+    toolAccessUnknown: renderToStaticMarkup(React.createElement(BridgeToolAccess, { bridgeOnline: null, canInstallBridge: true })),
+    toolAccessOffline: renderToStaticMarkup(React.createElement(BridgeToolAccess, { bridgeOnline: false, canInstallBridge: true })),
     railUnknown: rail(null),
     railOffline: rail(false),
   };

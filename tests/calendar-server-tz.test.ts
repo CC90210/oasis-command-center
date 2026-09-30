@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { seriesStarts } from "../lib/calendar/recurrence";
-import { instantOf } from "../lib/calendar/zone";
+import { instantOf, wallAsLocal } from "../lib/calendar/zone";
 import { DEFAULT_PREFS, type EventInput, type EventRecord } from "../lib/calendar/types";
 import { shabbatConflict } from "../lib/calendar/validate";
 
@@ -62,6 +62,14 @@ assert.ok(
   // Ordinary times on either side.
   assert.equal(instantOf(w(2026, 6, 1, 9, 0), "America/Toronto").toISOString(), "2026-07-01T13:00:00.000Z");
   assert.equal(instantOf(w(2026, 0, 15, 9, 0), "Asia/Kolkata").toISOString(), "2026-01-15T03:30:00.000Z");
+}
+
+// Repeat choices are built in the event's zone: a Toronto Monday 23:00 is a
+// Monday for the editor even where it is already Tuesday (here: UTC).
+{
+  const mon11pm = new Date("2026-10-05T23:00:00-04:00");
+  assert.equal(mon11pm.getUTCDay(), 2, "Tuesday in UTC");
+  assert.equal(wallAsLocal(mon11pm, "America/Toronto").getDay(), 1, "Monday in the event's zone");
 }
 
 console.log("calendar-server-tz: all checks passed");

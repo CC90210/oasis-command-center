@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
@@ -19,6 +20,8 @@ export default async function PlaybookSlugPage({
 }: {
   params: Promise<{ slug: string }>;
 }) {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const { slug } = await params;
   const file = await loadPlaybook(slug);
   if (!file) notFound();

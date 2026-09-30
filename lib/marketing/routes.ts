@@ -59,7 +59,9 @@ export const MARKETING_PATHS = [
   "/work",
   "/about",
   "/contact",
-  "/start", // the former /welcome entry-path page
+  // "/start" (the former /welcome entry-path page) was removed 2026-09-29 (F0
+  // containment): it fed the developer install funnel (/configure, /download),
+  // which cloned a repo that is now private. The page calls notFound().
 ] as const;
 
 /**

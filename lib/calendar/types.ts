@@ -61,6 +61,8 @@ export type Recurrence = {
   byWeekday?: number[];
   /** MONTHLY only. "day" = same day of month, "nth" = e.g. 2nd Tuesday. */
   monthlyMode?: "day" | "nth";
+  /** MONTHLY "nth" only: 1..4, or -1 for "last". Absent = implied by the first date. */
+  nth?: number;
   /** Last date an occurrence may START on, inclusive, `YYYY-MM-DD`. */
   until?: string;
   /** Total occurrences, including the first. */

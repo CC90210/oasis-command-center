@@ -38,6 +38,7 @@ import {
   EyeOff,
 } from "lucide-react";
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
+import { BridgeInstallLink } from "@/components/settings/BridgeInstallLink";
 
 type Props = {
   /** Set of services-with-key resolved server-side via aiServicesWithKey().
@@ -47,6 +48,8 @@ type Props = {
   /** null = the bridge heartbeat could not be read. */
   bridgeOnline: boolean | null;
   canManageTeam: boolean;
+  /** The server's verified platform-operator verdict. Only the operator is offered the bridge install. */
+  canInstallBridge: boolean;
 };
 
 // Providers that get a card on this surface. Ollama is intentionally hidden
@@ -58,6 +61,7 @@ export function ProviderAccountsCard({
   connectedServices: initialServices,
   bridgeOnline,
   canManageTeam,
+  canInstallBridge,
 }: Props) {
   const router = useRouter();
   // Server-rendered set, but track in state so connecting flips the UI
@@ -259,23 +263,7 @@ export function ProviderAccountsCard({
 
       {/* Only a KNOWN "no key and no bridge" earns this warning; a read that
           failed is not evidence that nothing is wired. */}
-      {keysKnown && !anyConnected && bridgeOnline === false && (
-        <div className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3 text-xs text-fg flex items-start gap-2">
-          <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span className="font-bold">No provider wired yet.</span> Your
-            agents can&apos;t think until you connect at least one — connect a
-            cloud provider above (recommended for client tenants) OR{" "}
-            <Link
-              href="/settings/devices/install"
-              className="text-accent hover:text-accent-bright underline"
-            >
-              install the local bridge
-            </Link>{" "}
-            to use your own Claude Code subscription.
-          </div>
-        </div>
-      )}
+      {keysKnown && !anyConnected && bridgeOnline === false && <NoProviderNotice canInstallBridge={canInstallBridge} />}
 
       {activeProvider && (
         <ConnectProviderDialog
@@ -719,5 +707,35 @@ function TestConnectionButton({ provider }: { provider: Provider }) {
         </span>
       )}
     </>
+  );
+}
+
+/**
+ * Shown when no provider is connected and no bridge is online. The bridge
+ * route installs for the verified platform operator only (F0 containment,
+ * 2026-09-29), so only the operator is offered it as the alternative; for
+ * everyone else the one way forward is a cloud provider above. No hooks, so
+ * tests/f0-containment.test.ts renders both versions.
+ */
+export function NoProviderNotice({ canInstallBridge }: { canInstallBridge: boolean }) {
+  return (
+    <div className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3 text-xs text-fg flex items-start gap-2">
+      <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
+      <div className="flex-1">
+        <span className="font-bold">No provider wired yet.</span> Your
+        agents can&apos;t think until you connect at least one
+        {canInstallBridge === true ? (
+          <>
+            {" "}— connect a cloud provider above (recommended for client tenants) OR{" "}
+            <BridgeInstallLink canInstallBridge className="text-accent hover:text-accent-bright underline">
+              install the local bridge
+            </BridgeInstallLink>{" "}
+            to use your own Claude Code subscription.
+          </>
+        ) : (
+          <> — connect a cloud provider above.</>
+        )}
+      </div>
+    </div>
   );
 }

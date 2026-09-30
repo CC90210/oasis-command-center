@@ -1,3 +1,4 @@
+import { requirePlaybookReader } from "@/lib/playbook-access";
 import Link from "next/link";
 import { cookies } from "next/headers";
 import { Card, PageHeader, Tag } from "@/components/Card";
@@ -161,6 +162,8 @@ function isSunBizPlaybook(file: PlaybookFile): boolean {
 }
 
 export default async function PlaybookIndex() {
+  // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
+  await requirePlaybookReader();
   const operatingManual = await listPlaybooks();
   const profile = await safe("playbook.profile", getActiveProfile(), null);
   const rawDemoProfileSlug = (await cookies()).get(DEMO_CLIENT_PROFILE_COOKIE)?.value || null;
