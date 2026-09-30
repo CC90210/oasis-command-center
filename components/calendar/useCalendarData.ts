@@ -123,6 +123,9 @@ export function useCalendarData() {
   // Saves run one at a time. With two in flight, rolling one back to its
   // snapshot would undo the other; serialized, each snapshot is exact.
   const queue = useRef<Promise<unknown>>(Promise.resolve());
+  // temp id -> server id, for saves queued while a create was in flight: an
+  // edit made to an event before its create finished still names the temp id.
+  const serverIds = useRef(new Map<string, string>());
 
   const reload = useCallback(async () => {
     try {
@@ -148,7 +151,17 @@ export function useCalendarData() {
    * undo. On failure the local state is restored and the error rethrown.
    */
   const commitNow = useCallback(
-    async (ops: EventOp[]): Promise<EventOp[]> => {
+    async (queued: EventOp[]): Promise<EventOp[]> => {
+      const real = (id: string) => serverIds.current.get(id) ?? id;
+      const ops: EventOp[] = queued.map((op) => {
+        if (op.op === "delete") return { ...op, id: real(op.id) };
+        if (op.op === "update") {
+          const link = op.patch.recurringEventId;
+          return { ...op, id: real(op.id), patch: link ? { ...op.patch, recurringEventId: real(link) } : op.patch };
+        }
+        const link = op.event.recurringEventId;
+        return link ? { ...op, event: { ...op.event, recurringEventId: real(link) } } : op;
+      });
       const before = eventsRef.current;
       const ids = ops.map((op) => (op.op === "create" ? tempId() : op.op === "update" || op.op === "delete" ? op.id : ""));
       // Map optimistic temp ids onto server-side tempIds so overrides can
@@ -168,8 +181,10 @@ export function useCalendarData() {
         });
         let next = eventsRef.current;
         results.forEach((r, i) => {
-          if (r.op === "create" && r.event) next = next.map((row) => (row.id === ids[i] ? r.event! : row));
-          else if (r.op === "update" && r.event) next = next.map((row) => (row.id === r.id ? r.event! : row));
+          if (r.op === "create" && r.event) {
+            serverIds.current.set(ids[i], r.id);
+            next = next.map((row) => (row.id === ids[i] ? r.event! : row));
+          } else if (r.op === "update" && r.event) next = next.map((row) => (row.id === r.id ? r.event! : row));
         });
         eventsRef.current = next;
         setEvents(next);
