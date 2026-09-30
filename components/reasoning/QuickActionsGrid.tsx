@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type { QuickAction } from "@/lib/quick-actions";
 import { getAgentInfo } from "@/lib/agents";
+import { askDepartment, departmentForAgent } from "@/lib/os/chat-href";
 
 const ICON_MAP = {
   Sparkles, Target, Mail, FileText, TrendingUp, Activity,
@@ -14,10 +15,10 @@ const ICON_MAP = {
 } as const;
 
 /**
- * Renders curated quick actions per agent. Click → routes to /agents with
- * the prompt + agent baked into the URL. ChatWidget reads the params on
- * mount, pre-fills the composer, and selects the right agent. Operator
- * hits Enter (or autosend) and goes.
+ * Renders curated quick actions per agent. Click -> opens the department that
+ * answers for the agent (lib/os/chat-href.ts askDepartment) with the prompt in
+ * `?ask=`. The department's composer prefills it once and cleans the URL; the
+ * person reviews it and presses Send. Nothing is sent on their behalf.
  */
 export function QuickActionsGrid({ actions }: { actions: QuickAction[] }) {
   // Group by agent so the page reads as "what each agent can do for you"
@@ -63,7 +64,7 @@ export function QuickActionsGrid({ actions }: { actions: QuickAction[] }) {
               <div className="grid sm:grid-cols-2 gap-2.5">
                 {byAgent[slug].map((q) => {
                   const Icon = ICON_MAP[q.icon] || Sparkles;
-                  const href = `/agents?agent=${encodeURIComponent(q.agent)}&prompt=${encodeURIComponent(q.prompt)}`;
+                  const href = askDepartment(departmentForAgent(q.agent), q.prompt);
                   return (
                     <Link
                       key={q.title}

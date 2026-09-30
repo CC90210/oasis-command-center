@@ -1,17 +1,24 @@
 /**
- * Playbook markdown loader.
+ * Playbook markdown (content/playbooks/*.md), bundled into the Worker.
  *
- * Server-only. Reads files from content/playbooks/<slug>.md,
- * extracts the H1 title (first line starting with "# "), and returns the body
- * for client-side rendering via <ReactMarkdown remarkPlugins={[remarkGfm]}>.
+ * The markdown is compiled into lib/playbooks.generated.ts by
+ * scripts/gen-content-modules.mjs (run by `prebuild`, committed, and checked
+ * for drift by tests/playbook-docs.test.ts). This module never touches a
+ * filesystem: the production Worker has none, and the previous runtime
+ * readdir/readFile answered [] / null there, which is how
+ * /playbook/10-oasis-loop showed "Page not found" and the Operating manual
+ * section disappeared (audit 2026-09-30, playbook-fs-reads-on-workers).
  *
- * No frontmatter parser — the existing playbooks use plain markdown with H1
- * as the title. Keeping it simple avoids adding gray-matter just for a few
- * files.
+ * NOTHING IS SWALLOWED. A slug that is not in the bundle is a real "no such
+ * playbook": loadPlaybook throws PlaybookNotFoundError, and the page maps that
+ * one error to a 404. Any other failure propagates.
+ *
+ * Frontmatter: an optional leading `---` block. `updated: YYYY-MM-DD` is the
+ * date the document's content was last reviewed; it is shown as the source
+ * date and never guessed when absent.
  */
 
-import { readFile, readdir } from "node:fs/promises";
-import path from "node:path";
+import { PLAYBOOK_SOURCES } from "./playbooks.generated";
 
 export type PlaybookSlug = string;
 
@@ -20,25 +27,28 @@ export type PlaybookFile = {
   title: string;
   body: string;
   audience: "operator" | "client" | "internal";
+  /** `updated:` from the frontmatter, YYYY-MM-DD, or null when not recorded. */
+  updated: string | null;
 };
 
-const CONTENT_DIR = path.join(process.cwd(), "content", "playbooks");
+export class PlaybookNotFoundError extends Error {
+  constructor(public readonly slug: string) {
+    super(`No bundled playbook "${slug}" (content/playbooks/${slug}.md is not in lib/playbooks.generated.ts)`);
+    this.name = "PlaybookNotFoundError";
+  }
+}
 
-// Audience inferred from the file's # heading suffix / known slugs. Keeps the
-// content files free of frontmatter while still letting the index page filter.
+// Audience inferred from an "Audience:" line or known wording. Keeps the
+// content files free of required frontmatter while letting the index filter.
 function inferAudience(slug: string, body: string): PlaybookFile["audience"] {
-  const explicitAudience = body.match(/^Audience:\s*(.+?)\s*$/im)?.[1]?.toLowerCase() || "";
+  const explicitAudience = body.match(/^\**Audience:\**\s*(.+?)\s*$/im)?.[1]?.toLowerCase() || "";
   if (explicitAudience.includes("client")) return "client";
   if (explicitAudience.includes("customer")) return "client";
   if (explicitAudience.includes("operator")) return "operator";
   if (explicitAudience.includes("internal")) return "internal";
   const lowered = `${slug} ${body.slice(0, 200)}`.toLowerCase();
-  if (lowered.includes("customer-facing") || lowered.includes("verbatim script")) {
-    return "client";
-  }
-  if (lowered.includes("internal-only") || lowered.includes("operator dev")) {
-    return "internal";
-  }
+  if (lowered.includes("customer-facing") || lowered.includes("verbatim script")) return "client";
+  if (lowered.includes("internal-only") || lowered.includes("operator dev")) return "internal";
   return "operator";
 }
 
@@ -47,61 +57,47 @@ function extractTitle(body: string, fallback: string): string {
   return firstH1?.[1]?.trim() || fallback;
 }
 
+function frontmatterOf(raw: string): { block: string; rest: string } {
+  const fm = raw.startsWith("---") ? raw.match(/^---\n[\s\S]*?\n---\n?/) : null;
+  return fm ? { block: fm[0], rest: raw.slice(fm[0].length) } : { block: "", rest: raw };
+}
+
+function updatedOf(block: string): string | null {
+  const v = block.match(/^updated:\s*(\d{4}-\d{2}-\d{2})\s*$/m)?.[1];
+  return v ?? null;
+}
+
 /**
- * Strip metadata that shouldn't render to the reader: a leading YAML
- * frontmatter block (--- ... ---) and a standalone "Audience: ..." line.
- * Title + audience are still inferred from the RAW file; this only cleans
- * the body that gets handed to the markdown renderer so docs don't show
- * "tags: [...]" / "Audience: ..." at the top.
+ * Strip what should not render: the frontmatter block and a standalone
+ * "Audience: ..." line. Title and audience are read from the raw file first.
  */
-function stripForDisplay(raw: string): string {
-  let s = raw;
-  if (s.startsWith("---")) {
-    const fm = s.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
-    if (fm) s = s.slice(fm[0].length);
-  }
-  s = s.replace(/^[ \t]*Audience:[^\n]*\r?\n+/im, "");
-  return s.replace(/^\s+/, "");
+function stripForDisplay(rest: string): string {
+  return rest.replace(/^[ \t]*\**Audience:\**[^\n]*\n+/im, "").replace(/^\s+/, "");
 }
 
-export async function listPlaybooks(): Promise<PlaybookFile[]> {
-  let entries: string[] = [];
-  try {
-    entries = await readdir(CONTENT_DIR);
-  } catch {
-    return [];
-  }
-  const files = entries.filter((n) => n.endsWith(".md") && n !== "INDEX.md").sort();
-  const out: PlaybookFile[] = [];
-  for (const name of files) {
-    const slug = name.replace(/\.md$/, "");
-    try {
-      const body = await readFile(path.join(CONTENT_DIR, name), "utf8");
-      out.push({
-        slug,
-        title: extractTitle(body, slug),
-        body: stripForDisplay(body),
-        audience: inferAudience(slug, body),
-      });
-    } catch {
-      // Skip unreadable file but don't crash the index.
-    }
-  }
-  return out;
+function toFile(file: string, raw: string): PlaybookFile {
+  const slug = file.replace(/\.md$/, "");
+  const { block, rest } = frontmatterOf(raw);
+  return {
+    slug,
+    title: extractTitle(rest, slug),
+    body: stripForDisplay(rest),
+    audience: inferAudience(slug, rest),
+    updated: updatedOf(block),
+  };
 }
 
-export async function loadPlaybook(slug: PlaybookSlug): Promise<PlaybookFile | null> {
-  // Defense against path traversal: slug must be a simple filename component.
-  if (!/^[a-zA-Z0-9_\-]+$/.test(slug)) return null;
-  try {
-    const body = await readFile(path.join(CONTENT_DIR, `${slug}.md`), "utf8");
-    return {
-      slug,
-      title: extractTitle(body, slug),
-      body: stripForDisplay(body),
-      audience: inferAudience(slug, body),
-    };
-  } catch {
-    return null;
-  }
+const FILES: readonly PlaybookFile[] = PLAYBOOK_SOURCES.map((s) => toFile(s.file, s.raw));
+const BY_SLUG = new Map(FILES.map((f) => [f.slug, f]));
+
+/** Every bundled playbook, in file-name order. */
+export function listPlaybooks(): PlaybookFile[] {
+  return [...FILES];
+}
+
+/** The bundled playbook `slug`. Throws PlaybookNotFoundError when there is none. */
+export function loadPlaybook(slug: PlaybookSlug): PlaybookFile {
+  const file = /^[a-zA-Z0-9_-]+$/.test(slug) ? BY_SLUG.get(slug) : undefined;
+  if (!file) throw new PlaybookNotFoundError(slug);
+  return file;
 }
