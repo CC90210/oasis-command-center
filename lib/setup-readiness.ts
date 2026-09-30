@@ -223,6 +223,14 @@ export async function loadReadinessReport(args: {
       .eq("tenant_id", tenantId)
       .eq("entity_type", "lender");
     const lenderCount = lendersRes.count || 0;
+    // The workspace's own lender table (/t/<slug>/<path>), when its manifest
+    // has one. The CTA used to go to top-level /lenders, a Coming Soon
+    // placeholder that could not add a lender and is now retired.
+    const lenderPage = (manifest?.pages || []).find((p) => p.entity === "lender");
+    const lendersHref =
+      lenderPage && manifest?.tenant_slug
+        ? `/t/${manifest.tenant_slug}/${lenderPage.path.replace(/^\/+/, "")}`
+        : null;
     tenant.push({
       key: "tenant.lenders",
       label: "Lender catalog",
@@ -234,8 +242,8 @@ export async function loadReadinessReport(args: {
             ? `${lenderCount} lender(s) — add 2+ more for meaningful ranking.`
             : `${lenderCount} lenders.`,
       cta:
-        lenderCount < 3
-          ? { href: "/lenders", label: "Add lenders" }
+        lenderCount < 3 && lendersHref
+          ? { href: lendersHref, label: "Add lenders" }
           : undefined,
     });
   }

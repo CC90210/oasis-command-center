@@ -25,7 +25,7 @@ export default async function RoleplayScenarioPage({
   params: Promise<{ scenario: string }>;
 }) {
   const [session, { scenario: id }] = await Promise.all([resolveSessionContext(), params]);
-  if (!session.ok) redirect(`/auth/login?next=/training/roleplay/${id}`);
+  if (!session.ok) redirect(`/login?next=${encodeURIComponent(`/training/roleplay/${id}`)}`);
   if (!mayViewTraining(session)) redirect("/");
 
   const scenario = scenarioById(id);
