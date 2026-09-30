@@ -264,9 +264,13 @@ export async function POST(req: NextRequest) {
   // freshly-paired bridges before their first heartbeat), bridgeAdvertisedTools
   // is null and the dashboard falls back to advertising every defer:true
   // tool in TOOL_DEFINITIONS (pre-Phase-F behavior).
-  const bridgeState = await getBridgeToolCapabilities(tenantId).catch(
-    () => ({ online: false, tools: null as string[] | null }),
-  );
+  // A failed pairings read (getBridgeToolCapabilities throws) is logged and
+  // gated as offline: bridge tools are never offered on a heartbeat nobody
+  // could read. This only gates tools; nothing here shows "offline".
+  const bridgeState = await getBridgeToolCapabilities(tenantId).catch((err) => {
+    console.error("[chat] bridge pairings read failed; bridge tools withheld this turn", err instanceof Error ? err.message : err);
+    return { online: false, tools: null as string[] | null };
+  });
   const bridgeOnline = bridgeState.online;
   const bridgeAdvertisedTools = bridgeState.tools;
 

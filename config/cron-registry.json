@@ -1,5 +1,5 @@
 {
-  "$comment": "Canonical cron INTENT registry. Nothing registers this with any scheduler - it exists so coverage tests can compare intent against whichever driver is live (cron-driver.yml today, oasis-cc-cron after the Wave 3 cutover) without vercel.json carrying registrations that Vercel could silently resurrect. Same shape as vercel.json's old crons block so computeCoverage consumes it unchanged. 2026-09-28: the SunBiz-only routes were removed when SunBiz was retired (runbook C-6a); see workers/oasis-cc-cron/src/index.ts.",
+  "$comment": "Canonical cron INTENT registry. Nothing registers this with any scheduler - it exists so coverage tests can compare intent against whichever driver is live (cron-driver.yml today, oasis-cc-cron after the Wave 3 cutover) without vercel.json carrying registrations that Vercel could silently resurrect. Same shape as vercel.json's old crons block so computeCoverage consumes it unchanged. 2026-09-28: the SunBiz-only routes were removed when SunBiz was retired (runbook C-6a); see workers/oasis-cc-cron/src/index.ts. 2026-09-29: the four finance-books jobs (lib/founders-finances/books-cron.ts) schedule the books' daily upkeep: Bank of Canada rates, the Stripe reconcile (payouts included), Wise invoice matches and the Wise bank feed.",
   "crons": [
     {
       "path": "/api/cron/materialize-plans",
@@ -60,6 +60,22 @@
     {
       "path": "/api/cron/connection-health",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/finance-books?job=fx-refresh",
+      "schedule": "23 21 * * *"
+    },
+    {
+      "path": "/api/cron/finance-books?job=stripe-reconcile",
+      "schedule": "43 21 * * *"
+    },
+    {
+      "path": "/api/cron/finance-books?job=wise-reconcile",
+      "schedule": "7 22 * * *"
+    },
+    {
+      "path": "/api/cron/finance-books?job=wise-sync",
+      "schedule": "29 22 * * *"
     }
   ]
 }

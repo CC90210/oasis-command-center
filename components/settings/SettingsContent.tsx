@@ -202,14 +202,16 @@ export async function SettingsContent({
   // bridge heartbeat feed AI setup and the provider override table. An owner's
   // Connections page is the app hub (app/settings/connections/page.tsx), which
   // does not render this component; the integration heartbeats moved to /health.
+  // Both reads throw on failure; null is "Couldn't check" in every card below,
+  // never "Not connected" / "offline" for a key or a machine that may be fine.
   const needsAiKeys = show("ai");
   const needsBridge = show("ai");
   const [connectedAiSet, bridgeOnline] = await Promise.all([
     needsAiKeys
-      ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), new Set<string>())
+      ? safe("settings.ai_keys", aiServicesWithKey(profile?.tenant_id || null), null)
       : Promise.resolve(new Set<string>()),
     needsBridge
-      ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), false)
+      ? safe("settings.bridge_online", getBridgeOnline(profile?.tenant_id ?? null), null)
       : Promise.resolve(false),
   ]);
 
@@ -404,7 +406,11 @@ export async function SettingsContent({
               subtitle="Optional. Each agent uses the workspace default from AI setup above unless you set a specific provider here. Edit a row to switch which provider that agent uses."
               action={
                 <Tag tone={bridgeOnline ? "engaged" : "neutral"}>
-                  {bridgeOnline ? "Tool access: bridge online" : "Tool access: cloud only"}
+                  {bridgeOnline === null
+                    ? "Tool access: couldn't check the bridge"
+                    : bridgeOnline
+                      ? "Tool access: bridge online"
+                      : "Tool access: cloud only"}
                 </Tag>
               }
             >
@@ -414,7 +420,7 @@ export async function SettingsContent({
                     agentKeys={enabledChatAgentKeys}
                     bridgeOnline={bridgeOnline}
                     canInstallBridge={isOperator}
-                    globallyConnectedServices={Array.from(connectedAiSet)}
+                    globallyConnectedServices={connectedAiSet ? Array.from(connectedAiSet) : null}
                     agentPalettes={Object.fromEntries(
                       (manifest?.agents || []).map((a) => [
                         a.slug.toLowerCase(),

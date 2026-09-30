@@ -150,6 +150,7 @@ export async function FounderToday({
     content,
     goal,
     stripeConnected: money?.stripeConnected ?? null,
+    stripeSync: money?.stripeSync ?? null,
     routines,
     nowMs: day.nowMs,
   });

@@ -86,6 +86,10 @@ export default async function OperationsPage({
   const now7Ago = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const now14Ago = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
+  // Every read below throws on a failed read, the lib/queries ones and the
+  // inline ones alike; safe() turns that into null, which each card and tile
+  // draws as "Couldn't check", never as an empty tape, a fleet of stopped
+  // workers, "0 bridges online" or a green 0 under "All clear".
   const [snaps, pairings, events, decisions, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
@@ -98,7 +102,7 @@ export default async function OperationsPage({
           health_status: r.health_status ?? null,
         })) as AgentSnap[]
       ),
-      [] as AgentSnap[]
+      null
     ),
     profile?.tenant_id
       ? safe(
@@ -110,9 +114,10 @@ export default async function OperationsPage({
               .eq("tenant_id", profile.tenant_id)
               .is("revoked_at", null)
               .order("last_seen_at", { ascending: false });
+            if (r.error) throw new Error(`bridge_pairings read failed: ${r.error.message}`);
             return (r.data as BridgePair[]) || [];
           })(),
-          [] as BridgePair[]
+          null
         )
       : Promise.resolve([] as BridgePair[]),
     // Activity tape default: most recent N events regardless of age.
@@ -125,7 +130,7 @@ export default async function OperationsPage({
         agentNames: agentNamesForOps,
         isOperator: false,
       }),
-      []
+      null
     ),
     // Agent decisions tape — moved here from /reasoning 2026-08-04 when that
     // page was dropped from CC's nav. Scoping is deliberately IDENTICAL to
@@ -137,7 +142,7 @@ export default async function OperationsPage({
     safe(
       "operations.recent_decisions",
       recentDecisions(profile?.tenant_id ?? null, agentNamesForOps, 20),
-      []
+      null
     ),
     // Health tile #1: ERROR events in last 24h (tenant-scoped via enabled
     // agents — same posture as the activity tape above).
@@ -161,9 +166,10 @@ export default async function OperationsPage({
           .in("publisher_agent", agentNamesForOps)
           .gte("published_at", now24Ago);
         const r = await q;
+        if (r.error) throw new Error(`agent_events count failed: ${r.error.message}`);
         return r.count || 0;
       })(),
-      0
+      null
     ),
     // Health tile #2: crons whose last run errored — both empire SEED_JOBS
     // (cron_jobs.last_result starts with ERROR/FAILED/unknown_action_type)
@@ -177,6 +183,7 @@ export default async function OperationsPage({
           .or(
             "last_result.like.ERROR%,last_result.like.FAILED%,last_result.like.unknown_action_type%",
           );
+        if (empireRes.error) throw new Error(`cron_jobs count failed: ${empireRes.error.message}`);
         let tenantCount = 0;
         if (tenantId) {
           const r = await db
@@ -184,11 +191,12 @@ export default async function OperationsPage({
             .select("id", { count: "exact", head: true })
             .eq("tenant_id", tenantId)
             .eq("last_run_status", "error");
+          if (r.error) throw new Error(`tenant_cron_jobs count failed: ${r.error.message}`);
           tenantCount = r.count || 0;
         }
         return (empireRes.count || 0) + tenantCount;
       })(),
-      0
+      null
     ),
     // Health tile #3: lender threads stuck at sent for >7d.
     tenantId
@@ -201,9 +209,10 @@ export default async function OperationsPage({
               .eq("tenant_id", tenantId)
               .eq("status", "sent")
               .lt("sent_at", now7Ago);
+            if (r.error) throw new Error(`application_lender_threads count failed: ${r.error.message}`);
             return r.count || 0;
           })(),
-          0
+          null
         )
       : Promise.resolve(0),
     // Health tile #4: leads whose updated_at is >14d ago.
@@ -217,9 +226,10 @@ export default async function OperationsPage({
               .eq("tenant_id", tenantId)
               .eq("entity_type", "lead")
               .lt("updated_at", now14Ago);
+            if (r.error) throw new Error(`tenant_records count failed: ${r.error.message}`);
             return r.count || 0;
           })(),
-          0
+          null
         )
       : Promise.resolve(0),
     // Overrides feature was deleted 2026-05-22 — CC's call: "I don't
@@ -227,7 +237,7 @@ export default async function OperationsPage({
     // exec_guard still refuses destructive commands; it just doesn't
     // create approval-request rows anymore. No more badge.
   ]);
-  const snapByName = new Map(snaps.map((s) => [s.agent_name, s] as const));
+  const snapByName = new Map((snaps ?? []).map((s) => [s.agent_name, s] as const));
 
   // Resolve lead/record UUIDs in event payloads to human names in one batch
   // query. Without this the Activity Tape renders lines like
@@ -236,7 +246,7 @@ export default async function OperationsPage({
   // identifiable.
   const recordResolver = await safe(
     "operations.record_resolver",
-    buildRecordResolver(db, events, { tenantId }),
+    buildRecordResolver(db, events ?? [], { tenantId }),
     new Map<string, string>(),
   );
 
@@ -254,8 +264,9 @@ export default async function OperationsPage({
   const enabled = agentNamesForOps.filter((key) => familySet.has(resolveAgentKey(key)));
   const now = Date.now();
 
-  const totalHealthSignals = errorsCount + failedCronsCount + stuckThreadsCount + staleLeadsCount;
-  const allClear = totalHealthSignals === 0;
+  // "All clear" is a claim about all four counts: it needs every one read,
+  // and every one zero. A count that could not be read is not a zero.
+  const allClear = [errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount].every((count) => count === 0);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -263,9 +274,13 @@ export default async function OperationsPage({
         title="Operations"
         subtitle="Background workers, paired machines, and the live event tape — what's running right now."
         action={
-          <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
-            {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
-          </Tag>
+          pairings === null ? (
+            <Tag tone="neutral">Bridges: couldn&apos;t check</Tag>
+          ) : (
+            <Tag tone={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)) ? "engaged" : "warm"}>
+              {pairings.filter((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS)).length} bridge{pairings.length === 1 ? "" : "s"} online
+            </Tag>
+          )
         }
       />
 
@@ -288,48 +303,54 @@ export default async function OperationsPage({
         title="Agent workers"
         subtitle="Each agent runs an autonomous reasoning loop on its own machine. A green dot means it cycled within the last 15 min."
       >
-        <div className="grid sm:grid-cols-2 gap-3">
-          {enabled.map((key) => {
-            const info = getAgentInfo(key);
-            const snap = snapByName.get(key);
-            const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
-            return (
-              <div
-                key={key}
-                className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
-                  fresh ? "border-status-engaged/30" : "border-bg-border"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${
-                      fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
-                    }`} />
-                    <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
-                      {info.label}
+        {snaps === null ? (
+          <EmptyState message="Couldn't check the agent heartbeats. The read failed and has been logged; this does not mean the workers stopped. Reload to try again." />
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3">
+            {enabled.map((key) => {
+              const info = getAgentInfo(key);
+              const snap = snapByName.get(key);
+              const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
+              return (
+                <div
+                  key={key}
+                  className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
+                    fresh ? "border-status-engaged/30" : "border-bg-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${
+                        fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
+                      }`} />
+                      <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
+                        {info.label}
+                      </span>
+                    </div>
+                    <span
+                      className="text-xs text-fg-dim font-mono"
+                      title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
+                    >
+                      {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
                     </span>
                   </div>
-                  <span
-                    className="text-xs text-fg-dim font-mono"
-                    title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
-                  >
-                    {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
-                  </span>
+                  <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
+                  <div className="text-[10px] text-fg-dim mt-2 font-mono">
+                    {snap?.last_tick_at
+                      ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
+                      : "worker not running on any paired machine"}
+                  </div>
                 </div>
-                <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
-                <div className="text-[10px] text-fg-dim mt-2 font-mono">
-                  {snap?.last_tick_at
-                    ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
-                    : "worker not running on any paired machine"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Card title="Paired machines" subtitle="Local installs heartbeating to this dashboard. Add a new one from Settings → Devices.">
-        {pairings.length === 0 ? (
+        {pairings === null ? (
+          <EmptyState message="Couldn't check the paired machines. The read failed and has been logged; this does not mean none are paired. Reload to try again." />
+        ) : pairings.length === 0 ? (
           <EmptyState
             message="No machines paired yet."
             cta={
@@ -384,7 +405,7 @@ export default async function OperationsPage({
         title="Local CLI status"
         subtitle="Per-CLI install probe on your local bridge. Green = the bridge found the binary and could run --version. Red = chat-via-CLI will fall back to API-key mode for that provider."
       >
-        <BridgeCliPanel serverBridgeOnline={pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
+        <BridgeCliPanel serverBridgeOnline={pairings === null ? null : pairings.some((p) => isFresh(p.last_seen_at, now, IDLE_BRIDGE_MS))} />
       </Card>
 
       <Card
@@ -397,9 +418,11 @@ export default async function OperationsPage({
       <Card
         title="Activity tape"
         subtitle={
-          showOlder
-            ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
-            : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
+          events === null
+            ? "Couldn't check the event tape just now."
+            : showOlder
+              ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
+              : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
         }
         action={
           <a
@@ -410,7 +433,9 @@ export default async function OperationsPage({
           </a>
         }
       >
-        {events.length === 0 ? (
+        {events === null ? (
+          <EmptyState message="Couldn't check the activity tape. The read failed and has been logged; this does not mean nothing ran. Reload to try again." />
+        ) : events.length === 0 ? (
           <EmptyState
             message="No events recorded yet. The event bus writes when crons fire (MRR snapshot, plan materialize), inbound webhooks land (n8n classifies email), or agents emit dashboard-action mutations."
           />
@@ -469,27 +494,34 @@ function HealthMiniTile({
   hint,
 }: {
   label: string;
-  count: number;
+  /** null = the count could not be read: a neutral "Couldn't check", never a 0. */
+  count: number | null;
   tone: "engaged" | "warm" | "accent" | "hot";
   href: string;
   hint?: string;
 }) {
   const toneClass =
-    tone === "engaged"
-      ? "border-status-engaged/30 bg-status-engaged/5 text-status-engaged"
-      : tone === "warm"
-        ? "border-status-warm/40 bg-status-warm/5 text-status-warm"
-        : tone === "hot"
-          ? "border-status-hot/40 bg-status-hot/5 text-status-hot"
-          : "border-accent/40 bg-accent/5 text-accent";
+    count === null
+      ? "border-bg-border bg-bg-elev text-fg-muted"
+      : tone === "engaged"
+        ? "border-status-engaged/30 bg-status-engaged/5 text-status-engaged"
+        : tone === "warm"
+          ? "border-status-warm/40 bg-status-warm/5 text-status-warm"
+          : tone === "hot"
+            ? "border-status-hot/40 bg-status-hot/5 text-status-hot"
+            : "border-accent/40 bg-accent/5 text-accent";
   return (
     <a
       href={href}
-      title={hint}
+      title={count === null ? "This count could not be read; the error has been logged. Reload to try again." : hint}
       className={`rounded-lg border px-3 py-2 transition-opacity hover:opacity-80 ${toneClass}`}
     >
       <div className="text-[10px] uppercase tracking-wider font-bold opacity-70">{label}</div>
-      <div className="text-2xl font-bold mt-0.5">{count}</div>
+      {count === null ? (
+        <div className="text-sm font-bold mt-1.5">Couldn&apos;t check</div>
+      ) : (
+        <div className="text-2xl font-bold mt-0.5">{count}</div>
+      )}
     </a>
   );
 }

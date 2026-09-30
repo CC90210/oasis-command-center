@@ -78,9 +78,13 @@ const bridgeStatusBlock = queries.slice(
   queries.indexOf("export async function getBridgeOnline"),
 );
 assert.ok(bridgeStatusBlock.includes('.eq("tenant_id", tenantId)'));
-assert.ok(
-  bridgeStatusBlock.match(/\.eq\("tenant_id", tenantId\)/g)?.length === 2,
-  "both the pairing and pairing-owner reads must remain tenant-scoped",
+// One read since 2026-09-29: the pairing-owner lookup went with its only
+// consumer (getTenantBridgeOwner, which nothing called). Every .from( in the
+// block must still carry the tenant filter.
+assert.equal(
+  bridgeStatusBlock.match(/\.from\(/g)?.length,
+  bridgeStatusBlock.match(/\.eq\("tenant_id", tenantId\)/g)?.length,
+  "every read in getTenantBridgeStatus must remain tenant-scoped",
 );
 
 // ── Surfaces that control the viewer's OWN daemons must target loopback ────
