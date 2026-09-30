@@ -50,7 +50,7 @@ const LOCAL_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/u;
 const APPROXIMATE_TIME_RE = /\b(?:about|around|roughly|approximately|ish|morning|afternoon|evening|maybe|might|perhaps|possibly|probably)\b/iu;
 const MULTIPLE_CHOICE_TIME_RE = /\b(?:or|either|between)\b/iu;
 const NEGATED_OR_CONDITIONAL_TIME_RE =
-  /\b(?:not|cannot|except|if|instead|rather|unless|unavailable)\b|\b(?:can|couldn|wouldn|shouldn|won|doesn|isn|aren|didn|don)['’]t\b|\bnever\s+mind\b/iu;
+  /\b(?:not|cannot|except|if|instead|rather|unless|unavailable)\b|\b(?:can|couldn|wouldn|shouldn|won|doesn|isn|aren|didn|don)['\u2019]t\b|\bnever\s+mind\b/iu;
 const UNPARSED_DATE_RE =
   /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|next\s+(?:week|month)|this\s+week)\b|\b(?:in\s+may|may\s+\d{1,2}|\d{1,2}\s+may)\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/iu;
 const EXPLICIT_TIME_ZONE_RE =
@@ -161,7 +161,7 @@ function isRetractedOrNearAction(text: string): boolean {
     /\b(?:almost|nearly)\s+(?:cancell?(?:ed|ing)?|reschedul(?:e|ed|ing)|mov(?:e|ed|ing)|chang(?:e|ed|ing))\b/iu.test(text) ||
     /\b(?:was|were)\s+(?:just\s+)?going\s+to\s+(?:cancel|call\s+off|reschedule|move|change)\b/iu.test(text) ||
     /\b(?:planned|intended|meant)\s+to\s+(?:cancel|call\s+off|reschedule|move|change)\b/iu.test(text) ||
-    /\b(?:changed?\s+(?:my|our)\s+mind|never\s*mind|actually(?:\s*[,;:-]\s*|\s+)(?:no|don['’]t)|scratch\s+that|disregard\s+that|forget\s+that)\b/iu.test(text) ||
+    /\b(?:changed?\s+(?:my|our)\s+mind|never\s*mind|actually(?:\s*[,;:-]\s*|\s+)(?:no|don['\u2019]t)|scratch\s+that|disregard\s+that|forget\s+that)\b/iu.test(text) ||
     /\b(?:keep|leave)\s+(?:the\s+)?(?:original|current)\s+(?:time|date|slot|meeting)\b/iu.test(text) ||
     /\?\s*(?:no|nope|nah)\b/iu.test(text)
   );
@@ -394,7 +394,7 @@ export function classifyMeetingReply(
 
   const stopBy = /\bstop\s+by\b/iu.test(normalized);
   const negatedMeetingAction =
-    /\b(?:(?:do|did|have|has|had|is|was|were|can|could|would|should|will)\s+not|cannot|\p{L}+n['’]t|never|not)\b[^.!?\n]{0,80}\b(?:cancell?(?:ed|ing)?|call(?:ed|ing)?\s+off|reschedul(?:e|ed|ing)|mov(?:e|ed|ing)|chang(?:e|ed|ing)|(?:different|another|new)\s+(?:the\s+)?(?:date|time|slot))\b/iu.test(normalized);
+    /\b(?:(?:do|did|have|has|had|is|was|were|can|could|would|should|will)\s+not|cannot|\p{L}+n['\u2019]t|never|not)\b[^.!?\n]{0,80}\b(?:cancell?(?:ed|ing)?|call(?:ed|ing)?\s+off|reschedul(?:e|ed|ing)|mov(?:e|ed|ing)|chang(?:e|ed|ing)|(?:different|another|new)\s+(?:the\s+)?(?:date|time|slot))\b/iu.test(normalized);
   const historicalActionQuestion = isHistoricalActionQuestion(normalized);
   const retractedOrNearAction = isRetractedOrNearAction(normalized);
   const deliberativeOrConditionalAction = isDeliberativeOrConditionalAction(normalized);
