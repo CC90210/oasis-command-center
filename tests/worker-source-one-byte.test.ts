@@ -13,11 +13,14 @@
  * 112.7 to 58.4 MiB, with identical responses.
  *
  * esbuild's ASCII output escapes strings, template literals and JSX text, but
- * it leaves regex literals byte for byte. So regex literals are the only way
- * our own code puts such a character into the bundle, and this guard checks
- * exactly those, with the TypeScript parser rather than a pattern.
- * `—` matches the same text as a raw em dash, so escaping never changes
- * what a regex matches.
+ * it leaves two things byte for byte: regex literals, and TAGGED templates
+ * such as String.raw`...` (their raw text is part of their value, so it cannot
+ * be rewritten). Those are the only ways our own code puts such a character
+ * into the bundle, and this guard checks exactly those, with the TypeScript
+ * parser rather than a pattern. In a tagged template, write the character as a
+ * substitution, ${"\u2014"}; the value is unchanged.
+ * `\u2014` in a regex matches the same text as a raw em dash, so escaping
+ * never changes what a regex matches.
  */
 
 import assert from "node:assert/strict";
@@ -43,17 +46,30 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const WIDE = /[^\u0000-ÿ]/;
+const WIDE = /[^\u0000-\u00ff]/;
 
-/** Every regex literal in `code` that holds a character above U+00FF, as `line: literal`. */
+/**
+ * Every regex literal and tagged template in `code` that holds a character
+ * above U+00FF, as `line: text` (a tagged template is cut to its first 80
+ * characters).
+ */
 export function wideRegexLiterals(code: string, fileName: string): string[] {
   const kind = /\.(tsx|jsx)$/.test(fileName) ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, kind);
   const found: string[] = [];
+  const at = (node: ts.Node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
   const visit = (node: ts.Node): void => {
     if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) {
       const text = node.getText(sf);
-      if (WIDE.test(text)) found.push(`${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}: ${text}`);
+      if (WIDE.test(text)) found.push(`${at(node)}: ${text}`);
+    } else if (ts.isTaggedTemplateExpression(node)) {
+      // Only the template's own text: substitutions are ordinary expressions
+      // that esbuild escapes, and are visited below like any other code.
+      const tpl = node.template;
+      const parts = ts.isNoSubstitutionTemplateLiteral(tpl)
+        ? [tpl]
+        : [tpl.head, ...tpl.templateSpans.map((s) => s.literal)];
+      if (parts.some((p) => WIDE.test(p.getText(sf)))) found.push(`${at(node)}: ${node.getText(sf).slice(0, 80)}`);
     }
     ts.forEachChild(node, visit);
   };
@@ -71,9 +87,10 @@ for (const file of files) {
 assert.deepEqual(
   offenders,
   [],
-  `A regex literal holds a character above U+00FF. That doubles the whole Worker ` +
-    `source in memory (see this file's header). Write each such character as a ` +
-    `\\uXXXX escape, e.g. /[—–]/ -> /[\\u2014\\u2013]/:\n  ${offenders.join("\n  ")}`,
+  `A regex literal or tagged template (String.raw) holds a character above U+00FF. ` +
+    `That doubles the whole Worker source in memory (see this file's header). In a ` +
+    `regex write it as a \\uXXXX escape, e.g. /[—–]/ -> /[\\u2014\\u2013]/; in a ` +
+    `tagged template write it as a substitution, e.g. \${"\\u2014"}:\n  ${offenders.join("\n  ")}`,
 );
 
 // PROVE THE GUARD FIRES, and that it looks only at regex literals: strings,
@@ -87,5 +104,11 @@ assert.deepEqual(
   "strings, templates, comments and escaped regexes pass",
 );
 assert.equal(wideRegexLiterals("const q = a / b / c; const r = /x/;", "a.ts").length, 0, "division is not a regex");
+// Tagged templates: esbuild keeps their raw text, so a wide character there is caught in the
+// head, a middle span or the tail; one inside a substitution is ordinary code and is not.
+assert.equal(wideRegexLiterals("const s = String.raw`a — b`;", "a.ts").length, 1, "a raw em dash in String.raw is caught");
+assert.equal(wideRegexLiterals("const s = String.raw`a ${x} b ${y} → c`;", "a.ts").length, 1, "in a later span too");
+assert.equal(wideRegexLiterals('const s = String.raw`a ${"—"} b`;', "a.ts").length, 0, "a substitution is escaped by esbuild");
+assert.equal(wideRegexLiterals("const s = `a — b`;", "a.ts").length, 0, "an untagged template is escaped by esbuild");
 
-console.log(`worker-source-one-byte: OK — ${files.length} files, no wide character in any regex literal`);
+console.log(`worker-source-one-byte: OK — ${files.length} files, no wide character in any regex literal or tagged template`);

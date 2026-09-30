@@ -77,14 +77,14 @@ Invoke-Expression $script
 `;
 
 export const INSTALL_SH = String.raw`#!/usr/bin/env bash
-# OASIS AI install — stable URL, repo-visibility-proof.
+# OASIS AI install ${"\u2014"} stable URL, repo-visibility-proof.
 #
 #   curl -fsSL https://oasisai.work/install.sh | bash
 #   OASIS_PROFILE=hermes curl -fsSL https://oasisai.work/install.sh | bash
 #
 # This URL is the canonical install entry point. The underlying GitHub
-# repo (CC90210/CEO-Agent) may flip visibility — this script always fetches
-# the latest install/quickstart.sh, transparently bridging public→gh-auth
+# repo (CC90210/CEO-Agent) may flip visibility ${"\u2014"} this script always fetches
+# the latest install/quickstart.sh, transparently bridging public${"\u2192"}gh-auth
 # if the public path 404s.
 
 set -euo pipefail

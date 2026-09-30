@@ -72,7 +72,7 @@ export type OneByteVerdict = { ok: true; chars: number } | { ok: false; reason: 
 
 /** The uploaded source must be Latin-1 only, so V8 keeps it at one byte per character. */
 export function checkOneByteSource(source: string): OneByteVerdict {
-  const wide = [...source.matchAll(/[^\u0000-ÿ]/g)];
+  const wide = [...source.matchAll(/[^\u0000-\u00ff]/g)];
   if (wide.length === 0) return { ok: true, chars: source.length };
   const shown = wide.slice(0, 5).map((m) => {
     const at = m.index ?? 0;
