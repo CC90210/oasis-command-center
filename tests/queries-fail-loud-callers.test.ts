@@ -268,7 +268,8 @@ async function main() {
     assert.doesNotMatch(text, /No decisions yet/);
   });
   await check("/operations: failed health counts and pairings say Couldn't check, never All clear or 0 bridges online", async () => {
-    const { text } = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
+    const { text, client } = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
+    assert.equal(one(client, "BridgeCliPanel").serverBridgeOnline, null, "the CLI panel is told the heartbeat is unknown, not stale");
     for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
       assert.match(text, new RegExp(`${tile} Couldn't check`), `${tile}: an unread count is not a number`);
     }
@@ -407,7 +408,9 @@ async function main() {
   await check("control: readable tables bring back the real empty and offline states", async () => {
     assert.match((await render(await RunsPage())).text, /No agent mutations recorded yet/);
     assert.match((await render(await ReasoningPage())).text, /No decisions yet/);
-    const ops = (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
+    const opsRender = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
+    const ops = opsRender.text;
+    assert.equal(one(opsRender.client, "BridgeCliPanel").serverBridgeOnline, false);
     assert.match(ops, /No events recorded yet/);
     assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions|paired machines)/);
     for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
@@ -476,11 +479,15 @@ async function main() {
     const count = (s: string, re: RegExp) => s.match(re)?.length ?? 0;
     const afterConnect = plain(html.accountsAfterConnect);
     assert.match(afterConnect, /Cloud: 1 provider connected/, "the connect shows before the refresh lands");
+    // The only count a failed read leaves is this page's own connects: a floor,
+    // so the header may not read as the workspace's total.
+    assert.match(afterConnect, /Cloud: 1 provider connected, couldn't check the rest/, "an unread key store has no total");
     assert.equal(count(afterConnect, /Replace key/g), 1, "Anthropic reads Connected");
     assert.equal(count(afterConnect, /Couldn't check/g), 3, "the other three are still unknown, not 'Not connected'");
     assert.doesNotMatch(afterConnect, /Not connected/);
     const afterRefresh = plain(html.accountsAfterRefresh);
     assert.match(afterRefresh, /Cloud: 2 providers connected/, "the refreshed read's OpenRouter key counts");
+    assert.doesNotMatch(afterRefresh, /couldn't check the rest/, "a read that answered is the total");
     assert.equal(count(afterRefresh, /Replace key/g), 2, "Anthropic and OpenRouter both read Connected");
     assert.equal(count(afterRefresh, /Not connected/g), 2, "OpenAI and Google are now KNOWN not connected");
     assert.doesNotMatch(afterRefresh, /Couldn't check/);
@@ -504,6 +511,15 @@ async function main() {
     assert.match(railUnknown, /bridge couldn't check/);
     assert.doesNotMatch(railUnknown, /bridge offline/);
     assert.match(plain(html.railOffline), /bridge offline/);
+
+    // /operations hands BridgeCliPanel null when bridge_pairings could not be
+    // read. After its localhost probe fails, that is "Couldn't check", never
+    // the red "no recent heartbeat is on file" a known-false heartbeat earns.
+    const cliUnknown = plain(html.cliUnknown);
+    assert.match(cliUnknown, /Couldn't check the local bridge/);
+    assert.doesNotMatch(cliUnknown, /isn't reachable|no recent heartbeat/);
+    assert.match(plain(html.cliOffline), /Local bridge isn't reachable/, "a KNOWN stale heartbeat is still the red state");
+    assert.match(plain(html.cliOnline), /Bridge is online/);
   });
 
   if (failures > 0) {

@@ -4,7 +4,7 @@
  * WHY A SEPARATE PROCESS. The suite runs with `--conditions=react-server`,
  * under which `react-dom/server` does not resolve and `react` has no
  * `useState`. IntegrationDot, ProviderAccountsCard, AgentConfigEditor (and its
- * BridgeToolAccess strip) and OsRail are client components, so the only way
+ * BridgeToolAccess strip), OsRail and BridgeCliPanel are client components, so the only way
  * to see what they draw when a page hands
  * them null ("the read failed") is to render them where React is whole — the
  * same split tests/os-channels-honest.render.ts makes. The test spawns this
@@ -64,6 +64,30 @@ function framesOf<P>(component: (props: P) => unknown): (props: P) => El {
   };
 }
 
+/**
+ * One frame of a component with each useState slot preset and effects inert.
+ * BridgeCliPanel reaches its heartbeat branches only after its browser probe
+ * of the local bridge fails, and renderToStaticMarkup runs no effects, so this
+ * hands it the post-probe state directly. Like framesOf, it knows useState and
+ * useEffect only, so any other hook fails loudly here.
+ */
+function frameWithState<P>(component: (props: P) => unknown, props: P, states: unknown[]): El {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- the CJS object whose dispatcher slot react's hooks read
+  const internals = (require("react") as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+  let cursor = 0;
+  const dispatcher = {
+    useState: () => [states[cursor++], () => undefined],
+    useEffect: () => undefined,
+  };
+  const previous = internals.H;
+  internals.H = dispatcher;
+  try {
+    return component(props) as El;
+  } finally {
+    internals.H = previous;
+  }
+}
+
 /** Depth-first through children only; throws when nothing matches. */
 function find(node: unknown, what: string, match: (el: El) => boolean): El {
   const walk = (n: unknown): El | null => {
@@ -110,6 +134,11 @@ async function main() {
   const { ProviderAccountsCard } = await import("../components/settings/ProviderAccountsCard");
   const { AgentConfigEditor, BridgeToolAccess } = await import("../components/settings/AgentConfigEditor");
   const { OsRail } = await import("../components/os/OsRail");
+  const { BridgeCliPanel } = await import("../components/BridgeCliPanel");
+  // The panel's state once its localhost probe has failed.
+  const probeFailed = { loading: false, reachable: false, data: null, error: "probe_failed" };
+  const cliPanel = (serverBridgeOnline: boolean | null) =>
+    renderToStaticMarkup(frameWithState(BridgeCliPanel, { serverBridgeOnline }, [probeFailed]));
   const railSections = [
     {
       key: "team" as const,
@@ -177,6 +206,9 @@ async function main() {
     toolAccessOffline: renderToStaticMarkup(React.createElement(BridgeToolAccess, { bridgeOnline: false, canInstallBridge: true })),
     railUnknown: rail(null),
     railOffline: rail(false),
+    cliUnknown: cliPanel(null),
+    cliOffline: cliPanel(false),
+    cliOnline: cliPanel(true),
   };
 
   // The same mounted card across a refresh. The key read fails, the operator

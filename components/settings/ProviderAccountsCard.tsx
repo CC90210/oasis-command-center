@@ -132,10 +132,12 @@ export function ProviderAccountsCard({
           >
             <Cloud className="w-3 h-3" />
             Cloud:{" "}
+            {/* After a failed read, a count can only come from this page's own
+                connects: it is a floor, not the total. */}
             {!keysKnown && !anyConnected
               ? "couldn't check"
               : anyConnected
-                ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected`
+                ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected${keysKnown ? "" : ", couldn't check the rest"}`
                 : "no provider connected"}
           </span>
           <span className="text-fg-dim">·</span>
