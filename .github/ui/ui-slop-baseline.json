@@ -313,16 +313,6 @@
       "rule": "radial-wash"
     },
     {
-      "file": "components/schedule/ScheduleClient.tsx",
-      "line": 67,
-      "rule": "ai-accent"
-    },
-    {
-      "file": "components/schedule/ScheduleClient.tsx",
-      "line": 408,
-      "rule": "ai-accent"
-    },
-    {
       "file": "components/shopping-out/ShoppingOutClient.tsx",
       "line": 110,
       "rule": "ai-accent"

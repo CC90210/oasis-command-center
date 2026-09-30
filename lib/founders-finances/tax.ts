@@ -90,7 +90,14 @@ export function trailingFourQuarters(today: string): Quarter[] {
   return out;
 }
 
-export type ThresholdLevel = "ok" | "watch" | "warning" | "exceeded";
+/**
+ * "unconfirmed": the books cannot hold every sale (no bank deposit recorded
+ * from before the first revenue, books-coverage.ts RevenueSources), so the
+ * total is a floor and "under the threshold" cannot be said. Only "exceeded"
+ * survives incomplete books: missing revenue can only add to a total that
+ * already passed.
+ */
+export type ThresholdLevel = "ok" | "watch" | "warning" | "exceeded" | "unconfirmed";
 
 export type ThresholdStatus = {
   thresholdCents: number;
@@ -100,11 +107,30 @@ export type ThresholdStatus = {
   singleQuarterExceeded: string | null;
   quarters: Array<{ label: string; revenueCents: number }>;
   message: string;
+  /** False when the total counts only part of the revenue (the level is then "unconfirmed" unless exceeded). */
+  revenueComplete: boolean;
 };
 
-/** watch at 75%, warning at 90%, exceeded above 100% (or any single quarter over). */
+/** What the tracker needs to know about the revenue it sums (books-coverage.ts RevenueSources). */
+export type ThresholdRevenueCoverage = {
+  /** Every sale can be in the books. */
+  complete: boolean;
+  /** What the total counts, in words, when not complete. */
+  note: string | null;
+};
+
+/** The sentence an unconfirmed tracker opens with when the books say nothing more precise. */
+export const UNCONFIRMED_REVENUE_NOTE = "Counts Stripe only; bank deposits and off-Stripe revenue are not recorded";
+
+/**
+ * watch at 75%, warning at 90%, exceeded above 100% (or any single quarter
+ * over); "unconfirmed" below exceeded whenever the revenue is not complete.
+ * `coverage` is required: a caller that does not know what the books hold
+ * gets "unconfirmed", never a green "No action needed".
+ */
 export function smallSupplierStatus(
   quarters: ReadonlyArray<{ label: string; revenueCents: number }>,
+  coverage: ThresholdRevenueCoverage,
   thresholdCents = SMALL_SUPPLIER_THRESHOLD_CENTS,
 ): ThresholdStatus {
   const totalCents = quarters.reduce((a, q) => a + Math.max(0, q.revenueCents), 0);
@@ -112,19 +138,23 @@ export function smallSupplierStatus(
   const single = quarters.find((q) => q.revenueCents > thresholdCents) || null;
   let level: ThresholdLevel = "ok";
   if (single || totalCents > thresholdCents) level = "exceeded";
+  else if (!coverage.complete) level = "unconfirmed";
   else if (pct >= 0.9) level = "warning";
   else if (pct >= 0.75) level = "watch";
   const pctLabel = `${Math.round(pct * 1000) / 10}%`;
+  const recorded = `CA$${(totalCents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const message =
     level === "exceeded"
       ? single
         ? `Taxable revenue in ${single.label} alone passed CA$30,000 — registration for GST/QST is required from the supply that crossed it. Talk to the accountant now.`
         : `Taxable revenue over the last four quarters passed CA$30,000 (${pctLabel}). You must register for GST/QST within 29 days of the end of the month you crossed it.`
-      : level === "warning"
-        ? `At ${pctLabel} of the CA$30,000 small-supplier threshold. Plan registration now.`
-        : level === "watch"
-          ? `At ${pctLabel} of the CA$30,000 small-supplier threshold.`
-          : `At ${pctLabel} of the CA$30,000 small-supplier threshold. No action needed.`;
+      : level === "unconfirmed"
+        ? `${coverage.note || UNCONFIRMED_REVENUE_NOTE}. Recorded so far: ${recorded}, ${pctLabel} of the CA$30,000 small-supplier threshold; the real figure can only be higher, so this cannot confirm OASIS is under it.`
+        : level === "warning"
+          ? `At ${pctLabel} of the CA$30,000 small-supplier threshold. Plan registration now.`
+          : level === "watch"
+            ? `At ${pctLabel} of the CA$30,000 small-supplier threshold.`
+            : `At ${pctLabel} of the CA$30,000 small-supplier threshold. No action needed.`;
   return {
     thresholdCents,
     totalCents,
@@ -133,6 +163,7 @@ export function smallSupplierStatus(
     singleQuarterExceeded: single ? single.label : null,
     quarters: quarters.map((q) => ({ label: q.label, revenueCents: q.revenueCents })),
     message,
+    revenueComplete: coverage.complete,
   };
 }
 

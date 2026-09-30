@@ -2,21 +2,30 @@
  * /founders/finances/taxes — GST/QST registration status, the CA$30,000
  * small-supplier threshold tracker, and the period report (collected minus
  * input tax credits) that becomes meaningful once OASIS registers.
+ *
+ * Quebec: OASIS is in Montreal, so GST and QST are both filed with Revenu
+ * Québec on one combined return (FPZ-500); the page never names the HST, the
+ * harmonized tax of other provinces. The threshold reads "unconfirmed"
+ * while the books cannot hold every sale (no bank deposit recorded from
+ * before the first revenue: books-coverage.ts), and the banner says why.
  */
 import Link from "next/link";
 import { Card, PageHeader } from "@/components/Card";
+import { BooksCoverageBanner } from "@/components/founders/finances/BooksCoverageBanner";
 import { inputClass, labelClass, numClass, quietButton, tableClass, tdClass } from "@/components/founders/finances/ui";
 import { financePage, loadTaxesPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { formatCents } from "@/lib/founders-finances/money";
+import type { ThresholdLevel } from "@/lib/founders-finances/tax";
 
 export const dynamic = "force-dynamic";
 
-const LEVEL = {
+const LEVEL: Record<ThresholdLevel, { tone: string; bar: string }> = {
   ok: { tone: "text-status-engaged", bar: "bg-status-engaged" },
   watch: { tone: "text-status-info", bar: "bg-status-info" },
   warning: { tone: "text-status-warm", bar: "bg-status-warm" },
   exceeded: { tone: "text-status-hot", bar: "bg-status-hot" },
-} as const;
+  unconfirmed: { tone: "text-status-warm", bar: "bg-status-warm" },
+};
 
 export default async function TaxesPage({ searchParams }: { searchParams: SearchParams }) {
   const { viewer, sp } = await financePage(searchParams);
@@ -29,16 +38,18 @@ export default async function TaxesPage({ searchParams }: { searchParams: Search
     <div className="space-y-6 animate-fade-in">
       <PageHeader title="Taxes" subtitle="GST/QST for OASIS AI Solutions: how close the business is to having to register, and what it would owe each period." />
 
+      <BooksCoverageBanner coverage={t.coverage} figures="The revenue and tax figures on this page" />
+
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title="Registration">
           {registered ? (
             <dl className="space-y-1 text-sm">
               <div className="flex justify-between">
-                <dt className="text-fg-muted">GST/HST</dt>
+                <dt className="text-fg-muted">GST number</dt>
                 <dd className="tabular-nums">{t.settings.gst_number}</dd>
               </div>
               <div className="flex justify-between">
-                <dt className="text-fg-muted">QST</dt>
+                <dt className="text-fg-muted">QST number</dt>
                 <dd className="tabular-nums">{t.settings.qst_number}</dd>
               </div>
               {t.settings.registration_effective_date && (
@@ -69,7 +80,7 @@ export default async function TaxesPage({ searchParams }: { searchParams: Search
             <div className={`h-full ${lv.bar}`} style={{ width: `${Math.min(100, Math.round(t.threshold.pct * 100))}%` }} />
           </div>
           <div className="mt-1 flex justify-between text-[11px] text-fg-dim">
-            <span>{cad(t.threshold.totalCents)}</span>
+            <span>{t.threshold.revenueComplete ? cad(t.threshold.totalCents) : `${cad(t.threshold.totalCents)} recorded so far`}</span>
             <span>75% {cad(2_250_000)} · 90% {cad(2_700_000)} · {cad(t.threshold.thresholdCents)}</span>
           </div>
           <table className={`${tableClass} mt-4`}>
@@ -130,7 +141,9 @@ export default async function TaxesPage({ searchParams }: { searchParams: Search
             </tr>
           </tbody>
         </table>
-        <p className="mt-3 text-[11px] text-fg-dim">GST is filed with the CRA and QST with Revenu Québec. Figures are CAD equivalents at each transaction&rsquo;s own-day rate.</p>
+        <p className="mt-3 text-[11px] text-fg-dim">
+          GST and QST are both filed with Revenu Québec on one combined return (FPZ-500). Figures are CAD equivalents at each transaction&rsquo;s own-day rate.
+        </p>
       </Card>
     </div>
   );

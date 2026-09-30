@@ -52,6 +52,8 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
   if (method !== "GET") throw new Error(`Stripe write attempted in test: ${method} ${url.pathname}`);
   const p = url.pathname;
   if (p === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+  // Every webhook event is proved to be the pinned account's before it is booked (stripe-ingest.ts stripeEventOrigin).
+  if (p.startsWith("/v1/events/")) return json({ id: decodeURIComponent(p.slice("/v1/events/".length)), object: "event" });
   if (p === "/v1/charges") return list(stripe.list.map((id) => stripe.charges.get(id)));
   if (p.startsWith("/v1/charges/")) {
     const c = stripe.charges.get(decodeURIComponent(p.slice("/v1/charges/".length)));

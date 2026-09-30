@@ -5,10 +5,12 @@
  * and nothing scheduled them: exchange rates went stale from 09-24, Stripe
  * reached the books only through the webhook, and the Wise feed never ran.
  *
- *   fx-refresh        21:23 UTC  Bank of Canada USD/CAD for the last 30 days
- *                                (the Valet API publishes about 16:30
- *                                Eastern). Rows are upserted.
- *   stripe-reconcile  21:43 UTC  payments, refunds, subscriptions and pending
+ *   fx-refresh        21:47 UTC  Bank of Canada USD/CAD for the last 30 days
+ *                                (the Valet API publishes by 16:30 Eastern,
+ *                                which is 21:30 UTC in winter (EST): 21:23
+ *                                ran before it for half the year, so moved
+ *                                2026-09-30). Rows are upserted.
+ *   stripe-reconcile  21:53 UTC  payments, refunds, subscriptions and pending
  *                                fees from the last 7 days, then every payout
  *                                (stripe-ingest.ts reconcileStripe). A safety
  *                                net under the webhook; idempotent on

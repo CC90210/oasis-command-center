@@ -10,12 +10,16 @@
  * prevent. So each tile says where its number comes from and is only "live"
  * when that source has actually reported:
  *
- *   Cash, In/Out/Net   live once the books hold any bank data (a balance or a
- *                      recorded transaction); otherwise "Not connected" with
- *                      a link to import a statement. Cash on hand also needs
- *                      complete books (overview().coverage): a bank account
- *                      with no opening balance, or Stripe payouts never
- *                      booked, makes it "Books incomplete", never a balance.
+ *   Cash, In/Out/Net   live once the books hold any bank data (a cash balance
+ *                      that moved, or an imported bank line); otherwise "Not
+ *                      connected" with a link to import a statement. Cash on
+ *                      hand also needs complete cash coverage
+ *                      (overview().coverage): a bank account with no opening
+ *                      balance, or Stripe payouts never booked, makes it
+ *                      "Books incomplete", never a balance. In/Out/Net need
+ *                      the whole book covered (overview().books): until then
+ *                      they say "Partial", with the recorded figure only as a
+ *                      labelled hint (books-coverage.ts, 2026-09-30).
  *   Collected          live once Stripe is pinned or any payment is recorded.
  *   MRR                live once a Stripe subscription sync has run (as_of).
  *   Owed / Overdue     live always: invoices are created in this app, so no
@@ -35,8 +39,10 @@ export type MoneyOverviewInput = {
     overdueAr: Record<string, number>;
     overdueCount: number;
     unreviewed: number;
-    /** lib/founders-finances/cash-coverage.ts, via overview(): may cashTotal be called a balance. */
-    coverage: { complete: boolean; gaps: readonly string[] };
+    /** lib/founders-finances/cash-coverage.ts, via overview(): may cashTotal be called a balance. `bankLines`: lines ever imported. */
+    coverage: { complete: boolean; gaps: readonly string[]; bankLines?: number };
+    /** lib/founders-finances/books-coverage.ts, via overview(): does the book hold the whole story (expenses, revenue, cash). Absent = unknown = partial. */
+    books?: { complete: boolean; gaps: readonly string[] };
   };
   collected: { cad_cents: number; usd_cents: number; payments: number; fx_missing_days: readonly string[] };
   mrr: { mrr_cents: number; currency: string; active_subscriptions: number; as_of: string | null };
@@ -61,9 +67,13 @@ function perCurrency(map: Record<string, number>, fmt: Fmt): string {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Books hold bank data when any cash balance moved or any transaction exists. */
-export function booksHaveBankData(input: Pick<MoneyOverviewInput, "ov" | "recent">): boolean {
-  return input.recent.length > 0 || input.ov.cashAccounts.some((a) => a.balanceCents !== 0);
+/**
+ * Books hold bank data when any cash balance moved or a bank line was ever
+ * imported. `recent` is every recorded movement now (bills and payments
+ * too), so it no longer says anything about a bank.
+ */
+export function booksHaveBankData(input: Pick<MoneyOverviewInput, "ov">): boolean {
+  return (input.ov.coverage.bankLines ?? 0) > 0 || input.ov.cashAccounts.some((a) => a.balanceCents !== 0);
 }
 
 /** The headline tiles, or every tile as "Couldn't load" when the read failed (null). */
@@ -88,6 +98,17 @@ export function moneyTiles(input: MoneyOverviewInput | null, fmt: Fmt): { headli
     bank
       ? { id, label, value: fmt(cents, "CAD"), status: "live", hint }
       : { id, label, value: null, status: "not_connected", connectHref: MONEY_LINKS.importStatement, hint: "No bank data yet" };
+  // In/Out/Net over a book that does not hold the whole story (costs missing
+  // for some months, deposits not recorded) are a floor, not the month:
+  // "Partial", the recorded figure only as a labelled hint, and why.
+  // The page's "Books incomplete" banner lists every gap; the tile points at it
+  // rather than repeating one of them.
+  const booksComplete = ov.books?.complete === true;
+  const whyPartial = ov.books ? "The books are incomplete: see Books incomplete above" : "What the books cover could not be read";
+  const monthTile = (id: string, label: string, cents: number, hint: string): MoneyTile =>
+    bank && !booksComplete
+      ? { id, label, value: null, status: "no_data", emptyText: "Partial", hint: `Recorded so far: ${fmt(cents, "CAD")}. ${whyPartial}` }
+      : bankTile(id, label, cents, hint);
 
   const collectedHint = [
     `${fmt(collected.usd_cents, "USD")} · ${plural(collected.payments, "payment")}`,
@@ -135,9 +156,9 @@ export function moneyTiles(input: MoneyOverviewInput | null, fmt: Fmt): { headli
       },
     ],
     month: [
-      bankTile("in", "In this month", ov.month.inCents, "Transfers between your own accounts excluded"),
-      bankTile("out", "Out this month", ov.month.outCents, "Spending, draws and fees"),
-      bankTile("net", "Net this month", ov.month.netCents, "Revenue minus expenses"),
+      monthTile("in", "In this month", ov.month.inCents, "Transfers between your own accounts excluded"),
+      monthTile("out", "Out this month", ov.month.outCents, "Spending, draws and fees"),
+      monthTile("net", "Net this month", ov.month.netCents, "Revenue minus expenses"),
     ],
   };
 }

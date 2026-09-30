@@ -91,6 +91,10 @@ const HANDLERS: Record<string, Handler> = {
   "equity.create": async (v, b) => ({ id: await bills.recordEquityEvent(v, str(b.entity), b), message: "Recorded." }),
   "recurring.create": async (v, b) => ({ id: await bills.createRecurring(v, str(b.entity), b), message: "Recurring expense added." }),
   "recurring.record": async (v, b) => ({ id: await bills.recordRecurringNow(v, str(b.item_id)), message: "Recorded and rescheduled." }),
+  "recurring.confirm": async (v, b) => {
+    const r = await bills.confirmRecurringPaidFrom(v, str(b.item_id), b);
+    return { ...r, message: r.accountId ? "Paid-from confirmed: Record books it as paid from that account." : "Paid-from cleared: each due date is recorded as a bill to pay." };
+  },
   "account.create": async (v, b) => ({ id: await settings.createAccount(v, str(b.entity), b), message: "Account added." }),
   "settings.update": async (v, b) => {
     await settings.updateSettings(v, str(b.entity), b);

@@ -13,9 +13,11 @@
  *   - a failed ledger insert rolls the book write back (the payment row, the
  *     subscription row, an invoice's payment: its row, key or link, the
  *     processed mark) and Stripe's retry then lands both;
- *   - no workspace to say (no finance tenant, or the account not pinned):
- *     the book write still happens, the fact goes to ledger_dead_letters,
- *     never to a default tenant;
+ *   - no workspace to say (no finance tenant): the book write still happens,
+ *     the fact goes to ledger_dead_letters, never to a default tenant; no
+ *     Stripe account pinned: the event itself is refused and dead-lettered
+ *     (the contamination guard, 2026-09-30), and every event here is proved
+ *     the pinned account's by its key first;
  *   - payloads hold ids and codes: no customer name or email reaches the ledger.
  *
  * Run: node --conditions=react-server --import tsx tests/finances-stripe-ledger-events.test.ts
@@ -31,8 +33,21 @@ process.env.TURSO_DB_PATH = dbFile;
 process.env.EMPIRE_DATA_BACKEND = "turso_cloud";
 for (const k of ["TURSO_DATABASE_URL", "TURSO_DB_URL", "STRIPE_SECRET_KEY", "FOUNDERS_TENANT_IDS", "STRIPE_FINANCE_WEBHOOK_SECRET"]) delete process.env[k];
 
-globalThis.fetch = (async (input: unknown) => {
-  throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
+// A webhook event is booked only when a key of the pinned account proves it is
+// that account's (stripe-ingest.ts stripeEventOrigin; no key = refused). The
+// key is OASIS's pinned account's: Stripe knows each event and no other object
+// (every other read is a 404, handled as "Stripe could not say").
+const STRIPE_KEY = "rk_live_ledger_events_test_only";
+process.env.STRIPE_SECRET_KEY = STRIPE_KEY;
+process.env.BRAVO_FIELD_ENCRYPTION_KEY = "ledger-events-test-only-field-key-000";
+globalThis.fetch = (async (input: unknown, init?: { method?: string }) => {
+  const url = new URL(String(input));
+  if (url.host !== "api.stripe.com") throw new Error(`network disabled in test: ${String(input).slice(0, 80)}`);
+  if ((init?.method || "GET").toUpperCase() !== "GET") throw new Error(`Stripe write attempted in test: ${url.pathname}`);
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  if (url.pathname === "/v1/account") return json({ id: "acct_test_oasis", settings: { dashboard: { display_name: "OASIS AI" } } });
+  if (url.pathname.startsWith("/v1/events/")) return json({ id: decodeURIComponent(url.pathname.slice("/v1/events/".length)), object: "event" });
+  return json({ error: { type: "invalid_request_error", message: "No such object" } }, 404);
 }) as typeof fetch;
 
 const TENANT = "oasis-books-test";
@@ -112,12 +127,25 @@ async function main() {
   for (const f of ["180_founders_finances.turso.sql", "184_finance_wise_payments.turso.sql", "185_finance_invoice_retainer.turso.sql", "bravo__190_ledger_core.sql", "bravo__193_stripe_payouts.sql"]) {
     await raw.executeMultiple(readFileSync(join(root, "database/turso", f), "utf8"));
   }
+  // bravo__188: the client records a Stripe customer links to (payment.received / refund.issued carry the record
+  // as customer_id). It alters migration 183's delivery tables, so those come first (as os-honest-numbers does).
+  const deliveryTables = readFileSync(join(root, "database/turso/183_delivery_and_support.turso.sql"), "utf8").match(
+    /CREATE TABLE IF NOT EXISTS (?:delivery_projects|delivery_tasks|delivery_updates|support_tickets|ticket_comments) \([\s\S]*?\n\);/g,
+  );
+  assert.equal(deliveryTables?.length, 5, "the five delivery tables are in migration 183");
+  await raw.executeMultiple(deliveryTables!.join("\n"));
+  await raw.executeMultiple(readFileSync(join(root, "database/turso/bravo__188_os_customers.sql"), "utf8"));
   for (let d = 1; d <= 30; d++) {
     await raw.execute({ sql: `INSERT INTO fin_fx_rates (pair, rate_date, rate) VALUES ('USDCAD', ?, '1.3800')`, args: [`2026-09-${String(d).padStart(2, "0")}`] });
   }
   // With a finance tenant set, the Stripe key is read from the tenant's stored
-  // credentials; an empty store = no key, so events are processed from their payloads.
+  // credentials (a tenant other than OASIS's own never falls back to the env key).
   await raw.execute(`CREATE TABLE tenant_integration_credentials (tenant_id TEXT, service TEXT, field_key TEXT, encrypted_value TEXT)`);
+  const { encryptField } = await import("../lib/field-encryption");
+  await raw.execute({
+    sql: `INSERT INTO tenant_integration_credentials (tenant_id, service, field_key, encrypted_value) VALUES (?, 'stripe', 'secret_key', ?)`,
+    args: [TENANT, encryptField(STRIPE_KEY)],
+  });
   const { ensureFinanceSeed } = await import("../lib/founders-finances/seed-io");
   const ingest = await import("../lib/founders-finances/stripe-ingest");
   const { BUSINESS_ENTITY_ID: B } = await import("../lib/founders-finances/chart");
@@ -365,14 +393,20 @@ async function main() {
     }
   });
 
-  await check("no workspace to say (Stripe account not pinned): dead-lettered with that reason", async () => {
+  // 2026-09-30 (contamination guard, stripe-ingest.ts stripeEventOrigin): with
+  // no Stripe account pinned, nothing says the event is OASIS's, so it never
+  // reaches the books at all (it used to be kept, with only its ledger fact
+  // dead-lettered). It is dead-lettered whole, ids only.
+  await check("Stripe account not pinned: the event never reaches the books or the ledger; dead-lettered with that reason, ids only", async () => {
     await pin(null);
     try {
-      await ingest.handleStripeEvent(event("customer.subscription.created", subscription("sub_led_unpinned")));
-      assert.equal(await num(`SELECT COUNT(*) FROM fin_subscriptions WHERE id = 'sub_led_unpinned'`), 1, "the subscription is still kept");
+      const out = await ingest.handleStripeEvent(event("customer.subscription.created", subscription("sub_led_unpinned")));
+      assert.equal(out.status, "ignored");
+      assert.equal(await num(`SELECT COUNT(*) FROM fin_subscriptions WHERE id = 'sub_led_unpinned'`), 0, "nothing kept for an account nobody pinned");
       assert.equal((await ledger("subscription.started")).filter((r) => r.subject_id === "sub_led_unpinned").length, 0);
-      const dl = (await raw.execute(`SELECT error FROM ledger_dead_letters WHERE event_key = 'subscription.started'`)).rows;
-      assert.deepEqual(dl.map((r) => r.error), ["tenant_unmapped:stripe_account_unpinned"]);
+      const dl = (await raw.execute(`SELECT error, payload_json FROM ledger_dead_letters WHERE error LIKE 'foreign_stripe_account:%'`)).rows;
+      assert.deepEqual(dl.map((r) => r.error), ["foreign_stripe_account:stripe_account_unpinned"]);
+      assert.doesNotMatch(String(dl[0].payload_json), /Tremblay|jean@example/, "ids only");
     } finally {
       await pin("acct_test_oasis");
     }

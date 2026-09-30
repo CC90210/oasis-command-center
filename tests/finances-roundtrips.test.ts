@@ -189,14 +189,22 @@ async function main() {
   // gap each; read in the same wave as the ledger) and settings +1 (the bank
   // accounts a founder can choose for Stripe payouts, same wave). Neither adds
   // a sequential step.
+  // 2026-09-30 (books coverage, one Money section): every page whose figures
+  // are built on the ledger now says what the book covers
+  // (reports-io.ts booksCoverageFor: the ledger's accounts and lines, the bank
+  // line stats, the unbooked payouts), all in the page's one wave: accounts +2
+  // (it reuses the page's own ledger read), reports +4, taxes +4 (the
+  // threshold's quarters now read beside it), transactions +5 (+ every
+  // recorded movement, activity-io.ts). The overview's activity list replaced
+  // its bank-line list (same count). No page gains a sequential step.
   const PAGES: Array<{ name: string; trips: number; depth: number; run: () => Promise<unknown> }> = [
     { name: "overview", trips: 17, depth: 2, run: () => pc.loadOverviewPage(cc, entity) },
-    { name: "transactions", trips: 5, depth: 1, run: () => pc.loadTransactionsPage(cc, entity, sp) },
+    { name: "transactions", trips: 10, depth: 1, run: () => pc.loadTransactionsPage(cc, entity, sp) },
     { name: "invoices", trips: 4, depth: 1, run: () => pc.loadInvoicesPage(cc, entity, sp) },
     { name: "bills", trips: 6, depth: 1, run: () => pc.loadBillsPage(cc, entity) },
-    { name: "accounts", trips: 3, depth: 1, run: () => pc.loadAccountsPage(cc, entity) },
-    { name: "reports", trips: 2, depth: 1, run: () => pc.loadReportsPage(cc, entity, sp) },
-    { name: "taxes", trips: 6, depth: 1, run: () => pc.loadTaxesPage(cc, sp) },
+    { name: "accounts", trips: 5, depth: 1, run: () => pc.loadAccountsPage(cc, entity) },
+    { name: "reports", trips: 6, depth: 1, run: () => pc.loadReportsPage(cc, entity, sp) },
+    { name: "taxes", trips: 10, depth: 1, run: () => pc.loadTaxesPage(cc, sp) },
     { name: "settings", trips: 6, depth: 1, run: () => pc.loadSettingsPage(cc, entity) },
     { name: "invoice detail", trips: 8, depth: 3, run: () => pc.loadInvoiceDetailPage(cc, draftInv) },
   ];
@@ -385,15 +393,18 @@ async function main() {
   await check("every Finances tab has its own loading.tsx, and none sits above the tabs", async () => {
     const { FINANCE_TABS } = await import("../components/founders/finances/FinanceTabs");
     const financesDir = join(root, "app/founders/finances");
-    // A loading.tsx directly in finances/ would wrap every tab and hide theirs;
-    // the Overview's lives in its (overview) route group instead.
+    // A loading.tsx directly in finances/ would wrap every tab and hide theirs.
     assert.equal(existsSync(join(financesDir, "loading.tsx")), false, "no loading.tsx directly under app/founders/finances");
+    // The Overview tab is /money (2026-09-30): its skeleton lives there, and the
+    // old Finances overview (the (overview) route group) only redirects to it.
+    assert.equal(FINANCE_TABS[0].href, "/money", "Overview is the one Money overview");
     for (const t of FINANCE_TABS) {
-      const rel = t.href.replace(/^\/founders\/finances\/?/, "");
-      const dir = rel ? join(financesDir, ...rel.split("/")) : join(financesDir, "(overview)");
+      const dir = t.href === "/money" ? join(root, "app/money") : join(financesDir, ...t.href.replace(/^\/founders\/finances\/?/, "").split("/"));
       assert.ok(existsSync(join(dir, "page.tsx")), `${t.href}: page.tsx expected in ${dir}`);
       assert.ok(existsSync(join(dir, "loading.tsx")), `${t.href}: no loading.tsx in ${dir}`);
     }
+    // The redirect keeps a boundary (tests/loading-boundaries.test.ts), and it is the Money overview's skeleton.
+    assert.match(readFileSync(join(financesDir, "(overview)", "loading.tsx"), "utf8"), /export \{ default \} from "@\/app\/money\/loading";/);
   });
 
   if (failures) {

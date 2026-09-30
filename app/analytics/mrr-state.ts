@@ -20,6 +20,30 @@
  */
 
 import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import { CLIENT_STAGES } from "@/components/os/landings/clients-model";
+import { stripeSyncLine } from "@/lib/founders-finances/stripe-sync-status";
+
+/**
+ * "Won" on /analytics: every lead whose stage means it became a client, the
+ * same stages Clients lists (components/os/landings/clients-model.ts
+ * CLIENT_STAGES, read-only here): won, onboarding, in build, client review,
+ * launched. It counted the literal "won" stage only, so a client that moved on
+ * to onboarding stopped being a win (2026-09-30: BreezeAdvance and SunBiz,
+ * both "launched", counted 0 won).
+ */
+export function wonCount(stages: Readonly<Record<string, number>>): number {
+  return CLIENT_STAGES.reduce((sum, s) => sum + Number(stages[s] || 0), 0);
+}
+
+/**
+ * The MRR stat's hint for OASIS: when the books last heard from Stripe
+ * (stripe-sync-status.ts, the line Today and Finances print), never a bare
+ * "live Stripe" with no time. `sync` null = the sync time could not be read.
+ */
+export function stripeMrrHint(sync: { lastSyncAt: string | null } | null, nowMs: number, usd: string | null): string {
+  const line = sync ? stripeSyncLine(sync.lastSyncAt, nowMs).note : "Stripe sync: couldn't check";
+  return `${line}${usd ? ` · ≈ ${usd} USD` : ""}`;
+}
 
 export type MrrState = "oasis" | "unconfirmed" | "owner_only" | "not_connected";
 

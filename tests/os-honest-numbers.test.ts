@@ -734,16 +734,16 @@ async function main() {
     const { incompleteBooksNote } = cashCoverageMod;
     assert.equal(incompleteBooksNote(cov), `Not a cash balance yet: ${NO_OPENING}; Stripe payouts to the bank are not recorded.`);
     assert.equal(incompleteBooksNote({ complete: true, gaps: [] }), null);
-    // The page (Today's "Books incomplete" links here) prints the ledger sum
-    // as Cash on hand ONLY when the note is null.
-    const page = code("app/founders/finances/(overview)/page.tsx");
+    // 2026-09-30: /founders/finances (where Today's "Books incomplete" links)
+    // redirects to /money, the one Money overview. Its Cash on hand is the
+    // money-model tile ("Books incomplete" unless complete, checked below),
+    // and its Accounts card calls the ledger totals balances only when the
+    // note is null.
+    assert.match(code("app/founders/finances/(overview)/page.tsx"), /redirect\("\/money"\)/, "the Finances overview is the Money overview");
+    const page = code("app/money/page.tsx");
     assert.match(page, /const booksNote = incompleteBooksNote\(ov\.coverage\);/);
-    assert.match(
-      page,
-      /\{booksNote \? \(\s*<Figure\s+label="Cash on hand"\s+value="Books incomplete"[\s\S]*?Ledger total, incomplete: \$\{formatCents\(ov\.cashTotal, "CAD"\)\}[\s\S]*?\) : \(\s*<Figure label="Cash on hand" value=\{formatCents\(ov\.cashTotal, "CAD"\)\} hint="Bank and Stripe balances" \/>\s*\)\}/,
-      "the ledger total is Cash on hand only when the books are complete",
-    );
-    assert.equal(page.match(/value=\{formatCents\(ov\.cashTotal, "CAD"\)\}/g)?.length, 1, "no second, unconditional Cash on hand figure");
+    assert.match(page, /booksNote \? "Ledger totals, CAD: the books are incomplete, so these are not balances yet" : "Balances today, CAD"/);
+    assert.doesNotMatch(page, /formatCents\(ov\.cashTotal/, "no Cash on hand figure outside the money-model tile");
   });
 
   const snapshot = (coverage: typeof cov) =>
@@ -835,7 +835,7 @@ async function main() {
     const page = code("app/analytics/page.tsx");
     assert.match(page, /const mrrState = analyticsMrrState\(surface\);/);
     assert.match(page, /mrrState === "oasis" \? loadOasisMoney\(tenantId, "analytics"\) : Promise\.resolve\(null\)/);
-    assert.match(page, /<Stat label="Net MRR" value=\{MRR_COPY\[noMoney\]\.value\} hint=\{MRR_COPY\[noMoney\]\.hint\} accent \/>/);
+    assert.match(page, /<Stat label="MRR \(Stripe\)" value=\{MRR_COPY\[noMoney\]\.value\} hint=\{MRR_COPY\[noMoney\]\.hint\} accent \/>/);
     assert.match(page, /<EmptyState message=\{MRR_COPY\[noMoney\]\.card\} \/>/);
     assert.doesNotMatch(page, /none feeding it|value="Not connected"/, "the page states no fact the state did not decide");
   });

@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { inputOf } from "@/lib/calendar/recurrence";
 import {
-  DEFAULT_PREFS,
+  NEUTRAL_PREFS,
   type CalendarColor,
   type CalendarPrefs,
   type CalendarRecord,
@@ -68,6 +68,16 @@ export function messageFor(code: string, detail?: string): string {
       return "That event no longer exists. The calendar has been refreshed.";
     case "cross_origin_refused":
       return "The request was refused because it did not come from this site.";
+    case "shabbat_needs_location":
+      return "Choose a location before turning on Shabbat protection: its times come from that place's sunset.";
+    case "routine_not_available":
+      return "The weekly routine can only be restored in the OASIS workspace.";
+    case "routine_block_unknown":
+    case "routine_time_invalid":
+    case "routine_times_invalid":
+      return "One of the times is not valid. Each block has to end after it starts.";
+    case "routine_empty":
+      return "Nothing was restored: every block falls inside Shabbat with these times.";
     default:
       return detail && detail.includes("changes saved")
         ? `Only part of that change saved (${detail.split(": ").pop()}). The calendar has been refreshed.`
@@ -114,7 +124,10 @@ function inverseOps(before: EventRecord[], ops: EventOp[], results: OpResult[]):
 export function useCalendarData() {
   const [calendars, setCalendars] = useState<CalendarRecord[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
-  const [prefs, setPrefs] = useState<CalendarPrefs>(DEFAULT_PREFS);
+  // Until the server answers, no place and no lock: the viewer's workspace
+  // defaults arrive with the first read (store.ts getPrefs), and a client
+  // must never see OASIS's city flash up while it loads.
+  const [prefs, setPrefs] = useState<CalendarPrefs>(NEUTRAL_PREFS);
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [truncated, setTruncated] = useState(false);
   const [saving, setSaving] = useState(0);

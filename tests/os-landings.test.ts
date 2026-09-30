@@ -87,6 +87,13 @@ stub("next/link", {
   default: ({ href, children, ...rest }: { href: string; children?: unknown }) =>
     ReactNS.createElement("a", { href, ...rest }, children as ReactNS.ReactNode),
 });
+// The Money overview's six-month chart is a recharts client component (class
+// components, which react-server does not ship). A named stand-in keeps the
+// page's own decision to draw it visible (as tests/queries-fail-loud-callers
+// does for /analytics' charts).
+stub(join(__dirname, "..", "components", "founders", "finances", "InOutChart.tsx"), {
+  InOutChart: (props: { data?: unknown[] }) => ReactNS.createElement("figure", { "data-chart": "InOutChart", "aria-label": `InOutChart ${(props.data ?? []).length} months` }),
+});
 // `after` needs a live request scope; the Money page schedules its overdue
 // sweep with it. Recorded, not run.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- the real module is spread into the stub
@@ -744,7 +751,8 @@ async function main() {
     for (const t of [...failed.headline, ...failed.month]) assert.equal(t.status, "error", t.label);
     const live = mm.moneyTiles(
       {
-        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0, coverage: { complete: true, gaps: [] } },
+        // A bank line imported (the books hold bank data) and the whole book covered.
+        ov: { cashTotal: 0, cashAccounts: [{ balanceCents: 0 }], month: { inCents: 0, outCents: 0, netCents: 0 }, openAr: {}, overdueAr: {}, overdueCount: 0, unreviewed: 0, coverage: { complete: true, gaps: [], bankLines: 1 }, books: { complete: true, gaps: [] } },
         collected: { cad_cents: 0, usd_cents: 0, payments: 0, fx_missing_days: [] },
         mrr: { mrr_cents: 0, currency: "CAD", active_subscriptions: 0, as_of: "2026-09-27T00:00:00Z" },
         recent: [{}],
@@ -754,7 +762,8 @@ async function main() {
     );
     const mrr = live.headline.find((t) => t.id === "mrr");
     assert.deepEqual([mrr?.status, mrr?.value], ["live", "CA$0.00"], "a synced Stripe with no subscriptions is a real zero");
-    assert.equal(live.headline.find((t) => t.id === "cash")?.status, "live", "books with a transaction are live");
+    assert.equal(live.headline.find((t) => t.id === "cash")?.status, "live", "books with an imported bank line are live");
+    assert.equal(live.month.find((t) => t.id === "in")?.status, "live", "a whole book's month is a real month");
   });
 
   if (failures > 0) {

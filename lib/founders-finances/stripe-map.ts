@@ -425,6 +425,12 @@ export type StripeEventEnvelope = {
   object: Obj;
   /** data.previous_attributes: the fields an *.updated event changed, at their old values; null when Stripe sent none. */
   previousAttributes: Obj | null;
+  /**
+   * The Stripe account the event names (`account`, set on Connect events);
+   * null when it names none, which is every event a direct account sends.
+   * stripe-ingest.ts stripeEventOrigin refuses one that is not the pinned account.
+   */
+  account: string | null;
 };
 
 export function eventEnvelope(raw: unknown): StripeEventEnvelope | null {
@@ -435,7 +441,16 @@ export function eventEnvelope(raw: unknown): StripeEventEnvelope | null {
   const data = asObj(e?.data);
   const object = asObj(data?.object);
   if (!e || !id || !id.startsWith("evt_") || !type || created === null || !object) return null;
-  return { id, type, created, livemode: e.livemode === true, object, previousAttributes: asObj(data?.previous_attributes) };
+  return {
+    id,
+    type,
+    created,
+    livemode: e.livemode === true,
+    object,
+    previousAttributes: asObj(data?.previous_attributes),
+    // Any value is an account named: one that is not the pinned account is refused.
+    account: str(e.account),
+  };
 }
 
 /** What a subscription bills, item by item: its price (or legacy plan) id and quantity. Null when the list is unreadable. */
