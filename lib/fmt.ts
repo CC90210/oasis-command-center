@@ -12,7 +12,7 @@
 export function formatTimeRange(label: string | null | undefined): string {
   if (!label) return "";
   // Normalize em-dash variants to en-dash for visual consistency.
-  const normalized = label.replace(/\s+[—–-]\s+/g, " – ");
+  const normalized = label.replace(/\s+[\u2014\u2013-]\s+/g, " – ");
   return normalized.replace(/(\d{1,2}):(\d{2})/g, (match, h: string, m: string) => {
     const hh = parseInt(h, 10);
     if (Number.isNaN(hh) || hh < 0 || hh > 23) return match;

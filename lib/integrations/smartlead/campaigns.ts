@@ -18,7 +18,7 @@ import { checkEmailSuppressed } from "@/lib/lead-interactions-queries";
 
 export type ColdRecipient = { email: string; first_name?: string | null; company?: string | null };
 
-const stripDashes = (s: string | undefined | null) => String(s || "").replace(/\s*[—–]\s*/g, ", ");
+const stripDashes = (s: string | undefined | null) => String(s || "").replace(/\s*[\u2014\u2013]\s*/g, ", ");
 
 /** Suppression-filter (fail closed) + dedupe an audience before it can be pushed to Smartlead. */
 async function filterSuppressed(tenantId: string, rows: ColdRecipient[]): Promise<{ ok: true; recipients: ColdRecipient[] } | { ok: false; error: string }> {

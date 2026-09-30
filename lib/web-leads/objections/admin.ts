@@ -87,8 +87,8 @@ const STOPWORDS = new Set([
 export function normaliseSays(says: string): string {
   return says
     .toLowerCase()
-    .replace(/[‘’‚‛]/g, "'")
-    .replace(/[“”„‟]/g, '"')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
     .replace(/[^a-z0-9'\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -176,7 +176,7 @@ export function findDuplicate(
 // ---------------------------------------------------------------------------
 
 /** Leading list marks a person pastes without meaning them as content. */
-const LIST_MARK = /^\s*(?:[-*•‣◦]|\d{1,3}[.)])\s+/;
+const LIST_MARK = /^\s*(?:[-*\u2022\u2023\u25E6]|\d{1,3}[.)])\s+/;
 
 /**
  * A pasted block split into candidate objections, one per line.
@@ -198,7 +198,7 @@ export function parseBatch(text: string): string[] {
     let line = rawLine.replace(LIST_MARK, "").trim();
     // Surrounding quotes, straight or curly, in matched pairs only: a line
     // that merely ends in a quotation mark keeps it.
-    line = line.replace(/^["'“‘]+\s*/, "").replace(/\s*["'”’]+$/, "").trim();
+    line = line.replace(/^["'\u201C\u2018]+\s*/, "").replace(/\s*["'\u201D\u2019]+$/, "").trim();
     if (line.length === 0) continue;
     const key = normaliseSays(line);
     if (key.length === 0 || seen.has(key)) continue;
