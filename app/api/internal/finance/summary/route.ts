@@ -5,6 +5,10 @@
  * collected for [from, to) (default: month to date), MRR and the GST/QST
  * small-supplier threshold. Bearer FINANCE_AGENT_TOKEN.
  *
+ * cash_coverage says whether the cash total is a balance at all: with
+ * complete:false (no opening balance, Stripe payouts never booked) it is a
+ * ledger sum, and `gaps` says what is missing.
+ *
  * open_invoices = invoices with money owed now. An issued invoice that only
  * sets up a monthly retainer (nothing due now) is never in it: it is listed
  * under retainer_invoices, with its monthly amount and whether its Stripe
@@ -51,6 +55,10 @@ export async function GET(req: Request) {
       currency_note: "all *_cents are integer cents; cash and in/out are CAD equivalents",
       cash_by_account: ov.cashAccounts.map((a) => ({ code: a.code, name: a.name, balance_cad_cents: a.balanceCents })),
       cash_total_cad_cents: ov.cashTotal,
+      // Whether cash_total_cad_cents may be called cash on hand. complete:false
+      // means the books miss part of an account's story (cash-coverage.ts), so
+      // the total is a ledger sum and must not be reported as a balance.
+      cash_coverage: { complete: ov.coverage.complete, gaps: ov.coverage.gaps },
       month: { in_cad_cents: ov.month.inCents, out_cad_cents: ov.month.outCents, revenue_cad_cents: ov.month.revenueCents, expense_cad_cents: ov.month.expenseCents },
       open_invoices: open.map((i) => ({
         id: i.id,

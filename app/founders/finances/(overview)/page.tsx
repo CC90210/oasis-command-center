@@ -17,6 +17,7 @@ import { amountTone, numClass, primaryButton, tdClass, thClass, tableClass } fro
 import { financePage, loadOverviewPage, type SearchParams } from "@/lib/founders-finances/page-context";
 import { sweepOverdue } from "@/lib/founders-finances/invoices-io";
 import { formatCents } from "@/lib/founders-finances/money";
+import { incompleteBooksNote } from "@/lib/founders-finances/cash-coverage";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,10 @@ export default async function FinancesOverview({ searchParams }: { searchParams:
     ),
   );
   const hasMrr = mrr.as_of !== null;
+  // Incomplete books (no opening balance, Stripe payouts never booked) have a
+  // ledger total, not cash on hand: the same rule as Today and /money, whose
+  // "Books incomplete" links here.
+  const booksNote = incompleteBooksNote(ov.coverage);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -67,7 +72,16 @@ export default async function FinancesOverview({ searchParams }: { searchParams:
       />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Figure label="Cash on hand" value={formatCents(ov.cashTotal, "CAD")} hint="Bank and Stripe balances" />
+        {booksNote ? (
+          <Figure
+            label="Cash on hand"
+            value="Books incomplete"
+            tone="text-status-warm"
+            hint={`${booksNote} Ledger total, incomplete: ${formatCents(ov.cashTotal, "CAD")}`}
+          />
+        ) : (
+          <Figure label="Cash on hand" value={formatCents(ov.cashTotal, "CAD")} hint="Bank and Stripe balances" />
+        )}
         <Figure label="In this month" value={formatCents(ov.month.inCents, "CAD")} tone="text-status-engaged" hint="Transfers between your own accounts excluded" />
         <Figure label="Out this month" value={formatCents(ov.month.outCents, "CAD")} hint="Spending, draws and fees" />
         <Figure label="Net income this month" value={formatCents(ov.month.netCents, "CAD")} tone={amountTone(ov.month.netCents)} hint="Revenue minus expenses" />
@@ -109,7 +123,7 @@ export default async function FinancesOverview({ searchParams }: { searchParams:
         <Card title="Money in and out" subtitle="Last six months, CAD" className="lg:col-span-2">
           <InOutChart data={ov.series} />
         </Card>
-        <Card title="Accounts" subtitle="Balances today, CAD">
+        <Card title="Accounts" subtitle={booksNote ? "Ledger totals, CAD: the books are incomplete, so these are not balances yet" : "Balances today, CAD"}>
           {ov.cashAccounts.length === 0 ? (
             <p className="text-sm text-fg-muted">
               No balances yet.{" "}

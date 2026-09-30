@@ -22,6 +22,12 @@ export type ReportLine = {
   memo: string;
   entryMemo: string;
   source: string;
+  /**
+   * fin_journal_entries.status: "posted", or "reversed" once a reversal entry
+   * cancels it. The statements sum both (the pair nets to zero); a check for
+   * whether something is IN FORCE (cash-coverage.ts) reads only "posted".
+   */
+  status: string;
 };
 
 export type AccountRow = { accountId: string; code: string; name: string; type: AccountType; subtype: string; amountCents: number };

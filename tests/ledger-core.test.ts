@@ -697,10 +697,12 @@ async function main() {
     const now = Math.floor(Date.now() / 1000);
     assert.equal((await post(ingestRequest(body, { sig: "0".repeat(64) }))).status, 401);
     assert.equal((await post(ingestRequest(body, { secret: "some-other-secret-0123456789abcdef" }))).status, 401);
-    const stale = await post(ingestRequest(body, { ts: now - 301, raw }));
+    // Far outside the 300 s window, not at its edge: a clock tick between `now`
+    // and the route's own check would pull a +301 s timestamp back inside it.
+    const stale = await post(ingestRequest(body, { ts: now - 900, raw }));
     assert.equal(stale.status, 401);
     assert.equal(stale.body.error, "stale_timestamp");
-    const future = await post(ingestRequest(body, { ts: now + 301, raw }));
+    const future = await post(ingestRequest(body, { ts: now + 900, raw }));
     assert.equal(future.status, 401);
     assert.equal((await post(ingestRequest(body, { producer: "stranger" }))).status, 401);
     // The signature covers the timestamp: a fresh header on an old signature fails.
