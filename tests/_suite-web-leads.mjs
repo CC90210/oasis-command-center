@@ -30,6 +30,7 @@ import { spawnSync } from "node:child_process";
 const TESTS = [
   // The projection/filter seam — the regression this suite was switched on for.
   "tests/web-leads-do-not-call.test.ts",
+  "tests/call-disposition.test.ts",
   "tests/web-leads-projection-covers-filters.test.ts",
   "tests/web-leads-enrichment.test.ts",
   "tests/web-leads-filters.test.ts",
