@@ -1,0 +1,15 @@
+{
+  "$comment": "Every oasisai.work address the product may publish as a contact (legal pages, unsubscribe page, error pages, support copy, compliance manifests). An address belongs here only after a person has confirmed it receives mail: it exists as a Google Workspace user, alias or group, and a test message sent to it arrived. tests/verified-mailboxes.test.ts fails the build when the product publishes an oasisai.work address that is not listed. On 2026-09-30 the only verified inbox is conaugh@oasisai.work (Gmail send-as lists it, and it receives mail daily). privacy@, legal@, dmca@, support@ and unsubscribe@ were published for months and never existed.",
+  "mailboxes": ["conaugh@oasisai.work"],
+  "identities": {
+    "$comment": "Teammate logins the code names as a person, not as a contact: the founders' assignment roster (lib/team.ts), the finance allowlist (lib/founders-finances/access.ts), author names in the marketing portal, and the reps named in comments about their accounts. Listing one here lets it appear in app/, components/ and lib/; it never makes it publishable: a mailto: or a rendered legal/unsubscribe page still accepts only `mailboxes`. A role alias (privacy@, support@...) can never be an identity.",
+    "addresses": ["adon@oasisai.work", "ariel@oasisai.work", "schneur@oasisai.work"]
+  },
+  "illustrations": [
+    {
+      "file": "lib/reply-identity.ts",
+      "address": "support+acmehvac@oasisai.work",
+      "why": "A doc comment showing the SHAPE of the per-client subaddress mode for a made-up client. The module has no default address; the real one is an operator choice at provisioning time. Nothing renders or sends to it."
+    }
+  ]
+}

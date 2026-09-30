@@ -751,14 +751,20 @@ const salesPerformance = stripComments(read("lib/audit/sales-performance.ts"));
 const teamPolicy = stripComments(read("lib/team.ts"));
 const commissionReader = stripComments(read("lib/website-sales-commission-summary.ts"));
 
+// Since 2026-09-30 the page asks the rail itself: requireOsRoute("/commissions")
+// is the Commissions row's own predicate (module `commissions` AND audience
+// "commissions", i.e. maySeeCommissionSurface), and it 404s when the viewer
+// cannot be resolved. The persona-only check it replaced let a client
+// workspace's owner open OASIS's commission portal.
+// tests/client-route-gating.test.ts runs the page for a client owner, an OASIS
+// closer and CC.
 assert.ok(
-  commissionPage.includes("resolveViewerSurface") && commissionPage.includes("maySeeCommissionSurface"),
-  "the Commission page must apply the same capability gate as its navigation",
+  /export default async function CommissionsPage\(\) \{\s*await requireOsRoute\("\/commissions"\);/.test(commissionPage),
+  "the Commission page must apply the same capability gate as its navigation, as its first statement",
 );
-assert.match(
-  commissionPage,
-  /if \(!surface\.ok \|\| !maySeeCommissionSurface\(surface\.capabilities\)\) notFound\(\)/,
-  "the Commission page fails closed when viewer identity cannot be resolved",
+assert.ok(
+  read("lib/os/nav.ts").includes('href: "/commissions", label: "Commissions", icon: "DollarSign", section: "growth", group: "Sales", module: "commissions", audience: "commissions"'),
+  "the Commissions rail row is gated on the commission surface (audience commissions) and the commissions module",
 );
 assert.ok(
   commissionApi.includes("resolvePersona") && commissionApi.includes("maySeeCommissionSurface"),

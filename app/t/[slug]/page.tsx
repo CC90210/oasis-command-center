@@ -212,12 +212,13 @@ function GenericSummary({
         </Card>
 
         <Card title="Industry" subtitle={manifest.onboarding_industry || "custom"}>
+          {/* No storage line. It named Supabase and "shared mode" for every
+              manifest that did not say otherwise: a vendor this app no longer
+              uses, printed as a default rather than a fact. */}
           <div className="text-sm text-fg-muted leading-relaxed">
-            Backed by <span className="font-mono text-fg">{manifest.data_backend || "supabase"}</span> in{" "}
-            <span className="font-mono text-fg">{manifest.deployment_mode || "shared"}</span> mode.
-            {manifest.permissions && (
-              <div className="mt-3 text-xs text-fg-dim">
-                Permissions —{" "}
+            {manifest.permissions ? (
+              <>
+                Permissions:{" "}
                 {[
                   manifest.permissions.local_files && "local files",
                   manifest.permissions.computer_control && "computer control",
@@ -225,7 +226,9 @@ function GenericSummary({
                 ]
                   .filter(Boolean)
                   .join(", ") || "none"}
-              </div>
+              </>
+            ) : (
+              "No permissions are recorded for this workspace."
             )}
           </div>
         </Card>

@@ -10,14 +10,21 @@ import { AGENT_REGISTRY, resolveAgentKey } from "@/lib/agents";
  * provided, the primary-agent picker renders THIS list. Workspace agent
  * membership is managed once in the tenant manifest, not independently on
  * every user's profile.
+ *
+ * `agentNames` — what each agent is called on screen, keyed by slug: the
+ * department it leads (lib/os/teammate-names.ts), never its persona name. A
+ * slug with no entry (an agent the workspace built) falls back to the registry
+ * label, then the slug.
  */
 export function ProfileEditor({
   profile,
   tenantAgents,
+  agentNames,
   personalOnly = false,
 }: {
   profile: UserProfile;
   tenantAgents?: string[];
+  agentNames?: Record<string, { name: string }>;
   /** Identity/contact fields only. Never exposes business targets or agent config. */
   personalOnly?: boolean;
 }) {
@@ -115,7 +122,7 @@ export function ProfileEditor({
                 {availableAgentKeys.length === 0 ? (
                   <option value="">No workspace agents enabled</option>
                 ) : availableAgentKeys.map((k) => (
-                  <option key={k} value={k}>{AGENT_REGISTRY[k]?.label || k}</option>
+                  <option key={k} value={k}>{agentNames?.[k]?.name || AGENT_REGISTRY[k]?.label || k}</option>
                 ))}
               </select>
               <p className="mt-1.5 text-[11px] text-fg-dim leading-relaxed">
@@ -123,7 +130,7 @@ export function ProfileEditor({
               </p>
             </Field>
             {/* MRR fields removed 2026-09-24: MRR is read live from Stripe and the
-                goal is set under Settings → Revenue goal. A typed number here is
+                goal is set under Settings > Team > Revenue goal. A typed number here is
                 how Today showed $6,263 while Stripe held $72. */}
           </>
         )}

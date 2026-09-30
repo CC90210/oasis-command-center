@@ -28,10 +28,19 @@
  *
  * `fetchImpl` is injectable so tests assert the exact request each provider
  * gets without a network.
+ *
+ * METERED. A probe spends, so it is a model call like any other: `meter`
+ * (lib/ai/usage.ts, surface "probe") reserves it against the workspace's
+ * monthly AI budget and records its ai_usage_events row from the usage the
+ * provider reports. A workspace at its cap is told so instead of being tested.
+ * Ollama's model LIST is not a model call and is not metered; its one-token
+ * completion is.
  */
 import "server-only";
 import { classifyProviderStatus, failureCopy, type TurnFailureCode } from "@/lib/os/channel/outcome";
 import type { Provider } from "@/lib/providers";
+import type { CallEnd, ModelCall, ModelCallMeter, ModelUsage } from "@/lib/ai/usage";
+import { AI_USAGE_UNAVAILABLE, isAiBudgetCode, meterRefusalCode } from "@/lib/ai/usage-codes";
 
 export const PROBE_TIMEOUT_MS = 15_000;
 
@@ -56,7 +65,11 @@ export type ProbeRequest = { url: string; init: RequestInit };
 
 export type ProbeResult =
   | { ok: true; latency_ms: number; model: string }
-  | { ok: false; code: TurnFailureCode | "timeout" | "network" | "no_local_model"; message: string };
+  | {
+      ok: false;
+      code: TurnFailureCode | "timeout" | "network" | "no_local_model" | typeof AI_USAGE_UNAVAILABLE;
+      message: string;
+    };
 
 type FetchImpl = (url: string, init: RequestInit) => Promise<Response>;
 
@@ -64,6 +77,8 @@ type ProbeOptions = {
   /** The model saved with the key; PROBE_MODEL (or Ollama's first) when absent. */
   model?: string | null;
   fetchImpl?: FetchImpl;
+  /** REQUIRED: meters the one-token completion (lib/ai/usage.ts, surface "probe"). */
+  meter: ModelCallMeter;
 };
 
 /** The exact one-token completion each hosted provider receives. */
@@ -172,7 +187,115 @@ function thrown(err: unknown, provider: Provider): ProbeResult {
   };
 }
 
-async function probeOllama(baseUrl: string, fetchImpl: FetchImpl, saved: string | null): Promise<ProbeResult> {
+/**
+ * The usage in a probe's (non-streamed) response, for the ledger. Each
+ * provider's own shape; input is UNCACHED input. null when it reported none.
+ */
+function probeUsage(provider: Provider, body: unknown): ModelUsage | null {
+  const r = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const obj = (v: unknown): Record<string, unknown> | null =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  if (provider === "anthropic") {
+    const u = obj(r?.usage);
+    const input = num(u?.input_tokens);
+    const output = num(u?.output_tokens);
+    if (input === null || output === null) return null;
+    return {
+      inputTokens: input,
+      outputTokens: output,
+      cacheReadTokens: num(u?.cache_read_input_tokens) ?? 0,
+      cacheWriteTokens: num(u?.cache_creation_input_tokens) ?? 0,
+    };
+  }
+  if (provider === "google") {
+    const u = obj(r?.usageMetadata);
+    const prompt = num(u?.promptTokenCount);
+    const candidates = num(u?.candidatesTokenCount);
+    if (prompt === null) return null;
+    const cached = num(u?.cachedContentTokenCount) ?? 0;
+    // A one-token cap can end with no candidate tokens at all (candidatesTokenCount absent).
+    return {
+      inputTokens: Math.max(prompt - cached, 0),
+      outputTokens: (candidates ?? 0) + (num(u?.thoughtsTokenCount) ?? 0),
+      cacheReadTokens: cached,
+      cacheWriteTokens: 0,
+    };
+  }
+  // OpenAI-compatible: openai, openrouter, ollama.
+  const u = obj(r?.usage);
+  const prompt = num(u?.prompt_tokens);
+  const completion = num(u?.completion_tokens);
+  if (prompt === null || completion === null) return null;
+  const details = obj(u?.prompt_tokens_details);
+  const cached = num(details?.cached_tokens) ?? 0;
+  const written = num(details?.cache_write_tokens) ?? 0;
+  return {
+    inputTokens: Math.max(prompt - cached - written, 0),
+    outputTokens: completion,
+    cacheReadTokens: cached,
+    cacheWriteTokens: written,
+    providerCostUsd: num(u?.cost),
+  };
+}
+
+/**
+ * Send one probe completion through the meter: reserve, send, then record
+ * exactly one row however it ends. A budget refusal comes back as the result.
+ */
+async function meteredProbe(
+  provider: Provider,
+  meter: ModelCallMeter,
+  fetchImpl: FetchImpl,
+  req: ProbeRequest,
+  model: string,
+  maxOutputTokens: number,
+): Promise<ProbeResult> {
+  let call: ModelCall;
+  try {
+    call = await meter.begin({
+      provider,
+      model,
+      maxOutputTokens,
+      promptBytes: new TextEncoder().encode(String(req.init.body ?? "")).length,
+    });
+  } catch (err) {
+    const code = meterRefusalCode(err);
+    return {
+      ok: false,
+      code: isAiBudgetCode(code) ? code : AI_USAGE_UNAVAILABLE,
+      message: isAiBudgetCode(code)
+        ? failureCopy(code, { canManageAi: true }).sentence
+        : "The AI budget could not be checked just now, so the key was not tested. Try again in a moment.",
+    };
+  }
+  let end: CallEnd = { outcome: "cancelled", usage: null };
+  try {
+    const { res, ms } = await timed(fetchImpl, req);
+    if (!res.ok) {
+      end = { outcome: "error", errorCode: `http_${res.status}`, notBilled: true };
+      return refusal(res, model);
+    }
+    const body = await res.json().catch(() => null);
+    end = { outcome: "ok", usage: probeUsage(provider, body) };
+    return { ok: true, latency_ms: ms, model };
+  } catch (err) {
+    end =
+      (err as Error)?.name === "AbortError"
+        ? { outcome: "timeout", errorCode: "timeout", usage: null }
+        : { outcome: "error", errorCode: "network", usage: null };
+    return thrown(err, provider);
+  } finally {
+    await call.finish(end);
+  }
+}
+
+async function probeOllama(
+  baseUrl: string,
+  fetchImpl: FetchImpl,
+  saved: string | null,
+  meter: ModelCallMeter,
+): Promise<ProbeResult> {
   const base = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
   let model: string | null = null;
   try {
@@ -189,35 +312,26 @@ async function probeOllama(baseUrl: string, fetchImpl: FetchImpl, saved: string 
   if (!model) {
     return { ok: false, code: "no_local_model", message: "The local model server has no models installed yet." };
   }
-  try {
-    const { res, ms } = await timed(fetchImpl, {
-      url: `${base}/v1/chat/completions`,
-      init: {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: PROBE_TEXT }] }),
-      },
-    });
-    return res.ok ? { ok: true, latency_ms: ms, model } : refusal(res, model);
-  } catch (err) {
-    return thrown(err, "ollama");
-  }
+  const req: ProbeRequest = {
+    url: `${base}/v1/chat/completions`,
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: PROBE_TEXT }] }),
+    },
+  };
+  return meteredProbe("ollama", meter, fetchImpl, req, model, 1);
 }
 
 /**
  * Probe a key (for Ollama, the "key" is the server URL). A 2xx from the
  * one-token completion is the only green.
  */
-export async function probeProvider(provider: Provider, key: string, opts: ProbeOptions = {}): Promise<ProbeResult> {
+export async function probeProvider(provider: Provider, key: string, opts: ProbeOptions): Promise<ProbeResult> {
   const fetchImpl: FetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init));
   const saved = typeof opts.model === "string" && opts.model.trim() ? opts.model.trim() : null;
-  if (provider === "ollama") return probeOllama(key, fetchImpl, saved);
+  if (provider === "ollama") return probeOllama(key, fetchImpl, saved, opts.meter);
   const model = saved ?? PROBE_MODEL[provider];
   const req = buildProbeRequest(provider, key, model);
-  try {
-    const { res, ms } = await timed(fetchImpl, req);
-    return res.ok ? { ok: true, latency_ms: ms, model } : refusal(res, model);
-  } catch (err) {
-    return thrown(err, provider);
-  }
+  return meteredProbe(provider, opts.meter, fetchImpl, req, model, provider === "openrouter" ? OPENROUTER_MIN_MAX_TOKENS : 1);
 }
