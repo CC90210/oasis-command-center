@@ -217,6 +217,32 @@ export function validatePrefs(v: unknown): Result<CalendarPrefs> {
   });
 }
 
+/**
+ * True when changing `before` into `after` could put the event somewhere it
+ * was not: its times, zone or all-day status change, or its repeat rule
+ * widens. Deleting one occurrence (an exdate), ending a series earlier or a
+ * title-only edit cannot, and must stay possible even if the Shabbat settings
+ * changed after the series was made. Anything uncertain counts as adding.
+ */
+export function addsTime(before: EventInput, after: EventInput): boolean {
+  if (before.start !== after.start || before.end !== after.end || before.allDay !== after.allDay || before.timeZone !== after.timeZone) return true;
+  const a = before.recurrence;
+  const b = after.recurrence;
+  if (!b) return false; // repeating -> single at the same first time: only removes
+  if (!a) return true;
+  if (a.freq !== b.freq || a.interval !== b.interval || (a.monthlyMode ?? "day") !== (b.monthlyMode ?? "day")) return true;
+  const days = (r: typeof a) => [...(r.byWeekday ?? [])].sort().join(",");
+  if (days(a) !== days(b)) return true;
+  // The series' end may only stay or come earlier. Mixed kinds (a date
+  // against a count) cannot be compared cheaply, so they count as widening.
+  const bound = (r: typeof a) => (r.until ? { kind: "until", v: r.until as string | number } : r.count ? { kind: "count", v: r.count as string | number } : null);
+  const was = bound(a);
+  const now = bound(b);
+  if (was && (!now || now.kind !== was.kind || now.v > was.v)) return true;
+  // Un-deleting an occurrence brings it back.
+  return before.exdates.some((x) => !after.exdates.includes(x));
+}
+
 /** How far ahead a recurring event is checked against Shabbat. */
 const PROTECTION_HORIZON_DAYS = 400;
 

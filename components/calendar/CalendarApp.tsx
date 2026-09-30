@@ -18,7 +18,7 @@ import {
 import { LEGACY_KEY_PREFIX, pickLegacyWeek, planLegacyImport } from "@/lib/calendar/legacy";
 import { eventStart, expandOccurrences, inputOf, planDelete, planEdit, sameRule } from "@/lib/calendar/recurrence";
 import type { CalendarView, EditScope, EventInput, EventOp, Occurrence } from "@/lib/calendar/types";
-import { shabbatConflict, validateEventInput } from "@/lib/calendar/validate";
+import { addsTime, shabbatConflict, validateEventInput } from "@/lib/calendar/validate";
 import { DayListPopover } from "./DayListPopover";
 import { EventEditor } from "./EventEditor";
 import { EventPopover } from "./EventPopover";
@@ -269,8 +269,10 @@ export function CalendarApp() {
     // Check exactly what will be written: each created event, and each
     // updated row as it will stand after the patch.
     for (const op of ops) {
+      const before = op.op === "update" ? events.find((e) => e.id === op.id) : undefined;
       const after = op.op === "create" ? op.event : op.op === "update" ? mergedInput(op.id, op.patch) : null;
-      const clash = after && conflictText(after);
+      // Same rule as the server: an update that cannot add time is not checked.
+      const clash = after && (!before || addsTime(inputOf(before), after)) && conflictText(after);
       if (!clash) continue;
       if (fromEditor) {
         setPanelError(clash);

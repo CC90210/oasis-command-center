@@ -56,7 +56,11 @@ export function badRequest(error: string): NextResponse {
 export function errorResponse(err: unknown, where: string): NextResponse {
   if (err instanceof CalendarStoreError) {
     if (err.status >= 500) console.error(`[calendar.${where}]`, err.message);
-    return NextResponse.json({ ok: false, error: err.code, detail: err.message }, { status: err.status });
+    if (err.status < 500) return NextResponse.json({ ok: false, error: err.code, detail: err.message }, { status: err.status });
+    // 5xx: never the storage text (SQL, table names). Only the partial-save
+    // count, which the page needs to tell the user to expect a refresh.
+    const partial = /(\d+ of \d+ changes saved before this failed)/.exec(err.message)?.[1];
+    return NextResponse.json({ ok: false, error: err.code, ...(partial ? { detail: partial } : {}) }, { status: err.status });
   }
   console.error(`[calendar.${where}]`, err);
   return NextResponse.json({ ok: false, error: "calendar_unavailable" }, { status: 500 });

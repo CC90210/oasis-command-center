@@ -103,6 +103,29 @@ async function main() {
   assert.deepEqual(events.find((e) => e.id === s2.id)!.exdates, [slot], "the original slot does not come back");
   await assert.rejects(store.deleteCalendar(adon, personal), (e: unknown) => e instanceof store.CalendarStoreError && e.code === "default_calendar_protected");
 
+  // CodeRabbit (Major): settings that tighten AFTER a series exists must not
+  // block removing its occurrences, and must still block moving it.
+  const weekday1pm = input({ title: "1pm", start: at("2026-12-14T13:00"), end: at("2026-12-14T14:00"), recurrence: { freq: "WEEKLY", interval: 1, byWeekday: [1, 2, 3, 4, 5] } });
+  const [w1] = await store.applyOps(adon, [{ op: "create", event: weekday1pm }], DEFAULT_PREFS);
+  // Svalbard in December has no sunset: the fallback protects Friday from noon.
+  const polar = { ...DEFAULT_PREFS, location: { label: "Longyearbyen", lat: 78.22, lon: 15.63 } };
+  await store.applyOps(adon, [{ op: "update", id: w1.id, patch: { exdates: [at("2026-12-18T13:00")] } }], polar);
+  await store.applyOps(adon, [{ op: "update", id: w1.id, patch: { title: "renamed", recurrence: { freq: "WEEKLY", interval: 1, byWeekday: [1, 2, 3, 4, 5], until: "2027-01-31" } } }], polar);
+  await assert.rejects(
+    store.applyOps(adon, [{ op: "update", id: w1.id, patch: { start: at("2026-12-14T13:30"), end: at("2026-12-14T14:30") } }], polar),
+    (e: unknown) => e instanceof store.CalendarStoreError && e.code === "shabbat_protected",
+    "a time change is still checked",
+  );
+
+  // CodeRabbit (Minor): 5xx responses carry no storage text, only a partial-save count.
+  const { errorResponse } = await import("../lib/calendar/http");
+  const leak = await errorResponse(new store.CalendarStoreError("event_write_failed", 500, "SQLITE_ERROR: no such column: secret_col"), "t").json();
+  assert.deepEqual(leak, { ok: false, error: "event_write_failed" });
+  const partialBody = await errorResponse(new store.CalendarStoreError("event_write_failed", 500, "event_write_failed: 2 of 3 changes saved before this failed"), "t").json();
+  assert.equal(partialBody.detail, "2 of 3 changes saved before this failed");
+  const clientErr = await errorResponse(new store.CalendarStoreError("shabbat_protected", 409, "overlaps x - y"), "t").json();
+  assert.ok(String(clientErr.detail).includes("overlaps"), "4xx keeps its detail");
+
   // Preferences: protective defaults until saved, then round-trip.
   assert.equal((await store.getPrefs(adon)).havdalahMinutesAfterSunset, 72);
   await store.savePrefs(adon, { ...DEFAULT_PREFS, weekStartsOn: 1 });

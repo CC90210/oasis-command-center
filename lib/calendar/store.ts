@@ -21,7 +21,7 @@ import {
   type Recurrence,
 } from "./types";
 import { planCalendarRemoval } from "./recurrence";
-import { LIMITS, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
+import { LIMITS, addsTime, shabbatConflict, validateEventInput, validatePrefs } from "./validate";
 
 export class CalendarStoreError extends Error {
   constructor(readonly code: string, readonly status = 500, detail?: string) {
@@ -287,8 +287,9 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
   const tempIds = new Map<string, string>();
   const results: OpResult[] = [];
 
-  const check = (input: EventInput) => {
+  const check = (input: EventInput, shabbat = true) => {
     if (!calendars.has(input.calendarId)) throw new CalendarStoreError("calendar_not_found", 404);
+    if (!shabbat) return;
     const hit = shabbatConflict(input, prefs);
     if (hit) throw new CalendarStoreError("shabbat_protected", 409, `overlaps ${hit.start.toISOString()} - ${hit.end.toISOString()}`);
   };
@@ -344,7 +345,9 @@ export async function applyOps(owner: Owner, ops: EventOp[], prefs: CalendarPref
         const { id: _i, createdAt: _c, updatedAt: _u, ...base } = current;
         const merged = validateEventInput({ ...base, ...op.patch });
         if (!merged.ok) throw new CalendarStoreError(merged.error, 400);
-        check(merged.value);
+        // An update that cannot add time (delete one occurrence, end a series
+        // earlier, rename) is never refused by the lock; anything else is.
+        check(merged.value, addsTime(base, merged.value));
         const now = new Date().toISOString();
         const { error } = await db
           .from("calendar_events")

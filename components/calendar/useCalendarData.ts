@@ -128,6 +128,7 @@ export function useCalendarData() {
     try {
       const data = await call<{ calendars: CalendarRecord[]; events: EventRecord[]; prefs: CalendarPrefs; truncated: boolean }>("/api/calendar");
       setCalendars(data.calendars);
+      eventsRef.current = data.events;
       setEvents(data.events);
       setPrefs(data.prefs);
       setTruncated(data.truncated);
@@ -153,25 +154,29 @@ export function useCalendarData() {
       // Map optimistic temp ids onto server-side tempIds so overrides can
       // reference a master created in the same batch.
       const withTemp = ops.map((op, i) => (op.op === "create" && !op.tempId ? { ...op, tempId: ids[i] } : op));
-      setEvents(applyLocal(before, withTemp, ids));
+      // Write the ref as well as state: the next queued commit starts in a
+      // microtask, before React renders, and must see these rows, not the
+      // previous render's (which still hold temp ids).
+      const optimistic = applyLocal(before, withTemp, ids);
+      eventsRef.current = optimistic;
+      setEvents(optimistic);
       setSaving((n) => n + 1);
       try {
         const { results } = await call<{ results: OpResult[] }>("/api/calendar/events", {
           method: "POST",
           body: JSON.stringify({ ops: withTemp }),
         });
-        setEvents((cur) => {
-          let next = cur;
-          results.forEach((r, i) => {
-            if (r.op === "create" && r.event) next = next.map((row) => (row.id === ids[i] ? r.event! : row));
-            else if (r.op === "update" && r.event) next = next.map((row) => (row.id === r.id ? r.event! : row));
-          });
-          return next;
+        let next = eventsRef.current;
+        results.forEach((r, i) => {
+          if (r.op === "create" && r.event) next = next.map((row) => (row.id === ids[i] ? r.event! : row));
+          else if (r.op === "update" && r.event) next = next.map((row) => (row.id === r.id ? r.event! : row));
         });
+        eventsRef.current = next;
+        setEvents(next);
         return inverseOps(before, withTemp, results);
       } catch (err) {
-        setEvents(before);
         eventsRef.current = before;
+        setEvents(before);
         // Re-read after any failure: the server is the truth, and a partial
         // batch or a concurrent change elsewhere must not linger locally.
         void reload();

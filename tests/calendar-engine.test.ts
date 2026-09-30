@@ -11,7 +11,7 @@ import { DEFAULT_PREFS, type EventRecord } from "../lib/calendar/types";
 import { pickLegacyWeek, planLegacyImport } from "../lib/calendar/legacy";
 import { createPlaceholderSchedule } from "../lib/schedule/model";
 import { inputForOccurrence } from "../components/calendar/ui";
-import { shabbatConflict, validateEventInput, validateOps, validatePrefs } from "../lib/calendar/validate";
+import { addsTime, shabbatConflict, validateEventInput, validateOps, validatePrefs } from "../lib/calendar/validate";
 
 // A DST zone, so wall-clock preservation is exercised on any machine. Node
 // re-reads TZ at runtime; nothing above computes a date at import time.
@@ -260,6 +260,22 @@ const take = <T>(g: Generator<T>, n: number) => {
   const later = { ...inputForOccurrence(occ11), start: local("2026-10-05T12:00").toISOString(), end: local("2026-10-05T13:00").toISOString() };
   const moved = planEdit(occ11, later, "all", [nine, at11]);
   assert.ok(moved[0].op === "update" && new Date(moved[0].patch.start!).getHours() === 10);
+}
+
+// ── addsTime (CodeRabbit, 2026-09-29) ─────────────────────────────────────
+
+{
+  const { id: _i, createdAt: _c, updatedAt: _u, ...s } = ev({ recurrence: { freq: "WEEKLY", interval: 1, until: "2026-12-31" } });
+  assert.equal(addsTime(s, { ...s, title: "x" }), false, "rename");
+  assert.equal(addsTime(s, { ...s, exdates: ["2026-10-05"] }), false, "delete one occurrence");
+  assert.equal(addsTime(s, { ...s, recurrence: { ...s.recurrence!, until: "2026-11-30" } }), false, "end earlier");
+  assert.equal(addsTime(s, { ...s, recurrence: null }), false, "stop repeating");
+  assert.equal(addsTime(s, { ...s, recurrence: { ...s.recurrence!, until: "2027-01-31" } }), true, "end later");
+  assert.equal(addsTime(s, { ...s, recurrence: { freq: "WEEKLY", interval: 1 } }), true, "no end");
+  assert.equal(addsTime(s, { ...s, recurrence: { freq: "WEEKLY", interval: 1, count: 3 } }), true, "date vs count: uncertain counts as adding");
+  assert.equal(addsTime(s, { ...s, recurrence: { ...s.recurrence!, byWeekday: [5] } }), true, "other days");
+  assert.equal(addsTime(s, { ...s, end: new Date(Date.parse(s.end) + 60_000).toISOString() }), true, "longer");
+  assert.equal(addsTime({ ...s, exdates: ["2026-10-05"] }, s), true, "un-delete an occurrence");
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────
