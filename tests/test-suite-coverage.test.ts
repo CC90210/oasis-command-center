@@ -84,11 +84,35 @@ const PATH_TOKEN = /(?<![\w/.-])tests\/[\w./@[\]-]+\.(?:[cm]?[jt]sx?)\b/g;
  * must not count. `run:` is either inline or a block scalar (`|` / `>`) whose
  * body is every following line indented deeper than the key.
  */
+/**
+ * A shell line without its comment. `#` starts a comment only at the start of
+ * a word and outside quotes, so `npm run test:a # npm run test:b` runs only
+ * test:a, while `echo "#x"` and `a#b` keep their `#`.
+ */
+function stripShellComment(line: string): string {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+    } else if (ch === "\\") {
+      i++;
+    } else if (quote === '"') {
+      if (ch === '"') quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
 function ciTestGroups(ciYaml: string): string[] {
   const groups: string[] = [];
   const collect = (command: string) => {
-    const code = command.trim();
-    if (!code || code.startsWith("#")) return;
+    const code = stripShellComment(command).trim();
+    if (!code) return;
     for (const m of code.matchAll(/(?:^|[\s;&|(])npm run (test:[\w:-]+)/g)) groups.push(m[1]);
   };
   let blockIndent: number | null = null;
@@ -127,17 +151,40 @@ function listTestFiles(repoRoot: string): string[] {
   return found.sort();
 }
 
+/**
+ * JavaScript source without its comments: `// ...` to the end of the line and
+ * `/* ... *\/` blocks, skipped only outside string literals, so a quoted path
+ * inside a comment is not read as a registration.
+ */
+function stripJsComments(text: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      out += ch;
+      if (ch === "\\") out += text[++i] ?? "";
+      else if (ch === quote) quote = null;
+    } else if (ch === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 1;
+      out += " ";
+    } else {
+      if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+      out += ch;
+    }
+  }
+  return out;
+}
+
 /** The string entries of a runner's `const TESTS = [ ... ];`, comments skipped. */
 function runnerEntries(text: string): string[] | null {
   const block = /const TESTS = \[([\s\S]*?)\n\];/.exec(text);
   if (!block) return null;
-  const entries: string[] = [];
-  for (const line of block[1].split(/\r?\n/)) {
-    const code = line.trim();
-    if (code.startsWith("//") || code.startsWith("*")) continue;
-    for (const m of code.matchAll(/"([^"]+)"/g)) entries.push(m[1]);
-  }
-  return entries;
+  return [...stripJsComments(block[1]).matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
 function coverage(src: Sources): Coverage {
@@ -185,13 +232,22 @@ function coverage(src: Sources): Coverage {
     "const TESTS = [",
     '  "tests/in-runner.test.ts",',
     '  // "tests/commented-out.test.ts",',
-    '  "tests/points-at-nothing.test.ts",',
+    '  "tests/points-at-nothing.test.ts", // "tests/trailing-comment.test.ts",',
+    '  /* "tests/block-comment.test.ts", */',
+    "  /*",
+    '  "tests/multi-line-comment.test.ts",',
+    "  */",
     "];",
   ].join("\n");
   const files = new Set([
     "tests/direct.test.ts",
     "tests/in-runner.test.ts",
     "tests/commented-out.test.ts",
+    "tests/trailing-comment.test.ts",
+    "tests/block-comment.test.ts",
+    "tests/multi-line-comment.test.ts",
+    "tests/in-trailing-ci-comment.test.ts",
+    "tests/after-quoted-hash.test.ts",
     "tests/in-unrun-group.test.ts",
     "tests/in-commented-ci-line.test.ts",
     "tests/nowhere.test.ts",
@@ -207,10 +263,11 @@ function coverage(src: Sources): Coverage {
       "        env:",
       "          NODE_OPTIONS: --conditions=react-server",
       "        run: |",
-      "          npm run test:a",
+      "          npm run test:a # npm run test:trailing",
       "          # npm run test:commented",
       "",
       "          npm run test:runner",
+      '          echo "a # inside quotes" && npm run test:quoted',
       "      - name: after the block, npm run test:unrun is prose again",
       "        run: echo done",
     ].join("\n"),
@@ -219,6 +276,8 @@ function coverage(src: Sources): Coverage {
       "test:runner": "node tests/_runner.mjs",
       "test:unrun": "node --import tsx tests/in-unrun-group.test.ts",
       "test:commented": "node --import tsx tests/in-commented-ci-line.test.ts",
+      "test:trailing": "node --import tsx tests/in-trailing-ci-comment.test.ts",
+      "test:quoted": "node --import tsx tests/after-quoted-hash.test.ts",
     },
     readRunner: (f) => (f === "tests/_runner.mjs" ? runner : null),
     testFiles: [...files],
@@ -231,20 +290,25 @@ function coverage(src: Sources): Coverage {
   const c = coverage(base);
   assert.deepEqual(
     c.ciGroups,
-    ["test:a", "test:runner"],
-    "only `run:` values count: not a step name, not a shell comment, not text after the block ends",
+    ["test:a", "test:runner", "test:quoted"],
+    "only `run:` values count: not a step name, not a shell comment (whole-line or trailing), not text after the block ends; a quoted # is not a comment",
   );
   assert.ok(c.covered.has("tests/direct.test.ts"), "named by a group CI runs");
   assert.ok(c.covered.has("tests/in-runner.test.ts"), "named by a runner a CI group invokes");
+  assert.ok(c.covered.has("tests/after-quoted-hash.test.ts"), "a command after a quoted # still runs");
   assert.deepEqual(
     c.orphans,
     [
+      "tests/block-comment.test.ts",
       "tests/commented-out.test.ts",
       "tests/in-commented-ci-line.test.ts",
+      "tests/in-trailing-ci-comment.test.ts",
       "tests/in-unrun-group.test.ts",
+      "tests/multi-line-comment.test.ts",
       "tests/nowhere.test.ts",
+      "tests/trailing-comment.test.ts",
     ],
-    "a commented entry, a group CI does not run, and no registration at all are all orphans",
+    "commented entries (line, trailing, block), a group only a comment names, a group CI does not run, and no registration at all are all orphans",
   );
   assert.deepEqual(c.missing, ["tests/points-at-nothing.test.ts"], "a registration for a file that does not exist is caught");
   assert.deepEqual(c.staleExclusions, ["tests/wrongly-excluded.test.ts"], "an exclusion for a covered file must be removed");
