@@ -131,8 +131,8 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onD
   const adjusted = plan?.adjusted ?? [];
 
   return (
-    <section aria-labelledby="routine-h" className="max-h-[55vh] shrink-0 overflow-y-auto border-b border-hairline bg-bg-panel px-4 py-4 md:px-6">
-      <div className="max-w-3xl">
+    <section aria-labelledby="routine-h" className="max-h-[55vh] shrink-0 overflow-y-auto border-b border-hairline bg-bg-panel px-4 md:px-6">
+      <div className="max-w-3xl pt-4">
         <h2 id="routine-h" className="text-[15px] font-semibold text-fg">Restore my weekly routine</h2>
         <p className="mt-1 text-[13px] text-fg-muted">
           The old Schedule page showed these blocks every week. Restoring adds them to {calendarName} as repeating events in
@@ -206,7 +206,7 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onD
         )}
 
         {/* Kept in view while the list scrolls inside the card on a phone. */}
-        <div className="sticky bottom-0 -mb-4 mt-2 flex flex-wrap items-center gap-2 bg-bg-panel pb-4 pt-2">
+        <div className="sticky bottom-0 mt-2 flex flex-wrap items-center gap-2 bg-bg-panel pb-4 pt-2">
           {mode === "confirm" && plan ? (
             <>
               <p className="w-full text-[13px] text-fg">
