@@ -565,6 +565,19 @@ async function main() {
     assert.deepEqual([cleared.paid_from_account_id, cleared.paid_from_confirmed], [null, false]);
   });
 
+  await check("materializeDueRecurring (for the recurring-draft job CC has yet to approve): every due date once, unconfirmed ones as bills due, a rerun adds nothing", async () => {
+    const item = await bills.createRecurring(cc, B, { name: "Domain (catch-up)", amount: "10.00", currency: "CAD", cadence: "monthly", next_run_on: "2026-07-05", category_id: categoryId(B, "5100") });
+    const first = await bills.materializeDueRecurring(cc, B, "2026-09-30");
+    const mine = (await raw.execute({ sql: `SELECT kind, status, due_date FROM fin_bills WHERE source = 'recurring' AND source_ref LIKE ? ORDER BY due_date`, args: [`${item}:%`] })).rows;
+    assert.deepEqual(mine.map((r) => [r.kind, r.status, r.due_date]), [["bill", "open", "2026-07-05"], ["bill", "open", "2026-08-05"], ["bill", "open", "2026-09-05"]]);
+    assert.ok(first.created.length >= 3);
+    const [row] = (await bills.listRecurring(cc, B)).filter((r) => r.id === item);
+    assert.equal(row.next_run_on, "2026-10-05", "the schedule caught up");
+    const again = await bills.materializeDueRecurring(cc, B, "2026-09-30");
+    assert.deepEqual(again.created, [], "a rerun materializes nothing new");
+    assert.equal(Number((await raw.execute({ sql: `SELECT COUNT(*) FROM fin_bills WHERE source = 'recurring' AND source_ref LIKE ?`, args: [`${item}:%`] })).rows[0][0]), 3, "idempotent");
+  });
+
   // ── complete books: no banner ──────────────────────────────────────────
   await check("complete books (opening balance, payout, bank import and costs from before the first revenue): no banner anywhere, live tiles, a real threshold level", async () => {
     await post("2026-01-01", "opening_balance", "ob-1000", [[SYS.chequing, 500000, 0], [SYS.retained, 0, 500000]]);

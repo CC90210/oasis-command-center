@@ -496,6 +496,45 @@ export async function createRecurring(viewer: FinanceViewer, entityRef: string, 
 }
 
 /**
+ * Every active recurring item due on or before `today`, materialized once per
+ * due date (recordRecurringNow, below), oldest first; an item several periods
+ * behind gets one bill per missed date. For the recurring-draft job CC has
+ * yet to approve and schedule (nothing calls this on a schedule today). A
+ * failure on one item is thrown with its id after the others ran, never
+ * swallowed.
+ */
+export async function materializeDueRecurring(viewer: FinanceViewer, entityRef: string, today = torontoToday()): Promise<{ created: string[] }> {
+  const entity = await requireEntity(viewer, entityRef);
+  const created: string[] = [];
+  const failed: string[] = [];
+  const due = await query<{ id: string }>(
+    `SELECT id FROM fin_recurring_items WHERE entity_id = ? AND active = 1 AND next_run_on <= ? ORDER BY next_run_on, id`,
+    [entity.id, today],
+  );
+  for (const { id } of due) {
+    // Catch up missed periods one date at a time; the schedule advances with each.
+    for (let guard = 0; guard < 60; guard++) {
+      const row = await queryOne<{ next_run_on: string; active: number }>(`SELECT next_run_on, active FROM fin_recurring_items WHERE id = ?`, [id]);
+      if (!row || row.active !== 1 || row.next_run_on > today) break;
+      let billId: string;
+      try {
+        billId = await recordRecurringNow(viewer, id);
+      } catch (e) {
+        console.error("[finances:recurring] could not materialize", id, row.next_run_on, e instanceof Error ? e.message : e);
+        failed.push(`${id}@${row.next_run_on}`);
+        break;
+      }
+      if (!created.includes(billId)) created.push(billId);
+      // No progress (that date was already recorded and the schedule did not move): stop, never loop.
+      const after = await queryOne<{ next_run_on: string }>(`SELECT next_run_on FROM fin_recurring_items WHERE id = ?`, [id]);
+      if (!after || after.next_run_on === row.next_run_on) break;
+    }
+  }
+  if (failed.length) throw new Error(`recurring items not materialized: ${failed.join(", ")} (${created.length} created)`);
+  return { created };
+}
+
+/**
  * The recurring materializer (source 'recurring'): a founder clicks "Record"
  * on a due item, and the CC-approved recurring job will call the same thing.
  *   - paid-from CONFIRMED by a founder: an expense, paid from that account (or
