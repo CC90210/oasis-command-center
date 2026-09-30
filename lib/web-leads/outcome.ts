@@ -212,6 +212,65 @@ export function validateCallOutcomeNote(outcome: CallOutcome, value: unknown): C
 }
 
 /**
+ * Which outcomes leave the lead alive and therefore owe it a next step.
+ *
+ * `not_interested` and `do_not_call` end it. Everything else is a lead still in
+ * play, and a lead in play with no date attached is the one that quietly rots:
+ * nobody decided to drop it, nobody scheduled it, and it simply stops being
+ * thought about. That is the single most common way a pipeline leaks.
+ */
+const KEEPS_LEAD_OPEN: readonly CallOutcome[] = ["no_answer", "connected", "interested"];
+
+export type NextActionValidation =
+  | { ok: true; nextActionAt: string | null }
+  | { ok: false; error: "next_action_required" | "next_action_invalid" | "next_action_not_future" };
+
+/**
+ * Every open lead leaves this call with a date on it. Every closed one leaves
+ * without one.
+ *
+ * WHY REQUIRED. `dispositionPatch` already refuses the attempted and voicemail
+ * dispositions without a future date, and that rule is why the `due` filter has
+ * anything to show. This extends the same rule to the outcomes logged from the
+ * board, so the queue has no holes: a lead can be worked, left open, and still
+ * be invisible tomorrow.
+ *
+ * 🚨 WHY A TERMINAL OUTCOME CLEARS IT RATHER THAN IGNORING IT. A lead marked
+ * `do_not_call` that still carries yesterday's callback would keep surfacing in
+ * the due queue, and that queue exists to tell a rep who to phone. Honouring a
+ * do-not-call request is a CRTC obligation, not a preference, so the date is
+ * nulled rather than left behind. `not_interested` clears for the milder reason
+ * that a lost lead recycles through claim.ts on its own schedule and does not
+ * need a promise attached to it.
+ *
+ * MANUAL DIALLING IS THE DESIGN CONSTRAINT (Adon, 2026-09-29): there is no
+ * dialer integration and there will not be one for some weeks, so every one of
+ * these is typed by a person immediately after hanging up. A required field
+ * that is tedious does not get filled honestly, it gets filled with whatever
+ * dismisses the dialog. That is why the client offers presets rather than a
+ * date picker, and why this accepts any future ISO instant rather than
+ * enforcing a shape the UI would then have to fight.
+ *
+ * @param now the caller's single clock, in ms, so one request cannot straddle two
+ */
+export function validateNextAction(
+  outcome: CallOutcome,
+  value: unknown,
+  now: number,
+): NextActionValidation {
+  if (!KEEPS_LEAD_OPEN.includes(outcome)) return { ok: true, nextActionAt: null };
+
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return { ok: false, error: "next_action_required" };
+
+  const at = Date.parse(raw);
+  if (!Number.isFinite(at)) return { ok: false, error: "next_action_invalid" };
+  if (at <= now) return { ok: false, error: "next_action_not_future" };
+
+  return { ok: true, nextActionAt: new Date(at).toISOString() };
+}
+
+/**
  * The routing, lifecycle, touch and owner facts needed to resume this call,
  * read off the same tenant_records row in one query. Mirrors
  * businessIdForLead in audit.ts (see this module's header, and that one's,
@@ -275,6 +334,9 @@ export async function logCallOutcome(input: {
   lead: WebLead;
   outcome: CallOutcome;
   note?: unknown;
+  /** Already validated by validateNextAction: a future ISO instant for an
+   *  outcome that leaves the lead open, null for one that ends it. */
+  nextActionAt: string | null;
   repUserId: string;
   requestId: string;
 }): Promise<{
@@ -284,7 +346,7 @@ export async function logCallOutcome(input: {
   idempotent: boolean;
   saveState: CallOutcomeSaveState;
 }> {
-  const { leadId, lead, outcome, repUserId } = input;
+  const { leadId, lead, outcome, repUserId, nextActionAt } = input;
   const requestId = input.requestId.trim().toLowerCase();
   if (!isCallOutcomeRequestId(requestId)) throw new Error("invalid_request_id");
   const noteResult = validateCallOutcomeNote(outcome, input.note);
@@ -311,6 +373,7 @@ export async function logCallOutcome(input: {
       rep_user_id: repUserId,
       outcome: DB_OUTCOME[outcome],
       notes: note,
+      next_action_at: nextActionAt,
       called_at: nowIso,
       created_at: nowIso,
       stage_from: initialRouting.stage,
@@ -528,8 +591,21 @@ export async function logCallOutcome(input: {
     // binds a telemarketer even when the calls are exempt from the National
     // DNCL, as business-to-business calls are, and the request must be kept for
     // three years and fourteen days.
+    // ═══ WHY next_action_at IS ALWAYS EMITTED HERE ═══
+    //
+    // lib/website-sales-workflow.ts documents the opposite hazard: the record
+    // store merges SHALLOWLY, so emitting next_action_at:null unconditionally
+    // erased a callback a rep had already scheduled. That is not this path.
+    // validateNextAction REQUIRES a future date for every outcome that leaves
+    // the lead open, so a null here is never an accident of omission -- it only
+    // ever arrives from a terminal outcome, where clearing is the point.
+    //
+    // Clearing on do_not_call is the load-bearing case. A lead someone asked to
+    // be removed from, still carrying yesterday's callback, would keep showing
+    // up in the due queue, which exists to tell a rep who to phone next.
     const contextPatch: Record<string, unknown> = {
       last_disposition: outcome,
+      next_action_at: nextActionAt,
       ...(outcome === "do_not_call" ? { dnc: true, dnc_at: calledAt } : {}),
       ...(note ? { last_handoff_note: note, last_handoff_note_at: calledAt } : {}),
     };

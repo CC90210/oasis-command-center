@@ -40,6 +40,7 @@ import {
   logCallOutcome,
   fetchRecentOutcomes,
   validateCallOutcomeNote,
+  validateNextAction,
 } from "@/lib/web-leads/outcome";
 
 export const runtime = "nodejs";
@@ -119,7 +120,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     );
   }
 
-  let body: { outcome?: unknown; note?: unknown; requestId?: unknown };
+  let body: { outcome?: unknown; note?: unknown; requestId?: unknown; nextActionAt?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -138,12 +139,26 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return NextResponse.json({ ok: false, error: noteResult.error }, { status: 400 });
   }
 
+  // EVERY OPEN LEAD LEAVES THIS CALL WITH A DATE ON IT, and every closed one
+  // leaves without one. Validated here rather than only in the client because
+  // the client is not the authorization boundary and never has been: a lead
+  // left open with no next step is invisible tomorrow, which is precisely the
+  // leak the due filter was added to close.
+  //
+  // One clock for the whole request, so a call logged across a second boundary
+  // cannot be judged against two.
+  const nextActionResult = validateNextAction(body.outcome, body.nextActionAt, Date.now());
+  if (!nextActionResult.ok) {
+    return NextResponse.json({ ok: false, error: nextActionResult.error }, { status: 400 });
+  }
+
   try {
     const { record, stageChangedTo, trackingWarning, idempotent, saveState } = await logCallOutcome({
       leadId: id,
       lead: auth.lead,
       outcome: body.outcome,
       note: noteResult.note,
+      nextActionAt: nextActionResult.nextActionAt,
       repUserId: auth.session.userId,
       requestId: body.requestId,
     });
