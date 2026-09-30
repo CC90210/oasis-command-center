@@ -123,7 +123,8 @@ async function main() {
   type EventRecord = import("../lib/calendar/types").EventRecord;
   const { expandOccurrences } = await import("../lib/calendar/recurrence");
   const { overlapsShabbat, shabbatForWeekOf } = await import("../lib/calendar/sun");
-  const { shabbatConflict, validateEventInput, validatePrefs } = await import("../lib/calendar/validate");
+  const { shabbatConflict, validateEventInput, validateOps, validatePrefs } = await import("../lib/calendar/validate");
+  const validateOpsOk = (ops: unknown) => validateOps(ops).ok;
 
   const record = (e: EventInput, id: string): EventRecord => ({ ...e, id, createdAt: "", updatedAt: "" });
   const FROM = new Date("2026-09-30T16:00:00Z"); // a Wednesday in Montréal
@@ -186,6 +187,31 @@ async function main() {
     const adj = plan.adjusted.find((a) => a.key === "fri:work-rnd")!;
     assert.equal(adj.shortened + adj.skipped, rnd.exdates.length, "every week taken out is shortened or named as left out");
     assert.equal(adj.shortened, plan.singles.length);
+  });
+
+  await check("The 18-minute wind-down alone shortens a Friday that would end before candle-lighting but inside it", () => {
+    const plan = routine.buildRoutineSeries(createPlaceholderSchedule(FROM), { calendarId: "cal", prefs: DEFAULT_PREFS, from: FROM });
+    const rnd = plan.series.find((s) => s.key === "fri:work-rnd")!.event;
+    // R&D runs to 5pm. On these Fridays candle-lighting is after 5pm, so only
+    // the wind-down (end 18 minutes before it) moves the block.
+    for (const [date, candles, end] of [["2027-02-19", "17:08", "16:50"], ["2028-02-18", "17:06", "16:48"], ["2028-02-25", "17:16", "16:58"]]) {
+      assert.equal(wall(shabbatForWeekOf(new Date(`${date}T17:00:00Z`), DEFAULT_PREFS).start), candles, `precondition: candles ${candles} on ${date}`);
+      const single = plan.singles.filter((s) => s.event.start.startsWith(date));
+      assert.equal(single.length, 1, `${date}: one shortened R&D`);
+      assert.deepEqual([wall(single[0].event.start), wall(single[0].event.end)], ["15:30", end], `${date}: ends ${end}, 18 min before candles`);
+      assert.ok(rnd.exdates.some((x) => x.startsWith(date)), `${date} is taken out of the weekly series`);
+    }
+    // And generally: no Friday occurrence ends later than candle-lighting less the wind-down.
+    const records = [...plan.series, ...plan.singles].map(({ event }, i) => record(event, `r${i}`));
+    const until = new Date(FROM.getTime() + routine.SHABBAT_PLAN_WEEKS * 7 * 86_400_000);
+    let fridays = 0;
+    for (const o of expandOccurrences(records, FROM, until)) {
+      if (wallDay(o.start) !== "Fri") continue;
+      fridays++;
+      const limit = shabbatForWeekOf(o.start, DEFAULT_PREFS).start.getTime() - routine.SHABBAT_WIND_DOWN_MIN * 60_000;
+      assert.ok(o.end.getTime() <= limit, `${o.event.title} on ${o.start.toISOString()} ends inside the wind-down`);
+    }
+    assert.ok(fridays > 800, `every Friday block was checked (${fridays})`);
   });
 
   // ── 2. Shabbat, across the whole horizon, from several starting weeks ────
@@ -374,6 +400,25 @@ async function main() {
     const rnd = events.find((e) => e.title === "Agent training / R&D" && e.recurrence?.byWeekday?.join("") === "5")!;
     await store.applyOps(owner, [{ op: "update", id: rnd.id, patch: { title: "R&D" } }], await store.getPrefs(owner));
     assert.equal((await store.listEvents(owner)).events.find((e) => e.id === rnd.id)?.title, "R&D");
+  });
+
+  await check("The browser-week import replaces a restored routine in ONE request the store accepts, leaving each block once", async () => {
+    const legacy = await import("../lib/calendar/legacy");
+    const owner = { tenantId: OASIS, userId: USERS.adon.id };
+    const prefs = await store.getPrefs(owner);
+    const before = (await store.listEvents(owner)).events;
+    const routineRows = before.filter((e) => e.id.startsWith(routine.ROUTINE_ID_PREFIX)).length;
+    assert.ok(routineRows >= 18, "precondition: Adon's routine was restored above");
+    const [calendar] = await store.listCalendars(owner);
+    const week = legacy.planLegacyImport(createPlaceholderSchedule(FROM), calendar.id, "UTC", prefs);
+    const writes = legacy.legacyImportWrites(week.events, before);
+    assert.equal(writes.batches.length, 1);
+    assert.equal(writes.replacing, routineRows);
+    assert.ok(validateOpsOk(writes.batches[0]), "the request passes the route's own validation");
+    await store.applyOps(owner, writes.batches[0], prefs);
+    const after = (await store.listEvents(owner)).events;
+    assert.equal(after.filter((e) => e.id.startsWith(routine.ROUTINE_ID_PREFIX)).length, 0, "the restored rows are gone");
+    assert.equal(after.length, week.events.length, "and exactly this browser's week is in their place");
   });
 
   await check("Prefs: OASIS gets Montréal + the lock, a client gets neither, and a saved row wins", async () => {

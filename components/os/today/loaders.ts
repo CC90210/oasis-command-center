@@ -39,6 +39,8 @@ import { toDateKey } from "@/lib/calendar/dates";
 import { expandOccurrences } from "@/lib/calendar/recurrence";
 import { listCalendars, listEvents } from "@/lib/calendar/store";
 import type { CalendarRecord, EventRecord } from "@/lib/calendar/types";
+import { isTimeZone } from "@/lib/calendar/zone";
+import { OPERATOR_TIME_ZONE, operatorDateKey, operatorDayStartIso } from "@/lib/dates";
 import type { CalendarDay } from "@/components/os/today/ScheduleGlance";
 import type { Persona } from "@/lib/role-surfaces";
 import {
@@ -261,7 +263,7 @@ const DAY_MS = 86_400_000;
 /**
  * Today's entries in the viewer's own Schedule calendar, in time order: the
  * rows /schedule shows, expanded by the same recurrence code, from visible
- * calendars only. Timed events count when they overlap the operator day;
+ * calendars only. Timed events count when they overlap the day given;
  * all-day events when their dates cover today's date key (their dates are
  * wall dates, so comparing instants on a UTC server would pull in tomorrow's).
  */
@@ -289,16 +291,54 @@ export function calendarBlocksForDay(
 }
 
 /**
+ * The zone a viewer's calendar is kept in: the zone most of their timed
+ * events carry (each is saved in the zone of the browser that made it, or
+ * America/Toronto for the restored routine). With no timed event, or a tie
+ * the operator's zone is part of, the operator's zone. The Today page runs on
+ * the server, which never sees the viewer's browser, so the calendar's own
+ * rows are the only honest source for it.
+ */
+export function calendarZone(events: EventRecord[]): string {
+  const counts = new Map<string, number>();
+  for (const e of events) {
+    if (e.allDay || !isTimeZone(e.timeZone)) continue;
+    counts.set(e.timeZone, (counts.get(e.timeZone) ?? 0) + 1);
+  }
+  let best = OPERATOR_TIME_ZONE;
+  let bestCount = counts.get(OPERATOR_TIME_ZONE) ?? 0;
+  for (const [zone, n] of [...counts].sort(([a], [b]) => a.localeCompare(b))) {
+    if (n > bestCount) [best, bestCount] = [zone, n];
+  }
+  return best;
+}
+
+/** Today in `timeZone`: its midnight-to-midnight and date key, at the same instant. */
+export function dayInZone(nowMs: number, timeZone: string): Pick<OperatorDay, "startMs" | "endMs" | "todayKey"> {
+  const now = new Date(nowMs);
+  return {
+    startMs: Date.parse(operatorDayStartIso(now, 0, timeZone)),
+    endMs: Date.parse(operatorDayStartIso(now, 1, timeZone)),
+    todayKey: operatorDateKey(now, 0, timeZone),
+  };
+}
+
+/**
  * The viewer's own calendar for today (lib/calendar/store, private to the
  * viewer: every read filters on the session's tenant AND user). Read-only: a
  * viewer who has never opened /schedule has no calendar yet, and looking at
  * Today must not create one. A failed read is `{ ok: false }`, never "nothing
  * today".
+ *
+ * "Today" is the day in the calendar's own zone (calendarZone), the way
+ * /schedule shows it in that viewer's browser: a Vancouver client's 10pm
+ * block is still Wednesday's, though Toronto is already on Thursday.
  */
 export function loadTodayCalendar(owner: { tenantId: string; userId: string }, day: OperatorDay): Promise<Read<CalendarDay>> {
   return read("calendar.events", async () => {
     const [calendars, { events, truncated }] = await Promise.all([listCalendars(owner, { create: false }), listEvents(owner)]);
-    return { blocks: calendarBlocksForDay(events, calendars, day), partial: truncated };
+    const timeZone = calendarZone(events);
+    const zoneDay = timeZone === OPERATOR_TIME_ZONE ? day : dayInZone(day.nowMs, timeZone);
+    return { blocks: calendarBlocksForDay(events, calendars, zoneDay), partial: truncated, asOfMs: day.nowMs, timeZone };
   });
 }
 

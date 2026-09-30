@@ -16,9 +16,9 @@
 
 import { DAYS, isScheduleDocument, type ScheduleDocument } from "@/lib/schedule/model";
 import { addDays, atMinute, fromDateKey, isDateKey } from "./dates";
-import { BLOCK_HUE, planAroundShabbat } from "./routine";
-import type { CalendarPrefs, EventInput } from "./types";
-import { shabbatConflict } from "./validate";
+import { BLOCK_HUE, planAroundShabbat, ROUTINE_ID_PREFIX } from "./routine";
+import type { CalendarPrefs, EventInput, EventOp, EventRecord } from "./types";
+import { LIMITS, shabbatConflict } from "./validate";
 
 export const LEGACY_KEY_PREFIX = "oasis.schedule";
 
@@ -86,4 +86,49 @@ export function planLegacyImport(doc: ScheduleDocument, calendarId: string, time
     }
   }
   return { events, skippedForShabbat, adjustedForShabbat };
+}
+
+/**
+ * The rows a routine restore wrote (routine.ts ROUTINE_ID_PREFIX), with any
+ * one-day edits made to them since (overrides point at their series).
+ */
+export function restoredRoutineIds(events: EventRecord[]): string[] {
+  const series = new Set(events.filter((e) => e.id.startsWith(ROUTINE_ID_PREFIX)).map((e) => e.id));
+  return events.filter((e) => series.has(e.id) || (e.recurringEventId !== null && series.has(e.recurringEventId))).map((e) => e.id);
+}
+
+export type LegacyWrites = {
+  /** Requests to send in order; each is one POST /api/calendar/events. */
+  batches: EventOp[][];
+  /** Rows of the restored routine this import removes (0 when there is none). */
+  replacing: number;
+};
+
+/**
+ * The writes that bring the browser's old week into the calendar.
+ *
+ * The restore (POST /api/calendar/routine) and this import write the same
+ * routine as separate rows, and nothing else links them: importing on top of
+ * a restored routine put every block in twice. So when the calendar already
+ * holds the restored routine, the browser's week REPLACES it: its rows are
+ * deleted after the creates (the server applies a request's ops in order,
+ * store.ts applyOps), so a failure part-way never leaves the calendar with
+ * neither. No other row is ever touched. With nothing to import, nothing is
+ * removed either.
+ *
+ * Everything goes in ONE request whenever it fits the server's per-request
+ * limit (LIMITS.opsPerBatch; a saved week is far below it): the creates are
+ * then one insert, the removal one delete, and the page can undo the whole
+ * import like any other change. Split requests could land the first half and
+ * not the rest, leaving the restored routine beside part of the week.
+ */
+export function legacyImportWrites(events: EventInput[], existing: EventRecord[], max: number = LIMITS.opsPerBatch): LegacyWrites {
+  if (!events.length) return { batches: [], replacing: 0 };
+  const deletes = restoredRoutineIds(existing).map((id) => ({ op: "delete" as const, id }));
+  const batches: EventOp[][] = [];
+  for (let i = 0; i < events.length; i += max) batches.push(events.slice(i, i + max).map((event) => ({ op: "create" as const, event })));
+  const last = batches[batches.length - 1];
+  if (last.length + deletes.length <= max) last.push(...deletes);
+  else for (let i = 0; i < deletes.length; i += max) batches.push(deletes.slice(i, i + max));
+  return { batches, replacing: deletes.length };
 }

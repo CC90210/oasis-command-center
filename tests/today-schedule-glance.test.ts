@@ -11,7 +11,13 @@
  *     creates a calendar just because Today was opened, and a failed read is
  *     a failure, not an empty day;
  *   - ScheduleGlance: one list in time order, and the empty line only when
- *     both sources were read and both are empty.
+ *     both sources were read and both are empty;
+ *   - every booked call stays listed and linked however many blocks the day
+ *     holds (a shared 10-row cap cut the afternoon's calls once the routine
+ *     was restored); past entries fold into an "earlier" line and the rest
+ *     into "and N more", both opening /schedule;
+ *   - a calendar kept outside Toronto is read on its own day and shown in
+ *     its own zone, with every time naming its zone.
  *
  * Run: node --conditions=react-server --import tsx tests/today-schedule-glance.test.ts
  */
@@ -142,9 +148,12 @@ async function main() {
     assert.deepEqual(blocks.map((b) => [b.title, b.allDay]), [["Offsite", true]]);
   });
 
+  const TORONTO = "America/Toronto";
+  const emptyDay = (iso: string) => ({ ok: true, value: { blocks: [], partial: false, asOfMs: Date.parse(iso), timeZone: TORONTO } });
+
   await check("loadTodayCalendar: a viewer with no calendar reads an empty day and nothing is created", async () => {
     const read = await loaders.loadTodayCalendar(CC, dayOf("2026-09-30T16:00:00Z"));
-    assert.deepEqual(read, { ok: true, value: { blocks: [], partial: false } });
+    assert.deepEqual(read, emptyDay("2026-09-30T16:00:00Z"));
     const n = Number((await raw.execute("SELECT count(*) AS n FROM calendar_calendars")).rows[0].n);
     assert.equal(n, 0, "looking at Today wrote no calendar");
   });
@@ -155,8 +164,43 @@ async function main() {
     const read = await loaders.loadTodayCalendar(CC, dayOf("2026-09-30T16:00:00Z"));
     assert.ok(read.ok);
     assert.deepEqual(read.value.blocks.map((b) => b.title), ROUTINE_ORDER);
+    assert.equal(read.value.timeZone, TORONTO, "the routine is kept in Montréal time");
+    assert.equal(read.value.asOfMs, Date.parse("2026-09-30T16:00:00Z"));
     const other = await loaders.loadTodayCalendar(OTHER, dayOf("2026-09-30T16:00:00Z"));
-    assert.deepEqual(other, { ok: true, value: { blocks: [], partial: false } });
+    assert.deepEqual(other, emptyDay("2026-09-30T16:00:00Z"));
+  });
+
+  await check("calendarZone: the zone most timed events carry; a tie with the operator's zone, or no event, is the operator's", () => {
+    const ev = (id: string, timeZone: string, allDay = false): EventRecord => ({ ...rows[0], id, timeZone, allDay });
+    assert.equal(loaders.calendarZone([]), TORONTO);
+    assert.equal(loaders.calendarZone([ev("a", "America/Vancouver"), ev("b", "America/Vancouver"), ev("c", TORONTO)]), "America/Vancouver");
+    assert.equal(loaders.calendarZone([ev("a", "America/Vancouver"), ev("c", TORONTO)]), TORONTO);
+    assert.equal(loaders.calendarZone([ev("a", "Europe/Paris", true)]), TORONTO, "all-day rows carry no clock time");
+    assert.equal(loaders.calendarZone([ev("a", "Not/AZone"), ev("b", "Not/AZone")]), TORONTO, "an unknown zone is never used");
+  });
+
+  await check("loadTodayCalendar: a calendar kept in Vancouver is read on Vancouver's day, not Toronto's", async () => {
+    // Wed 2026-09-30 23:30 in Vancouver is already Thu 02:30 in Toronto.
+    const VAN = { tenantId: "7c7c7c7c-0000-4000-8000-00000000007c", userId: "0d000000-0000-4000-8000-000000000003" };
+    const [calendar] = await store.listCalendars(VAN);
+    const base = { ...plan.series[0].event, calendarId: calendar.id, timeZone: "America/Vancouver", exdates: [], color: null };
+    await store.applyOps(
+      VAN,
+      [
+        { op: "create", event: { ...base, title: "Standup", start: "2026-09-28T16:00:00.000Z", end: "2026-09-28T16:30:00.000Z", recurrence: { freq: "WEEKLY", interval: 1, byWeekday: [1, 2, 3, 4, 5] } } },
+        { op: "create", event: { ...base, title: "Late review", start: "2026-10-01T05:00:00.000Z", end: "2026-10-01T05:30:00.000Z", recurrence: null } },
+      ],
+      await store.getPrefs(VAN),
+    );
+    const now = "2026-10-01T06:30:00Z";
+    const read = await loaders.loadTodayCalendar(VAN, dayOf(now));
+    assert.ok(read.ok);
+    assert.equal(read.value.timeZone, "America/Vancouver");
+    assert.deepEqual(
+      read.value.blocks.map((b) => [b.title, new Date(b.startMs).toISOString()]),
+      [["Standup", "2026-09-30T16:00:00.000Z"], ["Late review", "2026-10-01T05:00:00.000Z"]],
+      "Wednesday's 9am standup and 10pm review, not Thursday's standup",
+    );
   });
 
   await check("loadTodayCalendar: a failed read is { ok: false }, never an empty day", async () => {
@@ -178,29 +222,91 @@ async function main() {
   const status = { ok: true as const, value: { personal: { connected: false, address: null }, workspace: null } };
   const at = (hhmm: string) => Date.parse(`2026-09-30T${hhmm}:00-04:00`);
   const block = (title: string, s: string, e: string) => ({ key: title, title, startMs: at(s), endMs: at(e), allDay: false });
+  type Block = ReturnType<typeof block>;
+  /** A read calendar day, as loadTodayCalendar returns it; read at 05:00 Toronto unless said otherwise. */
+  const readDay = (blocks: Block[], extra: { partial?: boolean; asOf?: string; timeZone?: string } = {}) => ({
+    ok: true as const,
+    value: { blocks, partial: extra.partial ?? false, asOfMs: at(extra.asOf ?? "05:00"), timeZone: extra.timeZone ?? TORONTO },
+  });
   const glance = (p: Partial<Parameters<typeof ScheduleGlance>[0]>) =>
     render(createElement(ScheduleGlance, { blocks: null, meetings: null, partial: false, calendar: status, connectHref: "/settings", ...p }));
 
   await check("ScheduleGlance: calendar blocks and booked meetings in one list, in time order", () => {
     const out = glance({
-      blocks: { ok: true, value: { blocks: [block("Client fulfillment", "10:00", "13:00"), block("Wake up", "06:30", "07:00")], partial: false } },
+      blocks: readDay([block("Client fulfillment", "10:00", "13:00"), block("Wake up", "06:30", "07:00")]),
       meetings: { ok: true, value: [{ id: "lead-1", name: "Acme Plumbing", at: at("11:00") }] },
     });
     const order = ["Wake up", "Client fulfillment", "Acme Plumbing"].map((t) => out.text.indexOf(t));
     assert.ok(order.every((i) => i >= 0) && order[0] < order[1] && order[1] < order[2], out.text);
     assert.match(out.text, /6:30 AM Wake up to 7:00 AM/);
     assert.match(out.text, /11:00 AM Acme Plumbing Booked call/);
+    assert.doesNotMatch(out.text, /\b(EDT|EST)\b/, "a calendar kept in the operator's zone names no zone");
     assert.ok(out.hrefs.includes("/pipeline/lead-1") && out.hrefs.filter((h) => h === "/schedule").length >= 3);
     assert.doesNotMatch(out.text, /Nothing on your Schedule|No meetings booked/);
   });
 
+  // The restored routine's nine weekday blocks, exactly as Today reads them.
+  const ROUTINE_DAY: Block[] = [
+    block("Wake up", "06:30", "07:00"),
+    block("Praying", "07:00", "07:30"),
+    block("Run", "07:30", "08:15"),
+    block("Abs", "08:15", "08:45"),
+    block("Breakfast", "08:45", "09:30"),
+    block("Eating", "09:30", "10:00"),
+    block("Client fulfillment", "10:00", "13:00"),
+    block("Internal systems", "13:30", "15:00"),
+    block("Agent training / R&D", "15:30", "17:00"),
+  ];
+  const lateCalls = { ok: true as const, value: [{ id: "acme", name: "Acme", at: at("14:00") }, { id: "globex", name: "Globex", at: at("16:00") }] };
+
+  await check("ScheduleGlance: with the routine restored, every booked call is still listed and linked", () => {
+    const out = glance({ blocks: readDay(ROUTINE_DAY), meetings: lateCalls });
+    assert.match(out.text, /2:00 PM Acme Booked call/);
+    assert.match(out.text, /4:00 PM Globex Booked call/, "the afternoon call is not cut by the routine's blocks");
+    assert.ok(out.hrefs.includes("/pipeline/acme") && out.hrefs.includes("/pipeline/globex"), out.hrefs.join(" "));
+    for (const b of ROUTINE_DAY) assert.ok(out.text.includes(b.title), `${b.title} is listed before the day starts`);
+    assert.doesNotMatch(out.text, /earlier|more on your Schedule/);
+  });
+
+  await check("ScheduleGlance: entries already over fold into one 'earlier' line that opens /schedule", () => {
+    const out = glance({ blocks: readDay(ROUTINE_DAY, { asOf: "12:00" }), meetings: lateCalls });
+    assert.match(out.text, /6 earlier on your Schedule today/);
+    for (const past of ["Wake up", "Praying", "Run", "Abs", "Breakfast", "Eating"]) assert.ok(!out.text.includes(past), `${past} is folded`);
+    assert.match(out.text, /10:00 AM Client fulfillment to 1:00 PM .*2:00 PM Acme Booked call .*3:30 PM Agent training \/ R&D .*4:00 PM Globex Booked call/);
+    assert.equal(out.hrefs.filter((h) => h === "/schedule").length, 5, "header + the earlier line + the three blocks still to come");
+    const done = glance({ blocks: readDay(ROUTINE_DAY, { asOf: "18:00" }), meetings: { ok: true, value: [] } });
+    assert.match(done.text, /9 earlier on your Schedule today/);
+    assert.doesNotMatch(done.text, /Nothing on your Schedule/, "a day whose blocks are over is not an empty day");
+  });
+
+  await check("ScheduleGlance: past ten entries still to come, 'and N more' opens /schedule; meetings are never capped", () => {
+    const many = Array.from({ length: 14 }, (_, i) => block(`Block ${i + 1}`, `${String(6 + i).padStart(2, "0")}:00`, `${String(6 + i).padStart(2, "0")}:30`));
+    const calls = { ok: true as const, value: ["a", "b", "c"].map((id, i) => ({ id, name: `Call ${id}`, at: at(`${17 + i}:45`) })) };
+    const out = glance({ blocks: readDay(many), meetings: calls });
+    assert.ok(out.text.includes("Block 10") && !out.text.includes("Block 11"), out.text);
+    assert.match(out.text, /and 4 more on your Schedule today/);
+    for (const id of ["a", "b", "c"]) assert.ok(out.hrefs.includes(`/pipeline/${id}`), `call ${id} is linked`);
+    assert.equal(out.hrefs.filter((h) => h === "/schedule").length, 12, "header + ten entries + the 'more' line");
+  });
+
+  await check("ScheduleGlance: a calendar kept in another zone shows its times there, and every time names its zone", () => {
+    const standup = { key: "s", title: "Standup", startMs: Date.parse("2026-09-30T09:00:00-07:00"), endMs: Date.parse("2026-09-30T09:30:00-07:00"), allDay: false };
+    const out = glance({
+      blocks: { ok: true, value: { blocks: [standup], partial: false, asOfMs: Date.parse("2026-09-30T06:00:00-07:00"), timeZone: "America/Vancouver" } },
+      meetings: { ok: true, value: [{ id: "acme", name: "Acme", at: at("14:00") }] },
+    });
+    assert.match(out.text, /9:00 AM PDT Standup to 9:30 AM/, "Vancouver's 9am, named");
+    assert.doesNotMatch(out.text, /12:00 PM Standup/, "never Toronto's clock for a Vancouver entry");
+    assert.match(out.text, /2:00 PM EDT Acme Booked call/, "the meeting names Toronto's zone");
+  });
+
   await check("ScheduleGlance: the empty line appears only when both sources were read and both are empty", () => {
-    const both = glance({ blocks: { ok: true, value: { blocks: [], partial: false } }, meetings: { ok: true, value: [] } });
+    const both = glance({ blocks: readDay([]), meetings: { ok: true, value: [] } });
     assert.match(both.text, /Nothing on your Schedule today, and no meetings booked through the pipeline today\./);
-    const blocksOnly = glance({ blocks: { ok: true, value: { blocks: [block("Run", "07:30", "08:15")], partial: false } }, meetings: { ok: true, value: [] } });
+    const blocksOnly = glance({ blocks: readDay([block("Run", "07:30", "08:15")]), meetings: { ok: true, value: [] } });
     assert.doesNotMatch(blocksOnly.text, /Nothing on your Schedule/);
     assert.match(blocksOnly.text, /Run/);
-    const meetingOnly = glance({ blocks: { ok: true, value: { blocks: [], partial: false } }, meetings: { ok: true, value: [{ id: "l", name: "Lead", at: at("09:00") }] } });
+    const meetingOnly = glance({ blocks: readDay([]), meetings: { ok: true, value: [{ id: "l", name: "Lead", at: at("09:00") }] } });
     assert.doesNotMatch(meetingOnly.text, /Nothing on your Schedule/);
   });
 
@@ -209,13 +315,13 @@ async function main() {
     assert.match(failed.text, /Couldn.t load your Schedule for today\./);
     assert.doesNotMatch(failed.text, /Nothing on your Schedule/);
     assert.match(failed.text, /No meetings booked through the pipeline today\./, "what is known is still said");
-    const partialRead = glance({ blocks: { ok: true, value: { blocks: [], partial: true } }, meetings: { ok: true, value: [] } });
+    const partialRead = glance({ blocks: readDay([], { partial: true }), meetings: { ok: true, value: [] } });
     assert.doesNotMatch(partialRead.text, /Nothing on your Schedule/);
     assert.match(partialRead.text, /Only your first 5,000 calendar events were read/);
-    const meetingsFailed = glance({ blocks: { ok: true, value: { blocks: [], partial: false } }, meetings: { ok: false } });
+    const meetingsFailed = glance({ blocks: readDay([]), meetings: { ok: false } });
     assert.match(meetingsFailed.text, /Couldn.t load today.s booked meetings\./);
     assert.match(meetingsFailed.text, /^(?!.*and no meetings).*Nothing on your Schedule today\./);
-    const noPipeline = glance({ blocks: { ok: true, value: { blocks: [], partial: false } }, meetings: null });
+    const noPipeline = glance({ blocks: readDay([]), meetings: null });
     assert.match(noPipeline.text, /Nothing on your Schedule today\./);
     assert.doesNotMatch(noPipeline.text, /pipeline/);
   });

@@ -46,7 +46,47 @@ type Props = {
   now: Date;
   onRestored: (result: RoutineRestored | { status: "already_restored" }) => void;
   onDismiss: () => void;
+  /** Set when this browser still holds the old page's saved week: opens its import instead. */
+  onUseBrowserCopy?: () => void;
 };
+
+export type RestoreOutcome = { ok: true; body: RoutineRestored | { status: "already_restored" } } | { ok: false; message: string };
+
+/**
+ * POST /api/calendar/routine. Only a request that never reached the server is
+ * "could not reach the server", and it is logged; an answer the server gave
+ * is said as that answer. Never throws.
+ */
+export async function sendRoutineRestore(edits: RoutineTimeEdit[]): Promise<RestoreOutcome> {
+  let res: Response;
+  try {
+    res = await fetch("/api/calendar/routine", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      cache: "no-store",
+      body: JSON.stringify(edits.length ? { times: edits } : {}),
+    });
+  } catch (err) {
+    console.error("[calendar.routine.restore]", err);
+    return { ok: false, message: "Could not reach the server. Check your connection and try again." };
+  }
+  let body: ({ ok: true } & (RoutineRestored | { status: "already_restored" })) | { ok: false; error?: string; detail?: string } | null = null;
+  try {
+    body = await res.json();
+  } catch (err) {
+    console.error("[calendar.routine.restore] unreadable answer", res.status, err);
+  }
+  if (res.ok && !body) {
+    // The server said yes but its answer is unreadable: the routine may well be saved.
+    return { ok: false, message: "The server answered, but its reply could not be read. Reload the page to see whether your routine was restored." };
+  }
+  if (!res.ok || !body || !body.ok) {
+    const failed = body && !body.ok ? body : null;
+    return { ok: false, message: messageFor(failed?.error ?? "", failed?.detail) };
+  }
+  return { ok: true, body };
+}
 
 const at = (minute: number) => new Date(2000, 0, 1, Math.floor(minute / 60), minute % 60);
 /** "HH:MM" for a time input; midnight at the END of a day shows as 00:00 and is read back as 24:00. */
@@ -65,7 +105,7 @@ function dateLabel(key: string): string {
   return `${monthShort(d.getMonth())} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
-export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onDismiss }: Props) {
+export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onDismiss, onUseBrowserCopy }: Props) {
   const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
   const [times, setTimes] = useState<Record<string, { start: string; end: string }>>(() =>
     Object.fromEntries(info.blocks.map((b) => [b.key, { start: hhmm(b.startMinute), end: hhmm(b.endMinute) }])),
@@ -100,30 +140,20 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onD
     if (!edits) return;
     setBusy(true);
     setError(null);
-    try {
-      const res = await fetch("/api/calendar/routine", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        credentials: "same-origin",
-        cache: "no-store",
-        body: JSON.stringify(edits.length ? { times: edits } : {}),
-      });
-      const body = (await res.json().catch(() => null)) as
-        | ({ ok: true } & (RoutineRestored | { status: "already_restored" }))
-        | { ok: false; error?: string; detail?: string }
-        | null;
-      if (!res.ok || !body || !body.ok) {
-        const failed = body && !body.ok ? body : null;
-        setError(messageFor(failed?.error ?? "", failed?.detail));
-        setMode("view");
-        return;
-      }
-      onRestored(body);
-    } catch {
-      setError("Could not reach the server. Check your connection and try again.");
+    const outcome = await sendRoutineRestore(edits);
+    setBusy(false);
+    if (!outcome.ok) {
+      setError(outcome.message);
       setMode("view");
-    } finally {
-      setBusy(false);
+      return;
+    }
+    // The routine is saved. A failure from here on is this page's, never the network's.
+    try {
+      onRestored(outcome.body);
+    } catch (err) {
+      console.error("[calendar.routine.restored]", err);
+      setError("Your routine was restored, but this page could not show it. Reload the page to see it.");
+      setMode("view");
     }
   };
 
@@ -138,6 +168,14 @@ export function RoutineRestore({ info, prefs, calendarName, now, onRestored, onD
           The old Schedule page showed these blocks every week. Restoring adds them to {calendarName} as repeating events in
           Montr&eacute;al time, so they show on every device you sign in from.
         </p>
+        {onUseBrowserCopy && (
+          <p className="mt-2 text-[12px] text-fg-muted">
+            This browser also holds the week you last saved on the old Schedule page, with any times you changed there.{" "}
+            <button type="button" className="font-semibold text-accent hover:underline" onClick={onUseBrowserCopy}>
+              Use that week instead
+            </button>
+          </p>
+        )}
 
         <ul className="mt-3 grid gap-x-8 gap-y-1 sm:grid-cols-2" aria-label="Blocks to restore">
           {shown.map((b) => (

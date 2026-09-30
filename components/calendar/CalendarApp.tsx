@@ -15,13 +15,22 @@ import {
   startOfWeek,
   toDateKey,
 } from "@/lib/calendar/dates";
-import { LEGACY_KEY_PREFIX, pickLegacyWeek, planLegacyImport } from "@/lib/calendar/legacy";
+import {
+  LEGACY_KEY_PREFIX,
+  legacyImportWrites,
+  pickLegacyWeek,
+  planLegacyImport,
+  restoredRoutineIds,
+  type LegacyPlan,
+  type LegacyWrites,
+} from "@/lib/calendar/legacy";
 import { eventStart, expandOccurrences, inputOf, planDelete, planEdit, sameRule } from "@/lib/calendar/recurrence";
 import type { CalendarView, EditScope, EventInput, EventOp, Occurrence } from "@/lib/calendar/types";
 import { addsTime, shabbatConflict, validateEventInput } from "@/lib/calendar/validate";
 import { DayListPopover } from "./DayListPopover";
 import { EventEditor } from "./EventEditor";
 import { EventPopover } from "./EventPopover";
+import { LegacyImport } from "./LegacyImport";
 import { MonthView } from "./MonthView";
 import { QuickCreate } from "./QuickCreate";
 import { RoutineRestore, type RoutineInfo } from "./RoutineRestore";
@@ -80,9 +89,15 @@ export function CalendarApp() {
   const [query, setQuery] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [legacy, setLegacy] = useState<string[] | null>(null);
+  // The browser-week import waiting on its confirm step, and while it writes.
+  const [legacyAsk, setLegacyAsk] = useState<{ plan: LegacyPlan; writes: LegacyWrites } | null>(null);
+  const [legacyBusy, setLegacyBusy] = useState(false);
   // The weekly-routine restore card (OASIS only; the server decides).
   const [routine, setRoutine] = useState<RoutineInfo | null>(null);
   const [routineState, setRoutineState] = useState<"unchecked" | "checked" | "error" | "hidden">("unchecked");
+  // Between a restore and the re-read that brings its rows in, the calendar
+  // looks empty: the browser-week import is not offered until it is current.
+  const [routineSyncing, setRoutineSyncing] = useState(false);
   const lastUndo = useRef<EventOp[] | null>(null);
   const lastError = useRef<string>("");
 
@@ -143,7 +158,8 @@ export function CalendarApp() {
   const routineRestored = (result: { status: "already_restored" } | { status: "restored"; created: { recurrence: unknown }[]; adjusted: { label: string }[] }) => {
     setRoutine(null);
     setRoutineState("hidden");
-    void data.reload();
+    setRoutineSyncing(true);
+    void data.reload().finally(() => setRoutineSyncing(false));
     if (result.status === "already_restored") {
       toast("Your weekly routine was already restored. The calendar has been refreshed.");
       return;
@@ -370,20 +386,44 @@ export function CalendarApp() {
     setPanel({ kind: "editor", draft: draftFor(start, null, false, defaultCalendarId, prefs), occ: null });
   };
 
-  const importLegacy = async () => {
+  // ── This browser's old saved week ──────────────────────────────────────
+  // Offered only once the calendar is current. When it already holds the
+  // restored routine, the browser's week replaces it (legacy.ts
+  // legacyImportWrites): the two are the same routine, and adding one on top
+  // of the other put every block in twice.
+  const legacyMode: "add" | "replace" | null =
+    !legacy || data.load.status !== "ready" || routineSyncing ? null : restoredRoutineIds(events).length ? "replace" : "add";
+
+  /** Plans the import and asks first; nothing is written until it is confirmed. */
+  const askLegacy = () => {
     const doc = legacy && pickLegacyWeek(legacy);
     if (!doc || !defaultCalendarId) return setLegacy(null);
     const plan = planLegacyImport(doc, defaultCalendarId, localTimeZone(), prefs);
+    setLegacyAsk({ plan, writes: legacyImportWrites(plan.events, events) });
+  };
+
+  const importLegacy = async () => {
+    if (!legacyAsk) return;
+    const { plan, writes } = legacyAsk;
+    const around = plan.adjustedForShabbat.length ? ` Planned around Shabbat (shortened or left out on the weeks that meet it): ${plan.adjustedForShabbat.join(", ")}.` : "";
+    const skipped = plan.skippedForShabbat.length ? ` Left out, every week falls inside Shabbat: ${plan.skippedForShabbat.join(", ")}.` : "";
+    const done = writes.replacing
+      ? `Replaced the restored routine with this browser's saved week: ${plan.events.length} events.`
+      : `Imported ${plan.events.length} events from your old weekly routine.`;
+    setLegacyBusy(true);
     let ok = true;
-    for (let i = 0; i < plan.events.length && ok; i += 60) {
-      ok = await run(plan.events.slice(i, i + 60).map((event) => ({ op: "create" as const, event })), "Importing…", false);
+    // One request can be undone like any other change; a longer import cannot.
+    const undoable = writes.batches.length === 1;
+    for (let i = 0; i < writes.batches.length && ok; i++) {
+      const last = i === writes.batches.length - 1;
+      ok = await run(writes.batches[i], last ? `${done}${around}${skipped}` : "Importing…", last && undoable);
     }
+    setLegacyBusy(false);
+    setLegacyAsk(null);
     if (!ok) return;
     writeLocal(IMPORTED_KEY, new Date().toISOString());
     setLegacy(null);
-    const around = plan.adjustedForShabbat.length ? ` Planned around Shabbat (shortened or left out on the weeks that meet it): ${plan.adjustedForShabbat.join(", ")}.` : "";
-    const skipped = plan.skippedForShabbat.length ? ` Left out, every week falls inside Shabbat: ${plan.skippedForShabbat.join(", ")}.` : "";
-    toast(`Imported ${plan.events.length} events from your old weekly routine.${around}${skipped}`);
+    if (!writes.batches.length) toast(`Nothing was imported.${skipped}`);
   };
 
   // ── Keyboard ───────────────────────────────────────────────────────────
@@ -398,7 +438,7 @@ export function CalendarApp() {
         }
         return;
       }
-      if (e.ctrlKey || e.metaKey || e.altKey || panel) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || panel || legacyAsk) return;
       const map: Record<string, () => void> = {
         t: () => setCursor(startOfDay(new Date())),
         j: () => step(1),
@@ -484,7 +524,7 @@ export function CalendarApp() {
                 busyDays={busyDays}
                 rangeStart={view === "week" || view === "4day" || view === "day" ? range.start : cursor}
                 rangeEnd={view === "week" || view === "4day" || view === "day" ? range.end : cursor}
-                legacyAvailable={!!legacy && data.load.status === "ready"}
+                legacy={legacyMode}
                 onCreate={createNow}
                 onPick={(d) => {
                   pickDay(d);
@@ -497,7 +537,7 @@ export function CalendarApp() {
                   if (!window.confirm(`Delete "${c.name}" and every event in it? This cannot be undone.`)) return;
                   data.removeCalendar(c.id).then(() => toast(`Deleted ${c.name}`)).catch((e: Error) => toast(e.message, { tone: "error" }));
                 }}
-                onImportLegacy={() => void importLegacy()}
+                onImportLegacy={askLegacy}
                 onOpenSettings={() => setPanel({ kind: "settings" })}
               />
             </aside>
@@ -512,6 +552,7 @@ export function CalendarApp() {
               now={now}
               onRestored={routineRestored}
               onDismiss={() => setRoutineState("hidden")}
+              onUseBrowserCopy={legacyMode ? askLegacy : undefined}
             />
           )}
           {emptyCalendar && routineState === "error" && (
@@ -585,6 +626,18 @@ export function CalendarApp() {
         <SettingsDialog prefs={prefs} now={now} notifications={reminders.permission} onEnableNotifications={() => void reminders.request()} onSave={data.savePrefs} onClose={() => setPanel(null)} />
       )}
       {panel?.kind === "shortcuts" && <ShortcutsDialog onClose={() => setPanel(null)} />}
+      {legacyAsk && (
+        <LegacyImport
+          adds={legacyAsk.plan.events.length}
+          replacing={legacyAsk.writes.replacing}
+          calendarName={calMap.get(defaultCalendarId)?.name ?? "your calendar"}
+          adjusted={legacyAsk.plan.adjustedForShabbat}
+          skipped={legacyAsk.plan.skippedForShabbat}
+          busy={legacyBusy}
+          onConfirm={() => void importLegacy()}
+          onCancel={() => setLegacyAsk(null)}
+        />
+      )}
       {panel?.kind === "goto" && <GoToDate onPick={(d) => pickDay(d)} onClose={() => setPanel(null)} />}
 
       <div className="pointer-events-none fixed bottom-4 left-4 z-[70] flex max-w-[calc(100vw-32px)] flex-col gap-2" aria-live="polite">

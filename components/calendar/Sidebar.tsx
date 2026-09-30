@@ -15,7 +15,8 @@ type Props = {
   busyDays: Set<number>;
   rangeStart: Date;
   rangeEnd: Date;
-  legacyAvailable: boolean;
+  /** This browser still holds the old page's saved week: "replace" when the calendar has the restored routine. */
+  legacy: "add" | "replace" | null;
   onCreate: () => void;
   onPick: (d: Date) => void;
   onToggle: (c: CalendarRecord) => void;
@@ -147,11 +148,15 @@ export function Sidebar(p: Props) {
         )}
       </section>
 
-      {p.legacyAvailable && (
+      {p.legacy && (
         <section className="rounded-lg border border-dashed border-hairline p-3 text-[12px] text-fg-muted">
-          <p>Your old weekly routine is still saved in this browser.</p>
+          <p>
+            {p.legacy === "replace"
+              ? "This browser still holds the week you saved on the old Schedule page, with any times you changed there."
+              : "Your old weekly routine is still saved in this browser."}
+          </p>
           <button type="button" className="btn mt-2 h-8 text-[12px]" onClick={p.onImportLegacy}>
-            Bring it into the calendar
+            {p.legacy === "replace" ? "Use it instead of the restored routine" : "Bring it into the calendar"}
           </button>
         </section>
       )}
