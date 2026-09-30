@@ -18,8 +18,12 @@
  *     this browser". The daemon is heartbeating to the DB; this browser
  *     just can't reach localhost:9100 (common when on a different machine
  *     or when the browser is blocking localhost calls).
- *   - serverBridgeOnline === false / null → RED "bridge isn't reachable".
+ *   - serverBridgeOnline === false → RED "bridge isn't reachable".
  *     Neither signal is fresh; the daemon is genuinely down.
+ *   - serverBridgeOnline === null → "Couldn't check". The page could not
+ *     read the heartbeats (2026-09-29: /operations hands its failed
+ *     bridge_pairings read down as null), so this is not evidence the
+ *     daemon is down and must not say "no recent heartbeat is on file".
  */
 
 import { useEffect, useState } from "react";
@@ -60,7 +64,8 @@ export function BridgeCliPanel({
 }: {
   /** Server-side bridge_pairings freshness check from the page's
    * getBridgeOnline() call. When the localhost probe fails but this is
-   * true, we render the amber "online elsewhere" state instead of red. */
+   * true, we render the amber "online elsewhere" state instead of red.
+   * null = the page could not read the pairings: "Couldn't check". */
   serverBridgeOnline?: boolean | null;
 }) {
   const [state, setState] = useState<FetchState>({
@@ -125,11 +130,28 @@ export function BridgeCliPanel({
     //     fundamental mixed-content + cross-origin constraint, NOT a bug).
     //   - server bridge OFFLINE → the actual red state. Daemon isn't
     //     heartbeating; something is wrong.
+    //   - server bridge UNKNOWN (null, the pairings read failed) → a
+    //     neutral "Couldn't check": neither signal says the daemon is down.
     if (serverBridgeOnline === true) {
       return (
         <div className="text-xs text-fg-muted font-sans leading-relaxed flex items-center gap-2">
           <Info className="w-3.5 h-3.5 text-accent flex-shrink-0" />
           Bridge is online. Per-CLI install status only renders when you load this page on the bridge machine itself.
+        </div>
+      );
+    }
+
+    if (serverBridgeOnline === null) {
+      return (
+        <div className="rounded-lg border border-bg-border bg-bg-elev/40 px-3 py-2.5 text-sm flex items-start gap-2">
+          <Info className="w-4 h-4 mt-0.5 text-fg-dim flex-shrink-0" />
+          <div>
+            <div className="font-bold text-fg">Couldn&apos;t check the local bridge</div>
+            <div className="text-xs text-fg-muted mt-1 font-sans leading-relaxed">
+              This browser can&apos;t reach a bridge, and the paired machines&apos; heartbeats could not be read
+              just now, so this is not saying the bridge is down. Reload in a minute.
+            </div>
+          </div>
         </div>
       );
     }

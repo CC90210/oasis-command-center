@@ -10,9 +10,10 @@
  * Aura and Hermes to every fresh tenant.
  *
  * Liveness reads are done here rather than through lib/queries agentStates /
- * integrationsHealth because both drop `r.error`: a failed read came back as an
- * empty list and every agent rendered "never seen". A fleet page that cannot
- * read heartbeats has to say that, not declare the fleet dead.
+ * integrationsHealth because both dropped `r.error` when this was written (both
+ * throw now): a failed read came back as an empty list and every agent
+ * rendered "never seen". A fleet page that cannot read heartbeats has to say
+ * that, not declare the fleet dead.
  *
  * Dropped from the old page on purpose: the embedded ChatWidget (the power
  * chat is Admin › Agent console, /agent) and the repo stats line, which reads

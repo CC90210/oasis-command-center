@@ -140,7 +140,9 @@ type Busy =
 export function LocalCliProvidersCard({
   serverBridgeOnline,
 }: {
-  serverBridgeOnline: boolean;
+  /** null = the tenant heartbeat could not be read. "Offline" needs both the
+   *  browser probe AND the heartbeat down, so an unread heartbeat is never it. */
+  serverBridgeOnline: boolean | null;
 }) {
   const [state, setState] = useState<ProbeState>({ kind: "loading" });
   const [busy, setBusy] = useState<Busy>({ kind: "idle" });
@@ -294,7 +296,19 @@ export function LocalCliProvidersCard({
         </div>
       )}
 
-      {state.kind === "bridge_unreachable" && deriveDropdownState(false, serverBridgeOnline) === "degraded" && (
+      {state.kind === "bridge_unreachable" && serverBridgeOnline === null && (
+        <div className="flex items-start gap-2 text-sm text-fg-muted bg-bg-deep/40 border border-bg-border rounded-lg p-3">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div>
+            <div className="font-bold text-fg">Couldn&apos;t check the bridge</div>
+            <p className="mt-1 text-xs leading-relaxed">
+              This browser can&apos;t reach a bridge, and the paired machine&apos;s heartbeat could not be read just now, so this is not saying it is offline. Refresh in a minute.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {state.kind === "bridge_unreachable" && serverBridgeOnline !== null && deriveDropdownState(false, serverBridgeOnline) === "degraded" && (
         <div className="flex items-start gap-2 text-sm text-accent bg-accent/5 border border-accent/30 rounded-lg p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
@@ -312,7 +326,7 @@ export function LocalCliProvidersCard({
         </div>
       )}
 
-      {state.kind === "bridge_unreachable" && deriveDropdownState(false, serverBridgeOnline) === "offline" && (
+      {state.kind === "bridge_unreachable" && serverBridgeOnline !== null && deriveDropdownState(false, serverBridgeOnline) === "offline" && (
         <div className="flex items-start gap-2 text-sm text-status-warm bg-status-warm/5 border border-status-warm/30 rounded-lg p-3">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <div>
