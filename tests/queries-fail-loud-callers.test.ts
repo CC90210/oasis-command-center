@@ -132,6 +132,8 @@ for (const chart of ["GoalPaceChart", "PipelineFunnel"]) {
 }
 
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
+/** /operations' tiles, from lib/admin/attention.ts (the /health numbers). */
+const OPS_TILES = ["Errors today", "Warnings today", "Failed automations", "Workers down", "Cold leads"];
 const CC = { id: "0f000000-0000-4000-8000-000000000001", email: "conaugh@oasisai.work" };
 
 // ── A server-tree walker that awaits async components ─────────────────────
@@ -270,9 +272,10 @@ async function main() {
   await check("/operations: failed health counts and pairings say Couldn't check, never All clear or 0 bridges online", async () => {
     const { text, client } = await render(await OperationsPage({ searchParams: Promise.resolve({}) }));
     assert.equal(one(client, "BridgeCliPanel").serverBridgeOnline, null, "the CLI panel is told the heartbeat is unknown, not stale");
-    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+    for (const tile of OPS_TILES) {
       assert.match(text, new RegExp(`${tile} Couldn't check`), `${tile}: an unread count is not a number`);
     }
+    assert.doesNotMatch(text, /Stalled outbound/, "the retired SunBiz tile is gone");
     assert.doesNotMatch(text, /All clear/, "all clear needs every count read");
     assert.match(text, /Bridges: couldn't check/);
     assert.doesNotMatch(text, /\d+ bridge ?s? online/); // the walker spaces JSX text pieces
@@ -367,7 +370,7 @@ async function main() {
   // Last in phase 1: it leaves both cron tables in place for phase 2.
   await check("/operations: Failed automations sums two counts, so either one unread keeps it Couldn't check", async () => {
     const tile = async () => (await render(await OperationsPage({ searchParams: Promise.resolve({}) }))).text;
-    await db.execute("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT, last_result TEXT)");
+    await db.execute("CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT, last_result TEXT, tenant_id TEXT NOT NULL)");
     assert.match(await tile(), /Failed automations Couldn't check/, "tenant_cron_jobs unread, cron_jobs readable");
     await db.execute("ALTER TABLE cron_jobs RENAME TO cron_jobs_parked");
     await db.execute(
@@ -413,7 +416,7 @@ async function main() {
     assert.equal(one(opsRender.client, "BridgeCliPanel").serverBridgeOnline, false);
     assert.match(ops, /No events recorded yet/);
     assert.doesNotMatch(ops, /Couldn't check the (agent heartbeats|activity tape|agents' decisions|paired machines)/);
-    for (const tile of ["Errors today", "Failed automations", "Stalled outbound", "Cold leads"]) {
+    for (const tile of OPS_TILES) {
       assert.match(ops, new RegExp(`${tile} 0 `), `${tile}: a readable empty count is a real 0`);
     }
     assert.match(ops, /All clear/);
@@ -513,13 +516,21 @@ async function main() {
     assert.match(plain(html.railOffline), /bridge offline/);
 
     // /operations hands BridgeCliPanel null when bridge_pairings could not be
-    // read. After its localhost probe fails, that is "Couldn't check", never
-    // the red "no recent heartbeat is on file" a known-false heartbeat earns.
+    // read. The panel reads the server's CLI inventory (2026-09-30: the bridge
+    // answers 401 to a browser); with no report yet, an unread heartbeat is
+    // "Couldn't check", never the "isn't checking in" a known-false one earns.
     const cliUnknown = plain(html.cliUnknown);
-    assert.match(cliUnknown, /Couldn't check the local bridge/);
-    assert.doesNotMatch(cliUnknown, /isn't reachable|no recent heartbeat/);
-    assert.match(plain(html.cliOffline), /Local bridge isn't reachable/, "a KNOWN stale heartbeat is still the red state");
-    assert.match(plain(html.cliOnline), /Bridge is online/);
+    assert.match(cliUnknown, /Couldn't check whether your computer is checking in/);
+    assert.doesNotMatch(cliUnknown, /isn't checking in/);
+    assert.match(plain(html.cliOffline), /Your computer isn't checking in/, "a KNOWN stale heartbeat is still the warm state");
+    assert.match(plain(html.cliOnline), /Your computer is checking in/);
+    assert.doesNotMatch(plain(html.cliOnline), /only renders when you load this page on the bridge machine/, "the old false claim is gone");
+    const cliReport = plain(html.cliReport);
+    assert.match(cliReport, /Claude Code Signed in/);
+    assert.match(cliReport, /Codex Installed, not signed in/);
+    assert.match(cliReport, /Gemini Not installed/);
+    assert.match(plain(html.cliNetworkError), /Couldn't check your computer's AI tools/);
+    assert.match(plain(html.cliSignedOut), /You're signed out/);
   });
 
   if (failures > 0) {

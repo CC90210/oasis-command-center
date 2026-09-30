@@ -9,8 +9,8 @@
  * fleet is platform machinery and now answers to the operator rule every Admin
  * page uses.
  *
- * The power chat that used to sit on top of this roster is Admin › Agent
- * console (/agent); it is linked, not mounted a second time.
+ * The power chat that used to sit on top of this roster is Admin › Coding
+ * harness (/agent); it is linked, not mounted a second time.
  */
 
 import Link from "next/link";
@@ -28,12 +28,12 @@ export default async function AdminFleetPage() {
   return (
     <PageFrame
       title="Fleet"
-      subtitle="Every agent wired to your Command Center. Live means it ticked or pinged in the last 15 minutes."
+      subtitle="Every agent wired to your Command Center. Running means one of its processes on your computer checked in within 5 minutes; Last task is its own last tick."
       actions={
         <>
           <FleetSummaryTag fleet={fleet} />
           <Link href="/agent" prefetch={false} className="btn-secondary">
-            Agent console
+            Coding harness
           </Link>
         </>
       }

@@ -523,7 +523,7 @@ function WorkerActions({
 
     setBusy(action);
     setFeedback(null);
-    const result = await runWorkerAction(service, action, remoteControl);
+    const result = await runWorkerAction(service, action);
     setBusy(null);
 
     // Codex audit — DON'T optimistically flip critical workers. The 90s

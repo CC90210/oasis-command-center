@@ -18,6 +18,14 @@
  * rule that session was an operator everywhere; it must now get a 404 from
  * every surface.
  *
+ * 2026-09-30 (OASIS OS S2 T3): /operations, /health and /automations join
+ * them (they used requireSystemSurface, which admitted any client workspace's
+ * founder, who could then read OASIS's cron names by URL), /system-health now
+ * redirects the operator to /health, and /agent (the Coding harness) sends
+ * everyone else to Chief of Staff. A client founder and an OASIS closer must
+ * get a 404 or that redirect from each, and no statement may touch cron_jobs
+ * on their behalf.
+ *
  * Everything runs for real against a local libSQL file: the real signed
  * session cookie, the real Turso adapter, the real route handlers and page
  * components. next/headers and next/navigation are the only stand-ins (the
@@ -122,6 +130,7 @@ const USERS = {
   gone: u(7, "gone@alias.test"), // ADMIN_EMAILS; OASIS owner row, deactivated
   rep: u(8, "rep@oasisai.work"), // not an alias; OASIS opener
   client: u(9, "owner@client.test"), // not an alias; owner of a client workspace
+  closer: u(10, "closer@oasisai.work"), // not an alias; OASIS closer
 } as const;
 
 async function login(user: U | null): Promise<void> {
@@ -154,9 +163,33 @@ async function is404(run: () => Promise<unknown>): Promise<boolean> {
   }
 }
 
+/** "404", "redirect:<url>", or "rendered". Anything else rethrows. */
+async function outcome(run: () => Promise<unknown>): Promise<string> {
+  try {
+    await run();
+    return "rendered";
+  } catch (err) {
+    const m = (err as Error).message;
+    if (/NEXT_HTTP_ERROR_FALLBACK;404/.test(m)) return "404";
+    const r = m.match(/^NEXT_REDIRECT;(.+)$/);
+    if (r) return `redirect:${r[1]}`;
+    throw err;
+  }
+}
+
+/** Does a rendered tree (elements, props, arrays, Maps) carry this string anywhere? */
+function treeHas(node: unknown, needle: string, seen = new Set<unknown>()): boolean {
+  if (typeof node === "string") return node.includes(needle);
+  if (!node || typeof node !== "object" || seen.has(node)) return false;
+  seen.add(node);
+  if (node instanceof Map || node instanceof Set) return [...node.values()].some((v) => treeHas(v, needle, seen));
+  return Object.values(node as Record<string, unknown>).some((v) => treeHas(v, needle, seen));
+}
+
 const SECRET_SUMMARY = "EMPIRE-SESSION-SUMMARY-DO-NOT-LEAK";
 const SECRET_FOCUS = "BRAVO-WORKING-MEMORY-DO-NOT-LEAK";
 const SECRET_QUEST = "CC-ACTIVE-TASK-DO-NOT-LEAK";
+const SECRET_CRON = "OASIS-CRON-NAME-DO-NOT-LEAK";
 
 async function main() {
   const db = createClient({ url: `file:${dbFile}` });
@@ -175,7 +208,11 @@ async function main() {
     CREATE TABLE session_logs (id TEXT PRIMARY KEY, session_date TEXT, agent_interface TEXT,
       summary TEXT, created_at TEXT);
     CREATE TABLE agent_events (id TEXT PRIMARY KEY, event_type TEXT, publisher_agent TEXT,
-      source_agent TEXT, correlation_id TEXT, payload TEXT, published_at TEXT);
+      source_agent TEXT, correlation_id TEXT, payload TEXT, published_at TEXT, severity TEXT);
+    CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, name TEXT, schedule TEXT, last_run_at TEXT,
+      last_result TEXT, tenant_id TEXT NOT NULL);
+    CREATE TABLE tenant_cron_jobs (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT, schedule TEXT,
+      last_run_at TEXT, last_run_status TEXT, last_run_error TEXT);
   `);
   const stamp = "2026-09-01T00:00:00Z";
   const profile = (user: U, tenant: string, role: string, opts: { owner?: 1 | 0; adminAccess?: 1 | 0; deactivated?: string } = {}) => ({
@@ -201,6 +238,11 @@ async function main() {
       profile(USERS.gone, OASIS, "owner", { owner: 1, deactivated: "2026-09-20T00:00:00Z" }),
       profile(USERS.rep, OASIS, "opener"),
       profile(USERS.client, CLIENT, "owner", { owner: 1 }),
+      profile(USERS.closer, OASIS, "closer"),
+      {
+        sql: `INSERT INTO cron_jobs (id, name, schedule, last_run_at, last_result, tenant_id) VALUES ('c1', ?, '0 3 * * *', ?, 'ERROR: script_run exit 1', ?)`,
+        args: [SECRET_CRON, new Date().toISOString(), OASIS],
+      },
       // A legacy OASIS owner row that carries the alias as its EMAIL but is not
       // linked to that auth user. An email-keyed check would crown the squatter
       // of "unlinked@alias.test"; an auth-id check must not.
@@ -238,6 +280,29 @@ async function main() {
     "/reasoning": (await import("../app/reasoning/page")).default,
     "/system-health": (await import("../app/system-health/page")).default,
   } as Record<string, () => Promise<unknown>>;
+  const OperationsPage = (await import("../app/operations/page")).default;
+  // The OASIS platform surfaces moved off requireSystemSurface (2026-09-30).
+  const platformPages = {
+    "/operations": () => OperationsPage({ searchParams: Promise.resolve({}) }),
+    "/health": (await import("../app/health/page")).default,
+    "/automations": (await import("../app/automations/page")).default,
+    "/system-health": (await import("../app/system-health/page")).default,
+    "/agent": (await import("../app/agent/page")).default,
+  } as Record<string, () => Promise<unknown>>;
+
+  // Every statement the app sends to Turso, so "no cron_jobs read" is proven,
+  // not inferred from a 404.
+  const { getTursoClient } = await import("../lib/turso");
+  const tursoClient = getTursoClient() as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>;
+  let sqlLog: string[] = [];
+  for (const name of ["execute", "batch"] as const) {
+    const original = (Object.getPrototypeOf(tursoClient) as Record<string, (...a: unknown[]) => Promise<unknown>>)[name];
+    tursoClient[name] = async function (this: unknown, ...a: unknown[]) {
+      const stmts = name === "batch" && Array.isArray(a[0]) ? (a[0] as unknown[]) : [a[0]];
+      for (const s of stmts) sqlLog.push(typeof s === "string" ? s : String((s as { sql?: unknown })?.sql ?? ""));
+      return original.apply(this, a);
+    };
+  }
   const stateHealth = await import("../app/api/state-health/route");
   const quests = await import("../app/api/quests/route");
   const { NextRequest } = await import("next/server");
@@ -290,18 +355,64 @@ async function main() {
       assert.equal(await is404(page), true, `${path} must 404 when signed out`);
     }
   });
-  await check("the operator still gets every admin page", async () => {
+  await check("the operator still gets every admin page (/system-health by redirect to /health)", async () => {
     await login(USERS.cc);
     for (const [path, page] of Object.entries(pages)) {
-      assert.equal(await is404(page), false, `${path} must render for CC`);
+      assert.equal(await outcome(page), path === "/system-health" ? "redirect:/health" : "rendered", `${path} for CC`);
     }
+  });
+
+  // ── the OASIS platform surfaces (2026-09-30) ──────────────────────────
+  for (const key of ["client", "closer", "rep", "squatter"] as const) {
+    await check(`${key}: /operations, /health, /automations, /system-health are 404; /agent goes to Chief of Staff; no cron_jobs read`, async () => {
+      await login(USERS[key]);
+      sqlLog = [];
+      for (const [path, page] of Object.entries(platformPages)) {
+        const got = await outcome(page);
+        const want = path === "/agent" ? "redirect:/team/chief-of-staff" : "404";
+        assert.equal(got, want, `${path} for ${key}`);
+      }
+      assert.deepEqual(sqlLog.filter((s) => /\bcron_jobs\b/i.test(s)), [], "a statement touched cron_jobs");
+    });
+  }
+  await check("signed out: the platform surfaces are a 404 (and /agent goes to Chief of Staff)", async () => {
+    await login(null);
+    for (const [path, page] of Object.entries(platformPages)) {
+      assert.equal(await outcome(page), path === "/agent" ? "redirect:/team/chief-of-staff" : "404", path);
+    }
+  });
+  await check("the operator gets /operations, /health, /automations and /agent; /system-health redirects to /health", async () => {
+    await login(USERS.cc);
+    for (const [path, page] of Object.entries(platformPages)) {
+      assert.equal(await outcome(page), path === "/system-health" ? "redirect:/health" : "rendered", path);
+    }
+  });
+  await check("the operator's /health lists the failed OASIS schedule by name", async () => {
+    await login(USERS.cc);
+    const tree = await platformPages["/health"]();
+    assert.ok(treeHas(tree, SECRET_CRON), "the operator sees the failure");
   });
 
   // Ordering is the point: the gate must run before ANY query, so the data is
   // never fetched for a non-operator (a fetched-then-hidden value still ships
   // in the RSC payload). A runtime 404 cannot see ordering; the source can.
+  await check("the Coding harness's first statement sends non-operators to Chief of Staff", () => {
+    const src = readFileSync(join(__dirname, "..", "app/agent/page.tsx"), "utf8");
+    const body = src.match(/export default async function \w+\([^)]*\)[^{]*\{([\s\S]*)$/);
+    assert.ok(body, "app/agent/page.tsx: default export not found");
+    const first = body[1].split(/\r?\n/).map((l) => l.trim()).find((l) => l && !l.startsWith("//"));
+    assert.equal(first, "if (!(await isPlatformOperator())) redirect(ASK_HREF);");
+  });
   await check("each admin page calls requireOperator() as its first statement", () => {
-    for (const file of ["app/runs/page.tsx", "app/inbox/page.tsx", "app/reasoning/page.tsx", "app/system-health/page.tsx"]) {
+    for (const file of [
+      "app/runs/page.tsx",
+      "app/inbox/page.tsx",
+      "app/reasoning/page.tsx",
+      "app/system-health/page.tsx",
+      "app/operations/page.tsx",
+      "app/health/page.tsx",
+      "app/automations/page.tsx",
+    ]) {
       const src = readFileSync(join(__dirname, "..", file), "utf8");
       const body = src.match(/export default async function \w+\([^)]*\)[^{]*\{([\s\S]*)$/);
       assert.ok(body, `${file}: default export not found`);
@@ -328,19 +439,20 @@ async function main() {
     await login(null);
     assert.equal((await stateHealth.GET()).status, 401);
   });
-  await check("the operator keeps the empire-wide state-health view", async () => {
+  await check("the operator gets System health as JSON: the loader, not a self-fetch, and no working memory", async () => {
     await login(USERS.cc);
     const res = await stateHealth.GET();
     assert.equal(res.status, 200);
-    const body = (await res.json()) as {
-      available: boolean;
-      source: string;
-      state_db: { agents: Array<{ agent: string; current_focus: string }>; last_session_log?: { note: string } };
-    };
+    const text = await res.text();
+    const body = JSON.parse(text) as { available: boolean; verdict: { text: string }; attention: Record<string, unknown> };
     assert.equal(body.available, true);
-    assert.equal(body.source, "supabase-mirror");
-    assert.equal(body.state_db.agents[0]?.current_focus, SECRET_FOCUS);
-    assert.equal(body.state_db.last_session_log?.note, SECRET_SUMMARY);
+    assert.equal(typeof body.verdict.text, "string");
+    assert.ok("cronFailures" in body.attention, "the attention counts ride along");
+    // The old fallback returned every agent's working memory and the latest
+    // session summary; System health never needs either.
+    assert.ok(!text.includes(SECRET_SUMMARY), "session_logs summary leaked");
+    assert.ok(!text.includes(SECRET_FOCUS), "working memory leaked");
+    assert.doesNotMatch(text, /supabase-mirror|state-api|vercel/i, "no retired source or host in the answer");
   });
 
   // ── /api/quests (P0-6) ───────────────────────────────────────────────

@@ -206,7 +206,7 @@ async function main() {
     CREATE TABLE agent_state_snapshot (agent_name TEXT PRIMARY KEY, tick_count INTEGER, last_tick_at TEXT,
       working_memory TEXT, health_status TEXT);
     CREATE TABLE integrations_health (id TEXT PRIMARY KEY, tenant_id TEXT, service TEXT, status TEXT,
-      last_ping_at TEXT);
+      last_ping_at TEXT, metadata TEXT NOT NULL DEFAULT '{}');
     CREATE TABLE tenant_records (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, entity_type TEXT NOT NULL,
       data TEXT, created_at TEXT, updated_at TEXT);
   `);
@@ -267,6 +267,13 @@ async function main() {
       event("e-client", CLIENT, "bravo", "BRAVO_RECORD_CREATED", { note: "CLIENT-MARKER" }),
       event("e-unstamped", null, "bravo", "BRAVO_RECORD_CREATED", { note: "UNSTAMPED-MARKER" }),
       { sql: "INSERT INTO agent_state_snapshot (agent_name, tick_count, last_tick_at) VALUES ('bravo', 41, ?)", args: [iso(2 * MINUTE)] },
+      // Running comes from the agent's processes (pm2.<agent>-*), not its tick
+      // (2026-09-30): bravo's scheduler checked in 2 minutes ago, atlas's
+      // Telegram bridge an hour ago, and maven never reported.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-1', ?, 'pm2.bravo-scheduler', 'healthy', ?)", args: [OASIS, iso(2 * MINUTE)] },
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-2', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [OASIS, iso(60 * MINUTE)] },
+      // Another workspace's fresh ping for the same process must not light OASIS's fleet.
+      { sql: "INSERT INTO integrations_health (id, tenant_id, service, status, last_ping_at) VALUES ('ih-3', ?, 'pm2.atlas-telegram', 'healthy', ?)", args: [CLIENT, iso(1 * MINUTE)] },
       // Pipeline: one paid client with a project and an open ticket, one lost deal.
       lead("lead-won", { stage: "in_build", company: "Harbour Dental", name: "Dr. Lee", email: "lee@harbour.test", last_contacted_at: iso(3 * 24 * 60 * MINUTE) }),
       lead("lead-lost", { stage: "lost", company: "Gone Co", email: "x@gone.test" }),
@@ -423,17 +430,31 @@ async function main() {
     await login("cc");
     const hub = await AdminPage();
     const hubText = text(hub);
-    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox", "/system-health"]) {
+    for (const door of ["/operations", "/automations", "/health", "/agent", "/admin/agents", "/runs", "/inbox"]) {
       assert.ok(hubText.includes(door), `the hub links ${door}`);
     }
+    // One System health (2026-09-30): /system-health redirects to /health and
+    // has no door of its own; the harness is named for what it is.
+    assert.ok(!hubText.includes("/system-health"), "no second System health door");
+    assert.ok(hubText.includes("Coding harness") && !hubText.includes("Agent console"), "the harness door is named Coding harness");
+    assert.doesNotMatch(hubText, /state-api|guard substrate/i, "no engineering-internal copy on the hub");
     const fleetTree = await FleetPage();
     const fleetProp = walk(fleetTree).elements.find((e) => e.props && "fleet" in e.props)?.props.fleet as
-      | { agents: string[]; signalsKnown: boolean; signals: Map<string, { live: boolean; tickCount: number | null }> }
+      | {
+          agents: string[];
+          signalsKnown: boolean;
+          signals: Map<string, { live: boolean; tickCount: number | null; lastTaskAt: string | null; processCount: number }>;
+        }
       | undefined;
     assert.ok(fleetProp, "the fleet reached the page");
     assert.equal(fleetProp.signalsKnown, true);
-    assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo ticked 2 minutes ago");
+    assert.equal(fleetProp.signals.get("bravo")?.live, true, "bravo's scheduler process checked in 2 minutes ago");
     assert.equal(fleetProp.signals.get("bravo")?.tickCount, 41);
+    assert.ok(fleetProp.signals.get("bravo")?.lastTaskAt, "the last tick is kept as Last task");
+    if (fleetProp.agents.includes("atlas")) {
+      assert.equal(fleetProp.signals.get("atlas")?.live, false, "atlas's only process last checked in an hour ago; another workspace's ping does not count");
+      assert.equal(fleetProp.signals.get("atlas")?.processCount, 1);
+    }
   });
   await check("/admin + /admin/agents: requireOperator() is the first statement", () => {
     assert.equal(firstStatement("app/admin/page.tsx"), "await requireOperator();");
