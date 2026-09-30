@@ -49,7 +49,13 @@ import {
 } from "@/lib/cloud-tool-runner";
 import { verifyResumeState, signResumeState } from "@/lib/resume-hmac";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import {
+  addToSessionTotals,
+  fetchTenantVaultSecretsForRedaction,
+  persistAssistantTurn,
+  sessionTotalsDelta,
+  type TurnTokens,
+} from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
   billingForKey,
@@ -220,6 +226,9 @@ export async function POST(req: NextRequest) {
   let resumedText = "";
   let resumeUsageIn = 0;
   let resumeUsageOut = 0;
+  // The loop's token count when this request ended (done, or another pause);
+  // null when it ended with neither. It counts from the paused totals.
+  let resumeTokens: TurnTokens | null = null;
   let resumeStreamError: string | null = null;
   const toolCallsExecuted: Array<{ name: string; ok: boolean; summary?: string }> = [];
 
@@ -284,6 +293,7 @@ export async function POST(req: NextRequest) {
             // bridge execution + resume. Sign the new resume_state
             // with the SAME identity binding so the next
             // /api/chat/resume verification passes (Codex finding #3).
+            resumeTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
             const sig = signResumeState(ev.resume_state, {
               tenant_id: tenantId,
               user_id: user.id,
@@ -304,6 +314,7 @@ export async function POST(req: NextRequest) {
           } else if (ev.type === "done") {
             resumeUsageIn = ev.inputTokens;
             resumeUsageOut = ev.outputTokens;
+            resumeTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
             send("usage", {
               input_tokens: ev.inputTokens,
               output_tokens: ev.outputTokens,
@@ -353,41 +364,29 @@ export async function POST(req: NextRequest) {
           error: resumeStreamError,
           vaultSecrets: vaultSecretsForRedaction,
         });
-        // chat_sessions running totals — ACCUMULATE here (vs /api/chat
-        // which overwrites). The pause/resume boundary means one logical
-        // turn writes TWO chat_messages rows; without accumulation the
-        // resumed turn would clobber the paused turn's token counts. As in
-        // /api/chat, tokens and cost move TOGETHER and only when the resumed
-        // calls' cost is known (lib/ai/usage.ts meter totals), so the row
-        // never pairs tokens with a cost that does not include them.
+        // chat_sessions running totals — ADDED through the same one-statement
+        // SQL increment /api/chat uses (lib/chat-persistence.ts), so two turns
+        // finishing together both land. As in /api/chat, tokens and cost move
+        // TOGETHER and only when the resumed calls' cost is known, so the row
+        // never pairs tokens with a cost that does not include them. The
+        // resumed loop counts on from the paused totals, which the paused
+        // request already added, so only the tokens after them are new.
         try {
-          const service = getServiceSupabase();
-          const turn = meter.totals();
-          const knownCostUsd = turn.calls > 0 && turn.unknownCostCalls === 0 ? turn.costMicroUsd / 1_000_000 : null;
-          const cur = knownCostUsd === null
-            ? null
-            : await service
-                .from("chat_sessions")
-                .select("total_input_tokens, total_output_tokens, estimated_cost_usd")
-                .eq("id", sessionId)
-                .eq("tenant_id", tenantId)
-                .maybeSingle();
-          await service
-            .from("chat_sessions")
-            .update({
-              ...(knownCostUsd === null || !cur?.data
-                ? {}
-                : {
-                    total_input_tokens: (Number(cur.data?.total_input_tokens) || 0) + resumeUsageIn,
-                    total_output_tokens: (Number(cur.data?.total_output_tokens) || 0) + resumeUsageOut,
-                    estimated_cost_usd: (Number(cur.data?.estimated_cost_usd) || 0) + knownCostUsd,
-                  }),
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", sessionId)
-            .eq("tenant_id", tenantId);
+          await addToSessionTotals({
+            sessionId,
+            tenantId,
+            delta: sessionTotalsDelta({
+              end: resumeTokens,
+              start: { inputTokens: resumeState.totalIn, outputTokens: resumeState.totalOut },
+              meter,
+            }),
+          });
         } catch (sessErr) {
-          console.error("[chat/resume.session_totals]", sessErr);
+          console.error("[chat/resume.session_totals] the session's running totals were not updated", {
+            tenantId,
+            sessionId,
+            error: sessErr instanceof Error ? sessErr.message : String(sessErr),
+          });
         }
       }
     },

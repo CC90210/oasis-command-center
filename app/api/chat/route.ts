@@ -61,7 +61,13 @@ import { getAgentInfo } from "@/lib/agents";
 import { PROFILE_CUSTOM_FIELD_KEYS, getCustomFieldString } from "@/lib/profile-custom-fields";
 import { getTenantManifestForUser } from "@/lib/manifest/tenant-scope";
 import { redactAll } from "@/lib/secret-redaction";
-import { persistAssistantTurn, fetchTenantVaultSecretsForRedaction } from "@/lib/chat-persistence";
+import {
+  addToSessionTotals,
+  fetchTenantVaultSecretsForRedaction,
+  persistAssistantTurn,
+  sessionTotalsDelta,
+  type TurnTokens,
+} from "@/lib/chat-persistence";
 import { createRedactingSseSend } from "@/lib/chat-sse-helpers";
 import {
   formatAttachmentContext,
@@ -607,6 +613,10 @@ export async function POST(req: NextRequest) {
   let assistantText = "";
   let usageIn = 0;
   let usageOut = 0;
+  // The loop's own token count when the turn ended (a done event, or a pause
+  // for a bridge tool); null when it ended with neither. The session's running
+  // totals are added from this and nothing else (lib/chat-persistence.ts).
+  let turnTokens: TurnTokens | null = null;
   let streamError: string | null = null;
 
   // Pre-fetch the tenant's vault values ONCE before the stream opens.
@@ -721,6 +731,9 @@ export async function POST(req: NextRequest) {
               // re-checks this binding against the caller's resolved
               // identity so a captured signature can't replay across
               // tenants or under a different agent.
+              // The paused loop's calls have finished; resume_state carries
+              // their token count, and the resume adds only what comes after.
+              turnTokens = { inputTokens: ev.resume_state.totalIn, outputTokens: ev.resume_state.totalOut };
               const sig = signResumeState(ev.resume_state, {
                 tenant_id: tenantId,
                 user_id: user.id,
@@ -741,6 +754,7 @@ export async function POST(req: NextRequest) {
             } else if (ev.type === "done") {
               usageIn = ev.inputTokens;
               usageOut = ev.outputTokens;
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               streamError = redactAll(ev.message);
@@ -773,6 +787,7 @@ export async function POST(req: NextRequest) {
             } else if (ev.type === "done") {
               usageIn = ev.inputTokens;
               usageOut = ev.outputTokens;
+              turnTokens = { inputTokens: ev.inputTokens, outputTokens: ev.outputTokens };
               send("usage", { input_tokens: ev.inputTokens, output_tokens: ev.outputTokens });
             } else if (ev.type === "error") {
               // Redact any operator/platform credential values before
@@ -902,25 +917,23 @@ export async function POST(req: NextRequest) {
         error: streamError,
         vaultSecrets: vaultSecretsForRedaction,
       });
-      // The turn's cost is what the ledger recorded for its model calls
-      // (ai_usage_events by session_id is the record). chat_sessions'
-      // estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say "unknown", so
-      // the turn's tokens and cost are written TOGETHER, and only when every
-      // call's cost is known: an unknown turn leaves the last known pair, never
-      // this turn's tokens beside an older turn's cost (or a $0). It used to be
-      // a guess from a hardcoded price table.
-      const turn = meter.totals();
-      const knownCostUsd = turn.calls > 0 && turn.unknownCostCalls === 0 ? turn.costMicroUsd / 1_000_000 : null;
-      await service
-        .from("chat_sessions")
-        .update({
-          ...(knownCostUsd === null
-            ? {}
-            : { total_input_tokens: usageIn, total_output_tokens: usageOut, estimated_cost_usd: knownCostUsd }),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", sessionId)
-        .eq("tenant_id", tenantId);
+      // chat_sessions running totals. The turn's cost is what the ledger
+      // recorded for its model calls (ai_usage_events by session_id is the
+      // record). estimated_cost_usd is NOT NULL DEFAULT 0 and cannot say
+      // "unknown", so the turn's tokens and cost are ADDED together, in one SQL
+      // increment shared with /api/chat/resume, and only when the turn has a
+      // token count and every call's cost is known (a local call is a known
+      // $0). Anything else adds nothing and only stamps updated_at: never this
+      // turn's tokens beside an older cost, never a $0 over the last known pair.
+      try {
+        await addToSessionTotals({ sessionId, tenantId, delta: sessionTotalsDelta({ end: turnTokens, meter }) });
+      } catch (err) {
+        console.error("[chat.session_totals] the session's running totals were not updated", {
+          tenantId,
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       if (cfgScope) {
         let lastUsedUpdate = service
           .from("agent_model_config")

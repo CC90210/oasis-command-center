@@ -15,6 +15,11 @@
  *   - chat_sessions keeps a turn's tokens and cost TOGETHER: a turn whose cost is
  *     unknown leaves the last known pair, never a $0 and never this turn's
  *     tokens beside an older cost;
+ *   - both routes ADD a turn to the session's running totals, in one SQL
+ *     increment: /api/chat, a paused turn's resume and the next /api/chat turn
+ *     all accumulate; a provider refusal and a tool loop stopped mid-turn add
+ *     nothing; a local model's tokens are recorded at a known $0; and two
+ *     increments that finish together both land;
  *   - a session id from the body that is not the caller's own is not written
  *     into, and the turn's usage row is not filed under it.
  *
@@ -76,12 +81,16 @@ stub("next/navigation", {
 // Two client workspaces: one AT its monthly cap, one with no cap.
 const CAPPED = "7c7c7c7c-0000-4000-8000-00000000007c";
 const OPEN = "6b6b6b6b-0000-4000-8000-00000000006b";
+// OASIS's own workspace (lib/ai/tools/client-safe-registry.ts): the only kind
+// that is offered a bridge tool, so the only kind whose turn can pause.
+const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 type U = { id: string; email: string };
 const u = (n: number, email: string): U => ({ id: `0f000000-0000-4000-8000-${String(n).padStart(12, "0")}`, email });
 const USERS = {
   cappedOwner: u(11, "owner@capped.test"), // the capped workspace's workspace key (Anthropic)
   cappedLocal: u(12, "local@capped.test"), // a teammate there whose own override is a local Ollama server
   openOwner: u(13, "owner@open.test"),
+  oasisOwner: u(14, "owner@oasis.test"),
 } as const;
 const SENTENCE = "This month's AI budget is used. The owner can raise it.";
 const UNAVAILABLE = "We could not check this workspace's AI budget just now. Try again in a moment.";
@@ -124,6 +133,22 @@ const anthropicOk = (text: string, input: number, output: number) =>
     ["message_delta", { delta: { stop_reason: "end_turn" }, usage: { output_tokens: output } }],
     ["message_stop", {}],
   ]);
+/** A reply that asks to call one tool: the tool loop pauses (a bridge tool) or runs another iteration. */
+const anthropicToolUse = (id: string, name: string, input: number, output: number) =>
+  sse([
+    ["message_start", { message: { usage: { input_tokens: input, output_tokens: 1 } } }],
+    ["content_block_start", { index: 0, content_block: { type: "tool_use", id, name, input: {} } }],
+    ["content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: "{}" } }],
+    ["content_block_stop", { index: 0 }],
+    ["message_delta", { delta: { stop_reason: "tool_use" }, usage: { output_tokens: output } }],
+    ["message_stop", {}],
+  ]);
+/** The provider refuses the request (a non-retried 4xx): nothing generated, nothing billed, no usage reported. */
+const anthropicRefused = () =>
+  new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  });
 /** A reply that breaks off after its first frame: the provider never reports the call's usage. */
 function anthropicBroken(): Response {
   const first = new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify({ message: { usage: { input_tokens: 10, output_tokens: 1 } } })}\n\n`);
@@ -177,14 +202,18 @@ async function main() {
     CREATE TABLE agent_model_config (id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, agent_key TEXT,
       provider TEXT, model TEXT, encrypted_api_key TEXT, enabled INTEGER, system_prompt_override TEXT,
       display_name_override TEXT, last_used_at TEXT, updated_at TEXT);
+    -- The totals columns as the live bravo schema has them (bravo__000_master_schema):
+    -- estimated_cost_usd is TEXT there (Postgres numeric), so the routes' SQL
+    -- increment is exercised against that affinity, not a friendlier REAL.
     CREATE TABLE chat_sessions (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), tenant_id TEXT NOT NULL,
       user_id TEXT, agent_key TEXT, provider TEXT, model TEXT, title TEXT,
       total_input_tokens INTEGER NOT NULL DEFAULT 0, total_output_tokens INTEGER NOT NULL DEFAULT 0,
-      estimated_cost_usd REAL NOT NULL DEFAULT 0,
+      estimated_cost_usd TEXT NOT NULL DEFAULT 0,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));
     CREATE TABLE chat_messages (id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))), session_id TEXT, tenant_id TEXT,
       role TEXT, content TEXT, input_tokens INTEGER, output_tokens INTEGER, latency_ms INTEGER, error TEXT,
       created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));
+    CREATE TABLE bridge_pairings (id TEXT PRIMARY KEY, tenant_id TEXT, last_seen_at TEXT, tool_capabilities TEXT, revoked_at TEXT);
   `);
   await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__192_ai_usage.sql"), "utf8"));
   const { encryptField } = await import("../lib/field-encryption");
@@ -205,13 +234,18 @@ async function main() {
       ...Object.values(USERS).map((x) => ({ sql: `INSERT INTO "_supabase_auth_users" (id, email) VALUES (?, ?)`, args: [x.id, x.email] })),
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'capped-co', 'Capped Co')", args: [CAPPED] },
       { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'open-co', 'Open Co')", args: [OPEN] },
+      { sql: "INSERT INTO tenants (id, slug, name) VALUES (?, 'oasis-ai-cc', 'OASIS')", args: [OASIS] },
       profile("p-capped-owner", USERS.cappedOwner, CAPPED, "owner", 1),
       profile("p-capped-local", USERS.cappedLocal, CAPPED, "owner", 0),
       profile("p-open-owner", USERS.openOwner, OPEN, "owner", 1),
+      profile("p-oasis-owner", USERS.oasisOwner, OASIS, "owner", 1),
       config("c-capped", CAPPED, null, "anthropic", "claude-sonnet-4-6", "sk-ant-capped-0001"),
       // Ollama: the "key" is the local server's URL.
       config("c-capped-local", CAPPED, USERS.cappedLocal.id, "ollama", "llama3.3", "http://127.0.0.1:11434/v1"),
       config("c-open", OPEN, null, "anthropic", "claude-sonnet-4-6", "sk-ant-open-0001"),
+      config("c-oasis", OASIS, null, "anthropic", "claude-sonnet-4-6", "sk-ant-oasis-0001"),
+      // OASIS's paired machine is online, so its chat is offered the bridge tools (send_email among them).
+      { sql: "INSERT INTO bridge_pairings (id, tenant_id, last_seen_at) VALUES ('bp-oasis', ?, ?)", args: [OASIS, new Date().toISOString()] },
       {
         sql: `INSERT INTO tenant_ai_budgets (tenant_id, period_month, cap_micro_usd, reserved_micro_usd, spent_micro_usd, created_at, updated_at)
               VALUES (?, ?, 1000, 0, 1000, ?, ?)`,
@@ -347,7 +381,7 @@ async function main() {
       user_id: USERS.cappedOwner.id,
       total_input_tokens: 5,
       total_output_tokens: 5,
-      estimated_cost_usd: 0.5,
+      estimated_cost_usd: "0.5",
       updated_at: "2026-09-01T00:00:00.000Z",
     });
     assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [foreign]), 0);
@@ -417,6 +451,174 @@ async function main() {
     assert.deepEqual(await session(foreign), before);
     assert.equal(await count("SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?", [foreign]), 0);
     assert.equal(await count("SELECT COUNT(*) AS n FROM ai_usage_events WHERE session_id = ?", [foreign]), usageBefore);
+  });
+
+  console.log("running totals accumulate across both routes");
+  const totals = async (id: string) => {
+    const s = await session(id);
+    return [Number(s.total_input_tokens), Number(s.total_output_tokens), Number(s.estimated_cost_usd)];
+  };
+  const assertTotals = (got: number[], want: [number, number, number]) => {
+    assert.deepEqual(got.slice(0, 2), want.slice(0, 2), `tokens ${JSON.stringify(got)} != ${JSON.stringify(want)}`);
+    assert.ok(Math.abs(got[2] - want[2]) < 1e-12, `cost ${got[2]} != ${want[2]}`);
+  };
+  let oasisSession = "";
+  let oasisPaused: unknown = null;
+  await check("/api/chat, then its resume, then another /api/chat turn: each ADDS its own tokens and cost to the session", async () => {
+    await login(USERS.oasisOwner);
+    // 1. The turn pauses for a bridge tool. Its one call finished and reported
+    //    1000 in / 200 out, which the paused loop carries in resume_state.
+    provider = () => anthropicToolUse("tu_send", "send_email", 1000, 200);
+    const first = await settledTurn("c-oasis", "Email the client", { cloud_tools: "tools" });
+    assert.equal(first.res.status, 200);
+    oasisSession = String(first.events.find((e) => e.event === "session")?.data.session_id || "");
+    const pending = first.events.find((e) => e.event === "tool_use_pending");
+    assert.ok(oasisSession && pending, JSON.stringify(first.events));
+    assert.ok(!first.events.some((e) => e.event === "error"), JSON.stringify(first.events));
+    // 1000 x $3 + 200 x $15 = 6000 micro-USD.
+    assertTotals(await totals(oasisSession), [1000, 200, 0.006]);
+
+    // 2. The browser ran the tool and resumes. The resumed loop starts from the
+    //    paused totals, so its done event says 1040 / 204; only 40 / 4 are new.
+    //    The state is the one the route emitted, re-signed after its trip
+    //    through JSON: lib/resume-hmac.ts signs undefined-valued keys (this
+    //    state's maxTokens) that JSON drops, so the emitted signature does not
+    //    verify after a round trip. That is a separate defect, not this test's.
+    const state = pending!.data.resume_state;
+    assert.deepEqual([(state as Record<string, unknown>).totalIn, (state as Record<string, unknown>).totalOut], [1000, 200]);
+    oasisPaused = state;
+    const resumeSig = signResumeState(state, { tenant_id: OASIS, user_id: USERS.oasisOwner.id, agent_key: "bravo" });
+    provider = () => anthropicOk("sent", 40, 4);
+    await afterResume(oasisSession, async () => {
+      const res = await resumeRoute.POST(
+        post("/api/chat/resume", {
+          agent_key: "bravo",
+          session_id: oasisSession,
+          resume_state: state,
+          resume_signature: resumeSig,
+          tool_use_id: "tu_send",
+          tool_result: { content: "sent", is_error: false },
+        }),
+      );
+      const text = await res.text();
+      assert.equal(res.status, 200, text);
+      const events = parseSse(text);
+      assert.deepEqual(events.find((e) => e.event === "usage")?.data, { input_tokens: 1040, output_tokens: 204 }, JSON.stringify(events));
+    });
+    // + 40 x $3 + 4 x $15 = 180 micro-USD.
+    assertTotals(await totals(oasisSession), [1040, 204, 0.00618]);
+
+    // 3. The next /api/chat turn adds to that; it does not replace it.
+    provider = () => anthropicOk("third", 100, 10);
+    await settledTurn("c-oasis", "And now?", { session_id: oasisSession });
+    // + 100 x $3 + 10 x $15 = 450 micro-USD.
+    assertTotals(await totals(oasisSession), [1140, 214, 0.00663]);
+  });
+
+  await check("a resumed request that pauses AGAIN adds what it spent up to that pause, counted from the paused totals", async () => {
+    await login(USERS.oasisOwner);
+    assert.ok(oasisPaused, "the previous check captured a paused state");
+    const before = await totals(oasisSession);
+    // The resumed call (30 in / 3 out) asks for another bridge tool: the loop
+    // pauses at 1030 / 203 from its 1000 / 200 start, with no done event.
+    provider = () => anthropicToolUse("tu_again", "send_email", 30, 3);
+    const sig = signResumeState(oasisPaused, { tenant_id: OASIS, user_id: USERS.oasisOwner.id, agent_key: "bravo" });
+    await afterResume(oasisSession, async () => {
+      const res = await resumeRoute.POST(
+        post("/api/chat/resume", {
+          agent_key: "bravo",
+          session_id: oasisSession,
+          resume_state: oasisPaused,
+          resume_signature: sig,
+          tool_use_id: "tu_send",
+          tool_result: { content: "sent", is_error: false },
+        }),
+      );
+      const text = await res.text();
+      assert.equal(res.status, 200, text);
+      const events = parseSse(text);
+      const again = events.find((e) => e.event === "tool_use_pending");
+      assert.ok(again, JSON.stringify(events));
+      const s = again.data.resume_state as Record<string, unknown>;
+      assert.deepEqual([s.totalIn, s.totalOut], [1030, 203]);
+    });
+    // + 30 x $3 + 3 x $15 = 135 micro-USD.
+    assertTotals(await totals(oasisSession), [before[0] + 30, before[1] + 3, before[2] + 0.000135]);
+  });
+
+  await check("a provider refusal (non-2xx, no done event) leaves the totals unchanged, never 0 / 0 / $0", async () => {
+    await login(USERS.oasisOwner);
+    const before = await totals(oasisSession);
+    assert.ok(before[0] > 0, "the previous check left a session with totals");
+    provider = () => anthropicRefused();
+    const { events } = await settledTurn("c-oasis", "Try again", { session_id: oasisSession });
+    assert.ok(events.some((e) => e.event === "error"), JSON.stringify(events));
+    assert.ok(!events.some((e) => e.event === "usage"), JSON.stringify(events));
+    // The meter did count the refused call, as a KNOWN zero: that is what made the old write $0.
+    const last = (await db.execute({ sql: "SELECT outcome, cost_micro_usd FROM ai_usage_events WHERE session_id = ? ORDER BY id DESC LIMIT 1", args: [oasisSession] })).rows[0];
+    assert.deepEqual([last.outcome, Number(last.cost_micro_usd)], ["error", 0]);
+    assertTotals(await totals(oasisSession), before as [number, number, number]);
+  });
+
+  await check("a tool loop stopped mid-turn leaves the totals unchanged, never iteration 1's cost beside 0 tokens", async () => {
+    await login(USERS.oasisOwner);
+    const before = await totals(oasisSession);
+    // Iteration 1 completes (500 in / 50 out, a known 2250 micro-USD) and asks for
+    // a tool this agent is not offered, so the loop runs iteration 2, which the
+    // provider refuses. The turn ends on an error, with no done event.
+    let calls = 0;
+    provider = (s) => {
+      if (!s.url.includes("api.anthropic.com")) return new Response("unexpected", { status: 599 });
+      calls += 1;
+      return calls === 1 ? anthropicToolUse("tu_x", "not_a_real_tool", 500, 50) : anthropicRefused();
+    };
+    const { events } = await settledTurn("c-oasis", "Do the thing", { session_id: oasisSession, cloud_tools: "tools" });
+    assert.equal(calls, 2, JSON.stringify(events));
+    assert.ok(events.some((e) => e.event === "error"), JSON.stringify(events));
+    assert.ok(!events.some((e) => e.event === "usage"), JSON.stringify(events));
+    const rows = (await db.execute({ sql: "SELECT outcome, cost_micro_usd FROM ai_usage_events WHERE session_id = ? ORDER BY id DESC LIMIT 2", args: [oasisSession] })).rows;
+    assert.deepEqual(rows.map((r) => [r.outcome, Number(r.cost_micro_usd)]).reverse(), [["ok", 2250], ["error", 0]]);
+    assertTotals(await totals(oasisSession), before as [number, number, number]);
+  });
+
+  await check("a local model's turn records its tokens: a local call's cost is a known $0, not an unknown", async () => {
+    await login(USERS.cappedLocal);
+    provider = (s) =>
+      s.url.startsWith("http://127.0.0.1:11434")
+        ? sse([
+            [null, { choices: [{ delta: { content: "local reply" } }] }],
+            [null, { choices: [{ delta: {}, finish_reason: "stop" }] }],
+            [null, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }],
+            [null, "[DONE]"],
+          ])
+        : new Response("unexpected", { status: 599 });
+    const { res, events } = await settledTurn("c-capped-local", "Summarise my notes again");
+    assert.equal(res.status, 200);
+    const id = String(events.find((e) => e.event === "session")?.data.session_id || "");
+    assert.ok(id, JSON.stringify(events));
+    // The ledger still says the cost is unpriced (no price rows for a local model)...
+    const row = (await db.execute({ sql: "SELECT billing_mode, cost_micro_usd FROM ai_usage_events WHERE session_id = ?", args: [id] })).rows[0];
+    assert.deepEqual([row.billing_mode, row.cost_micro_usd], ["local", null]);
+    // ...but the session records the turn's tokens at $0.
+    assertTotals(await totals(id), [7, 3, 0]);
+  });
+
+  await check("two increments that finish together both land (one SQL statement, not a read then a write)", async () => {
+    const { addToSessionTotals } = await import("../lib/chat-persistence");
+    const id = "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0";
+    await db.execute({
+      sql: `INSERT INTO chat_sessions (id, tenant_id, user_id, agent_key, provider, model, title) VALUES (?, ?, ?, 'bravo', 'anthropic', 'claude-sonnet-4-6', 'race')`,
+      args: [id, OPEN, USERS.openOwner.id],
+    });
+    await Promise.all(
+      Array.from({ length: 12 }, () =>
+        addToSessionTotals({ sessionId: id, tenantId: OPEN, delta: { inputTokens: 10, outputTokens: 2, costUsd: 0.25 } }),
+      ),
+    );
+    assertTotals(await totals(id), [120, 24, 3]);
+    // Scoped by id AND tenant: the same id under another workspace changes nothing.
+    await addToSessionTotals({ sessionId: id, tenantId: CAPPED, delta: { inputTokens: 1, outputTokens: 1, costUsd: 1 } });
+    assertTotals(await totals(id), [120, 24, 3]);
   });
 
   console.log("an unreadable budget");
