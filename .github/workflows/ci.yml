@@ -5,6 +5,18 @@ on:
   push:
     branches: [main]
 
+# ONE RUN PER REF (2026-09-29, F0 release gate). A newer push to the same ref
+# cancels the run still going for the older one. On main this is what makes a
+# deploy that waits for CI (a workflow_run trigger on this workflow) safe:
+# without it, two pushes close together can finish CI in either order, each
+# success starts a deploy, and the deploy's cancel-in-progress group lets the
+# LAST one to start win, which can be the older commit. A superseded run ends
+# as cancelled, and a deploy gated on success skips it. On a pull request it
+# stops a stale head from holding a runner for the full build.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -178,7 +190,29 @@ jobs:
       # Hand the OpenNext output to wrangler the way the deploy's
       # `wrangler deploy` does, without uploading: it bundles .open-next/worker.js
       # against wrangler.jsonc and prints the upload size. A Worker that
-      # wrangler cannot bundle, or that has outgrown the size limit, fails
-      # here instead of in the deploy after merge. No Cloudflare credentials.
-      - name: Bundle the Worker (wrangler dry run)
-        run: npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run
+      # wrangler cannot bundle fails here instead of in the deploy after merge.
+      # No Cloudflare credentials.
+      #
+      # The dry run does NOT fail on size: it only colours the size line and
+      # exits 0 (wrangler 4.127.1, printBundleSize). scripts/check-worker-size.ts
+      # reads that line from the log and fails the step past the budget below,
+      # and fails it too when the line is missing (an unknown size is not a
+      # small one). pipefail keeps a failed dry run failing through `tee`.
+      #
+      # WORKER_GZIP_BUDGET_KIB is in wrangler's gzip KiB, the number this step
+      # prints. Cloudflare's paid-plan limit is "10 MB compressed", measured on
+      # its side, and it is not the same measure: production has accepted
+      # 10283.20 KiB by wrangler's count (the deploy of 4189719b, 2026-09-29;
+      # 0b5da811 deployed at 10230.73), above 10 MiB. So the budget is the
+      # largest size production is known to accept plus about 1%. The dry run
+      # here reads about 20 KiB below the deploy for the same commit (it
+      # builds with placeholder env, not the manifest's). Raising the budget is
+      # a decision, not a fix: until a staging Worker exists, the post-merge
+      # deploy is the only place Cloudflare's real limit is checked.
+      - name: Bundle the Worker (wrangler dry run) and check its size
+        env:
+          WORKER_GZIP_BUDGET_KIB: "10400"
+        run: |
+          set -o pipefail
+          npx wrangler deploy --dry-run --outdir .wrangler/ci-dry-run 2>&1 | tee "$RUNNER_TEMP/wrangler-dry-run.log"
+          node --import tsx scripts/check-worker-size.ts "$RUNNER_TEMP/wrangler-dry-run.log"
