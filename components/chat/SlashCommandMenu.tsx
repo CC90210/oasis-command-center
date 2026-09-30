@@ -29,7 +29,7 @@ import { ALL_COMMANDS, COMMAND_DESCRIPTIONS, type SlashCommandName } from "@/lib
  * single-sentence description shows verbatim instead of getting empty).
  */
 export function stripDescriptionPreamble(desc: string): string {
-  const dashMatch = desc.match(/\s[—-]\s/);
+  const dashMatch = desc.match(/\s[\u2014-]\s/);
   if (!dashMatch || dashMatch.index === undefined) return desc;
   return desc.slice(dashMatch.index + dashMatch[0].length).trim();
 }

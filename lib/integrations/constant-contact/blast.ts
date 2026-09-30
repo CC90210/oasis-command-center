@@ -30,7 +30,7 @@ const SUNBIZ_FOOTER: Record<string, string> = {
 // Strip em/en dashes from merchant-facing copy (standing no-em-dash rule). The blast-safety
 // guard flags them but we send the ORIGINAL text, so scrub here before every send path.
 export function stripDashes(s: string | undefined | null): string {
-  return String(s || "").replace(/\s*[—–]\s*/g, ", ");
+  return String(s || "").replace(/\s*[\u2014\u2013]\s*/g, ", ");
 }
 
 export type BlastRecipient = { email: string; first_name: string | null; business: string | null; lead_id?: string | null };

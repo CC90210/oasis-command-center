@@ -53,7 +53,7 @@ export function detectFormat(filename: string, text: string): ImportFormat {
 
 /** RFC 4180 reader with delimiter sniffing (comma, semicolon, tab). */
 export function parseCsv(text: string): string[][] {
-  const src = text.replace(/^﻿/, "");
+  const src = text.replace(/^\uFEFF/, "");
   const firstLine = src.split(/\r?\n/, 1)[0] || "";
   const counts: Array<[string, number]> = [",", ";", "\t"].map((d) => [d, firstLine.split(d).length - 1]);
   counts.sort((a, b) => b[1] - a[1]);

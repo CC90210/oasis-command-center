@@ -73,7 +73,7 @@ export function parseMoneyToCents(input: string | number | null | undefined): nu
   }
   s = s.replace(/^(?:CA|US|C|U)?\$\s*/i, "");
   // Thousands separators: commas or thin/regular spaces between digit groups.
-  s = s.replace(/[,\s  ]/g, "");
+  s = s.replace(/[,\s\u202F ]/g, "");
   const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(s);
   if (!m) return null;
   const whole = m[1];

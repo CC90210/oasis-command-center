@@ -29,12 +29,12 @@
 
 /** Em dash and en dash. Both are the standing tell of generated text in
  *  customer-facing copy, and both render as a dash a rep stumbles over. */
-const DASH = /[—–]/;
+const DASH = /[\u2014\u2013]/;
 /** A double hyphen renders literally on the card rather than as a dash. */
 const DOUBLE_HYPHEN = /--/;
 /** A currency symbol, or a figure attached to a money word. A rep reading a
  *  number off a script is quoting a price nobody scoped to that business. */
-const MONEY = /[$£€]|\b\d[\d,.]*\s*(?:dollars?|bucks|grand|cents?|k)\b/i;
+const MONEY = /[$£\u20AC]|\b\d[\d,.]*\s*(?:dollars?|bucks|grand|cents?|k)\b/i;
 
 /** The longest a single spoken answer may be. Not a style preference: past
  *  this a rep stops reading it and starts paraphrasing, and a paraphrased
