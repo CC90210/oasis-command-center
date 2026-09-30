@@ -47,7 +47,8 @@ export type OsRailProps = {
   /** Admin view status line. Operators only; never shown elsewhere. */
   primaryAgent: string;
   primaryAgentLive: boolean;
-  bridgeOnline: boolean;
+  /** null = the status read answered but could not check the pairings. */
+  bridgeOnline: boolean | null;
   /** False until the deferred /api/shell/status read answers: render "—". */
   statusKnown: boolean;
   /** Needs-you counts keyed by OsNavRow.badgeKey. Absent key = no pill. */
@@ -280,7 +281,7 @@ function OperatorStatus({
 }: {
   primaryAgent: string;
   primaryAgentLive: boolean;
-  bridgeOnline: boolean;
+  bridgeOnline: boolean | null;
   known: boolean;
 }) {
   return (
@@ -303,12 +304,15 @@ function OperatorStatus({
         state={!known ? null : bridgeOnline}
         onText="online"
         offText="offline"
+        nullText={known ? "couldn't check" : "—"}
         title={
           !known
             ? "Checking the local bridge"
-            : bridgeOnline
-              ? "Local bridge daemon pinged within last 5 min"
-              : "Local bridge offline — pair a machine from Settings → Devices"
+            : bridgeOnline === null
+              ? "Couldn't check the local bridge: its pairings could not be read"
+              : bridgeOnline
+                ? "Local bridge daemon pinged within last 5 min"
+                : "Local bridge offline — pair a machine from Settings → Devices"
         }
       />
     </div>
@@ -320,12 +324,15 @@ function StatusDot({
   state,
   onText,
   offText,
+  nullText = "—",
   title,
 }: {
   label: string;
   state: boolean | null;
   onText: string;
   offText: string;
+  /** What a null state says: "—" while unasked, "couldn't check" once a read failed. */
+  nullText?: string;
   title: string;
 }) {
   return (
@@ -338,7 +345,7 @@ function StatusDot({
       />
       <span className="truncate">{label}</span>
       <span className={state ? "text-status-engaged" : undefined}>
-        {state === null ? "—" : state ? onText : offText}
+        {state === null ? nullText : state ? onText : offText}
       </span>
     </span>
   );
