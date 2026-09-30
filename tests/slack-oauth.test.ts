@@ -86,6 +86,12 @@ const CODES: Record<string, { team: string; name: string; token: string }> = {
   "code-bravo-same-team": { team: "T0ALPHA", name: "Alpha Slack", token: "xoxb-bravo-attempt" },
   "code-alpha-other-team": { team: "T0SECOND", name: "Second Slack", token: "xoxb-second-token" },
 };
+// The team's channels, as conversations.info reports them.
+const CHANNELS: Record<string, { name: string; is_member: boolean; is_archived: boolean; is_ext_shared: boolean }> = {
+  C0CLIENTS: { name: "clients", is_member: true, is_archived: false, is_ext_shared: false },
+  C0MARKETING: { name: "marketing", is_member: true, is_archived: false, is_ext_shared: false },
+  C0PARTNERS: { name: "partners", is_member: true, is_archived: false, is_ext_shared: true },
+};
 const exchanges: Array<Record<string, string>> = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -104,6 +110,13 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
     const c = Object.values(CODES).find((x) => x.token === token);
     return json(c ? { ok: true, team_id: c.team, team: c.name } : { ok: false, error: "invalid_auth" });
+  }
+  if (url.pathname === "/api/conversations.info") {
+    const token = (new Headers(init?.headers).get("authorization") || "").replace(/^Bearer /, "");
+    if (!Object.values(CODES).some((x) => x.token === token)) return json({ ok: false, error: "invalid_auth" });
+    const id = new URLSearchParams(String(init?.body ?? "")).get("channel") ?? "";
+    const c = CHANNELS[id];
+    return json(c ? { ok: true, channel: { id, ...c } } : { ok: false, error: "channel_not_found" });
   }
   return json({ ok: false, error: "unknown_method" });
 }) as typeof fetch;
@@ -381,6 +394,69 @@ async function main() {
     const hostile = slackInstallBanner("error", "<script>alert(1)</script>")!;
     assert.doesNotMatch(hostile.text, /script/);
     assert.equal(slackInstallBanner("weird", "x"), null);
+  });
+
+  // ── 3. The channel map API, and a disconnect ──────────────────────────────
+
+  const channelsRoute = await import("../app/api/slack/channels/route");
+  const disconnectRoute = await import("../app/api/connections/[provider]/disconnect/route");
+  const putChannel = (b: Record<string, unknown>) =>
+    channelsRoute.PUT(
+      new NextRequest("https://oasisai.work/api/slack/channels", { method: "PUT", body: JSON.stringify(b), headers: { "content-type": "application/json" } }),
+    );
+  const routesOf = async (tenantId: string) => count("SELECT COUNT(*) AS n FROM slack_channel_routes WHERE tenant_id = ?", [tenantId]);
+
+  await check("a channel shared with another company cannot be mapped: 409, and nothing is written", async () => {
+    await login(USERS.ownerA);
+    const res = await putChannel({ channel_id: "C0PARTNERS", department: "sales" });
+    assert.equal(res.status, 409);
+    assert.equal(((await res.json()) as { error: string }).error, "shared_channel");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_channel_routes WHERE channel_id = 'C0PARTNERS'"), 0);
+  });
+
+  await check("a client workspace maps a channel only to a department with an AI teammate; the rest are refused with the reason", async () => {
+    await login(USERS.ownerA);
+    const refused = await putChannel({ channel_id: "C0MARKETING", department: "marketing" });
+    assert.equal(refused.status, 400);
+    const why = (await refused.json()) as { error: string; message: string };
+    assert.equal(why.error, "department_not_set_up");
+    assert.match(why.message, /^Marketing has no AI teammate in this workspace yet/);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_channel_routes WHERE channel_id = 'C0MARKETING'"), 0);
+    const mapped = await putChannel({ channel_id: "C0CLIENTS", department: "client_success" });
+    assert.equal(mapped.status, 200, await mapped.clone().text());
+    const general = await putChannel({ channel_id: "C0MARKETING", department: null });
+    assert.equal(general.status, 200, "a general channel is always allowed");
+    assert.equal(await routesOf(ALPHA), 2);
+  });
+
+  await check("disconnecting Slack deletes its channel map and the people it looked up; the next workspace to install that team can map its channels", async () => {
+    const at = new Date().toISOString();
+    await db.execute({
+      sql: `INSERT INTO external_identities (id, tenant_id, provider, external_team_id, external_user_id, display_name, profile_id,
+              is_guest, is_external, checked_at, created_at, updated_at)
+            VALUES ('ei-alpha-1', ?, 'slack', 'T0ALPHA', 'UALPHA1', 'Ann Alpha', ?, 0, 0, ?, ?, ?)`,
+      args: [ALPHA, `p-${USERS.ownerA.id}`, at, at, at],
+    });
+    await login(USERS.ownerA);
+    const res = await disconnectRoute.POST(new Request("https://oasisai.work/api/connections/slack/disconnect", { method: "POST" }), ctx("slack"));
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(res.status, 200, JSON.stringify(body));
+    assert.equal(body.disconnected, true);
+    assert.equal(await routesOf(ALPHA), 0, "the channel map went with the connection");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE tenant_id = ?", [ALPHA]), 0, "so did the Slack people");
+
+    // Bravo installs the same Slack team, then maps #clients.
+    await login(USERS.ownerB);
+    const state = stateFrom(await authorize()).state;
+    const cb = await callback({ code: "code-bravo-same-team", state });
+    assert.equal(landed(cb).searchParams.get("slack"), "connected", landed(cb).search);
+    const mapped = await putChannel({ channel_id: "C0CLIENTS", department: "sales" });
+    assert.equal(mapped.status, 200, await mapped.clone().text());
+    const rows = (await db.execute("SELECT tenant_id, department FROM slack_channel_routes WHERE team_id = 'T0ALPHA' AND channel_id = 'C0CLIENTS'")).rows;
+    assert.deepEqual(
+      rows.map((r) => [String(r.tenant_id), String(r.department)]),
+      [[BRAVO_CO, "sales"]],
+    );
   });
 
   globalThis.fetch = realFetch;

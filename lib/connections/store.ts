@@ -633,10 +633,14 @@ export async function recordHealthCheck(db: Client, input: HealthRecordInput): P
  * credential is deleted BEFORE this by the caller (lib/connections/service.ts),
  * so a revoked row never sits next to a stored secret. Returns false when
  * there was nothing live to revoke in THIS tenant.
+ *
+ * `alsoDelete` is the provider's own data that must not outlive the
+ * connection (Slack: its channel map and looked-up people), deleted in the
+ * SAME batch, so a disconnect never half-happens.
  */
 export async function revokeConnection(
   db: Client,
-  input: { tenantId: string; connectionId: string; revokedBy: string | null; now: Date },
+  input: { tenantId: string; connectionId: string; revokedBy: string | null; now: Date; alsoDelete?: readonly InStatement[] },
 ): Promise<boolean> {
   const nowIso = input.now.toISOString();
   const [revoked] = await db.batch(
@@ -651,6 +655,7 @@ export async function revokeConnection(
         sql: `DELETE FROM provider_webhook_routes WHERE tenant_id = ? AND connection_id = ?`,
         args: [input.tenantId, input.connectionId],
       },
+      ...(input.alsoDelete ?? []),
     ],
     "write",
   );

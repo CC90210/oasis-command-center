@@ -34,6 +34,7 @@ import {
   isWorkspaceHeartbeatFresh,
 } from "@/lib/integrations/workspace-connection-status";
 import { isVerifiedHealthy } from "@/lib/connections/rules";
+import { SLACK_APPROVAL_RULE } from "@/lib/slack/copy";
 
 // ── Catalog shape ──────────────────────────────────────────────────────────
 
@@ -336,7 +337,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorDef[] = [
     ],
     does: [
       "Your department drafts a reply in the thread when someone @mentions it, under the department's name",
-      "Nothing is posted until an owner or admin approves it, in the Feed or with the button in Slack",
+      SLACK_APPROVAL_RULE,
       "Messages in a channel mapped to a client show on that client's Conversations tab, and are deleted after 90 days",
       "Guests, people from other companies and channels shared with other companies are never read or answered",
     ],

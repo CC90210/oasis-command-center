@@ -8,8 +8,9 @@
  *              team is not the connected team, or Slack marks them a stranger.
  *              Dropped the same way.
  *   teammate   when the Slack user's email (users:read.email) matches an
- *              active teammate of THIS workspace, that profile. Only a linked
- *              owner or admin may approve from Slack (lib/slack/interactivity.ts).
+ *              active teammate of THIS workspace, that profile. Only a linked,
+ *              active owner or admin may approve from Slack
+ *              (slackApproverProfile below).
  *
  * Looked up with users.info and cached in external_identities for a day, so a
  * busy channel does not call Slack for every message. A lookup that fails is
@@ -69,6 +70,34 @@ async function teammateByEmail(db: Client, tenantId: string, email: string | nul
     args: [tenantId, e],
   });
   return rs.rows[0] ? String((rs.rows[0] as unknown as Row).id) : null;
+}
+
+export type SlackApprover = { profileId: string; authUserId: string; email: string | null; teamRole: string | null };
+
+/**
+ * The teammate a linked Slack user may approve AS from Slack: an ACTIVE owner
+ * or admin of THIS workspace (is_owner, or team_role owner/admin), else null.
+ * One rule for both halves of the Slack approval: who is sent the draft at all
+ * (lib/slack/jobs.ts), and whose Approve press counts (lib/slack/interactivity.ts).
+ * A deactivated teammate whose Slack link is still cached is not an approver.
+ */
+export async function slackApproverProfile(db: Client, tenantId: string, profileId: string | null): Promise<SlackApprover | null> {
+  if (!profileId) return null;
+  const rs = await db.execute({
+    sql: `SELECT auth_user_id, email, team_role, is_owner, deactivated_at FROM user_profiles WHERE id = ? AND tenant_id = ? LIMIT 1`,
+    args: [profileId, tenantId],
+  });
+  const r = rs.rows[0] as unknown as Row | undefined;
+  if (!r || !r.auth_user_id) return null;
+  if (r.deactivated_at) return null;
+  const role = (r.team_role ? String(r.team_role) : "").toLowerCase();
+  if (!(Number(r.is_owner) === 1 || role === "owner" || role === "admin")) return null;
+  return {
+    profileId,
+    authUserId: String(r.auth_user_id),
+    email: r.email ? String(r.email) : null,
+    teamRole: r.team_role ? String(r.team_role) : null,
+  };
 }
 
 export async function resolveSlackIdentity(

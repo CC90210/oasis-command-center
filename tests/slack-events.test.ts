@@ -38,6 +38,23 @@ process.env.CONNECTIONS_OAUTH_STATE_SECRET = "slack-events-test-state-secret-lon
 process.env.LIVE_SEND_SLACK = "1";
 delete process.env.BRAVO_FORCE_DRY_RUN;
 
+// next/server's after() needs a live request scope; the interactivity route's
+// work is collected here instead, so a test can prove it runs AFTER the answer.
+const laterTasks: Array<() => unknown> = [];
+{
+  const p = require.resolve("next/server");
+  const real = require(p) as Record<string, unknown>;
+  require.cache[p] = {
+    id: p,
+    filename: p,
+    path: dirname(p),
+    loaded: true,
+    children: [],
+    paths: [],
+    exports: { ...real, after: (task: () => unknown) => void laterTasks.push(task) },
+  } as unknown as NodeModule;
+}
+
 const OASIS = "ef8d389e-3f15-43f2-ae00-3660f69a1452";
 const ALPHA = "a1a1a1a1-0000-4000-8000-0000000000a1";
 const BRAVO_CO = "b2b2b2b2-0000-4000-8000-0000000000b2";
@@ -58,8 +75,13 @@ const SLACK_USERS: Record<string, SlackUserFixture> = {
   UGUEST2: { team_id: TEAM_A, email: "single@elsewhere.test", name: "Sid Single", is_ultra_restricted: true },
   UEXT1: { team_id: "T0OTHERCO", email: "partner@other.test", name: "Pat Partner" },
   UBMEMBER: { team_id: TEAM_B, email: "someone@bravo.test", name: "Bea Bravo" },
+  UOWNER2: { team_id: TEAM_A, email: "owner2@alpha.test", name: "Opal Owner" },
+  UDEACT1: { team_id: TEAM_A, email: "gone@alpha.test", name: "Dee Parted" },
 };
+/** users.info answers HTTP 500 for this user: Slack is down for the lookup. */
+const FLAKY_USER = "UFLAKY1";
 const posts: Array<{ token: string; body: Record<string, unknown> }> = [];
+const ephemerals: Array<{ token: string; body: Record<string, unknown> }> = [];
 const responses: Array<{ url: string; body: Record<string, unknown> }> = [];
 let usersInfoCalls = 0;
 let postFails: string | null = null;
@@ -80,6 +102,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (method === "users.info") {
     usersInfoCalls += 1;
     const id = new URLSearchParams(String(init?.body ?? "")).get("user") ?? "";
+    if (id === FLAKY_USER) return json(500, { ok: false, error: "internal_error" });
     const u = SLACK_USERS[id];
     if (!u) return json(200, { ok: false, error: "user_not_found" });
     return json(200, {
@@ -102,6 +125,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (postFails) return json(200, { ok: false, error: postFails });
     posts.push({ token, body });
     return json(200, { ok: true, channel: body.channel, ts: `${Math.floor(Date.now() / 1000)}.${String(posts.length).padStart(6, "0")}` });
+  }
+  if (method === "chat.postEphemeral") {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    ephemerals.push({ token, body });
+    return json(200, { ok: true, message_ts: `${Math.floor(Date.now() / 1000)}.${String(ephemerals.length).padStart(6, "0")}` });
   }
   return json(200, { ok: false, error: "unknown_method" });
 }) as typeof fetch;
@@ -203,6 +231,19 @@ async function main() {
         sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
               VALUES ('p-member-a', 'auth-member-a', 'member@alpha.test', ?, 'member', 0, ?, ?)`,
         args: [ALPHA, stamp, stamp],
+      },
+      { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-owner2-a', 'owner2@alpha.test')", args: [] },
+      { sql: "INSERT INTO _supabase_auth_users (id, email) VALUES ('auth-gone-a', 'gone@alpha.test')", args: [] },
+      {
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at)
+              VALUES ('p-owner2-a', 'auth-owner2-a', 'owner2@alpha.test', ?, 'owner', 1, ?, ?)`,
+        args: [ALPHA, stamp, stamp],
+      },
+      {
+        // An admin who has left: deactivated before any Slack lookup.
+        sql: `INSERT INTO user_profiles (id, auth_user_id, email, tenant_id, team_role, is_owner, onboarding_completed_at, updated_at, deactivated_at)
+              VALUES ('p-gone-a', 'auth-gone-a', 'gone@alpha.test', ?, 'admin', 0, ?, ?, ?)`,
+        args: [ALPHA, stamp, stamp, stamp],
       },
       { sql: "INSERT INTO customers VALUES (?, ?, 'Acme Plumbing', NULL, NULL, ?, ?)", args: [CUSTOMER_A, ALPHA, stamp, stamp] },
     ],
@@ -476,6 +517,7 @@ async function main() {
     assert.equal(job.customerId, CUSTOMER_A);
 
     const postsBefore = posts.length;
+    const ephemeralsBefore = ephemerals.length;
     const out = await jobs.runSlackMentionJob(job, turnDeps("Hi Acme, the invoice went out today. Client Success"));
     assert.equal(out.outcome, "approval_created", JSON.stringify(out));
     // The queue retrying the same job never drafts a second approval.
@@ -493,17 +535,57 @@ async function main() {
     assert.equal(payload.thread_ts, job.threadTs);
     approvalId = String(rows[0].id);
     payloadHash = String(rows[0].payload_hash);
-    // The card was posted once, in the thread, with the Approve button bound to this exact draft.
-    assert.equal(posts.length, postsBefore + 1, "one card, and no reply yet");
-    const card = posts[posts.length - 1].body;
-    assert.equal(card.thread_ts, job.threadTs);
-    const blocks = JSON.stringify(card.blocks);
-    assert.match(blocks, new RegExp(`${approvalId}\\|${payloadHash}`));
-    assert.match(blocks, /Client Success/);
+    // ONE line in the thread, and no reply yet. Everyone in the channel reads
+    // it (a client's single-channel guest too), so it carries NO draft text
+    // and no Approve button: the draft is not in Slack until it is approved.
+    assert.equal(posts.length, postsBefore + 1, "one line in the thread, and no reply yet");
+    const notice = posts[posts.length - 1].body;
+    assert.equal(notice.thread_ts, job.threadTs);
+    const noticeAll = JSON.stringify(notice);
+    assert.doesNotMatch(noticeAll, /invoice went out/, "the draft is not posted in the channel");
+    assert.doesNotMatch(noticeAll, new RegExp(send.APPROVE_ACTION_ID), "no Approve button where everyone can see it");
+    assert.doesNotMatch(noticeAll, new RegExp(approvalId), "no approval handle in the channel");
+    assert.match(String(notice.text), /^Client Success drafted a reply for review in OASIS\. Nothing is posted in this thread unless someone approves it\.$/);
+    // The person who asked is a member, not an owner or admin: nobody is sent the draft in Slack.
+    assert.equal(ephemerals.length, ephemeralsBefore, "a member who asked is not sent the draft");
+    assert.equal((out as { reviewSent: boolean }).reviewSent, false);
     // Department names only: no internal agent name ever reaches a client's Slack.
     for (const name of ["bravo", "maven", "atlas", "customer-support", "Conaugh"]) {
+      assert.doesNotMatch(noticeAll.toLowerCase(), new RegExp(name.toLowerCase()), `the notice names "${name}"`);
+    }
+  });
+
+  await check("an owner who asks gets the draft on a card only they can see; the channel still gets no draft", async () => {
+    const body = eventBody(mention("UOWNER1", "C0CLIENTS", "Client Success draft a note to Acme about Friday"), { eventId: "EvMENTIONOWN1" });
+    const r = await events.handleSlackEvents(signed(body), deps());
+    assert.equal(r.body.dispatched, true, JSON.stringify(r.body));
+    const job = dispatched[dispatched.length - 1];
+    assert.equal(job.profileId, "p-owner-a", "the owner's Slack email links to their teammate");
+    const postsBefore = posts.length;
+    const ephemeralsBefore = ephemerals.length;
+    const draft = "Hi Acme, we will be there on Friday at 9. Client Success";
+    const out = await jobs.runSlackMentionJob(job, turnDeps(draft));
+    assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    assert.equal((out as { reviewSent: boolean }).reviewSent, true);
+    const id = (out as { approvalId: string }).approvalId;
+    const row = await approvalsStore.getApprovalInTenant(db, ALPHA, id);
+    // Public: one draft-free line.
+    assert.equal(posts.length, postsBefore + 1);
+    const publicText = JSON.stringify(posts[posts.length - 1].body);
+    assert.doesNotMatch(publicText, /Friday at 9/);
+    assert.doesNotMatch(publicText, new RegExp(send.APPROVE_ACTION_ID));
+    // Private: the draft and the Approve button bound to it, to the owner alone.
+    assert.equal(ephemerals.length, ephemeralsBefore + 1);
+    const card = ephemerals[ephemerals.length - 1].body;
+    assert.equal(card.user, "UOWNER1", "only the owner who asked");
+    assert.equal(card.channel, "C0CLIENTS");
+    assert.equal(card.thread_ts, job.threadTs);
+    const blocks = JSON.stringify(card.blocks);
+    assert.match(blocks, /Friday at 9/);
+    assert.match(blocks, new RegExp(`${id}\\|${row!.payload_hash}`));
+    assert.match(blocks, /Only you can see this/);
+    for (const name of ["bravo", "maven", "atlas", "customer-support", "Conaugh"]) {
       assert.doesNotMatch(blocks.toLowerCase(), new RegExp(name.toLowerCase()), `the card names "${name}"`);
-      assert.doesNotMatch(String(card.text).toLowerCase(), new RegExp(name.toLowerCase()));
     }
   });
 
@@ -675,7 +757,7 @@ async function main() {
 
   // ── 4. Routing words ─────────────────────────────────────────────────────
 
-  await check("the department named after the mention wins, then the channel's, then Chief of Staff", () => {
+  await check("the department named after the mention wins, then the channel's, then the workspace's default", () => {
     assert.deepEqual(routing.departmentForMention({ text: "<@UBOT> Client Success, draft a reply", channelDepartment: "sales" }), {
       department: "client_success",
       question: "draft a reply",
@@ -684,6 +766,29 @@ async function main() {
     assert.equal(routing.departmentForMention({ text: "<@UBOT> @Chief of Staff what's next?", channelDepartment: "sales" }).department, "chief_of_staff");
     assert.equal(routing.departmentForMention({ text: "<@UBOT> what's next for sales?", channelDepartment: "marketing" }).department, "marketing");
     assert.equal(routing.departmentForMention({ text: "<@UBOT> salesforce import?", channelDepartment: null }).department, "chief_of_staff", "a label must end at a word boundary");
+    // The workspace's default, when neither the text nor the channel names one.
+    assert.equal(routing.departmentForMention({ text: "<@UBOT> where are we?", channelDepartment: null, defaultDepartment: "sales" }).department, "sales");
+    assert.equal(routing.departmentForMention({ text: "<@UBOT> where are we?", channelDepartment: "client_success", defaultDepartment: "sales" }).department, "client_success");
+  });
+
+  await check("only departments with an AI teammate can answer: all six in OASIS, Sales and Client Success in a client workspace", () => {
+    assert.deepEqual(routing.answeringDepartments({ oasis: true }), ["chief_of_staff", "sales", "marketing", "client_success", "finance", "operations"]);
+    assert.deepEqual(routing.answeringDepartments({ oasis: false }), ["sales", "client_success"]);
+    assert.equal(routing.defaultMentionDepartment({ oasis: true }), "chief_of_staff");
+    assert.equal(routing.defaultMentionDepartment({ oasis: false }), "sales", "a client workspace has no Chief of Staff teammate");
+    // The Settings page offers exactly these (source wiring: the page filters
+    // OS_DEPARTMENTS by answeringDepartments before rendering the map).
+    const page = read("app/settings/chat-apps/page.tsx");
+    assert.match(page, /answeringDepartments\(\{ oasis: viewer\.access\.oasisWorkspace \}\)/);
+    assert.match(page, /departments=\{mappableDepartments\}/);
+  });
+
+  await check("in a client workspace, a mention that names no department in a general channel gets a draft, not a 'not set up' notice", async () => {
+    const job = { ...dispatched[0], eventId: "EvMENTIONDEF1", text: `<@${BOT_A}> where are we with the Acme renovation?`, channelDepartment: null, customerId: null };
+    const out = await jobs.runSlackMentionJob(job, turnDeps("We are on schedule; the next visit is booked."));
+    assert.equal(out.outcome, "approval_created", JSON.stringify(out));
+    const row = await approvalsStore.getApprovalInTenant(db, ALPHA, (out as { approvalId: string }).approvalId);
+    assert.equal(row?.department_key, "sales", "the first department with a teammate");
   });
 
   // ── 4b. Where each department lives in Slack (AI Team, department tab) ────
@@ -724,6 +829,276 @@ async function main() {
     assert.doesNotMatch(rendered, /Slack · Phase 2/);
     assert.match(text(Homes({ web: "ready", slack: { kind: "not_configured" } })), /Slack · app not set up/);
     assert.doesNotMatch(text(Homes({ web: "ready" })), /Slack/, "a custom teammate does not live in Slack");
+  });
+
+  // ── 4c. Guards that must hold even when nothing else would catch them ─────
+
+  await check("a users.info failure (Slack 5xx, or no answer) is 503 and writes no receipt, so Slack retries", async () => {
+    const receipts = await count("SELECT COUNT(*) AS n FROM slack_event_receipts");
+    const r = await events.handleSlackEvents(signed(eventBody(message(FLAKY_USER, "C0CLIENTS", "is anyone there"), { eventId: "EvFLAKY001" })), deps());
+    assert.equal(r.status, 503, JSON.stringify(r.body));
+    assert.equal(r.body.error, "identity_unavailable");
+    const timedOut = await events.handleSlackEvents(signed(eventBody(message("UNEWUSER1", "C0CLIENTS", "slow slack"), { eventId: "EvFLAKY002" })), {
+      ...deps(),
+      fetchImpl: (async () => {
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }) as typeof fetch,
+    });
+    assert.equal(timedOut.status, 503);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_event_receipts"), receipts, "no receipt: the retry is processed");
+    assert.equal(await count("SELECT COUNT(*) AS n FROM slack_event_receipts WHERE event_id IN ('EvFLAKY001','EvFLAKY002')"), 0);
+  });
+
+  await check("a job whose Slack team now routes to another workspace is dropped: nothing drafted, no model called", async () => {
+    let prepared = 0;
+    const job = { ...dispatched[0], tenantId: BRAVO_CO, eventId: "EvWRONGTEN1" };
+    const out = await jobs.runSlackMentionJob(job, {
+      db,
+      now,
+      prepare: (async () => {
+        prepared += 1;
+        return { ok: false, status: 500, error: "should_not_run" };
+      }) as unknown as NonNullable<Parameters<typeof jobs.runSlackMentionJob>[1]["prepare"]>,
+    });
+    assert.deepEqual(out, { outcome: "dropped", reason: "team_not_routed_here" });
+    assert.equal(prepared, 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM approvals WHERE tenant_id = ?", [BRAVO_CO]), 0);
+  });
+
+  const pendingSlackApproval = async (eventId: string) => {
+    const created = await jobs.runSlackMentionJob({ ...dispatched[0], eventId }, turnDeps(`draft for ${eventId}`));
+    assert.equal(created.outcome, "approval_created", JSON.stringify(created));
+    const id = (created as { approvalId: string }).approvalId;
+    return { id, hash: (await approvalsStore.getApprovalInTenant(db, ALPHA, id))!.payload_hash };
+  };
+
+  await check("an owner deactivated after their Slack link was cached cannot approve from Slack", async () => {
+    // The owner writes once: their Slack user is looked up and linked (cached a day).
+    await events.handleSlackEvents(signed(eventBody(message("UOWNER2", "C0CLIENTS", "morning all"))), deps());
+    const cached = (await db.execute("SELECT profile_id FROM external_identities WHERE external_user_id = 'UOWNER2'")).rows[0];
+    assert.equal(cached?.profile_id, "p-owner2-a");
+    await db.execute({ sql: "UPDATE user_profiles SET deactivated_at = ? WHERE id = 'p-owner2-a'", args: [new Date().toISOString()] });
+    const { id, hash } = await pendingSlackApproval("EvDEACT0001");
+    const postsBefore = posts.length;
+    const r = await pressApprove("UOWNER2", `${id}|${hash}`);
+    assert.match(String(r.replaced), /Only an owner or admin/);
+    assert.equal(posts.length, postsBefore, "nothing posted");
+    assert.equal((await approvalsStore.getApprovalInTenant(db, ALPHA, id))?.status, "pending");
+  });
+
+  await check("a deactivated teammate's Slack email never links to them on a fresh lookup", async () => {
+    const identityMod = await import("../lib/slack/identity");
+    const who = await identityMod.resolveSlackIdentity(db, { tenantId: ALPHA, teamId: TEAM_A, slackUserId: "UDEACT1", token: TOKEN_A, now: now() });
+    assert.ok(who.ok);
+    assert.equal(who.identity.profileId, null, "gone@alpha.test is deactivated");
+    assert.equal(await identityMod.slackApproverProfile(db, ALPHA, "p-gone-a"), null);
+    assert.equal((await identityMod.slackApproverProfile(db, ALPHA, "p-owner-a"))?.authUserId, "auth-owner-a");
+    assert.equal(await identityMod.slackApproverProfile(db, ALPHA, "p-member-a"), null, "a member is not an approver");
+  });
+
+  await check("a guest (or another company's user) cannot approve, even when a stale row still links them to an owner", async () => {
+    const stamp2 = new Date().toISOString();
+    for (const [user, guest, external] of [["UGUESTLNK", 1, 0], ["UEXTLNK01", 0, 1]] as const) {
+      await db.execute({
+        sql: `INSERT INTO external_identities (id, tenant_id, provider, external_team_id, external_user_id, display_name, profile_id,
+                is_guest, is_external, checked_at, created_at, updated_at)
+              VALUES (?, ?, 'slack', ?, ?, 'Linked Once', 'p-owner-a', ?, ?, ?, ?, ?)`,
+        args: [`ei-${user}`, ALPHA, TEAM_A, user, guest, external, stamp2, stamp2, stamp2],
+      });
+      const { id, hash } = await pendingSlackApproval(`Ev${user}`);
+      const postsBefore = posts.length;
+      const r = await pressApprove(user, `${id}|${hash}`);
+      assert.match(String(r.replaced), /Only an owner or admin/, user);
+      assert.equal(posts.length, postsBefore, `${user}: nothing posted`);
+      assert.equal((await approvalsStore.getApprovalInTenant(db, ALPHA, id))?.status, "pending", user);
+    }
+  });
+
+  await check("another workspace's route for the same channel is its own row: the first workspace's mapping is untouched", async () => {
+    const before = await routing.getChannelRoute(db, ALPHA, TEAM_A, "C0CLIENTS");
+    assert.equal(before?.department, "client_success");
+    const other = await routing.saveChannelRoute(db, { tenantId: BRAVO_CO, teamId: TEAM_A, channelId: "C0CLIENTS", channelName: "clients", department: "sales", customerId: null, createdBy: null, now: now() });
+    assert.ok(other.ok, JSON.stringify(other));
+    assert.equal((other as { route: { tenant_id: string } }).route.tenant_id, BRAVO_CO);
+    const after = await routing.getChannelRoute(db, ALPHA, TEAM_A, "C0CLIENTS");
+    assert.deepEqual(
+      { department: after?.department, customer_id: after?.customer_id, id: after?.id },
+      { department: "client_success", customer_id: CUSTOMER_A, id: before?.id },
+      "Alpha's row is not overwritten",
+    );
+    // Events for the team still reach Alpha's mapping only (the team routes to Alpha).
+    const r = await events.handleSlackEvents(signed(eventBody(message("UMEMBER1", "C0CLIENTS", "still alpha's"))), deps());
+    assert.equal(r.body.mirrored, true);
+    const last = (await slackRows(ALPHA)).find((x) => x.meta.text === "still alpha's");
+    assert.ok(last, "mirrored into Alpha");
+    assert.equal(last.meta.department, "client_success");
+    assert.equal((await slackRows(BRAVO_CO)).length, 0);
+    await routing.deleteChannelRoute(db, BRAVO_CO, TEAM_A, "C0CLIENTS");
+  });
+
+  await check("a disconnect's Slack cleanup is empty (never a failing statement) where the Slack tables are not installed", async () => {
+    const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "slack-bare-")), "bare.db")}` });
+    assert.deepEqual(await routing.slackDisconnectStatements(bare, ALPHA, TEAM_A), []);
+    const full = await routing.slackDisconnectStatements(db, ALPHA, TEAM_A);
+    assert.equal(full.length, 2);
+    bare.close();
+  });
+
+  await check("Slack installed but its tables missing reads as 'couldn't check', never 'by @mention'", async () => {
+    const status = await import("../lib/slack/status");
+    const bare = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), "slack-bare-")), "bare.db")}` });
+    await bare.executeMultiple(read("database/turso/bravo__187_os_connections.sql"));
+    await bare.execute({
+      sql: `INSERT INTO tenant_connections (id, tenant_id, provider, scope_kind, auth_kind, external_account_id, external_account_label,
+              status, last_health_verdict, last_health_at, connected_at, created_at, updated_at)
+            VALUES ('conn-bare', ?, 'slack', 'tenant', 'app_install', ?, 'Alpha', 'connected', 'healthy', ?, ?, ?, ?)`,
+      args: [ALPHA, TEAM_A, new Date().toISOString(), stamp, stamp, stamp],
+    });
+    const env = { SLACK_CLIENT_ID: "x", SLACK_CLIENT_SECRET: "y", SLACK_SIGNING_SECRET: "z", CONNECTIONS_OAUTH_STATE_SECRET: "w".repeat(40) };
+    const presence = await status.loadSlackPresence(bare, ALPHA, env);
+    assert.deepEqual(presence, { kind: "unknown" });
+    assert.deepEqual(status.slackHomeFor(presence, ["sales"]), { kind: "unknown" });
+    bare.close();
+  });
+
+  await check("a turn whose provider THROWS is logged with its cause (redacted) and returns a code, never a silent failure", async () => {
+    const deptAgent = await import("../lib/os/department-agent");
+    const secret = process.env.SLACK_SIGNING_SECRET!;
+    const logged: unknown[][] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    let out;
+    try {
+      const boom = async function* (): AsyncGenerator<{ type: "delta"; text: string }> {
+        if (secret) throw new Error(`socket hang up while sending with ${secret}`);
+        yield { type: "delta", text: "" };
+      };
+      out = await deptAgent.runAgentTurnToText(
+        { tenantId: ALPHA, agentSlug: "customer-support" } as unknown as Parameters<typeof deptAgent.runAgentTurnToText>[0],
+        [{ role: "user", content: "hi" }],
+        64,
+        boom as unknown as Parameters<typeof deptAgent.runAgentTurnToText>[3],
+      );
+    } finally {
+      console.error = realError;
+    }
+    assert.deepEqual(out, { ok: false, code: "stream_failed" });
+    const entry = logged.find((a) => a[0] === "[department-agent.turn]");
+    assert.ok(entry, "the failure is logged");
+    const fields = entry![1] as { tenantId: string; error: string };
+    assert.equal(fields.tenantId, ALPHA);
+    assert.match(fields.error, /socket hang up/);
+    assert.doesNotMatch(fields.error, new RegExp(secret), "the secret is redacted");
+    assert.match(fields.error, /\[REDACTED:SLACK_SIGNING_SECRET\]/);
+  });
+
+  await check("who can approve, as every surface says it, is what the rules do: a department's own teammate in the Feed", async () => {
+    const copy = await import("../lib/slack/copy");
+    const connectors = await import("../lib/os/connectors");
+    // A Sales rep (the sales seat) approves a Sales Slack reply in the Feed.
+    const created = await approvalsStore.createApproval(
+      db,
+      {
+        tenantId: ALPHA,
+        departmentKey: "sales",
+        requestedBy: { type: "agent", id: "sdr" },
+        actionKind: "send_slack_message",
+        title: "Slack reply in #sales",
+        payload: { team_id: TEAM_A, channel_id: "C0SALES", thread_ts: "1727700000.000300", text: "Thanks, we will call you Monday." },
+      },
+      now(),
+    );
+    assert.ok(created.ok);
+    const row = (created as { approval: { id: string; payload_hash: string } }).approval;
+    const rep = rules.approvalScopeFor({ tenantId: ALPHA, userId: "auth-member-a", persona: "sales", canAct: true, openDepartments: new Set(["sales"] as const) });
+    const decided = await approvalsStore.decideApproval(db, rep, row.id, { kind: "approve", payloadHash: row.payload_hash }, now());
+    assert.equal(decided.ok, true, "the Feed lets the department's own teammate approve");
+    // So no surface may promise "only an owner or admin" for the Feed.
+    assert.match(copy.SLACK_APPROVAL_RULE, /someone who can approve for that department approves it in the Feed/);
+    assert.match(copy.SLACK_APPROVAL_RULE, /An owner or admin who asks in Slack can also approve there/);
+    const slack = connectors.connectorBySlug("slack")!;
+    assert.ok(slack.does.includes(copy.SLACK_APPROVAL_RULE), "the Slack connector says it");
+    const page = read("app/settings/chat-apps/page.tsx");
+    assert.match(page, /\{SLACK_APPROVAL_RULE\}/, "Settings > Chat apps says it");
+    for (const said of [slack.does.join(" "), page, send.approvalNoticeText("Sales")]) {
+      assert.doesNotMatch(said, /until an owner or admin approves/i);
+    }
+  });
+
+  await check("the channel map's writes never throw: a request that cannot reach OASIS is a note on the row", async () => {
+    const actions = await import("../components/settings/slack-channel-map-actions");
+    const offline = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as Parameters<typeof actions.saveChannelMapping>[1];
+    const realError = console.error;
+    console.error = () => undefined;
+    try {
+      assert.deepEqual(await actions.saveChannelMapping({ channelId: "C0CLIENTS", department: "sales", customerId: null }, offline), {
+        ok: false,
+        text: "Not saved: could not reach OASIS. Try again.",
+      });
+      assert.deepEqual(await actions.removeChannelMapping("C0CLIENTS", offline), { ok: false, text: "Not removed: could not reach OASIS. Try again." });
+      const htmlError = (async () => new Response("<html>bad gateway</html>", { status: 502 })) as unknown as Parameters<typeof actions.saveChannelMapping>[1];
+      assert.deepEqual(await actions.saveChannelMapping({ channelId: "C0CLIENTS", department: null, customerId: null }, htmlError), {
+        ok: false,
+        text: "Not saved (HTTP 502).",
+      });
+    } finally {
+      console.error = realError;
+    }
+    const saved = await actions.saveChannelMapping(
+      { channelId: "C0CLIENTS", department: "sales", customerId: null },
+      (async () => new Response(JSON.stringify({ ok: true, route: { department: "sales", customer_id: null } }), { status: 200 })) as unknown as Parameters<
+        typeof actions.saveChannelMapping
+      >[1],
+    );
+    assert.deepEqual(saved, { ok: true, value: { department: "sales", customer_id: null } });
+    const component = read("components/settings/SlackChannelMap.tsx");
+    assert.match(component, /saveChannelMapping\(/);
+    assert.match(component, /removeChannelMapping\(/);
+    assert.doesNotMatch(component, /method: "(PUT|DELETE)"/, "the component makes no raw write that could throw");
+  });
+
+  await check("the Approve press is answered at once; the decision and the post run after the answer", async () => {
+    const interactivityRoute = await import("../app/api/webhooks/slack/interactivity/route");
+    const { id, hash } = await pendingSlackApproval("EvROUTE0001");
+    const payload = {
+      type: "block_actions",
+      team: { id: TEAM_A },
+      user: { id: "UOWNER1" },
+      response_url: "https://hooks.slack.com/actions/T0ALPHA/9/route",
+      actions: [{ action_id: send.APPROVE_ACTION_ID, value: `${id}|${hash}` }],
+    };
+    const body = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
+    const req = (b: string, sig?: string) => {
+      const s = signed(b);
+      return new NextRequest("https://oasisai.work/api/webhooks/slack/interactivity", {
+        method: "POST",
+        body: b,
+        headers: { "content-type": "application/x-www-form-urlencoded", "x-slack-request-timestamp": s.timestamp, "x-slack-signature": sig ?? s.signature },
+      });
+    };
+    laterTasks.length = 0;
+    const postsBefore = posts.length;
+    const usersBefore = usersInfoCalls;
+    const res = await interactivityRoute.POST(req(body));
+    assert.equal(res.status, 200);
+    assert.equal((await approvalsStore.getApprovalInTenant(db, ALPHA, id))?.status, "pending", "nothing decided before Slack has its answer");
+    assert.equal(posts.length, postsBefore, "nothing posted before the answer");
+    assert.equal(usersInfoCalls, usersBefore, "no Slack call before the answer");
+    assert.equal(laterTasks.length, 1, "the press's work waits for after the answer");
+    await laterTasks[0]();
+    assert.equal((await approvalsStore.getApprovalInTenant(db, ALPHA, id))?.status, "executed");
+    assert.equal(posts.length, postsBefore + 1, "the reply is posted once");
+    assert.match(String(responses.at(-1)?.body.text), /Approved by Olly Owner in Slack/);
+    // A forged press is refused in the answer itself, with no work left behind.
+    laterTasks.length = 0;
+    const forged = await interactivityRoute.POST(req(body, "v0=" + "0".repeat(64)));
+    assert.equal(forged.status, 401);
+    assert.equal(laterTasks.length, 0);
+    // Work that throws after the answer still tells the presser.
+    await interactivity.reportPressFailure("https://hooks.slack.com/actions/T0ALPHA/9/route");
+    assert.equal(responses.at(-1)?.body.text, interactivity.PRESS_FAILED_COPY);
   });
 
   // ── 5. The queue consumer and the internal jobs route ─────────────────────
@@ -784,15 +1159,26 @@ async function main() {
         { sql: "INSERT INTO conversation_events (id, tenant_id, event_type, metadata, created_at) VALUES ('recent-slack', ?, 'slack_message', '{}', ?)", args: [ALPHA, recent] },
         { sql: "INSERT INTO conversation_events (id, tenant_id, event_type, metadata, created_at) VALUES ('old-email', ?, 'email_sent', '{}', ?)", args: [ALPHA, old] },
         { sql: "INSERT INTO slack_event_receipts VALUES ('EvOLDRECEIPT', ?, ?, 'message', ?)", args: [ALPHA, TEAM_A, old] },
+        {
+          // A Slack person not looked up again for 91 days: their name and teammate link age out.
+          sql: `INSERT INTO external_identities (id, tenant_id, provider, external_team_id, external_user_id, display_name, profile_id,
+                  is_guest, is_external, checked_at, created_at, updated_at)
+                VALUES ('ei-old', ?, 'slack', ?, 'UOLDPERSON', 'Old Person', NULL, 0, 0, ?, ?, ?)`,
+          args: [ALPHA, TEAM_A, old, old, old],
+        },
       ],
       "write",
     );
+    const identitiesBefore = await count("SELECT COUNT(*) AS n FROM external_identities");
     const r = await retention.purgeSlackRetention(db, new Date());
     assert.equal(r.messagesDeleted, 1);
     assert.ok(r.receiptsDeleted >= 1);
     assert.equal(r.notInstalled, false);
     const ids = (await db.execute("SELECT id FROM conversation_events WHERE id IN ('old-slack','recent-slack','old-email')")).rows.map((x) => String(x.id)).sort();
     assert.deepEqual(ids, ["old-email", "recent-slack"]);
+    assert.equal(r.identitiesDeleted, 1);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities WHERE external_user_id = 'UOLDPERSON'"), 0);
+    assert.equal(await count("SELECT COUNT(*) AS n FROM external_identities"), identitiesBefore - 1, "people looked up recently stay");
   });
 
   // Anti-vacuity: the real network is still not reachable from here.

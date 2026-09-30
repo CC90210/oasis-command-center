@@ -36,6 +36,7 @@ import {
   probeStoredConnection,
   type ConnectionsDeps,
 } from "@/lib/connections/health";
+import { slackDisconnectStatements } from "@/lib/slack/routing";
 
 export type ConnectionsActor = {
   tenantId: string;
@@ -292,6 +293,11 @@ export async function disconnectConnection(
   const row = await findActiveConnection(deps.db, actor.tenantId, provider.id);
   if (!row) return { status: 200, body: { ok: true, already_disconnected: true } };
 
+  // What the provider kept that must go with the connection (Slack: the
+  // channel map and the people it looked up). Worked out before anything is
+  // deleted, and deleted in the revoke's own batch.
+  const alsoDelete = provider.id === "slack" ? await slackDisconnectStatements(deps.db, actor.tenantId, row.external_account_id) : [];
+
   const removed = await deleteTenantIntegrationService({ tenantId: actor.tenantId, service: credentialServiceFor(row.id) });
   if (!removed.ok) {
     console.error("[connections.disconnect] credential delete failed", {
@@ -307,6 +313,7 @@ export async function disconnectConnection(
     connectionId: row.id,
     revokedBy: actor.userId,
     now: deps.now(),
+    alsoDelete,
   });
   if (!revoked) {
     // Revoked concurrently (another tab). The key is gone either way.

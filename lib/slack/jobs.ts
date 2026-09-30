@@ -14,8 +14,10 @@
  *
  * WHAT THE JOB DOES, IN ORDER
  *   1. The Slack team must still route to the job's workspace.
- *   2. The department: named in the text, else the channel's, else Chief of
- *      Staff (lib/slack/routing.ts). It must have an agent in this workspace
+ *   2. The department: named in the text, else the channel's, else the
+ *      workspace's default (Chief of Staff; in a client workspace without a
+ *      Chief of Staff teammate, the first department that has one:
+ *      lib/slack/routing.ts). It must have an agent in this workspace
  *      (components/os/department/config.ts), or a one-line notice says it is
  *      not set up.
  *   3. Exactly once per Slack event: an approval with this event's key already
@@ -24,9 +26,12 @@
  *      rules as the web channel). The workspace's own AI account pays; the
  *      platform key only when the person who @mentioned is the verified
  *      platform operator, the web channel's rule.
- *   5. The draft becomes a send_slack_message approval (Feed shows it), and the
- *      card with the Approve button is posted under the mention. Nothing the
- *      agent wrote reaches Slack until someone approves it.
+ *   5. The draft becomes a send_slack_message approval (Feed shows it). Under
+ *      the mention goes a line with NO draft text ("drafted a reply for review
+ *      in OASIS"); the draft and its Approve button go ephemerally to the
+ *      person who asked, only when they are an active owner or admin linked by
+ *      email (lib/slack/send.ts postApprovalRequest). Nothing the agent wrote
+ *      is readable by the channel until someone approves it and it is posted.
  */
 import "server-only";
 import type { Client } from "@libsql/client";
@@ -45,8 +50,17 @@ import { recordTurnOutcome } from "@/lib/os/channel/turns";
 import { prepareAgentTurn, runAgentTurnToText } from "@/lib/os/department-agent";
 import { createApproval, parsePayload } from "@/lib/os/approvals/store";
 import type { SlackFetch } from "@/lib/slack/client";
-import { departmentForMention, departmentLabelOf, isDepartmentKey, isSlackChannelId, isSlackTeamId, isSlackTs } from "@/lib/slack/routing";
-import { postApprovalCard, postNotice } from "@/lib/slack/send";
+import {
+  defaultMentionDepartment,
+  departmentForMention,
+  departmentLabelOf,
+  isDepartmentKey,
+  isSlackChannelId,
+  isSlackTeamId,
+  isSlackTs,
+} from "@/lib/slack/routing";
+import { slackApproverProfile } from "@/lib/slack/identity";
+import { postApprovalRequest, postNotice } from "@/lib/slack/send";
 
 /** A reply short enough to be a Slack message, and a turn short enough for waitUntil. */
 export const SLACK_REPLY_MAX_TOKENS = 1024;
@@ -92,7 +106,7 @@ export function isSlackMentionJob(v: unknown): v is SlackMentionJob {
 }
 
 export type JobOutcome =
-  | { outcome: "approval_created"; approvalId: string; cardPosted: boolean }
+  | { outcome: "approval_created"; approvalId: string; noticePosted: boolean; reviewSent: boolean }
   | { outcome: "duplicate"; approvalId: string }
   | { outcome: "notice"; reason: string; noticePosted: boolean }
   | { outcome: "dropped"; reason: string };
@@ -173,7 +187,11 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   const route = await resolveWebhookRoute(db, "slack", job.teamId);
   if (!route || route.tenantId !== job.tenantId) return { outcome: "dropped", reason: "team_not_routed_here" };
 
-  const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment });
+  const tenant = await getTenant(job.tenantId);
+  if (!tenant?.slug) throw new Error("slack.jobs: the workspace could not be read");
+  const oasis = isOasisSurfaceTenant(tenant.slug);
+
+  const picked = departmentForMention({ text: job.text, channelDepartment: job.channelDepartment, defaultDepartment: defaultMentionDepartment({ oasis }) });
   const dept = OS_DEPARTMENTS.find((d) => d.key === picked.department);
   if (!dept) return { outcome: "dropped", reason: "unknown_department" };
   const label = departmentLabelOf(dept.key);
@@ -186,9 +204,7 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
     return notice(deps, job, "empty_question", `Ask ${label} a question after the mention, in the same message.`);
   }
 
-  const tenant = await getTenant(job.tenantId);
-  if (!tenant?.slug) throw new Error("slack.jobs: the workspace could not be read");
-  const binding = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug) });
+  const binding = departmentChannelFor(dept.key, { oasis });
   if (binding.kind !== "agent") {
     return notice(deps, job, "department_not_set_up", `${label} is not set up in this workspace yet, so it cannot draft a reply.`);
   }
@@ -262,7 +278,11 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
   } catch (err) {
     console.error("[slack.jobs] PUBLIC_APP_URL is not set; the card has no link", err instanceof Error ? err.message : err);
   }
-  const card = await postApprovalCard(
+  // The draft is shown in Slack only to the person who asked, and only when
+  // they may approve it there (an active owner or admin, linked by email).
+  // Everyone else in the channel sees a line with no draft in it.
+  const approver = await slackApproverProfile(db, job.tenantId, job.profileId);
+  const posted = await postApprovalRequest(
     db,
     {
       tenantId: job.tenantId,
@@ -275,11 +295,18 @@ export async function runSlackMentionJob(job: SlackMentionJob, deps: SlackJobDep
       approvalId: created.approval.id,
       payloadHash: created.approval.payload_hash,
       openUrl,
+      reviewer: approver ? job.slackUserId : null,
     },
     { fetchImpl: deps.fetchImpl },
   );
-  if (!card.ok) console.error("[slack.jobs] approval card not posted (the approval is in Feed)", { tenantId: job.tenantId, reason: card.reason });
-  return { outcome: "approval_created", approvalId: created.approval.id, cardPosted: card.ok };
+  if (!posted.notice.ok) console.error("[slack.jobs] review notice not posted (the approval is in Feed)", { tenantId: job.tenantId, reason: posted.notice.reason });
+  if (approver && !posted.review.ok) console.error("[slack.jobs] review card not sent (the approval is in Feed)", { tenantId: job.tenantId, reason: posted.review.reason });
+  return {
+    outcome: "approval_created",
+    approvalId: created.approval.id,
+    noticePosted: posted.notice.ok,
+    reviewSent: posted.review.ok,
+  };
 }
 
 // -- Dispatch -------------------------------------------------------------------

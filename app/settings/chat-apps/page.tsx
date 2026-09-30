@@ -39,7 +39,8 @@ import {
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { loadSlackSettings, type SlackSettings } from "@/lib/slack/settings";
-import { slackInstallBanner } from "@/lib/slack/copy";
+import { SLACK_APPROVAL_RULE, slackInstallBanner } from "@/lib/slack/copy";
+import { answeringDepartments } from "@/lib/slack/routing";
 import { SLACK_RETENTION_DAYS } from "@/lib/slack/retention";
 
 export const dynamic = "force-dynamic";
@@ -84,7 +85,10 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
   }
   const banner = slackInstallBanner(params.slack, params.reason);
   const conn = slackSettings?.connection ?? null;
-  const departments = OS_DEPARTMENTS.map((d) => ({ key: d.key, label: d.label }));
+  // Only departments with an AI teammate in THIS workspace can answer in Slack,
+  // so only they are offered (the channels API refuses the rest).
+  const answering = answeringDepartments({ oasis: viewer.access.oasisWorkspace });
+  const mappableDepartments = OS_DEPARTMENTS.filter((d) => answering.includes(d.key)).map((d) => ({ key: d.key, label: d.label }));
 
   return (
     <PageFrame
@@ -125,7 +129,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                 )}
                 <p className="text-[13px] leading-5 text-fg-muted">
                   Install the OASIS app in your Slack workspace, then pick a department for each channel. An @mention gets
-                  a draft reply from that department, and nothing is posted until an owner or admin approves it.
+                  a draft reply from that department. {SLACK_APPROVAL_RULE}
                 </p>
                 {viewer.access.canManage ? (
                   <a href="/api/connections/slack/authorize" className="btn-primary inline-flex">
@@ -154,7 +158,7 @@ export default async function SettingsChatAppsPage({ searchParams }: { searchPar
                   </p>
                 ) : viewer.access.canManage ? (
                   <SlackChannelMap
-                    departments={departments}
+                    departments={mappableDepartments}
                     savedRoutes={(slackSettings.routes ?? []).map((r) => ({
                       channel_id: r.channel_id,
                       channel_name: r.channel_name,

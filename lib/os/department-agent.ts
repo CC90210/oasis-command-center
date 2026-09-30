@@ -48,6 +48,7 @@ import {
 import { departmentIdentityLock, departmentPrompt } from "@/lib/os/channel/identity";
 import { CHANNEL_CONFIG_AGENT_KEY } from "@/lib/os/channel/workspace-key";
 import { billingForKey, budgetExhaustedBeforeStream, modelCallMeter, type ModelCallMeter } from "@/lib/ai/usage";
+import { redactAll } from "@/lib/secret-redaction";
 
 export type AgentTurnRequest = {
   tenantId: string;
@@ -290,16 +291,30 @@ export type TurnText = { ok: true; text: string } | { ok: false; code: TurnFailu
 /**
  * Run a prepared turn to its full text (a Slack draft). A turn that errors, or
  * that finishes with no text, is a failure with a code, never an empty draft.
+ * A provider or SDK that THROWS is logged here with its cause (redacted, like
+ * the web route's), because the caller only ever sees the code.
  */
-export async function runAgentTurnToText(turn: PreparedTurn, messages: readonly ChatMessage[], maxTokens = 1024): Promise<TurnText> {
+export async function runAgentTurnToText(
+  turn: PreparedTurn,
+  messages: readonly ChatMessage[],
+  maxTokens = 1024,
+  stream: typeof streamAgentTurn = streamAgentTurn,
+): Promise<TurnText> {
   let text = "";
   try {
-    for await (const ev of streamAgentTurn(turn, messages, maxTokens)) {
+    for await (const ev of stream(turn, messages, maxTokens)) {
       if (ev.type === "delta") text += ev.text;
       else if (ev.type === "error") return { ok: false, code: classifyStreamError(ev.message) };
     }
-  } catch {
-    return { ok: false, code: "stream_failed" };
+  } catch (err) {
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    console.error("[department-agent.turn]", {
+      tenantId: turn.tenantId,
+      agentSlug: turn.agentSlug,
+      error: redactAll(detail).slice(0, 500),
+    });
+    const code = classifyStreamError(err instanceof Error ? err.message : String(err));
+    return { ok: false, code: code === "provider_error" ? "stream_failed" : code };
   }
   const trimmed = text.trim();
   return trimmed ? { ok: true, text: trimmed } : { ok: false, code: "stream_failed" };

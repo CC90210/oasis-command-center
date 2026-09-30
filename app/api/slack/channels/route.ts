@@ -6,7 +6,9 @@
  *           this workspace's client records to link a channel to.
  *   PUT     { channel_id, channel_name, department | null, customer_id | null }
  *           maps one channel. department null = a general channel (mirrored,
- *           answered only when @mentioned).
+ *           answered only when @mentioned). A department is accepted only when
+ *           it has an AI teammate in this workspace (every one in OASIS's own;
+ *           in a client workspace, the neutral ones).
  *   DELETE  ?channel_id=C...  unmaps one channel.
  *
  * Owner/admin only (lib/connections/access.ts). The tenant AND the Slack team
@@ -20,8 +22,12 @@ import { resolveConnectionsActor, routeFailure } from "@/lib/connections/route-h
 import { findActiveConnection } from "@/lib/connections/store";
 import { readBotToken } from "@/lib/connections/token-store";
 import { channelInfo, listPublicChannels } from "@/lib/slack/client";
+import { isOasisSurfaceTenant } from "@/lib/role-surfaces";
+import type { DepartmentKey } from "@/lib/os/types";
 import {
+  answeringDepartments,
   deleteChannelRoute,
+  departmentLabelOf,
   isDepartmentKey,
   isSlackChannelId,
   isSlackSchemaMissing,
@@ -39,6 +45,15 @@ async function slackContext(tenantId: string, db: Parameters<typeof findActiveCo
   const conn = await findActiveConnection(db, tenantId, "slack");
   if (!conn || !conn.external_account_id) return null;
   return conn;
+}
+
+/** The departments with an AI teammate in the session's workspace (lib/slack/routing.ts answeringDepartments). */
+async function answeringDepartmentsOf(db: Parameters<typeof findActiveConnection>[0], tenantId: string): Promise<DepartmentKey[]> {
+  const rs = await db.execute({ sql: "SELECT slug FROM tenants WHERE id = ? LIMIT 1", args: [tenantId] });
+  const row = rs.rows[0] as unknown as Record<string, unknown> | undefined;
+  const slug = row?.slug ? String(row.slug) : "";
+  if (!slug) throw new Error("api.slack.channels: the workspace's slug could not be read");
+  return answeringDepartments({ oasis: isOasisSurfaceTenant(slug) });
 }
 
 export async function GET() {
@@ -127,6 +142,15 @@ export async function PUT(req: NextRequest) {
     if (!isSlackChannelId(channelId)) return json(400, { ok: false, error: "invalid_channel", message: "That is not a Slack channel id." });
     const department = body.department === null || body.department === "" || body.department === undefined ? null : body.department;
     if (department !== null && !isDepartmentKey(department)) return json(400, { ok: false, error: "invalid_department", message: "That is not a department." });
+    // Only a department with an AI teammate in THIS workspace can answer in
+    // Slack; a channel mapped to one without would only ever get notices.
+    if (department !== null && !(await answeringDepartmentsOf(db, tenantId)).includes(department)) {
+      return json(400, {
+        ok: false,
+        error: "department_not_set_up",
+        message: `${departmentLabelOf(department)} has no AI teammate in this workspace yet, so it cannot answer in Slack.`,
+      });
+    }
     const customerId = typeof body.customer_id === "string" && body.customer_id.trim() ? body.customer_id.trim() : null;
 
     // Slack says what the channel is, not the request: its real name, and
@@ -166,9 +190,8 @@ export async function PUT(req: NextRequest) {
         invalid_channel: "That is not a channel in the connected Slack workspace.",
         invalid_department: "That is not a department.",
         unknown_customer: "That client is not in this workspace.",
-        channel_taken: "That channel is mapped by another workspace.",
       };
-      return json(saved.error === "channel_taken" ? 409 : 400, { ok: false, error: saved.error, message: msg[saved.error] });
+      return json(400, { ok: false, error: saved.error, message: msg[saved.error] });
     }
     return json(200, { ok: true, route: saved.route });
   } catch (error) {

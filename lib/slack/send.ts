@@ -5,9 +5,13 @@
  *   postSlackReply      an APPROVED department reply (the send_slack_message
  *                       executor is the only caller), mirrored onto the
  *                       conversation as outbound.
- *   postApprovalCard    the "waiting for approval" card under the @mention,
- *                       with an Approve button (lib/slack/interactivity.ts) and
- *                       a link to the approval in OASIS.
+ *   postApprovalRequest a line under the @mention saying a draft waits for
+ *                       review in OASIS, with NO draft text in it (everyone in
+ *                       the channel reads it, guests included); and the draft
+ *                       with its Approve button (lib/slack/interactivity.ts)
+ *                       sent ephemerally to the one owner or admin who asked,
+ *                       when that is who asked. Nobody else sees the draft in
+ *                       Slack until it is approved and posted.
  *   postNotice          a one-line status under the @mention when no draft
  *                       could be made (department not set up, no AI account,
  *                       the month's AI budget reached). Operational only: it
@@ -23,7 +27,7 @@ import type { Client } from "@libsql/client";
 import { findActiveConnection } from "@/lib/connections/store";
 import { readBotToken } from "@/lib/connections/token-store";
 import type { DepartmentKey } from "@/lib/os/types";
-import { postMessage, type SlackFetch } from "@/lib/slack/client";
+import { postEphemeral, postMessage, type SlackFetch } from "@/lib/slack/client";
 import { mirrorStatement } from "@/lib/slack/mirror";
 import { departmentLabelOf, getChannelRoute, isSlackSchemaMissing } from "@/lib/slack/routing";
 
@@ -139,12 +143,37 @@ export function parseApproveButtonValue(v: unknown): { approvalId: string; paylo
 }
 
 export const APPROVE_ACTION_ID = "oasis_approval_approve";
+export const OPEN_ACTION_ID = "oasis_approval_open";
 
 /** Slack mrkdwn needs &, < and > escaped in text it did not write. */
 export function escapeMrkdwn(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * The line posted IN the thread when a draft is made. It carries no draft
+ * text: everyone in the channel reads it, guests included, and a draft that is
+ * later sent back or left to expire must never have been shown there. It is
+ * true whatever happens to the approval afterwards, so it never goes stale.
+ */
+export function approvalNoticeText(departmentLabel: string): string {
+  return `${departmentLabel} drafted a reply for review in OASIS. Nothing is posted in this thread unless someone approves it.`;
+}
+
+export function approvalNoticeBlocks(input: { departmentLabel: string; openUrl: string | null }): unknown[] {
+  return [
+    { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(approvalNoticeText(input.departmentLabel)) } },
+    ...(input.openUrl
+      ? [{ type: "actions", elements: [{ type: "button", action_id: OPEN_ACTION_ID, text: { type: "plain_text", text: "Open in OASIS" }, url: input.openUrl }] }]
+      : []),
+  ];
+}
+
+/**
+ * The review card: the draft, word for word, and the Approve button bound to
+ * exactly those words. Sent ONLY with chat.postEphemeral, to one owner or
+ * admin (postApprovalRequest), never into the channel.
+ */
 export function approvalCardBlocks(input: {
   departmentLabel: string;
   draft: string;
@@ -159,7 +188,10 @@ export function approvalCardBlocks(input: {
   const blocks: unknown[] = [
     {
       type: "section",
-      text: { type: "mrkdwn", text: `*${escapeMrkdwn(input.departmentLabel)}* drafted a reply. Nothing is posted until an owner or admin approves it.\n${quoted}`.slice(0, 2900) },
+      text: {
+        type: "mrkdwn",
+        text: `Only you can see this. *${escapeMrkdwn(input.departmentLabel)}* drafted this reply. Nothing is posted until it is approved.\n${quoted}`.slice(0, 2900),
+      },
     },
     {
       type: "actions",
@@ -171,14 +203,27 @@ export function approvalCardBlocks(input: {
           text: { type: "plain_text", text: "Approve and post" },
           value: approveButtonValue(input.approvalId, input.payloadHash),
         },
-        ...(input.openUrl ? [{ type: "button", action_id: "oasis_approval_open", text: { type: "plain_text", text: "Open in OASIS" }, url: input.openUrl }] : []),
+        ...(input.openUrl ? [{ type: "button", action_id: OPEN_ACTION_ID, text: { type: "plain_text", text: "Open in OASIS" }, url: input.openUrl }] : []),
       ],
     },
   ];
   return blocks;
 }
 
-export async function postApprovalCard(
+export type ApprovalRequestOutcome = {
+  /** The draft-free line in the thread. */
+  notice: SlackPostOutcome;
+  /** The ephemeral review card, or why none was sent. */
+  review: SlackPostOutcome | { ok: false; reason: "no_slack_approver"; message: string };
+};
+
+/**
+ * Tell the thread a draft waits (no draft text), and send the draft with its
+ * Approve button to `reviewer` alone: the Slack user id of the owner or admin
+ * who asked (lib/slack/identity.ts slackApproverProfile), or null when the
+ * person who asked may not approve from Slack. Then the draft is only in OASIS.
+ */
+export async function postApprovalRequest(
   db: Client,
   input: {
     tenantId: string;
@@ -190,24 +235,44 @@ export async function postApprovalCard(
     approvalId: string;
     payloadHash: string;
     openUrl: string | null;
+    reviewer: string | null;
   },
   opts: { fetchImpl?: SlackFetch } = {},
-): Promise<SlackPostOutcome> {
+): Promise<ApprovalRequestOutcome> {
   const token = await slackTokenFor(db, input.tenantId, input.teamId);
-  if (!token.ok) return token;
+  if (!token.ok) return { notice: token, review: token };
   const label = departmentLabelOf(input.department);
   const posted = await postMessage(
     token.token,
     {
       channel: input.channelId,
       thread_ts: input.threadTs,
-      text: `${label} drafted a reply. It waits for approval before it is posted.`,
+      text: approvalNoticeText(label),
+      blocks: approvalNoticeBlocks({ departmentLabel: label, openUrl: input.openUrl }),
+    },
+    { fetchImpl: opts.fetchImpl },
+  );
+  const notice: SlackPostOutcome = posted.ok
+    ? { ok: true, ts: posted.data.ts }
+    : { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
+  if (!input.reviewer) {
+    return { notice, review: { ok: false, reason: "no_slack_approver", message: "The person who asked cannot approve from Slack; the draft is in the Feed." } };
+  }
+  const card = await postEphemeral(
+    token.token,
+    {
+      channel: input.channelId,
+      user: input.reviewer,
+      thread_ts: input.threadTs,
+      text: `${label} drafted a reply for you to review. Only you can see it.`,
       blocks: approvalCardBlocks({ departmentLabel: label, draft: input.draft, approvalId: input.approvalId, payloadHash: input.payloadHash, openUrl: input.openUrl }),
     },
     { fetchImpl: opts.fetchImpl },
   );
-  if (!posted.ok) return { ok: false, reason: `slack_${posted.error}`, message: slackFailureMessage(posted.error) };
-  return { ok: true, ts: posted.data.ts };
+  const review: SlackPostOutcome = card.ok
+    ? { ok: true, ts: card.data.message_ts }
+    : { ok: false, reason: `slack_${card.error}`, message: slackFailureMessage(card.error) };
+  return { notice, review };
 }
 
 export async function postNotice(

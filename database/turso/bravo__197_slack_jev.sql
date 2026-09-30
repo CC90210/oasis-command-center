@@ -13,6 +13,8 @@
 --                          their verified email matches a teammate in the SAME
 --                          workspace, that teammate's profile. is_guest and
 --                          is_external are what the events route drops on.
+--                          Deleted on a Slack disconnect, and a row not
+--                          re-checked for 90 days is deleted by retention.
 --   slack_event_receipts   one row per Slack event_id processed: the dedupe for
 --                          Slack's retries (x-slack-retry-num). Trimmed after a
 --                          week by lib/slack/retention.ts.
@@ -64,10 +66,15 @@ CREATE TABLE IF NOT EXISTS slack_channel_routes (
   updated_at    TEXT NOT NULL
 );
 
--- One Slack channel has one route. Across tenants on purpose: a Slack team
--- belongs to one workspace (provider_webhook_routes), so its channels do too.
-CREATE UNIQUE INDEX IF NOT EXISTS ux_slack_channel_routes_channel
-  ON slack_channel_routes (team_id, channel_id);
+-- One route per channel PER WORKSPACE. Which workspace a Slack team's events
+-- reach is provider_webhook_routes' job (one live workspace per team); every
+-- read here is by that tenant. Keyed across tenants instead, a workspace that
+-- installed a Slack team another workspace had used before could never map
+-- that team's channels (the old rows would hold them). A Slack disconnect
+-- deletes the workspace's rows anyway (lib/slack/routing.ts
+-- slackDisconnectStatements).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_slack_channel_routes_tenant_channel
+  ON slack_channel_routes (tenant_id, team_id, channel_id);
 
 CREATE INDEX IF NOT EXISTS idx_slack_channel_routes_tenant
   ON slack_channel_routes (tenant_id, department);

@@ -1,11 +1,25 @@
 /**
- * lib/slack/interactivity.ts - the "Approve and post" button on an approval
- * card in Slack.
+ * lib/slack/interactivity.ts - the "Approve and post" button on the review
+ * card (sent only to the owner or admin who asked: lib/slack/send.ts).
+ *
+ * TWO HALVES, BECAUSE OF SLACK'S 3 SECONDS. Slack wants a block_actions press
+ * acknowledged within 3 seconds, or the presser sees "the app did not
+ * respond" (and may press again). The work of a press can take longer: a
+ * users.info lookup, the decision, the chat.postMessage and the response_url
+ * update each have their own timeouts. So:
+ *   acceptSlackInteraction   verify the signature and read the press. Fast, no
+ *                            network. Answers 401/400/503 itself, and hands
+ *                            back the press's work.
+ *   work()                   everything else; the route runs it AFTER Slack
+ *                            has its 200 (next/server after(), the Worker's
+ *                            waitUntil) and the outcome reaches the presser
+ *                            through response_url, as it always did.
+ * handleSlackInteractivity runs both in order (the tests).
  *
  * WHO MAY PRESS IT. The Slack user must be a full member of the connected team
  * (no guest, no other company) whose verified email is an ACTIVE owner or admin
- * of the same OASIS workspace (lib/slack/identity.ts links them). Anyone else
- * is told to decide in OASIS, and nothing is decided.
+ * of the same OASIS workspace (lib/slack/identity.ts slackApproverProfile).
+ * Anyone else is told to decide in OASIS, and nothing is decided.
  *
  * WHAT A PRESS DOES. decideApproval(via "slack") with the payload hash the
  * button carries: the yes binds to the exact draft the card showed, and the
@@ -25,9 +39,9 @@ import { approvalScopeFor, DEPARTMENT_KEYS } from "@/lib/os/approvals/rules";
 import { decideApproval, getApproval } from "@/lib/os/approvals/store";
 import { executeApproval } from "@/lib/os/approvals/execute";
 import type { ExecutorDeps } from "@/lib/os/approvals/executors";
-import { respondToAction, type SlackFetch } from "@/lib/slack/client";
+import { isSlackResponseUrl, respondToAction, type SlackFetch } from "@/lib/slack/client";
 import { verifySlackRequest } from "@/lib/slack/verify";
-import { resolveSlackIdentity } from "@/lib/slack/identity";
+import { resolveSlackIdentity, slackApproverProfile } from "@/lib/slack/identity";
 import { APPROVE_ACTION_ID, parseApproveButtonValue, slackTokenFor } from "@/lib/slack/send";
 import { isSlackTeamId, isSlackUserId } from "@/lib/slack/routing";
 
@@ -43,23 +57,15 @@ export type InteractivityDeps = {
 
 export type InteractivityResult = { status: number; body: Record<string, unknown>; replaced?: string };
 
-type Profile = { auth_user_id: string; email: string | null; team_role: string | null; is_owner: number; deactivated_at: string | null };
-
-async function profileInTenant(db: Client, tenantId: string, profileId: string): Promise<Profile | null> {
-  const rs = await db.execute({
-    sql: `SELECT auth_user_id, email, team_role, is_owner, deactivated_at FROM user_profiles WHERE id = ? AND tenant_id = ? LIMIT 1`,
-    args: [profileId, tenantId],
-  });
-  const r = rs.rows[0] as unknown as Record<string, unknown> | undefined;
-  if (!r || !r.auth_user_id) return null;
-  return {
-    auth_user_id: String(r.auth_user_id),
-    email: r.email ? String(r.email) : null,
-    team_role: r.team_role ? String(r.team_role) : null,
-    is_owner: Number(r.is_owner) || 0,
-    deactivated_at: r.deactivated_at ? String(r.deactivated_at) : null,
-  };
-}
+export type AcceptedInteraction = {
+  /** What Slack is answered NOW. */
+  status: number;
+  body: Record<string, unknown>;
+  /** The press's work, to run after the answer. Absent when there is nothing to do. */
+  work?: () => Promise<InteractivityResult>;
+  /** Slack's response_url for this press (Slack's own host only), where a failure after the answer is reported. */
+  responseUrl: string | null;
+};
 
 const DECIDE_COPY: Record<string, string> = {
   not_found: "That approval is not in this workspace any more.",
@@ -69,39 +75,49 @@ const DECIDE_COPY: Record<string, string> = {
   forbidden: "You can see this approval but you cannot decide it.",
 };
 
-export async function handleSlackInteractivity(
+/** The sentence a presser gets when the work after the answer failed outright. */
+export const PRESS_FAILED_COPY = "OASIS could not finish this. Check the approval in OASIS before you press again.";
+
+export async function acceptSlackInteraction(
   input: { rawBody: string; timestamp: string | null; signature: string | null },
   deps: InteractivityDeps,
-): Promise<InteractivityResult> {
-  const now = deps.now();
-  const verified = verifySlackRequest({ rawBody: input.rawBody, timestamp: input.timestamp, signature: input.signature, nowMs: now.getTime(), env: deps.env });
+): Promise<AcceptedInteraction> {
+  const verified = verifySlackRequest({ rawBody: input.rawBody, timestamp: input.timestamp, signature: input.signature, nowMs: deps.now().getTime(), env: deps.env });
   if (!verified.ok) {
-    if (verified.reason === "not_configured") return { status: 503, body: { ok: false, error: "slack_not_configured" } };
-    return { status: 401, body: { ok: false, error: verified.reason } };
+    if (verified.reason === "not_configured") return { status: 503, body: { ok: false, error: "slack_not_configured" }, responseUrl: null };
+    return { status: 401, body: { ok: false, error: verified.reason }, responseUrl: null };
   }
   let payload: Record<string, unknown>;
   try {
     const raw = new URLSearchParams(input.rawBody).get("payload");
     const parsed = raw ? (JSON.parse(raw) as unknown) : null;
-    if (!parsed || typeof parsed !== "object") return { status: 400, body: { ok: false, error: "payload_invalid" } };
+    if (!parsed || typeof parsed !== "object") return { status: 400, body: { ok: false, error: "payload_invalid" }, responseUrl: null };
     payload = parsed as Record<string, unknown>;
   } catch {
-    return { status: 400, body: { ok: false, error: "payload_invalid" } };
+    return { status: 400, body: { ok: false, error: "payload_invalid" }, responseUrl: null };
   }
-  if (payload.type !== "block_actions") return { status: 200, body: { ok: true, ignored: "not_a_button" } };
+  if (payload.type !== "block_actions") return { status: 200, body: { ok: true, ignored: "not_a_button" }, responseUrl: null };
   const actions = Array.isArray(payload.actions) ? (payload.actions as Array<Record<string, unknown>>) : [];
   const action = actions.find((a) => a && a.action_id === APPROVE_ACTION_ID);
-  if (!action) return { status: 200, body: { ok: true, ignored: "other_action" } };
+  if (!action) return { status: 200, body: { ok: true, ignored: "other_action" }, responseUrl: null };
   const button = parseApproveButtonValue(action.value);
   const team = (payload.team && typeof payload.team === "object" ? payload.team : {}) as Record<string, unknown>;
   const user = (payload.user && typeof payload.user === "object" ? payload.user : {}) as Record<string, unknown>;
-  const responseUrl = typeof payload.response_url === "string" ? payload.response_url : null;
-  if (!button || !isSlackTeamId(team.id) || !isSlackUserId(user.id)) return { status: 200, body: { ok: true, ignored: "malformed" } };
+  const responseUrl = isSlackResponseUrl(payload.response_url) ? payload.response_url : null;
+  if (!button || !isSlackTeamId(team.id) || !isSlackUserId(user.id)) return { status: 200, body: { ok: true, ignored: "malformed" }, responseUrl: null };
+  const press = { approvalId: button.approvalId, payloadHash: button.payloadHash, teamId: team.id, slackUserId: user.id, responseUrl };
+  return { status: 200, body: { ok: true }, responseUrl, work: () => decidePress(press, deps) };
+}
 
+async function decidePress(
+  press: { approvalId: string; payloadHash: string; teamId: string; slackUserId: string; responseUrl: string | null },
+  deps: InteractivityDeps,
+): Promise<InteractivityResult> {
+  const now = deps.now();
   const reply = async (text: string, replace: boolean): Promise<InteractivityResult> => {
-    if (responseUrl) {
+    if (press.responseUrl) {
       const r = await respondToAction(
-        responseUrl,
+        press.responseUrl,
         replace ? { replace_original: true, text } : { response_type: "ephemeral", replace_original: false, text },
         { fetchImpl: deps.fetchImpl },
       );
@@ -110,41 +126,40 @@ export async function handleSlackInteractivity(
     return { status: 200, body: { ok: true }, replaced: text };
   };
 
-  const routed = await resolveWebhookRoute(deps.db, "slack", team.id);
+  const routed = await resolveWebhookRoute(deps.db, "slack", press.teamId);
   if (!routed) return { status: 200, body: { ok: true, ignored: "unknown_team" } };
   const tenantId = routed.tenantId;
 
-  const token = await slackTokenFor(deps.db, tenantId, team.id);
+  const token = await slackTokenFor(deps.db, tenantId, press.teamId);
   if (!token.ok) return reply("OASIS cannot check who you are in this Slack workspace right now. Decide this approval in OASIS.", false);
-  const who = await resolveSlackIdentity(deps.db, { tenantId, teamId: team.id, slackUserId: user.id, token: token.token, now, fetchImpl: deps.fetchImpl });
+  const who = await resolveSlackIdentity(deps.db, { tenantId, teamId: press.teamId, slackUserId: press.slackUserId, token: token.token, now, fetchImpl: deps.fetchImpl });
   if (!who.ok) return reply("OASIS could not check who you are in Slack just now. Try again, or decide this approval in OASIS.", false);
   const id = who.identity;
   if (id.isGuest || id.isExternal || !id.profileId) {
     return reply("Only an owner or admin of this OASIS workspace can approve from Slack, and your Slack email is not linked to one. Decide it in OASIS.", false);
   }
-  const profile = await profileInTenant(deps.db, tenantId, id.profileId);
-  const isTrueAdmin = !!profile && (profile.is_owner === 1 || ["owner", "admin"].includes((profile.team_role || "").toLowerCase()));
-  if (!profile || profile.deactivated_at || !isTrueAdmin) {
+  const approver = await slackApproverProfile(deps.db, tenantId, id.profileId);
+  if (!approver) {
     return reply("Only an owner or admin of this OASIS workspace can approve from Slack. Decide it in OASIS.", false);
   }
-  const persona = resolvePersona({ teamRole: profile.team_role, isTrueAdmin: true });
+  const persona = resolvePersona({ teamRole: approver.teamRole, isTrueAdmin: true });
   const scope = approvalScopeFor({
     tenantId,
-    userId: profile.auth_user_id,
+    userId: approver.authUserId,
     persona,
     canAct: SURFACE_CAPABILITIES[persona].canAct,
     openDepartments: new Set(DEPARTMENT_KEYS),
   });
 
-  const decided = await decideApproval(deps.db, scope, button.approvalId, { kind: "approve", payloadHash: button.payloadHash }, now, "slack");
+  const decided = await decideApproval(deps.db, scope, press.approvalId, { kind: "approve", payloadHash: press.payloadHash }, now, "slack");
   if (!decided.ok) {
-    const current = decided.error === "not_pending" && decided.status === "approved" ? await getApproval(deps.db, scope, button.approvalId) : null;
-    const resumable = !!current && current.status === "approved" && current.payload_hash === button.payloadHash;
+    const current = decided.error === "not_pending" && decided.status === "approved" ? await getApproval(deps.db, scope, press.approvalId) : null;
+    const resumable = !!current && current.status === "approved" && current.payload_hash === press.payloadHash;
     if (!resumable) return reply(DECIDE_COPY[decided.error] ?? "This approval could not be decided from Slack. Open it in OASIS.", decided.error === "not_pending" || decided.error === "expired");
   }
   const executed = await executeApproval(
     deps.db,
-    { tenantId, approvalId: button.approvalId, approver: { userId: profile.auth_user_id, email: profile.email }, now: deps.now },
+    { tenantId, approvalId: press.approvalId, approver: { userId: approver.authUserId, email: approver.email }, now: deps.now },
     deps.executorDeps,
   );
   const done = executed.approval;
@@ -155,4 +170,21 @@ export async function handleSlackInteractivity(
   if (done?.status === "executed" && r?.outcome === "dry_run") return reply(`Approved${by} in Slack, but not posted: this OASIS deployment is in dry-run for Slack.`, true);
   const why = r && r.outcome === "failed" ? r.message : "it could not be carried out.";
   return reply(`Approved${by} in Slack, but not posted: ${why}`, true);
+}
+
+/** The press's work, run after the answer, threw: tell the presser (Slack shows nothing otherwise). */
+export async function reportPressFailure(responseUrl: string | null, opts: { fetchImpl?: SlackFetch } = {}): Promise<void> {
+  if (!responseUrl) return;
+  const r = await respondToAction(responseUrl, { response_type: "ephemeral", replace_original: false, text: PRESS_FAILED_COPY }, { fetchImpl: opts.fetchImpl });
+  if (!r.ok) console.error("[slack.interactivity] could not tell the presser the press failed", { error: r.error });
+}
+
+/** Accept, then do the work, in order: the whole press as one call. */
+export async function handleSlackInteractivity(
+  input: { rawBody: string; timestamp: string | null; signature: string | null },
+  deps: InteractivityDeps,
+): Promise<InteractivityResult> {
+  const accepted = await acceptSlackInteraction(input, deps);
+  if (!accepted.work) return { status: accepted.status, body: accepted.body };
+  return accepted.work();
 }

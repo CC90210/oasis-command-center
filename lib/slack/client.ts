@@ -11,7 +11,10 @@
  *                       which email (to link to a teammate)?
  *   conversations.list  the public channels the Settings channel map offers
  *   chat.postMessage    a reply in a thread (only ever from an approved
- *                       send_slack_message, or the approval card itself)
+ *                       send_slack_message), or a line with no draft in it
+ *                       saying a draft waits for review
+ *   chat.postEphemeral  the draft and its Approve button, to the ONE owner or
+ *                       admin who asked for it (nobody else in the channel)
  *   response_url        replace an interactive message after a button press
  *
  * Tokens are passed in by the caller from the encrypted store; they are never
@@ -221,6 +224,35 @@ export async function postMessage(
   if (!r.ok) return r;
   if (typeof r.data.ts !== "string") return { ok: false, error: "unexpected_response", status: 200 };
   return { ok: true, data: { ts: r.data.ts, channel: String(r.data.channel ?? message.channel) } };
+}
+
+// -- chat.postEphemeral ------------------------------------------------------
+
+/**
+ * A message only ONE person in the channel sees (Slack keeps it in their
+ * client for the session; nobody else, guests included, can read it). How a
+ * draft reaches the owner or admin who asked for it without being shown to
+ * the channel.
+ */
+export async function postEphemeral(
+  token: string,
+  message: { channel: string; user: string; text: string; thread_ts?: string | null; blocks?: unknown[] },
+  opts: Opts = {},
+): Promise<SlackCallResult<{ message_ts: string }>> {
+  const r = await call<{ message_ts?: string }>(
+    "chat.postEphemeral",
+    {
+      channel: message.channel,
+      user: message.user,
+      text: message.text,
+      ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
+      ...(message.blocks ? { blocks: message.blocks } : {}),
+    },
+    { ...opts, token },
+  );
+  if (!r.ok) return r;
+  if (typeof r.data.message_ts !== "string") return { ok: false, error: "unexpected_response", status: 200 };
+  return { ok: true, data: { message_ts: r.data.message_ts } };
 }
 
 // -- response_url ------------------------------------------------------------

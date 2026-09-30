@@ -10,7 +10,9 @@
  * row's words:
  *   department   an @mention in the channel goes to that department unless the
  *                message names another; "General" means nobody answers unless
- *                @mentioned (Chief of Staff then).
+ *                @mentioned (then the workspace's default department). Only
+ *                departments with an AI teammate in this workspace are offered
+ *                (the page passes them; the API refuses the rest).
  *   client       every message in the channel shows on that client's
  *                Conversations tab.
  * Channels shared with another company are listed, disabled: OASIS never reads
@@ -19,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { removeChannelMapping, saveChannelMapping } from "@/components/settings/slack-channel-map-actions";
 
 type Department = { key: string; label: string };
 type Channel = {
@@ -91,21 +94,18 @@ export function SlackChannelMap({
     void load();
   }, [load]);
 
+  // Both writes come back as a result, never a thrown error: a request that
+  // cannot reach OASIS is a note on the row (slack-channel-map-actions.ts).
   async function save(c: Channel) {
     const d = drafts[c.id] ?? draftOf(c);
     setBusy(c.id);
     try {
-      const res = await fetch("/api/slack/channels", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ channel_id: c.id, department: d.department || null, customer_id: d.customer || null }),
-      });
-      const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!res.ok || body?.ok !== true) {
-        setRowNote((n) => ({ ...n, [c.id]: { ok: false, text: String(body?.message ?? `Not saved (HTTP ${res.status}).`) } }));
+      const saved = await saveChannelMapping({ channelId: c.id, department: d.department || null, customerId: d.customer || null });
+      if (!saved.ok) {
+        setRowNote((n) => ({ ...n, [c.id]: { ok: false, text: saved.text } }));
         return;
       }
-      const route = body.route as { department: string | null; customer_id: string | null };
+      const route = saved.value;
       setLoaded((l) =>
         l.state === "ready"
           ? { ...l, channels: l.channels.map((x) => (x.id === c.id ? { ...x, route: { department: route.department, customer_id: route.customer_id } } : x)) }
@@ -120,10 +120,9 @@ export function SlackChannelMap({
   async function remove(channelId: string) {
     setBusy(channelId);
     try {
-      const res = await fetch(`/api/slack/channels?channel_id=${encodeURIComponent(channelId)}`, { method: "DELETE" });
-      const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!res.ok || body?.ok !== true) {
-        setRowNote((n) => ({ ...n, [channelId]: { ok: false, text: String(body?.message ?? `Not removed (HTTP ${res.status}).`) } }));
+      const removed = await removeChannelMapping(channelId);
+      if (!removed.ok) {
+        setRowNote((n) => ({ ...n, [channelId]: { ok: false, text: removed.text } }));
         return;
       }
       await load();

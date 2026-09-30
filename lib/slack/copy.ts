@@ -1,10 +1,25 @@
 /**
- * lib/slack/copy.ts - the sentence Settings > Chat apps shows after an install
+ * lib/slack/copy.ts - Slack sentences shared across surfaces: who can approve
+ * a Slack reply, and the sentence Settings > Chat apps shows after an install
  * attempt comes back (?slack=connected|denied|error&reason=<code>).
  *
  * The query string is attacker-reachable, so only KNOWN codes turn into words;
  * anything else is a generic sentence, and the raw value is never shown.
  */
+
+/**
+ * Who can approve a Slack reply, said the same way on every surface that
+ * promises it (the Slack connector's "does" list, Settings > Chat apps). It
+ * says what the rules do, not more:
+ *   - in the Feed, the approvals store's department seats decide
+ *     (lib/os/approvals/rules.ts DEPARTMENT_SEATS: an owner or admin for every
+ *     department, a teammate for their own department's approvals);
+ *   - in Slack, only an owner or admin, and only on the card sent to the one
+ *     who asked (lib/slack/interactivity.ts, lib/slack/send.ts).
+ * tests/slack-events.test.ts pins the sentence to both rules.
+ */
+export const SLACK_APPROVAL_RULE =
+  "Nothing is posted until someone who can approve for that department approves it in the Feed. An owner or admin who asks in Slack can also approve there, on a card only they can see.";
 
 const REASONS: Readonly<Record<string, string>> = {
   not_configured: "OASIS's Slack app is not set up on this deployment yet.",

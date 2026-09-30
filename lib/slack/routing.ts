@@ -10,13 +10,16 @@
  * DEPARTMENT NAMES ONLY. What a Slack user sees is the department ("Client
  * Success"), never an internal agent name. The text a person types after the
  * mention may name a department ("@OASIS Client Success, can you ..."); that
- * wins over the channel's default, which wins over Chief of Staff.
+ * wins over the channel's default, which wins over the workspace's default
+ * (Chief of Staff, or in a client workspace without one, the first department
+ * that has an AI teammate).
  */
 import "server-only";
 import { randomUUID } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import type { DepartmentKey } from "@/lib/os/types";
+import { departmentChannelFor } from "@/components/os/department/config";
 
 /** Providers whose install flow OASIS can finish (the generic authorize route starts only these). */
 export const INSTALL_PROVIDERS: readonly string[] = ["slack"];
@@ -96,8 +99,26 @@ export function departmentFromMention(text: string): { department: DepartmentKey
   return { department: null, rest: plain };
 }
 
-/** Text named > the channel's default > Chief of Staff. */
-export function departmentForMention(input: { text: string; channelDepartment: DepartmentKey | null }): {
+/**
+ * The departments that have an AI teammate in a workspace, so they can answer
+ * in Slack (components/os/department/config.ts): every department in OASIS's
+ * own workspace; in a client workspace only the neutral ones (today Sales and
+ * Client Success). The channel map offers only these, and the map's API
+ * refuses the rest: a channel mapped to a department that cannot answer would
+ * only ever get "not set up" notices.
+ */
+export function answeringDepartments(opts: { oasis: boolean }): DepartmentKey[] {
+  return DEPARTMENT_KEYS.filter((k) => departmentChannelFor(k, opts).kind === "agent");
+}
+
+/** Who takes a mention that names no department in a channel with none: Chief of Staff where it has a teammate, else the first department that does. */
+export function defaultMentionDepartment(opts: { oasis: boolean }): DepartmentKey {
+  const answering = answeringDepartments(opts);
+  return answering.includes("chief_of_staff") ? "chief_of_staff" : (answering[0] ?? "chief_of_staff");
+}
+
+/** Text named > the channel's default > the workspace's default department (defaultMentionDepartment). */
+export function departmentForMention(input: { text: string; channelDepartment: DepartmentKey | null; defaultDepartment?: DepartmentKey }): {
   department: DepartmentKey;
   question: string;
   source: "named" | "channel" | "default";
@@ -105,7 +126,7 @@ export function departmentForMention(input: { text: string; channelDepartment: D
   const named = departmentFromMention(input.text);
   if (named.department) return { department: named.department, question: named.rest, source: "named" };
   if (input.channelDepartment) return { department: input.channelDepartment, question: named.rest, source: "channel" };
-  return { department: "chief_of_staff", question: named.rest, source: "default" };
+  return { department: input.defaultDepartment ?? "chief_of_staff", question: named.rest, source: "default" };
 }
 
 // -- The channel map -----------------------------------------------------------
@@ -186,12 +207,18 @@ export type SaveRouteInput = {
 
 export type SaveRouteResult =
   | { ok: true; route: ChannelRoute }
-  | { ok: false; error: "invalid_channel" | "invalid_department" | "unknown_customer" | "channel_taken" };
+  | { ok: false; error: "invalid_channel" | "invalid_department" | "unknown_customer" };
 
 /**
- * Map (or re-map) one channel. The customer must be one of THIS workspace's
- * client records; the channel must not be mapped by another workspace (it
- * cannot be, while the team routes here, but the unique index is the proof).
+ * Map (or re-map) one channel, for THIS workspace. The customer must be one of
+ * its own client records.
+ *
+ * A route is unique per (tenant, team, channel): another workspace's row for
+ * the same channel is a different row, never overwritten and never in the way.
+ * Which workspace a Slack team's events reach is decided once, by
+ * provider_webhook_routes (one live workspace per team), and every read here
+ * is by that tenant, so a row left by a workspace that no longer holds the
+ * team is never read (and its disconnect deletes it: slackDisconnectStatements).
  */
 export async function saveChannelRoute(db: Client, input: SaveRouteInput): Promise<SaveRouteResult> {
   const tenantId = requireTenant(input.tenantId);
@@ -209,18 +236,42 @@ export async function saveChannelRoute(db: Client, input: SaveRouteInput): Promi
   const rs = await db.execute({
     sql: `INSERT INTO slack_channel_routes (id, tenant_id, team_id, channel_id, channel_name, department, customer_id, created_by, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT (team_id, channel_id) DO UPDATE SET
+          ON CONFLICT (tenant_id, team_id, channel_id) DO UPDATE SET
             channel_name = excluded.channel_name,
             department = excluded.department,
             customer_id = excluded.customer_id,
-            updated_at = excluded.updated_at
-          WHERE slack_channel_routes.tenant_id = excluded.tenant_id`,
+            updated_at = excluded.updated_at`,
     args: [randomUUID(), tenantId, input.teamId, input.channelId, name, input.department, input.customerId, input.createdBy, nowIso, nowIso],
   });
-  if (rs.rowsAffected !== 1) return { ok: false, error: "channel_taken" };
-  const route = await getChannelRoute(db, tenantId, input.teamId, input.channelId);
-  if (!route) return { ok: false, error: "channel_taken" };
+  const route = rs.rowsAffected === 1 ? await getChannelRoute(db, tenantId, input.teamId, input.channelId) : null;
+  if (!route) throw new Error("slack.routing: the channel route was not written");
   return { ok: true, route };
+}
+
+/**
+ * What a Slack disconnect deletes, run IN the same batch that revokes the
+ * connection (lib/connections/service.ts disconnectConnection): this
+ * workspace's channel map for the team, and every Slack person it looked up
+ * (display names and teammate links). Nothing of a disconnected Slack stays
+ * behind to block the next workspace that installs it or to outlive the
+ * connection. Empty when migration bravo__197 is not applied (nothing to
+ * delete, and a statement on a missing table would fail the disconnect).
+ */
+export async function slackDisconnectStatements(db: Client, tenantId: string, teamId: string | null): Promise<InStatement[]> {
+  const t = requireTenant(tenantId);
+  const rs = await db.execute({
+    sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('slack_channel_routes', 'external_identities')",
+    args: [],
+  });
+  const present = new Set(rs.rows.map((r) => String((r as unknown as Row).name)));
+  const out: InStatement[] = [];
+  if (present.has("slack_channel_routes") && teamId) {
+    out.push({ sql: "DELETE FROM slack_channel_routes WHERE tenant_id = ? AND team_id = ?", args: [t, teamId] });
+  }
+  if (present.has("external_identities")) {
+    out.push({ sql: "DELETE FROM external_identities WHERE tenant_id = ? AND provider = 'slack'", args: [t] });
+  }
+  return out;
 }
 
 export async function deleteChannelRoute(db: Client, tenantId: string, teamId: string, channelId: string): Promise<boolean> {

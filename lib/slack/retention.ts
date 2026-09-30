@@ -7,7 +7,10 @@
  *   - slack_event_receipts older than RECEIPT_RETENTION_DAYS (Slack retries
  *     within minutes; a week of receipts is ample dedupe);
  *   - jev_calls older than JEV_TELEMETRY_RETENTION_DAYS (telemetry only, no
- *     text, but it is not kept forever either).
+ *     text, but it is not kept forever either);
+ *   - Slack people (external_identities: display name, teammate link) not
+ *     looked up again for SLACK_RETENTION_DAYS. A disconnect deletes them all
+ *     at once (lib/slack/routing.ts slackDisconnectStatements).
  * Approvals (with their draft text) are the business record of what was
  * approved and posted, and stay.
  *
@@ -34,12 +37,13 @@ export type RetentionResult = {
   messagesDeleted: number;
   receiptsDeleted: number;
   jevCallsDeleted: number;
+  identitiesDeleted: number;
   /** True when a table this sweep needs is not there yet (bravo__197). */
   notInstalled: boolean;
 };
 
 export async function purgeSlackRetention(db: Client, now: Date): Promise<RetentionResult> {
-  const out: RetentionResult = { workspaces: 0, messagesDeleted: 0, receiptsDeleted: 0, jevCallsDeleted: 0, notInstalled: false };
+  const out: RetentionResult = { workspaces: 0, messagesDeleted: 0, receiptsDeleted: 0, jevCallsDeleted: 0, identitiesDeleted: 0, notInstalled: false };
   const messageCutoff = new Date(now.getTime() - SLACK_RETENTION_DAYS * DAY).toISOString();
 
   // Every workspace that ever connected Slack, revoked included: its mirrored
@@ -69,6 +73,13 @@ export async function purgeSlackRetention(db: Client, now: Date): Promise<Retent
       args: [new Date(now.getTime() - JEV_TELEMETRY_RETENTION_DAYS * DAY).toISOString()],
     });
     out.jevCallsDeleted = j.rowsAffected;
+    // A Slack person OASIS has not had to look up for 90 days (they stopped
+    // writing in mapped channels, or left): their name and teammate link go.
+    const i = await db.execute({
+      sql: "DELETE FROM external_identities WHERE provider = 'slack' AND checked_at < ?",
+      args: [messageCutoff],
+    });
+    out.identitiesDeleted = i.rowsAffected;
   } catch (err) {
     if (!isSlackSchemaMissing(err)) throw err;
     out.notInstalled = true;

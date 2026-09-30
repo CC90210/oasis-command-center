@@ -7,7 +7,9 @@
  *   mention_only    installed, no channel mapped to this department: it still
  *                   answers an @mention that names it
  *   channels        the channels mapped to this department
- *   unknown         a read failed (never shown as "not connected")
+ *   unknown         a read failed, or Slack is installed but its tables are
+ *                   not (then nothing answers): never shown as "not
+ *                   connected" or "by @mention"
  *
  * Tenant from the caller's session.
  */
@@ -50,6 +52,11 @@ export async function loadSlackPresence(
       }
     } catch (err) {
       if (!isSlackSchemaMissing(err)) throw err;
+      // Installed, but the Slack tables are not (bravo__197): the events route
+      // refuses every event, so no department answers an @mention. Never
+      // "connected" / "by @mention".
+      console.error("[slack.status] Slack is installed but migration bravo__197 is not applied", { tenantId });
+      return { kind: "unknown" };
     }
     return { kind: "connected", byDepartment };
   } catch (err) {
