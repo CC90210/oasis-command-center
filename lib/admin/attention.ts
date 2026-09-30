@@ -310,7 +310,7 @@ export async function loadCronFailures(
 export type AttentionEvent = {
   id: string;
   eventType: string;
-  severity: "error" | "warn";
+  severity: "critical" | "error" | "warn";
   publisherAgent: string | null;
   payload: Record<string, unknown> | null;
   publishedAt: string;
@@ -323,6 +323,21 @@ export function normaliseSeverity(raw: unknown): string {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The severities that count as errors. The event bus accepts "critical" above
+ * "error" (BEA scripts/core/event_bus.py; the inbound classifier publishes
+ * BRAVO_CLASSIFIER_DEGRADED at critical on a bug) and the Feed already draws it
+ * as Failed. Reading only "error" left the most urgent events out of "needs
+ * you", so a critical one read as "Nothing needs you".
+ */
+export const ERROR_SEVERITIES = ["critical", "error"] as const;
+
+/** A row's severity as the page labels it: critical, error, or (warn and the legacy warning) warn. */
+export function attentionSeverity(raw: unknown): AttentionEvent["severity"] {
+  const s = normaliseSeverity(raw);
+  return s === "critical" || s === "error" ? s : "warn";
+}
 
 /**
  * Errors and warnings in the window: exact counts per severity, plus the newest
@@ -342,7 +357,7 @@ export async function loadAttentionEvents(
       .from("agent_events")
       .select("id", { count: "exact", head: true })
       .or(thisTenant)
-      .eq("severity", "error")
+      .in("severity", [...ERROR_SEVERITIES])
       .gte("published_at", since),
     db
       .from("agent_events")
@@ -354,7 +369,7 @@ export async function loadAttentionEvents(
       .from("agent_events")
       .select("id, event_type, severity, publisher_agent, payload, published_at")
       .or(thisTenant)
-      .in("severity", ["error", "warn", "warning"])
+      .in("severity", [...ERROR_SEVERITIES, "warn", "warning"])
       .gte("published_at", since)
       .order("published_at", { ascending: false })
       .limit(ATTENTION_LIST_LIMIT),
@@ -369,7 +384,7 @@ export async function loadAttentionEvents(
     rows: ((rows.data || []) as Row[]).map((e) => ({
       id: String(e.id),
       eventType: e.event_type,
-      severity: normaliseSeverity(e.severity) === "error" ? ("error" as const) : ("warn" as const),
+      severity: attentionSeverity(e.severity),
       publisherAgent: e.publisher_agent,
       payload: typeof e.payload === "string" && e.payload.trim() && !e.payload.trim().startsWith("{")
         ? { text: e.payload }

@@ -259,6 +259,10 @@ async function main() {
     { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at, payload) VALUES ('e4', 'CLIENT_ERR', 'bravo', 'error', ?, ?, '{\"note\":\"CLIENT-EVENT-DO-NOT-COUNT\"}')", args: [CLIENT, ago(1 * H)] },
     { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at) VALUES ('e5', 'OLD_ERR', 'bravo', 'error', ?, ?)", args: [OASIS, ago(30 * H)] },
     { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at) VALUES ('e6', 'TICK', 'bravo', 'info', ?, ?)", args: [OASIS, ago(1 * H)] },
+    // The event bus's top severity (BEA event_bus.py accepts info|warn|error|
+    // critical): an untenanted critical counts as an error; a client's never.
+    { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at) VALUES ('e7', 'BRAVO_CLASSIFIER_DEGRADED', 'inbound_classifier', 'critical', NULL, ?)", args: [ago(30 * MIN)] },
+    { sql: "INSERT INTO agent_events (id, event_type, publisher_agent, severity, correlation_id, published_at, payload) VALUES ('e8', 'CLIENT_CRIT', 'bravo', 'critical', ?, ?, '{\"note\":\"CLIENT-EVENT-DO-NOT-COUNT\"}')", args: [CLIENT, ago(20 * MIN)] },
   ];
   // Sixty cold OASIS leads (more than the 50-row list), five fresh ones, ten cold client leads.
   for (let i = 0; i < 60; i++) {
@@ -430,9 +434,18 @@ async function main() {
     assert.match(at.whatToDoForCronFailure({ error: "timed out after 600s" }), /time limit/);
   });
   await check("events: own or untenanted, inside 24 h; warnings normalised; another workspace's never counted", () => {
-    assert.equal(health.events?.errors, 1);
     assert.equal(health.events?.warnings, 2);
-    assert.deepEqual(health.events?.rows.map((e) => [e.id, e.severity]), [["e1", "error"], ["e2", "warn"], ["e3", "warn"]]);
+    assert.deepEqual(
+      health.events?.rows.filter((e) => e.severity === "warn" || e.severity === "error").map((e) => [e.id, e.severity]),
+      [["e1", "error"], ["e2", "warn"], ["e3", "warn"]],
+    );
+  });
+  await check("events: a critical event is an error (counted, listed, labelled Critical); a client's is not", () => {
+    assert.equal(health.events?.errors, 2, "the OASIS error and the untenanted critical");
+    assert.deepEqual(health.events?.rows.map((e) => [e.id, e.severity]), [["e7", "critical"], ["e1", "error"], ["e2", "warn"], ["e3", "warn"]]);
+    assert.equal(health.attention.errors, 2);
+    assert.equal(at.attentionSeverity("CRITICAL"), "critical");
+    assert.equal(at.attentionSeverity("warning"), "warn");
   });
   await check("cold leads: COUNT(*) of 60, not the 50-row list", () => {
     assert.equal(health.attention.coldLeads, 60);
@@ -451,7 +464,7 @@ async function main() {
       const h = await sh.loadSystemHealth(OASIS, { now: NOW, probeCloud });
       assert.equal(h.cron, null);
       assert.equal(h.attention.cronFailures, null);
-      assert.equal(h.attention.errors, 1, "the other reads still answer");
+      assert.equal(h.attention.errors, 2, "the other reads still answer");
       assert.equal(at.nothingNeedsYou({ ...h.attention, errors: 0, workersDown: 0 }), false, "an unread count is not a zero");
     } finally {
       console.error = originalError;
@@ -486,6 +499,8 @@ async function main() {
     assert.match(text, /Cold leads 60 /, "the tile is the count, not the list length");
     assert.match(text, /Showing the 50 oldest of 60/);
     assert.match(text, /What to do: It ran past its time limit/);
+    assert.match(text, /Errors today 2 /, "a critical event is in the errors tile");
+    assert.match(text, /Critical .{0,40}BRAVO|Critical .{0,80}classifier/i, "the critical event is listed and labelled Critical");
     assert.ok(!text.includes("CLIENT-PC-DO-NOT-LIST") && !text.includes("CLIENT-CRON-DO-NOT-COUNT") && !text.includes("CLIENT-EVENT-DO-NOT-COUNT"));
   });
   await check("/health: no docker, Vercel, state-api, Supabase or 'unauthorized' anywhere on the page", () => {

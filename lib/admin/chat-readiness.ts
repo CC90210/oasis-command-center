@@ -15,6 +15,20 @@ export function harnessOwnsUrlParams(active: boolean, pathname: string | null | 
 }
 
 /**
+ * How long the widget waits for its bridge health probe before calling the
+ * bridge unreachable. Direct to the operator's own loopback bridge, 1.5 s is
+ * plenty. Through /api/bridge/health (proxy mode, which oasisai.work uses) the
+ * server first authorizes the session, then gives the bridge 1.5 s of its own
+ * (AbortSignal.timeout(1500) there): a 1.5 s client window aborted before the
+ * server could answer, so an online bridge read "offline" for the 30 s until
+ * the next probe, and the Coding harness told the operator to go get an API
+ * key while the header above it said the computer was online.
+ */
+export function bridgeProbeTimeoutMs(proxyMode: boolean): number {
+  return proxyMode ? 6000 : 1500;
+}
+
+/**
  * Is a chat turn possible right now, from a real check? The desktop bridge
  * answered, or there is an actual key: this agent's own saved key, or, for
  * the operator, a platform key /api/usage confirmed exists. Being the

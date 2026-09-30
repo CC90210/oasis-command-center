@@ -211,10 +211,11 @@ export async function POST(req: NextRequest) {
     userMessage: String(lastUserMsg.content || ""),
     startedAt,
   });
-  // <dashboard-action> markers in the reply are applied and logged here, the
-  // same as /api/chat (2026-09-30): the bridge's prompt promises the dashboard
-  // applies them, and until now nothing did, so /runs never saw a harness
-  // change. Tenant and user are this route's own authorization, never the body.
+  // <dashboard-action> markers in the reply become signed proposals here
+  // (2026-09-30), never writes: markers inside code are ignored, and each
+  // other one is written only when the operator clicks Apply, then Confirm
+  // (POST /api/bridge/actions, which logs it for /runs). Tenant, user and role
+  // are this route's own authorization, never the body.
   const withActions = teeBridgeDashboardActions(persistedBody, {
     tenantId: auth.tenantId,
     userId: auth.userId,

@@ -357,6 +357,20 @@ async function main() {
     assert.match(widget, /const cloud = chatReadiness\(\{/);
     assert.doesNotMatch(widget, /cloudReady \|\| isAdmin/, "the retry offer is readiness too: being the operator is not a key");
   });
+  await check("the bridge probe waits longer than the proxy's own bridge budget, so an online bridge never reads offline", async () => {
+    const { bridgeProbeTimeoutMs } = await import("../lib/admin/chat-readiness");
+    // /api/bridge/health authorizes the session first, then gives the bridge
+    // its own AbortSignal.timeout(N). A client window at or under N aborts
+    // before the server can answer: the harness then said "bridge offline" and
+    // "needs a model + API key" beside a header saying the computer is online.
+    const healthRoute = readFileSync(join(ROOT, "app", "api", "bridge", "health", "route.ts"), "utf8");
+    const serverBudgets = [...healthRoute.matchAll(/AbortSignal\.timeout\((\d[\d_]*)\)/g)].map((m) => Number(m[1].replace(/_/g, "")));
+    assert.ok(serverBudgets.length > 0, "the proxy's bridge timeout is found");
+    assert.ok(bridgeProbeTimeoutMs(true) >= Math.max(...serverBudgets) + 2000, `proxy probe ${bridgeProbeTimeoutMs(true)} ms vs server budget ${Math.max(...serverBudgets)} ms plus auth`);
+    assert.equal(bridgeProbeTimeoutMs(false), 1500, "the direct loopback probe keeps its short window");
+    const widget = readFileSync(join(ROOT, "components", "ChatWidget.tsx"), "utf8");
+    assert.match(widget, /setTimeout\(\(\) => ctl\.abort\(\), bridgeProbeTimeoutMs\(isProxyModeRuntime\(\)\)\)/, "the widget's probe uses it");
+  });
   const usage = await import("../app/api/usage/route");
   const { NextRequest } = await import("next/server");
   const usageGet = () => usage.GET(new NextRequest("http://localhost/api/usage?agent=bravo"));
@@ -618,6 +632,14 @@ async function main() {
       const edited = await confirm({ agent: "bravo", ...proposal, payload: { display_name: "EDITED" } });
       assert.equal(edited.status, 403, "an edited payload is refused");
       assert.notEqual(await profileName(), "EDITED");
+      // The agent is checked against this workspace's bridge before any
+      // signature work: an unknown agent, or one this workspace's bridge does
+      // not serve (SunBiz's), is a 400 that names it, and nothing runs.
+      const unknownAgent = await confirm({ ...proposal, agent: "nope" });
+      assert.deepEqual([unknownAgent.status, ((await unknownAgent.json()) as { error?: string }).error], [400, "invalid_agent"]);
+      const otherBridge = await confirm({ ...proposal, agent: "solara" });
+      assert.deepEqual([otherBridge.status, ((await otherBridge.json()) as { error?: string }).error], [400, "agent_not_enabled_for_tenant"]);
+      assert.equal((await loggedRows()).length, 0, "a refused agent wrote and logged nothing");
 
       const ok = await confirm({ agent: "bravo", ...proposal });
       assert.equal(ok.status, 200);
@@ -757,6 +779,12 @@ async function main() {
   await check("copy: /runs has no invented goal, /inbox reads only the database and says Turso", () => {
     const runs = readFileSync(join(ROOT, "app", "runs", "page.tsx"), "utf8");
     assert.doesNotMatch(runs, /\$7000|MRR target/);
+    // The harness writes nothing until the operator confirms each change
+    // (lib/admin/bridge-dashboard-actions.ts); the page must not say it applies
+    // them the way a cloud chat does.
+    const runsText = runs.replace(/\s+/g, " ");
+    assert.doesNotMatch(runsText, /applies and logs the markers the same way/);
+    assert.match(runsText, /until you click Apply, then Confirm/);
     const inbox = readFileSync(join(ROOT, "app", "inbox", "page.tsx"), "utf8");
     assert.doesNotMatch(inbox, /from "@\/lib\/agent-inbox-fs"/, "the page no longer imports the filesystem inbox");
     assert.doesNotMatch(inbox, /Supabase|tmp\/agent_inbox|\$5K/);

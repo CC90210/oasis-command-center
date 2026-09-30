@@ -54,9 +54,10 @@ export default async function RunsPage() {
           </p>
           <p>
             <span className="text-fg font-medium">The Coding harness and cloud chats both land here.</span>{" "}
-            The harness runs Claude Code on your computer; its reply comes back
-            through the Command Center, which applies and logs the markers the
-            same way it does for a cloud chat. Two places to work, one audit trail.
+            The harness runs Claude Code on your computer. Each change its reply
+            proposes waits in the chat until you click Apply, then Confirm; only
+            then is it written, and logged here. A cloud chat applies its changes
+            as it answers. Two places to work, one audit trail.
           </p>
           <p className="text-fg-dim">
             <span className="text-fg font-medium">When to look here:</span>{" "}

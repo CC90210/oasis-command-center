@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { chatReadiness, harnessOwnsUrlParams } from "@/lib/admin/chat-readiness";
+import { bridgeProbeTimeoutMs, chatReadiness, harnessOwnsUrlParams } from "@/lib/admin/chat-readiness";
 import { PendingHarnessActions, pendingFromFrame, type PendingHarnessAction } from "@/components/admin/PendingHarnessActions";
 import { ToolTimelineList } from "@/components/chat/ToolTimelineList";
 import { MessageDownloadMenu } from "@/components/chat/MessageDownloadMenu";
@@ -1126,7 +1126,9 @@ export default function ChatWidget({ agentKeys, defaultAgent, isAdmin, welcomeMe
     const probe = async () => {
       try {
         const ctl = new AbortController();
-        const t = setTimeout(() => ctl.abort(), 1500);
+        // Longer through the proxy than the proxy's own 1.5 s bridge budget
+        // (lib/admin/chat-readiness.ts bridgeProbeTimeoutMs).
+        const t = setTimeout(() => ctl.abort(), bridgeProbeTimeoutMs(isProxyModeRuntime()));
         // Proxy mode: probe the same-origin proxy (which forwards the bearer
         // to the VPS server-side) so the browser never touches the VPS and
         // never needs the bearer. Operator localhost: probe the bridge directly.

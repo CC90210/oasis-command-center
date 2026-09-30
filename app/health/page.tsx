@@ -147,7 +147,7 @@ export default async function HealthPage() {
           The buckets that might need you today. A tile that says Couldn&apos;t check could not be read; it is not a zero.
         </p>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          <HealthTile label="Errors today" count={a.errors} alarm hint="Things that broke in the last 24 hours: crashes, failed calls, anything an agent flagged as an error." />
+          <HealthTile label="Errors today" count={a.errors} alarm hint="Things that broke in the last 24 hours: crashes, failed calls, anything an agent flagged as an error or critical." />
           <HealthTile label="Warnings today" count={a.warnings} hint="Things that went wrong but kept running in the last 24 hours. Worth a look, not an emergency." />
           <HealthTile label="Failed automations" count={a.cronFailures} alarm hint="Schedules whose run in the last 24 hours errored. Each one is listed under Background work with what to do." />
           <HealthTile label="Workers down" count={a.workersDown} alarm hint="Background processes on your computer that stopped reporting or report themselves down." />
@@ -181,7 +181,9 @@ export default async function HealthPage() {
               <li key={ev.id} className="rounded-lg border border-hairline bg-bg-panel p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Tag tone={ev.severity === "error" ? "warm" : "accent"}>{ev.severity === "error" ? "Error" : "Warning"}</Tag>
+                    <Tag tone={ev.severity === "warn" ? "accent" : "warm"}>
+                      {ev.severity === "critical" ? "Critical" : ev.severity === "error" ? "Error" : "Warning"}
+                    </Tag>
                     <span className="font-mono text-[11px] text-fg-dim" title={ev.eventType}>
                       {formatEventType(ev.eventType)}
                     </span>
