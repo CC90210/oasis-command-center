@@ -598,7 +598,18 @@ export type NeedsYouItem = {
   /** The count came from a read that hit its ceiling: the pill prints a floor. */
   capped?: boolean;
   href: string;
+  /**
+   * The leads this row counts (`lead:<id>`), one per unit of `count`. A lead
+   * can sit in two rows at once (a follow-up past due AND a meeting booked
+   * today); each row says so, and the shared total counts the lead once
+   * (needsYouTotal). Absent on a row that is not about leads: its `count` is
+   * its own things, which no other row counts.
+   */
+  subjects?: readonly string[];
 };
+
+/** A lead as a Needs-you subject: the key the shared total counts it by. */
+const leadSubjects = (leads: readonly LeadLite[]): string[] => leads.map((l) => `lead:${l.id}`);
 
 export type NeedsYou = {
   items: NeedsYouItem[];
@@ -722,7 +733,8 @@ export function buildNeedsYou(input: {
     if (!input.sales.ok) unavailable.push("pipeline follow-ups");
     else {
       const s = input.sales.value;
-      // One row per bucket (salesBuckets): each lead is counted once.
+      // One row per bucket (salesBuckets), and each row names its leads
+      // (`subjects`): a lead also in "booked today" is counted once in the total.
       const floor = s.partial ? "At least " : "";
       if (s.overdue.length > 0) {
         const n = s.overdue.length;
@@ -735,6 +747,7 @@ export function buildNeedsYou(input: {
           count: n,
           capped: s.partial,
           href: "/pipeline",
+          subjects: leadSubjects(s.overdue),
         });
       }
       if (s.outcomeMissing.length > 0) {
@@ -748,6 +761,7 @@ export function buildNeedsYou(input: {
           count: n,
           capped: s.partial,
           href: "/pipeline?stage=founder_meeting_booked",
+          subjects: leadSubjects(s.outcomeMissing),
         });
       }
       if (s.carriedOver.length > 0) {
@@ -761,6 +775,7 @@ export function buildNeedsYou(input: {
           count: n,
           capped: s.partial,
           href: "/pipeline",
+          subjects: leadSubjects(s.carriedOver),
         });
       }
       if (s.noNextStep.length > 0) {
@@ -774,6 +789,7 @@ export function buildNeedsYou(input: {
           count: n,
           capped: s.partial,
           href: "/pipeline",
+          subjects: leadSubjects(s.noNextStep),
         });
       }
       // Today's booked meetings, less any already in the meeting-outcomes row:
@@ -791,6 +807,7 @@ export function buildNeedsYou(input: {
           detail: `First at ${time(first.at)} with ${first.name}`,
           count: booked.length,
           href: "/pipeline?stage=founder_meeting_booked",
+          subjects: leadSubjects(booked),
         });
       }
     }
@@ -857,11 +874,24 @@ export function buildNeedsYou(input: {
  * counted rows (1) while the tab counted SLA breaches plus routine failures
  * (0), for the same moment.
  *
+ * THINGS ARE DISTINCT: a lead that is in two rows (a follow-up past due and a
+ * meeting booked today; a meeting held this morning and no next step since)
+ * is one thing waiting on the viewer, not two. Rows about leads name them
+ * (`subjects`), and the total counts each lead once; every other row counts
+ * its own things, which no other row does. The rows keep their own counts:
+ * each is true of the leads it lists.
+ *
  * `capped`: the total is a floor, because an item behind it came from a capped
  * read or a source could not be read at all.
  */
 export function needsYouTotal(n: NeedsYou): { total: number; capped: boolean } {
-  const total = n.items.reduce((sum, item) => sum + (item.count ?? 1), 0) + (n.approvals?.total ?? 0);
+  const subjects = new Set<string>();
+  let own = 0;
+  for (const item of n.items) {
+    if (item.subjects) for (const s of item.subjects) subjects.add(s);
+    else own += item.count ?? 1;
+  }
+  const total = subjects.size + own + (n.approvals?.total ?? 0);
   return { total, capped: n.unavailable.length > 0 || n.items.some((item) => item.capped === true) };
 }
 
@@ -1106,6 +1136,21 @@ function departmentCard(
       const pCap = d.projectsTruncated;
       const projects = `${floorCount(d.activeProjects, pCap)} ${d.activeProjects === 1 && !pCap ? "active project" : "active projects"}`;
       const projectDetail = `${projects}${d.overdueProjects > 0 ? ` · ${floorCount(d.overdueProjects, pCap)} past due` : ""}`;
+      // Someone reading OASIS's desk as its client: these are the requests
+      // their team filed, and a missed first-response target is OASIS's miss,
+      // not their task (the rule Needs you and the Client Success tab keep,
+      // numbers.ts). Their open requests, never "past SLA".
+      if (d.viewerKind === "client") {
+        return {
+          ...base,
+          tone: "quiet",
+          status: !d.ticketHistory ? "No requests yet" : d.openTickets > 0 ? "Requests open with OASIS" : "No open requests",
+          metric: d.ticketHistory
+            ? { kind: "live", value: floorCount(d.openTickets, tCap), label: d.openTickets === 1 && !tCap ? "open request" : "open requests" }
+            : { kind: "no_data", label: "Your team has not filed a support request yet" },
+          detail: projectDetail,
+        };
+      }
       // A desk that has never held a ticket is not "Within SLA": the claim
       // needs tickets behind it (2026-09-29: every workspace had 0 ever).
       if (!d.ticketHistory) {

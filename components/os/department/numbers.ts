@@ -47,15 +47,24 @@ import { resolveDeliveryViewer } from "@/lib/delivery/access";
 import { ACTIVE_PROJECT_STAGES, slaStatus } from "@/lib/delivery/rules";
 import { getDeliveryDb } from "@/lib/delivery/session";
 import { listProjects, listTickets } from "@/lib/delivery/store";
-import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
-import { briefPlanFor, empireRoutinesFor, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
+import { resolvePlatformOperatorForAuthUser } from "@/lib/platform-operator";
+import {
+  briefPlanFor,
+  empireLaneFromCheck,
+  empireRoutinesFor,
+  loadNeedsYouReads,
+  needsYouFrom,
+  operatorDayAt,
+} from "@/components/os/today/brief-load";
 import { needsYouTotal } from "@/components/os/today/model";
 import { tileCount } from "./count-rules";
 import {
+  empireReadFor,
   failedRoutinesHref,
   mergeRoutineReads,
   OPERATIONS_HREF,
   routineHealth,
+  type EmpireLane,
   type RoutineHealth,
   type RoutineRow,
 } from "./routine-rules";
@@ -310,9 +319,13 @@ function breachAttention(d: DeliveryFigures): AttentionItem[] {
 
 // ── Routines (Operations, Chief of Staff) ─────────────────────────────────
 
-/** The verified platform-operator check for this viewer's session (lib/platform-operator.ts). */
-function operatorCheck(viewer: OsViewer): () => Promise<boolean> {
-  return () => isPlatformOperatorForAuthUser(viewer.authUserId, viewer.email);
+/**
+ * The verified platform-operator check for this viewer's session
+ * (lib/platform-operator.ts), as an Empire lane: a failed lookup is "unknown",
+ * never a quiet "no" (brief-load.ts empireLaneFromCheck).
+ */
+function operatorCheck(viewer: OsViewer): () => Promise<EmpireLane> {
+  return async () => empireLaneFromCheck(await resolvePlatformOperatorForAuthUser(viewer.authUserId, viewer.email));
 }
 
 /**
@@ -322,9 +335,10 @@ function operatorCheck(viewer: OsViewer): () => Promise<boolean> {
  * rule Today's Operations card reads by (brief-load.ts empireRoutinesFor).
  */
 async function routineHealthFor(viewer: OsViewer, workspace: Read<RoutineRow[]>): Promise<Read<RoutineHealth>> {
-  const empire = (await empireRoutinesFor(viewer.surface, operatorCheck(viewer)))
-    ? await loadEmpireRoutines(viewer.surface.tenantId)
-    : null;
+  // "unknown" (the operator check failed) is a failed Empire read, so the
+  // tiles say "Couldn't check" rather than the workspace lane alone.
+  const lane = await empireRoutinesFor(viewer.surface, operatorCheck(viewer));
+  const empire = await empireReadFor(lane, () => loadEmpireRoutines(viewer.surface.tenantId));
   const merged = mergeRoutineReads(workspace, empire);
   return merged.ok ? { ok: true, value: routineHealth(merged.value, Date.now()) } : { ok: false };
 }

@@ -241,6 +241,58 @@ async function main() {
     assert.deepEqual(probe.items.map((i) => i.id), ["meetings-today"], "a running meeting is on the schedule, not a missed close-out");
     assert.deepEqual(model.needsYouTotal(probe), { total: 1, capped: false });
   });
+  // Verify-fix probes (2026-09-29): the rows are right to name these leads
+  // twice, and the shared total counted each of them twice.
+  const hour = 60 * minute;
+  const twoRowLeads = [
+    // A meeting later today (5:36 PM Toronto) and a follow-up it promised for yesterday.
+    { id: "prep-late", data: { company: "Prep Late Co", stage: "founder_meeting_booked", founder_meeting_at: iso(now + 2 * hour), next_action_at: iso(now - 20 * hour) } },
+    // A meeting this morning, moved to demo_completed, no next step set since.
+    { id: "held", data: { company: "Held Co", stage: "demo_completed", founder_meeting_at: iso(now - 5 * hour) } },
+  ];
+  await check("Needs you total: a lead in two rows is ONE thing waiting; the rows keep their own counts", () => {
+    const listFor = (rows: typeof twoRowLeads) =>
+      model.buildNeedsYou({ sales: { ok: true, value: model.summarizeRecords(rows, rows.length, now, day) }, delivery: null, inbound: null, cash: null, nowMs: now });
+    for (const [lead, rows] of [
+      [twoRowLeads[0], ["follow-ups", "meetings-today"]],
+      [twoRowLeads[1], ["no-next-step", "meetings-today"]],
+    ] as const) {
+      const list = listFor([lead]);
+      assert.deepEqual(list.items.map((i) => [i.id, i.count]), rows.map((id) => [id, 1]), `${lead.id}: each row still says what is true of the lead`);
+      assert.deepEqual(model.needsYouTotal(list), { total: 1, capped: false }, `${lead.id}: one lead, however many rows name it`);
+    }
+    // Both leads, and a row that is not about leads: 2 leads + 1 routine = 3, never 5.
+    const both = model.buildNeedsYou({
+      sales: { ok: true, value: model.summarizeRecords(twoRowLeads, 2, now, day) },
+      delivery: null,
+      inbound: null,
+      cash: null,
+      routines: { ok: true, value: { total: 1, on: 1, failed24h: [{ id: "w9", agentKey: "x", name: "x", description: "", schedule: "", enabled: true, lastRunAt: iso(now - hour), lastRunStatus: "error", lane: "workspace" }], lastSuccessAt: null } },
+      nowMs: now,
+    });
+    assert.deepEqual(model.needsYouTotal(both), { total: 3, capped: false });
+    // No row claims more leads than exist: each lead row's number is its own
+    // leads, every one of them real, and none exceeds the leads there are.
+    for (const item of both.items.filter((i) => i.subjects)) {
+      assert.equal(item.count, item.subjects?.length, `${item.id}: its count is its leads`);
+      assert.ok((item.count ?? 0) <= twoRowLeads.length, `${item.id} claims ${item.count} leads of ${twoRowLeads.length}`);
+      assert.match(item.title, new RegExp(`^${item.count} `), `${item.id}: ${item.title}`);
+    }
+    assert.equal(both.items.find((i) => i.id === "meetings-today")?.title, "2 meetings booked today");
+    // The Chief of Staff card prints the same deduped total as the header.
+    const cos = model.buildDepartmentCards({
+      departments: dept("chief_of_staff"),
+      needsYou: both,
+      sales: null,
+      delivery: null,
+      content: null,
+      goal: null,
+      stripeConnected: null,
+      routines: null,
+      nowMs: now,
+    })[0];
+    assert.equal(cos.status, "3 waiting on you");
+  });
 
   const needs = model.buildNeedsYou({
     sales: { ok: true, value: board },
@@ -412,6 +464,38 @@ async function main() {
     const team = model.buildNeedsYou({ sales: null, delivery: { ok: true, value: breachedDesk("founder") }, inbound: null, cash: null, nowMs: now });
     assert.deepEqual(team.items.map((i) => i.id), ["sla-breached"], "the team that owes the reply is told (control)");
   });
+  await check("Client Success card: a CLIENT of OASIS's desk sees their open requests, never 'past SLA'", () => {
+    const deskFor = (viewerKind: "founder" | "client") =>
+      model.summarizeDelivery({
+        viewerKind,
+        tickets: [{ id: "t1", ticket_number: "T-0001", title: "Site down", status: "open", severity: "critical", sla_target: iso(now - 3_600_000), first_response_at: null, created_at: iso(now - 7_200_000) }],
+        projects: [],
+        ticketsTruncated: false,
+        projectsTruncated: false,
+        closedTicketsExist: false,
+        now: new Date(now),
+        todayKey: "2026-09-29",
+      });
+    const cardFor = (viewerKind: "founder" | "client") =>
+      model.buildDepartmentCards({
+        departments: dept("client_success"),
+        needsYou: { items: [], unavailable: [] },
+        sales: null,
+        delivery: { ok: true, value: deskFor(viewerKind) },
+        content: null,
+        goal: null,
+        stripeConnected: null,
+        routines: null,
+        nowMs: now,
+      })[0];
+    const client = cardFor("client");
+    const text = render(createElement(DepartmentCard, { card: client }));
+    assert.doesNotMatch(text, /SLA/, `a client was shown OASIS's missed SLA: ${text}`);
+    assert.notEqual(client.tone, "needs_you", "their request is not their task");
+    assert.deepEqual([client.status, client.metric.kind === "live" && client.metric.value, client.metric.label], ["Requests open with OASIS", "1", "open request"]);
+    const team = cardFor("founder");
+    assert.deepEqual([team.tone, team.status], ["needs_you", "1 past SLA"], "the team that owes the reply is told (control)");
+  });
 
   // ── 6. Marketing: the line names the source the number comes from ─────────
   const marketing = (content: Parameters<typeof model.buildDepartmentCards>[0]["content"]) =>
@@ -536,6 +620,11 @@ async function main() {
     return legs.map(([accountId, d, c]) => ({ entryId: `e${seq}`, entryDate: date, accountId, cadDebitCents: d, cadCreditCents: c, memo: "", entryMemo: "", source, status }));
   };
   const NO_OPENING = "Business chequing has no opening balance (post it from the Wise card in Finances › Settings)";
+  // The same gap while bank feed writes are off (production; this process never
+  // sets FINANCE_WISE_FEED_WRITES): the Wise card's Post button is disabled.
+  const NO_OPENING_OFF = "Business chequing has no opening balance (recording one is not yet possible from the app while bank feed writes are off)";
+  // The business book with the Wise card able to post (the pure checks below).
+  const BIZ = { book: "business" as const, wiseWritesEnabled: true };
   const productionLines = [
     ...entry("2026-09-01", "expense", [["B:5650", 275000, 0], ["B:1000", 0, 275000]], "reversed"),
     ...entry("2026-09-01", "reversal", [["B:1000", 275000, 0], ["B:5650", 0, 275000]]),
@@ -545,7 +634,7 @@ async function main() {
     ...entry("2026-01-20", "stripe_fee", [["B:5000", 11079, 0], ["B:1050", 0, 11079]]),
     ...entry("2026-09-05", "stripe_refund", [["B:4010", 30000, 0], ["B:1050", 0, 30000]]),
   ];
-  const cov = cashCoverage({ accounts, lines: productionLines, bankLinesByAccount: {} });
+  const cov = cashCoverage({ accounts, lines: productionLines, bankLinesByAccount: {}, ...BIZ });
   const ledgerTotal = productionLines
     .filter((l) => ["B:1000", "B:1010", "B:1050", "B:1060"].includes(l.accountId))
     .reduce((s, l) => s + l.cadDebitCents - l.cadCreditCents, 0);
@@ -562,10 +651,10 @@ async function main() {
   await check("cash coverage: an opening balance and a payout INTO a bank account complete the books", () => {
     const opening = entry("2026-08-31", "opening_balance", [["B:1000", 500000, 0], ["B:3900", 0, 500000]]);
     const toFx = entry("2026-09-08", "bank_import", [["B:1060", 6585, 0], ["B:1050", 0, 6585]]);
-    const half = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...toFx], bankLinesByAccount: { "B:1000": 3 } });
+    const half = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...toFx], bankLinesByAccount: { "B:1000": 3 }, ...BIZ });
     assert.deepEqual(half.gaps, ["Stripe payouts to the bank are not recorded"], "money moved to a clearing account is not a payout to the bank");
     const payout = entry("2026-09-08", "bank_import", [["B:1000", 6585, 0], ["B:1050", 0, 6585]]);
-    const whole = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...payout], bankLinesByAccount: { "B:1000": 3 } });
+    const whole = cashCoverage({ accounts, lines: [...productionLines, ...opening, ...payout], bankLinesByAccount: { "B:1000": 3 }, ...BIZ });
     assert.deepEqual([whole.complete, whole.gaps], [true, []]);
     assert.equal(whole.accounts[0].covers, "6 entries from Aug 31 to Sep 25; opening balance recorded; 3 bank lines imported");
   });
@@ -575,13 +664,58 @@ async function main() {
     // and a reversal entry cancels it (ledger-io buildReversal).
     const voided = entry("2026-08-31", "opening_balance", [["B:1000", 500000, 0], ["B:3900", 0, 500000]], "reversed");
     const reversal = entry("2026-08-31", "reversal", [["B:3900", 500000, 0], ["B:1000", 0, 500000]]);
-    const gone = cashCoverage({ accounts, lines: [...productionLines, ...voided, ...reversal, ...payout], bankLinesByAccount: {} });
+    const gone = cashCoverage({ accounts, lines: [...productionLines, ...voided, ...reversal, ...payout], bankLinesByAccount: {}, ...BIZ });
     assert.deepEqual(gone.gaps, [NO_OPENING], "the raw ledger figure must not come back as 'Cash on hand'");
     assert.equal(gone.accounts[0].hasOpeningBalance, false);
     // An account with no feed says so instead of pointing at a button that does not exist.
     const savings = entry("2026-09-10", "bank_import", [["B:1010", 1000, 0], ["B:4010", 0, 1000]]);
-    const withSavings = cashCoverage({ accounts, lines: [...productionLines, ...savings], bankLinesByAccount: {} });
-    assert.ok(withSavings.gaps.includes("Business savings has no opening balance (no bank feed or screen can record one for it yet)"), withSavings.gaps.join(" | "));
+    const withSavings = cashCoverage({ accounts, lines: [...productionLines, ...savings], bankLinesByAccount: {}, ...BIZ });
+    assert.ok(withSavings.gaps.includes("Business savings has no opening balance (recording one for this account is not yet possible from the app)"), withSavings.gaps.join(" | "));
+  });
+  // Verify-fix (2026-09-29): the check was the Wise source string, so an
+  // opening balance posted any other way never counted.
+  await check("cash coverage: ANY posted opening balance counts, whatever wrote it; reversed ones and reversals never do", () => {
+    const payout = entry("2026-09-08", "bank_import", [["B:1000", 6585, 0], ["B:1050", 0, 6585]]);
+    // Posted by hand (not the Wise card): chequing against Retained earnings, the book's opening-balance account.
+    const byHand = entry("2026-08-31", "manual_journal", [["B:1000", 500000, 0], ["B:3900", 0, 500000]]);
+    const opened = cashCoverage({ accounts, lines: [...productionLines, ...byHand, ...payout], bankLinesByAccount: {}, ...BIZ });
+    assert.deepEqual([opened.complete, opened.accounts[0].hasOpeningBalance, opened.gaps], [true, true, []], "a hand-posted opening balance is a starting point");
+    // Voided: the original is marked reversed, and the reversal entry has the
+    // same shape the other way round. Neither is a starting point.
+    const voided = entry("2026-08-31", "manual_journal", [["B:1000", 500000, 0], ["B:3900", 0, 500000]], "reversed");
+    const undo = entry("2026-08-31", "reversal", [["B:3900", 500000, 0], ["B:1000", 0, 500000]]);
+    const undone = cashCoverage({ accounts, lines: [...productionLines, ...voided, ...undo, ...payout], bankLinesByAccount: {}, ...BIZ });
+    assert.deepEqual([undone.accounts[0].hasOpeningBalance, undone.gaps], [false, [NO_OPENING]], "a voided opening balance and its reversal record nothing");
+    // Not opening balances: a transfer between two bank accounts, an owner's
+    // contribution (owner equity, not the opening-balance account), an expense.
+    const withOwner = [...accounts, { id: "B:3000", code: "3000", name: "Owner equity — CC", type: "equity" as const, subtype: "owner_equity" }];
+    const transfer = entry("2026-09-03", "bank_import", [["B:1000", 1000, 0], ["B:1010", 0, 1000]]);
+    const contribution = entry("2026-09-04", "manual_journal", [["B:1000", 20000, 0], ["B:3000", 0, 20000]]);
+    const notOpening = cashCoverage({ accounts: withOwner, lines: [...productionLines, ...transfer, ...contribution, ...payout], bankLinesByAccount: {}, ...BIZ });
+    assert.equal(notOpening.accounts[0].hasOpeningBalance, false, "only the opening-balance account makes an entry an opening balance");
+  });
+  await check("cash coverage: a personal book's Chequing is never sent to the business Wise card; its own opening balance counts", () => {
+    const personal = [
+      { id: "P:1000", code: "1000", name: "Chequing", type: "asset" as const, subtype: "bank" },
+      { id: "P:3000", code: "3000", name: "Net worth (opening balance)", type: "equity" as const, subtype: "owner_equity" },
+      { id: "P:5100", code: "5100", name: "Groceries", type: "expense" as const, subtype: "expense" },
+    ];
+    const groceries = entry("2026-09-10", "bank_txn", [["P:5100", 8240, 0], ["P:1000", 0, 8240]]);
+    const bare = cashCoverage({ accounts: personal, lines: groceries, bankLinesByAccount: {}, book: "personal", wiseWritesEnabled: true });
+    assert.deepEqual(bare.gaps, ["Chequing has no opening balance (recording one for this account is not yet possible from the app)"]);
+    assert.doesNotMatch(bare.gaps.join(" "), /Wise|Settings/, "the Wise card posts to the business book only");
+    const start = entry("2026-08-31", "manual_journal", [["P:1000", 100000, 0], ["P:3000", 0, 100000]]);
+    const opened = cashCoverage({ accounts: personal, lines: [...groceries, ...start], bankLinesByAccount: {}, book: "personal", wiseWritesEnabled: true });
+    assert.deepEqual([opened.complete, opened.gaps], [true, []], "the personal book's Net worth (opening balance) is its opening-balance account");
+  });
+  await check("cash coverage: the gap never names a disabled control (bank feed writes off)", () => {
+    const off = cashCoverage({ accounts, lines: productionLines, bankLinesByAccount: {}, book: "business", wiseWritesEnabled: false });
+    assert.deepEqual(off.gaps, [NO_OPENING_OFF, "Stripe payouts to the bank are not recorded"]);
+    assert.doesNotMatch(off.gaps.join(" "), /Wise card|Finances › Settings/, "the Post button is disabled while writes are off");
+    assert.doesNotMatch([...off.gaps, NO_OPENING, NO_OPENING_OFF].join(" "), /Bravo|Maven|Atlas/, "no agent is named to a client");
+    // The switch the gap reads is the one the Wise card's Post button reads.
+    assert.match(code("lib/founders-finances/reports-io.ts"), /book: business \? "business" : "personal",\s*wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,/);
+    assert.match(code("components/founders/finances/WiseCard.tsx"), /disabled=\{!WISE_FEED_WRITES_ENABLED \|\| busy !== null \|\| !!opening\.blocked\}/);
   });
   await check("Finances Overview: incomplete books print 'Books incomplete', the ledger total only as a labelled detail", () => {
     const { incompleteBooksNote } = cashCoverageMod;
@@ -899,11 +1033,54 @@ async function main() {
     const failing = async (): Promise<boolean> => {
       throw new Error("profile read failed");
     };
-    assert.equal(await empireRoutinesFor({ persona: "founder", tenantSlug: "oasis-ai-cc" }, failing), false, "a failed check is closed, never a rejection");
+    assert.equal(await empireRoutinesFor({ persona: "founder", tenantSlug: "oasis-ai-cc" }, failing), "unknown", "a failed check is unknown, never a rejection and never 'no'");
     const b = await numbersMod.loadDepartmentNumbers(deptOf("operations"), osViewer(TENANT_B, false), await loadTenantRoutines(TENANT_B));
     assert.deepEqual([tile(b.tiles, "Routines on")?.value, tile(b.tiles, "Failed in 24h")?.value], ["1 of 1", "1"], "a client workspace: its own lane only");
     const none = await numbersMod.loadDepartmentNumbers(deptOf("operations"), osViewer(TENANT_C, false), await loadTenantRoutines(TENANT_C));
     assert.deepEqual([tile(none.tiles, "Routines on")?.status, tile(none.tiles, "Failed in 24h")?.status], ["no_data", "no_data"], "no routine set up is not '0 failed'");
+  });
+  // Verify-fix (2026-09-29): a failed operator lookup answered "not the
+  // operator", so CC's Empire failures vanished behind a clean workspace lane.
+  await check("Operations + Needs you I/O: a FAILED operator lookup is 'Couldn't check', never the workspace lane alone", async () => {
+    const { resolvePlatformOperatorForAuthUser } = await import("../lib/platform-operator");
+    const { empireRoutinesFor, empireLaneFromCheck } = await import("../components/os/today/brief-load");
+    const oasisOwner = { persona: "founder" as const, tenantSlug: "oasis-ai-cc" };
+    const lane = async (authUserId: string, email: string) =>
+      empireRoutinesFor(oasisOwner, async () => empireLaneFromCheck(await resolvePlatformOperatorForAuthUser(authUserId, email)));
+    assert.equal(await lane("auth-cc", "conaugh@oasisai.work"), true, "control: the lookup answers, the operator gets the Empire lane");
+    // The profile read behind the verified check fails for the length of this check.
+    await raw.execute("ALTER TABLE user_profiles RENAME TO user_profiles_offline");
+    try {
+      assert.deepEqual(
+        await resolvePlatformOperatorForAuthUser("auth-cc", "conaugh@oasisai.work"),
+        { operator: false, reason: "lookup_failed" },
+        "precondition: the lookup itself failed",
+      );
+      assert.equal(await lane("auth-cc", "conaugh@oasisai.work"), "unknown", "a failed lookup is unknown, not 'not the operator'");
+      assert.equal(await lane("auth-adon", "adon@oasis.test"), false, "a true non-operator is still a plain no (no lookup needed)");
+      // Operations tab: the operator's tiles say the read failed.
+      const ops = await numbersMod.loadDepartmentNumbers(deptOf("operations"), operatorViewer(), await loadTenantRoutines(TENANT_A));
+      assert.deepEqual(
+        [tile(ops.tiles, "Routines on")?.status, tile(ops.tiles, "Failed in 24h")?.status],
+        ["error", "error"],
+        "never '1 of 2 on, 0 failed' from the workspace lane alone",
+      );
+      assert.deepEqual(ops.attention, []);
+      // Chief of Staff (Today's reads): the routines source is named as unread and the total is a floor.
+      const cos = await numbersMod.loadDepartmentNumbers(deptOf("chief_of_staff"), operatorViewer(), await loadTenantRoutines(TENANT_A));
+      assert.equal(tile(cos.tiles, "Routines on")?.status, "error");
+      assert.equal(cos.needsYou?.capped, true, "the total is at least, not exact");
+      // Today's card and Needs you, from the same loader.
+      const today = await loaders.loadRoutineHealth(TENANT_A, "unknown", Date.now());
+      assert.equal(today.ok, false, "Today's Operations card: Couldn't load");
+      const list = model.buildNeedsYou({ sales: null, delivery: null, inbound: null, cash: null, routines: today, nowMs: now });
+      assert.deepEqual([list.unavailable, model.needsYouTotal(list)], [["routine runs"], { total: 0, capped: true }]);
+      // A true non-operator keeps their workspace lane as a real answer, even now.
+      const coOwner = await numbersMod.loadDepartmentNumbers(deptOf("operations"), coOwnerViewer(), await loadTenantRoutines(TENANT_A));
+      assert.deepEqual([tile(coOwner.tiles, "Routines on")?.value, tile(coOwner.tiles, "Failed in 24h")?.value], ["1 of 2", "0"]);
+    } finally {
+      await raw.execute("ALTER TABLE user_profiles_offline RENAME TO user_profiles");
+    }
   });
   await check("Chief of Staff tab I/O: a worker in a client workspace is never handed OASIS's missed SLA", async () => {
     // One open request TENANT_B filed on OASIS's desk from its own session, past
@@ -950,7 +1127,7 @@ async function main() {
     await txns.createManualTransaction(cc, "cc-personal", { date: "2026-09-10", description: "Groceries", amount: "-82.40", category_id: categoryId("fin_ent_cc", "5100"), account_id: accountId("fin_ent_cc", "1000") });
     const ov = await reportsIo.overview(cc, "oasis", { sweep: "deferred" });
     assert.equal(ov.cashTotal, -269513 + 19390, "cashTotal itself is unchanged: presentation only");
-    assert.deepEqual(ov.coverage.gaps, [NO_OPENING, "Stripe payouts to the bank are not recorded"]);
+    assert.deepEqual(ov.coverage.gaps, [NO_OPENING_OFF, "Stripe payouts to the bank are not recorded"]);
     assert.equal(ov.coverage.bankLines, 0, "the personal book's bank line is not the business's");
     const personal = await reportsIo.overview(cc, "cc-personal", { sweep: "deferred" });
     assert.equal(personal.coverage.bankLines, 1);
@@ -970,7 +1147,7 @@ async function main() {
   await check("summary I/O: the agent's cash total comes with cash_coverage, so it is never read as a balance", async () => {
     const body = await agentSummary();
     assert.equal(body.cash_total_cad_cents, -269513 + 19390);
-    assert.deepEqual(body.cash_coverage, { complete: false, gaps: [NO_OPENING, "Stripe payouts to the bank are not recorded"] });
+    assert.deepEqual(body.cash_coverage, { complete: false, gaps: [NO_OPENING_OFF, "Stripe payouts to the bank are not recorded"] });
   });
   let openingId = "";
   await check("overview I/O: an opening balance and a booked payout make the business book complete", async () => {
@@ -984,7 +1161,7 @@ async function main() {
     const rev = await ledgerIo.buildReversal({ entityId: B, entryId: openingId, date: "2026-08-31", memo: "Opening balance removed", createdBy: "test" });
     await raw.batch(rev.statements);
     const ov = await reportsIo.overview(cc, "oasis", { sweep: "deferred" });
-    assert.deepEqual([ov.coverage.complete, ov.coverage.gaps], [false, [NO_OPENING]], "a reversed opening balance is not a starting point");
+    assert.deepEqual([ov.coverage.complete, ov.coverage.gaps], [false, [NO_OPENING_OFF]], "a reversed opening balance is not a starting point");
   });
 
   if (failures > 0) {

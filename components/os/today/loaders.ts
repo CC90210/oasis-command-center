@@ -28,7 +28,7 @@ import { getServiceSupabase } from "@/lib/supabase-server";
 import { operatorCalendarStatus, systemCalendarConfig } from "@/lib/integrations/google-calendar";
 import { getUserIntegrationBundleForStatus } from "@/lib/user-integration-store";
 import { loadEmpireRoutines, loadTenantRoutines } from "@/components/os/department/routines";
-import { mergeRoutineReads, routineHealth, type RoutineHealth } from "@/components/os/department/routine-rules";
+import { empireReadFor, mergeRoutineReads, routineHealth, type EmpireLane, type RoutineHealth } from "@/components/os/department/routine-rules";
 import { requireBusinessEntity, resolveFinanceViewer } from "@/lib/founders-finances/access-io";
 import { overview } from "@/lib/founders-finances/reports-io";
 import { formatCents } from "@/lib/founders-finances/money";
@@ -193,18 +193,26 @@ export function loadContentWeek(tenantId: string): Promise<Read<ContentWeek>> {
 
 /**
  * Routine health for the Operations card and a failed-routine row in Needs
- * you: the workspace's own routines, plus — for an OASIS owner — the Empire
- * scheduler's rows that carry the OASIS workspace id (routines.ts). The same
- * readers and the same routineHealth the Operations tab uses.
+ * you: the workspace's own routines, plus — for the platform operator in
+ * OASIS — the Empire scheduler's rows that carry the OASIS workspace id
+ * (routines.ts). The same readers and the same routineHealth the Operations
+ * tab uses. `empire` "unknown" (the operator check failed) is a failed read:
+ * "Couldn't check", never the workspace lane passed off as the whole.
  */
-export function loadRoutineHealth(tenantId: string, includeEmpire: boolean, nowMs: number): Promise<Read<RoutineHealth>> {
+export function loadRoutineHealth(tenantId: string, empire: EmpireLane, nowMs: number): Promise<Read<RoutineHealth>> {
   return read("routines", async () => {
-    const [workspace, empire] = await Promise.all([
+    const [workspace, empireRead] = await Promise.all([
       loadTenantRoutines(tenantId),
-      includeEmpire ? loadEmpireRoutines(tenantId) : Promise.resolve(null),
+      empireReadFor(empire, () => loadEmpireRoutines(tenantId)),
     ]);
-    const merged = mergeRoutineReads(workspace, empire);
-    if (!merged.ok) throw new Error("routine read failed (logged by the reader)");
+    const merged = mergeRoutineReads(workspace, empireRead);
+    if (!merged.ok) {
+      throw new Error(
+        empire === "unknown"
+          ? "the platform-operator check failed, so the Empire lane is unknown (logged by lib/platform-operator)"
+          : "routine read failed (logged by the reader)",
+      );
+    }
     return routineHealth(merged.value, nowMs);
   });
 }

@@ -103,6 +103,22 @@ export type RoutineHealth = {
 type RoutineRead = { ok: true; value: RoutineRow[] } | { ok: false };
 
 /**
+ * Whether a viewer's routine health includes the Empire lane: true (the
+ * platform operator in OASIS), false (anyone else: correctly no Empire lane),
+ * or "unknown" when the verified operator check could not be made (a failed
+ * profile or session read). "unknown" is not "no": the operator's own Empire
+ * failures would vanish behind a clean-looking workspace lane, so it reads as
+ * a failed Empire read (mergeRoutineReads), "Couldn't check".
+ */
+export type EmpireLane = boolean | "unknown";
+
+/** The Empire read for a lane answer: null = not asked, a failed read for "unknown". */
+export async function empireReadFor(lane: EmpireLane, load: () => Promise<RoutineRead>): Promise<RoutineRead | null> {
+  if (lane === "unknown") return { ok: false };
+  return lane ? load() : null;
+}
+
+/**
  * The workspace lane plus, when asked (null = not asked), the Empire lane: one
  * list for the health counts. Either read failing fails the whole answer — a
  * health card built from half the routines would call the other half fine.

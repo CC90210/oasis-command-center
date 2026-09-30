@@ -21,16 +21,19 @@
  *
  * INCOMPLETE when either holds:
  *   - a bank or cash account that is in use (it has ledger lines or imported
- *     bank lines) has no opening-balance entry IN FORCE (source
- *     "opening_balance", the one the Wise feed posts — wise-feed.ts
- *     OPENING_BALANCE_SOURCE — with status "posted": a reversed one no longer
- *     records a starting point);
+ *     bank lines) has no opening-balance entry IN FORCE (isOpeningBalance,
+ *     below: status "posted", so a reversed one no longer records a starting
+ *     point);
  *   - Stripe clearing has card money in it and no payout has ever moved money
  *     out of it into a bank or cash account.
  * A payout is recognised by its SHAPE, not a source name: one entry that
  * credits Stripe clearing and debits a bank or cash account. That is how a
  * payout lands today (a bank line categorised by the seeded "Stripe payouts
  * are transfers" rule) and how a future payout.paid handler would post it.
+ * An opening balance is recognised the same way, whatever wrote it: the Wise
+ * card's (source "opening_balance", wise-feed.ts OPENING_BALANCE_SOURCE), or
+ * any posted entry that sets bank or cash accounts against the book's
+ * opening-balance equity account and nothing else.
  *
  * PURE: overview() hands it the ledger it already loaded; tests run it bare.
  */
@@ -89,17 +92,39 @@ function span(first: string | null, last: string | null): string {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** Which book the accounts belong to (fin_entities.kind): the charts differ (chart.ts). */
+export type BookKind = "business" | "personal";
+
+/**
+ * The equity account a book's opening balances post against: the business
+ * book's Retained earnings (what the Wise card posts to, wise-feed-io.ts), the
+ * personal book's "Net worth (opening balance)" (chart.ts PERSONAL_CHART).
+ */
+const OPENING_EQUITY_CODE: Record<BookKind, string> = { business: SYS.retained, personal: "3000" };
+
+/** ledger-io.ts buildReversal's source: a reversal has an opening balance's shape and undoes it. */
+const REVERSAL_SOURCE = "reversal";
+
 /**
  * How an account's missing opening balance gets fixed, said with the gap so it
- * is not a dead end. Only Business chequing has a feed that posts one (the Wise
- * card, wise-feed-io.ts postWiseOpeningBalance); no screen records one for any
- * other bank or cash account yet, and the gap says that instead of implying a
- * button exists.
+ * is not a dead end, and never pointing at a control that does not work.
+ *
+ * The one place in the app that records an opening balance is the Wise card
+ * (Finances › Settings; wise-feed-io.ts postWiseOpeningBalance), and only for
+ * the BUSINESS book's chequing: it posts to the business entity whatever book
+ * is open. Its Post button is disabled while bank feed writes are off
+ * (wise-feed.ts WISE_FEED_WRITES_ENABLED), so the gap says it cannot be done
+ * yet rather than naming a greyed-out button. No journal-entry screen exists,
+ * so every other bank or cash account, and every personal book, is told the
+ * same plainly.
  */
-function openingBalanceFix(code: string): string {
-  return code === SYS.chequing
-    ? "(post it from the Wise card in Finances › Settings)"
-    : "(no bank feed or screen can record one for it yet)";
+function openingBalanceFix(book: BookKind, code: string, wiseWritesEnabled: boolean): string {
+  if (book === "business" && code === SYS.chequing) {
+    return wiseWritesEnabled
+      ? "(post it from the Wise card in Finances › Settings)"
+      : "(recording one is not yet possible from the app while bank feed writes are off)";
+  }
+  return "(recording one for this account is not yet possible from the app)";
 }
 
 /**
@@ -117,6 +142,10 @@ export function cashCoverage(input: {
   lines: readonly ReportLine[];
   /** fin_bank_transactions counts by account id. */
   bankLinesByAccount: Readonly<Record<string, number>>;
+  /** The book these accounts belong to: its opening-balance account and who can post one differ. */
+  book: BookKind;
+  /** Whether the Wise card can post an opening balance right now (wise-feed.ts WISE_FEED_WRITES_ENABLED). */
+  wiseWritesEnabled: boolean;
 }): CashCoverage {
   const cashAccounts = input.accounts.filter((a) => BALANCE_SUBTYPES.has(a.subtype) || a.subtype === "clearing");
   const kindOf = new Map(input.accounts.map((a) => [a.id, a.subtype]));
@@ -126,6 +155,26 @@ export function cashCoverage(input: {
     byAccount.set(l.accountId, [...(byAccount.get(l.accountId) || []), l]);
     byEntry.set(l.entryId, [...(byEntry.get(l.entryId) || []), l]);
   }
+  const openingEquity = new Set(
+    input.accounts.filter((a) => a.type === "equity" && a.code === OPENING_EQUITY_CODE[input.book]).map((a) => a.id),
+  );
+  /**
+   * An opening balance IN FORCE, whatever posted it: a posted entry (a
+   * reversed one records no starting point) that is not itself a reversal,
+   * and is either the Wise card's (its source) or sets bank and cash accounts
+   * against the book's opening-balance equity account and nothing else. A
+   * transfer between two bank accounts touches no equity; an expense, an
+   * owner contribution or a payout touches other accounts; neither counts.
+   */
+  const isOpeningBalance = (l: ReportLine): boolean => {
+    if (l.status !== "posted" || l.source === REVERSAL_SOURCE) return false;
+    if (l.source === OPENING_BALANCE_SOURCE) return true;
+    const legs = byEntry.get(l.entryId) || [];
+    return (
+      legs.some((o) => openingEquity.has(o.accountId)) &&
+      legs.every((o) => openingEquity.has(o.accountId) || BALANCE_SUBTYPES.has(kindOf.get(o.accountId) || ""))
+    );
+  };
 
   const gaps: string[] = [];
   const accounts: CoverageAccount[] = [];
@@ -140,7 +189,7 @@ export function cashCoverage(input: {
     const balanceCents = lines.reduce((s, l) => s + l.cadDebitCents - l.cadCreditCents, 0);
     // In force only: a reversed opening balance (replaced or removed from the
     // Wise card; ledger-io buildReversal) records no starting point at all.
-    const hasOpeningBalance = lines.some((l) => l.source === OPENING_BALANCE_SOURCE && l.status === "posted");
+    const hasOpeningBalance = lines.some(isOpeningBalance);
     let covers: string;
 
     if (a.code === SYS.stripeClearing) {
@@ -161,7 +210,7 @@ export function cashCoverage(input: {
       covers = `${plural(entries, "entry", "entries")}${span(firstDate, lastDate)}; ${
         hasOpeningBalance ? "opening balance recorded" : "no opening balance"
       }; ${bankLines > 0 ? `${plural(bankLines, "bank line")} imported` : "no bank import"}`;
-      if (!hasOpeningBalance) gaps.push(`${a.name} has no opening balance ${openingBalanceFix(a.code)}`);
+      if (!hasOpeningBalance) gaps.push(`${a.name} has no opening balance ${openingBalanceFix(input.book, a.code, input.wiseWritesEnabled)}`);
     } else {
       covers = `${plural(entries, "entry", "entries")}${span(firstDate, lastDate)}`;
     }

@@ -31,7 +31,8 @@ import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/
 import { loadPendingApprovals } from "@/components/os/approvals/load";
 import { approvalScopeFromViewer } from "@/lib/os/approvals/scope";
 import type { ApprovalsBlock } from "@/lib/os/approvals/rules";
-import type { RoutineHealth } from "@/components/os/department/routine-rules";
+import type { EmpireLane, RoutineHealth } from "@/components/os/department/routine-rules";
+import type { PlatformOperatorCheck } from "@/lib/platform-operator";
 import {
   buildNeedsYou,
   todayBriefPlan,
@@ -93,19 +94,32 @@ export function briefPlanFor(viewer: BriefViewer, navInput: BuildOsNavInput): { 
  * them the count stays the workspace's own lane.
  *
  * `isOperator` is asked only for an owner in OASIS (it costs a profile read).
- * It fails closed; a throw is logged and answered "no", never rejected.
+ * A check that could not be made is "unknown", never "no" (routine-rules.ts
+ * EmpireLane): the operator must not read "no failures" over the workspace
+ * lane alone because their profile read blipped. A throw is logged and
+ * answered "unknown", never rejected.
  */
 export async function empireRoutinesFor(
   viewer: Pick<BriefViewer, "persona" | "tenantSlug">,
-  isOperator: () => Promise<boolean>,
-): Promise<boolean> {
+  isOperator: () => Promise<EmpireLane>,
+): Promise<EmpireLane> {
   if (!isOasisSurfaceTenant(viewer.tenantSlug) || viewer.persona !== "founder") return false;
   try {
     return await isOperator();
   } catch (err) {
     console.error("[today.routines.operator]", err);
-    return false;
+    return "unknown";
   }
+}
+
+/**
+ * The verified check's verdict (lib/platform-operator.ts) as an Empire lane:
+ * a failed lookup is "unknown", and every other "no" (not an operator alias,
+ * not an owner of OASIS, no session) is a true no.
+ */
+export function empireLaneFromCheck(check: PlatformOperatorCheck): EmpireLane {
+  if (check.operator) return true;
+  return check.reason === "lookup_failed" ? "unknown" : false;
 }
 
 export type NeedsYouReads = {
@@ -127,8 +141,8 @@ export async function loadNeedsYouReads(input: {
   day: OperatorDay;
   /** Approval cards to fetch (the total is an exact count either way). */
   approvalsLimit: number;
-  /** The verified platform-operator check for this session (see empireRoutinesFor). */
-  isPlatformOperator: () => Promise<boolean>;
+  /** The verified platform-operator check for this session, as an Empire lane (see empireRoutinesFor). */
+  isPlatformOperator: () => Promise<EmpireLane>;
 }): Promise<NeedsYouReads> {
   const { viewer, plan, day } = input;
   const tenantId = viewer.tenantId;

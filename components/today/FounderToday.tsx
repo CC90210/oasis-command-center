@@ -47,13 +47,13 @@ import {
   usd,
 } from "@/components/os/today/model";
 import { loadCalendarStatus, loadContentWeek } from "@/components/os/today/loaders";
-import { briefPlanFor, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
+import { briefPlanFor, empireLaneFromCheck, loadNeedsYouReads, needsYouFrom, operatorDayAt } from "@/components/os/today/brief-load";
 import { operatorParts } from "@/lib/dates";
 import { loadOasisMoney } from "@/lib/goals/oasis-money";
 import { resolveOsModules } from "@/lib/os/modules";
 import { ASK_HREF, mayOpenOsHref, type BuildOsNavInput } from "@/lib/os/nav";
 import { isOasisSurfaceTenant, type Persona, type SurfaceCapabilities } from "@/lib/role-surfaces";
-import { isPlatformOperator } from "@/lib/role-surfaces-session";
+import { resolvePlatformOperator } from "@/lib/role-surfaces-session";
 import type { UserProfile } from "@/lib/supabase";
 
 /** Where a viewer connects their own Google Calendar today (Settings › Personal). */
@@ -115,7 +115,8 @@ export async function FounderToday({
     showFinancials,
     day,
     approvalsLimit: TODAY_APPROVALS_SHOWN,
-    isPlatformOperator,
+    // A failed lookup is "unknown", not "no" (brief-load.ts empireLaneFromCheck).
+    isPlatformOperator: async () => empireLaneFromCheck(await resolvePlatformOperator()),
   });
   const contentP = plan.content ? loadContentWeek(tenantId) : Promise.resolve(null);
   const calendarP = loadCalendarStatus(tenantId, viewer.userId, isOasisSurfaceTenant(viewer.tenantSlug));

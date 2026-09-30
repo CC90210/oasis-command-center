@@ -25,6 +25,7 @@ import { requireEntity, type EntityRow } from "./access-io";
 import { loadSettings } from "./settings-io";
 import { sweepOverdue } from "./invoices-io";
 import { cashCoverage } from "./cash-coverage";
+import { WISE_FEED_WRITES_ENABLED } from "./wise-feed";
 
 export const REPORT_KINDS = ["pnl", "balance", "trial", "cashflow", "ledger", "aging"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -282,6 +283,8 @@ export async function overview(viewer: FinanceViewer, entityRef: string, opts: {
       accounts,
       lines,
       bankLinesByAccount: Object.fromEntries(bankLines.map((r) => [r.account_id, Number(r.n || 0)])),
+      book: business ? "business" : "personal",
+      wiseWritesEnabled: WISE_FEED_WRITES_ENABLED,
     }),
     threshold,
   };
