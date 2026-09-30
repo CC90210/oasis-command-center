@@ -762,7 +762,7 @@ export function AgentConfigEditor({
                     <div className="border-t border-bg-border px-3 py-3 space-y-3">
                       <p className="text-[11px] text-fg-dim leading-relaxed">
                         Choose which tools this agent can call. Uncheck what
-                        it shouldn&apos;t touch (e.g. give Helios{" "}
+                        it shouldn&apos;t touch (for example, allow{" "}
                         <span className="font-mono">send_sms</span> but not{" "}
                         <span className="font-mono">bash</span>). The bridge
                         tools (right column) require the local bridge to be

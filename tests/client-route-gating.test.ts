@@ -31,7 +31,11 @@
  *      own tabs call not set up. OASIS's own owner is not offered add-ons by
  *      persona name either. Remove is offered only where Add brings the agent
  *      back: never in a client workspace, and in OASIS's only for a house agent,
- *      which then reappears under Available add-ons.
+ *      which then reappears under Available add-ons. The copy behind a toggle
+ *      (a row's Tool palette) is read from source, since it never paints on
+ *      first render.
+ *  11. Drips' New sequence starter is created off and signs as nobody (it went
+ *      live signed "Solara, SunBiz Funding" in every workspace).
  *   7. Today's "we could not confirm your workspace" screen sends the person to
  *      the support form and the verified inbox, not to "CC".
  *   8. The error boundaries say what to do (try again, then send the code
@@ -58,6 +62,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as ReactNS from "react";
 import { createClient } from "@libsql/client";
+import ts from "typescript";
 
 const ROOT = join(__dirname, "..");
 const dbFile = join(mkdtempSync(join(tmpdir(), "client-route-gating-")), "test.db");
@@ -539,6 +544,39 @@ async function main() {
     assert.equal(c.marketplace?.offerAddOns, false, "a client is not offered OASIS's house agents");
     assert.doesNotMatch(readable(html.client.marketplace), /Available add-ons/);
   });
+  // The render above shows each card as it first paints. Copy behind a toggle
+  // (a row's Tool palette, the system prompt override) never paints there, so
+  // the cards' own JSX text and string attributes are read from source too.
+  // The Tool palette's help said "e.g. give Helios send_sms" to every owner who
+  // opened it, a client's included, until 2026-09-30.
+  await check("Settings > AI brain cards: no persona name in any copy, including the copy behind a toggle", () => {
+    const hits: string[] = [];
+    for (const rel of [
+      "components/settings/AgentConfigEditor.tsx",
+      "components/settings/AgentMarketplaceCard.tsx",
+      "components/settings/ProfileEditor.tsx",
+      "components/settings/ProviderAccountsCard.tsx",
+    ]) {
+      const sf = ts.createSourceFile(rel, readFileSync(join(ROOT, rel), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+      let inJsx = 0;
+      const visit = (n: ts.Node) => {
+        const jsx = ts.isJsxElement(n) || ts.isJsxSelfClosingElement(n) || ts.isJsxFragment(n);
+        if (jsx) inJsx += 1;
+        const text = ts.isJsxText(n)
+          ? n.text
+          : inJsx > 0 && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n))
+            ? n.text
+            : null;
+        if (text && PERSONA_NAMES.test(text)) {
+          hits.push(`${rel}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}  ${text.trim().slice(0, 80)}`);
+        }
+        ts.forEachChild(n, visit);
+        if (jsx) inJsx -= 1;
+      };
+      visit(sf);
+    }
+    assert.deepEqual(hits, [], "a persona or OASIS-internal word in Settings > AI brain copy");
+  });
 
   // The names must agree with the client's own department tabs, which read
   // departmentChannelFor(key, { oasis: false }): only departments bound there
@@ -626,6 +664,22 @@ async function main() {
     // The Manage tab's help text (a client component with a live fetch): read as source.
     const manage = readFileSync(join(ROOT, "components/sequences/SequencesListClient.tsx"), "utf8");
     assert.doesNotMatch(manage, /Bravo|Metrics tab/, "Drips > Manage names Bravo or sends people to the retired Metrics page");
+  });
+  // /sequences opens for every workspace whose rail has Pipeline, a client's
+  // included, and its New sequence button POSTs this starter the moment it is
+  // clicked. It was created live and signed "Solara, SunBiz Funding".
+  await check("Drips > New sequence: the starter is created off and signs as nobody", async () => {
+    const { STARTER_SEQUENCE_TEMPLATE } = await import("../components/sequences/SequencesListClient");
+    assert.equal(STARTER_SEQUENCE_TEMPLATE.enabled, false, "a starter nobody has written yet goes live the moment it is created");
+    // The steps are what a prospect receives (trigger_event is the bus's event name).
+    assert.doesNotMatch(
+      JSON.stringify(STARTER_SEQUENCE_TEMPLATE.steps),
+      /Solara|Helios|SunBiz|Sun Biz|Bravo|OASIS|Conaugh/i,
+      "the starter speaks as another company's agent in every workspace",
+    );
+    for (const step of STARTER_SEQUENCE_TEMPLATE.steps) {
+      assert.ok(!("from_label" in step), "the starter invents a sender name");
+    }
   });
 
   // ── 7. Today, unlinked account ─────────────────────────────────────────
