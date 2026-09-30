@@ -236,6 +236,65 @@ async function main() {
     assert.equal(res.status, 409);
   });
 
+  // "Name your workspace" says the name shows in the header. The header reads
+  // tenants.name first, and a workspace made by signup_tenant or the setup CLI
+  // is named "<First name>'s workspace", so the wizard must save the owner's
+  // name there (2026-09-30 verifier: it saved only the manifest brand, and the
+  // header kept "Dana's workspace").
+  const DELTA = "de17a000-0000-4000-8000-0000000de17a";
+  const DANA = u(6, "dana@delta-dental.test", "Dana Dentist");
+  const HALO = "4a100000-0000-4000-8000-0000000004a1";
+  const HAL = u(7, "hal@halo.test", "Hal Owner");
+  await seedTenant(db, DELTA, "dana", "Dana's workspace");
+  await seedTenant(db, HALO, "hal", "Hal's workspace");
+  for (const who of [DANA, HAL]) await seedAuthUser(db, who);
+  await seedProfile(db, DANA, DELTA, { role: "owner", owner: true });
+  await seedProfile(db, HAL, HALO, { role: "owner", owner: true });
+
+  await check("the name the owner types in the wizard becomes the workspace name the header shows", async () => {
+    setSessionCookie(await signFor(DANA, "wizard"));
+    const res = await POST(
+      wizardPost({ template: "custom", answers: { brand_name: "  Delta Dental  ", departments: ["sales"] } }, await signFor(DANA, "wizard")),
+    );
+    assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+    const t = await one(db, `SELECT name FROM tenants WHERE id = ?`, [DELTA]);
+    assert.equal(t?.name, "Delta Dental", "tenants.name is the owner's answer, trimmed");
+    const m = await one(db, `SELECT manifest FROM tenant_manifests WHERE tenant_id = ?`, [DELTA]);
+    const { workspaceDisplayName } = await import("../lib/provisioning/workspace-name");
+    const header = workspaceDisplayName({
+      tenantName: String(t?.name),
+      manifestBrand: (JSON.parse(String(m?.manifest)) as { brand: { name: string } }).brand.name,
+      profileBrand: null,
+      isOasisWorkspace: false,
+    });
+    assert.equal(header, "Delta Dental", "the header shows the name typed in 'Name your workspace'");
+    const client = readFileSync("components/onboarding/OnboardingWizardClient.tsx", "utf8");
+    assert.ok(client.includes("The name shows in the header and across every page."), "the promise this pins");
+  });
+
+  await check("when the workspace name cannot be saved, nothing is saved and the owner is told", async () => {
+    await db.execute(`CREATE TRIGGER refuse_halo_rename BEFORE UPDATE OF name ON tenants
+                        WHEN OLD.id = '${HALO}' BEGIN SELECT RAISE(ABORT, 'rename refused'); END`);
+    try {
+      setSessionCookie(await signFor(HAL, "wizard"));
+      const res = await POST(
+        wizardPost({ template: "custom", answers: { brand_name: "Halo Studio", departments: ["sales"] } }, await signFor(HAL, "wizard")),
+      );
+      const json = (await res.json()) as Record<string, unknown>;
+      assert.equal(res.status, 503, JSON.stringify(json));
+      assert.equal(json.error, "workspace_name_unsaved");
+      assert.match(String(json.reason), /nothing was saved/);
+      const m = await one(db, `SELECT COUNT(*) AS n FROM tenant_manifests WHERE tenant_id = ?`, [HALO]);
+      assert.equal(Number(m?.n), 0, "the create-only setup was not saved, so the owner can retry");
+      const p = await one(db, `SELECT onboarding_completed_at FROM user_profiles WHERE auth_user_id = ?`, [HAL.id]);
+      assert.equal(p?.onboarding_completed_at, null, "onboarding is not marked done");
+      const t = await one(db, `SELECT name FROM tenants WHERE id = ?`, [HALO]);
+      assert.equal(t?.name, "Hal's workspace");
+    } finally {
+      await db.execute(`DROP TRIGGER refuse_halo_rename`);
+    }
+  });
+
   await check("no route path promotes anyone to owner", () => {
     const route = readFileSync("app/api/onboarding/wizard/route.ts", "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
     assert.doesNotMatch(route, /is_owner\s*:\s*true/);

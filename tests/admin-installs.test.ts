@@ -452,6 +452,17 @@ async function main() {
 
     const { setupConfirmation } = await import("../components/admin/installs/outcome");
     assert.match(setupConfirmation("Custom Co", true), /replaces its departments.*Its own name, tagline, pages, saved prompts and the teammates it added stay/s);
+
+    // The first-time confirmation must not promise that members see the chosen
+    // departments: the rail draws every department without a module gate
+    // whatever was ticked (2026-09-30 verifier walk: Operations, never chosen,
+    // was in Delta Dental's rail). It promises what the save does change.
+    const { OS_DEPARTMENTS } = await import("../lib/os/departments");
+    const ungated = OS_DEPARTMENTS.filter((d) => !d.module).map((d) => d.key);
+    assert.ok(ungated.includes("marketing") && ungated.includes("operations"), JSON.stringify(ungated));
+    const first = setupConfirmation("Acme Plumbing", false);
+    assert.doesNotMatch(first, /departments/i, first);
+    assert.match(first, /see the workspace and its AI teammates on their next page load/);
   });
 
   await check("a stored setup that does not parse is never replaced, and the console says it is unreadable", async () => {

@@ -26,7 +26,9 @@
  *   2. Folds answers into the chosen template via finalizeManifestFromWizard
  *      (departments -> neutral teammates; chat apps and Jev into integrations).
  *   3. Validates the resulting manifest (parseManifest).
- *   4. Saves through the audit-logged path the AI editor uses.
+ *   4. Saves the name the owner typed as the workspace's own name
+ *      (tenants.name, what the header shows), then saves the manifest through
+ *      the audit-logged path the AI editor uses.
  *   5. Marks the owner's onboarding finished and refreshes the session's
  *      onboarding claim, so the gate stops sending them here.
  *
@@ -139,6 +141,35 @@ export async function POST(req: NextRequest) {
       { ok: false, error: "build_failed", message: err instanceof Error ? err.message : "unknown" },
       { status: 422 },
     );
+  }
+
+  // The name the owner typed in "Name your workspace" becomes the workspace's
+  // own name (tenants.name), which is what the header shows first
+  // (lib/provisioning/workspace-name.ts). Without this the manifest carried the
+  // new name and the header kept the placeholder, e.g. "Dana's workspace"
+  // (2026-09-30 verifier). Written BEFORE the create-only save: if it fails,
+  // nothing is saved and the owner can retry the whole step.
+  const workspaceName = typeof answers.brand_name === "string" ? answers.brand_name.trim().slice(0, 120) : "";
+  if (workspaceName) {
+    const renamed = await service
+      .from("tenants")
+      .update({ name: workspaceName, updated_at: new Date().toISOString() })
+      .eq("id", tenantId)
+      .select("id");
+    if (renamed.error || (renamed.data || []).length !== 1) {
+      console.error("[onboarding.wizard] workspace name not saved; nothing saved", {
+        tenantId,
+        error: renamed.error?.message ?? "no row updated",
+      });
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "workspace_name_unsaved",
+          reason: "Your workspace name could not be saved, so nothing was saved. Try again.",
+        },
+        { status: 503 },
+      );
+    }
   }
 
   let result;

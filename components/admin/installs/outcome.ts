@@ -39,7 +39,13 @@ export function outcomeFrom(json: Record<string, unknown>, fallback: string): Ou
  * changes a live workspace its members are using.
  */
 export function setupConfirmation(workspaceName: string, alreadySetUp: boolean): string {
-  if (!alreadySetUp) return `Set up ${workspaceName} with these choices? Members see the new departments on their next page load.`;
+  // Not "members see the new departments": the rail's department rows come
+  // from lib/os/departments.ts and the member's role, not from this choice, so
+  // an unticked Marketing or Operations still shows (2026-09-30 verifier walk).
+  // What the save does change is that the workspace opens, with its teammates.
+  if (!alreadySetUp) {
+    return `Set up ${workspaceName} with these choices? Its members see the workspace and its AI teammates on their next page load.`;
+  }
   return (
     `Save these choices to ${workspaceName}? This replaces its departments, add-ons, chat apps, fast classifier ` +
     `setting and department teammates. Its own name, tagline, pages, saved prompts and the teammates it added stay. ` +
