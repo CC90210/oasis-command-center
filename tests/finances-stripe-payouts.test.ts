@@ -408,6 +408,7 @@ async function main() {
     await booksBalance();
     // A failed payout never comes back to paid, whatever order the events arrive in.
     await ingest.handleStripeEvent(event("payout.paid", P1));
+    assert.equal((await row("po_live_1"))?.stripe_status, "failed", "Stripe's own status stays failed");
     assert.equal((await row("po_live_1"))?.booking, "reversed");
     assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_live_1"), 1);
   });
@@ -733,6 +734,54 @@ async function main() {
     });
     // Without a key the question is never guessed at.
     assert.match(String(((await payoutsIo.payoutContents({ payoutId: "po_c_ok", settlementCents: 6684, settlementCurrency: "USD", feeCents: 0 })) as { reason?: string }).reason), /Stripe is not connected/);
+  });
+
+  await check("a payout adopted from a bank line whose entry is reversed since (the line re-categorised or excluded) is a gap again, never posted from Stripe on top", async () => {
+    const { categoryId } = await import("../lib/founders-finances/chart");
+    const chequingBefore = await held(CHEQUING, "USD");
+    const clearingBefore = await held(CLEARING, "USD");
+    await importCsv(`2026-09-17,STRIPE TRANSFER UNDONE,33.33`);
+    const bankLine = await line("STRIPE TRANSFER UNDONE");
+    assert.equal((await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })))).detail, "payout po_undone booked");
+    assert.equal((await row("po_undone"))?.entry_id, bankLine.entry_id, "adopted from the bank line");
+    const gapsBefore = (await payoutsIo.unbookedPayouts()).length;
+
+    // The founder re-categorises that deposit as revenue: the line's own entry (the one adopted) is reversed.
+    await txns.categorizeTransaction(cc, String(bankLine.id), categoryId(B, SYS.serviceRevenue));
+    assert.equal(await held(CHEQUING, "USD"), chequingBefore + 3_333, "the deposit is in chequing once, as revenue now");
+    assert.equal(await held(CLEARING, "USD"), clearingBefore, "and no longer out of Stripe clearing");
+    const unbooked = await payoutsIo.unbookedPayouts();
+    assert.equal(unbooked.length, gapsBefore + 1, "the payout is a gap again, before any reconcile");
+    assert.deepEqual(unbooked.find((u) => u.id === "po_undone"), {
+      id: "po_undone",
+      amountCents: 3_333,
+      currency: "USD",
+      arrivalDate: "2026-09-17",
+      booking: "held",
+      reason: payoutsIo.UNDONE_REASON,
+    });
+    assert.ok((await coverage()).gaps.some((g) => g.startsWith(`${gapsBefore + 1} Stripe payouts to the bank are not booked`)), "the cash tile counts it");
+
+    // The reconcile's retry reopens it, and neither it nor the payout's next event posts it from Stripe on top of the re-categorised deposit.
+    await payoutsIo.retryUnbookedPayouts();
+    const reopened = await row("po_undone");
+    assert.equal(reopened?.booking, "held");
+    assert.equal(reopened?.reason, payoutsIo.UNDONE_REASON);
+    await ingest.handleStripeEvent(event("payout.paid", payout({ id: "po_undone", amount: 3_333, arrival: "2026-09-17" })));
+    assert.equal((await row("po_undone"))?.booking, "held");
+    assert.equal(await entries(payouts.PAYOUT_SOURCE, "po_undone"), 0, "never posted from Stripe");
+    assert.equal(await held(CHEQUING, "USD"), chequingBefore + 3_333, "the deposit is not counted twice");
+
+    // Categorised back to Stripe clearing, the deposit is adopted again at the next retry.
+    await txns.categorizeTransaction(cc, String(bankLine.id), categoryId(B, SYS.stripeClearing));
+    await payoutsIo.retryUnbookedPayouts();
+    const back = await row("po_undone");
+    assert.equal(back?.booking, "booked");
+    assert.equal(back?.entry_id, (await line("STRIPE TRANSFER UNDONE")).entry_id, "the line's new entry");
+    assert.ok(!(await payoutsIo.unbookedPayouts()).some((u) => u.id === "po_undone"));
+    assert.equal(await held(CHEQUING, "USD"), chequingBefore + 3_333, "US$33.33 in chequing once");
+    assert.equal(await held(CLEARING, "USD"), clearingBefore - 3_333, "and out of Stripe clearing once");
+    await booksBalance();
   });
 
   await check("the webhook's handled types include the payout events (the endpoint must be subscribed to each)", () => {

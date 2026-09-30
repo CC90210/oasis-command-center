@@ -35,9 +35,11 @@
  * the hourly :15 / :17 jobs.
  *
  * NONE OF THEM MOVES MONEY OR WRITES TO A CLIENT. They read Stripe, Wise and
- * the Bank of Canada and write the books. None writes to Stripe: the one
- * outward write a reconcile could make (deactivating a paid invoice's payment
- * link) belongs to recording a Wise payment, which the schedule does not do.
+ * the Bank of Canada and write the books. The one write to Stripe is the
+ * Stripe reconcile's, and the webhook makes the same one: a charge it records
+ * against a fin invoice deactivates that paid invoice's payment link
+ * (stripe-ingest.ts deactivatePaymentLinkIfPaid), so it cannot be paid twice.
+ * Recording a Wise payment would make it too; the schedule records none.
  */
 import "server-only";
 

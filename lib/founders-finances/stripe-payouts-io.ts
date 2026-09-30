@@ -25,6 +25,9 @@
  *   - a bank line arriving after the payout was booked here is LINKED to this
  *     entry: by the feed (bookedPayoutEntry), or by categorisation
  *     (transactions-io.ts, bookedPayoutForBankLine), which never posts it.
+ * An adopted entry is the bank line's own, so excluding or re-categorising
+ * that line reverses it: the payout is then UNDONE (UNDONE_REASON), a gap
+ * again, and adopted again only from a bank line, never posted from Stripe.
  *
  * WHAT CONVERTS. A USD payout from charges booked in CAD converts exactly the
  * charges it pays out, as Stripe lists them (payoutContents; the reasoning is
@@ -442,6 +445,38 @@ export async function recordStripePayout(facts: PayoutFacts, opts: { reportedOn?
   return unbookPayout(row, opts.reportedOn ?? torontoToday());
 }
 
+/**
+ * A booking undone on the books since: the row says booked, but its entry is
+ * no longer posted. Only an ADOPTED entry can be undone that way (the payout's
+ * own stripe_payout entry is reversed in the same batch that marks the row
+ * 'reversed', unbookPayout): it is the bank line's own entry, and excluding or
+ * re-categorising the line reverses it. The payout is then not on the books.
+ * It is never posted from Stripe on its own: the line may have been
+ * re-categorised as other money that reached the bank, and a payout entry on
+ * top would count that deposit twice. A deposit categorised to Stripe
+ * clearing is adopted again (the next reconcile, or the payout's next event).
+ */
+export const UNDONE_REASON =
+  "its booking was undone on the books (the bank line it was booked from was excluded or re-categorised); categorise that deposit to Stripe clearing to book it again";
+
+/** fin_stripe_payouts rows whose booking was undone (UNDONE_REASON), as a SQL condition on the unaliased table. */
+const UNDONE_WHERE = `fin_stripe_payouts.booking = 'booked'
+  AND NOT EXISTS (SELECT 1 FROM fin_journal_entries ue WHERE ue.id = fin_stripe_payouts.entry_id AND ue.status = 'posted')`;
+
+async function entryPosted(entryId: string | null): Promise<boolean> {
+  if (!entryId) return false;
+  return (await queryOne<{ one: number }>(`SELECT 1 AS one FROM fin_journal_entries WHERE id = ? AND status = 'posted'`, [entryId])) !== null;
+}
+
+/** Back to held, still naming the entry that was undone (so bookPayout never posts it from Stripe). */
+async function reopenUndoneBooking(row: PayoutRow): Promise<PayoutRow> {
+  await finDb().execute({
+    sql: `UPDATE fin_stripe_payouts SET booking = 'held', reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND ${UNDONE_WHERE}`,
+    args: [UNDONE_REASON, row.id],
+  });
+  return (await loadPayout(row.id)) ?? row;
+}
+
 async function setUnbooked(id: string, booking: "held" | "unmapped", reason: string): Promise<void> {
   await finDb().execute({
     sql: `UPDATE fin_stripe_payouts SET booking = ?, reason = ?, updated_at = ${NOW_SQL} WHERE id = ? AND booking IN ('held', 'unmapped')`,
@@ -450,12 +485,20 @@ async function setUnbooked(id: string, booking: "held" | "unmapped", reason: str
 }
 
 async function bookPayout(row: PayoutRow): Promise<PayoutOutcome> {
+  // Booked from a bank line whose entry was reversed since: a gap again (UNDONE_REASON).
+  if (row.booking === "booked" && !(await entryPosted(row.entry_id))) row = await reopenUndoneBooking(row);
   if (row.booking !== "held" && row.booking !== "unmapped") return outcomeOf(row);
   const id = row.id;
 
   // A bank line put it on the books first (the Wise feed's, or any categorised to Stripe clearing): adopt that entry.
   const adopted = await adoptExistingBooking(row);
   if (adopted) return adopted;
+
+  // Undone once (it still names that entry): adopted again from a bank line, never posted from Stripe.
+  if (row.entry_id) {
+    await setUnbooked(id, "held", UNDONE_REASON);
+    return outcomeOf((await loadPayout(id)) ?? row);
+  }
 
   const bank = await payoutBankAccount();
   if (bank.id === null) {
@@ -608,10 +651,12 @@ async function unbookPayout(row: PayoutRow, reportedOn: string): Promise<PayoutO
   return outcomeOf((await loadPayout(id)) ?? row);
 }
 
-/** Book every paid payout still held or unmapped, oldest first (clearing is used in arrival order). */
+/** Book every paid payout still held or unmapped, or undone (UNDONE_REASON), oldest first (clearing is used in arrival order). */
 export async function retryUnbookedPayouts(): Promise<number> {
   const rows = await query<PayoutRow>(
-    `SELECT * FROM fin_stripe_payouts WHERE entity_id = ? AND booking IN ('held', 'unmapped') AND stripe_status = 'paid' ORDER BY arrival_date, id`,
+    `SELECT * FROM fin_stripe_payouts
+      WHERE entity_id = ? AND stripe_status = 'paid' AND (booking IN ('held', 'unmapped') OR (${UNDONE_WHERE}))
+      ORDER BY arrival_date, id`,
     [E],
   );
   let booked = 0;
@@ -621,15 +666,29 @@ export async function retryUnbookedPayouts(): Promise<number> {
 
 export type UnbookedPayout = { id: string; amountCents: number; currency: string; arrivalDate: string; booking: "held" | "unmapped"; reason: string };
 
-/** Paid payouts the books have not booked, oldest first: what the cash tile lists as a gap. */
+/**
+ * Paid payouts the books have not booked, oldest first: what the cash tile
+ * lists as a gap. A booking undone since (UNDONE_REASON) is one of them from
+ * the moment its entry is reversed, before any reconcile reopens its row.
+ */
 export async function unbookedPayouts(entityId: string = E): Promise<UnbookedPayout[]> {
-  const rows = await query<{ id: string; amount_cents: number; currency: string; arrival_date: string; booking: "held" | "unmapped"; reason: string | null }>(
-    `SELECT id, amount_cents, currency, arrival_date, booking, reason FROM fin_stripe_payouts
-      WHERE entity_id = ? AND booking IN ('held', 'unmapped') AND stripe_status = 'paid' AND livemode = 1
+  const rows = await query<{ id: string; amount_cents: number; currency: string; arrival_date: string; booking: string; reason: string | null; undone: number }>(
+    `SELECT id, amount_cents, currency, arrival_date, booking, reason, (${UNDONE_WHERE}) AS undone FROM fin_stripe_payouts
+      WHERE entity_id = ? AND (booking IN ('held', 'unmapped') OR (${UNDONE_WHERE})) AND stripe_status = 'paid' AND livemode = 1
       ORDER BY arrival_date, id`,
     [entityId],
   );
-  return rows.map((r) => ({ id: r.id, amountCents: n(r.amount_cents), currency: r.currency, arrivalDate: r.arrival_date, booking: r.booking, reason: r.reason || "" }));
+  return rows.map((r) => {
+    const undone = n(r.undone) === 1;
+    return {
+      id: r.id,
+      amountCents: n(r.amount_cents),
+      currency: r.currency,
+      arrivalDate: r.arrival_date,
+      booking: undone || r.booking === "held" ? "held" : "unmapped",
+      reason: undone ? UNDONE_REASON : r.reason || "",
+    };
+  });
 }
 
 /**
