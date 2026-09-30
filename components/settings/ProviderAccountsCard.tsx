@@ -40,9 +40,12 @@ import {
 import { PROVIDER_REGISTRY, PROVIDER_TO_SERVICE, type Provider } from "@/lib/providers";
 
 type Props = {
-  /** Set of services-with-key resolved server-side via aiServicesWithKey(). */
-  connectedServices: Set<string>;
-  bridgeOnline: boolean;
+  /** Set of services-with-key resolved server-side via aiServicesWithKey().
+   *  null = that read failed: a card with no key known says "Couldn't check",
+   *  never "Not connected". */
+  connectedServices: Set<string> | null;
+  /** null = the bridge heartbeat could not be read. */
+  bridgeOnline: boolean | null;
   canManageTeam: boolean;
 };
 
@@ -58,8 +61,11 @@ export function ProviderAccountsCard({
 }: Props) {
   const router = useRouter();
   // Server-rendered set, but track in state so connecting flips the UI
-  // immediately without waiting for the router refresh round-trip.
-  const [services, setServices] = useState<Set<string>>(initialServices);
+  // immediately without waiting for the router refresh round-trip. When the
+  // server read failed the set starts empty and `keysKnown` stays false, so a
+  // provider this page has not just connected reads "Couldn't check".
+  const keysKnown = initialServices !== null;
+  const [services, setServices] = useState<Set<string>>(initialServices ?? new Set());
   const [activeProvider, setActiveProvider] = useState<Provider | null>(null);
 
   function markConnected(p: Provider) {
@@ -118,9 +124,11 @@ export function ProviderAccountsCard({
           >
             <Cloud className="w-3 h-3" />
             Cloud:{" "}
-            {anyConnected
-              ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected`
-              : "no provider connected"}
+            {!keysKnown && !anyConnected
+              ? "couldn't check"
+              : anyConnected
+                ? `${totalConnected} provider${totalConnected === 1 ? "" : "s"} connected`
+                : "no provider connected"}
           </span>
           <span className="text-fg-dim">·</span>
           <span
@@ -129,7 +137,7 @@ export function ProviderAccountsCard({
             }`}
           >
             <Cpu className="w-3 h-3" />
-            Local bridge: {bridgeOnline ? "online" : "offline"}
+            Local bridge: {bridgeOnline === null ? "couldn't check" : bridgeOnline ? "online" : "offline"}
           </span>
         </div>
       </div>
@@ -172,6 +180,10 @@ export function ProviderAccountsCard({
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-status-engaged shrink-0">
                     <Check className="w-3 h-3" /> Connected
                   </span>
+                ) : !keysKnown ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-muted shrink-0">
+                    <AlertCircle className="w-3 h-3" /> Couldn&apos;t check
+                  </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider font-bold text-fg-dim shrink-0">
                     <AlertCircle className="w-3 h-3" /> Not connected
@@ -191,7 +203,7 @@ export function ProviderAccountsCard({
                       : "text-accent hover:text-accent-bright"
                   }`}
                 >
-                  {connected ? "Replace key" : "Connect"} →
+                  {connected ? "Replace key" : keysKnown ? "Connect" : "Set key"} →
                 </button>
                 <span className="text-fg-dim text-[10px]">·</span>
                 <a
@@ -245,7 +257,9 @@ export function ProviderAccountsCard({
         })}
       </div>
 
-      {!anyConnected && !bridgeOnline && (
+      {/* Only a KNOWN "no key and no bridge" earns this warning; a read that
+          failed is not evidence that nothing is wired. */}
+      {keysKnown && !anyConnected && bridgeOnline === false && (
         <div className="rounded-lg border border-status-warm/30 bg-status-warm/5 p-3 text-xs text-fg flex items-start gap-2">
           <AlertCircle className="w-4 h-4 text-status-warm shrink-0 mt-0.5" />
           <div className="flex-1">

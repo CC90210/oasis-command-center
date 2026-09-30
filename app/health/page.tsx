@@ -242,9 +242,11 @@ export default async function HealthPage() {
       console.error("[health] integrations_health read failed", err instanceof Error ? err.message : err);
       return null;
     }),
+    // null = the key read failed: each card says "Couldn't check", never
+    // "Not connected" for a key that may well be on file.
     aiServicesWithKey(tenantId).catch((err) => {
       console.error("[health] AI key presence read failed", err instanceof Error ? err.message : err);
-      return new Set<string>();
+      return null;
     }),
     isVerifiedOperator(),
   ]);
@@ -517,7 +519,7 @@ export default async function HealthPage() {
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             {visibleHeartbeats.map((h) => (
-              <IntegrationDot key={h.service} health={h} connection={{ hasCredentials: keyedAi.has(h.service) }} />
+              <IntegrationDot key={h.service} health={h} connection={{ hasCredentials: keyedAi ? keyedAi.has(h.service) : null }} />
             ))}
           </div>
         )}

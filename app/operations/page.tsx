@@ -86,6 +86,9 @@ export default async function OperationsPage({
   const now7Ago = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const now14Ago = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
+  // The three lib/queries reads below throw on a failed read; safe() turns
+  // that into null, which each card draws as "Couldn't check", never as an
+  // empty tape or a fleet of stopped workers.
   const [snaps, pairings, events, decisions, errorsCount, failedCronsCount, stuckThreadsCount, staleLeadsCount] = await Promise.all([
     safe(
       "operations.agent_state_snapshot",
@@ -98,7 +101,7 @@ export default async function OperationsPage({
           health_status: r.health_status ?? null,
         })) as AgentSnap[]
       ),
-      [] as AgentSnap[]
+      null
     ),
     profile?.tenant_id
       ? safe(
@@ -125,7 +128,7 @@ export default async function OperationsPage({
         agentNames: agentNamesForOps,
         isOperator: false,
       }),
-      []
+      null
     ),
     // Agent decisions tape — moved here from /reasoning 2026-08-04 when that
     // page was dropped from CC's nav. Scoping is deliberately IDENTICAL to
@@ -137,7 +140,7 @@ export default async function OperationsPage({
     safe(
       "operations.recent_decisions",
       recentDecisions(profile?.tenant_id ?? null, agentNamesForOps, 20),
-      []
+      null
     ),
     // Health tile #1: ERROR events in last 24h (tenant-scoped via enabled
     // agents — same posture as the activity tape above).
@@ -227,7 +230,7 @@ export default async function OperationsPage({
     // exec_guard still refuses destructive commands; it just doesn't
     // create approval-request rows anymore. No more badge.
   ]);
-  const snapByName = new Map(snaps.map((s) => [s.agent_name, s] as const));
+  const snapByName = new Map((snaps ?? []).map((s) => [s.agent_name, s] as const));
 
   // Resolve lead/record UUIDs in event payloads to human names in one batch
   // query. Without this the Activity Tape renders lines like
@@ -236,7 +239,7 @@ export default async function OperationsPage({
   // identifiable.
   const recordResolver = await safe(
     "operations.record_resolver",
-    buildRecordResolver(db, events, { tenantId }),
+    buildRecordResolver(db, events ?? [], { tenantId }),
     new Map<string, string>(),
   );
 
@@ -288,44 +291,48 @@ export default async function OperationsPage({
         title="Agent workers"
         subtitle="Each agent runs an autonomous reasoning loop on its own machine. A green dot means it cycled within the last 15 min."
       >
-        <div className="grid sm:grid-cols-2 gap-3">
-          {enabled.map((key) => {
-            const info = getAgentInfo(key);
-            const snap = snapByName.get(key);
-            const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
-            return (
-              <div
-                key={key}
-                className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
-                  fresh ? "border-status-engaged/30" : "border-bg-border"
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${
-                      fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
-                    }`} />
-                    <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
-                      {info.label}
+        {snaps === null ? (
+          <EmptyState message="Couldn't check the agent heartbeats. The read failed and has been logged; this does not mean the workers stopped. Reload to try again." />
+        ) : (
+          <div className="grid sm:grid-cols-2 gap-3">
+            {enabled.map((key) => {
+              const info = getAgentInfo(key);
+              const snap = snapByName.get(key);
+              const fresh = isFresh(snap?.last_tick_at || null, now, FRESH_AGENT_MS);
+              return (
+                <div
+                  key={key}
+                  className={`rounded-lg border bg-bg-elev px-4 py-3.5 ${
+                    fresh ? "border-status-engaged/30" : "border-bg-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${
+                        fresh ? "bg-status-engaged animate-pulse-slow" : snap?.last_tick_at ? "bg-status-warm" : "bg-fg-faint"
+                      }`} />
+                      <span className={`font-bold uppercase tracking-[0.14em] text-sm ${info.textClass}`}>
+                        {info.label}
+                      </span>
+                    </div>
+                    <span
+                      className="text-xs text-fg-dim font-mono"
+                      title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
+                    >
+                      {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
                     </span>
                   </div>
-                  <span
-                    className="text-xs text-fg-dim font-mono"
-                    title="One cycle = one autonomous reasoning loop (the agent woke up, decided what to fire, logged it). Higher count = more activity since the worker started."
-                  >
-                    {snap?.last_tick_at ? `${snap.tick_count ?? 0} cycle${snap.tick_count === 1 ? "" : "s"}` : "no activity yet"}
-                  </span>
+                  <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
+                  <div className="text-[10px] text-fg-dim mt-2 font-mono">
+                    {snap?.last_tick_at
+                      ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
+                      : "worker not running on any paired machine"}
+                  </div>
                 </div>
-                <div className="text-xs text-fg-muted mt-1.5">{info.tagline}</div>
-                <div className="text-[10px] text-fg-dim mt-2 font-mono">
-                  {snap?.last_tick_at
-                    ? `last cycle ${timeAgo(snap.last_tick_at)}${snap.last_tick_id ? ` · ${truncate(snap.last_tick_id, 12)}` : ""}`
-                    : "worker not running on any paired machine"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Card title="Paired machines" subtitle="Local installs heartbeating to this dashboard. Add a new one from Settings → Devices.">
@@ -397,9 +404,11 @@ export default async function OperationsPage({
       <Card
         title="Activity tape"
         subtitle={
-          showOlder
-            ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
-            : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
+          events === null
+            ? "Couldn't check the event tape just now."
+            : showOlder
+              ? `All events (last 100) — cron fires, reasoning loops, outbound sends, inbound classifications.`
+              : `Most recent ${events.length} events — cron fires, reasoning loops, outbound sends, inbound classifications.`
         }
         action={
           <a
@@ -410,7 +419,9 @@ export default async function OperationsPage({
           </a>
         }
       >
-        {events.length === 0 ? (
+        {events === null ? (
+          <EmptyState message="Couldn't check the activity tape. The read failed and has been logged; this does not mean nothing ran. Reload to try again." />
+        ) : events.length === 0 ? (
           <EmptyState
             message="No events recorded yet. The event bus writes when crons fire (MRR snapshot, plan materialize), inbound webhooks land (n8n classifies email), or agents emit dashboard-action mutations."
           />

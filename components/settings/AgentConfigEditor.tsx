@@ -78,8 +78,9 @@ type Props = {
    * below reads this to show whether the agent has full local-tool
    * access (bridge paired, Python/file/script tools wired) or runs
    * cloud-only (chat + dashboard actions via the saved API key).
+   * null = the heartbeat could not be read: "Couldn't check", not "Offline".
    */
-  bridgeOnline?: boolean;
+  bridgeOnline?: boolean | null;
   /**
    * Per-agent tool palette from the tenant's manifest (Phase D of
    * giggly-reef). Map of agent slug → string[] (allowlist) | undefined
@@ -107,8 +108,10 @@ type Props = {
    * KEY field shows "Using AI Setup default" instead of asking for
    * a re-paste — kills the "do I need to enter this key again?"
    * confusion CC flagged 2026-05-22.
+   * null = the AI-key read failed: the banner says so instead of "No global
+   * AI account connected yet".
    */
-  globallyConnectedServices?: string[];
+  globallyConnectedServices?: string[] | null;
 };
 
 export function AgentConfigEditor({
@@ -119,7 +122,8 @@ export function AgentConfigEditor({
   toolCatalog = [],
   globallyConnectedServices = [],
 }: Props) {
-  const globalServiceSet = new Set(globallyConnectedServices);
+  const globalKeysKnown = globallyConnectedServices !== null;
+  const globalServiceSet = new Set(globallyConnectedServices ?? []);
   const [configs, setConfigs] = useState<Record<string, AgentConfig>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   // Bumped from the cross-component event below (oasis:agent-configs-changed)
@@ -403,6 +407,12 @@ export function AgentConfigEditor({
               a different provider or a different key. Leaving the key field
               blank keeps whatever&apos;s already on file.
             </>
+          ) : !globalKeysKnown ? (
+            <>
+              Couldn&apos;t check which AI accounts are connected just now, so
+              this is not saying none are. Leaving a key field blank keeps
+              whatever&apos;s already on file. Reload to check again.
+            </>
           ) : (
             <>
               No global AI account connected yet. Either connect one above in{" "}
@@ -676,7 +686,13 @@ export function AgentConfigEditor({
                     Local bridge · CLI
                   </div>
                   <div className="text-xs text-fg mt-0.5 leading-relaxed">
-                    {bridgeOnline ? (
+                    {bridgeOnline === null ? (
+                      <>
+                        <span className="text-fg-muted">Couldn&apos;t check.</span>{" "}
+                        The bridge heartbeat could not be read just now; this
+                        does not mean it is offline.
+                      </>
+                    ) : bridgeOnline ? (
                       <>
                         <span className="text-status-engaged">Online.</span>{" "}
                         Python scripts, file reads, scheduled jobs, real
@@ -690,7 +706,7 @@ export function AgentConfigEditor({
                       </>
                     )}
                   </div>
-                  {!bridgeOnline && (
+                  {bridgeOnline === false && (
                     <Link
                       href="/settings/devices/install"
                       className="text-[11px] text-accent hover:text-accent-bright inline-flex items-center gap-1 mt-1.5"
