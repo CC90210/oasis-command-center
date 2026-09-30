@@ -10,10 +10,13 @@
  *   3. Idempotent on the Stripe event id (fin_stripe_events): a redelivery
  *      answers 200 "duplicate" and changes nothing.
  *
- * Handled: payment_intent.succeeded, charge.succeeded, charge.refunded,
- * invoice.paid, customer.subscription.created|updated|deleted. Anything else
- * is acknowledged and recorded as ignored. A processing failure answers 500 so
- * Stripe retries; the event row is marked failed and a retry reclaims it.
+ * Handled: lib/founders-finances/stripe-ingest.ts HANDLED_EVENT_TYPES
+ * (payments, failed charges, refunds, Stripe invoices, subscriptions and
+ * payouts). The endpoint in Stripe must be subscribed to every one of them;
+ * an event it is not subscribed to never arrives. Anything else is
+ * acknowledged and recorded as ignored. A processing failure (a failed
+ * Business Ledger insert included) answers 500 so Stripe retries; the event
+ * row is marked failed and a retry reclaims it.
  */
 
 import { NextResponse } from "next/server";

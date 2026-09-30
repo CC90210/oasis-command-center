@@ -70,7 +70,14 @@ const QUEUE_TIER_RE = /^(fast|smart|max)$/;
  * anything slower than one caller's budget. With it, the job is tagged on
  * `source` and the next call ADOPTS the in-flight job (or collects its finished
  * result for free) instead of queueing a twin.
+ *
+ * `onJob` (optional) is told which job the call waited on and whether it
+ * queued it, adopted it or collected it, before the call returns. The AI usage
+ * ledger (lib/ai/infer.ts) keeps ONE row per job with it: only the call that
+ * queued a job is a new model call.
  */
+export type InferJob = { id: string; origin: "queued" | "adopted" | "collected" };
+
 export async function queueInfer(
   args: {
     source: string;
@@ -90,6 +97,8 @@ export async function queueInfer(
      * lets a later call see the original job's age). Default 15 min.
      */
     stalledAfterMs?: number;
+    /** Told the job the call waited on and how it got it (see InferJob). */
+    onJob?: (job: InferJob) => void;
   },
   opts?: { timeoutMs?: number; pollMs?: number },
 ): Promise<
@@ -140,6 +149,7 @@ export async function queueInfer(
       // every completed classification was silently discarded 8/09→8/16.
       const priorText = coerceInferResultText(p.result_text);
       if (p.status === "complete" && priorText.trim()) {
+        args.onJob?.({ id: p.id, origin: "collected" });
         return { ok: true, text: priorText.trim(), reused: true };
       }
       // Still queued or running — adopt it rather than enqueue a duplicate.
@@ -153,6 +163,7 @@ export async function queueInfer(
         // failure this whole change exists to make impossible.
         const ageMs = p.created_at ? Date.now() - Date.parse(p.created_at) : 0;
         const stalledAfterMs = args.stalledAfterMs ?? 15 * 60_000;
+        args.onJob?.({ id: p.id, origin: "adopted" });
         if (Number.isFinite(ageMs) && ageMs > stalledAfterMs) {
           return {
             ok: false,
@@ -184,6 +195,7 @@ export async function queueInfer(
       return { ok: false, error: `queue_insert_failed: ${ins.error?.message || "unknown"}` };
     }
     jobId = (ins.data as { id: string }).id;
+    args.onJob?.({ id: jobId, origin: "queued" });
   }
 
   const deadline = Date.now() + timeoutMs;

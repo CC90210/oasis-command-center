@@ -11,6 +11,7 @@ import { auditStatement, queryOne, writeBatch } from "./db";
 import { requireEntity, FinanceInputError } from "./access-io";
 import { viewerLabel, type FinanceViewer } from "./access";
 import { stripeConnectionStatus } from "./stripe-io";
+import { retryUnbookedPayouts } from "./stripe-payouts-io";
 import { validateEmail } from "./validation";
 
 export type SettingsRow = {
@@ -33,6 +34,8 @@ export type SettingsRow = {
   payment_terms_days: number;
   payment_instructions: string;
   stripe_account_id: string | null;
+  /** The bank account Stripe payouts land in (migration bravo__193); null = not chosen, payouts are recorded but not booked. */
+  stripe_payout_account_id: string | null;
   updated_at: string;
   updated_by: string | null;
 };
@@ -173,4 +176,30 @@ export async function pinStripeAccount(viewer: FinanceViewer, entityRef: string,
     auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "stripe.account_pinned", objectType: "settings", objectId: entity.id, detail: { account: status.accountId } }),
   ]);
   return status.accountId;
+}
+
+/**
+ * Choose the bank account Stripe payouts land in, or none (`""`): payouts are
+ * then recorded and listed as a gap, never booked to a guessed account. Only
+ * one of the business book's bank accounts may be chosen. Payouts already
+ * waiting are booked straight away (stripe-payouts-io.ts), so the cash tile
+ * changes on the next load, not the next reconcile.
+ */
+export async function setStripePayoutAccount(viewer: FinanceViewer, entityRef: string, rawAccountId: unknown): Promise<{ accountId: string | null; booked: number }> {
+  const entity = await requireEntity(viewer, entityRef);
+  if (entity.kind !== "business") throw new FinanceInputError("only the business book uses Stripe");
+  const accountId = text(rawAccountId, 120) || null;
+  if (accountId) {
+    const acct = await queryOne<{ subtype: string }>(`SELECT subtype FROM fin_accounts WHERE id = ? AND entity_id = ?`, [accountId, entity.id]);
+    if (!acct || acct.subtype !== "bank") throw new FinanceInputError("choose one of this book's bank accounts");
+  }
+  await writeBatch([
+    {
+      sql: `UPDATE fin_settings SET stripe_payout_account_id = ?, updated_by = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE entity_id = ?`,
+      args: [accountId, viewerLabel(viewer), entity.id],
+    },
+    auditStatement({ entityId: entity.id, actor: viewerLabel(viewer), action: "stripe.payout_account_set", objectType: "settings", objectId: entity.id, detail: { account: accountId } }),
+  ]);
+  const booked = accountId ? await retryUnbookedPayouts() : 0;
+  return { accountId, booked };
 }
