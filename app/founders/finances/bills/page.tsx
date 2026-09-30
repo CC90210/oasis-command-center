@@ -183,7 +183,7 @@ export default async function BillsPage({ searchParams }: { searchParams: Search
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                     {r.paid_from_confirmed ? (
-                      <span className="text-fg-muted">Paid from {paidBy} (confirmed)</span>
+                      <span className="text-fg-muted">{r.paid_by_owner ? paidBy : `Paid from ${paidBy}`} (confirmed)</span>
                     ) : (
                       <span className="text-status-warm">
                         Paid from: not confirmed{paidBy ? ` (set to ${paidBy}, never confirmed)` : ""}. Each due date is recorded as a bill to pay.

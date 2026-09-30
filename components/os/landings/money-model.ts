@@ -101,11 +101,13 @@ export function moneyTiles(input: MoneyOverviewInput | null, fmt: Fmt): { headli
   // In/Out/Net over a book that does not hold the whole story (costs missing
   // for some months, deposits not recorded) are a floor, not the month:
   // "Partial", the recorded figure only as a labelled hint, and why.
+  // The page's "Books incomplete" banner lists every gap; the tile points at it
+  // rather than repeating one of them.
   const booksComplete = ov.books?.complete === true;
-  const firstBooksGap = ov.books?.gaps[0] ?? "what the books cover could not be read";
+  const whyPartial = ov.books ? "The books are incomplete: see Books incomplete above" : "What the books cover could not be read";
   const monthTile = (id: string, label: string, cents: number, hint: string): MoneyTile =>
     bank && !booksComplete
-      ? { id, label, value: null, status: "no_data", emptyText: "Partial", hint: `Recorded so far: ${fmt(cents, "CAD")}. ${firstBooksGap}` }
+      ? { id, label, value: null, status: "no_data", emptyText: "Partial", hint: `Recorded so far: ${fmt(cents, "CAD")}. ${whyPartial}` }
       : bankTile(id, label, cents, hint);
 
   const collectedHint = [

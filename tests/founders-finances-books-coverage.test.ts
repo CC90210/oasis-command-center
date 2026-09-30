@@ -462,6 +462,11 @@ async function main() {
     assert.equal(breadcrumbLabel("/system-health", rows), "System health");
     assert.equal(breadcrumbLabel("/", rows), "Today");
     assert.equal(breadcrumbLabel("/founders/finances/taxes", rows), "Taxes");
+    // A viewer whose rail has no Money row (their page is a 404) is never shown the section's name.
+    const repRows = rows.filter((r) => r.id !== "money");
+    assert.deepEqual(breadcrumbTrail("/founders/finances/taxes", repRows), ["Founders"]);
+    assert.deepEqual(breadcrumbTrail("/money", repRows), ["Money"]);
+    assert.equal(longestPrefixMatch("/founders/finances/taxes", repRows), null);
     // The header draws the whole trail.
     assert.match(code("components/os/ContentHeader.tsx"), /const trail = breadcrumbTrail\(pathname, entries\);/);
   });

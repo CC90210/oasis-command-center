@@ -102,12 +102,15 @@ export function breadcrumbTrail(
   pathname: string,
   entries: readonly { href: string; label: string }[],
 ): string[] {
+  // Only for a viewer whose rail has the section's row: anyone else gets the
+  // plain crumb (their page is a 404), so the section is never named to them.
+  const has = (href: string) => entries.some((e) => e.href === href);
   const alias = aliasFor(pathname);
-  if (alias) {
+  if (alias && has(alias.as)) {
     const tab = pathname.slice(alias.prefix.length).split("/").filter(Boolean)[0] ?? "";
     return [alias.section, alias.tabs[tab] ?? sentenceCase(tab)];
   }
-  const target = PATH_ALIASES.find((a) => underPrefix(pathname, a.as));
+  const target = PATH_ALIASES.find((a) => underPrefix(pathname, a.as) && has(a.as));
   if (target) return [target.section, target.tabs[""]];
   const hit = longestPrefixMatch(pathname, entries);
   if (hit) return [hit.label];
