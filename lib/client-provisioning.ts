@@ -2,6 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { getClientCommandCenterProfileById } from "./client-profiles";
 import { getTursoClient, tursoConfigured } from "./turso";
 
+/** Registered profile ids that belong to OASIS itself, never to a client. */
+export const OASIS_ONLY_PROFILE_IDS: ReadonlySet<string> = new Set(["default", "oasis-ai-cc"]);
+
 type ProvisioningInput = {
   db: SupabaseClient;
   tenantId: string;
@@ -37,6 +40,12 @@ export async function applyClientProvisioningProfile({
   // path recognises.
   if (getClientCommandCenterProfileById(clientProfileSlug).id !== clientProfileSlug) {
     throw new Error(`applyClientProvisioningProfile: unknown client profile "${clientProfileSlug}"`);
+  }
+  // OASIS's own shells are not client shells. "oasis-ai-cc" resolves to OASIS's
+  // seed manifest (its nav, its agents), so writing it onto another workspace
+  // would hand that workspace OASIS's command center.
+  if (OASIS_ONLY_PROFILE_IDS.has(clientProfileSlug)) {
+    throw new Error(`applyClientProvisioningProfile: "${clientProfileSlug}" is OASIS's own shell, not a client shell`);
   }
 
   const tenantRes = await db

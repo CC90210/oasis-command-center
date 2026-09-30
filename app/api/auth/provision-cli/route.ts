@@ -19,7 +19,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, checkBearerSecret } from "@/lib/api-helpers";
-import { applyClientProvisioningProfile } from "@/lib/client-provisioning";
+import { OASIS_ONLY_PROFILE_IDS, applyClientProvisioningProfile } from "@/lib/client-provisioning";
+import { getClientCommandCenterProfileById } from "@/lib/client-profiles";
+import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,12 +35,28 @@ export async function POST(req: NextRequest) {
     brand?: string;
     prefer_oauth?: boolean;
     agent?: string;
+    /**
+     * The shell to give this workspace, a registered id in lib/client-profiles.ts.
+     * Before 2026-09-30 the route never passed one, so
+     * applyClientProvisioningProfile wrote nothing and "provisioned" workspaces
+     * stayed unprovisioned. An unknown id is refused (400), not ignored.
+     */
+    client_profile_slug?: string;
   };
   try { body = await req.json(); } catch { return bad(400, "invalid JSON"); }
   const email = (body.email || "").trim().toLowerCase();
   if (!email || !email.includes("@")) return bad(400, "valid email required");
   const fullName = body.full_name?.trim() || email.split("@")[0];
-  const brand = body.brand?.trim() || "OASIS AI";
+  // Never "OASIS AI": that default named strangers' workspaces after OASIS.
+  const brand = body.brand?.trim() || defaultWorkspaceName(fullName, email);
+  const clientProfileSlug = (body.client_profile_slug || "").trim().toLowerCase() || null;
+  if (
+    clientProfileSlug &&
+    (getClientCommandCenterProfileById(clientProfileSlug).id !== clientProfileSlug ||
+      OASIS_ONLY_PROFILE_IDS.has(clientProfileSlug))
+  ) {
+    return bad(400, `client_profile_slug "${clientProfileSlug}" is not a client shell`);
+  }
   const agentToAdd = (body.agent || "").trim().toLowerCase();
   // Includes deprecated aliases (sunbiz, suga_sean, lyra*) so existing CLIs
   // that still pass the old slugs keep working; agents.ts:resolveAgentKey
@@ -174,8 +192,7 @@ export async function POST(req: NextRequest) {
     db,
     tenantId,
     profileId,
-    brand,
-    email,
+    clientProfileSlug,
   });
 
   return NextResponse.json({

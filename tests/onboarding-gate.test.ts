@@ -85,4 +85,40 @@ assert.equal(
   "fresh signup → /onboarding/wizard (industry template flow)",
 );
 
+// 2026-09-30: the OWNER of a workspace that is not set up yet may set it up
+// themselves, so the gate sends them to the wizard. Only a positive "not set
+// up" does: an unknown answer never traps anyone, and a member never goes.
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: false },
+  ),
+  "/onboarding/wizard",
+  "owner of an unprovisioned workspace -> wizard",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: true },
+  ),
+  null,
+  "owner of a set-up workspace lands in it",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 1 },
+    { workspaceProvisioned: null },
+  ),
+  null,
+  "unknown provisioning state never gates",
+);
+assert.equal(
+  shouldRedirectToOnboarding(
+    { onboarding_completed_at: null, invited_by: "inviter", tenant_id: "acme", is_owner: 0 },
+    { workspaceProvisioned: false },
+  ),
+  null,
+  "a member of an unprovisioned workspace is never sent to the wizard",
+);
+
 console.log("Onboarding gate tests passed");
