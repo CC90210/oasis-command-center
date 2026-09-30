@@ -51,6 +51,7 @@ const FOUNDER = u(2, "founder@acme-plumbing.test", "Ada Founder");
 const ACME_STAFF = u(3, "staff@acme-plumbing.test", "Sam Staff");
 const ORPHAN = u(4, "orphan@elsewhere.test", "Orla Orphan");
 const BAYSIDE_OWNER = u(5, "owner@bayside-hvac.test", "Olive Owner");
+const DETACHED = u(6, "detached@nowhere.test", "Dee Tached"); // no workspace, never invited
 
 function page(path: string, cookie?: string, headers: Record<string, string> = {}): NextRequest {
   return new NextRequest(`https://oasisai.work${path}`, {
@@ -65,7 +66,8 @@ async function main() {
   await seedTenant(db, OASIS, "oasis-ai-cc", "OASIS AI");
   await seedTenant(db, ACME, "acme-plumbing", "Acme Plumbing");
   await seedTenant(db, BAYSIDE, "bayside-hvac", "Bayside HVAC");
-  for (const who of [CC, FOUNDER, ACME_STAFF, ORPHAN, BAYSIDE_OWNER]) await seedAuthUser(db, who);
+  for (const who of [CC, FOUNDER, ACME_STAFF, ORPHAN, BAYSIDE_OWNER, DETACHED]) await seedAuthUser(db, who);
+  await seedProfile(db, DETACHED, null, {});
   await seedProfile(db, CC, OASIS, { role: "owner", owner: true, onboarded: false, agents: ["bravo"] });
   await seedProfile(db, FOUNDER, ACME, { role: "owner", owner: true, invitedBy: CC.id });
   await seedProfile(db, ACME_STAFF, ACME, { role: "member", invitedBy: CC.id });
@@ -124,6 +126,17 @@ async function main() {
     assert.equal((await computeOnboardingState(db, BAYSIDE_OWNER.id)).claim, "done", "owner of a set-up workspace");
     assert.equal((await computeOnboardingState(db, CC.id)).claim, "done", "OASIS's own workspace is set up in code");
     assert.equal((await computeOnboardingState(db, "no-such-user")).claim, "done", "no profile: no gate");
+  });
+
+  await check("an account with no workspace and no invite is never sent to the wizard (it would loop)", async () => {
+    // The wizard serves only a workspace owner and refuses anyone without a
+    // workspace; its refusal page linked to "/", which this claim sent straight
+    // back to the wizard, on every page until the next login.
+    const { computeOnboardingState } = await import("../lib/onboarding-claim");
+    assert.equal((await computeOnboardingState(db, DETACHED.id)).claim, "done");
+    const { wizardAccess } = await import("../lib/provisioning/wizard-access");
+    const access = await wizardAccess({ id: DETACHED.id, email: DETACHED.email });
+    assert.equal(access.ok, false, "the wizard would refuse this account");
   });
 
   await check("the password login mints the claim into the session cookie", async () => {

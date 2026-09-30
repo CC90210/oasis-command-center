@@ -3228,6 +3228,61 @@ export async function redeem_tenant_invite(
     if (existingTenantId !== tenantId) {
       return { ok: false, error: "already_member_of_another_tenant" };
     }
+    if (ownerClaim && existingProfileId) {
+      // THE FOUNDER IS ALREADY A MEMBER (2026-09-30 fix pass). Every workspace
+      // made by signup_tenant or the setup CLI has its creator as its only,
+      // non-owner member, and the wizard is now owner-only, so an owner invite
+      // is those creators' one path to ownership. It used to return
+      // already_member here without reading the claim: the invite stayed
+      // unclaimed, is_owner stayed 0, and the redemption still answered ok.
+      // Now the claim and the promotion are one compare-and-swap batch: the
+      // invite is claimed only while this person is still an active member of
+      // this workspace and the workspace still has no owner, and the profile
+      // is promoted only if that claim happened.
+      const promote = await client.batch(
+        [
+          {
+            sql:
+              `UPDATE "tenant_invites" SET "redeemed_at" = ?, "redeemed_by" = ? ` +
+              `WHERE "id" = ? AND "redeemed_at" IS NULL AND "revoked_at" IS NULL AND ${notExpired} ` +
+              `AND EXISTS (SELECT 1 FROM "user_profiles" p WHERE p."id" = ? AND p."tenant_id" = ? AND p."deactivated_at" IS NULL) ` +
+              `AND NOT EXISTS (SELECT 1 FROM "user_profiles" o WHERE o."tenant_id" = ? AND o."is_owner" = 1)`,
+            args: [nowIso, redeemerAuthId, inviteId, nowIso, existingProfileId, tenantId, tenantId],
+          },
+          {
+            sql:
+              `UPDATE "user_profiles" SET "is_owner" = 1, "team_role" = 'owner' ` +
+              `WHERE "id" = ? AND "tenant_id" = ? AND changes() = 1`,
+            args: [existingProfileId, tenantId],
+          },
+        ],
+        "write",
+      );
+      if (promote[0].rowsAffected === 1) {
+        return {
+          ok: true,
+          tenant_id: tenantId,
+          team_role: "owner",
+          is_owner: true,
+          profile_id: existingProfileId,
+          already_redeemed: false,
+          promoted_existing_member: true,
+        };
+      }
+      const again = await retrySelect();
+      if (again !== null) return alreadyRedeemedResponse(again);
+      const ownerNow = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "tenant_id" = ? AND "is_owner" = 1 LIMIT 1`,
+        args: [tenantId],
+      });
+      if (ownerNow.rows.length > 0) return { ok: false, error: "workspace_already_has_owner" };
+      const active = await client.execute({
+        sql: `SELECT 1 FROM "user_profiles" WHERE "id" = ? AND "tenant_id" = ? AND "deactivated_at" IS NULL LIMIT 1`,
+        args: [existingProfileId, tenantId],
+      });
+      if (active.rows.length === 0) return { ok: false, error: "member_deactivated" };
+      return { ok: false, error: "invalid_or_expired" };
+    }
     return {
       ok: true,
       tenant_id: existingTenantId,

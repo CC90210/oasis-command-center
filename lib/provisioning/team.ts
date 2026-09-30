@@ -98,7 +98,25 @@ export function neutralTeamFor(departments: readonly DepartmentKey[]): ManifestA
   return out;
 }
 
+/**
+ * Every agent some department can bind as its teammate. On "Set up again" these
+ * are the teammates the operator's department choice owns; any other agent in a
+ * stored manifest is one the workspace added itself and is kept
+ * (lib/provisioning/manifest.ts mergeProvisionedManifest).
+ */
+export const DEPARTMENT_TEAMMATE_SLUGS: ReadonlySet<string> = new Set(
+  neutralTeamFor(PROVISION_DEPARTMENT_KEYS).map((a) => a.slug),
+);
+
 /** Department labels for display ("Chief of Staff, Sales"). */
 export function departmentLabels(departments: readonly DepartmentKey[]): string[] {
   return OS_DEPARTMENTS.filter((d) => departments.includes(d.key)).map((d) => d.label);
+}
+
+/**
+ * Add-on labels for display ("Content, Client portal"), never the module keys:
+ * the setup steps are shown to the client on their setup page.
+ */
+export function moduleLabels(modules: readonly ModuleKey[]): string[] {
+  return OPT_IN_MODULES.filter((m) => modules.includes(m.key)).map((m) => m.label);
 }

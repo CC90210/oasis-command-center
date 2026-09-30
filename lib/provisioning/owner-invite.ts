@@ -12,6 +12,13 @@
  * Refuses a workspace that already has an owner: a second owner is not
  * something redemption can create (user_profiles_one_owner_per_tenant), so the
  * invite would be a link that can only fail.
+ *
+ * ONE LIVE OWNER INVITE PER WORKSPACE (2026-09-30 fix pass). Minting used to
+ * revoke only earlier invites to the SAME address, so an owner invite to a
+ * mistyped address stayed live for its whole expiry beside the corrected one,
+ * and whichever was redeemed first made its holder the owner. Now every open
+ * owner invite for the workspace is revoked before a new one is minted, and
+ * the operator can revoke one on its own (revokeOwnerInvite).
  */
 
 import "server-only";
@@ -53,7 +60,11 @@ export async function mintOwnerClaimInvite(args: {
     throw new OwnerInviteError("workspace_already_has_owner", "This workspace already has an owner.");
   }
 
-  const superseded = await supersedeActiveInvites({ tenantId: args.tenantId, email });
+  // Every open owner invite for this workspace, whatever address it went to,
+  // then any other open invite to this address (a member invite the founder
+  // should no longer use).
+  const revokedOwnerInvites = await revokeOpenOwnerInvites(args.tenantId);
+  const superseded = revokedOwnerInvites + (await supersedeActiveInvites({ tenantId: args.tenantId, email }));
   const { raw, hash } = generateInviteToken();
   const expiresAt = inviteExpiryFrom();
   const { data, error } = await db
@@ -80,6 +91,40 @@ export async function mintOwnerClaimInvite(args: {
     throw new OwnerInviteError("owner_invite_create_failed", message);
   }
   return { id: String(data.id), rawToken: raw, expiresAt: String(data.expires_at), superseded };
+}
+
+/** Revoke every open owner invite for the workspace. Returns how many. */
+async function revokeOpenOwnerInvites(tenantId: string): Promise<number> {
+  const { data, error } = await getServiceSupabase()
+    .from("tenant_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("tenant_id", tenantId)
+    .eq("team_role", "owner")
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .select("id");
+  if (error) throw new OwnerInviteError("owner_invite_create_failed", `could not revoke earlier owner invites: ${error.message}`);
+  return (data || []).length;
+}
+
+/**
+ * The operator's Revoke on one open owner invite. Scoped to the workspace in
+ * the URL and to owner invites only, so this can never revoke a team invite.
+ * Returns false when there was no such open invite (already redeemed, revoked
+ * or never there).
+ */
+export async function revokeOwnerInvite(args: { tenantId: string; inviteId: string }): Promise<boolean> {
+  const { data, error } = await getServiceSupabase()
+    .from("tenant_invites")
+    .update({ revoked_at: new Date().toISOString() })
+    .eq("id", args.inviteId)
+    .eq("tenant_id", args.tenantId)
+    .eq("team_role", "owner")
+    .is("redeemed_at", null)
+    .is("revoked_at", null)
+    .select("id");
+  if (error) throw new Error(`owner_invite_revoke_failed: ${error.message}`);
+  return (data || []).length === 1;
 }
 
 /** The email the founder receives. Names the workspace; nothing invented. */

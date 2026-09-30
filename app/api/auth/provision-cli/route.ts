@@ -19,8 +19,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { bad, checkBearerSecret } from "@/lib/api-helpers";
-import { OASIS_ONLY_PROFILE_IDS, applyClientProvisioningProfile } from "@/lib/client-provisioning";
-import { getClientCommandCenterProfileById } from "@/lib/client-profiles";
+import { applyClientProvisioningProfile, newWorkspaceShellRefusal } from "@/lib/client-provisioning";
 import { defaultWorkspaceName } from "@/lib/provisioning/workspace-name";
 
 export const runtime = "nodejs";
@@ -39,7 +38,9 @@ export async function POST(req: NextRequest) {
      * The shell to give this workspace, a registered id in lib/client-profiles.ts.
      * Before 2026-09-30 the route never passed one, so
      * applyClientProvisioningProfile wrote nothing and "provisioned" workspaces
-     * stayed unprovisioned. An unknown id is refused (400), not ignored.
+     * stayed unprovisioned. Only shells in NEW_WORKSPACE_SHELL_IDS
+     * (lib/client-provisioning.ts) are accepted; anything else is refused
+     * (400), not ignored.
      */
     client_profile_slug?: string;
   };
@@ -50,13 +51,11 @@ export async function POST(req: NextRequest) {
   // Never "OASIS AI": that default named strangers' workspaces after OASIS.
   const brand = body.brand?.trim() || defaultWorkspaceName(fullName, email);
   const clientProfileSlug = (body.client_profile_slug || "").trim().toLowerCase() || null;
-  if (
-    clientProfileSlug &&
-    (getClientCommandCenterProfileById(clientProfileSlug).id !== clientProfileSlug ||
-      OASIS_ONLY_PROFILE_IDS.has(clientProfileSlug))
-  ) {
-    return bad(400, `client_profile_slug "${clientProfileSlug}" is not a client shell`);
-  }
+  // An allowlist of shells a NEW workspace may start with (empty today): the
+  // retired SunBiz shell, OASIS's own and one named client's are all refused
+  // here, before any account or workspace is created (2026-09-30 fix pass).
+  const shellRefusal = clientProfileSlug ? newWorkspaceShellRefusal(clientProfileSlug) : null;
+  if (shellRefusal) return bad(400, `client_profile_slug refused: ${shellRefusal}`);
   const agentToAdd = (body.agent || "").trim().toLowerCase();
   // Includes deprecated aliases (sunbiz, suga_sean, lyra*) so existing CLIs
   // that still pass the old slugs keep working; agents.ts:resolveAgentKey

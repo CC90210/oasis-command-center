@@ -261,6 +261,63 @@ async function main() {
     assert.equal(row?.redeemed_at, null);
   });
 
+  // ── The founder is ALREADY a member (every signup_tenant / CLI workspace) ──
+  const SOLO = "50105010-0000-4000-8000-000000005010";
+  const CREATOR = u(10, "creator@solo.test", "Cleo Creator");
+  const SLEEPER = u(11, "sleeper@solo.test", "Sol Sleeper");
+  await seedTenant(db, SOLO, "solo", "Solo Studio");
+  for (const who of [CREATOR, SLEEPER]) await seedAuthUser(db, who);
+  await seedProfile(db, CREATOR, SOLO, { role: "member" }); // creator, never made owner
+  await seedProfile(db, SLEEPER, SOLO, { role: "member" });
+  await db.execute({ sql: `UPDATE user_profiles SET deactivated_at = ? WHERE auth_user_id = ?`, args: [new Date().toISOString(), SLEEPER.id] });
+
+  await check("an owner invite to someone already in the workspace makes them the owner (claimed, not a silent no-op)", async () => {
+    const inv = await mintInvite(db, SOLO, CREATOR.email, { role: "owner", kind: "owner_claim" });
+    const r = await redeemInvite(inv.raw, CREATOR.id);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    if (r.ok) {
+      assert.equal(r.teamRole, "owner");
+      assert.notEqual(r.alreadyMember, true, "something was written");
+    }
+    const p = await one(db, `SELECT is_owner, team_role, tenant_id FROM user_profiles WHERE auth_user_id = ?`, [CREATOR.id]);
+    assert.equal(Number(p?.is_owner), 1);
+    assert.equal(p?.team_role, "owner");
+    assert.equal(p?.tenant_id, SOLO, "still the same workspace");
+    const row = await one(db, `SELECT redeemed_at, redeemed_by FROM tenant_invites WHERE id = ?`, [inv.id]);
+    assert.ok(row?.redeemed_at, "the invite is claimed, so the console stops showing it as pending");
+    assert.equal(row?.redeemed_by, CREATOR.id);
+    const again = await redeemInvite(inv.raw, CREATOR.id);
+    assert.equal(again.ok, true, "a retry is idempotent");
+    const owners = await one(db, `SELECT COUNT(*) AS n FROM user_profiles WHERE tenant_id = ? AND is_owner = 1`, [SOLO]);
+    assert.equal(Number(owners?.n), 1);
+  });
+
+  await check("a deactivated member's owner invite is refused and stays unclaimed", async () => {
+    await db.execute({ sql: `UPDATE user_profiles SET is_owner = 0, team_role = 'member' WHERE auth_user_id = ?`, args: [CREATOR.id] });
+    try {
+      const inv = await mintInvite(db, SOLO, SLEEPER.email, { role: "owner", kind: "owner_claim" });
+      const r = await redeemInvite(inv.raw, SLEEPER.id);
+      assert.deepEqual(r, { ok: false, error: "member_deactivated" });
+      const row = await one(db, `SELECT redeemed_at FROM tenant_invites WHERE id = ?`, [inv.id]);
+      assert.equal(row?.redeemed_at, null);
+      const p = await one(db, `SELECT is_owner FROM user_profiles WHERE auth_user_id = ?`, [SLEEPER.id]);
+      assert.equal(Number(p?.is_owner), 0);
+      const { inviteRedeemFailure } = await import("../lib/invite-redeem-errors");
+      assert.doesNotMatch(inviteRedeemFailure("member_deactivated").message, /member_deactivated/);
+    } finally {
+      await db.execute({ sql: `UPDATE user_profiles SET is_owner = 1, team_role = 'owner' WHERE auth_user_id = ?`, args: [CREATOR.id] });
+    }
+  });
+
+  await check("a MEMBER invite to someone already in the workspace changes nothing and is not claimed", async () => {
+    const inv = await mintInvite(db, SOLO, CREATOR.email);
+    const r = await redeemInvite(inv.raw, CREATOR.id);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    if (r.ok) assert.equal(r.alreadyMember, true);
+    const p = await one(db, `SELECT is_owner, team_role FROM user_profiles WHERE auth_user_id = ?`, [CREATOR.id]);
+    assert.equal(p?.team_role, "owner", "their role is untouched");
+  });
+
   await check("a MEMBER invite whose row says team_role 'owner' joins as a member, never an owner", async () => {
     await seedAuthUser(db, FAKE_OWNER);
     const inv = await mintInvite(db, BAYSIDE, FAKE_OWNER.email, { role: "owner" });

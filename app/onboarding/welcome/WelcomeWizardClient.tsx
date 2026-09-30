@@ -54,12 +54,15 @@ const TIMEZONES: Array<{ value: string; label: string }> = [
 export function WelcomeWizardClient({
   initialProfile,
   teammates,
+  teammatesUnknown = false,
   slackConnected,
   alreadyCompleted,
 }: {
   initialProfile: InitialProfile;
   /** May be empty: a workspace not set up yet has no teammates. */
   teammates: WelcomeTeammate[];
+  /** True when the workspace's teammates could not be read (not "none"). */
+  teammatesUnknown?: boolean;
   slackConnected: boolean;
   alreadyCompleted: boolean;
 }) {
@@ -210,6 +213,10 @@ export function WelcomeWizardClient({
                 options={teammates.map((t) => ({ value: t.slug, label: t.label }))}
                 hint="The teammate that opens first when you click 'Chat' anywhere."
               />
+            ) : teammatesUnknown ? (
+              <p className="text-[12.5px] text-fg-muted leading-relaxed">
+                We could not load your teammates just now; you can pick a default one later in Settings.
+              </p>
             ) : (
               <p className="text-[12.5px] text-fg-muted leading-relaxed">
                 Your workspace&apos;s AI teammates appear once it is set up. You can pick a default one then, in Settings.

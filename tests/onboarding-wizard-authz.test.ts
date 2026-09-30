@@ -105,6 +105,21 @@ function textOf(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/** Every value of prop `key` anywhere in an element tree (not rendered further). */
+function propValues(node: unknown, key: string, out: unknown[] = []): unknown[] {
+  if (node == null || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) propValues(n, key, out);
+    return out;
+  }
+  const props = (node as { props?: Record<string, unknown> }).props;
+  if (props) {
+    if (key in props) out.push(props[key]);
+    propValues(props.children, key, out);
+  }
+  return out;
+}
+
 async function main() {
   const db = createClient({ url: `file:${dbFile}` });
   await createBaseSchema(db);
@@ -172,6 +187,17 @@ async function main() {
     const text = textOf(el).join(" ");
     assert.match(String(el.props.reason ?? text), /Only the workspace owner/);
     assert.equal(typeof el.type === "function" && (el.type as { name?: string }).name === "OnboardingWizardClient", false);
+  });
+
+  await check("the refusal page's link refreshes the gate claim instead of looping back to the wizard", async () => {
+    // A stale "wizard" claim sent "/" straight back here, on every page, until
+    // the next login. The link goes through /api/auth/onboarding-refresh.
+    setSessionCookie(await signFor(MEMBER, "wizard"));
+    const { default: Page } = await import("../app/onboarding/wizard/page");
+    const el = (await Page()) as { props: Record<string, unknown>; type: (p: Record<string, unknown>) => unknown };
+    const rendered = el.type(el.props);
+    const hrefs = propValues(rendered, "href");
+    assert.deepEqual(hrefs, ["/api/auth/onboarding-refresh?next=/"], JSON.stringify(hrefs));
   });
 
   await check("the owner sets up their workspace: own address, neutral team, chat apps + Jev recorded", async () => {
@@ -244,6 +270,28 @@ async function main() {
     const text = textOf(el).join(" | ");
     assert.doesNotMatch(text, FORBIDDEN, text);
     assert.match(text, /Chief of Staff/);
+  });
+
+  await check("a failed teammate read says so; it is never shown as 'not set up yet'", async () => {
+    // Bayside IS set up (the owner ran the wizard above). With the manifest
+    // table unreadable, the page used to fall through to the seed and tell this
+    // member the teammates "appear once it is set up".
+    await db.execute(`ALTER TABLE tenant_manifests RENAME TO tenant_manifests_hidden`);
+    try {
+      setSessionCookie(await signFor(MEMBER));
+      const { default: Welcome } = await import("../app/onboarding/welcome/page");
+      const el = await Welcome({ searchParams: Promise.resolve({ settings: "1" }) });
+      assert.deepEqual(propValues(el, "teammatesUnknown"), [true], "the client is told the read failed");
+      assert.deepEqual(propValues(el, "teammates"), [[]]);
+    } finally {
+      await db.execute(`ALTER TABLE tenant_manifests_hidden RENAME TO tenant_manifests`);
+    }
+    const client = readFileSync("app/onboarding/welcome/WelcomeWizardClient.tsx", "utf8");
+    assert.ok(client.includes("We could not load your teammates just now; you can pick a default one later in Settings."));
+    setSessionCookie(await signFor(MEMBER));
+    const { default: Welcome } = await import("../app/onboarding/welcome/page");
+    const ok = await Welcome({ searchParams: Promise.resolve({ settings: "1" }) });
+    assert.deepEqual(propValues(ok, "teammatesUnknown"), [false], "a good read is not 'unknown'");
   });
 
   await check("the welcome page gives a member of an unset-up workspace no teammate and no fallback agent", async () => {

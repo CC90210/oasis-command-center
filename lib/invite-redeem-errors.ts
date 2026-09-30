@@ -55,6 +55,11 @@ const FAILURES: Record<string, Omit<InviteRedeemFailure, "code">> = {
     retryable: false,
     message: "This workspace already has an owner. Ask them to invite you as a teammate.",
   },
+  member_deactivated: {
+    status: 403,
+    retryable: false,
+    message: "Your access to this workspace is switched off, so this invite cannot make you its owner. Ask OASIS to turn your access back on first.",
+  },
   auth_user_not_found: {
     status: 401,
     retryable: false,

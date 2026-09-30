@@ -91,6 +91,14 @@ export default async function OnboardingWizardPage() {
   return <OnboardingWizardClient userEmail={user.email || ""} canInstallBridge={canInstallBridge} options={options} />;
 }
 
+/**
+ * The refusal page. Its link goes through the claim refresh, never straight to
+ * "/": a session still carrying a stale "wizard" claim (a member attached after
+ * login, or an account with no workspace) was redirected from "/" straight back
+ * here, on every page, until the next login (2026-09-30 fix pass).
+ */
+const NOT_FOR_YOU_HREF = "/api/auth/onboarding-refresh?next=/";
+
 function NotForYou({ reason }: { reason: string }) {
   return (
     <div className="min-h-screen bg-bg-deep flex flex-col items-center justify-center p-6">
@@ -101,7 +109,7 @@ function NotForYou({ reason }: { reason: string }) {
         <div className="rounded-2xl border border-bg-border bg-bg-elev p-6 space-y-3">
           <h1 className="text-lg font-bold text-fg">Workspace setup</h1>
           <p className="text-sm text-fg-muted leading-relaxed">{reason}</p>
-          <Link href="/" prefetch={false} className="inline-block text-sm font-medium text-accent hover:underline">
+          <Link href={NOT_FOR_YOU_HREF} prefetch={false} className="inline-block text-sm font-medium text-accent hover:underline">
             Go to your workspace
           </Link>
         </div>

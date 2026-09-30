@@ -64,7 +64,9 @@ function Status({ loaded }: { loaded: Loaded }) {
         {run.status === "complete"
           ? `Setup finished${finished ? ` on ${finished}` : ""}. Reload the page to open your workspace.`
           : run.status === "failed"
-            ? "Setup stopped before it finished. OASIS has the details and will pick it up."
+            ? // No alert fires on a failed run, so this promises nothing: the
+              // contact line below is the next step (2026-09-30 fix pass).
+              "Setup stopped before it finished."
             : "OASIS is setting up this workspace now."}
       </p>
       {run.steps.length > 0 && (

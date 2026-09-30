@@ -13,9 +13,16 @@
  *             the workspace's own pages and routines are built for it.
  */
 
-import { MANIFEST_SCHEMA_VERSION, parseManifest, type ManifestChatApp, type ManifestJevMode, type TenantManifest } from "@/lib/manifest/schema";
+import {
+  MANIFEST_SCHEMA_VERSION,
+  parseManifest,
+  type ManifestAgentBinding,
+  type ManifestChatApp,
+  type ManifestJevMode,
+  type TenantManifest,
+} from "@/lib/manifest/schema";
 import type { DepartmentKey, ModuleKey } from "@/lib/os/types";
-import { modulesForSetup, neutralTeamFor } from "@/lib/provisioning/team";
+import { DEPARTMENT_TEAMMATE_SLUGS, modulesForSetup, neutralTeamFor } from "@/lib/provisioning/team";
 
 export type ProvisionedManifestInput = {
   slug: string;
@@ -61,4 +68,54 @@ export function buildProvisionedManifest(input: ProvisionedManifestInput): Tenan
   // Round-trip through the parser: anything the schema would refuse fails here,
   // before a provisioning run records a step it cannot finish.
   return parseManifest(manifest);
+}
+
+/**
+ * "Set up again" on a workspace that already has a setup (2026-09-30, fix pass).
+ *
+ * The first version saved `built` over the stored manifest whole, so the
+ * workspace lost its own tagline, pages, data model, saved prompts and any
+ * teammate it had added, and the audit diff was taken against the empty
+ * placeholder, so nothing recorded the loss (tenant_manifests keeps one row).
+ *
+ * What the operator's choices own, and so replace:
+ *   os                       the departments and add-ons;
+ *   integrations.chat_apps   "Where does the team talk?";
+ *   integrations.jev         the fast classifier;
+ *   department teammates     the neutral agents lib/provisioning/team.ts binds
+ *                            to departments. One that stays keeps its stored
+ *                            binding (a name the owner gave it, enabled or
+ *                            not); one whose department was removed goes.
+ * Everything else is the workspace's own and is kept as stored: brand, nav,
+ * pages, data_model, default_prompts, permissions, connectors, tier, ui, and
+ * every teammate that is not a department teammate.
+ *
+ * One primary: the stored primary stays primary while it is still in the
+ * team; otherwise the first teammate is.
+ */
+export function mergeProvisionedManifest(stored: TenantManifest, built: TenantManifest): TenantManifest {
+  const storedBySlug = new Map(stored.agents.map((a) => [a.slug, a]));
+  const team: ManifestAgentBinding[] = built.agents.map((a) => {
+    const prev = storedBySlug.get(a.slug);
+    return prev ? { ...prev } : { ...a };
+  });
+  const own = stored.agents.filter((a) => !DEPARTMENT_TEAMMATE_SLUGS.has(a.slug)).map((a) => ({ ...a }));
+  const agents = [...team, ...own];
+  const storedPrimary = stored.agents.find((a) => a.primary)?.slug;
+  const primarySlug = agents.some((a) => a.slug === storedPrimary) ? storedPrimary : agents[0]?.slug;
+  const merged: TenantManifest = {
+    ...stored,
+    agents: agents.map((a) => {
+      const { primary: _primary, ...rest } = a;
+      return a.slug === primarySlug ? { ...rest, primary: true } : _primary === undefined ? rest : { ...rest, primary: false };
+    }),
+    integrations: {
+      ...(stored.integrations ?? {}),
+      chat_apps: [...(built.integrations?.chat_apps ?? [])],
+      jev: built.integrations?.jev ?? "off",
+    },
+    os: built.os,
+    meta: { ...stored.meta, updated_at: built.meta.updated_at },
+  };
+  return parseManifest(merged);
 }

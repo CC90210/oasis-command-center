@@ -120,14 +120,22 @@ export default async function WelcomePage({
   // The workspace's teammates: its own manifest (by tenant id), else its
   // in-code seed. NEVER a fallback agent: the old ["bravo"] default showed
   // OASIS's own agent to every client whose workspace was not set up yet.
+  // A failed manifest read is "could not tell", never "not set up": the page
+  // says it could not load the teammates (2026-09-30 fix pass; it used to fall
+  // through to the seed and tell a member of a set-up workspace that its
+  // teammates "appear once it is set up").
   let manifestAgents: Array<{ slug: string; display_name?: string; enabled?: boolean }> = [];
+  let teammatesUnknown = false;
   if (profile.tenant_id) {
-    const stored = await getManifestByTenantId(profile.tenant_id).catch((err: unknown) => {
+    let stored: Awaited<ReturnType<typeof getManifestByTenantId>> = null;
+    try {
+      stored = await getManifestByTenantId(profile.tenant_id);
+    } catch (err) {
       console.error("[onboarding.welcome] manifest read failed", err);
-      return null;
-    });
+      teammatesUnknown = true;
+    }
     if (stored) manifestAgents = stored.agents;
-    else if (tenant) {
+    else if (tenant && !teammatesUnknown) {
       const seed = getSeedManifest(resolveClientProfileSlug(tenant), profile.tenant_id);
       if (!isUnprovisionedManifest(seed)) manifestAgents = seed.agents;
     }
@@ -176,6 +184,7 @@ export default async function WelcomePage({
             custom_fields: (profile.custom_fields as Record<string, unknown>) || {},
           }}
           teammates={teammates}
+          teammatesUnknown={teammatesUnknown}
           slackConnected={slackConnected}
           alreadyCompleted={!!profile.onboarding_completed_at}
         />

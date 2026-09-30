@@ -12,12 +12,16 @@
  *
  * Delivery: emailed through the auth mailer. When delivery fails the link is
  * returned once so the operator can send it another way; it is never logged.
+ *
+ * DELETE /api/admin/installs/[tenantId]/owner-invite  Body: { invite_id }
+ * revokes one open owner invite of that workspace (2026-09-30 fix pass: there
+ * was no way to take back an invite sent to a wrong address). Audited.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { sendAuthEmail } from "@/lib/auth-email";
 import { OASIS_SEED_TENANT_IDS } from "@/lib/manifest/seeds";
-import { OwnerInviteError, mintOwnerClaimInvite, ownerInviteEmailText } from "@/lib/provisioning/owner-invite";
+import { OwnerInviteError, mintOwnerClaimInvite, ownerInviteEmailText, revokeOwnerInvite } from "@/lib/provisioning/owner-invite";
 import { operatorFromSession } from "@/lib/provisioning/operator-session";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { teamInviteUrl } from "@/lib/team-invite-email";
@@ -119,4 +123,50 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ ten
     },
     { status: 201 },
   );
+}
+
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ tenantId: string }> }) {
+  const operator = await operatorFromSession();
+  if (!operator) return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
+  const { tenantId } = await params;
+  if (!UUID_RE.test(tenantId)) return NextResponse.json({ ok: false, error: "invalid_workspace" }, { status: 400 });
+
+  let body: { invite_id?: unknown };
+  try {
+    body = (await req.json()) as { invite_id?: unknown };
+  } catch {
+    return NextResponse.json({ ok: false, error: "invalid_json" }, { status: 400 });
+  }
+  const inviteId = typeof body.invite_id === "string" ? body.invite_id.trim() : "";
+  if (!inviteId) return NextResponse.json({ ok: false, error: "invite_id_required" }, { status: 400 });
+
+  let revoked: boolean;
+  try {
+    revoked = await revokeOwnerInvite({ tenantId, inviteId });
+  } catch (err) {
+    console.error("[admin.installs.owner_invite.revoke]", { tenantId, inviteId, error: err instanceof Error ? err.message : String(err) });
+    return NextResponse.json(
+      { ok: false, error: "owner_invite_revoke_failed", message: "Could not revoke the invite. It may still work. Try again." },
+      { status: 503 },
+    );
+  }
+  if (!revoked) {
+    return NextResponse.json(
+      { ok: false, error: "invite_not_open", message: "That invite is no longer open (already used, revoked or expired)." },
+      { status: 404 },
+    );
+  }
+
+  const audit = await getServiceSupabase().rpc("log_tenant_event", {
+    p_tenant_id: tenantId,
+    p_action_type: "invite.owner_claim.revoke",
+    p_target_table: "tenant_invites",
+    p_target_id: inviteId,
+    p_after: { revoked: true },
+    p_metadata: { operator_auth_user_id: operator.authUserId },
+  });
+  if (audit.error) {
+    console.error("[admin.installs.owner_invite.revoke] audit write failed", { tenantId, inviteId, error: audit.error.message });
+  }
+  return NextResponse.json({ ok: true, invite: { id: inviteId, audited: !audit.error }, message: "Invite revoked. The link no longer works." });
 }

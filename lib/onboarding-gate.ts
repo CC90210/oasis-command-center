@@ -24,9 +24,16 @@
  *                                                     (invitee whose redemption
  *                                                      failed — welcome page runs
  *                                                      orphan recovery on render)
- *   null                     null       null        → /onboarding/wizard
- *                                                     (genuine fresh-tenant signup
- *                                                      who never finished scaffolding)
+ *   null                     null       null        → null  (2026-09-30 fix pass: this
+ *                                                            used to be the wizard,
+ *                                                            which now serves only a
+ *                                                            workspace OWNER and refuses
+ *                                                            anyone with no workspace.
+ *                                                            Its only link, "/", was
+ *                                                            redirected straight back:
+ *                                                            a loop until next login.
+ *                                                            "/" says the account is
+ *                                                            not linked to a workspace.)
  *   profile is null itself                          → null  (no profile yet — the
  *                                                            calling page handles it
  *                                                            with provisioning)
@@ -60,7 +67,7 @@ export function shouldRedirectToOnboarding(
     const owner = profile.is_owner === true || Number(profile.is_owner) === 1;
     return owner && opts.workspaceProvisioned === false ? "/onboarding/wizard" : null;
   }
-  return profile.invited_by ? "/onboarding/welcome" : "/onboarding/wizard";
+  return profile.invited_by ? "/onboarding/welcome" : null;
 }
 
 /** The claim values a session cookie may carry. "done" = do not gate. */

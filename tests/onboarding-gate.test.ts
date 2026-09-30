@@ -74,15 +74,18 @@ assert.equal(
   "orphan invitee → /onboarding/welcome (page runs recovery)",
 );
 
-// Genuine fresh-tenant signup — no invitation, no attachment yet.
+// No workspace and no invitation. 2026-09-30: this used to go to the wizard,
+// which now serves only a workspace owner and refuses an account with no
+// workspace; its refusal page's link to "/" was sent straight back, a loop on
+// every page until the next login. "/" explains the account is not linked.
 assert.equal(
   shouldRedirectToOnboarding({
     onboarding_completed_at: null,
     invited_by: null,
     tenant_id: null,
   }),
-  "/onboarding/wizard",
-  "fresh signup → /onboarding/wizard (industry template flow)",
+  null,
+  "no workspace, no invite → no redirect (the wizard cannot serve them)",
 );
 
 // 2026-09-30: the OWNER of a workspace that is not set up yet may set it up

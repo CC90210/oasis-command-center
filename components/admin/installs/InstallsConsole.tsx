@@ -10,7 +10,8 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { InstallRow } from "@/lib/provisioning/installs";
+import type { InstallRow, PendingOwnerInvite } from "@/lib/provisioning/installs";
+import { initialChoices, outcomeFrom, setupConfirmation, type Choices, type Outcome, type Step } from "./outcome";
 
 export type ConsoleOptions = {
   departments: Array<{ key: string; label: string; purpose: string; teammate: string | null; locked: boolean }>;
@@ -18,11 +19,6 @@ export type ConsoleOptions = {
   modules: Array<{ key: string; label: string; description: string }>;
   chatApps: Array<{ key: string; label: string }>;
 };
-
-type Step = { title: string; time: string };
-type Outcome = { ok: boolean; message: string; steps?: Step[]; link?: string | null };
-
-type Choices = { departments: string[]; modules: string[]; chatApps: string[]; jev: "off" | "shadow" };
 
 function slugify(name: string): string {
   return name
@@ -40,24 +36,10 @@ function formatWhen(iso: string | null): string {
   return d.toLocaleString("en-CA", { dateStyle: "medium", timeStyle: "short" });
 }
 
-async function postJson(url: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+async function sendJson(url: string, body: unknown, method: "POST" | "DELETE" = "POST"): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = await fetch(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   return { status: res.status, json };
-}
-
-function outcomeFrom(json: Record<string, unknown>, fallback: string): Outcome {
-  const steps = Array.isArray(json.steps) ? (json.steps as Step[]) : undefined;
-  if (json.ok === true) {
-    const invite = json.invite as { invite_url?: string | null } | undefined;
-    return {
-      ok: true,
-      message: typeof json.message === "string" ? json.message : "Done.",
-      steps,
-      link: invite?.invite_url ?? null,
-    };
-  }
-  return { ok: false, message: typeof json.message === "string" ? json.message : fallback, steps };
 }
 
 export function InstallsConsole({ installs, options }: { installs: InstallRow[]; options: ConsoleOptions }) {
@@ -247,7 +229,7 @@ function NewWorkspace({ options }: { options: ConsoleOptions }) {
     setBusy(true);
     setOutcome(null);
     try {
-      const { json } = await postJson("/api/admin/installs", {
+      const { json } = await sendJson("/api/admin/installs", {
         name,
         slug: address,
         departments: choices.departments,
@@ -329,10 +311,64 @@ function NewWorkspace({ options }: { options: ConsoleOptions }) {
   );
 }
 
+function PendingInvites({ row, invites }: { row: InstallRow; invites: PendingOwnerInvite[] }) {
+  const router = useRouter();
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+
+  async function revoke(invite: PendingOwnerInvite) {
+    setBusy(true);
+    setOutcome(null);
+    try {
+      const { json } = await sendJson(`/api/admin/installs/${row.tenantId}/owner-invite`, { invite_id: invite.id }, "DELETE");
+      const o = outcomeFrom(json, "The invite was not revoked. It may still work.");
+      setOutcome(o);
+      if (o.ok) router.refresh();
+    } catch {
+      setOutcome({ ok: false, message: "Could not reach the server. The invite was not revoked and may still work." });
+    } finally {
+      setBusy(false);
+      setConfirmingId(null);
+    }
+  }
+
+  return (
+    <div>
+      <ul className="space-y-1">
+        {invites.map((inv) => (
+          <li key={inv.id}>
+            <span>Invite sent to {inv.email}</span>
+            {inv.expiresAt && <span className="block text-[12px]">Expires {formatWhen(inv.expiresAt)}</span>}
+            {confirmingId === inv.id ? (
+              <span className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-fg">
+                Revoke the invite to {inv.email}?
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => revoke(inv)}>
+                  {busy ? "Revoking…" : "Yes, revoke"}
+                </button>
+                <button type="button" className="btn-secondary" disabled={busy} onClick={() => setConfirmingId(null)}>
+                  Keep it
+                </button>
+              </span>
+            ) : (
+              <button type="button" className="mt-1 text-[12px] text-accent hover:underline" onClick={() => setConfirmingId(inv.id)}>
+                Revoke
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <OutcomeView outcome={outcome} />
+    </div>
+  );
+}
+
 function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOptions }) {
   const router = useRouter();
   const [panel, setPanel] = useState<"none" | "setup" | "invite">("none");
-  const [choices, setChoices] = useState<Choices>({ departments: options.defaultDepartments, modules: [], chatApps: [], jev: "off" });
+  const [choices, setChoices] = useState<Choices>(() =>
+    initialChoices(row.currentSetup, options.defaultDepartments, options.modules.map((m) => m.key)),
+  );
   const [email, setEmail] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -341,6 +377,17 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
     if (!row.manifestSlug) return row.runStatus === "failed" ? "Not set up (last attempt failed)" : "Not set up";
     return row.manifestSlug === row.slug ? "Set up" : `Set up under /${row.manifestSlug}`;
   }, [row]);
+  const setUp = !!row.manifestSlug;
+  const unreadable = row.currentSetup === "unreadable";
+  const current = row.currentSetup && row.currentSetup !== "unreadable" ? row.currentSetup : null;
+
+  function openPanel(next: "setup" | "invite") {
+    setPanel(panel === next ? "none" : next);
+    setConfirming(false);
+    setOutcome(null);
+    // Each opening starts from what is stored now, not from an earlier edit.
+    if (next === "setup") setChoices(initialChoices(row.currentSetup, options.defaultDepartments, options.modules.map((m) => m.key)));
+  }
 
   async function run() {
     setBusy(true);
@@ -348,13 +395,13 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
     try {
       const { json } =
         panel === "setup"
-          ? await postJson(`/api/admin/installs/${row.tenantId}/provision`, {
+          ? await sendJson(`/api/admin/installs/${row.tenantId}/provision`, {
               departments: choices.departments,
               modules: choices.modules,
               chat_apps: choices.chatApps,
               jev: choices.jev,
             })
-          : await postJson(`/api/admin/installs/${row.tenantId}/owner-invite`, { email });
+          : await sendJson(`/api/admin/installs/${row.tenantId}/owner-invite`, { email });
       const o = outcomeFrom(json, panel === "setup" ? "Setup did not finish." : "The invite was not created.");
       setOutcome(o.ok && panel === "setup" ? { ...o, message: `Set up ${row.name}.` } : o);
       if (o.ok) router.refresh();
@@ -376,8 +423,8 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
         <td className="px-3 py-2 text-fg-muted">
           {row.ownerEmail ? (
             <span className="text-fg">{row.ownerName ? `${row.ownerName} · ` : ""}{row.ownerEmail}</span>
-          ) : row.pendingOwnerInvite ? (
-            `Invite sent to ${row.pendingOwnerInvite}`
+          ) : row.pendingOwnerInvites.length > 0 ? (
+            <PendingInvites row={row} invites={row.pendingOwnerInvites} />
           ) : (
             "No owner yet"
           )}
@@ -387,15 +434,15 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
         <td className="px-3 py-2 text-fg-muted">{formatWhen(row.lastActivity)}</td>
         <td className="px-3 py-2">
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn-secondary" onClick={() => { setPanel(panel === "setup" ? "none" : "setup"); setConfirming(false); setOutcome(null); }}>
-              {row.manifestSlug ? "Set up again" : "Provision"}
+            <button type="button" className="btn-secondary" onClick={() => openPanel("setup")}>
+              {setUp ? "Set up again" : "Provision"}
             </button>
             <button
               type="button"
               className="btn-secondary"
               disabled={!!row.ownerEmail}
               title={row.ownerEmail ? "This workspace already has an owner" : undefined}
-              onClick={() => { setPanel(panel === "invite" ? "none" : "invite"); setConfirming(false); setOutcome(null); }}
+              onClick={() => openPanel("invite")}
             >
               Send owner invite
             </button>
@@ -406,7 +453,24 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
         <tr className="bg-bg-panel">
           <td colSpan={6} className="px-3 py-3">
             {panel === "setup" ? (
-              <ChoicesEditor options={options} value={choices} onChange={setChoices} />
+              unreadable ? (
+                <p className="max-w-2xl text-sm text-fg">
+                  This workspace&apos;s saved setup could not be read, so it cannot be set up again from here. Nothing
+                  would be merged into it safely; the setup needs repairing first.
+                </p>
+              ) : (
+                <>
+                  {current && (
+                    <p className="mb-3 max-w-2xl text-[13px] text-fg-muted">
+                      {current.departments
+                        ? "The form starts from this workspace's current choices."
+                        : "This setup was saved before departments were recorded, so the departments start from the defaults."}{" "}
+                      Current teammates: {current.teammates.length ? current.teammates.join(", ") : "none"}.
+                    </p>
+                  )}
+                  <ChoicesEditor options={options} value={choices} onChange={setChoices} />
+                </>
+              )
             ) : (
               <label className="block max-w-md text-sm">
                 <span className="text-[13px] font-medium text-fg">Founder&apos;s email</span>
@@ -419,23 +483,22 @@ function InstallRowView({ row, options }: { row: InstallRow; options: ConsoleOpt
                 />
                 <span className="mt-1 block text-[12px] text-fg-muted">
                   The invite works only for this address and makes them the workspace owner.
+                  {row.pendingOwnerInvites.length > 0 ? " Sending it revokes the open owner invite listed for this workspace." : ""}
                 </span>
               </label>
             )}
-            {!confirming ? (
+            {panel === "setup" && unreadable ? null : !confirming ? (
               <button
                 type="button"
                 className="btn-primary mt-3"
                 disabled={busy || (panel === "invite" && !email.includes("@"))}
                 onClick={() => setConfirming(true)}
               >
-                {panel === "setup" ? "Set up this workspace" : "Send the owner invite"}
+                {panel === "setup" ? (setUp ? "Save the new setup" : "Set up this workspace") : "Send the owner invite"}
               </button>
             ) : (
-              <div className="mt-3 text-sm text-fg">
-                {panel === "setup"
-                  ? `Save this setup to ${row.name}? Members see the new departments on their next page load.`
-                  : `Email an owner invite for ${row.name} to ${email.trim()}?`}
+              <div className="mt-3 max-w-2xl text-sm text-fg">
+                {panel === "setup" ? setupConfirmation(row.name, setUp) : `Email an owner invite for ${row.name} to ${email.trim()}?`}
                 <div className="mt-2 flex gap-2">
                   <button type="button" className="btn-primary" disabled={busy} onClick={run}>
                     {busy ? "Working…" : "Yes, do it"}
