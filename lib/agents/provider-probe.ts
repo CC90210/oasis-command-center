@@ -9,15 +9,22 @@
  * with 400 "credit balance is too low". The owner saw a green check over a key
  * every department channel was failing on.
  *
- * So each probe sends one short user message to the provider's cheapest listed
- * model with an output cap of ONE token. It costs a fraction of a cent and
- * fails exactly when a chat turn would. The failure is reduced to the same code
- * a chat turn records (lib/os/channel/outcome.ts), so "Test" and the channel
- * can never disagree about a key.
+ * So each probe sends one short user message with an output cap of ONE token.
+ * It costs a fraction of a cent. The failure is reduced to the same code a chat
+ * turn records (lib/os/channel/outcome.ts).
+ *
+ * WHICH MODEL. A saved key is tested on the model saved WITH it (the caller
+ * passes `model`), which is the model the channel sends it, so "Test" and the
+ * channel ask the provider the same question. A key with no model yet (one
+ * pasted before saving) is tested on the provider's cheapest listed model
+ * (PROBE_MODEL). Some refusals are about the model, not the key: a project key
+ * without access to it (403), or a model the account cannot see (404). Those
+ * name the model they were about, so a red "Test" is never read as a verdict on
+ * a key the channel's own model would accept.
  *
  * A local server (Ollama, LM Studio) has no account to bill: the probe asks it
- * for its model list and then runs the one-token completion on the first model
- * it has.
+ * for its model list and then runs the one-token completion on the saved model,
+ * or on the first model it has.
  *
  * `fetchImpl` is injectable so tests assert the exact request each provider
  * gets without a network.
@@ -51,9 +58,18 @@ export type ProbeResult =
 
 type FetchImpl = (url: string, init: RequestInit) => Promise<Response>;
 
+type ProbeOptions = {
+  /** The model saved with the key; PROBE_MODEL (or Ollama's first) when absent. */
+  model?: string | null;
+  fetchImpl?: FetchImpl;
+};
+
 /** The exact one-token completion each hosted provider receives. */
-export function buildProbeRequest(provider: Exclude<Provider, "ollama">, key: string): ProbeRequest {
-  const model = PROBE_MODEL[provider];
+export function buildProbeRequest(
+  provider: Exclude<Provider, "ollama">,
+  key: string,
+  model: string = PROBE_MODEL[provider],
+): ProbeRequest {
   const json = { "content-type": "application/json" };
   if (provider === "anthropic") {
     return {
@@ -112,10 +128,23 @@ async function timed(fetchImpl: FetchImpl, req: ProbeRequest): Promise<{ res: Re
   }
 }
 
-/** A refusal, in the owner-facing words a channel would use for it. */
-async function refusal(res: Response): Promise<ProbeResult> {
+/**
+ * A refusal, in the owner-facing words a channel would use for it, except the
+ * two that are about the MODEL tested: those name it (see WHICH MODEL above).
+ */
+async function refusal(res: Response, model: string | null): Promise<ProbeResult> {
   const body = await res.text().catch(() => "");
   const code = classifyProviderStatus(res.status, body);
+  if (model && code === "provider_403") {
+    return {
+      ok: false,
+      code,
+      message: `This key is not allowed to use ${model}. Check the key's access, or pick another model in AI settings.`,
+    };
+  }
+  if (model && code === "provider_404") {
+    return { ok: false, code, message: `The model ${model} was not found for this key. Pick another model in AI settings.` };
+  }
   return { ok: false, code, message: failureCopy(code, { canManageAi: true }).sentence };
 }
 
@@ -139,16 +168,17 @@ function thrown(err: unknown, provider: Provider): ProbeResult {
   };
 }
 
-async function probeOllama(baseUrl: string, fetchImpl: FetchImpl): Promise<ProbeResult> {
+async function probeOllama(baseUrl: string, fetchImpl: FetchImpl, saved: string | null): Promise<ProbeResult> {
   const base = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
   let model: string | null = null;
   try {
     // /v1/models is the OpenAI-compatible list both Ollama and LM Studio serve.
     const { res } = await timed(fetchImpl, { url: `${base}/v1/models`, init: { method: "GET", headers: { accept: "application/json" } } });
-    if (!res.ok) return refusal(res);
+    // The list is not about any model: its refusal gets the generic words.
+    if (!res.ok) return refusal(res, null);
     const list = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null;
     const first = list?.data?.find((m) => typeof m?.id === "string" && m.id);
-    model = first ? String(first.id) : null;
+    model = saved || (first ? String(first.id) : null);
   } catch (err) {
     return thrown(err, "ollama");
   }
@@ -164,7 +194,7 @@ async function probeOllama(baseUrl: string, fetchImpl: FetchImpl): Promise<Probe
         body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: PROBE_TEXT }] }),
       },
     });
-    return res.ok ? { ok: true, latency_ms: ms, model } : refusal(res);
+    return res.ok ? { ok: true, latency_ms: ms, model } : refusal(res, model);
   } catch (err) {
     return thrown(err, "ollama");
   }
@@ -174,16 +204,15 @@ async function probeOllama(baseUrl: string, fetchImpl: FetchImpl): Promise<Probe
  * Probe a key (for Ollama, the "key" is the server URL). A 2xx from the
  * one-token completion is the only green.
  */
-export async function probeProvider(
-  provider: Provider,
-  key: string,
-  fetchImpl: FetchImpl = (url, init) => fetch(url, init),
-): Promise<ProbeResult> {
-  if (provider === "ollama") return probeOllama(key, fetchImpl);
-  const req = buildProbeRequest(provider, key);
+export async function probeProvider(provider: Provider, key: string, opts: ProbeOptions = {}): Promise<ProbeResult> {
+  const fetchImpl: FetchImpl = opts.fetchImpl ?? ((url, init) => fetch(url, init));
+  const saved = typeof opts.model === "string" && opts.model.trim() ? opts.model.trim() : null;
+  if (provider === "ollama") return probeOllama(key, fetchImpl, saved);
+  const model = saved ?? PROBE_MODEL[provider];
+  const req = buildProbeRequest(provider, key, model);
   try {
     const { res, ms } = await timed(fetchImpl, req);
-    return res.ok ? { ok: true, latency_ms: ms, model: PROBE_MODEL[provider] } : refusal(res);
+    return res.ok ? { ok: true, latency_ms: ms, model } : refusal(res, model);
   } catch (err) {
     return thrown(err, provider);
   }

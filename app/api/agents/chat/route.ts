@@ -42,10 +42,11 @@
  * user_id IS NULL — a teammate's personal key never answers a shared channel),
  * or the platform key for the verified operator only.
  *
- * Every turn's outcome (ok, or a failure code from lib/os/channel/outcome.ts)
- * is recorded as its channel's last turn (lib/os/channel/turns.ts), which the
- * department header reads; every failure is logged with the tenant, the
- * department or agent, and the code (never message content, never a key).
+ * Every turn that reaches a key has its outcome (ok, or a failure code from
+ * lib/os/channel/outcome.ts) recorded as its channel's last turn
+ * (lib/os/channel/turns.ts), which the department header reads; a 412 (no key
+ * to try) is not. Every failure is logged with the tenant, the department or
+ * agent, and the code (never message content, never a key).
  *
  * Response: text/event-stream SSE
  *   event: agent       data: { display_name, agent_slug | department, model? }
@@ -252,8 +253,12 @@ export async function POST(req: NextRequest) {
   if (departmentKey) {
     dept = OS_DEPARTMENTS.find((d) => d.key === departmentKey) ?? null;
     if (!dept) return refuse(ctx, 400, "unknown_department");
+    // getTenant answers null when the tenants read fails. That is not "not
+    // OASIS": judging the binding on it would refuse OASIS's own Chief of
+    // Staff, Marketing, Finance and Operations as out of date.
     const tenant = await getTenant(tenantId);
-    const binding = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant?.slug ?? null) });
+    if (!tenant?.slug) return refuse(ctx, 503, "workspace_unavailable");
+    const binding = departmentChannelFor(dept.key, { oasis: isOasisSurfaceTenant(tenant.slug) });
     if (binding.kind !== "agent" || binding.agentSlug !== agentSlug) {
       return refuse(ctx, 400, "department_agent_mismatch");
     }
@@ -325,7 +330,10 @@ export async function POST(req: NextRequest) {
     // The platform key bills OASIS: verified operator only (lib/platform-operator.ts).
     const fallback = isOperator ? operatorPlatformFallback() : null;
     if (!fallback) {
-      await recordTurn(turn, false, "agent_not_configured");
+      // Not recorded: no key was tried, so this says nothing about the key's
+      // record, and as the channel's last turn it would overwrite a real
+      // refusal (a member's 412 while the owner had the key switched off).
+      // Readiness answers "no key" from the key itself.
       return refuse(ctx, 412, "agent_not_configured", {
         hint: "Connect an AI account in Settings > AI brain before chatting here.",
       });

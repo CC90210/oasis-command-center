@@ -57,10 +57,10 @@ export function DepartmentChannel({ label, state }: { label: string; state: Chan
       >
         <div className="flex items-center gap-2 text-sm font-semibold text-fg">
           <PlugZap className="h-4 w-4 text-fg-dim" strokeWidth={1.75} aria-hidden />
-          Channel not connected
+          {state.kind === "unknown" ? "Couldn’t check this channel" : "Channel not connected"}
         </div>
         <p className="max-w-prose text-sm leading-[1.55] text-fg-muted">{state.reason}</p>
-        {state.action && (
+        {state.kind === "not_connected" && state.action && (
           <Link href={state.action.href} prefetch={false} className="btn-primary">
             {state.action.label}
           </Link>

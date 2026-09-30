@@ -13,7 +13,8 @@
  *   - app/api/agents/chat classifies the provider error and records the code as
  *     the channel's last turn (lib/os/channel/turns.ts);
  *   - app/api/agent-config/test-connection classifies its 1-token probe the
- *     same way, so "Test" and the channel can never disagree about a key;
+ *     same way, on the model saved with the key (lib/agents/provider-probe.ts),
+ *     so "Test" reads a refusal the way the channel does;
  *   - the channel (components/agents/AgentChat.tsx) and the department header
  *     (components/os/department/StatusPill.tsx) print the code's copy below.
  * A code the copy table does not know prints a generic sentence, never the raw
@@ -54,7 +55,6 @@ export function isTurnFailureCode(code: unknown): code is TurnFailureCode {
  * a reply that broke off) are the channel's own until that channel answers.
  */
 const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
-  "agent_not_configured",
   "key_unreadable",
   "provider_401",
   "provider_402",
@@ -66,6 +66,19 @@ const ACCOUNT_SCOPED: ReadonlySet<TurnFailureCode> = new Set<TurnFailureCode>([
 
 export function isAccountScoped(code: TurnFailureCode): boolean {
   return ACCOUNT_SCOPED.has(code);
+}
+
+/**
+ * "No AI account connected" is not a verdict on any key: no key was tried. The
+ * route no longer records its 412, but a stream that ends in missing_api_key
+ * still does, and such a row must not stand in for the key's real record, or a
+ * member's 412 while the key was switched off would hide the 402 that key was
+ * getting, and the header would read Working over a drained account. Whether a
+ * key exists is answered by readiness (components/os/department/channel.ts),
+ * which reads the key itself.
+ */
+function saysNothingAboutTheKey(o: TurnOutcome): boolean {
+  return !o.ok && o.code === "agent_not_configured";
 }
 
 /** Wording a provider uses when the balance, not the request, is the problem. */
@@ -114,7 +127,7 @@ export function classifyStreamError(message: string): TurnFailureCode {
  */
 const ROUTE_ERRORS = {
   unauthorized: "Your session ended. Sign in again to keep chatting.",
-  slug_not_owned: "This chat belongs to a workspace you are not signed in to.",
+  slug_not_owned: "This chat belongs to another workspace.",
   no_tenant: "Your account is not part of a workspace yet.",
   unknown_tenant: "This workspace's agent settings are not set up yet.",
   agent_not_found: "This channel's AI teammate could not be found.",
@@ -122,6 +135,7 @@ const ROUTE_ERRORS = {
   department_agent_mismatch: "This channel is out of date. Refresh the page and try again.",
   unknown_department: "This channel is out of date. Refresh the page and try again.",
   profile_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
+  workspace_unavailable: "We could not confirm your workspace just now. Try again in a moment.",
   config_unavailable: "We could not read this workspace's AI settings just now. Try again in a moment.",
   // Client-side: the request never reached the route, or the stream closed
   // with no text and no reason.
@@ -254,10 +268,13 @@ export type TurnOutcome = {
  *   2. Otherwise this channel's own last turn, if it failed with a failure that
  *      is its own (not account-scoped, which step 1 already settled).
  * A code this build does not know is treated as the channel's own failure: an
- * unknown outcome is shown as a failure, never as "Working".
+ * unknown outcome is shown as a failure, never as "Working". A 412 ("no AI
+ * account connected") is skipped in both steps (saysNothingAboutTheKey).
  */
 export function channelFailure(outcomes: readonly TurnOutcome[], channelKey: string): { code: string } | null {
-  const newest = [...outcomes].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const newest = outcomes
+    .filter((o) => !saysNothingAboutTheKey(o))
+    .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const accountVerdict = newest.find((o) => o.ok || (isTurnFailureCode(o.code) && isAccountScoped(o.code)));
   if (accountVerdict && !accountVerdict.ok) return { code: String(accountVerdict.code) };
   const own = newest.find((o) => o.channelKey === channelKey);

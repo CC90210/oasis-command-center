@@ -42,10 +42,30 @@ type Props = {
 // Distinct from ChatWidget's key — separate surfaces, separate state.
 const PLAN_MODE_STORAGE_KEY = "oasis.tenant-chat.planMode.v1";
 
-/** The commands that work in this chat. /agent and /model belong to the
- *  operator chat: a channel's agent is fixed, and its model is a setting. */
-const CHANNEL_COMMANDS: SlashCommandName[] = ["clear", "compact", "plan", "build", "help"];
-const CHANNEL_HELP = ["Slash commands:", ...CHANNEL_COMMANDS.map((c) => `  ${COMMAND_DESCRIPTIONS[c]}`)].join("\n");
+/**
+ * The commands that work in this chat. /agent and /model belong to the
+ * operator chat: a channel's agent is fixed, and its model is a setting.
+ * /compact summarises through /api/chat/compact, which answers on the caller's
+ * OWN config for the agent key (a teammate's personal key first) and has no row
+ * for most department agents, so in a department channel it would fail, or
+ * send the shared channel's transcript to one person's key. A department
+ * channel does not offer it.
+ */
+export function chatCommands(department: string | undefined): SlashCommandName[] {
+  return department ? ["clear", "plan", "build", "help"] : ["clear", "compact", "plan", "build", "help"];
+}
+
+export function chatHelp(department: string | undefined): string {
+  return ["Slash commands:", ...chatCommands(department).map((c) => `  ${COMMAND_DESCRIPTIONS[c]}`)].join("\n");
+}
+
+/** What a command this chat does not offer answers with, instead of running. */
+export function unavailableCommandCopy(name: SlashCommandName): string {
+  if (name === "agent") return "/agent isn't available here. Each department has its own channel.";
+  if (name === "model") return "/model isn't available here. The AI model is chosen in Settings > AI brain.";
+  if (name === "compact") return "/compact isn't available in a department channel. Use /clear to start a fresh conversation.";
+  return `/${name} isn't available here.`;
+}
 
 export function AgentChat({
   tenantSlug,
@@ -85,19 +105,24 @@ export function AgentChat({
       setFailure(null);
 
       // Slash commands — intercepted client-side, never hit the server.
-      // Scoped to the commands that make sense for a single-agent chat:
-      // /clear, /help, /plan, /build, /compact.
+      // Scoped to the commands this chat offers (chatCommands): anything
+      // else says why it is not here instead of running.
       const parsed = parseInput(trimmed);
       if (parsed.kind === "command") {
         const appendSystem = (content: string) =>
           setTurns((prev) => [...prev, { role: "system", content }]);
+        if (!chatCommands(department).includes(parsed.name)) {
+          appendSystem(unavailableCommandCopy(parsed.name));
+          setInput("");
+          return;
+        }
         switch (parsed.name) {
           case "clear":
             setTurns([]);
             setInput("");
             return;
           case "help":
-            appendSystem(CHANNEL_HELP);
+            appendSystem(chatHelp(department));
             setInput("");
             return;
           case "plan":
@@ -110,14 +135,6 @@ export function AgentChat({
           case "build":
             setPlanMode("build");
             appendSystem("Execute mode active — full agent capabilities restored.");
-            setInput("");
-            return;
-          case "agent":
-            appendSystem("/agent isn't available here. Each department has its own channel.");
-            setInput("");
-            return;
-          case "model":
-            appendSystem("/model isn't available here. The AI model is chosen in Settings > AI brain.");
             setInput("");
             return;
           case "compact": {
@@ -428,7 +445,7 @@ export function AgentChat({
       {failureText && (
         <div
           role="alert"
-          className="mx-5 mb-2 rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200 inline-flex flex-wrap items-start gap-x-2 gap-y-1"
+          className="mx-5 mb-2 rounded-xl border border-status-hot/40 bg-status-hot/10 px-3 py-2 text-xs text-status-hot inline-flex flex-wrap items-start gap-x-2 gap-y-1"
         >
           <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" aria-hidden />
           <span>{failureText.sentence}</span>

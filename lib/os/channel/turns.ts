@@ -4,9 +4,10 @@
  *
  * WHY. "Ready" used to mean "a key is on file". The header said Working over a
  * key the provider was refusing, because nothing remembered that the last turn
- * failed. app/api/agents/chat now records every turn here, ok or with its
- * failure code (lib/os/channel/outcome.ts), and the department page reads the
- * workspace's rows to say "Not working: …" until a turn succeeds again.
+ * failed. app/api/agents/chat now records every turn that reaches a key here,
+ * ok or with its failure code (lib/os/channel/outcome.ts), and the department
+ * page reads the workspace's rows to say "Not working: …" until a turn
+ * succeeds again.
  *
  * One row per (tenant, channel): an upsert, so the table stays the size of the
  * channel list. The history of every turn belongs to the Business Ledger (plan

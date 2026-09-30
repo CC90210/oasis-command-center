@@ -14,8 +14,9 @@
  *                  (lib/os/channel/outcome.ts), until a turn succeeds again
  *   unknown        nothing counted is waiting, but a count behind the total
  *                  could not be read (an approvals read failed), or the last
- *                  turn's record could not be read, so "nothing waiting" or
- *                  "answering" is not known and Working would be a guess
+ *                  turn's record or the AI account could not be read, so
+ *                  "nothing waiting" or "answering" is not known and Working
+ *                  (or Not connected) would be a guess
  *
  * A dot, not a glow: colour carries the state and the words carry it again
  * for anyone who cannot see the colour.
@@ -23,7 +24,7 @@
 
 import { floorCount } from "@/lib/os/count";
 import { failureCopy } from "@/lib/os/channel/outcome";
-import type { LastTurn } from "./channel";
+import type { ChannelState, LastTurn } from "./channel";
 
 export type DepartmentStatus =
   | { kind: "working" }
@@ -60,6 +61,17 @@ export function withLastTurn(status: DepartmentStatus, lastTurn: LastTurn | null
   }
   if (lastTurn.kind === "unknown" && status.kind === "working") return { kind: "unknown" };
   return status;
+}
+
+/**
+ * The department header: the counts' status (statusFor), then what the channel
+ * itself knows. A ready channel adds its last turn; a channel whose AI account
+ * could not be checked is Couldn't check, never Not connected (a failed read is
+ * not a missing key).
+ */
+export function headerStatus(status: DepartmentStatus, channel: ChannelState): DepartmentStatus {
+  if (channel.kind === "unknown") return { kind: "unknown" };
+  return channel.kind === "ready" ? withLastTurn(status, channel.lastTurn) : status;
 }
 
 export function StatusPill({ status }: { status: DepartmentStatus }) {

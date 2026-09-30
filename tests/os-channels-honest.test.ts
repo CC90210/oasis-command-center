@@ -28,6 +28,7 @@
  * Run: node --conditions=react-server --import tsx tests/os-channels-honest.test.ts
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,6 +102,7 @@ const USERS = {
   partner: u(2, "partner@oasisai.work"), // OASIS owner, NOT an alias: a founder, not the operator
   client: u(3, "owner@client.test"), // owner of a client workspace
   multi: u(4, "multi@client.test"), // seated in two workspaces: an old OASIS rep seat, a current client owner seat
+  rep: u(5, "rep@client.test"), // a closer in the client workspace: not an owner or admin
 } as const;
 
 const WORKSPACE_KEY = "sk-ant-workspace-key-0001";
@@ -225,6 +227,7 @@ async function main() {
       // Two seats: the newer owner seat in the client workspace is the active one.
       profile("p-multi-oasis", USERS.multi, OASIS, "opener", 0, "2026-08-01T00:00:00Z"),
       profile("p-multi-client", USERS.multi, CLIENT, "owner", 1, "2026-09-20T00:00:00Z"),
+      profile("p-rep", USERS.rep, CLIENT, "closer", 0, stamp),
       // OASIS: the workspace key, and a teammate's PERSONAL key for the same agent.
       {
         sql: `INSERT INTO agent_model_config (id, tenant_id, user_id, agent_key, provider, model, encrypted_api_key, enabled, updated_at)
@@ -251,8 +254,9 @@ async function main() {
   const { NextRequest } = await import("next/server");
   const { resolveOsViewer } = await import("../components/os/department/viewer");
   const { resolveChannelState } = await import("../components/os/department/channel");
-  const { statusFor, withLastTurn } = await import("../components/os/department/StatusPill");
+  const { headerStatus, statusFor, withLastTurn } = await import("../components/os/department/StatusPill");
   const { loadAiTeam } = await import("../components/os/aiteam/roster");
+  const { Homes } = await import("../components/os/aiteam/TeammateRow");
   const { departmentBySlug, OS_DEPARTMENTS } = await import("../lib/os/departments");
   const { departmentChannelFor, suggestedAsksFor } = await import("../components/os/department/config");
   const outcome = await import("../lib/os/channel/outcome");
@@ -286,6 +290,37 @@ async function main() {
   }
   // Every client-rendered string this suite sees, for the name scan at the end.
   const rendered: string[] = [];
+  // Department pages to draw for real (tests/os-channels-honest.render.ts):
+  // the state and status the resolver produced, rendered by the real
+  // DepartmentTab -> DepartmentChannel -> AgentChat in section 4b.
+  const renderScenarios: Array<{ id: string; deptSlug: string; status: unknown; channel: unknown }> = [];
+  // A server page's element tree, walked without rendering components: every
+  // string in it, and the first element of a given component type.
+  type El = { type?: unknown; props?: Record<string, unknown> & { children?: unknown } };
+  const textOf = (node: unknown): string => {
+    if (node == null || typeof node === "boolean") return "";
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(textOf).join(" ");
+    const el = node as El;
+    return Object.values(el.props ?? {}).map(textOf).join(" ");
+  };
+  const findEl = (node: unknown, type: unknown): El | null => {
+    if (!node || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        const hit = findEl(n, type);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    const el = node as El;
+    if (el.type === type) return el;
+    for (const v of Object.values(el.props ?? {})) {
+      const hit = findEl(v, type);
+      if (hit) return hit;
+    }
+    return null;
+  };
 
   console.log("os-channels-honest:");
 
@@ -322,6 +357,17 @@ async function main() {
     assert.deepEqual(f([t("dept:sales", false, "from_a_newer_build", "2026-09-29T10:00:00Z")], "dept:sales"), { code: "from_a_newer_build" });
     assert.equal(f([], "dept:sales"), null);
   });
+  await check("a 412 (no key tried) never stands in for the key's own record", () => {
+    const t = (channelKey: string, ok: boolean, code: string | null, at: string) => ({ channelKey, ok, code, at });
+    const f = outcome.channelFailure;
+    // The key was drained (402 in Sales); a member's turn in Marketing got a
+    // 412 while the owner had it switched off; the same key is back on.
+    const rows = [t("dept:sales", false, "provider_402", "2026-09-29T10:00:00Z"), t("dept:marketing", false, "agent_not_configured", "2026-09-29T11:00:00Z")];
+    assert.deepEqual(f(rows, "dept:sales"), { code: "provider_402" });
+    assert.deepEqual(f(rows, "dept:marketing"), { code: "provider_402" }, "the 412 hid the key's refusal from its own channel");
+    // Alone, a 412 is no verdict at all: readiness answers "no key".
+    assert.equal(f([t("dept:sales", false, "agent_not_configured", "2026-09-29T11:00:00Z")], "dept:sales"), null);
+  });
   await check("a turn older than the one on record does not overwrite it", async () => {
     await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
     const { recordTurnOutcome } = await import("../lib/os/channel/turns");
@@ -353,6 +399,11 @@ async function main() {
     const body = (await res.json()) as { error: string; hint: string };
     assert.equal(body.error, "agent_not_configured");
     rendered.push(body.hint);
+    // A turn that reaches a key still answers while the table is missing.
+    await login(USERS.partner);
+    provider = () => anthropicOk("Still here.");
+    const events = parseSse(await (await post(say({ agent_slug: "bravo", department: "chief_of_staff" }))).text());
+    assert.deepEqual(events.map((e) => e.event), ["agent", "delta", "usage", "done"]);
     assert.ok(
       logged.some((a) => String(a[0]).includes("agent_turn_outcomes is missing")),
       "a missing outcomes table is logged, not thrown",
@@ -362,10 +413,15 @@ async function main() {
   await db.executeMultiple(readFileSync(join(process.cwd(), "database/turso/bravo__191_agent_turn_outcomes.sql"), "utf8"));
   await check("a person seated in two workspaces chats in their ACTIVE one", async () => {
     await login(USERS.multi);
+    logged.length = 0;
     const res = await post(say({ agent_slug: "sdr", department: "sales" }));
-    // Not 403 no_tenant (what .maybeSingle() over two seats produced).
+    // Not 403 no_tenant (what .maybeSingle() over two seats produced), and not
+    // the old OASIS seat, whose workspace key would have answered.
     assert.equal(res.status, 412);
-    assert.deepEqual(await outcomes(CLIENT), ["dept:sales=failed:agent_not_configured"], "recorded in the active workspace");
+    assert.equal(failureLogs().at(-1)?.tenantId, CLIENT, "refused in the active workspace");
+    // A 412 tried no key, so it is not a turn on record: as the channel's last
+    // word it would overwrite the key's real refusal.
+    assert.deepEqual(await outcomes(CLIENT), [], "a 412 was recorded as the channel's last turn");
     assert.deepEqual(await outcomes(OASIS), [], "never in the other seat's workspace");
   });
   await check("a department label is only pinned on the agent that workspace binds to it", async () => {
@@ -378,6 +434,31 @@ async function main() {
       const res = await post(say({ agent_slug: agent, department }));
       assert.equal(res.status, 400, `${department}/${agent}`);
       assert.equal(((await res.json()) as { error: string }).error, want);
+    }
+  });
+  await check("a tenants read that fails is 'try again', not OASIS judged as a stranger's workspace", async () => {
+    const { resolveOwnedSlug } = await import("../lib/manifest/tenant-scope");
+    const oasisSlug = await resolveOwnedSlug(OASIS);
+    assert.ok(oasisSlug, "OASIS's manifest slug");
+    // The workspace's manifest claim keeps the slug resolvable while the
+    // tenants table is unreadable, so the department check is what is reached.
+    await db.execute({ sql: "INSERT INTO tenant_manifests (id, tenant_id, slug) VALUES ('m-oasis', ?, ?)", args: [OASIS, oasisSlug] });
+    await db.execute("ALTER TABLE tenants RENAME TO tenants_unreadable");
+    try {
+      await login(USERS.partner);
+      sent = [];
+      logged.length = 0;
+      const res = await post(say({ agent_slug: "bravo", department: "chief_of_staff" }));
+      const body = (await res.json()) as { error: string };
+      // Not 400 department_agent_mismatch ("this channel is out of date").
+      assert.equal(res.status, 503, JSON.stringify(body));
+      assert.equal(body.error, "workspace_unavailable");
+      assert.equal(failureLogs().at(-1)?.code, "workspace_unavailable");
+      assert.equal(sent.length, 0);
+      assert.match(outcome.failureCopy(body.error, { canManageAi: true }).sentence, /Try again/);
+    } finally {
+      await db.execute("ALTER TABLE tenants_unreadable RENAME TO tenants");
+      await db.execute("DELETE FROM tenant_manifests WHERE id = 'm-oasis'");
     }
   });
 
@@ -443,10 +524,41 @@ async function main() {
       assert.equal(state.kind, "ready", slug);
       if (state.kind !== "ready") return;
       assert.deepEqual(state.lastTurn, { kind: "failed", code: "provider_400_credit" }, slug);
-      const header = withLastTurn(statusFor(true, 0), state.lastTurn);
+      const header = headerStatus(statusFor(true, 0), state);
       assert.deepEqual(header, { kind: "not_working", reason: "AI account refused the request (check billing)" }, slug);
       rendered.push(JSON.stringify(header));
+      if (slug === "chief-of-staff") {
+        // An owner: failures carry the fix link. The same state with the
+        // flag off is what a member's channel gets.
+        assert.equal(state.canManageAi, true);
+        renderScenarios.push(
+          { id: "refused_owner", deptSlug: slug, status: statusFor(true, 0), channel: state },
+          { id: "refused_member", deptSlug: slug, status: statusFor(true, 0), channel: { ...state, canManageAi: false } },
+        );
+      }
     }
+  });
+  await check("the AI Team roster says 'Web · not working' where the header says Not working", async () => {
+    const viewer = await viewerFor(USERS.partner);
+    const team = await loadAiTeam(viewer, []);
+    const agentLeads = team.leads.filter((l) => !l.id.startsWith("dept:"));
+    assert.ok(agentLeads.length >= 2, JSON.stringify(team.leads.map((l) => l.id)));
+    for (const lead of agentLeads) assert.equal(lead.web, "not_working", lead.name);
+    const label = textOf(Homes({ web: "not_working" }));
+    assert.match(label, /Web · not working/);
+    rendered.push(label);
+  });
+  await check("a member's 412 while the key is off does not wipe the key's refusal from the channel", async () => {
+    await db.execute({ sql: "UPDATE agent_model_config SET enabled = 0 WHERE id = 'c-oasis'", args: [] });
+    await login(USERS.partner); // not the operator: no platform key, so a 412
+    const res = await post(say({ agent_slug: "bravo", department: "chief_of_staff" }));
+    assert.equal(res.status, 412);
+    // The owner turns the same drained key back on.
+    await db.execute({ sql: "UPDATE agent_model_config SET enabled = 1 WHERE id = 'c-oasis'", args: [] });
+    assert.deepEqual(await outcomes(OASIS), ["dept:chief_of_staff=failed:provider_400_credit"]);
+    const state = await resolveChannelState(dept("chief-of-staff"), await viewerFor(USERS.partner));
+    assert.ok(state.kind === "ready", state.kind);
+    assert.equal(headerStatus(statusFor(true, 0), state).kind, "not_working", "the header read Working over a drained key");
   });
   await check("a successful turn anywhere on the account clears it", async () => {
     await login(USERS.partner);
@@ -480,6 +592,20 @@ async function main() {
     const viewer = await viewerFor(USERS.client);
     assert.equal((await resolveChannelState(dept("sales"), viewer)).kind, "not_connected");
   });
+  await check("a key saved after a recorded 412 reads ready, with a Working header", async () => {
+    // A 412 on record (a stream that ended in missing_api_key records one),
+    // then the owner saves a workspace key.
+    await db.execute({
+      sql: "INSERT INTO agent_turn_outcomes (tenant_id, channel_key, agent_slug, outcome, code, at) VALUES (?, 'dept:sales', 'sdr', 'failed', 'agent_not_configured', ?)",
+      args: [CLIENT, new Date().toISOString()],
+    });
+    await db.execute({ sql: "UPDATE agent_model_config SET enabled = 1 WHERE id = 'c-client'", args: [] });
+    const state = await resolveChannelState(dept("sales"), await viewerFor(USERS.client));
+    assert.ok(state.kind === "ready", state.kind);
+    assert.deepEqual(state.lastTurn, { kind: "ok" });
+    assert.deepEqual(headerStatus(statusFor(true, 0), state), { kind: "working" });
+    renderScenarios.push({ id: "key_saved_after_412", deptSlug: "sales", status: statusFor(true, 0), channel: state });
+  });
   await check("the operator is ready only when a platform key exists to fall back to", async () => {
     await db.execute({ sql: "UPDATE agent_model_config SET enabled = 0 WHERE id = 'c-oasis'", args: [] });
     try {
@@ -494,12 +620,104 @@ async function main() {
       await db.execute({ sql: "UPDATE agent_model_config SET enabled = 1 WHERE id = 'c-oasis'", args: [] });
     }
   });
+  await check("an AI settings read that fails is Couldn't check, never 'no AI account connected'", async () => {
+    await db.execute("ALTER TABLE agent_model_config RENAME TO agent_model_config_unreadable");
+    try {
+      const viewer = await viewerFor(USERS.partner);
+      const state = await resolveChannelState(dept("marketing"), viewer);
+      assert.equal(state.kind, "unknown", JSON.stringify(state));
+      assert.ok(!("action" in state), "a connect button for an account that may be connected");
+      if (state.kind === "unknown") {
+        assert.doesNotMatch(state.reason, /No AI account is connected/);
+        rendered.push(state.reason);
+      }
+      assert.deepEqual(headerStatus(statusFor(false, 0), state), { kind: "unknown" });
+      renderScenarios.push({ id: "unchecked", deptSlug: "marketing", status: statusFor(false, 0), channel: state });
+      // The route says the same thing about the same failure.
+      await login(USERS.partner);
+      const res = await post(say({ agent_slug: "maven", department: "marketing" }));
+      assert.equal(res.status, 503);
+      assert.equal(((await res.json()) as { error: string }).error, "config_unavailable");
+      // So does the AI Team roster, and so does Test on a saved key.
+      const team = await loadAiTeam(viewer, []);
+      for (const lead of team.leads.filter((l) => !l.id.startsWith("dept:"))) assert.equal(lead.web, "unknown", lead.name);
+      const test = await testConnection.POST(
+        new NextRequest("http://localhost/api/agent-config/test-connection", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ provider: "anthropic" }),
+        }),
+      );
+      const tested = (await test.json()) as { ok: boolean; code: string };
+      assert.equal(test.status, 503, "a failed read was answered 'no key on file'");
+      assert.equal(tested.code, "config_unavailable");
+    } finally {
+      await db.execute("ALTER TABLE agent_model_config_unreadable RENAME TO agent_model_config");
+    }
+  });
   await check("the model id reaches the verified operator only", async () => {
     await login(USERS.cc);
     provider = () => anthropicOk("ok");
     const events = parseSse(await (await post(say({ agent_slug: "atlas", department: "finance" }))).text());
     assert.equal(events[0].data.model, "claude-sonnet-4-6");
     assert.equal(events[0].data.display_name, "Finance");
+  });
+
+  // ── 4b. The page draws what the resolver decided ──────────────────────
+  // One spawn renders every scenario collected above through the real
+  // DepartmentTab (header pill), DepartmentChannel and AgentChat (banner).
+  let html: Record<string, string> = {};
+  await check("the department pages render (tests/os-channels-honest.render.ts)", () => {
+    // The render needs whole React: drop the suite's react-server condition.
+    const nodeOptions = (process.env.NODE_OPTIONS || "")
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(--conditions|-C)(=|$)/.test(tok) && tok !== "react-server")
+      .join(" ");
+    const env = { ...process.env, NODE_OPTIONS: nodeOptions };
+    if (!nodeOptions) delete env.NODE_OPTIONS;
+    const r = spawnSync(process.execPath, ["--import", "tsx", "tests/os-channels-honest.render.ts"], {
+      encoding: "utf8",
+      env,
+      input: JSON.stringify(renderScenarios),
+    });
+    assert.equal(r.status, 0, `the render helper exited ${r.status}:\n${r.stderr}`);
+    html = JSON.parse(r.stdout) as Record<string, string>;
+    assert.deepEqual(Object.keys(html).sort(), ["key_saved_after_412", "refused_member", "refused_owner", "unchecked"]);
+    for (const markup of Object.values(html)) rendered.push(markup.replace(/<[^>]*>/g, " "));
+  });
+  const readable = (id: string) =>
+    (html[id] ?? "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&#x27;|&#39;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ");
+  const alertOf = (id: string) => /<div role="alert"[^>]*>[\s\S]*?<\/div>/.exec(html[id] ?? "")?.[0] ?? "";
+  await check("a refused key: the header pill says Not working, the channel opens on the reason and the fix", () => {
+    const page = readable("refused_owner");
+    assert.match(page, /Not working: AI account refused the request \(check billing\)/, "the header pill");
+    assert.doesNotMatch(page, /\bWorking\b/, "a Working pill over a refused key");
+    const alert = alertOf("refused_owner");
+    assert.match(alert, /Your AI account refused the request\. Check its billing or key\./, "the last turn's failure is not shown before typing");
+    assert.match(alert, /href="\/settings\/ai"[^>]*>Open AI settings</, "an owner's banner carries the fix link");
+    // One red for one failure: the pill's status-hot tokens, not raw Tailwind red.
+    assert.match(alert, /border-status-hot\/40 bg-status-hot\/10/);
+    assert.doesNotMatch(alert, /red-\d/);
+  });
+  await check("a member sees who can fix it, and no link to a page they cannot open", () => {
+    const alert = alertOf("refused_member");
+    assert.match(alert, /Check its billing or key\. An owner or admin can fix this in Settings\./);
+    assert.doesNotMatch(html.refused_member, /href="\/settings\/ai"/);
+  });
+  await check("a key saved after a 412 renders Working with no failure banner", () => {
+    assert.match(readable("key_saved_after_412"), /Working/);
+    assert.doesNotMatch(readable("key_saved_after_412"), /Not working|No AI account/);
+    assert.equal(alertOf("key_saved_after_412"), "");
+  });
+  await check("an unchecked AI account renders Couldn't check, with no connect button", () => {
+    const page = readable("unchecked");
+    assert.match(page, /Couldn’t check this channel/);
+    assert.match(page, /Couldn’t check/);
+    assert.doesNotMatch(page, /Not connected|Channel not connected|Connect an AI account/);
   });
 
   // ── 5. Test connection is a real one-token completion ──────────────────
@@ -538,9 +756,11 @@ async function main() {
       ],
     ] as const) {
       const seen: Sent[] = [];
-      const r = await probeProvider(p, "k", async (url2, init) => {
-        seen.push({ url: url2, method: String(init.method), headers: {}, body: JSON.parse(String(init.body)) });
-        return new Response("{}", { status: 200 });
+      const r = await probeProvider(p, "k", {
+        fetchImpl: async (url2, init) => {
+          seen.push({ url: url2, method: String(init.method), headers: {}, body: JSON.parse(String(init.body)) });
+          return new Response("{}", { status: 200 });
+        },
       });
       assert.equal(r.ok, true, p);
       assert.equal(seen.length, 1, p);
@@ -549,16 +769,42 @@ async function main() {
       assert.equal(cap(seen[0].body!), 1, p);
     }
     // Anthropic's drained balance (400) and a Google bad key (400) are not the same failure.
-    const credit = await probeProvider("anthropic", "k", async () => anthropicCredit());
+    const credit = await probeProvider("anthropic", "k", { fetchImpl: async () => anthropicCredit() });
     assert.equal(credit.ok === false && credit.code, "provider_400_credit");
-    const badKey = await probeProvider("google", "k", async () => new Response('{"error":{"message":"API key not valid. Please pass a valid API key."}}', { status: 400 }));
+    const badKey = await probeProvider("google", "k", {
+      fetchImpl: async () => new Response('{"error":{"message":"API key not valid. Please pass a valid API key."}}', { status: 400 }),
+    });
     assert.equal(badKey.ok === false && badKey.code, "provider_401");
   });
   await check("the route source no longer lists models to decide a key works", () => {
     const src = readFileSync(join(process.cwd(), "app/api/agent-config/test-connection/route.ts"), "utf8");
     assert.doesNotMatch(src, /\/v1\/models|\/v1beta\/models\?|api\/tags/, "a model-list probe is back");
     assert.match(src, /probeProvider\(provider, proposedKey\)/);
-    assert.match(src, /probeProvider\(provider, plain\)/);
+    assert.match(src, /probeProvider\(provider, plain, \{ model: saved\?\.model \}\)/);
+  });
+  await check("Test on a saved key asks the model saved with it, and a model refusal names that model", async () => {
+    // The client's workspace row: anthropic, claude-sonnet-4-6 (not PROBE_MODEL's haiku).
+    await login(USERS.client);
+    sent = [];
+    provider = () => new Response('{"type":"error","error":{"type":"not_found_error","message":"model: claude-sonnet-4-6"}}', { status: 404 });
+    const res = await testConnection.POST(
+      new NextRequest("http://localhost/api/agent-config/test-connection", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "anthropic" }),
+      }),
+    );
+    const body = (await res.json()) as { ok: boolean; code: string; message: string };
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].body?.model, "claude-sonnet-4-6", "Test asked a model the channel does not use");
+    assert.equal(sent[0].headers["x-api-key"], WORKSPACE_KEY);
+    assert.equal(body.ok, false);
+    assert.equal(body.code, "provider_404");
+    assert.equal(body.message, "The model claude-sonnet-4-6 was not found for this key. Pick another model in AI settings.");
+    // A key with no model saved yet is asked on the cheap probe model, and a
+    // 403 there says it is about THAT model, not the key in general.
+    const forbidden = await probeProvider("openai", "k", { fetchImpl: async () => new Response("{}", { status: 403 }) });
+    assert.equal(forbidden.ok === false && forbidden.message, "This key is not allowed to use gpt-5.4-mini. Check the key's access, or pick another model in AI settings.");
   });
 
   // ── 6. Names: departments only, everywhere a client (or CC) looks ───────
@@ -582,7 +828,10 @@ async function main() {
       rendered.push(JSON.stringify(events[0].data));
     }
   });
-  await check("no client-rendered string or stream event names Bravo, Maven, Atlas or Conaugh", async () => {
+  // Department surfaces only. The direct /t/<slug>/agent/<agent> chat still
+  // answers AS the library agent (its own name and IDENTITY_LOCK_OVERLAY) for
+  // any public seed, OASIS's house agents included; that is plan F0, not here.
+  await check("no department-channel, AI Team or failure-copy string names Bravo, Maven, Atlas or Conaugh", async () => {
     for (const oasis of [true, false]) {
       for (const d of OS_DEPARTMENTS) {
         const binding = departmentChannelFor(d.key, { oasis });
@@ -622,7 +871,39 @@ async function main() {
     assert.equal(hasChat(await page({ params: Promise.resolve({ slug: "suga", agent: "sdr" }) })), true, "own workspace");
     assert.equal(hasChat(await page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) })), false, "a seat that is not the active one");
     await login(USERS.client);
-    assert.equal(hasChat(await page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) })), false, "someone else's workspace");
+    const other = await page({ params: Promise.resolve({ slug: "oasis-ai-cc", agent: "sdr" }) });
+    assert.equal(hasChat(other), false, "someone else's workspace");
+    // OCC has no workspace switcher, so the note does not tell anyone to switch.
+    assert.match(textOf(other), /This chat belongs to another workspace\./);
+    assert.doesNotMatch(textOf(other), /[Ss]witch|not signed in/);
+  });
+  await check("the agent preview gives owners the fix link, and members the words", async () => {
+    const { AgentChat } = await import("../components/agents/AgentChat");
+    const page = (await import("../app/t/[slug]/agent/[agent]/page")).default;
+    const chatProps = async (user: U) => {
+      await login(user);
+      const el = findEl(await page({ params: Promise.resolve({ slug: "suga", agent: "sdr" }) }), AgentChat);
+      assert.ok(el, `no chat for ${user.email}`);
+      return el!.props ?? {};
+    };
+    assert.equal((await chatProps(USERS.client)).canManageAi, true, "an owner");
+    assert.equal((await chatProps(USERS.rep)).canManageAi, false, "a closer");
+  });
+  await check("a profile read that fails is 'we could not confirm', not 'another workspace'", async () => {
+    const { AgentChat } = await import("../components/agents/AgentChat");
+    const page = (await import("../app/t/[slug]/agent/[agent]/page")).default;
+    await login(USERS.client);
+    logged.length = 0;
+    await db.execute("ALTER TABLE user_profiles RENAME TO user_profiles_unreadable");
+    try {
+      const tree = await page({ params: Promise.resolve({ slug: "suga", agent: "sdr" }) });
+      assert.equal(findEl(tree, AgentChat), null);
+      assert.match(textOf(tree), /We could not confirm which workspace you are in\./);
+      assert.doesNotMatch(textOf(tree), /another workspace/, "a failed read was shown as a definite answer");
+      assert.ok(logged.some((a) => a[0] === "[t.agent.session]"), "the failure is logged");
+    } finally {
+      await db.execute("ALTER TABLE user_profiles_unreadable RENAME TO user_profiles");
+    }
   });
 
   // ── 7. The channel UI: plain errors, no empty bubble, Enter sends ───────
@@ -640,6 +921,20 @@ async function main() {
     const channel = readFileSync(join(process.cwd(), "components/os/department/DepartmentChannel.tsx"), "utf8");
     assert.doesNotMatch(channel, /tenantSlug=/, "a department channel sends no tenant slug; the route reads the session");
     assert.match(channel, /department=\{state\.department\}/);
+  });
+  await check("a department channel does not offer /compact, and says why if it is typed", async () => {
+    const chat = await import("../components/agents/AgentChat");
+    // /compact answers on the caller's own agent config, which has no row for
+    // most department agents (and would be a teammate's personal key if it did).
+    assert.deepEqual(chat.chatCommands("sales"), ["clear", "plan", "build", "help"]);
+    assert.doesNotMatch(chat.chatHelp("sales"), /compact/);
+    // The direct agent chat keeps it.
+    assert.ok(chat.chatCommands(undefined).includes("compact"));
+    assert.match(chat.chatHelp(undefined), /\/compact/);
+    assert.match(chat.unavailableCommandCopy("compact"), /isn't available in a department channel\. Use \/clear/);
+    // The send path runs only the commands this chat offers.
+    const src = readFileSync(join(process.cwd(), "components/agents/AgentChat.tsx"), "utf8");
+    assert.match(src, /if \(!chatCommands\(department\)\.includes\(parsed\.name\)\) \{\s*appendSystem\(unavailableCommandCopy\(parsed\.name\)\);/);
   });
 
   console.log(`os-channels-honest: ${failures === 0 ? "OK" : `${failures} FAILED`}`);

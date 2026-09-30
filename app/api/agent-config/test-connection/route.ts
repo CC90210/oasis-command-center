@@ -4,13 +4,15 @@
  * One-shot provider-key validation. Two modes, single endpoint:
  *
  * 1. Test the SAVED key (default — body { provider }):
- *      Reads the encrypted key from agent_model_config (tenant-wide row
- *      first, per-user override second), decrypts, and runs the probe.
+ *      Reads the encrypted key and its model from agent_model_config
+ *      (tenant-wide row first, per-user override second), decrypts, and
+ *      probes that model.
  *
  * 2. Test a PROPOSED key before saving (body { provider, api_key }):
  *      Skips the DB lookup and probes with the supplied key directly so
  *      the AgentConfigEditor's "Test connection" button can validate
- *      a key the operator just pasted but hasn't saved.
+ *      a key the operator just pasted but hasn't saved, on the provider's
+ *      cheapest listed model.
  *
  * Auth: session — both modes require a logged-in operator. Mode #2 is
  * NOT a public oracle for credential stuffing; the rate limit + session
@@ -27,7 +29,8 @@
  *   { ok: false, status: "error", provider, message, code? }
  *
  * `message` is one plain sentence (the same one a failed chat turn shows,
- * lib/os/channel/outcome.ts), never the provider's raw error body.
+ * lib/os/channel/outcome.ts, except a 403 or 404, which names the model it was
+ * about), never the provider's raw error body.
  *
  * Codes (when ok=false):
  *   provider_401 | provider_402 | provider_400_credit | provider_403 |
@@ -37,6 +40,7 @@
  *   "network"               → fetch threw before HTTP
  *   "no_local_model"        → a local server with no model installed
  *   "no_key_on_file"        → mode 1, no saved key for provider
+ *   "config_unavailable"    → mode 1, the saved-key read failed (503)
  *   "decrypt_failed"        → mode 1, decryptField threw
  *   "invalid_provider"      → body.provider invalid
  *
@@ -133,11 +137,12 @@ export async function POST(req: NextRequest) {
 
   // Mode 1: test the saved key. Tenant-wide row first, then per-user
   // override. Either has the same encrypted_api_key column shape; first
-  // non-empty value wins.
+  // non-empty value wins. The key is tested on the model saved WITH it, the
+  // model the channel sends it (lib/agents/provider-probe.ts WHICH MODEL).
   const db = getServiceSupabase();
   const tenantRow = await db
     .from("agent_model_config")
-    .select("encrypted_api_key")
+    .select("encrypted_api_key, model")
     .eq("tenant_id", ctx.tenantId)
     .eq("provider", provider)
     .is("user_id", null)
@@ -148,17 +153,37 @@ export async function POST(req: NextRequest) {
     ? null
     : await db
         .from("agent_model_config")
-        .select("encrypted_api_key")
+        .select("encrypted_api_key, model")
         .eq("tenant_id", ctx.tenantId)
         .eq("provider", provider)
         .eq("user_id", ctx.userId)
         .not("encrypted_api_key", "is", null)
         .limit(1)
         .maybeSingle();
-  const encrypted =
-    (tenantRow.data?.encrypted_api_key as string | null | undefined) ||
-    (userRow?.data?.encrypted_api_key as string | null | undefined) ||
-    null;
+  // A failed read is not "no key on file": the owner would be told to add a
+  // key that is already saved.
+  if (tenantRow.error || userRow?.error) {
+    console.error("[agent-config.test-connection] saved key could not be read", {
+      tenantId: ctx.tenantId,
+      provider,
+      error: (tenantRow.error || userRow?.error)?.message,
+    });
+    return NextResponse.json(
+      {
+        ok: false,
+        status: "error",
+        provider,
+        code: "config_unavailable",
+        message: "The saved key could not be read just now. Try again in a moment.",
+      },
+      { status: 503 },
+    );
+  }
+  const saved = (tenantRow.data?.encrypted_api_key ? tenantRow.data : userRow?.data) as
+    | { encrypted_api_key: string | null; model: string | null }
+    | null
+    | undefined;
+  const encrypted = saved?.encrypted_api_key || null;
   if (!encrypted) {
     return NextResponse.json(
       { ok: false, status: "error", provider, code: "no_key_on_file", message: "No API key on file for this provider." },
@@ -187,5 +212,5 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return respond(provider, plain, await probeProvider(provider, plain));
+  return respond(provider, plain, await probeProvider(provider, plain, { model: saved?.model }));
 }

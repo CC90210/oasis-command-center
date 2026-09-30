@@ -23,10 +23,12 @@ import { getAgentBySlug } from "@/lib/agents/loader";
 import { OS_DEPARTMENTS } from "@/lib/os/departments";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { departmentChannelFor, departmentProfile } from "@/components/os/department/config";
-import { workspaceChatReadiness } from "@/components/os/department/channel";
+import { lastTurnFrom, readWorkspaceTurns, workspaceChatReadiness } from "@/components/os/department/channel";
 import { departmentGate } from "@/components/os/department/gate";
 import type { Read } from "@/components/os/department/routines";
 import type { OsViewer } from "@/components/os/department/viewer";
+import type { DepartmentKey } from "@/lib/os/types";
+import type { WebState } from "./TeammateRow";
 
 export type TeammateHome = { label: string; href: string };
 
@@ -37,8 +39,12 @@ export type LeadTeammate = {
   summary: string;
   /** The departments this teammate leads, each a Web home. */
   departments: TeammateHome[];
-  /** Web channel state: answering, or why not. */
-  web: "ready" | "not_connected" | "not_set_up";
+  /**
+   * Web channel state, by the department header's own rules: a key on file
+   * whose last turn failed is `not_working` (the header says "Not working"),
+   * and a read that failed is `unknown`, never a green check.
+   */
+  web: WebState;
 };
 
 export type CustomTeammate = {
@@ -50,8 +56,9 @@ export type CustomTeammate = {
   enabled: boolean;
   /** Its chat, when the workspace has a chat slug. */
   webHref: string | null;
-  /** Whether that chat can answer (a chat slug and an AI provider). */
-  web: "ready" | "not_connected";
+  /** Whether that chat can answer (a chat slug and an AI provider). Its turns
+   *  are recorded per agent, not read here, so it is never `not_working`. */
+  web: "ready" | "not_connected" | "unknown";
 };
 
 export type AiTeam = {
@@ -104,12 +111,31 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
     ...new Set(bindings.flatMap((b) => (b.binding.kind === "agent" ? [b.binding.agentSlug] : []))),
   ];
 
-  const [readiness, agents, custom] = await Promise.all([
+  const [readiness, agents, custom, turns] = await Promise.all([
     workspaceChatReadiness(viewer),
     Promise.all(slugs.map((s) => getAgentBySlug(s, tenantId))),
     loadCustom(tenantId),
+    readWorkspaceTurns(tenantId),
   ]);
-  const web: "ready" | "not_connected" = readiness.slug && readiness.provider ? "ready" : "not_connected";
+  // Key readiness, the same answer the channel gets: no slug or no key is Not
+  // connected; an AI settings read that failed is unknown, not "not connected".
+  const web: "ready" | "not_connected" | "unknown" = !readiness.slug
+    ? "not_connected"
+    : readiness.provider === "ready"
+      ? "ready"
+      : readiness.provider === "unknown"
+        ? "unknown"
+        : "not_connected";
+  // A ready lead is only as good as its channels' last turns (the department
+  // header's rule, lastTurnFrom): one that failed is Not working, and a record
+  // that could not be read is unknown.
+  const leadWeb = (keys: readonly DepartmentKey[]): WebState => {
+    if (web !== "ready") return web;
+    const last = keys.map((k) => lastTurnFrom(turns, k));
+    if (last.some((t) => t.kind === "failed")) return "not_working";
+    if (last.some((t) => t.kind === "unknown")) return "unknown";
+    return "ready";
+  };
 
   const leads: LeadTeammate[] = [];
   for (const [i, slug] of slugs.entries()) {
@@ -126,7 +152,7 @@ export async function loadAiTeam(viewer: OsViewer, enabledSlugs: readonly string
       name: departments.map((d) => d.label).join(" · "),
       summary: led[0] ? departmentProfile(led[0].dept.key).purpose : "",
       departments,
-      web: agent ? web : "not_connected",
+      web: agent ? leadWeb(led.map((b) => b.dept.key)) : "not_connected",
     });
   }
   for (const { dept, binding } of bindings) {

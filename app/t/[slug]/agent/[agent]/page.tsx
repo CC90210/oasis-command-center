@@ -7,8 +7,8 @@ import { getAgentBySlug } from "@/lib/agents/loader";
 import { CATEGORY_LABELS } from "@/lib/agents/library";
 import { getManifest, manifestExists } from "@/lib/manifest/loader";
 import { ownsSlug } from "@/lib/manifest/tenant-scope";
-import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
-import { getSessionUser } from "@/lib/supabase-server";
+import { resolveSessionContext, type SessionContext } from "@/lib/api-auth";
+import { resolvePersona } from "@/lib/role-surfaces";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,13 +22,34 @@ export default async function TenantAgentChatPage({
   const normalised = slug.toLowerCase();
   if (!(await manifestExists(normalised))) notFound();
 
-  // The viewer's ACTIVE workspace (the resolver the /team pages use): a
-  // `.maybeSingle()` over user_profiles errors for anyone seated in two
-  // workspaces and read them as having none.
-  const user = await getSessionUser();
-  const resolved = user ? await resolveActiveProfileForUser(user) : { profile: null, error: null };
-  if (resolved.error) console.error("[t.agent.profile]", resolved.error);
-  const tenantId = resolved.profile?.tenant_id || null;
+  // The viewer's ACTIVE workspace, through the session context the /team pages
+  // use: a `.maybeSingle()` over user_profiles errors for anyone seated in two
+  // workspaces and read them as having none. A profile read that FAILED throws
+  // there; it is not "signed in somewhere else", so say we could not tell.
+  let session: SessionContext;
+  try {
+    session = await resolveSessionContext();
+  } catch (err) {
+    console.error("[t.agent.session]", err);
+    return (
+      <div className="space-y-6 animate-fade-in">
+        <PageHeader title="Chat unavailable" subtitle="We could not confirm which workspace you are in." />
+        <Card>
+          <div className="text-sm text-fg-muted leading-relaxed">Refresh to try again.</div>
+        </Card>
+      </div>
+    );
+  }
+  const tenantId = session.ok ? session.tenantId : null;
+  // Owners and admins may open AI settings, so a failure carries the fix link
+  // (the same persona rule a department channel uses).
+  const canManageAi =
+    session.ok &&
+    resolvePersona({
+      teamRole: session.teamRole,
+      isTrueAdmin: session.isTrueAdmin,
+      adminAccess: session.adminAccess,
+    }) === "founder";
   // /api/agents/chat answers only in a workspace the caller owns (403
   // otherwise), so a chat box over someone else's workspace would fail on
   // its first message. Say so instead of rendering it.
@@ -99,13 +120,11 @@ export default async function TenantAgentChatPage({
           agentName={displayName}
           agentSubtitle={CATEGORY_LABELS[agentDef.category]}
           greeting={agentDef.short_description}
+          canManageAi={canManageAi}
         />
       ) : (
         <Card>
-          <div className="text-sm text-fg-muted leading-relaxed">
-            This chat belongs to a workspace you are not signed in to. Switch to that workspace to talk
-            to its agents.
-          </div>
+          <div className="text-sm text-fg-muted leading-relaxed">This chat belongs to another workspace.</div>
         </Card>
       )}
     </div>

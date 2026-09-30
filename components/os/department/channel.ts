@@ -7,7 +7,8 @@
  * find (404), or no AI provider — no workspace key and not an operator (412).
  * This asks the same three questions up front, with the route's own rules, so
  * the header can say "Not connected" and the owner is told what to connect
- * instead of typing into a box that will fail.
+ * instead of typing into a box that will fail. A question it could not ask (the
+ * AI settings read failed) is "Couldn't check", never "Not connected".
  *
  * A key that answers is not the same as a key on file. So a ready channel also
  * carries its LAST TURN (lib/os/channel/turns.ts, recorded by the route): when
@@ -29,7 +30,7 @@ import { isPlatformOperatorForAuthUser } from "@/lib/platform-operator";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTursoClient, tursoConfigured } from "@/lib/turso";
 import { AI_SETTINGS_HREF, channelFailure, departmentChannelKey } from "@/lib/os/channel/outcome";
-import { readTurnOutcomes } from "@/lib/os/channel/turns";
+import { readTurnOutcomes, type TurnOutcomesRead } from "@/lib/os/channel/turns";
 import { departmentChannelFor } from "./config";
 import type { OsViewer } from "./viewer";
 
@@ -57,7 +58,22 @@ export type ChannelState =
       reason: string;
       /** Where to fix it, when the viewer is the one who can. */
       action: { href: string; label: string } | null;
+    }
+  | {
+      /** The AI account could not be checked (a failed read), so neither
+       *  "ready" nor "not connected" is known. No connect button: sending an
+       *  owner to connect an account that may be connected is the lie. */
+      kind: "unknown";
+      reason: string;
     };
+
+/**
+ * The workspace's AI provider, as the route would find it:
+ *   ready    a key the route would use
+ *   none     no such key (a known answer: the route answers 412)
+ *   unknown  the read failed (the route answers 503 config_unavailable)
+ */
+export type ProviderReadiness = "ready" | "none" | "unknown";
 
 /**
  * The slug the chat route and the builder accept for this workspace, or null.
@@ -85,8 +101,14 @@ export async function workspaceChatSlug(tenantId: string): Promise<string | null
  *     owner/admin profile by auth id) WHEN a platform key is configured. Being
  *     the operator is not a key: with no platform key the route answers 412,
  *     so the channel is not ready either.
+ * A failed read is `unknown`, never "none": the route answers it with 503
+ * config_unavailable, not 412, and the header must agree with the route.
  */
-async function providerReady(tenantId: string, authUserId: string | null, email: string | null): Promise<boolean> {
+async function providerReady(
+  tenantId: string,
+  authUserId: string | null,
+  email: string | null,
+): Promise<ProviderReadiness> {
   try {
     const res = await getServiceSupabase()
       .from("agent_model_config")
@@ -97,15 +119,17 @@ async function providerReady(tenantId: string, authUserId: string | null, email:
       .maybeSingle();
     if (res.error) {
       console.error("[os.channel.provider]", res.error);
-      return false;
+      return "unknown";
     }
     const row = res.data as { enabled: unknown; encrypted_api_key: string | null } | null;
-    if (row && (row.enabled === true || row.enabled === 1) && !!row.encrypted_api_key) return true;
+    if (row && (row.enabled === true || row.enabled === 1) && !!row.encrypted_api_key) return "ready";
   } catch (err) {
     console.error("[os.channel.provider]", err);
-    return false;
+    return "unknown";
   }
-  return operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email));
+  return operatorPlatformFallback() !== null && (await isPlatformOperatorForAuthUser(authUserId, email))
+    ? "ready"
+    : "none";
 }
 
 /**
@@ -115,7 +139,7 @@ async function providerReady(tenantId: string, authUserId: string | null, email:
  */
 export async function workspaceChatReadiness(
   viewer: OsViewer,
-): Promise<{ slug: string | null; provider: boolean }> {
+): Promise<{ slug: string | null; provider: ProviderReadiness }> {
   const [slug, provider] = await Promise.all([
     workspaceChatSlug(viewer.surface.tenantId),
     providerReady(viewer.surface.tenantId, viewer.authUserId, viewer.email),
@@ -124,19 +148,24 @@ export async function workspaceChatReadiness(
 }
 
 /**
- * This department's last turn, judged against the whole workspace's
- * (lib/os/channel/outcome.ts channelFailure). A table not yet migrated reads as
- * "nothing recorded"; any other failed read is `unknown`, never "ok".
+ * The workspace's recorded last turns, one read per page (the AI Team roster
+ * judges every lead from the same read).
  */
-async function lastTurnFor(tenantId: string, department: DepartmentKey): Promise<LastTurn> {
-  if (!tursoConfigured()) return { kind: "ok" };
-  const read = await readTurnOutcomes(getTursoClient(), tenantId);
+export async function readWorkspaceTurns(tenantId: string): Promise<TurnOutcomesRead> {
+  if (!tursoConfigured()) return { ok: true, value: [] };
+  return readTurnOutcomes(getTursoClient(), tenantId);
+}
+
+/**
+ * This department's last turn, judged against the whole workspace's
+ * (lib/os/channel/outcome.ts channelFailure, which leaves "no AI account
+ * connected" to providerReady). A table not yet migrated reads as "nothing
+ * recorded"; any other failed read is `unknown`, never "ok".
+ */
+export function lastTurnFrom(read: TurnOutcomesRead, department: DepartmentKey): LastTurn {
   if (!read.ok) return read.reason === "table_missing" ? { kind: "ok" } : { kind: "unknown" };
   const failure = channelFailure(read.value, departmentChannelKey(department));
-  // "No AI account connected" is settled by providerReady, which is fresher:
-  // a key saved since that turn makes the channel ready again.
-  if (!failure || failure.code === "agent_not_configured") return { kind: "ok" };
-  return { kind: "failed", code: failure.code };
+  return failure ? { kind: "failed", code: failure.code } : { kind: "ok" };
 }
 
 export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer): Promise<ChannelState> {
@@ -146,10 +175,10 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
   }
   const owner = viewer.surface.persona === "founder";
   const tenantId = viewer.surface.tenantId;
-  const [{ slug, provider }, agent, lastTurn] = await Promise.all([
+  const [{ slug, provider }, agent, turns] = await Promise.all([
     workspaceChatReadiness(viewer),
     getAgentBySlug(binding.agentSlug, tenantId),
-    lastTurnFor(tenantId, dept.key),
+    readWorkspaceTurns(tenantId),
   ]);
   if (!slug) {
     return {
@@ -165,7 +194,13 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
       action: null,
     };
   }
-  if (!provider) {
+  if (provider === "unknown") {
+    return {
+      kind: "unknown",
+      reason: "We could not check this workspace's AI account just now, so this channel cannot start. Refresh to try again.",
+    };
+  }
+  if (provider === "none") {
     return {
       kind: "not_connected",
       reason: owner
@@ -179,7 +214,7 @@ export async function resolveChannelState(dept: OsDepartment, viewer: OsViewer):
     department: dept.key,
     agentSlug: agent.slug,
     greeting: binding.greeting,
-    lastTurn,
+    lastTurn: lastTurnFrom(turns, dept.key),
     canManageAi: owner,
   };
 }

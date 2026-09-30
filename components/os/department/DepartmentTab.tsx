@@ -22,7 +22,7 @@ import type { ChannelState } from "./channel";
 import { ComposerProvider } from "./ComposerContext";
 import { DepartmentChannel } from "./DepartmentChannel";
 import { OverviewPanel, type OverviewPanelProps } from "./OverviewPanel";
-import { StatusPill, withLastTurn, type DepartmentStatus } from "./StatusPill";
+import { StatusPill, headerStatus, type DepartmentStatus } from "./StatusPill";
 
 export type DepartmentTabProps = {
   dept: OsDepartment;
@@ -37,8 +37,9 @@ export type DepartmentTabProps = {
 export function DepartmentTab({ dept, purpose, status, channel, prefill, overview }: DepartmentTabProps) {
   const ready = channel.kind === "ready";
   // The header also answers "did the last turn work?": a connected key the
-  // provider refused reads Not working, in the words the channel used.
-  const header = ready ? withLastTurn(status, channel.lastTurn) : status;
+  // provider refused reads Not working, in the words the channel used; an AI
+  // account that could not be checked reads Couldn't check.
+  const header = headerStatus(status, channel);
   return (
     <PageFrame title={dept.label} subtitle={purpose} actions={<StatusPill status={header} />}>
       {/* Keyed by department: moving from Sales to Marketing is the same page
