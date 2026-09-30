@@ -703,6 +703,16 @@ async function main() {
       ],
       "write",
     );
+    // A client from a deal whose ONLY interaction is an internal note: not contact.
+    const LEAD_NOTE = "1ead0000-0000-4000-8000-00000000009e";
+    await db.execute({
+      sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)",
+      args: [LEAD_NOTE, OASIS, JSON.stringify({ stage: "launched", company: "Note Only Co", name: "Nora Note", email: "nora@noteonly.test" })],
+    });
+    const noteConv = await store.convertLeadToCustomer(db, OASIS, LEAD_NOTE, USERS.cc.id, new Date(ago(60)));
+    assert.ok(noteConv.ok, JSON.stringify(noteConv));
+    await db.batch([li("li-t-note", OASIS, { lead_id: LEAD_NOTE, channel: "note", type: "note", preview: "INTERNAL-ONLY", at: ago(1) })], "write");
+    assert.equal((await activity.lastTouchFor(db, OASIS, [noteConv.customer])).get(noteConv.customer.id), null, "an internal note on the deal is not contact");
     const all = Object.values(made);
     const touch = await activity.lastTouchFor(db, OASIS, all);
     const expected: Record<string, string | null> = {
@@ -754,6 +764,18 @@ async function main() {
     const past = list.indexOf("Past clients");
     assert.ok(past > 0 && list.indexOf("Other Client") > past, "Y is listed under Past clients");
     assert.equal((await call(endRoute.POST(req("POST", `/api/clients/${A.id}/end-engagement`), params({ id: A.id })))).status, 404, "not OASIS's");
+  });
+  await check("a deal that ended AFTER it became a record is listed once, as the record, not again under Past clients in Pipeline", async () => {
+    const LEAD_P = "1ead0000-0000-4000-8000-0000000000e5";
+    const lead = (stage: string) => JSON.stringify({ stage, company: "Ended Later Co", name: "Eli Later", email: "eli@endedlater.test" });
+    await db.execute({ sql: "INSERT INTO tenant_records (id, tenant_id, entity_type, data) VALUES (?, ?, 'lead', ?)", args: [LEAD_P, OASIS, lead("launched")] });
+    const conv = await store.convertLeadToCustomer(db, OASIS, LEAD_P, USERS.cc.id, new Date(ago(20)));
+    assert.ok(conv.ok, JSON.stringify(conv));
+    await db.execute({ sql: "UPDATE tenant_records SET data = ? WHERE id = ?", args: [lead("churned"), LEAD_P] });
+    await login(USERS.cc);
+    const list = await page(ClientsPage({ searchParams: Promise.resolve({}) }));
+    assert.match(list, /Ended Later Co|Eli Later/, "the record is listed");
+    assert.doesNotMatch(list, /Past clients in Pipeline/, "not listed a second time from the pipeline");
   });
   await check("the pipeline-derived list files a deal whose engagement ended under Past, not among clients to convert", async () => {
     const cm = await import("../components/os/landings/clients-model");
@@ -948,6 +970,22 @@ async function main() {
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.deepEqual([r.body.created, r.body.linked, r.body.changed], [0, 0, 1]);
     assert.equal(await count("SELECT COUNT(*) AS n FROM customers WHERE stripe_customer_id = 'cus_LATE_ARRIVAL'"), 0);
+  });
+  await check("Stripe import: two Stripe customers with one client's email - the first links, the second is a conflict, never an overwrite", async () => {
+    const dup = await store.createCustomer(db, OASIS, { ...base, display_name: "Dup Email Co", primary_email: "dup@both.test" }, USERS.cc.id, new Date(ago(3)));
+    assert.ok(dup.ok);
+    const sub = (id: string, cus: string, name: string) => ({
+      sql: `INSERT INTO fin_subscriptions (id, entity_id, stripe_customer_id, customer_name, customer_email, status, currency, monthly_cents)
+            VALUES (?, 'fin_ent_oasis', ?, ?, 'dup@both.test', 'active', 'CAD', 10000)`,
+      args: [id, cus, name],
+    });
+    await db.batch([sub("s-dup-a", "cus_DUPA", "Dup A"), sub("s-dup-b", "cus_DUPB", "Dup B")], "write");
+    const plan = Object.fromEntries((await sync.planStripeImport(db, OASIS)).map((p) => [p.group.stripe_customer_id, p.action]));
+    assert.deepEqual([plan.cus_DUPA, plan.cus_DUPB], ["link", "conflict"], "the dialog shows the second as a conflict");
+    const r = await sync.runStripeImport(db, OASIS, USERS.cc.id, T0, new Map([["cus_DUPA", "link"], ["cus_DUPB", "link"]]));
+    assert.deepEqual(r.linked, [dup.customer.id]);
+    assert.ok(r.conflicts.some((c) => c.stripe_customer_id === "cus_DUPB"), JSON.stringify(r));
+    assert.equal((await store.getCustomer(db, OASIS, dup.customer.id))!.stripe_customer_id, "cus_DUPA", "the first link stands");
   });
 
   // ── Support desk ───────────────────────────────────────────────────────────

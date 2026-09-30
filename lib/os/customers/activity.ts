@@ -293,7 +293,7 @@ export type TouchCustomer = ActivityCustomer & { primary_phone?: string | null; 
  * never says "no contact" over a thread full of messages. The latest of:
  *   - the client's ledger facts (bookkeeping about the record excluded);
  *   - its tickets, and the public replies on them;
- *   - interactions on the deal it came from;
+ *   - interactions on the deal it came from (internal notes excluded);
  *   - email and SMS to or from ANY of its addresses: the primary email and
  *     phone and every contact's email and phone;
  *   - messages stamped with its id (metadata.customer_id, what the composer
@@ -415,8 +415,11 @@ export async function lastTouchFor(
   const leads = [...byLead.keys()];
   for (const part of chunk(leads)) {
     const rs = await db.execute({
+      // An internal note on the deal is not contact with the client (the
+      // Conversations tab does not show it either).
       sql: `SELECT lead_id, MAX(COALESCE(sent_at, created_at)) AS at FROM lead_interactions
             WHERE tenant_id = ? AND lead_id IN (${part.map(() => "?").join(", ")}) AND COALESCE(type, '') <> ?
+              AND COALESCE(channel, '') <> 'note' AND COALESCE(type, '') <> 'note'
             GROUP BY lead_id`,
       args: [tenantId, ...part, UNCONFIRMED_SEND],
     });

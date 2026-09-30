@@ -148,12 +148,13 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
       ? await loadConvertedLeads(cv, [...built.rows, ...built.past].map((r) => leadIdOf(r.key)).filter((x): x is string => x !== null))
       : null;
   const convertedLeads = converted?.state === "ok" ? converted.value : null;
-  const derivedRows = built
-    ? built.rows.filter((row) => {
-        const leadId = leadIdOf(row.key);
-        return !(leadId && convertedLeads?.has(leadId));
-      })
-    : [];
+  const notConverted = (row: { key: string }) => {
+    const leadId = leadIdOf(row.key);
+    return !(leadId && convertedLeads?.has(leadId));
+  };
+  const derivedRows = built ? built.rows.filter(notConverted) : [];
+  // The same for ended deals: one that already has a record is listed there.
+  const pastDerivedRows = built ? built.past.filter(notConverted) : [];
   const derivedFailed = [
     sources.wonDeals.state === "error" ? "won deals from Pipeline" : null,
     sources.projects.state === "error" ? "projects" : null,
@@ -333,12 +334,12 @@ export default async function ClientsPage(props: { searchParams?: Promise<Search
                     <p className="py-4 text-[13px] text-fg-muted">Nothing left to convert: no won deals, projects or open tickets outside client records.</p>
                   </Card>
                 ) : null}
-                {built && built.past.length > 0 && (
+                {built && pastDerivedRows.length > 0 && (
                   <div className="space-y-2">
                     <h3 className="text-[13px] font-semibold text-fg">Past clients in Pipeline</h3>
                     <p className="text-[13px] text-fg-muted">Deals whose engagement ended. They are past clients, not clients to convert.</p>
                     <ClientsTable
-                      rows={built.past}
+                      rows={pastDerivedRows}
                       deliveryHidden={deliveryHidden}
                       floors={built.floors}
                       convertedLeads={convertedLeads ? Object.fromEntries(convertedLeads) : null}

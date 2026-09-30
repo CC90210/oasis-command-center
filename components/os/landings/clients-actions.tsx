@@ -450,6 +450,10 @@ export function ImportStripeButton() {
     setBusy(true);
     setError(null);
     setDone(null);
+    // A new list is a new question: the privacy answer covered the people
+    // listed last time, not whoever this read lists.
+    setAgreed(false);
+    setPlan(null);
     try {
       const res = await fetch("/api/clients/import-stripe", { cache: "no-store" });
       const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;

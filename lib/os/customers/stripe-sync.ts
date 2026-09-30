@@ -117,15 +117,19 @@ export async function planStripeImport(db: Client, tenantId: string): Promise<Im
   const byEmail = new Map(
     existing.filter((r) => r.primary_email).map((r) => [String(r.primary_email).toLowerCase(), { id: String(r.id), stripe: r.stripe_customer_id ? String(r.stripe_customer_id) : null }]),
   );
+  // Two Stripe customers can share an email. Only the first may link to the
+  // record with that email; the next is a conflict for the founder, never a
+  // second link that would overwrite the first.
+  const claimed = new Set<string>();
   return groups.map((group): ImportPlanItem => {
     const have = byStripe.get(group.stripe_customer_id);
     if (have) return { action: "skip", group, reason: "already_a_client", customerId: have };
     if (!group.name && !group.email) return { action: "skip", group, reason: "no_name_or_email" };
     const sameEmail = group.email ? byEmail.get(group.email) : undefined;
     if (sameEmail) {
-      return sameEmail.stripe
-        ? { action: "conflict", group, customerId: sameEmail.id }
-        : { action: "link", group, customerId: sameEmail.id };
+      if (sameEmail.stripe || claimed.has(sameEmail.id)) return { action: "conflict", group, customerId: sameEmail.id };
+      claimed.add(sameEmail.id);
+      return { action: "link", group, customerId: sameEmail.id };
     }
     return { action: "create", group };
   });
