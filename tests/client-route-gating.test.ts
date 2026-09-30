@@ -597,13 +597,16 @@ async function main() {
         );
       }
     }
-    // The client manifest runs bravo, atlas and maven; none leads a department there.
+    // The client manifest comes from the setup wizard with its default departments
+    // (#497): its neutral teammates lead Sales and Client Success, the only
+    // departments a client's tabs bind. No house agent (bravo, atlas, maven) runs there.
     const card = readable(html.client.marketplace);
     const overrides = readable(html.client.agentConfig);
     for (const text of [card, overrides, readable(html.client.profileEditor)]) {
       assert.doesNotMatch(text, /Chief of Staff|Marketing|Finance|Operations/, "a department the client's tabs call not set up (or do not have)");
     }
-    assert.match(card, /General assistant/, "the general agent is named for its job");
+    assert.match(card, /Sales/, "the Sales teammate is named for its department");
+    assert.match(card, /Client Success/, "the Client Success teammate is named for its department");
     // The card's subtitle lists only the departments bound for a client.
     const subtitle = workspaceAgentsSubtitle({ oasis: false });
     assert.ok(captured.client.serverText.includes(subtitle), "the client's card does not carry the client subtitle");
@@ -613,7 +616,7 @@ async function main() {
   await check("Profile's primary-agent picker, client owner: job names, no persona", () => {
     const text = readable(html.client.profileEditor);
     assert.doesNotMatch(text, PERSONA_NAMES, text.match(PERSONA_NAMES)?.[0]);
-    assert.match(text, /General assistant/);
+    assert.match(text, /Sales|Client Success/, "the picker offers the client's own teammates by department");
   });
   await check("Settings > AI brain, OASIS owner: add-ons offered, by department or job, never by persona", () => {
     const text = readable(html.cc.marketplace);

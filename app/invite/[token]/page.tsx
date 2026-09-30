@@ -218,9 +218,10 @@ function ValidCard({ token, preview }: { token: string; preview: Preview }) {
         </p>
       </div>
 
+      {/* No "you can leave at any time" line: there is no self-serve leave
+          control. Removing a member is an admin action on the Team page. */}
       <p className="text-[11px] text-fg-dim leading-relaxed">
-        By accepting, you&apos;ll join {preview.tenant_name} with {roleLabel} permissions. You can leave
-        the workspace at any time from your profile settings.
+        By accepting, you&apos;ll join {preview.tenant_name} with {roleLabel} permissions.
       </p>
     </div>
   );

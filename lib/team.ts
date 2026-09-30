@@ -4,6 +4,11 @@ import { getServiceSupabase, getSessionUser } from "@/lib/supabase-server";
 import { adminGetUser } from "@/lib/turso-auth-admin";
 import { dbError } from "@/lib/db-error";
 import { resolveActiveProfileForUser } from "@/lib/active-profile-resolver";
+import {
+  finalizeInviteProfile,
+  inviteTenantSlug,
+  type InviteProfilePlan,
+} from "@/lib/invite-profile-finalization";
 
 import {
   INVITABLE_ROLES,
@@ -244,7 +249,8 @@ export type InviteRow = {
 export type InvitePreview = {
   tenant_id: string;
   tenant_name: string;
-  team_role: Exclude<TeamRole, "owner">;
+  /** "owner" only on an operator-minted owner-claim invite (bravo__196). */
+  team_role: TeamRole;
   expires_at: string;
   email_pinned: string | null;
 };
@@ -571,21 +577,40 @@ export async function revokeInvite(inviteId: string, tenantId: string): Promise<
   if (error) throw dbError("revokeInvite", error);
 }
 
-export async function redeemInvite(
-  rawToken: string,
-  redeemerAuthId: string
-): Promise<
+export type RedeemInviteResult =
   | {
       ok: true;
       tenantId: string;
       teamRole: TeamRole;
+      /** Where the member lands (/t/<slug>); null when it could not be read. */
+      tenantSlug: string | null;
       idempotent?: boolean;
+      /**
+       * True when nothing was written: the caller already redeemed this invite,
+       * or already belongs to this workspace. A retry after a network blip ends
+       * here and succeeds instead of failing the same way twice.
+       */
       alreadyMember?: boolean;
     }
-  | { ok: false; error: string }
-> {
+  | { ok: false; error: string };
+
+export async function redeemInvite(
+  rawToken: string,
+  redeemerAuthId: string
+): Promise<RedeemInviteResult> {
   const supa = getServiceSupabase();
   const hash = hashInviteToken(rawToken);
+
+  const landingSlug = async (tenantId: string): Promise<string | null> => {
+    try {
+      return await inviteTenantSlug(tenantId);
+    } catch (err) {
+      // The redemption itself is done; the member still lands on "/", which
+      // resolves their workspace from the session. Logged, not hidden.
+      console.error("[team.redeemInvite] landing slug lookup failed", { tenantId, err });
+      return null;
+    }
+  };
 
   const preview = await previewInvite(rawToken);
   if (!preview) {
@@ -605,11 +630,17 @@ export async function redeemInvite(
       .not("redeemed_at", "is", null)
       .maybeSingle();
     if (priorRedeem?.tenant_id && priorRedeem.team_role) {
+      // alreadyMember: this caller's profile was finished in the same write
+      // that claimed the invite, so there is nothing left to do. Before
+      // 2026-09-30 this branch omitted it and every retry re-ran finalization.
+      const tenantId = priorRedeem.tenant_id as string;
       return {
         ok: true,
-        tenantId: priorRedeem.tenant_id as string,
+        tenantId,
         teamRole: priorRedeem.team_role as TeamRole,
+        tenantSlug: await landingSlug(tenantId),
         idempotent: true,
+        alreadyMember: true,
       };
     }
     return { ok: false, error: "invalid_or_expired" };
@@ -630,6 +661,20 @@ export async function redeemInvite(
   // without it — returning "auth_user_not_found", the SAME string the lookup
   // above returns on failure. That collision is why this went unnoticed: the
   // join simply reported the error it would have reported anyway.
+  // The joining member's profile (agents, primary agent, workspace name) is
+  // decided HERE, before anything is claimed, and redeem_tenant_invite writes
+  // it in the same batch as the claim. A failure to decide (the workspace or
+  // its manifest could not be read) refuses now, with the invite untouched.
+  let plan: InviteProfilePlan;
+  try {
+    plan = await finalizeInviteProfile({ tenantId: preview.tenant_id, teamRole: preview.team_role });
+  } catch (err) {
+    console.error("[team.redeemInvite] profile plan failed; invite left unclaimed", {
+      tenantId: preview.tenant_id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, error: "profile_finalize_failed" };
+  }
   // The value is already in hand from the adminGetUser call one line up.
   const { data, error } = await supa.rpc("redeem_tenant_invite", {
     p_token_hash: hash,
@@ -639,14 +684,21 @@ export async function redeemInvite(
     // Turso port takes it as an argument, and without it a new member's profile
     // is created with full_name set to their email address.
     p_redeemer_full_name: authUser.value.fullName,
+    p_expected_tenant_id: preview.tenant_id,
+    p_agents_enabled: plan.agentsEnabled,
+    p_primary_agent: plan.primaryAgent,
+    p_brand: plan.brand,
   });
   if (error) return { ok: false, error: error.message };
   if (!data?.ok) return { ok: false, error: data?.error ?? "invalid_or_expired" };
+  const nothingWritten = data.already_member === true || data.already_redeemed === true;
   return {
     ok: true,
     tenantId: data.tenant_id,
     teamRole: data.team_role as TeamRole,
-    alreadyMember: data.already_member === true,
+    tenantSlug: data.tenant_id === preview.tenant_id ? plan.tenantSlug : await landingSlug(data.tenant_id),
+    idempotent: data.already_redeemed === true || undefined,
+    alreadyMember: nothingWritten,
   };
 }
 

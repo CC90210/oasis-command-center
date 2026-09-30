@@ -751,10 +751,12 @@ export const SUN_SEED: TenantManifest = {
   // jotform integration removed 2026-06-06 — SunBiz intake is the
   // dashboard's native /forms designer + /f/<tenant>/<form>/<lead_token>
   // public flow. Twilio is kept for SMS; Turso for the per-tenant cache.
-  integrations: [
-    { kind: "twilio", enabled: true, credential_env_key: "SUNBIZ_AGENT_HMAC_SECRET" },
-    { kind: "turso", enabled: true },
-  ],
+  integrations: {
+    connectors: [
+      { kind: "twilio", enabled: true, credential_env_key: "SUNBIZ_AGENT_HMAC_SECRET" },
+      { kind: "turso", enabled: true },
+    ],
+  },
   // SunBiz employees run the shared VPS bridge across Claude Code / Codex /
   // Gemini and need to pick the runtime per chat — expose the picker (was
   // hidden when SunBiz was single-operator). The CLI selector still only

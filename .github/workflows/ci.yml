@@ -170,6 +170,7 @@ jobs:
           npm run test:lead-advancements
           npm run test:legal
           npm run test:media
+          npm run test:onboarding
       # THE ARTIFACT THE DEPLOY SHIPS (2026-09-29, F0 release gate).
       # deploy-cloudflare.yml runs exactly this command with this NODE_OPTIONS
       # and CF_MIGRATION_BUILD. CF_MIGRATION_BUILD is not cosmetic:
