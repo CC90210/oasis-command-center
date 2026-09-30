@@ -18,6 +18,7 @@ import Link from "next/link";
 import { ArrowRight, Check, Copy, Search, ShieldAlert, User as UserIcon, Users, X } from "lucide-react";
 import { Card } from "@/components/Card";
 import { copyText } from "@/lib/clipboard";
+import { askDepartment, departmentForAgent, departmentLabel, fitsAskLink } from "@/lib/os/chat-href";
 import type {
   PromptCategory,
   PromptEntry,
@@ -202,7 +203,10 @@ export function PromptsLibraryFilter({
 }
 
 function PromptCard({ p, copied, onCopy }: { p: PromptEntry; copied: boolean; onCopy: (prompt: PromptEntry) => void }) {
-  const href = `/agents?agent=${encodeURIComponent(p.agent)}&prompt=${encodeURIComponent(p.prompt)}`;
+  // The department that answers for this prompt's agent (lib/os/chat-href.ts).
+  // A prompt too long for a link is offered as Copy only, never cut to fit.
+  const dept = departmentForAgent(p.agent);
+  const href = fitsAskLink(p.prompt) ? askDepartment(dept, p.prompt) : null;
   const isOverride = p.category === "system_override";
   return (
     <div className="group rounded-lg border border-bg-border bg-bg-elev/40 hover:border-accent/50 hover:bg-accent/5 transition-all p-3.5 flex items-start gap-3">
@@ -224,10 +228,14 @@ function PromptCard({ p, copied, onCopy }: { p: PromptEntry; copied: boolean; on
             <ShieldAlert className="w-3 h-3" /> [OVERRIDE] prompt
           </div>
         )}
-        <div className="flex gap-2 mt-3">
-          <Link href={href} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-accent hover:border-accent/50 transition-colors">
-            Open in chat <ArrowRight className="w-3 h-3" />
-          </Link>
+        <div className="flex flex-wrap items-center gap-2 mt-3">
+          {href ? (
+            <Link href={href} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-accent hover:border-accent/50 transition-colors">
+              Ask {departmentLabel(dept)} <ArrowRight className="w-3 h-3" />
+            </Link>
+          ) : (
+            <span className="text-[11px] text-fg-dim">Too long for a link: copy it into the {departmentLabel(dept)} channel.</span>
+          )}
           <button type="button" onClick={() => onCopy(p)} className="inline-flex items-center gap-1.5 rounded border border-bg-border px-2.5 py-1.5 text-[11px] font-semibold text-fg-muted hover:text-fg hover:border-fg-dim transition-colors" aria-label={`Copy ${p.title} prompt`}>
             {copied ? <Check className="w-3 h-3 text-status-engaged" /> : <Copy className="w-3 h-3" />}
             {copied ? "Copied" : "Copy prompt"}

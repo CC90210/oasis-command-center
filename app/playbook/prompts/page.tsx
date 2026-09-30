@@ -66,7 +66,7 @@ export default async function PromptsLibraryPage() {
 
       <PageHeader
         title="Prompts Library"
-        subtitle="Current, reusable system messages. Open one in chat or copy it unchanged for your IDE."
+        subtitle="Current, reusable system messages. Hand one to the department that answers for it, or copy it unchanged for your IDE."
         action={
           <Tag tone="accent">
             {totalPrompts} prompts · {operatorPrompts.length} operator · {sharedPrompts.length} universal
@@ -80,9 +80,9 @@ export default async function PromptsLibraryPage() {
             Most messages route through the agent&apos;s standard reasoning. When you need to <strong className="text-fg">force a specific mode</strong> — pause crons, draft-only, private, voice-shift, correct a mistake — start the message with <code className="bg-bg-elev px-1.5 py-0.5 rounded text-accent">[OVERRIDE]</code> on its own line, then a context line, then the request.
           </p>
           <pre className="bg-bg-deep border border-bg-border rounded p-3 text-xs font-mono text-fg overflow-x-auto whitespace-pre">{`[OVERRIDE]
-Context: pause autonomous agent activity for the next 24h.
+Context: draft-only for the rest of today.
 
-Disable every cron in vercel.json by setting it to a date in the past...`}</pre>
+Do not send, post or publish anything. Prepare every draft and list them for my review.`}</pre>
           <p className="text-xs">
             The agent treats <code className="text-accent">[OVERRIDE]</code> messages as imperative + non-conversational. Foundational override prompts (badged below) are hard-coded and always available across both operator + client deployments.
           </p>

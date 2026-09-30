@@ -754,11 +754,20 @@ async function main() {
   // list is read from disk, so a new page without the guard fails here.
   const playbookPages = sourceFiles(join(ROOT, "app", "playbook")).filter((f) => /[\\/]page\.tsx$/.test(f));
   const playbookSlug = readdirSync(join(ROOT, "content", "playbooks")).find((n) => n.endsWith(".md") && n !== "INDEX.md")!.replace(/\.md$/, "");
+  // The business documents viewer takes a catalog slug (lib/playbook/catalog.ts),
+  // not a markdown one: a team-visible document whose text is bundled, so it
+  // renders for every OASIS persona without a stored row.
+  const businessDocSlug = "client-onboarding-sop";
   const renderPlaybookPage = async (file: string) => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports -- CommonJS test harness, absolute Windows path
     const page = (require(file) as { default: (props: unknown) => unknown }).default;
-    return page(file.includes("[slug]") ? { params: Promise.resolve({ slug: playbookSlug }) } : {});
+    if (!file.includes("[slug]")) return page({});
+    const slug = /[\\/]business[\\/]\[slug\]/.test(file) ? businessDocSlug : playbookSlug;
+    return page({ params: Promise.resolve({ slug }) });
   };
+  // /playbook/onboarding is retired: an OASIS member is sent to the Operating
+  // manual section (after the same 404 guard as every other page).
+  const isOnboardingRedirect = (file: string) => /[\\/]playbook[\\/]onboarding[\\/]page\.tsx$/.test(file);
   const playbookName = (file: string) => relative(join(ROOT, "app"), file).split(sep).join("/");
   await check("every /playbook route is covered (index, [slug], prompts, client-deploy, onboarding, script and the rest)", () => {
     const names = playbookPages.map(playbookName).sort();
@@ -777,6 +786,10 @@ async function main() {
     await check(`${viewer} (OASIS member): every /playbook page renders`, async () => {
       await login(viewer);
       for (const file of playbookPages) {
+        if (isOnboardingRedirect(file)) {
+          await assert.rejects(() => Promise.resolve(renderPlaybookPage(file)), /NEXT_REDIRECT;\/playbook#operating-manual/, `${playbookName(file)} did not redirect for ${viewer}`);
+          continue;
+        }
         const out = await renderPlaybookPage(file);
         assert.ok(isValidElement(out), `${playbookName(file)} did not render for ${viewer}`);
       }

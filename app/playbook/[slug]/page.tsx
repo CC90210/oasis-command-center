@@ -4,7 +4,7 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Card, PageHeader, Tag } from "@/components/Card";
-import { loadPlaybook } from "@/lib/playbooks";
+import { loadPlaybook, PlaybookNotFoundError, type PlaybookFile } from "@/lib/playbooks";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,8 +23,15 @@ export default async function PlaybookSlugPage({
   // OASIS members only (lib/playbook-access.ts); everyone else gets the 404.
   await requirePlaybookReader();
   const { slug } = await params;
-  const file = await loadPlaybook(slug);
-  if (!file) notFound();
+  let file: PlaybookFile;
+  try {
+    file = loadPlaybook(slug);
+  } catch (err) {
+    // Only "no such playbook" is a 404. Anything else is a real failure and
+    // propagates to the error boundary instead of posing as a missing page.
+    if (err instanceof PlaybookNotFoundError) notFound();
+    throw err;
+  }
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -33,8 +40,9 @@ export default async function PlaybookSlugPage({
         subtitle={
           <span>
             <Link href="/playbook" className="text-fg-muted hover:text-accent underline-offset-2 hover:underline">
-              ← Playbook index
+              Playbook index
             </Link>
+            <span className="text-fg-dim"> · {file.updated ? `Updated ${file.updated}` : "Update date not recorded"}</span>
           </span>
         }
         action={<Tag tone={AUDIENCE_TONE[file.audience] ?? "accent"}>{file.audience}</Tag>}

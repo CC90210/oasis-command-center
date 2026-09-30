@@ -2,9 +2,14 @@
  * Single source of truth for AI prompts used by the dashboard
  * (lib/ai-*.ts). Each prompt lives in its own .txt file in this directory.
  *
- * This module reads at process startup via fs.readFileSync and exports
- * the string. Next.js's outputFileTracing picks up the .txt file at build
- * time so the bundle on Vercel includes them.
+ * The .txt files are compiled into ./generated.ts by
+ * scripts/gen-content-modules.mjs (run by `prebuild`, committed, and checked
+ * for drift by tests/playbook-docs.test.ts). This module used to
+ * readFileSync them at module init, which works on every local runtime and
+ * throws on the production Worker: workerd has no filesystem, and the file
+ * tracer copying a .txt into .open-next/ does not put it in the bundle
+ * wrangler uploads. The scoring and check-in routes under /api/leads/[id]
+ * would have thrown the first time anything exercised them.
  *
  * The Python cron scripts in the Business-Empire-Agent repo
  * (scripts/auto_score_leads.py and friends) need their own copy of these
@@ -12,29 +17,21 @@
  * was a subfolder of that repo. Sync prompt edits across both repos until
  * the Python side fetches from a shared store.
  *
- * Editing only one runtime's copy now means git status flags the diff.
- * Prior pattern (literal duplicate string in two files with a "Keep in
- * lockstep" comment) was wishful — this is the structural fix.
- *
  * Also shared: the INCLUDED_FIELDS allowlist for which lead-data keys
  * Claude should weight against. Same problem (duplication between TS
  * and Python), same fix (declared here, mirrored as JSON for Python).
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const PROMPTS_DIR = join(process.cwd(), "lib", "prompts");
+import { PROMPT_SOURCES } from "./generated";
 
 function loadPrompt(filename: string): string {
-  try {
-    return readFileSync(join(PROMPTS_DIR, filename), "utf-8").trim();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+  const text = PROMPT_SOURCES[filename];
+  if (typeof text !== "string") {
     throw new Error(
-      `prompts/${filename} not found at module init — Next.js bundling missed the file. ${message}`,
+      `prompts/${filename} is not in lib/prompts/generated.ts. Run node scripts/gen-content-modules.mjs.`,
     );
   }
+  return text.trim();
 }
 
 export const OASIS_LEAD_SCORING_PROMPT = loadPrompt("oasis-lead-scoring.txt");

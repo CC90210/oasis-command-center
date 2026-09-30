@@ -12,6 +12,7 @@ import {
   Handshake,
 } from "lucide-react";
 import { PROMPTS_LIBRARY } from "@/lib/prompts-library";
+import { askDepartment, departmentForAgent, departmentLabel, fitsAskLink } from "@/lib/os/chat-href";
 
 export const dynamic = "force-dynamic";
 
@@ -172,7 +173,7 @@ const PHASES: Phase[] = [
       {
         title: "Discover what's already running",
         detail:
-          "Before building on top of their stack, scan what they already have. The discover prompt lists their n8n workflows, Stripe products, Supabase tables, Gmail labels — so you don't accidentally overwrite anything.",
+          "Before building on top of their stack, scan what they already have. The discover prompt lists their n8n workflows, Stripe products, database tables, Gmail labels — so you don't accidentally overwrite anything.",
         promptId: "client-discover-existing-stack",
       },
       {
@@ -205,7 +206,7 @@ const PHASES: Phase[] = [
       {
         title: "Audit which crons even apply",
         detail:
-          "Before changing any cadence, decide what should run at all. Most crons in the default repo are CC-specific. The scope prompt walks vercel.json + .agents/workflows/ and returns an enable / disable / retune recommendation per job — recommendation only, it changes nothing.",
+          "Before changing any cadence, decide what should run at all. Most crons in the default repo are CC-specific. The scope prompt walks config/cron-registry.json + .agents/workflows/ and returns an enable / disable / retune recommendation per job — recommendation only, it changes nothing.",
         promptId: "client-cron-scope",
       },
       {
@@ -271,9 +272,10 @@ const PHASES: Phase[] = [
 
 function StepRow({ step }: { step: Phase["steps"][number] }) {
   const prompt = step.promptId ? PROMPT_BY_ID.get(step.promptId) : null;
-  const promptHref = prompt
-    ? `/agents?agent=${encodeURIComponent(prompt.agent)}&prompt=${encodeURIComponent(prompt.prompt)}`
-    : null;
+  // The step's prompt goes to the department that answers for its agent
+  // (lib/os/chat-href.ts); the channel prefills it and never sends it.
+  const promptDept = prompt ? departmentForAgent(prompt.agent) : null;
+  const promptHref = prompt && promptDept && fitsAskLink(prompt.prompt) ? askDepartment(promptDept, prompt.prompt) : null;
   return (
     <li className="border-l-2 border-bg-border pl-4 py-2 hover:border-accent/40 transition-colors">
       <div className="flex items-start gap-2">
@@ -287,7 +289,7 @@ function StepRow({ step }: { step: Phase["steps"][number] }) {
                 href={promptHref}
                 className="text-[11px] text-accent hover:text-accent-bright inline-flex items-center gap-1"
               >
-                <Sparkles className="w-3 h-3" /> run this prompt
+                <Sparkles className="w-3 h-3" /> Ask {promptDept ? departmentLabel(promptDept) : ""}
               </Link>
             )}
             {step.cta && (
@@ -404,7 +406,7 @@ export default async function ClientDeployPage() {
             <strong className="text-fg">The pair token</strong> — minted on first <code className="text-accent">oasis bridge serve</code> through the installed launcher. Stored at <code className="text-accent">~/.oasis/bridge_token</code> (chmod 600 on Unix). SHA-256 hashed in the <code className="text-accent">bridge_pairings</code> table. Idempotent by <code className="text-accent">(tenant_id, machine_fingerprint)</code> via partial unique index — re-pairing rotates the token instead of creating duplicates.
           </div>
           <div>
-            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (Supabase, GitHub, n8n, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
+            <strong className="text-fg">MCP servers</strong> — credential-bearing ones (GitHub, n8n, Late, Firecrawl, Obsidian) use <code className="text-accent">scripts/mcp_shims/&lt;name&gt;.js</code> Node shims. Each loads <code className="text-accent">.env.agents</code> via dotenv, spawns with <code className="text-accent">windowsHide:true</code>. No plaintext secrets in any MCP config.
           </div>
         </div>
       </Card>
